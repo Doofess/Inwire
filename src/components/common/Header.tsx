@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTheme } from 'next-themes';
 import {
   Play,
   Pause,
@@ -7,9 +8,18 @@ import {
   Download,
   Sun,
   Moon,
+  Monitor,
+  Check,
 } from 'lucide-react';
 import { UserRole, UserRolePermissions } from '../../types/packet';
 import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
+import { Button } from '../ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 
 interface HeaderProps {
   isCapturing: boolean;
@@ -24,8 +34,6 @@ interface HeaderProps {
   onOpenIspModal?: () => void;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   onOpenColorRulesModal: () => void;
-  isDark: boolean;
-  onToggleTheme: () => void;
   totalPacketsCount: number;
   filteredPacketsCount: number;
 }
@@ -40,6 +48,41 @@ function downloadAgentInstaller() {
   a.remove();
 }
 
+const THEME_OPTIONS = [
+  { value: 'light', label: 'Light', icon: Sun },
+  { value: 'dark', label: 'Dark', icon: Moon },
+  { value: 'system', label: 'System', icon: Monitor },
+] as const;
+
+function ThemeToggle() {
+  const { theme, setTheme } = useTheme();
+  const ActiveIcon = THEME_OPTIONS.find((o) => o.value === theme)?.icon ?? Monitor;
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="outline"
+          size="icon"
+          title="Change theme"
+          className="bg-secondary hover:bg-accent border-border text-foreground"
+        >
+          <ActiveIcon className="w-4 h-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
+          <DropdownMenuItem key={value} onClick={() => setTheme(value)}>
+            <Icon className="w-4 h-4" />
+            <span>{label}</span>
+            {theme === value && <Check className="w-3.5 h-3.5 ml-auto" />}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export const Header: React.FC<HeaderProps> = ({
   isCapturing,
   onStartCapture,
@@ -52,18 +95,12 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenExportModal,
   agentStatus,
   onOpenColorRulesModal,
-  isDark,
-  onToggleTheme,
   totalPacketsCount,
   filteredPacketsCount,
 }) => {
   const agentDownload = getAgentDownloadForCurrentOS();
   return (
-    <header
-      className={`h-16 px-4 sm:px-6 border-b flex items-center justify-between transition-colors z-40 shrink-0 select-none ${
-        isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
-      }`}
-    >
+    <header className="h-16 px-4 sm:px-6 border-b flex items-center justify-between transition-colors z-40 shrink-0 select-none bg-card border-border text-card-foreground">
       {/* Left: Branding & Capture Stream Controls */}
       <div className="flex items-center space-x-3 sm:space-x-4">
         {/* Title */}
@@ -74,7 +111,7 @@ export const Header: React.FC<HeaderProps> = ({
               PRO
             </span>
           </div>
-          <span className="text-[10px] text-slate-500 font-mono">Packet Analyzer</span>
+          <span className="text-[10px] text-muted-foreground font-mono">Packet Analyzer</span>
         </div>
 
         {/* Capture Buttons */}
@@ -105,7 +142,7 @@ export const Header: React.FC<HeaderProps> = ({
           {isCapturing && (
             <button
               onClick={onStopCapture}
-              className="bg-slate-800 hover:bg-slate-700 text-rose-400 hover:text-rose-300 text-xs px-3 py-2 rounded font-bold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
+              className="bg-secondary hover:bg-accent text-rose-500 dark:text-rose-400 hover:text-rose-600 dark:hover:text-rose-300 text-xs px-3 py-2 rounded font-bold border border-border flex items-center gap-1.5 transition-colors cursor-pointer"
               title="Halt Capture"
             >
               <Square className="w-3.5 h-3.5 fill-current" />
@@ -116,7 +153,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={onClearPackets}
             disabled={!permissions.canClearBuffer || totalPacketsCount === 0}
-            className={`p-2 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors ${
+            className={`p-2 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors ${
               !permissions.canClearBuffer || totalPacketsCount === 0 ? 'opacity-40 cursor-not-allowed' : ''
             }`}
             title="Clear Packet Buffer"
@@ -128,33 +165,30 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right: Actions, Speed, Auth & Role Selector */}
       <div className="flex items-center space-x-2 sm:space-x-2.5">
-        
-
-        
         {/* Agent Connectivity Indicator - separate from the download button so
             the button stays a stable, always-clickable action and only this
             small pill reflects the (sometimes flickery) live connection state. */}
         <div
           className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full border font-mono ${
             agentStatus === 'connected'
-              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
               : agentStatus === 'connecting'
-              ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+              ? 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
               : agentStatus === 'error'
-              ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
-              : 'bg-slate-800/80 border-slate-700 text-slate-400'
+              ? 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-400'
+              : 'bg-secondary border-border text-muted-foreground'
           }`}
           title="NetView Agent connection status (ws://localhost:8999)"
         >
           <span
             className={`w-1.5 h-1.5 rounded-full ${
               agentStatus === 'connected'
-                ? 'bg-emerald-400'
+                ? 'bg-emerald-500 dark:bg-emerald-400'
                 : agentStatus === 'connecting'
-                ? 'bg-amber-400 animate-pulse'
+                ? 'bg-amber-500 dark:bg-amber-400 animate-pulse'
                 : agentStatus === 'error'
-                ? 'bg-rose-400'
-                : 'bg-slate-500'
+                ? 'bg-rose-500 dark:bg-rose-400'
+                : 'bg-muted-foreground'
             }`}
           />
           <span>
@@ -169,33 +203,29 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Download Driver Button - detects OS, downloads the matching one-click installer directly (no modal) */}
-        <button
+        <Button
+          variant="outline"
           onClick={downloadAgentInstaller}
-          className="bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs px-3 sm:px-4 py-2 rounded font-bold border border-slate-700 flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+          className="bg-secondary hover:bg-accent border-border text-foreground text-xs"
           title={`Download the one-click NetView agent installer for ${agentDownload.label}`}
         >
-          <Download className="w-3.5 h-3.5 text-emerald-400" />
+          <Download className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
           <span className="hidden sm:inline">Download Driver ({agentDownload.label})</span>
-        </button>
+        </Button>
 
         {/* Export PCAP Button */}
-        <button
+        <Button
+          variant="outline"
           onClick={onOpenExportModal}
-          className="bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs px-3 sm:px-4 py-2 rounded font-bold border border-slate-700 flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+          className="bg-secondary hover:bg-accent border-border text-foreground text-xs"
           title="Import or Export PCAP / JSON"
         >
-          <Download className="w-3.5 h-3.5 text-cyan-400" />
+          <Download className="w-3.5 h-3.5 text-cyan-500 dark:text-cyan-400" />
           <span className="hidden sm:inline">Export PCAP</span>
-        </button>
+        </Button>
 
-        {/* Theme Toggle */}
-        <button
-          onClick={onToggleTheme}
-          className="p-2 rounded bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors cursor-pointer"
-          title={isDark ? 'Switch to Light Theme' : 'Switch to Dark Theme'}
-        >
-          {isDark ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-400" />}
-        </button>
+        {/* Theme Toggle - System / Light / Dark */}
+        <ThemeToggle />
       </div>
     </header>
   );

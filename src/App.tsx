@@ -63,7 +63,7 @@ export default function App() {
   // to "dark" during that gap avoids a flash-to-light regression versus the
   // previous hardcoded-dark default. Remove this bridge once every component
   // reads useTheme() directly (Phase 5 of the theming migration).
-  const { resolvedTheme, setTheme } = useTheme();
+  const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme !== "light";
   const [showRightAnalytics, setShowRightAnalytics] = useState(true);
   const [mobileTab, setMobileTab] = useState<
@@ -442,19 +442,9 @@ export default function App() {
   );
 
   return (
-    <div
-      className={`h-screen w-screen flex font-sans overflow-hidden transition-colors ${
-        isDark ? "bg-slate-950 text-slate-300" : "bg-[#f4f7f9] text-slate-800"
-      }`}
-    >
+    <div className="h-screen w-screen flex font-sans overflow-hidden transition-colors bg-background text-foreground">
       {/* 1. Geometric Balance Geometric Aside Dock (Hidden on tiny mobile, visible on tablet+) */}
-      <aside
-        className={`w-14 sm:w-16 border-r flex flex-col items-center py-4 space-y-6 shrink-0 z-30 transition-colors ${
-          isDark
-            ? "bg-slate-900 border-slate-800"
-            : "bg-white border-slate-200 shadow-sm"
-        }`}
-      >
+      <aside className="w-14 sm:w-16 border-r flex flex-col items-center py-4 space-y-6 shrink-0 z-30 transition-colors bg-card border-border shadow-sm">
         {/* Geometric Logo Badge */}
         <div
           onClick={() => setShowStatsModal(true)}
@@ -471,9 +461,7 @@ export default function App() {
             className={`p-2.5 rounded-md transition-all ${
               sidebarActiveView === "capture"
                 ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30"
-                : isDark
-                  ? "text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-                  : "text-slate-600 hover:bg-slate-300 hover:text-slate-900"
+                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             }`}
             title="Live Packet Capture"
           >
@@ -485,9 +473,7 @@ export default function App() {
             className={`p-2.5 rounded-md transition-all ${
               showRightAnalytics
                 ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30"
-                : isDark
-                  ? "text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-                  : "text-slate-600 hover:bg-slate-300 hover:text-slate-900"
+                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             }`}
             title="Toggle Right Analytics Panel"
           >
@@ -496,11 +482,7 @@ export default function App() {
 
           <button
             onClick={() => setShowDissectorModal(true)}
-            className={`p-2.5 rounded-md transition-all ${
-              isDark
-                ? "text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-                : "text-slate-600 hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200"
-            }`}
+            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             title="Custom Protocol Dissectors"
           >
             <Code className="w-5 h-5 text-cyan-400/80" />
@@ -508,11 +490,7 @@ export default function App() {
 
           <button
             onClick={() => setShowStatsModal(true)}
-            className={`p-2.5 rounded-md transition-all ${
-              isDark
-                ? "text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-                : "text-slate-600 hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200"
-            }`}
+            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             title="Protocol Hierarchy Statistics"
           >
             <BarChart2 className="w-5 h-5 text-purple-400/80" />
@@ -520,11 +498,7 @@ export default function App() {
 
           <button
             onClick={() => setShowExportModal(true)}
-            className={`p-2.5 rounded-md transition-all ${
-              isDark
-                ? "text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-                : "text-slate-600 hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200"
-            }`}
+            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             title="PCAP / JSON Import & Export"
           >
             <Download className="w-5 h-5 text-sky-400/80" />
@@ -532,11 +506,7 @@ export default function App() {
 
           <button
             onClick={() => setShowColorRulesModal(true)}
-            className={`p-2.5 rounded-md transition-all ${
-              isDark
-                ? "text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-                : "text-slate-600 hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200"
-            }`}
+            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             title="Color Highlighting Rules"
           >
             <Palette className="w-5 h-5 text-pink-400/80" />
@@ -544,11 +514,7 @@ export default function App() {
 
           <button
             onClick={() => setShowIspModal(true)}
-            className={`p-2.5 rounded-md transition-all ${
-              isDark
-                ? "text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-                : "text-slate-600 hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200"
-            }`}
+            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             title="ISP Network Statistics"
           >
             <Globe className="w-5 h-5 text-sky-400/80" />
@@ -588,8 +554,6 @@ export default function App() {
           onOpenColorRulesModal={() => setShowColorRulesModal(true)}
           onOpenIspModal={() => setShowIspModal(true)}
           agentStatus={agentStatus}
-          isDark={isDark}
-          onToggleTheme={() => setTheme(isDark ? "light" : "dark")}
           totalPacketsCount={packets.length}
           filteredPacketsCount={filteredPackets.length}
         />
@@ -607,13 +571,13 @@ export default function App() {
         />
 
         {/* Mobile Tab Switcher */}
-        <div className="flex md:hidden border-b border-slate-800 bg-slate-900 text-xs overflow-x-auto shrink-0">
+        <div className="flex md:hidden border-b border-border bg-card text-xs overflow-x-auto shrink-0">
           <button
             onClick={() => setMobileTab("packets")}
             className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
               mobileTab === "packets"
                 ? "border-b-2 border-cyan-400 text-cyan-400 bg-cyan-950/20"
-                : "text-slate-400 hover:text-slate-200"
+                : "text-muted-foreground hover:text-foreground"
             }`}
           >
             <List className="w-3.5 h-3.5" />
@@ -625,7 +589,7 @@ export default function App() {
             className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
               mobileTab === "tree"
                 ? "border-b-2 border-cyan-400 text-cyan-400 bg-cyan-950/20"
-                : "text-slate-400 hover:text-slate-200"
+                : "text-muted-foreground hover:text-foreground"
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
@@ -637,7 +601,7 @@ export default function App() {
             className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
               mobileTab === "hex"
                 ? "border-b-2 border-cyan-400 text-cyan-400 bg-cyan-950/20"
-                : "text-slate-400 hover:text-slate-200"
+                : "text-muted-foreground hover:text-foreground"
             }`}
           >
             <Binary className="w-3.5 h-3.5" />
@@ -649,7 +613,7 @@ export default function App() {
             className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
               mobileTab === "graphs"
                 ? "border-b-2 border-cyan-400 text-cyan-400 bg-cyan-950/20"
-                : "text-slate-400 hover:text-slate-200"
+                : "text-muted-foreground hover:text-foreground"
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
@@ -660,7 +624,7 @@ export default function App() {
         {/* Central Inspection + Analytics Split Grid */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
           {/* Main Packet Inspection Core */}
-          <section className="flex-1 flex flex-col border-r border-slate-800 overflow-hidden min-w-0">
+          <section className="flex-1 flex flex-col border-r border-border overflow-hidden min-w-0">
             {/* Upper Pane: High-Density Packet Table */}
             <div
               className={`flex-1 flex flex-col min-h-0 overflow-hidden ${
@@ -687,11 +651,7 @@ export default function App() {
 
             {/* Resize Drag Handle */}
             <div
-              className={`hidden md:block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 ${
-                isDark
-                  ? "bg-slate-800 hover:bg-cyan-500/50"
-                  : "bg-slate-300 hover:bg-cyan-400/50"
-              }`}
+              className="hidden md:block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-cyan-500/50"
               onMouseDown={() => {
                 isDraggingRef.current = true;
                 document.body.style.cursor = "row-resize";
@@ -705,15 +665,11 @@ export default function App() {
                   "--bottom-pane-height": `${bottomPaneHeight}px`,
                 } as React.CSSProperties
               }
-              className={`h-56 md:h-[var(--bottom-pane-height)] border-t border-slate-800 flex flex-col md:flex-row overflow-hidden transition-colors shrink-0 ${
-                isDark
-                  ? "bg-slate-900"
-                  : "bg-white shadow-sm border border-slate-200"
-              } ${mobileTab !== "packets" && mobileTab !== "graphs" ? "block" : "hidden md:flex"}`}
+              className={`h-56 md:h-[var(--bottom-pane-height)] border-t border-border flex flex-col md:flex-row overflow-hidden transition-colors shrink-0 bg-card ${mobileTab !== "packets" && mobileTab !== "graphs" ? "block" : "hidden md:flex"}`}
             >
               {/* Protocol Layers Inspection Tree */}
               <div
-                className={`w-full md:w-1/2 h-full border-r border-slate-800 overflow-hidden ${
+                className={`w-full md:w-1/2 h-full border-r border-border overflow-hidden ${
                   mobileTab === "tree" ? "block" : "hidden md:block"
                 }`}
               >
@@ -749,11 +705,9 @@ export default function App() {
 
           {/* Right Analytics Aside (Geometric Balance style) */}
           <aside
-            className={`w-80 lg:w-96 border-l border-slate-800 p-4 space-y-4 flex flex-col overflow-y-auto custom-scrollbar shrink-0 transition-colors ${
-              isDark ? "bg-slate-950" : "bg-slate-50 border-b border-slate-200"
-            } ${showRightAnalytics ? "hidden lg:flex" : "hidden"} ${
-              mobileTab === "graphs" ? "!flex !w-full !border-l-0" : ""
-            }`}
+            className={`w-80 lg:w-96 border-l border-border p-4 space-y-4 flex flex-col overflow-y-auto custom-scrollbar shrink-0 transition-colors bg-background ${
+              showRightAnalytics ? "hidden lg:flex" : "hidden"
+            } ${mobileTab === "graphs" ? "!flex !w-full !border-l-0" : ""}`}
           >
             {/* Real-time D3 Throughput & Traffic Spikes */}
             <div>
@@ -786,7 +740,7 @@ export default function App() {
             </div>
 
             {/* Geo-IP Map */}
-            <div className="h-64 shrink-0 rounded-lg overflow-hidden border border-slate-700">
+            <div className="h-64 shrink-0 rounded-lg overflow-hidden border border-border">
               <GeoMap packets={packets} isDark={isDark} />
             </div>
             {/* Flow Matrix & Top Talkers */}
