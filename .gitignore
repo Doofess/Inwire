@@ -1,0 +1,22 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+!.env.local.example
+
+# Compiled local-agent installers (~18MB Windows exe) - regenerate via
+# `pyinstaller netview_agent.spec` + copy into public/downloads, don't track.
+public/downloads/
+
+# Pre-existing scratch script from before this repo's git history; targets a
+# component (LocalAgentModal.tsx) that no longer exists. Left on disk, just
+# not part of source control.
+/tmp/
+
+# Python bytecode cache
+__pycache__/
+*.pyc

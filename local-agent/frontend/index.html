@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NetView Agent - Live Capture</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #131722;
+    --border: #232838;
+    --text: #e6e9f0;
+    --muted: #8b92a8;
+    --accent: #6366f1;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
+  .status.connecting .dot { background: var(--warn); }
+  .status.connected .dot { background: var(--ok); }
+
+  .actions { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  .btn.success { background: var(--ok); border-color: var(--ok); color: white; cursor: default; }
+  .btn:disabled { opacity: 0.7; cursor: default; }
+  .btn:hover:not(:disabled) { filter: brightness(1.1); }
+
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+    margin: -10px 0 20px;
+    max-width: 560px;
+  }
+  .hint.warn { color: var(--warn); }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left;
+    padding: 10px 12px;
+    color: var(--muted);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--panel);
+  }
+  tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-family: "SF Mono", Consolas, monospace;
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  .proto {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .proto-TCP { background: #1d3a5f; color: #7dd3fc; }
+  .proto-UDP { background: #3a2f1d; color: #fcd34d; }
+  .proto-Other { background: #2a2a2a; color: #aaa; }
+
+  .table-scroll { max-height: 520px; overflow-y: auto; }
+  .empty-state { padding: 40px; text-align: center; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>NetView Agent Live Capture</h1>
+        <div class="subtitle">Streams packet metadata from the local agent running on your machine.</div>
+      </div>
+      <div id="status" class="status">
+        <span class="dot"></span>
+        <span id="statusText">Disconnected</span>
+      </div>
+    </header>
+
+    <div class="actions">
+      <button class="btn primary" id="activateBtn" type="button">
+        Activate Agent
+      </button>
+      <a class="btn" href="/downloads/NetView-Agent-Setup.exe">
+        Manual Download
+      </a>
+    </div>
+    <div id="activateHint" class="hint" style="display:none;"></div>
+
+    <div class="panel">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Source</th>
+              <th>Destination</th>
+              <th>Protocol</th>
+              <th>Src Port</th>
+              <th>Dst Port</th>
+              <th>Length</th>
+              <th>Info</th>
+            </tr>
+          </thead>
+          <tbody id="packetBody"></tbody>
+        </table>
+        <div id="emptyState" class="empty-state">
+          Waiting for packets&hellip; click "Activate Agent" above to start capturing.
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  const WS_URL = "ws://localhost:8999";
+  const AGENT_URI = "netview://start";
+  const DOWNLOAD_URL = "/downloads/NetView-Agent-Setup.exe";
+  const RECONNECT_DELAY_MS = 2000;
+  const LAUNCH_TIMEOUT_MS = 1800;
+  const MAX_ROWS = 50;
+
+  const statusEl = document.getElementById("status");
+  const statusText = document.getElementById("statusText");
+  const packetBody = document.getElementById("packetBody");
+  const emptyState = document.getElementById("emptyState");
+  const activateBtn = document.getElementById("activateBtn");
+  const activateHint = document.getElementById("activateHint");
+
+  let ws = null;
+  let reconnectTimer = null;
+  let launchTimer = null;
+  let isConnected = false;
+
+  function setStatus(state) {
+    statusEl.classList.remove("connecting", "connected");
+    if (state === "connecting") {
+      statusEl.classList.add("connecting");
+      statusText.textContent = "Connecting";
+    } else if (state === "connected") {
+      statusEl.classList.add("connected");
+      statusText.textContent = "Connected";
+    } else {
+      statusText.textContent = "Disconnected";
+    }
+  }
+
+  function showHint(message, isWarning) {
+    activateHint.textContent = message;
+    activateHint.style.display = message ? "block" : "none";
+    activateHint.classList.toggle("warn", !!isWarning);
+  }
+
+  // Tries the OS-registered netview:// handler (installed alongside the
+  // driver by the Inno Setup installer). A page can never install a driver
+  // or launch an .exe on its own - the handoff to the OS is the only
+  // legitimate mechanism, same pattern Zoom/Slack/Teams use for their
+  // "join/open in app" buttons. If nothing answers within LAUNCH_TIMEOUT_MS,
+  // we assume the agent isn't installed yet and fall back to the installer.
+  function activateAgent() {
+    if (isConnected) return;
+
+    activateBtn.disabled = true;
+    activateBtn.textContent = "Activating…";
+    showHint("Handing off to the local agent…");
+
+    window.location.href = AGENT_URI;
+
+    clearTimeout(launchTimer);
+    launchTimer = setTimeout(() => {
+      if (isConnected) return;
+      activateBtn.disabled = false;
+      activateBtn.textContent = "Activate Agent";
+      showHint(
+        "Agent not detected. Downloading the installer — run it once (installs the Npcap driver + agent), then click Activate Agent again.",
+        true
+      );
+      const a = document.createElement("a");
+      a.href = DOWNLOAD_URL;
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }, LAUNCH_TIMEOUT_MS);
+  }
+
+  // If the OS shows its "Open NetView Agent?" confirmation dialog, the tab
+  // loses focus - that's a signal the handoff is in progress, not a failure,
+  // so don't race it into downloading the installer underneath the user.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearTimeout(launchTimer);
+    }
+  });
+
+  activateBtn.addEventListener("click", activateAgent);
+
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
+  }
+
+  function connect() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    setStatus("connecting");
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      isConnected = true;
+      clearTimeout(launchTimer);
+      setStatus("connected");
+      activateBtn.disabled = true;
+      activateBtn.textContent = "Agent Active";
+      activateBtn.classList.add("success");
+      showHint("");
+    };
+
+    ws.onmessage = (event) => {
+      let pkt;
+      try {
+        pkt = JSON.parse(event.data);
+      } catch (err) {
+        return; // ignore malformed frames
+      }
+      appendPacketRow(pkt);
+    };
+
+    ws.onerror = () => {
+      // onclose will fire right after; reconnect is handled there.
+    };
+
+    ws.onclose = () => {
+      isConnected = false;
+      setStatus("disconnected");
+      activateBtn.disabled = false;
+      activateBtn.textContent = "Activate Agent";
+      activateBtn.classList.remove("success");
+      scheduleReconnect();
+    };
+  }
+
+  function appendPacketRow(pkt) {
+    emptyState.style.display = "none";
+
+    const row = document.createElement("tr");
+    const time = pkt.timestamp ? new Date(pkt.timestamp).toLocaleTimeString() : "-";
+    const proto = pkt.protocol || "Other";
+
+    row.innerHTML = `
+      <td>${escapeHtml(time)}</td>
+      <td>${escapeHtml(pkt.source ?? "-")}</td>
+      <td>${escapeHtml(pkt.destination ?? "-")}</td>
+      <td><span class="proto proto-${escapeHtml(proto)}">${escapeHtml(proto)}</span></td>
+      <td>${pkt.sourcePort ?? "-"}</td>
+      <td>${pkt.destPort ?? "-"}</td>
+      <td>${pkt.length ?? "-"}</td>
+      <td>${escapeHtml(pkt.info ?? "-")}</td>
+    `;
+
+    packetBody.prepend(row);
+
+    while (packetBody.rows.length > MAX_ROWS) {
+      packetBody.deleteRow(packetBody.rows.length - 1);
+    }
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[ch]));
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

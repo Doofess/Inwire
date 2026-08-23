@@ -1,0 +1,3 @@
+scapy>=2.5.0
+websockets>=12.0
+pyinstaller>=6.3.0
