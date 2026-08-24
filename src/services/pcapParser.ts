@@ -348,7 +348,7 @@ export function decodeRawEthernetPacket(
     layers.push(ipLayer);
 
     const transportOffset = l3Offset + ipHeaderLen;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl);
     if (transport) {
       proto = transport.proto;
       srcPort = transport.srcPort;
@@ -384,7 +384,7 @@ export function decodeRawEthernetPacket(
     layers.push(ipv6Layer);
 
     const transportOffset = l3Offset + 40;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit);
     if (transport) {
       proto = transport.proto;
       srcPort = transport.srcPort;
@@ -478,7 +478,8 @@ function decodeTransportLayer(
   ipProtocolNum: number,
   srcIp: string,
   dstIp: string,
-  tcpTracker?: TcpStreamTracker
+  tcpTracker?: TcpStreamTracker,
+  ttl?: number
 ): {
   proto: Packet['protocol'];
   srcPort?: number;
@@ -685,6 +686,15 @@ function decodeTransportLayer(
     const isIcmpv6 = ipProtocolNum === 58;
     const icmpType = rawBytes[transportOffset];
     const icmpCode = rawBytes[transportOffset + 1];
+    const isEchoRequest = isIcmpv6 ? icmpType === 128 : icmpType === 8;
+    const isEchoReply = isIcmpv6 ? icmpType === 129 : icmpType === 0;
+
+    let icmpId: number | undefined;
+    let icmpSeq: number | undefined;
+    if ((isEchoRequest || isEchoReply) && rawBytes.length >= transportOffset + 8) {
+      icmpId = (rawBytes[transportOffset + 4] << 8) | rawBytes[transportOffset + 5];
+      icmpSeq = (rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7];
+    }
 
     let info: string;
     if (isIcmpv6) {
@@ -706,17 +716,34 @@ function decodeTransportLayer(
       info = `ICMP Type ${icmpType} Code ${icmpCode}`;
     }
 
+    if (icmpId !== undefined && icmpSeq !== undefined) {
+      // Wireshark shows both the big-endian wire value and the same 16 bits
+      // reinterpreted little-endian, since many ping implementations
+      // increment the sequence counter in host (LE) byte order.
+      const seqLe = ((icmpSeq << 8) | (icmpSeq >> 8)) & 0xffff;
+      const ttlPart = ttl !== undefined ? `, ttl=${ttl}` : '';
+      info += ` id=0x${icmpId.toString(16).padStart(4, '0')}, seq=${icmpSeq}/${seqLe}${ttlPart}`;
+    }
+
+    const fields: ProtocolField[] = [
+      { name: 'Type', value: icmpType, rawBytesRange: [transportOffset, transportOffset] },
+      { name: 'Code', value: icmpCode, rawBytesRange: [transportOffset + 1, transportOffset + 1] },
+    ];
+    if (icmpId !== undefined && icmpSeq !== undefined) {
+      fields.push(
+        { name: 'Identifier (BE)', value: `0x${icmpId.toString(16).padStart(4, '0')} (${icmpId})`, rawBytesRange: [transportOffset + 4, transportOffset + 5] },
+        { name: 'Sequence Number (BE)', value: icmpSeq, rawBytesRange: [transportOffset + 6, transportOffset + 7] },
+      );
+    }
+
     return {
       proto: 'ICMP',
       info,
       layer: {
         name: isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol',
         summary: `${isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol'}, ${info}`,
-        rawBytesRange: [transportOffset, transportOffset + 3],
-        fields: [
-          { name: 'Type', value: icmpType, rawBytesRange: [transportOffset, transportOffset] },
-          { name: 'Code', value: icmpCode, rawBytesRange: [transportOffset + 1, transportOffset + 1] },
-        ],
+        rawBytesRange: [transportOffset, transportOffset + (icmpId !== undefined ? 7 : 3)],
+        fields,
       },
     };
   }
