@@ -1,4 +1,4 @@
-import { Packet, ProtocolLayer, AnomalyInfo } from '../types/packet';
+import { Packet, ProtocolLayer, ProtocolField, AnomalyInfo } from '../types/packet';
 import { TcpStreamTracker } from './tcpStreamTracker';
 
 /**
@@ -422,15 +422,17 @@ function decodeTransportLayer(
   status?: Packet['status'];
   anomalies?: AnomalyInfo[];
 } | null {
-  // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {
     const srcPort = (rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1];
     const dstPort = (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3];
-    // ">>> 0" reinterprets the bitwise result as unsigned - without it, any
-    // seq/ack number with the top bit set comes out as a negative number,
-    // since JS's <</| operators always produce signed 32-bit results.
     const seqNum = ((rawBytes[transportOffset + 4] << 24) | (rawBytes[transportOffset + 5] << 16) | (rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7]) >>> 0;
     const ackNum = ((rawBytes[transportOffset + 8] << 24) | (rawBytes[transportOffset + 9] << 16) | (rawBytes[transportOffset + 10] << 8) | rawBytes[transportOffset + 11]) >>> 0;
+    // Data Offset is the top 4 bits of this byte, in 32-bit words - hardcoding
+    // 20 bytes here (as this file previously did everywhere) silently
+    // misreads Len= and the payload-scan offset whenever real options are
+    // present, which is most real-world TCP traffic.
+    const dataOffsetWords = (rawBytes[transportOffset + 12] >> 4) & 0x0f;
+    const tcpHeaderLen = Math.max(20, dataOffsetWords * 4);
     const flags = rawBytes[transportOffset + 13];
     const syn = (flags & 0x02) !== 0;
     const ack = (flags & 0x10) !== 0;
@@ -450,21 +452,36 @@ function decodeTransportLayer(
     else if (srcPort === 80 || dstPort === 80) proto = 'HTTP';
     else if (srcPort === 22 || dstPort === 22) proto = 'SSH';
 
+    const tcpOptions = tcpHeaderLen > 20 ? parseTcpOptions(rawBytes, transportOffset + 20, transportOffset + tcpHeaderLen) : null;
+    const optionsSummaryParts: string[] = [];
+    if (tcpOptions) {
+      if (syn) {
+        if (tcpOptions.mss !== undefined) optionsSummaryParts.push(`MSS=${tcpOptions.mss}`);
+        if (tcpOptions.windowScale !== undefined) optionsSummaryParts.push(`WS=${2 ** tcpOptions.windowScale}`);
+        if (tcpOptions.sackPermitted) optionsSummaryParts.push('SACK_PERM');
+      } else {
+        for (const block of tcpOptions.sackBlocks) {
+          optionsSummaryParts.push(`SLE=${block.leftEdge} SRE=${block.rightEdge}`);
+        }
+      }
+    }
+    const optionsSummary = optionsSummaryParts.length > 0 ? ' ' + optionsSummaryParts.join(' ') : '';
+
+    const tcpPayloadStart = transportOffset + tcpHeaderLen;
+    const payloadLength = Math.max(0, rawBytes.length - tcpPayloadStart);
     // TLS payloads are encrypted from essentially the first byte - never
     // scan them, since any "match" there would be a false positive.
-    const tcpPayloadStart = transportOffset + 20;
     const tcpHost =
       proto !== 'TLS' && tcpPayloadStart < rawBytes.length
         ? extractLiteralUrlOrHost(rawBytes, tcpPayloadStart)
         : null;
-    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${seqNum} Ack=${ackNum} Len=${rawBytes.length - transportOffset - 20}${tcpHost ? ' ' + tcpHost : ''}`;
+    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${seqNum} Ack=${ackNum} Len=${payloadLength}${optionsSummary}${tcpHost ? ' ' + tcpHost : ''}`;
 
     let streamId: number | undefined;
     let status: Packet['status'] | undefined;
     let anomalies: AnomalyInfo[] | undefined;
     if (tcpTracker) {
       streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
-      const payloadLength = rawBytes.length - transportOffset - 20;
       const seqResult = tcpTracker.checkSequence(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength);
       if (seqResult === 'retransmit') {
         status = 'retransmit';
@@ -498,13 +515,15 @@ function decodeTransportLayer(
       layer: {
         name: 'Transmission Control Protocol',
         summary: `Transmission Control Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
-        rawBytesRange: [transportOffset, transportOffset + 19],
+        rawBytesRange: [transportOffset, transportOffset + tcpHeaderLen - 1],
         fields: [
           { name: 'Source Port', value: srcPort, rawBytesRange: [transportOffset, transportOffset + 1] },
           { name: 'Destination Port', value: dstPort, rawBytesRange: [transportOffset + 2, transportOffset + 3] },
           { name: 'Sequence Number', value: seqNum, rawBytesRange: [transportOffset + 4, transportOffset + 7] },
           { name: 'Acknowledgment Number', value: ackNum, rawBytesRange: [transportOffset + 8, transportOffset + 11] },
+          { name: 'Header Length', value: `${tcpHeaderLen} bytes`, rawBytesRange: [transportOffset + 12, transportOffset + 12] },
           { name: 'Flags', value: `0x${flags.toString(16).padStart(3, '0')} (${flagList.join(', ')})`, rawBytesRange: [transportOffset + 12, transportOffset + 13] },
+          ...(tcpOptions ? tcpOptions.fields : []),
         ],
       },
     };
@@ -593,6 +612,77 @@ function decodeTransportLayer(
   }
 
   return null;
+}
+
+/**
+ * Parses the variable-length TCP options region (RFC 9293 3.1) starting at
+ * the first byte past the fixed 20-byte header, up to (not including)
+ * `optionsEnd` (the start of the real payload, derived from the Data Offset
+ * field). Stops early on End-of-Option-List or anything malformed, rather
+ * than guessing - a truncated/corrupt options list is common in captured
+ * traffic and should degrade gracefully, not throw.
+ */
+function parseTcpOptions(
+  rawBytes: Uint8Array,
+  optionsStart: number,
+  optionsEnd: number
+): {
+  fields: ProtocolField[];
+  mss?: number;
+  windowScale?: number;
+  sackPermitted: boolean;
+  sackBlocks: { leftEdge: number; rightEdge: number }[];
+} {
+  const fields: ProtocolField[] = [];
+  let mss: number | undefined;
+  let windowScale: number | undefined;
+  let sackPermitted = false;
+  const sackBlocks: { leftEdge: number; rightEdge: number }[] = [];
+
+  let offset = optionsStart;
+  while (offset < optionsEnd && offset < rawBytes.length) {
+    const kind = rawBytes[offset];
+    if (kind === 0) break; // End of Option List
+    if (kind === 1) {
+      fields.push({ name: 'TCP Option - No-Operation (NOP)', value: 'NOP', rawBytesRange: [offset, offset] });
+      offset += 1;
+      continue;
+    }
+
+    if (offset + 1 >= optionsEnd) break; // no room for a length byte
+    const length = rawBytes[offset + 1];
+    if (length < 2 || offset + length > optionsEnd) break; // malformed - stop rather than misread
+
+    if (kind === 2 && length === 4) {
+      mss = (rawBytes[offset + 2] << 8) | rawBytes[offset + 3];
+      fields.push({ name: 'TCP Option - Maximum Segment Size', value: `MSS: ${mss}`, rawBytesRange: [offset, offset + length - 1] });
+    } else if (kind === 3 && length === 3) {
+      windowScale = rawBytes[offset + 2];
+      fields.push({ name: 'TCP Option - Window Scale', value: `${windowScale} (multiply by ${2 ** windowScale})`, rawBytesRange: [offset, offset + length - 1] });
+    } else if (kind === 4 && length === 2) {
+      sackPermitted = true;
+      fields.push({ name: 'TCP Option - SACK Permitted', value: 'True', rawBytesRange: [offset, offset + length - 1] });
+    } else if (kind === 5) {
+      const blockCount = Math.floor((length - 2) / 8);
+      for (let i = 0; i < blockCount; i++) {
+        const blockOffset = offset + 2 + i * 8;
+        const leftEdge = ((rawBytes[blockOffset] << 24) | (rawBytes[blockOffset + 1] << 16) | (rawBytes[blockOffset + 2] << 8) | rawBytes[blockOffset + 3]) >>> 0;
+        const rightEdge = ((rawBytes[blockOffset + 4] << 24) | (rawBytes[blockOffset + 5] << 16) | (rawBytes[blockOffset + 6] << 8) | rawBytes[blockOffset + 7]) >>> 0;
+        sackBlocks.push({ leftEdge, rightEdge });
+        fields.push({ name: `TCP Option - SACK Block ${i + 1}`, value: `${leftEdge}-${rightEdge}`, rawBytesRange: [blockOffset, blockOffset + 7] });
+      }
+    } else if (kind === 8 && length === 10) {
+      const tsval = ((rawBytes[offset + 2] << 24) | (rawBytes[offset + 3] << 16) | (rawBytes[offset + 4] << 8) | rawBytes[offset + 5]) >>> 0;
+      const tsecr = ((rawBytes[offset + 6] << 24) | (rawBytes[offset + 7] << 16) | (rawBytes[offset + 8] << 8) | rawBytes[offset + 9]) >>> 0;
+      fields.push({ name: 'TCP Option - Timestamps', value: `TSval ${tsval}, TSecr ${tsecr}`, rawBytesRange: [offset, offset + length - 1] });
+    } else {
+      fields.push({ name: `TCP Option - Unknown (Kind ${kind})`, value: `${length} bytes`, rawBytesRange: [offset, offset + length - 1] });
+    }
+
+    offset += length;
+  }
+
+  return { fields, mss, windowScale, sackPermitted, sackBlocks };
 }
 
 export function formatHexDump(bytes: Uint8Array): string {
