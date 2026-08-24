@@ -190,68 +190,74 @@ export default function App() {
 
           const epochMs = typeof rawPkt.timestamp === 'number' ? rawPkt.timestamp : Date.now();
 
+          // Decoding (which mutates tcpTracker/icmpTracker with one-shot,
+          // consume-on-match semantics) and id/ref bookkeeping must happen
+          // exactly once per real packet - doing this inside the setPackets
+          // updater breaks under React StrictMode's double-invocation in
+          // development, since a second invocation would find the ICMP
+          // tracker's match already consumed and keep that unpatched result.
+          const isFirstOfCapture = captureStartRef.current === null;
+          if (isFirstOfCapture) {
+            captureStartRef.current = epochMs;
+            lastPacketTimeRef.current = null;
+          }
+
+          const relativeTime = captureStartRef.current !== null
+            ? (epochMs - captureStartRef.current) / 1000
+            : 0;
+          const timeDelta = lastPacketTimeRef.current !== null
+            ? Math.max(0, (epochMs - lastPacketTimeRef.current) / 1000)
+            : 0;
+          lastPacketTimeRef.current = epochMs;
+
+          const id = packetGenerator.getNextId();
+
+          let safePkt: Packet;
+          let icmpMatchedRequestFrameId: number | undefined;
+          if (typeof rawPkt.raw === 'string' && rawPkt.raw.length > 0) {
+            // Authoritative path: dissect the real captured bytes exactly
+            // like an imported pcap file would be dissected.
+            const binaryString = atob(rawPkt.raw);
+            const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
+            const decoded = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker, icmpTracker);
+            safePkt = decoded.packet;
+            icmpMatchedRequestFrameId = decoded.icmpMatchedRequestFrameId;
+          } else {
+            // Fallback only: the agent did not send raw bytes. Use the
+            // lightweight metadata fields and leave byte data genuinely
+            // empty rather than fabricating fake content.
+            const length = rawPkt.length || 0;
+            safePkt = {
+              id,
+              timestamp: epochMs,
+              relativeTime,
+              timeDelta,
+              source: rawPkt.source || '0.0.0.0',
+              destination: rawPkt.destination || '0.0.0.0',
+              sourcePort: rawPkt.sourcePort,
+              destPort: rawPkt.destPort,
+              protocol: rawPkt.protocol || 'TCP',
+              length,
+              info: rawPkt.info || 'Traffic',
+              status: 'ok',
+              layers: [
+                {
+                  name: 'Frame',
+                  summary: `Frame ${id}: ${length} bytes (no raw capture data was available)`,
+                  fields: [
+                    { name: 'Interface', value: 'Live Agent' },
+                    { name: 'Length', value: `${length} bytes` }
+                  ]
+                }
+              ],
+              rawBytes: new Uint8Array(0),
+              hexDump: '',
+              asciiDump: '',
+              interfaceName: 'Live Agent'
+            };
+          }
+
           setPackets((prev) => {
-            const isFirstOfCapture = prev.length === 0;
-            if (isFirstOfCapture) {
-              captureStartRef.current = epochMs;
-              lastPacketTimeRef.current = null;
-            }
-
-            const relativeTime = captureStartRef.current !== null
-              ? (epochMs - captureStartRef.current) / 1000
-              : 0;
-            const timeDelta = lastPacketTimeRef.current !== null
-              ? Math.max(0, (epochMs - lastPacketTimeRef.current) / 1000)
-              : 0;
-            lastPacketTimeRef.current = epochMs;
-
-            const id = packetGenerator.getNextId();
-
-            let safePkt: Packet;
-            let icmpMatchedRequestFrameId: number | undefined;
-            if (typeof rawPkt.raw === 'string' && rawPkt.raw.length > 0) {
-              // Authoritative path: dissect the real captured bytes exactly
-              // like an imported pcap file would be dissected.
-              const binaryString = atob(rawPkt.raw);
-              const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
-              const decoded = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker, icmpTracker);
-              safePkt = decoded.packet;
-              icmpMatchedRequestFrameId = decoded.icmpMatchedRequestFrameId;
-            } else {
-              // Fallback only: the agent did not send raw bytes. Use the
-              // lightweight metadata fields and leave byte data genuinely
-              // empty rather than fabricating fake content.
-              const length = rawPkt.length || 0;
-              safePkt = {
-                id,
-                timestamp: epochMs,
-                relativeTime,
-                timeDelta,
-                source: rawPkt.source || '0.0.0.0',
-                destination: rawPkt.destination || '0.0.0.0',
-                sourcePort: rawPkt.sourcePort,
-                destPort: rawPkt.destPort,
-                protocol: rawPkt.protocol || 'TCP',
-                length,
-                info: rawPkt.info || 'Traffic',
-                status: 'ok',
-                layers: [
-                  {
-                    name: 'Frame',
-                    summary: `Frame ${id}: ${length} bytes (no raw capture data was available)`,
-                    fields: [
-                      { name: 'Interface', value: 'Live Agent' },
-                      { name: 'Length', value: `${length} bytes` }
-                    ]
-                  }
-                ],
-                rawBytes: new Uint8Array(0),
-                hexDump: '',
-                asciiDump: '',
-                interfaceName: 'Live Agent'
-              };
-            }
-
             const patchedPrev = icmpMatchedRequestFrameId !== undefined
               ? prev.map((p) => (p.id === icmpMatchedRequestFrameId ? { ...p, info: p.info + ` (reply in ${id})` } : p))
               : prev;
@@ -376,6 +382,12 @@ export default function App() {
     packetGenerator.reset();
     tcpTracker.reset();
     icmpTracker.reset();
+    // Clearing the buffer is the only way a fresh capture begins, so this is
+    // where the relative-time clock resets. captureStartRef === null is then
+    // a reliable, side-effect-free "this is the first packet of a capture"
+    // test in the live-packet handler.
+    captureStartRef.current = null;
+    lastPacketTimeRef.current = null;
     setPackets([]);
     setSelectedPacket(null);
     setActiveByteRange(null);

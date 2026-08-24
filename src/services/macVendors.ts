@@ -59,5 +59,8 @@ export function resolveMacVendor(mac: string): string {
   const oui = mac.slice(0, 8).toUpperCase();
   const vendor = OUI_VENDOR_MAP[oui];
   if (!vendor) return mac;
-  return `${vendor}_${mac.slice(9).toUpperCase()} (${mac})`;
+  // The NIC-specific half stays lowercase, matching Wireshark's own
+  // convention (e.g. "Apple_a1:b2:c3 (a4:83:e7:a1:b2:c3)"); `mac` arrives
+  // already lowercase from formatMac() in pcapParser.ts.
+  return `${vendor}_${mac.slice(9)} (${mac})`;
 }

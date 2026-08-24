@@ -14,6 +14,19 @@ import { IcmpEchoTracker } from './icmpEchoTracker';
  * network (4 bytes) = 1 (LINKTYPE_ETHERNET)
  */
 
+/**
+ * Flattens a ProtocolField for JSON export, recursing into nested children so
+ * sub-fields (TCP's raw seq/ack numbers, IP's DSCP/ECN and flag bits, ICMP's
+ * identifier) survive the export instead of being silently dropped.
+ */
+function mapField(f: ProtocolField): { name: string; value: string | number | boolean; children?: ReturnType<typeof mapField>[] } {
+  return {
+    name: f.name,
+    value: f.value,
+    ...(f.children && f.children.length > 0 ? { children: f.children.map(mapField) } : {}),
+  };
+}
+
 export class PcapService {
   /**
    * Generates a compliant binary Libpcap 2.4 file from packet stream
@@ -169,7 +182,7 @@ export class PcapService {
       layers: p.layers.map(l => ({
         layer: l.name,
         summary: l.summary,
-        fields: l.fields.map(f => ({ name: f.name, value: f.value })),
+        fields: l.fields.map(mapField),
       })),
     }));
 
@@ -198,6 +211,23 @@ export class PcapService {
     return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
   }
 }
+
+/**
+ * Maps dissected layer names to their Wireshark filter-field abbreviations for
+ * the Frame layer's "[Protocols in frame]" field. Module-level so it isn't
+ * rebuilt once per decoded packet.
+ */
+const PROTOCOL_NAME_MAP: Record<string, string> = {
+  'Frame': 'frame',
+  'Ethernet II': 'eth',
+  '802.1Q Virtual LAN': 'vlan',
+  'Internet Protocol Version 4': 'ip',
+  'Internet Protocol Version 6': 'ipv6',
+  'Transmission Control Protocol': 'tcp',
+  'User Datagram Protocol': 'udp',
+  'Internet Control Message Protocol': 'icmp',
+  'Internet Control Message Protocol v6': 'icmpv6',
+};
 
 export function decodeRawEthernetPacket(
   rawBytes: Uint8Array,
@@ -359,7 +389,7 @@ export function decodeRawEthernetPacket(
     layers.push(ipLayer);
 
     const transportOffset = l3Offset + ipHeaderLen;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen);
     if (transport) {
       proto = transport.proto;
       srcPort = transport.srcPort;
@@ -376,6 +406,7 @@ export function decodeRawEthernetPacket(
     }
   } else if (currentEtherType === 0x86dd && rawBytes.length >= l3Offset + 40) {
     // IPv6 Decode - fixed 40-byte header only; IPv6 extension headers are not supported.
+    const ipv6PayloadLen = (rawBytes[l3Offset + 4] << 8) | rawBytes[l3Offset + 5];
     const nextHeader = rawBytes[l3Offset + 6];
     const hopLimit = rawBytes[l3Offset + 7];
     srcIp = formatIpv6Address(rawBytes, l3Offset + 8);
@@ -396,7 +427,7 @@ export function decodeRawEthernetPacket(
     layers.push(ipv6Layer);
 
     const transportOffset = l3Offset + 40;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, ipv6PayloadLen);
     if (transport) {
       proto = transport.proto;
       srcPort = transport.srcPort;
@@ -413,18 +444,7 @@ export function decodeRawEthernetPacket(
     }
   }
 
-  const protocolNameMap: Record<string, string> = {
-    'Frame': 'frame',
-    'Ethernet II': 'eth',
-    '802.1Q Virtual LAN': 'vlan',
-    'Internet Protocol Version 4': 'ip',
-    'Internet Protocol Version 6': 'ipv6',
-    'Transmission Control Protocol': 'tcp',
-    'User Datagram Protocol': 'udp',
-    'Internet Control Message Protocol': 'icmp',
-    'Internet Control Message Protocol v6': 'icmpv6',
-  };
-  const protocolsInFrame = layers.map(l => protocolNameMap[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_')).join(':');
+  const protocolsInFrame = layers.map(l => PROTOCOL_NAME_MAP[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_')).join(':');
   layers[0].fields.push({ name: '[Protocols in frame]', value: protocolsInFrame });
 
   return {
@@ -497,7 +517,15 @@ function decodeTransportLayer(
   tcpTracker?: TcpStreamTracker,
   ttl?: number,
   icmpTracker?: IcmpEchoTracker,
-  frameId?: number
+  frameId?: number,
+  /**
+   * Number of bytes belonging to the transport header+payload as *declared by
+   * the network layer* (IPv4: Total Length - IHL; IPv6: Payload Length, which
+   * already excludes the fixed 40-byte header). Real Ethernet frames are
+   * padded up to a 60-byte minimum, so deriving TCP payload length from
+   * rawBytes.length would count that padding as payload.
+   */
+  l4SegmentLen?: number
 ): {
   proto: Packet['protocol'];
   srcPort?: number;
@@ -559,7 +587,15 @@ function decodeTransportLayer(
     const optionsSummary = optionsSummaryParts.length > 0 ? ' ' + optionsSummaryParts.join(' ') : '';
 
     const tcpPayloadStart = transportOffset + tcpHeaderLen;
-    const payloadLength = Math.max(0, rawBytes.length - tcpPayloadStart);
+    // Prefer the network layer's declared segment length over the raw frame
+    // length so Ethernet's 60-byte minimum padding isn't counted as payload
+    // (a bare 54-byte ACK would otherwise report Len=6). Clamping against
+    // what was actually captured keeps snaplen-truncated captures honest:
+    // they degrade to "however much was captured", never more.
+    const capturedPayloadLength = Math.max(0, rawBytes.length - tcpPayloadStart);
+    const payloadLength = l4SegmentLen !== undefined
+      ? Math.max(0, Math.min(capturedPayloadLength, l4SegmentLen - tcpHeaderLen))
+      : capturedPayloadLength;
     // TLS payloads are encrypted from essentially the first byte - never
     // scan them, since any "match" there would be a false positive.
     const tcpHost =
@@ -569,10 +605,18 @@ function decodeTransportLayer(
     const relSeq = tcpTracker ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, seqNum) : seqNum;
     const relAck = tcpTracker && ack ? tcpTracker.getRelativeSeq(dstIp, dstPort, srcIp, srcPort, ackNum) : ackNum;
 
+    // This segment's *own* next sequence number - deliberately independent of
+    // the tracker's per-direction high-water mark, which would report the
+    // stream's furthest-seen sequence for a retransmit/out-of-order segment
+    // and a stale value for a keep-alive (which skips checkSequence). SYN and
+    // FIN each consume one sequence number. Wireshark omits the field for
+    // zero-length non-SYN/FIN segments, where it would just repeat Seq.
+    const nextSeqDelta = payloadLength + (syn || fin ? 1 : 0);
+    const expectedNextRel = nextSeqDelta > 0 ? relSeq + nextSeqDelta : undefined;
+
     let streamId: number | undefined;
     let status: Packet['status'] | undefined;
     let anomalies: AnomalyInfo[] | undefined;
-    let expectedNextRel: number | undefined;
     let streamPacketNumber: number | undefined;
     let conversationCompleteness: string | undefined;
     let isKeepAlive = false;
@@ -609,8 +653,6 @@ function decodeTransportLayer(
         }
       }
 
-      const expectedNextRaw = tcpTracker.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
-      expectedNextRel = expectedNextRaw !== undefined ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, expectedNextRaw) : undefined;
       conversationCompleteness = tcpTracker.getConversationCompleteness(streamId);
     }
 

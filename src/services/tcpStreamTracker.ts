@@ -27,6 +27,15 @@ export class TcpStreamTracker {
   }
 
   /**
+   * Keys one *direction* of a connection: the (symmetric) connection key plus
+   * the sending endpoint, so the two halves of a conversation track their
+   * sequence state independently.
+   */
+  private directionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
+    return `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+  }
+
+  /**
    * Returns a stable, zero-based ID shared by both directions of a TCP
    * conversation, assigning a new one the first time a connection is seen.
    */
@@ -54,7 +63,7 @@ export class TcpStreamTracker {
     seqNum: number,
     payloadLength: number
   ): 'ok' | 'retransmit' | 'out-of-order' {
-    const directionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
     const seenThrough = this.highWaterSeq.get(directionKey);
 
     if (seenThrough === undefined) {
@@ -79,7 +88,7 @@ export class TcpStreamTracker {
    * legitimately wrap past 2**32 on long-lived connections.
    */
   public getRelativeSeq(srcIp: string, srcPort: number, dstIp: string, dstPort: number, seqNum: number): number {
-    const directionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
     let base = this.baseSeq.get(directionKey);
     if (base === undefined) {
       base = seqNum;
@@ -94,7 +103,7 @@ export class TcpStreamTracker {
    * from this direction has been through checkSequence() yet.
    */
   public getExpectedNext(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number | undefined {
-    const directionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
     return this.highWaterSeq.get(directionKey);
   }
 
@@ -137,14 +146,21 @@ export class TcpStreamTracker {
     srcIp: string, srcPort: number, dstIp: string, dstPort: number,
     seqNum: number, payloadLength: number, syn: boolean, fin: boolean, rst: boolean
   ): boolean {
-    if (syn || fin || rst || payloadLength > 1) return false;
-    const expectedNext = this.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
-    if (expectedNext === undefined) return false;
-    const isKeepAlive = seqNum === ((expectedNext - 1 + 2 ** 32) % 2 ** 32);
-    if (isKeepAlive) {
-      const directionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
-      this.lastWasKeepAlive.set(directionKey, true);
+    // The flag must be *cleared* as well as set: if a keep-alive goes
+    // unanswered and the sender then transmits real data, the peer's ordinary
+    // ACK of that data would otherwise still be labeled a Keep-Alive ACK.
+    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
+    if (syn || fin || rst || payloadLength > 1) {
+      this.lastWasKeepAlive.set(directionKey, false);
+      return false;
     }
+    const expectedNext = this.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
+    if (expectedNext === undefined) {
+      this.lastWasKeepAlive.set(directionKey, false);
+      return false;
+    }
+    const isKeepAlive = seqNum === ((expectedNext - 1 + 2 ** 32) % 2 ** 32);
+    this.lastWasKeepAlive.set(directionKey, isKeepAlive);
     return isKeepAlive;
   }
 
@@ -154,7 +170,9 @@ export class TcpStreamTracker {
    * re-labeled on a later unrelated lookup.
    */
   public consumeKeepAliveAck(srcIp: string, srcPort: number, dstIp: string, dstPort: number): boolean {
-    const peerDirectionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${dstIp}:${dstPort}`;
+    // Swapped arguments address the peer's direction; connectionKey is
+    // symmetric, so the resulting key is identical either way round.
+    const peerDirectionKey = this.directionKey(dstIp, dstPort, srcIp, srcPort);
     const wasKeepAlive = this.lastWasKeepAlive.get(peerDirectionKey) === true;
     if (wasKeepAlive) this.lastWasKeepAlive.set(peerDirectionKey, false);
     return wasKeepAlive;
