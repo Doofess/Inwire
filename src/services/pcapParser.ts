@@ -422,9 +422,13 @@ function decodeTransportLayer(
   status?: Packet['status'];
   anomalies?: AnomalyInfo[];
 } | null {
+  // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {
     const srcPort = (rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1];
     const dstPort = (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3];
+    // ">>> 0" reinterprets the bitwise result as unsigned - without it, any
+    // seq/ack number with the top bit set comes out as a negative number,
+    // since JS's <</| operators always produce signed 32-bit results.
     const seqNum = ((rawBytes[transportOffset + 4] << 24) | (rawBytes[transportOffset + 5] << 16) | (rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7]) >>> 0;
     const ackNum = ((rawBytes[transportOffset + 8] << 24) | (rawBytes[transportOffset + 9] << 16) | (rawBytes[transportOffset + 10] << 8) | rawBytes[transportOffset + 11]) >>> 0;
     // Data Offset is the top 4 bits of this byte, in 32-bit words - hardcoding
@@ -649,9 +653,9 @@ function parseTcpOptions(
       continue;
     }
 
-    if (offset + 1 >= optionsEnd) break; // no room for a length byte
+    if (offset + 1 >= optionsEnd || offset + 1 >= rawBytes.length) break; // no room for a length byte
     const length = rawBytes[offset + 1];
-    if (length < 2 || offset + length > optionsEnd) break; // malformed - stop rather than misread
+    if (length < 2 || offset + length > optionsEnd || offset + length > rawBytes.length) break; // malformed - stop rather than misread
 
     if (kind === 2 && length === 4) {
       mss = (rawBytes[offset + 2] << 8) | rawBytes[offset + 3];
