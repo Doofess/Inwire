@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Packet, UserRolePermissions } from '../../types/packet';
+import { Packet, ProtocolField, UserRolePermissions } from '../../types/packet';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,6 +66,65 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
     navigator.clipboard.writeText(String(val));
     setCopiedField(name);
     setTimeout(() => setCopiedField(null), 1500);
+  };
+
+  const renderField = (field: ProtocolField, key: string | number, depth: number): React.ReactNode => {
+    const isFieldActive =
+      activeByteRange &&
+      field.rawBytesRange &&
+      activeByteRange[0] === field.rawBytesRange[0] &&
+      activeByteRange[1] === field.rawBytesRange[1];
+
+    const indentClass = depth === 0 ? '' : depth === 1 ? 'ml-4' : 'ml-8';
+
+    return (
+      <div key={key}>
+        <div
+          onMouseEnter={e => {
+            e.stopPropagation();
+            onHoverByteRange(field.rawBytesRange || null);
+          }}
+          onMouseLeave={e => {
+            e.stopPropagation();
+            onHoverByteRange(null);
+          }}
+          className={`flex items-center justify-between px-2 py-0.5 rounded group transition-colors ${indentClass} ${
+            isFieldActive
+              ? 'bg-cyan-100 dark:bg-cyan-500/20 text-cyan-800 dark:text-cyan-300 font-bold'
+              : 'hover:bg-accent/60 text-muted-foreground'
+          }`}
+        >
+          <div className="flex items-center gap-2 truncate">
+            <span className="text-muted-foreground">{field.name}:</span>
+            <span className="font-semibold text-foreground truncate">{String(field.value)}</span>
+            {field.description && (
+              <span className="text-[10px] text-muted-foreground italic hidden sm:inline truncate">
+                ({field.description})
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={() => copyFieldValue(field.name, field.value)}
+              className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
+              title="Copy field value"
+            >
+              {copiedField === field.name ? (
+                <Check className="w-3 h-3 text-emerald-400" />
+              ) : (
+                <Copy className="w-3 h-3" />
+              )}
+            </button>
+          </div>
+        </div>
+        {field.children && field.children.length > 0 && (
+          <div className="space-y-1 mt-1">
+            {field.children.map((child, cIdx) => renderField(child, cIdx, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
@@ -162,56 +221,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
               {/* Layer Fields */}
               {isExpanded && layer.fields && layer.fields.length > 0 && (
                 <div className="pl-6 pr-3 py-1.5 space-y-1 border-t border-border/60 text-[11px]">
-                  {layer.fields.map((field, fIdx) => {
-                    const isFieldActive =
-                      activeByteRange &&
-                      field.rawBytesRange &&
-                      activeByteRange[0] === field.rawBytesRange[0] &&
-                      activeByteRange[1] === field.rawBytesRange[1];
-
-                    return (
-                      <div
-                        key={fIdx}
-                        onMouseEnter={e => {
-                          e.stopPropagation();
-                          onHoverByteRange(field.rawBytesRange || layer.rawBytesRange || null);
-                        }}
-                        onMouseLeave={e => {
-                          e.stopPropagation();
-                          onHoverByteRange(null);
-                        }}
-                        className={`flex items-center justify-between px-2 py-0.5 rounded group transition-colors ${
-                          isFieldActive
-                            ? 'bg-cyan-100 dark:bg-cyan-500/20 text-cyan-800 dark:text-cyan-300 font-bold'
-                            : 'hover:bg-accent/60 text-muted-foreground'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 truncate">
-                          <span className="text-muted-foreground">{field.name}:</span>
-                          <span className="font-semibold text-foreground truncate">{String(field.value)}</span>
-                          {field.description && (
-                            <span className="text-[10px] text-muted-foreground italic hidden sm:inline truncate">
-                              ({field.description})
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button
-                            onClick={() => copyFieldValue(field.name, field.value)}
-                            className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
-                            title="Copy field value"
-                          >
-                            {copiedField === field.name ? (
-                              <Check className="w-3 h-3 text-emerald-400" />
-                            ) : (
-                              <Copy className="w-3 h-3" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {layer.fields.map((field, fIdx) => renderField(field, fIdx, 0))}
                 </div>
               )}
             </div>
