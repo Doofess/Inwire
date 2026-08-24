@@ -10,6 +10,7 @@ import { Packet, UserRole } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
 import { decodeRawEthernetPacket } from "./services/pcapParser";
 import { TcpStreamTracker } from "./services/tcpStreamTracker";
+import { IcmpEchoTracker } from "./services/icmpEchoTracker";
 import { FilterEngine } from "./services/filterEngine";
 import { CustomDissectorEngine } from "./services/customDissectorEngine";
 import { ColorRulesEngine } from "./services/colorRules";
@@ -134,6 +135,7 @@ export default function App() {
     [dissectorEngine],
   );
   const tcpTracker = useMemo(() => new TcpStreamTracker(), []);
+  const icmpTracker = useMemo(() => new IcmpEchoTracker(), []);
 
   // Track the latest isCapturing value for the always-on agent connection
   // below, whose handlers are set up once and must not go stale.
@@ -206,12 +208,15 @@ export default function App() {
             const id = packetGenerator.getNextId();
 
             let safePkt: Packet;
+            let icmpMatchedRequestFrameId: number | undefined;
             if (typeof rawPkt.raw === 'string' && rawPkt.raw.length > 0) {
               // Authoritative path: dissect the real captured bytes exactly
               // like an imported pcap file would be dissected.
               const binaryString = atob(rawPkt.raw);
               const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
-              safePkt = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker).packet;
+              const decoded = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker, icmpTracker);
+              safePkt = decoded.packet;
+              icmpMatchedRequestFrameId = decoded.icmpMatchedRequestFrameId;
             } else {
               // Fallback only: the agent did not send raw bytes. Use the
               // lightweight metadata fields and leave byte data genuinely
@@ -247,7 +252,10 @@ export default function App() {
               };
             }
 
-            const updated = [...prev, safePkt];
+            const patchedPrev = icmpMatchedRequestFrameId !== undefined
+              ? prev.map((p) => (p.id === icmpMatchedRequestFrameId ? { ...p, info: p.info + ` (reply in ${id})` } : p))
+              : prev;
+            const updated = [...patchedPrev, safePkt];
             if (updated.length > 4000) {
               return updated.slice(updated.length - 4000);
             }
@@ -367,6 +375,7 @@ export default function App() {
   const handleClearPackets = () => {
     packetGenerator.reset();
     tcpTracker.reset();
+    icmpTracker.reset();
     setPackets([]);
     setSelectedPacket(null);
     setActiveByteRange(null);
