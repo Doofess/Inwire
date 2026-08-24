@@ -282,25 +282,68 @@ export function decodeRawEthernetPacket(
   // IPv4 Decode
   if (currentEtherType === 0x0800 && rawBytes.length >= l3Offset + 20) {
     const ipHeaderLen = (rawBytes[l3Offset] & 0x0f) * 4;
+    const tos = rawBytes[l3Offset + 1];
+    const dscp = tos >> 2;
+    const ecn = tos & 0x3;
     const ipTotalLen = (rawBytes[l3Offset + 2] << 8) | rawBytes[l3Offset + 3];
+    const identification = (rawBytes[l3Offset + 4] << 8) | rawBytes[l3Offset + 5];
+    const flagsAndFragOffset = (rawBytes[l3Offset + 6] << 8) | rawBytes[l3Offset + 7];
+    const ipReservedBit = (flagsAndFragOffset >> 15) & 0x1;
+    const dontFragment = (flagsAndFragOffset >> 14) & 0x1;
+    const moreFragments = (flagsAndFragOffset >> 13) & 0x1;
+    const fragmentOffset = flagsAndFragOffset & 0x1fff;
+    const ttl = rawBytes[l3Offset + 8];
     const ipProtocolNum = rawBytes[l3Offset + 9];
+    const headerChecksumActual = (rawBytes[l3Offset + 10] << 8) | rawBytes[l3Offset + 11];
+    const headerChecksumComputed = computeIpHeaderChecksum(rawBytes, l3Offset, ipHeaderLen);
+    const checksumCorrect = headerChecksumActual === headerChecksumComputed;
     srcIp = `${rawBytes[l3Offset + 12]}.${rawBytes[l3Offset + 13]}.${rawBytes[l3Offset + 14]}.${rawBytes[l3Offset + 15]}`;
     dstIp = `${rawBytes[l3Offset + 16]}.${rawBytes[l3Offset + 17]}.${rawBytes[l3Offset + 18]}.${rawBytes[l3Offset + 19]}`;
 
-    layers.push({
+    const ipLayer: ProtocolLayer = {
       name: 'Internet Protocol Version 4',
       summary: `Internet Protocol Version 4, Src: ${srcIp}, Dst: ${dstIp}`,
       rawBytesRange: [l3Offset, l3Offset + ipHeaderLen - 1],
       fields: [
         { name: 'Version', value: '4', rawBytesRange: [l3Offset, l3Offset] },
         { name: 'Header Length', value: `${ipHeaderLen} bytes`, rawBytesRange: [l3Offset, l3Offset] },
+        {
+          name: 'Differentiated Services Field',
+          value: `0x${tos.toString(16).padStart(2, '0')} (DSCP: ${dscp}, ECN: ${ecn})`,
+          rawBytesRange: [l3Offset + 1, l3Offset + 1],
+          children: [
+            { name: 'Differentiated Services Codepoint', value: dscp, rawBytesRange: [l3Offset + 1, l3Offset + 1] },
+            { name: 'Explicit Congestion Notification', value: ecn, rawBytesRange: [l3Offset + 1, l3Offset + 1] },
+          ],
+        },
         { name: 'Total Length', value: ipTotalLen, rawBytesRange: [l3Offset + 2, l3Offset + 3] },
-        { name: 'Time to Live (TTL)', value: rawBytes[l3Offset + 8], rawBytesRange: [l3Offset + 8, l3Offset + 8] },
+        { name: 'Identification', value: `0x${identification.toString(16).padStart(4, '0')} (${identification})`, rawBytesRange: [l3Offset + 4, l3Offset + 5] },
+        {
+          name: 'Flags',
+          value: `0x${((flagsAndFragOffset >> 13) & 0x7).toString(16).padStart(2, '0')}`,
+          rawBytesRange: [l3Offset + 6, l3Offset + 6],
+          children: [
+            { name: 'Reserved bit', value: ipReservedBit === 1 ? 'Set' : 'Not set', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
+            { name: "Don't fragment", value: dontFragment === 1 ? 'Set' : 'Not set', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
+            { name: 'More fragments', value: moreFragments === 1 ? 'Set' : 'Not set', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
+          ],
+        },
+        { name: 'Fragment Offset', value: fragmentOffset, rawBytesRange: [l3Offset + 6, l3Offset + 7] },
+        { name: 'Time to Live (TTL)', value: ttl, rawBytesRange: [l3Offset + 8, l3Offset + 8] },
         { name: 'Protocol', value: ipProtocolNum === 6 ? 'TCP (6)' : ipProtocolNum === 17 ? 'UDP (17)' : `${ipProtocolNum}`, rawBytesRange: [l3Offset + 9, l3Offset + 9] },
+        {
+          name: 'Header Checksum',
+          value: `0x${headerChecksumActual.toString(16).padStart(4, '0')} [${checksumCorrect ? 'correct' : 'incorrect'}]`,
+          rawBytesRange: [l3Offset + 10, l3Offset + 11],
+          children: [
+            { name: '[Header checksum status]', value: checksumCorrect ? 'Correct' : `Incorrect, should be 0x${headerChecksumComputed.toString(16).padStart(4, '0')}` },
+          ],
+        },
         { name: 'Source Address', value: srcIp, rawBytesRange: [l3Offset + 12, l3Offset + 15] },
         { name: 'Destination Address', value: dstIp, rawBytesRange: [l3Offset + 16, l3Offset + 19] },
       ],
-    });
+    };
+    layers.push(ipLayer);
 
     const transportOffset = l3Offset + ipHeaderLen;
     const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker);
@@ -313,6 +356,9 @@ export function decodeRawEthernetPacket(
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
       anomalies = transport.anomalies;
+      if (transport.streamId !== undefined) {
+        ipLayer.fields.push({ name: '[Stream index]', value: transport.streamId });
+      }
     }
   } else if (currentEtherType === 0x86dd && rawBytes.length >= l3Offset + 40) {
     // IPv6 Decode - fixed 40-byte header only; IPv6 extension headers are not supported.
@@ -321,7 +367,7 @@ export function decodeRawEthernetPacket(
     srcIp = formatIpv6Address(rawBytes, l3Offset + 8);
     dstIp = formatIpv6Address(rawBytes, l3Offset + 24);
 
-    layers.push({
+    const ipv6Layer: ProtocolLayer = {
       name: 'Internet Protocol Version 6',
       summary: `Internet Protocol Version 6, Src: ${srcIp}, Dst: ${dstIp}`,
       rawBytesRange: [l3Offset, l3Offset + 39],
@@ -332,7 +378,8 @@ export function decodeRawEthernetPacket(
         { name: 'Source Address', value: srcIp, rawBytesRange: [l3Offset + 8, l3Offset + 23] },
         { name: 'Destination Address', value: dstIp, rawBytesRange: [l3Offset + 24, l3Offset + 39] },
       ],
-    });
+    };
+    layers.push(ipv6Layer);
 
     const transportOffset = l3Offset + 40;
     const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker);
@@ -345,6 +392,9 @@ export function decodeRawEthernetPacket(
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
       anomalies = transport.anomalies;
+      if (transport.streamId !== undefined) {
+        ipv6Layer.fields.push({ name: '[Stream index]', value: transport.streamId });
+      }
     }
   }
 
@@ -727,6 +777,25 @@ function parseTcpOptions(
   }
 
   return { fields, mss, windowScale, sackPermitted, sackBlocks };
+}
+
+/**
+ * Standard Internet checksum (RFC 1071) over the IPv4 header, with the
+ * checksum field itself treated as zero - the same algorithm the sender
+ * used to produce it, so a correct header always recomputes to the value
+ * actually stored there.
+ */
+function computeIpHeaderChecksum(rawBytes: Uint8Array, l3Offset: number, ipHeaderLen: number): number {
+  let sum = 0;
+  for (let i = 0; i < ipHeaderLen; i += 2) {
+    if (i === 10) continue;
+    const word = i + 1 < ipHeaderLen ? (rawBytes[l3Offset + i] << 8) | rawBytes[l3Offset + i + 1] : rawBytes[l3Offset + i] << 8;
+    sum += word;
+  }
+  while (sum >> 16) {
+    sum = (sum & 0xffff) + (sum >> 16);
+  }
+  return (~sum) & 0xffff;
 }
 
 export function formatHexDump(bytes: Uint8Array): string {
