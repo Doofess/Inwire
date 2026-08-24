@@ -211,7 +211,7 @@ export default function App() {
               // like an imported pcap file would be dissected.
               const binaryString = atob(rawPkt.raw);
               const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
-              safePkt = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker);
+              safePkt = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker).packet;
             } else {
               // Fallback only: the agent did not send raw bytes. Use the
               // lightweight metadata fields and leave byte data genuinely

@@ -1,6 +1,7 @@
 import { Packet, ProtocolLayer, ProtocolField, AnomalyInfo } from '../types/packet';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacVendor } from './macVendors';
+import { IcmpEchoTracker } from './icmpEchoTracker';
 
 /**
  * Standard Libpcap file header structure (24 bytes)
@@ -110,6 +111,7 @@ export class PcapService {
     let baseTime: number | null = null;
     let prevTime = 0;
     const tcpTracker = new TcpStreamTracker();
+    const icmpTracker = new IcmpEchoTracker();
 
     while (offset + 16 <= arrayBuffer.byteLength) {
       const tsSec = view.getUint32(offset, isLittleEndian);
@@ -132,8 +134,15 @@ export class PcapService {
       prevTime = epochMs;
 
       // Extract basic layers from Ethernet frame
-      const packet = decodeRawEthernetPacket(rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, origLen, tcpTracker);
+      const { packet, icmpMatchedRequestFrameId } = decodeRawEthernetPacket(rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, origLen, tcpTracker, icmpTracker);
       parsedPackets.push(packet);
+
+      if (icmpMatchedRequestFrameId !== undefined) {
+        const requestPacket = parsedPackets.find(p => p.id === icmpMatchedRequestFrameId);
+        if (requestPacket) {
+          requestPacket.info += ` (reply in ${packet.id})`;
+        }
+      }
 
       if (parsedPackets.length >= 10000) {
         break; // Safety limit for memory in browser
@@ -197,8 +206,9 @@ export function decodeRawEthernetPacket(
   relativeTime: number,
   timeDelta: number,
   origLen: number,
-  tcpTracker?: TcpStreamTracker
-): Packet {
+  tcpTracker?: TcpStreamTracker,
+  icmpTracker?: IcmpEchoTracker
+): { packet: Packet; icmpMatchedRequestFrameId?: number } {
   const hexDump = formatHexDump(rawBytes);
   const asciiDump = formatAsciiDump(rawBytes);
 
@@ -221,6 +231,7 @@ export function decodeRawEthernetPacket(
   let status: Packet['status'] = 'ok';
   let streamId: number | undefined;
   let anomalies: AnomalyInfo[] | undefined;
+  let icmpMatchedRequestFrameId: number | undefined;
 
   const layers: ProtocolLayer[] = [
     {
@@ -348,7 +359,7 @@ export function decodeRawEthernetPacket(
     layers.push(ipLayer);
 
     const transportOffset = l3Offset + ipHeaderLen;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id);
     if (transport) {
       proto = transport.proto;
       srcPort = transport.srcPort;
@@ -358,6 +369,7 @@ export function decodeRawEthernetPacket(
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
       anomalies = transport.anomalies;
+      icmpMatchedRequestFrameId = transport.icmpMatchedRequestFrameId;
       if (transport.streamId !== undefined) {
         ipLayer.fields.push({ name: '[Stream index]', value: transport.streamId });
       }
@@ -384,7 +396,7 @@ export function decodeRawEthernetPacket(
     layers.push(ipv6Layer);
 
     const transportOffset = l3Offset + 40;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id);
     if (transport) {
       proto = transport.proto;
       srcPort = transport.srcPort;
@@ -394,6 +406,7 @@ export function decodeRawEthernetPacket(
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
       anomalies = transport.anomalies;
+      icmpMatchedRequestFrameId = transport.icmpMatchedRequestFrameId;
       if (transport.streamId !== undefined) {
         ipv6Layer.fields.push({ name: '[Stream index]', value: transport.streamId });
       }
@@ -415,25 +428,28 @@ export function decodeRawEthernetPacket(
   layers[0].fields.push({ name: '[Protocols in frame]', value: protocolsInFrame });
 
   return {
-    id,
-    timestamp: epochMs,
-    relativeTime,
-    timeDelta,
-    source: srcIp,
-    destination: dstIp,
-    sourcePort: srcPort,
-    destPort: dstPort,
-    protocol: proto,
-    length: rawBytes.length,
-    info,
-    status,
-    streamId,
-    layers,
-    rawBytes,
-    hexDump,
-    asciiDump,
-    anomalies,
-    interfaceName: 'eth0',
+    packet: {
+      id,
+      timestamp: epochMs,
+      relativeTime,
+      timeDelta,
+      source: srcIp,
+      destination: dstIp,
+      sourcePort: srcPort,
+      destPort: dstPort,
+      protocol: proto,
+      length: rawBytes.length,
+      info,
+      status,
+      streamId,
+      layers,
+      rawBytes,
+      hexDump,
+      asciiDump,
+      anomalies,
+      interfaceName: 'eth0',
+    },
+    icmpMatchedRequestFrameId,
   };
 }
 
@@ -479,7 +495,9 @@ function decodeTransportLayer(
   srcIp: string,
   dstIp: string,
   tcpTracker?: TcpStreamTracker,
-  ttl?: number
+  ttl?: number,
+  icmpTracker?: IcmpEchoTracker,
+  frameId?: number
 ): {
   proto: Packet['protocol'];
   srcPort?: number;
@@ -489,6 +507,7 @@ function decodeTransportLayer(
   streamId?: number;
   status?: Packet['status'];
   anomalies?: AnomalyInfo[];
+  icmpMatchedRequestFrameId?: number;
 } | null {
   // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {
@@ -725,6 +744,18 @@ function decodeTransportLayer(
       info += ` id=0x${icmpId.toString(16).padStart(4, '0')}, seq=${icmpSeq}/${seqLe}${ttlPart}`;
     }
 
+    let icmpMatchedRequestFrameId: number | undefined;
+    if (icmpTracker && icmpId !== undefined && icmpSeq !== undefined && frameId !== undefined) {
+      if (isEchoRequest) {
+        icmpTracker.recordRequest(srcIp, dstIp, icmpId, icmpSeq, frameId);
+      } else if (isEchoReply) {
+        icmpMatchedRequestFrameId = icmpTracker.matchReply(srcIp, dstIp, icmpId, icmpSeq);
+        if (icmpMatchedRequestFrameId !== undefined) {
+          info += ` (request in ${icmpMatchedRequestFrameId})`;
+        }
+      }
+    }
+
     const fields: ProtocolField[] = [
       { name: 'Type', value: icmpType, rawBytesRange: [transportOffset, transportOffset] },
       { name: 'Code', value: icmpCode, rawBytesRange: [transportOffset + 1, transportOffset + 1] },
@@ -739,6 +770,7 @@ function decodeTransportLayer(
     return {
       proto: 'ICMP',
       info,
+      icmpMatchedRequestFrameId,
       layer: {
         name: isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol',
         summary: `${isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol'}, ${info}`,
