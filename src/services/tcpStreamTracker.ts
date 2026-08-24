@@ -18,6 +18,7 @@ export class TcpStreamTracker {
   private baseSeq = new Map<string, number>();
   private packetCountByStream = new Map<number, number>();
   private connState = new Map<number, { sawSyn: boolean; sawSynAck: boolean; sawFinOrRst: boolean }>();
+  private lastWasKeepAlive = new Map<string, boolean>();
 
   private connectionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
     const a = `${srcIp}:${srcPort}`;
@@ -126,12 +127,46 @@ export class TcpStreamTracker {
     return 'Incomplete';
   }
 
+  /**
+   * A classic TCP Keep-Alive resends 0-1 bytes at (expected next seq - 1),
+   * purely to provoke an ACK - without this check, checkSequence() would
+   * misread it as a retransmission, since its sequence number is
+   * deliberately behind the high-water mark.
+   */
+  public checkKeepAlive(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number,
+    seqNum: number, payloadLength: number, syn: boolean, fin: boolean, rst: boolean
+  ): boolean {
+    if (syn || fin || rst || payloadLength > 1) return false;
+    const expectedNext = this.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
+    if (expectedNext === undefined) return false;
+    const isKeepAlive = seqNum === ((expectedNext - 1 + 2 ** 32) % 2 ** 32);
+    if (isKeepAlive) {
+      const directionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+      this.lastWasKeepAlive.set(directionKey, true);
+    }
+    return isKeepAlive;
+  }
+
+  /**
+   * Checks (and clears) whether the peer direction just sent a keep-alive
+   * that this ACK is replying to - one-shot, so the same ACK isn't
+   * re-labeled on a later unrelated lookup.
+   */
+  public consumeKeepAliveAck(srcIp: string, srcPort: number, dstIp: string, dstPort: number): boolean {
+    const peerDirectionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${dstIp}:${dstPort}`;
+    const wasKeepAlive = this.lastWasKeepAlive.get(peerDirectionKey) === true;
+    if (wasKeepAlive) this.lastWasKeepAlive.set(peerDirectionKey, false);
+    return wasKeepAlive;
+  }
+
   public reset(): void {
     this.streamIds.clear();
     this.highWaterSeq.clear();
     this.baseSeq.clear();
     this.packetCountByStream.clear();
     this.connState.clear();
+    this.lastWasKeepAlive.clear();
     this.nextStreamId = 0;
   }
 }

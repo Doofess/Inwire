@@ -481,7 +481,6 @@ function decodeTransportLayer(
         : null;
     const relSeq = tcpTracker ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, seqNum) : seqNum;
     const relAck = tcpTracker && ack ? tcpTracker.getRelativeSeq(dstIp, dstPort, srcIp, srcPort, ackNum) : ackNum;
-    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${relSeq} Ack=${relAck} Len=${payloadLength}${optionsSummary}${tcpHost ? ' ' + tcpHost : ''}`;
 
     let streamId: number | undefined;
     let status: Packet['status'] | undefined;
@@ -489,34 +488,47 @@ function decodeTransportLayer(
     let expectedNextRel: number | undefined;
     let streamPacketNumber: number | undefined;
     let conversationCompleteness: string | undefined;
+    let isKeepAlive = false;
+    let isKeepAliveAck = false;
     if (tcpTracker) {
       streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
       streamPacketNumber = tcpTracker.recordStreamPacket(streamId);
       tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst);
-      const seqResult = tcpTracker.checkSequence(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength);
-      if (seqResult === 'retransmit') {
-        status = 'retransmit';
-        anomalies = [{
-          type: 'tcp-retransmission',
-          severity: 'low',
-          title: 'TCP Retransmission',
-          description: `Segment with sequence number ${seqNum} was already seen on stream #${streamId} - likely a retransmission after packet loss or a duplicate ACK race.`,
-          recommendation: 'Check for network congestion, packet loss, or an unusually high round-trip time on this path.',
-        }];
-      } else if (seqResult === 'out-of-order') {
-        status = 'warning';
-        anomalies = [{
-          type: 'tcp-out-of-order',
-          severity: 'low',
-          title: 'TCP Out-of-Order Segment',
-          description: `Segment with sequence number ${seqNum} arrived out of order relative to previously seen data on stream #${streamId}.`,
-          recommendation: 'Usually harmless (multi-path routing or reordering in transit) - investigate further only if paired with retransmissions or application-level errors.',
-        }];
+
+      isKeepAlive = tcpTracker.checkKeepAlive(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength, syn, fin, rst);
+      isKeepAliveAck = !isKeepAlive && payloadLength === 0 && ack && !syn && !fin && !rst
+        && tcpTracker.consumeKeepAliveAck(srcIp, srcPort, dstIp, dstPort);
+
+      if (!isKeepAlive) {
+        const seqResult = tcpTracker.checkSequence(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength);
+        if (seqResult === 'retransmit') {
+          status = 'retransmit';
+          anomalies = [{
+            type: 'tcp-retransmission',
+            severity: 'low',
+            title: 'TCP Retransmission',
+            description: `Segment with sequence number ${seqNum} was already seen on stream #${streamId} - likely a retransmission after packet loss or a duplicate ACK race.`,
+            recommendation: 'Check for network congestion, packet loss, or an unusually high round-trip time on this path.',
+          }];
+        } else if (seqResult === 'out-of-order') {
+          status = 'warning';
+          anomalies = [{
+            type: 'tcp-out-of-order',
+            severity: 'low',
+            title: 'TCP Out-of-Order Segment',
+            description: `Segment with sequence number ${seqNum} arrived out of order relative to previously seen data on stream #${streamId}.`,
+            recommendation: 'Usually harmless (multi-path routing or reordering in transit) - investigate further only if paired with retransmissions or application-level errors.',
+          }];
+        }
       }
+
       const expectedNextRaw = tcpTracker.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
       expectedNextRel = expectedNextRaw !== undefined ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, expectedNextRaw) : undefined;
       conversationCompleteness = tcpTracker.getConversationCompleteness(streamId);
     }
+
+    const keepAliveLabel = isKeepAlive ? ' [TCP Keep-Alive]' : isKeepAliveAck ? ' [TCP Keep-Alive ACK]' : '';
+    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${relSeq} Ack=${relAck} Len=${payloadLength}${optionsSummary}${keepAliveLabel}${tcpHost ? ' ' + tcpHost : ''}`;
 
     return {
       proto,
