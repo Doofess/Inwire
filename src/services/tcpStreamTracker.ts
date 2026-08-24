@@ -16,6 +16,8 @@ export class TcpStreamTracker {
   private nextStreamId = 0;
   private highWaterSeq = new Map<string, number>();
   private baseSeq = new Map<string, number>();
+  private packetCountByStream = new Map<number, number>();
+  private connState = new Map<number, { sawSyn: boolean; sawSynAck: boolean; sawFinOrRst: boolean }>();
 
   private connectionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
     const a = `${srcIp}:${srcPort}`;
@@ -95,10 +97,41 @@ export class TcpStreamTracker {
     return this.highWaterSeq.get(directionKey);
   }
 
+  /** Returns this packet's 1-based position within its stream, recording it. */
+  public recordStreamPacket(streamId: number): number {
+    const count = (this.packetCountByStream.get(streamId) ?? 0) + 1;
+    this.packetCountByStream.set(streamId, count);
+    return count;
+  }
+
+  public updateConnectionState(streamId: number, syn: boolean, ack: boolean, fin: boolean, rst: boolean): void {
+    const state = this.connState.get(streamId) ?? { sawSyn: false, sawSynAck: false, sawFinOrRst: false };
+    if (syn && !ack) state.sawSyn = true;
+    if (syn && ack) state.sawSynAck = true;
+    if (fin || rst) state.sawFinOrRst = true;
+    this.connState.set(streamId, state);
+  }
+
+  /**
+   * A plain-English summary of handshake progress - deliberately not
+   * Wireshark's internal numeric completeness bitmask, since that's an
+   * implementation detail nobody reading this UI needs to decode.
+   */
+  public getConversationCompleteness(streamId: number): string {
+    const state = this.connState.get(streamId);
+    if (!state) return 'Incomplete';
+    if (state.sawSyn && state.sawSynAck && state.sawFinOrRst) return 'Complete, WITH_DATA';
+    if (state.sawSyn && state.sawSynAck) return 'Established, no close seen';
+    if (state.sawSyn) return 'SYN sent, no reply seen';
+    return 'Incomplete';
+  }
+
   public reset(): void {
     this.streamIds.clear();
     this.highWaterSeq.clear();
     this.baseSeq.clear();
+    this.packetCountByStream.clear();
+    this.connState.clear();
     this.nextStreamId = 0;
   }
 }

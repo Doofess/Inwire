@@ -487,8 +487,12 @@ function decodeTransportLayer(
     let status: Packet['status'] | undefined;
     let anomalies: AnomalyInfo[] | undefined;
     let expectedNextRel: number | undefined;
+    let streamPacketNumber: number | undefined;
+    let conversationCompleteness: string | undefined;
     if (tcpTracker) {
       streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
+      streamPacketNumber = tcpTracker.recordStreamPacket(streamId);
+      tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst);
       const seqResult = tcpTracker.checkSequence(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength);
       if (seqResult === 'retransmit') {
         status = 'retransmit';
@@ -511,6 +515,7 @@ function decodeTransportLayer(
       }
       const expectedNextRaw = tcpTracker.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
       expectedNextRel = expectedNextRaw !== undefined ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, expectedNextRaw) : undefined;
+      conversationCompleteness = tcpTracker.getConversationCompleteness(streamId);
     }
 
     return {
@@ -547,6 +552,8 @@ function decodeTransportLayer(
           { name: 'Header Length', value: `${tcpHeaderLen} bytes`, rawBytesRange: [transportOffset + 12, transportOffset + 12] },
           { name: 'Flags', value: `0x${flags.toString(16).padStart(3, '0')} (${flagList.join(', ')})`, rawBytesRange: [transportOffset + 12, transportOffset + 13] },
           ...(expectedNextRel !== undefined ? [{ name: '[Next Sequence Number]', value: expectedNextRel }] : []),
+          ...(streamPacketNumber !== undefined ? [{ name: '[Stream Packet Number]', value: streamPacketNumber }] : []),
+          ...(conversationCompleteness !== undefined ? [{ name: '[Conversation completeness]', value: conversationCompleteness }] : []),
           ...(tcpOptions ? tcpOptions.fields : []),
         ],
       },
