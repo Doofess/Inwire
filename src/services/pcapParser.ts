@@ -479,11 +479,14 @@ function decodeTransportLayer(
       proto !== 'TLS' && tcpPayloadStart < rawBytes.length
         ? extractLiteralUrlOrHost(rawBytes, tcpPayloadStart)
         : null;
-    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${seqNum} Ack=${ackNum} Len=${payloadLength}${optionsSummary}${tcpHost ? ' ' + tcpHost : ''}`;
+    const relSeq = tcpTracker ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, seqNum) : seqNum;
+    const relAck = tcpTracker && ack ? tcpTracker.getRelativeSeq(dstIp, dstPort, srcIp, srcPort, ackNum) : ackNum;
+    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${relSeq} Ack=${relAck} Len=${payloadLength}${optionsSummary}${tcpHost ? ' ' + tcpHost : ''}`;
 
     let streamId: number | undefined;
     let status: Packet['status'] | undefined;
     let anomalies: AnomalyInfo[] | undefined;
+    let expectedNextRel: number | undefined;
     if (tcpTracker) {
       streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
       const seqResult = tcpTracker.checkSequence(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength);
@@ -506,6 +509,8 @@ function decodeTransportLayer(
           recommendation: 'Usually harmless (multi-path routing or reordering in transit) - investigate further only if paired with retransmissions or application-level errors.',
         }];
       }
+      const expectedNextRaw = tcpTracker.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
+      expectedNextRel = expectedNextRaw !== undefined ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, expectedNextRaw) : undefined;
     }
 
     return {
@@ -523,10 +528,25 @@ function decodeTransportLayer(
         fields: [
           { name: 'Source Port', value: srcPort, rawBytesRange: [transportOffset, transportOffset + 1] },
           { name: 'Destination Port', value: dstPort, rawBytesRange: [transportOffset + 2, transportOffset + 3] },
-          { name: 'Sequence Number', value: seqNum, rawBytesRange: [transportOffset + 4, transportOffset + 7] },
-          { name: 'Acknowledgment Number', value: ackNum, rawBytesRange: [transportOffset + 8, transportOffset + 11] },
+          {
+            name: 'Sequence Number',
+            value: `${relSeq} (relative sequence number)`,
+            rawBytesRange: [transportOffset + 4, transportOffset + 7],
+            children: [
+              { name: 'Sequence Number (raw)', value: seqNum, rawBytesRange: [transportOffset + 4, transportOffset + 7] },
+            ],
+          },
+          {
+            name: 'Acknowledgment Number',
+            value: `${relAck} (relative ack number)`,
+            rawBytesRange: [transportOffset + 8, transportOffset + 11],
+            children: [
+              { name: 'Acknowledgment Number (raw)', value: ackNum, rawBytesRange: [transportOffset + 8, transportOffset + 11] },
+            ],
+          },
           { name: 'Header Length', value: `${tcpHeaderLen} bytes`, rawBytesRange: [transportOffset + 12, transportOffset + 12] },
           { name: 'Flags', value: `0x${flags.toString(16).padStart(3, '0')} (${flagList.join(', ')})`, rawBytesRange: [transportOffset + 12, transportOffset + 13] },
+          ...(expectedNextRel !== undefined ? [{ name: '[Next Sequence Number]', value: expectedNextRel }] : []),
           ...(tcpOptions ? tcpOptions.fields : []),
         ],
       },

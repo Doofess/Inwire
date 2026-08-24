@@ -15,6 +15,7 @@ export class TcpStreamTracker {
   private streamIds = new Map<string, number>();
   private nextStreamId = 0;
   private highWaterSeq = new Map<string, number>();
+  private baseSeq = new Map<string, number>();
 
   private connectionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
     const a = `${srcIp}:${srcPort}`;
@@ -67,9 +68,37 @@ export class TcpStreamTracker {
     return 'ok';
   }
 
+  /**
+   * Returns the sequence number relative to the first one seen in this
+   * direction (Wireshark's default display), establishing that base the
+   * first time a direction is seen. Wraparound-safe: uses unsigned modular
+   * subtraction rather than naive arithmetic, since raw TCP sequence numbers
+   * legitimately wrap past 2**32 on long-lived connections.
+   */
+  public getRelativeSeq(srcIp: string, srcPort: number, dstIp: string, dstPort: number, seqNum: number): number {
+    const directionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+    let base = this.baseSeq.get(directionKey);
+    if (base === undefined) {
+      base = seqNum;
+      this.baseSeq.set(directionKey, base);
+    }
+    return ((seqNum - base) + 2 ** 32) % 2 ** 32;
+  }
+
+  /**
+   * Returns the raw sequence number expected in the next segment from this
+   * direction (i.e. the current high-water mark), or undefined if no segment
+   * from this direction has been through checkSequence() yet.
+   */
+  public getExpectedNext(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number | undefined {
+    const directionKey = `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+    return this.highWaterSeq.get(directionKey);
+  }
+
   public reset(): void {
     this.streamIds.clear();
     this.highWaterSeq.clear();
+    this.baseSeq.clear();
     this.nextStreamId = 0;
   }
 }
