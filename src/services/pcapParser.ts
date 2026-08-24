@@ -1,5 +1,6 @@
 import { Packet, ProtocolLayer, ProtocolField, AnomalyInfo } from '../types/packet';
 import { TcpStreamTracker } from './tcpStreamTracker';
+import { resolveMacVendor } from './macVendors';
 
 /**
  * Standard Libpcap file header structure (24 bytes)
@@ -239,8 +240,8 @@ export function decodeRawEthernetPacket(
       summary: `Ethernet II, Src: ${srcMac}, Dst: ${dstMac}`,
       rawBytesRange: [0, 13],
       fields: [
-        { name: 'Destination', value: dstMac, rawBytesRange: [0, 5] },
-        { name: 'Source', value: srcMac, rawBytesRange: [6, 11] },
+        { name: 'Destination', value: resolveMacVendor(dstMac), rawBytesRange: [0, 5] },
+        { name: 'Source', value: resolveMacVendor(srcMac), rawBytesRange: [6, 11] },
         { name: 'Type', value: `0x${etherType.toString(16).padStart(4, '0')} (${describeEtherType(etherType)})`, rawBytesRange: [12, 13] },
       ],
     },
