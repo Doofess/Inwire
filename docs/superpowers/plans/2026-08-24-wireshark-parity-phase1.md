@@ -61,7 +61,6 @@ function buildFrame(tcpOptionsHex: string, payloadLen: number): Uint8Array {
   ip.set([10, 0, 0, 1], 12);
   ip.set([10, 0, 0, 2], 16);
 
-  const tcp = new Uint8Array(tcpHeaderLen + optionBytes.length - optionBytes.length); // base alloc, options appended below
   const tcpFull = new Uint8Array(tcpHeaderLen);
   tcpFull[0] = 0; tcpFull[1] = 80; // src port 80
   tcpFull[2] = 0; tcpFull[3] = 443; // dst port 443... but 443 forces TLS proto, use 8080 instead
