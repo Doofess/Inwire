@@ -68,7 +68,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
     setTimeout(() => setCopiedField(null), 1500);
   };
 
-  const renderField = (field: ProtocolField, key: string | number, depth: number): React.ReactNode => {
+  const renderField = (field: ProtocolField, key: string | number, depth: number, fallbackRange: [number, number] | null): React.ReactNode => {
     const isFieldActive =
       activeByteRange &&
       field.rawBytesRange &&
@@ -82,7 +82,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
         <div
           onMouseEnter={e => {
             e.stopPropagation();
-            onHoverByteRange(field.rawBytesRange || null);
+            onHoverByteRange(field.rawBytesRange || fallbackRange || null);
           }}
           onMouseLeave={e => {
             e.stopPropagation();
@@ -120,7 +120,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
         </div>
         {field.children && field.children.length > 0 && (
           <div className="space-y-1 mt-1">
-            {field.children.map((child, cIdx) => renderField(child, cIdx, depth + 1))}
+            {field.children.map((child, cIdx) => renderField(child, cIdx, depth + 1, fallbackRange))}
           </div>
         )}
       </div>
@@ -221,7 +221,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
               {/* Layer Fields */}
               {isExpanded && layer.fields && layer.fields.length > 0 && (
                 <div className="pl-6 pr-3 py-1.5 space-y-1 border-t border-border/60 text-[11px]">
-                  {layer.fields.map((field, fIdx) => renderField(field, fIdx, 0))}
+                  {layer.fields.map((field, fIdx) => renderField(field, fIdx, 0, layer.rawBytesRange || null))}
                 </div>
               )}
             </div>
