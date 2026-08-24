@@ -233,6 +233,8 @@ export function decodeRawEthernetPacket(
         { name: 'Frame Length', value: `${rawBytes.length} bytes` },
         { name: 'Capture Length', value: `${origLen} bytes` },
         { name: 'Epoch Time', value: new Date(epochMs).toISOString() },
+        { name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(6)} seconds` },
+        { name: '[Time since reference or first frame]', value: `${relativeTime.toFixed(6)} seconds` },
       ],
     },
     {
@@ -397,6 +399,20 @@ export function decodeRawEthernetPacket(
       }
     }
   }
+
+  const protocolNameMap: Record<string, string> = {
+    'Frame': 'frame',
+    'Ethernet II': 'eth',
+    '802.1Q Virtual LAN': 'vlan',
+    'Internet Protocol Version 4': 'ip',
+    'Internet Protocol Version 6': 'ipv6',
+    'Transmission Control Protocol': 'tcp',
+    'User Datagram Protocol': 'udp',
+    'Internet Control Message Protocol': 'icmp',
+    'Internet Control Message Protocol v6': 'icmpv6',
+  };
+  const protocolsInFrame = layers.map(l => protocolNameMap[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_')).join(':');
+  layers[0].fields.push({ name: '[Protocols in frame]', value: protocolsInFrame });
 
   return {
     id,
