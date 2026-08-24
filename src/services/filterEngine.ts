@@ -105,13 +105,27 @@ export class FilterEngine {
 
     try {
       FilterEngine.compileFilter(trimmed);
-      return { isValid: true };
     } catch (e: any) {
       return {
         isValid: false,
         errorMessage: e.message || 'Invalid filter expression',
       };
     }
+
+    // Syntax alone can't catch a typo'd field name (e.g. "tc.port == 80") -
+    // the runtime evaluator is deliberately lenient about unknown fields
+    // (falls through to "no match" rather than throwing), so this second
+    // pass is the only thing that surfaces it to the user.
+    let normalized = trimmed;
+    normalized = normalized.replace(/\band\b/gi, '&&');
+    normalized = normalized.replace(/\bor\b/gi, '||');
+    normalized = normalized.replace(/\bnot\b/gi, '!');
+    const semanticError = checkFilterSemantics(normalized);
+    if (semanticError) {
+      return { isValid: false, errorMessage: semanticError };
+    }
+
+    return { isValid: true };
   }
 
   /**
@@ -166,6 +180,76 @@ export class FilterEngine {
 
     return keywords.filter(k => k.toLowerCase().includes(currentToken));
   }
+}
+
+// Every field name handled by the `field op value` branch in
+// evaluateAtomicCondition below - kept in sync with that switch so
+// validateFilter can flag a typo'd/unknown field before the user hits Apply.
+const KNOWN_FIELD_NAMES = new Set([
+  'ip.src', 'src', 'ip.dst', 'dst', 'ip.addr', 'ip', 'addr',
+  'tcp.port', 'udp.port', 'port',
+  'tcp.srcport', 'udp.srcport', 'srcport',
+  'tcp.dstport', 'udp.dstport', 'dstport',
+  'protocol', 'proto',
+  'len', 'length', 'frame.len',
+  'status',
+  'stream', 'tcp.stream',
+  'info',
+  'anomaly.severity',
+]);
+
+function checkFilterSemantics(expr: string): string | null {
+  if (expr.includes('||')) {
+    const orParts = splitTopLevel(expr, '||');
+    if (orParts.length > 1) {
+      for (const part of orParts) {
+        const err = checkFilterSemantics(part.trim());
+        if (err) return err;
+      }
+      return null;
+    }
+  }
+
+  if (expr.includes('&&')) {
+    const andParts = splitTopLevel(expr, '&&');
+    if (andParts.length > 1) {
+      for (const part of andParts) {
+        const err = checkFilterSemantics(part.trim());
+        if (err) return err;
+      }
+      return null;
+    }
+  }
+
+  const trimmed = expr.trim();
+  if (trimmed.startsWith('!')) {
+    return checkFilterSemantics(trimmed.slice(1).trim());
+  }
+
+  if (trimmed.startsWith('(') && trimmed.endsWith(')')) {
+    return checkFilterSemantics(trimmed.slice(1, -1));
+  }
+
+  return checkAtomicSemantics(trimmed);
+}
+
+function checkAtomicSemantics(cond: string): string | null {
+  const c = cond.trim();
+  if (!c) return null;
+
+  // `info contains "something"` - not a field comparison, always valid.
+  if (/^info\s+(?:contains|matches|icontains)\s+["']?[^"']+["']?$/i.test(c)) return null;
+
+  const compMatch = c.match(/^([a-zA-Z0-9_.]+)\s*(==|!=|>=|<=|>|<|=)\s*["']?([^"']+)["']?$/);
+  if (!compMatch) {
+    // A bareword with no comparison operator is either a known protocol
+    // keyword (e.g. "dns") or an intentional free-text substring search -
+    // both are valid at runtime, so there's nothing to flag here.
+    return null;
+  }
+
+  const field = compMatch[1].toLowerCase();
+  return KNOWN_FIELD_NAMES.has(field) ? null : `Unknown field "${compMatch[1]}" in filter expression`;
 }
 
 function evaluateComplexExpression(expr: string, packet: Packet): boolean {
@@ -241,7 +325,7 @@ function evaluateAtomicCondition(cond: string, packet: Packet): boolean {
   if (lower === 'mqtt') return packet.protocol === 'MQTT';
   if (lower === 'ssh') return packet.protocol === 'SSH';
   if (lower === 'quic') return packet.protocol === 'QUIC';
-  if (lower === 'anomaly') return !!packet.anomaly || packet.status === 'alert';
+  if (lower === 'anomaly') return (!!packet.anomalies && packet.anomalies.length > 0) || packet.status === 'alert';
   if (lower === 'proto_iot') return packet.protocol === 'CUSTOM' || packet.info.includes('Proto-IoT');
   if (lower === 'finfast') return packet.protocol === 'CUSTOM' || packet.info.includes('FinFast');
 
@@ -324,7 +408,7 @@ function evaluateAtomicCondition(cond: string, packet: Packet): boolean {
       return compareStrings(packet.info, val, op);
 
     case 'anomaly.severity':
-      return packet.anomaly ? compareStrings(packet.anomaly.severity, val, op) : false;
+      return !!packet.anomalies?.some(a => compareStrings(a.severity, val, op));
 
     default:
       return true;

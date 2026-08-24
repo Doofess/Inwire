@@ -1,4 +1,5 @@
-import { Packet, ProtocolLayer } from '../types/packet';
+import { Packet, ProtocolLayer, AnomalyInfo } from '../types/packet';
+import { TcpStreamTracker } from './tcpStreamTracker';
 
 /**
  * Standard Libpcap file header structure (24 bytes)
@@ -107,6 +108,7 @@ export class PcapService {
     let packetIndex = 1;
     let baseTime: number | null = null;
     let prevTime = 0;
+    const tcpTracker = new TcpStreamTracker();
 
     while (offset + 16 <= arrayBuffer.byteLength) {
       const tsSec = view.getUint32(offset, isLittleEndian);
@@ -129,7 +131,7 @@ export class PcapService {
       prevTime = epochMs;
 
       // Extract basic layers from Ethernet frame
-      const packet = decodeRawEthernetPacket(rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, origLen);
+      const packet = decodeRawEthernetPacket(rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, origLen, tcpTracker);
       parsedPackets.push(packet);
 
       if (parsedPackets.length >= 10000) {
@@ -153,7 +155,7 @@ export class PcapService {
       length: p.length,
       info: p.info,
       status: p.status,
-      anomaly: p.anomaly?.title,
+      anomalies: p.anomalies?.map(a => a.title),
       layers: p.layers.map(l => ({
         layer: l.name,
         summary: l.summary,
@@ -178,7 +180,9 @@ export class PcapService {
       p.length,
       `"${p.info.replace(/"/g, '""')}"`,
       p.status,
-      p.anomaly ? `"${p.anomaly.title.replace(/"/g, '""')}"` : '""',
+      p.anomalies && p.anomalies.length > 0
+        ? `"${p.anomalies.map(a => a.title).join('; ').replace(/"/g, '""')}"`
+        : '""',
     ]);
 
     return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
@@ -191,7 +195,8 @@ export function decodeRawEthernetPacket(
   epochMs: number,
   relativeTime: number,
   timeDelta: number,
-  origLen: number
+  origLen: number,
+  tcpTracker?: TcpStreamTracker
 ): Packet {
   const hexDump = formatHexDump(rawBytes);
   const asciiDump = formatAsciiDump(rawBytes);
@@ -212,6 +217,9 @@ export function decodeRawEthernetPacket(
   let srcPort: number | undefined;
   let dstPort: number | undefined;
   let info = `Frame (${rawBytes.length} bytes)`;
+  let status: Packet['status'] = 'ok';
+  let streamId: number | undefined;
+  let anomalies: AnomalyInfo[] | undefined;
 
   const layers: ProtocolLayer[] = [
     {
@@ -294,13 +302,16 @@ export function decodeRawEthernetPacket(
     });
 
     const transportOffset = l3Offset + ipHeaderLen;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker);
     if (transport) {
       proto = transport.proto;
       srcPort = transport.srcPort;
       dstPort = transport.dstPort;
       info = transport.info;
       layers.push(transport.layer);
+      if (transport.status) status = transport.status;
+      streamId = transport.streamId;
+      anomalies = transport.anomalies;
     }
   } else if (currentEtherType === 0x86dd && rawBytes.length >= l3Offset + 40) {
     // IPv6 Decode - fixed 40-byte header only; IPv6 extension headers are not supported.
@@ -323,13 +334,16 @@ export function decodeRawEthernetPacket(
     });
 
     const transportOffset = l3Offset + 40;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker);
     if (transport) {
       proto = transport.proto;
       srcPort = transport.srcPort;
       dstPort = transport.dstPort;
       info = transport.info;
       layers.push(transport.layer);
+      if (transport.status) status = transport.status;
+      streamId = transport.streamId;
+      anomalies = transport.anomalies;
     }
   }
 
@@ -345,11 +359,13 @@ export function decodeRawEthernetPacket(
     protocol: proto,
     length: rawBytes.length,
     info,
-    status: 'ok',
+    status,
+    streamId,
     layers,
     rawBytes,
     hexDump,
     asciiDump,
+    anomalies,
     interfaceName: 'eth0',
   };
 }
@@ -392,8 +408,20 @@ function formatIpv6Address(bytes: Uint8Array, offset: number): string {
 function decodeTransportLayer(
   rawBytes: Uint8Array,
   transportOffset: number,
-  ipProtocolNum: number
-): { proto: Packet['protocol']; srcPort?: number; dstPort?: number; info: string; layer: ProtocolLayer } | null {
+  ipProtocolNum: number,
+  srcIp: string,
+  dstIp: string,
+  tcpTracker?: TcpStreamTracker
+): {
+  proto: Packet['protocol'];
+  srcPort?: number;
+  dstPort?: number;
+  info: string;
+  layer: ProtocolLayer;
+  streamId?: number;
+  status?: Packet['status'];
+  anomalies?: AnomalyInfo[];
+} | null {
   // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {
     const srcPort = (rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1];
@@ -422,13 +450,51 @@ function decodeTransportLayer(
     else if (srcPort === 80 || dstPort === 80) proto = 'HTTP';
     else if (srcPort === 22 || dstPort === 22) proto = 'SSH';
 
-    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${seqNum} Ack=${ackNum} Len=${rawBytes.length - transportOffset - 20}`;
+    // TLS payloads are encrypted from essentially the first byte - never
+    // scan them, since any "match" there would be a false positive.
+    const tcpPayloadStart = transportOffset + 20;
+    const tcpHost =
+      proto !== 'TLS' && tcpPayloadStart < rawBytes.length
+        ? extractLiteralUrlOrHost(rawBytes, tcpPayloadStart)
+        : null;
+    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${seqNum} Ack=${ackNum} Len=${rawBytes.length - transportOffset - 20}${tcpHost ? ' ' + tcpHost : ''}`;
+
+    let streamId: number | undefined;
+    let status: Packet['status'] | undefined;
+    let anomalies: AnomalyInfo[] | undefined;
+    if (tcpTracker) {
+      streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
+      const payloadLength = rawBytes.length - transportOffset - 20;
+      const seqResult = tcpTracker.checkSequence(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength);
+      if (seqResult === 'retransmit') {
+        status = 'retransmit';
+        anomalies = [{
+          type: 'tcp-retransmission',
+          severity: 'low',
+          title: 'TCP Retransmission',
+          description: `Segment with sequence number ${seqNum} was already seen on stream #${streamId} - likely a retransmission after packet loss or a duplicate ACK race.`,
+          recommendation: 'Check for network congestion, packet loss, or an unusually high round-trip time on this path.',
+        }];
+      } else if (seqResult === 'out-of-order') {
+        status = 'warning';
+        anomalies = [{
+          type: 'tcp-out-of-order',
+          severity: 'low',
+          title: 'TCP Out-of-Order Segment',
+          description: `Segment with sequence number ${seqNum} arrived out of order relative to previously seen data on stream #${streamId}.`,
+          recommendation: 'Usually harmless (multi-path routing or reordering in transit) - investigate further only if paired with retransmissions or application-level errors.',
+        }];
+      }
+    }
 
     return {
       proto,
       srcPort,
       dstPort,
       info,
+      streamId,
+      status,
+      anomalies,
       layer: {
         name: 'Transmission Control Protocol',
         summary: `Transmission Control Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
@@ -452,7 +518,18 @@ function decodeTransportLayer(
     if (srcPort === 53 || dstPort === 53) proto = 'DNS';
     else if (srcPort === 1883 || dstPort === 1883) proto = 'MQTT';
 
-    const info = `${srcPort} → ${dstPort} Len=${udpLen}`;
+    // QUIC (HTTP/3) rides on UDP:443 and, like TLS, is encrypted from
+    // essentially the first byte - never scan it, only DNS gets the precise
+    // wire-format decode, everything else gets the literal-prefix scan.
+    const udpPayloadStart = transportOffset + 8;
+    const isQuic = srcPort === 443 || dstPort === 443;
+    let udpHost: string | null = null;
+    if (proto === 'DNS') {
+      udpHost = decodeDnsQueryName(rawBytes, udpPayloadStart);
+    } else if (!isQuic && udpPayloadStart < rawBytes.length) {
+      udpHost = extractLiteralUrlOrHost(rawBytes, udpPayloadStart);
+    }
+    const info = `${srcPort} → ${dstPort} Len=${udpLen}${udpHost ? ' ' + udpHost : ''}`;
 
     return {
       proto,
@@ -528,4 +605,79 @@ export function formatAsciiDump(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.'))
     .join('');
+}
+
+// Surfacing a readable hostname/URL in the Info column is far more useful at
+// a glance than "Len=76" alone - but a generic "does this look like a domain"
+// regex scanned over an entire payload is a bad idea: high-entropy encrypted
+// traffic (TLS, QUIC on port 443) renders as ASCII noise once non-printable
+// bytes become '.', and over a large enough payload that noise very often
+// happens to look like a short hostname (e.g. "3b.Hl.sBR"). No amount of
+// regex tightening fixes that, because that traffic genuinely contains no
+// real hostname - any match there is a false positive by construction.
+//
+// So instead of one heuristic scan, this uses two precise extractors and
+// only runs them where cleartext can plausibly exist:
+//  - DNS query names are decoded from the actual wire format (length-prefixed
+//    labels), not guessed at - the length byte must numerically match the
+//    label that follows, which noise essentially never satisfies.
+//  - Everywhere else, only literal, highly-specific prefixes ("http://",
+//    "Host: ") are matched - safe because matching an exact multi-byte
+//    literal by chance in random bytes is astronomically unlikely.
+// Neither runs on known-encrypted traffic (TLS/QUIC on port 443), since that
+// can never contain genuine plaintext.
+const URL_PATTERN = /https?:\/\/[^\s"'<>\\]+/;
+const HTTP_HOST_HEADER_PATTERN = /(?:^|\r\n)Host:\s*([^\r\n]+)/i;
+
+// formatAsciiDump() turns CR/LF into '.' along with every other non-printable
+// byte, which destroys the "\r\n" line boundary the Host-header match relies
+// on - this variant keeps real CR/LF characters so line-based matching works,
+// while still mapping every other non-printable byte to '.' as before.
+function toLineAwareText(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map(b => {
+      if (b === 13) return '\r';
+      if (b === 10) return '\n';
+      return b >= 32 && b <= 126 ? String.fromCharCode(b) : '.';
+    })
+    .join('');
+}
+
+function extractLiteralUrlOrHost(rawBytes: Uint8Array, payloadStart: number): string | null {
+  const text = toLineAwareText(rawBytes.slice(payloadStart));
+  const urlMatch = text.match(URL_PATTERN);
+  if (urlMatch) return urlMatch[0].replace(/[.,;:)]+$/, '');
+  const hostMatch = text.match(HTTP_HOST_HEADER_PATTERN);
+  return hostMatch ? hostMatch[1].trim() : null;
+}
+
+/**
+ * Decodes the QNAME of the first question in a DNS message using the real
+ * length-prefixed label wire format (RFC 1035 4.1.2), starting right after
+ * the fixed 12-byte DNS header. Returns null on anything that doesn't look
+ * like a well-formed, fully-printable name (including compression pointers,
+ * which aren't resolved here) rather than guessing.
+ */
+function decodeDnsQueryName(rawBytes: Uint8Array, dnsMessageStart: number): string | null {
+  let offset = dnsMessageStart + 12; // past ID/Flags/QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT
+  const labels: string[] = [];
+
+  for (let guard = 0; guard < 32; guard++) {
+    if (offset >= rawBytes.length) return null;
+    const len = rawBytes[offset];
+    if (len === 0) break; // root label - end of name
+    if ((len & 0xc0) === 0xc0) return null; // compression pointer - not resolved here
+    if (len > 63 || offset + 1 + len > rawBytes.length) return null; // malformed/truncated
+
+    let label = '';
+    for (let i = 0; i < len; i++) {
+      const byte = rawBytes[offset + 1 + i];
+      if (byte < 32 || byte > 126) return null; // not a printable hostname label
+      label += String.fromCharCode(byte);
+    }
+    labels.push(label);
+    offset += 1 + len;
+  }
+
+  return labels.length > 0 ? labels.join('.') : null;
 }

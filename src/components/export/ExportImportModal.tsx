@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { motion } from 'motion/react';
 import { Packet, UserRolePermissions } from '../../types/packet';
 import { PcapService } from '../../services/pcapParser';
+import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import {
@@ -109,7 +111,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
     });
 
     // 3. Active Alerts
-    const alerts = packets.filter(p => p.anomaly || p.status === 'alert');
+    const alerts = packets.filter(p => (p.anomalies && p.anomalies.length > 0) || p.status === 'alert');
     let currentY = (doc as any).lastAutoTable.finalY + 15;
     
     doc.setFontSize(14);
@@ -121,7 +123,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
         a.protocol,
         a.source,
         a.destination,
-        a.anomaly?.title || 'Unknown Alert'
+        a.anomalies?.[0]?.title || 'Unknown Alert'
       ]);
       
       autoTable(doc, {
@@ -191,25 +193,29 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-      <div
+    <motion.div
+      {...modalBackdropMotion}
+      className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+    >
+      <motion.div
+        {...modalPanelMotion}
         className={`w-full max-w-2xl rounded-xl border flex flex-col shadow-2xl transition-colors ${
-          isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-zinc-300 text-zinc-900'
+          'bg-card border-border text-card-foreground'
         }`}
       >
         {/* Header */}
-        <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between">
+        <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="p-2 rounded-lg bg-sky-500/20 text-sky-400">
               <Download className="w-5 h-5" />
             </div>
             <div>
               <div className="font-bold text-base">Capture Import & Export Center</div>
-              <p className={`text-xs ${isDark ? "text-zinc-400" : "text-slate-600"}`}>Libpcap 2.4 binary format, JSON telemetry & CSV reports</p>
+              <p className={`text-xs ${"text-muted-foreground"}`}>Libpcap 2.4 binary format, JSON telemetry & CSV reports</p>
             </div>
           </div>
 
-          <button onClick={onClose} className={`p-1.5 rounded-md hover:bg-zinc-800 ${isDark ? "text-zinc-400" : "text-slate-600"} hover:text-zinc-200`}>
+          <button onClick={onClose} className={`p-1.5 rounded-md hover:bg-accent ${"text-muted-foreground"} hover:text-foreground`}>
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -218,7 +224,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
         <div className="p-5 space-y-5 text-xs">
           {/* Permission notice */}
           {!permissions.canExportPcap && (
-            <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center gap-2">
+            <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 flex items-center gap-2">
               <Shield className="w-4 h-4 text-amber-400 shrink-0" />
               <span>Exporting raw captures is restricted for the Auditor / Guest role.</span>
             </div>
@@ -226,7 +232,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
 
           {/* Export Options */}
           <div>
-            <div className={`font-bold ${isDark ? "text-zinc-300" : "text-slate-700"} text-sm mb-2`}>Export Active Capture Stream</div>
+            <div className={`font-bold ${"text-foreground/80"} text-sm mb-2`}>Export Active Capture Stream</div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               {/* PCAP Binary */}
               <button
@@ -237,14 +243,14 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                     ? isDark
                       ? 'bg-sky-950/30 border-sky-600/50 hover:bg-sky-900/40 text-sky-200'
                       : 'bg-sky-50 border-sky-300 hover:bg-sky-100 text-sky-900'
-                    : 'opacity-40 cursor-not-allowed border-zinc-800'
+                    : 'opacity-40 cursor-not-allowed border-border'
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-xs">Libpcap (.pcap)</span>
                   <Download className="w-4 h-4 text-sky-400" />
                 </div>
-                <p className={`text-[11px] ${isDark ? "text-zinc-400" : "text-slate-600"}`}>
+                <p className={`text-[11px] ${"text-muted-foreground"}`}>
                   Standard binary libpcap 2.4 file compatible with Wireshark & Tcpdump
                 </p>
               </button>
@@ -255,17 +261,15 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                 disabled={packets.length === 0}
                 className={`p-3 rounded-lg border text-left transition-all flex flex-col justify-between gap-2 ${
                   packets.length > 0
-                    ? isDark
-                      ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-200'
-                      : 'bg-zinc-50 border-zinc-300 hover:bg-zinc-100 text-zinc-800'
-                    : 'opacity-40 cursor-not-allowed border-zinc-800'
+                    ? 'bg-muted border-border hover:bg-accent text-foreground'
+                    : 'opacity-40 cursor-not-allowed border-border'
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-xs">JSON Telemetry</span>
                   <FileCode className="w-4 h-4 text-purple-400" />
                 </div>
-                <p className={`text-[11px] ${isDark ? "text-zinc-400" : "text-slate-600"}`}>
+                <p className={`text-[11px] ${"text-muted-foreground"}`}>
                   Structured packet metadata with decoded protocol layer fields
                 </p>
               </button>
@@ -276,17 +280,15 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                 disabled={packets.length === 0}
                 className={`p-3 rounded-lg border text-left transition-all flex flex-col justify-between gap-2 ${
                   packets.length > 0
-                    ? isDark
-                      ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-200'
-                      : 'bg-zinc-50 border-zinc-300 hover:bg-zinc-100 text-zinc-800'
-                    : 'opacity-40 cursor-not-allowed border-zinc-800'
+                    ? 'bg-muted border-border hover:bg-accent text-foreground'
+                    : 'opacity-40 cursor-not-allowed border-border'
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-xs">Spreadsheet CSV</span>
                   <FileText className="w-4 h-4 text-emerald-400" />
                 </div>
-                <p className={`text-[11px] ${isDark ? "text-zinc-400" : "text-slate-600"}`}>
+                <p className={`text-[11px] ${"text-muted-foreground"}`}>
                   Tabular packet summary for reports, Excel, and SIEM pipelines
                 </p>
               </button>
@@ -300,30 +302,30 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                     ? isDark
                       ? 'bg-red-950/30 border-red-900/50 hover:bg-red-900/40 text-red-200'
                       : 'bg-red-50 border-red-300 hover:bg-red-100 text-red-900'
-                    : 'opacity-40 cursor-not-allowed border-zinc-800'
+                    : 'opacity-40 cursor-not-allowed border-border'
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-xs">PDF Report</span>
                   <FileImage className="w-4 h-4 text-red-400" />
                 </div>
-                <p className={`text-[11px] ${isDark ? "text-zinc-400" : "text-slate-600"}`}>
+                <p className={`text-[11px] ${"text-muted-foreground"}`}>
                   Formatted document with stats, alerts, and packet summary
                 </p>
               </button>
             </div>
           </div>
 
-          <div className="border-t border-zinc-800 pt-4">
-            <div className={`font-bold ${isDark ? "text-zinc-300" : "text-slate-700"} text-sm mb-2`}>Import External PCAP Capture</div>
+          <div className="border-t border-border pt-4">
+            <div className={`font-bold ${"text-foreground/80"} text-sm mb-2`}>Import External PCAP Capture</div>
             <label
               className={`border-2 border-dashed rounded-lg p-6 flex flex-col items-center justify-center cursor-pointer transition-colors ${
-                isDark ? 'border-zinc-700 hover:border-sky-500 bg-zinc-900/30' : 'border-zinc-300 hover:border-sky-500 bg-zinc-50'
+                'border-border hover:border-sky-500 bg-muted/30'
               }`}
             >
               <Upload className="w-8 h-8 text-sky-400 mb-2" />
-              <span className={`font-semibold ${isDark ? "text-zinc-200" : "text-slate-800"}`}>Click to upload .pcap or drag & drop</span>
-              <span className={`text-[11px] ${isDark ? "text-zinc-500" : "text-slate-600"} mt-1 font-mono`}>Supports standard Libpcap 2.4 captures</span>
+              <span className={`font-semibold ${"text-foreground"}`}>Click to upload .pcap or drag & drop</span>
+              <span className={`text-[11px] ${"text-muted-foreground"} mt-1 font-mono`}>Supports standard Libpcap 2.4 captures</span>
               <input type="file" accept=".pcap,.pcapng,.cap,.json" onChange={handleFileUpload} className="hidden" />
             </label>
 
@@ -344,15 +346,15 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-zinc-800 flex justify-end">
+        <div className="px-5 py-3 border-t border-border flex justify-end">
           <button
             onClick={onClose}
-            className={`px-4 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 ${isDark ? "text-zinc-200" : "text-slate-800"} font-medium transition-colors`}
+            className={`px-4 py-1.5 rounded-md bg-secondary hover:bg-accent ${"text-foreground"} font-medium transition-colors`}
           >
             Close
           </button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };

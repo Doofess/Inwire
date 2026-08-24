@@ -99,3 +99,39 @@
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(6, 182, 212, 0.7);
 }
+
+/* MapLibre GL popup/control theming - keep the library's chrome in sync with
+   our light/dark tokens instead of its hardcoded white default. */
+.netview-geo-popup .maplibregl-popup-content {
+  background: var(--popover);
+  color: var(--popover-foreground);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+}
+
+.netview-geo-popup .maplibregl-popup-tip {
+  border-top-color: var(--popover) !important;
+  border-bottom-color: var(--popover) !important;
+}
+
+.maplibregl-ctrl-group {
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+
+.maplibregl-ctrl-group button + button {
+  border-top: 1px solid var(--border);
+}
+
+.dark .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: invert(1);
+}
+
+.maplibregl-cooperative-gesture-screen {
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-family: inherit;
+}

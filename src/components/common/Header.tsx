@@ -1,25 +1,14 @@
 import React from 'react';
-import { useTheme } from 'next-themes';
 import {
   Play,
   Pause,
   Square,
-  Trash2,
   Download,
-  Sun,
-  Moon,
-  Monitor,
-  Check,
 } from 'lucide-react';
 import { UserRole, UserRolePermissions } from '../../types/packet';
 import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
 import { Button } from '../ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '../ui/dropdown-menu';
+import { AppMenu } from './AppMenu';
 
 interface HeaderProps {
   isCapturing: boolean;
@@ -34,9 +23,16 @@ interface HeaderProps {
   onOpenIspModal?: () => void;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   onOpenColorRulesModal: () => void;
+  onOpenSettingsModal: () => void;
   totalPacketsCount: number;
   filteredPacketsCount: number;
+  totalBytes: number;
+  onApplyFilterPreset: (filter: string) => void;
 }
+
+// Matches the capture buffer cap enforced in App.tsx's WebSocket handler
+// (oldest packets are dropped once the live buffer exceeds this size).
+const PACKET_BUFFER_CAP = 4000;
 
 function downloadAgentInstaller() {
   const { url, filename } = getAgentDownloadForCurrentOS();
@@ -46,41 +42,6 @@ function downloadAgentInstaller() {
   document.body.appendChild(a);
   a.click();
   a.remove();
-}
-
-const THEME_OPTIONS = [
-  { value: 'light', label: 'Light', icon: Sun },
-  { value: 'dark', label: 'Dark', icon: Moon },
-  { value: 'system', label: 'System', icon: Monitor },
-] as const;
-
-function ThemeToggle() {
-  const { theme, setTheme } = useTheme();
-  const ActiveIcon = THEME_OPTIONS.find((o) => o.value === theme)?.icon ?? Monitor;
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="outline"
-          size="icon"
-          title="Change theme"
-          className="bg-secondary hover:bg-accent border-border text-foreground"
-        >
-          <ActiveIcon className="w-4 h-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
-          <DropdownMenuItem key={value} onClick={() => setTheme(value)}>
-            <Icon className="w-4 h-4" />
-            <span>{label}</span>
-            {theme === value && <Check className="w-3.5 h-3.5 ml-auto" />}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -93,14 +54,19 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenDissectorModal,
   onOpenStatsModal,
   onOpenExportModal,
+  onOpenIspModal,
   agentStatus,
   onOpenColorRulesModal,
+  onOpenSettingsModal,
   totalPacketsCount,
   filteredPacketsCount,
+  totalBytes,
+  onApplyFilterPreset,
 }) => {
+  const bufferPercent = Math.min(100, (totalPacketsCount / PACKET_BUFFER_CAP) * 100);
   const agentDownload = getAgentDownloadForCurrentOS();
   return (
-    <header className="h-16 px-4 sm:px-6 border-b flex items-center justify-between transition-colors z-40 shrink-0 select-none bg-card border-border text-card-foreground">
+    <header className="h-16 px-4 sm:px-6 border-b flex items-center justify-between gap-4 transition-colors z-40 shrink-0 select-none bg-card border-border text-card-foreground">
       {/* Left: Branding & Capture Stream Controls */}
       <div className="flex items-center space-x-3 sm:space-x-4">
         {/* Title */}
@@ -153,18 +119,31 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={onClearPackets}
             disabled={!permissions.canClearBuffer || totalPacketsCount === 0}
-            className={`p-2 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors ${
-              !permissions.canClearBuffer || totalPacketsCount === 0 ? 'opacity-40 cursor-not-allowed' : ''
+            className={`bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider shadow-md shadow-cyan-500/20 transition-all cursor-pointer ${
+              !permissions.canClearBuffer || totalPacketsCount === 0 ? 'opacity-50 cursor-not-allowed' : ''
             }`}
             title="Clear Packet Buffer"
           >
-            <Trash2 className="w-4 h-4" />
+            <span>Clear Cache</span>
           </button>
         </div>
       </div>
 
-      {/* Right: Actions, Speed, Auth & Role Selector */}
+      {/* Right: Buffer Status, Agent Status, Downloads, App Menu */}
       <div className="flex items-center space-x-2 sm:space-x-2.5">
+        {/* Capture Buffer Status - relocated from the old bottom status bar.
+            Packet/filtered counts were dropped here since FilterBar already
+            shows filtered/total right below the header; "DROPPED: 0" was a
+            hardcoded placeholder with no real data behind it. */}
+        <div
+          className="hidden md:flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-full border font-mono shrink-0 bg-secondary border-border text-muted-foreground"
+          title={`Capture buffer: ${totalPacketsCount.toLocaleString()} / ${PACKET_BUFFER_CAP.toLocaleString()} packets`}
+        >
+          <span className="text-foreground font-semibold">Buffer {bufferPercent.toFixed(0)}%</span>
+          <span className="text-border">·</span>
+          <span>{(totalBytes / 1024).toFixed(1)} KB</span>
+        </div>
+
         {/* Agent Connectivity Indicator - separate from the download button so
             the button stays a stable, always-clickable action and only this
             small pill reflects the (sometimes flickery) live connection state. */}
@@ -213,19 +192,22 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="hidden sm:inline">Download Driver ({agentDownload.label})</span>
         </Button>
 
-        {/* Export PCAP Button */}
-        <Button
-          variant="outline"
-          onClick={onOpenExportModal}
-          className="bg-secondary hover:bg-accent border-border text-foreground text-xs"
-          title="Import or Export PCAP / JSON"
-        >
-          <Download className="w-3.5 h-3.5 text-cyan-500 dark:text-cyan-400" />
-          <span className="hidden sm:inline">Export PCAP</span>
-        </Button>
-
-        {/* Theme Toggle - System / Light / Dark */}
-        <ThemeToggle />
+        {/* App Menu - Actions, Views, Filter Presets (Ctrl/Cmd+K) */}
+        <AppMenu
+          isCapturing={isCapturing}
+          onStartCapture={onStartCapture}
+          onPauseCapture={onPauseCapture}
+          onClearPackets={onClearPackets}
+          onOpenDissectorModal={onOpenDissectorModal}
+          onOpenStatsModal={onOpenStatsModal}
+          onOpenExportModal={onOpenExportModal}
+          onOpenColorRulesModal={onOpenColorRulesModal}
+          onOpenIspModal={onOpenIspModal}
+          onOpenSettingsModal={onOpenSettingsModal}
+          onApplyFilterPreset={onApplyFilterPreset}
+          permissions={permissions}
+          totalPacketsCount={totalPacketsCount}
+        />
       </div>
     </header>
   );

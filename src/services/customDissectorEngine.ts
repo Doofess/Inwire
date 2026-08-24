@@ -65,6 +65,25 @@ export class CustomDissectorEngine {
   }
 
   /**
+   * Moves a dissector one slot earlier/later in the match order. Array order
+   * *is* precedence here - dissectPayload() below returns the first match,
+   * so when two enabled dissectors could both claim the same traffic (same
+   * port, or magic bytes that happen to overlap), whichever comes first in
+   * this list wins. Exposed so users can resolve that ambiguity themselves
+   * instead of it being silently whatever order the rules were created in.
+   */
+  public moveDissector(id: string, direction: 'up' | 'down'): void {
+    const index = this.dissectors.findIndex(d => d.id === id);
+    if (index === -1) return;
+    const swapWith = direction === 'up' ? index - 1 : index + 1;
+    if (swapWith < 0 || swapWith >= this.dissectors.length) return;
+
+    const reordered = [...this.dissectors];
+    [reordered[index], reordered[swapWith]] = [reordered[swapWith], reordered[index]];
+    this.dissectors = reordered;
+  }
+
+  /**
    * Evaluates application payload bytes against active custom dissectors
    */
   public dissectPayload(

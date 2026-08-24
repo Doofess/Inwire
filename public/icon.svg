@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+    
+    <linearGradient id="eyeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#2563eb" />
+    </linearGradient>
+    
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bgGradient)"/>
+  
+  <g stroke="#334155" stroke-width="6" fill="none">
+    <polygon points="256,72 416,164 416,348 256,440 96,348 96,164" stroke-linejoin="round"/>
+    <line x1="256" y1="72" x2="256" y2="152" />
+    <line x1="416" y1="164" x2="336" y2="210" />
+    <line x1="416" y1="348" x2="336" y2="302" />
+    <line x1="256" y1="440" x2="256" y2="360" />
+    <line x1="96" y1="348" x2="176" y2="302" />
+    <line x1="96" y1="164" x2="176" y2="210" />
+  </g>
+  
+  <g fill="#38bdf8" filter="url(#glow)">
+    <circle cx="256" cy="72" r="10" />
+    <circle cx="416" cy="164" r="10" />
+    <circle cx="416" cy="348" r="10" />
+    <circle cx="256" cy="440" r="10" />
+    <circle cx="96" cy="348" r="10" />
+    <circle cx="96" cy="164" r="10" />
+  </g>
+  
+  <g filter="url(#glow)">
+     <path d="M 120 256 C 176 168 336 168 392 256 C 336 344 176 344 120 256 Z" fill="none" stroke="url(#eyeGradient)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+     <circle cx="256" cy="256" r="48" fill="url(#eyeGradient)" />
+     <circle cx="256" cy="256" r="18" fill="#0f172a" />
+  </g>
+</svg>

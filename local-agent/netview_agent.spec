@@ -43,5 +43,5 @@ exe = EXE(
     upx=False,
     console=True,          # keep a console window so capture/install errors are visible
     uac_admin=True,        # embeds requireAdministrator - Windows shows UAC on double-click
-    icon=None,
+    icon='icon.ico',
 )

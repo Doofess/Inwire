@@ -4,10 +4,12 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { AnimatePresence } from "motion/react";
 import { useTheme } from "next-themes";
 import { Packet, UserRole } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
 import { decodeRawEthernetPacket } from "./services/pcapParser";
+import { TcpStreamTracker } from "./services/tcpStreamTracker";
 import { FilterEngine } from "./services/filterEngine";
 import { CustomDissectorEngine } from "./services/customDissectorEngine";
 import { ColorRulesEngine } from "./services/colorRules";
@@ -29,6 +31,7 @@ import { StatisticsModal } from "./components/statistics/StatisticsModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
 import { ColorRulesModal } from "./components/common/ColorRulesModal";
 import { IspStatsModal } from "./components/isp/IspStatsModal";
+import { SettingsModal } from "./components/common/SettingsModal";
 
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { FloatingToolbar } from "./components/common/FloatingToolbar";
@@ -36,42 +39,27 @@ import { LiveIOGraph } from "./components/analytics/LiveIOGraph";
 import { GeoMap } from "./components/analytics/GeoMap";
 
 import {
-  Zap,
   Activity,
-  ShieldAlert,
-  Code,
-  Download,
-  BarChart2,
   List,
   Layers,
   Binary,
-  Palette,
-  Shield,
-  LayoutGrid,
-  ChevronRight,
-  Maximize2,
-  Sliders,
-  Cpu,
-  Globe,
 } from "lucide-react";
 
 export default function App() {
   // Theme & Layout
-  // Bridge to next-themes (the real source of truth) for the ~20 not-yet-migrated
-  // components still reading a plain isDark boolean prop. resolvedTheme is
+  // Bridge to next-themes (the real source of truth) for the 4 remaining
+  // components that need a plain isDark boolean for genuine non-Tailwind color
+  // decisions (PacketList's colorEngine, TrafficTimelineChart's d3 code,
+  // GeoMap's react-simple-maps fill/stroke props, ExportImportModal's accent
+  // cards) rather than for Tailwind class branching. resolvedTheme is
   // undefined for one tick before next-themes' mount effect runs; defaulting
   // to "dark" during that gap avoids a flash-to-light regression versus the
-  // previous hardcoded-dark default. Remove this bridge once every component
-  // reads useTheme() directly (Phase 5 of the theming migration).
+  // previous hardcoded-dark default.
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme !== "light";
-  const [showRightAnalytics, setShowRightAnalytics] = useState(true);
   const [mobileTab, setMobileTab] = useState<
     "packets" | "tree" | "hex" | "graphs" | "alerts"
   >("packets");
-  const [sidebarActiveView, setSidebarActiveView] = useState<
-    "capture" | "graphs" | "threats" | "dissectors" | "stats"
-  >("capture");
 
   // Stream & Capturing State
   const [isCapturing, setIsCapturing] = useState(false);
@@ -86,6 +74,7 @@ export default function App() {
   // Filter State
   const [filterText, setFilterText] = useState("");
   const [appliedFilter, setAppliedFilter] = useState("");
+  const [packetSearchText, setPacketSearchText] = useState("");
 
   // Modals
   const [streamToFollow, setStreamToFollow] = useState<number | null>(null);
@@ -94,6 +83,7 @@ export default function App() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showColorRulesModal, setShowColorRulesModal] = useState(false);
   const [showIspModal, setShowIspModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [agentStatus, setAgentStatus] = useState<
     "disconnected" | "connecting" | "connected" | "error"
   >("disconnected");
@@ -143,6 +133,7 @@ export default function App() {
     () => new PacketGenerator(dissectorEngine),
     [dissectorEngine],
   );
+  const tcpTracker = useMemo(() => new TcpStreamTracker(), []);
 
   // Track the latest isCapturing value for the always-on agent connection
   // below, whose handlers are set up once and must not go stale.
@@ -220,7 +211,7 @@ export default function App() {
               // like an imported pcap file would be dissected.
               const binaryString = atob(rawPkt.raw);
               const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
-              safePkt = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length);
+              safePkt = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker);
             } else {
               // Fallback only: the agent did not send raw bytes. Use the
               // lightweight metadata fields and leave byte data genuinely
@@ -375,6 +366,7 @@ export default function App() {
 
   const handleClearPackets = () => {
     packetGenerator.reset();
+    tcpTracker.reset();
     setPackets([]);
     setSelectedPacket(null);
     setActiveByteRange(null);
@@ -401,24 +393,6 @@ export default function App() {
     setStreamToFollow(streamId);
   };
 
-  const handleReplayPackets = (packetsToReplay: Packet[]) => {
-    setPackets((prev) => {
-      const replayedPackets = packetsToReplay.map((p) => {
-        return {
-          ...p,
-          id: packetGenerator.getNextId(),
-          timestamp: Date.now(),
-          info: `[REPLAY] ${p.info}`,
-        };
-      });
-      const updated = [...prev, ...replayedPackets];
-      if (updated.length > 4000) {
-        return updated.slice(updated.length - 4000);
-      }
-      return updated;
-    });
-  };
-
   const handleImportPackets = (imported: Packet[]) => {
     setIsCapturing(false);
     setPackets(imported);
@@ -431,113 +405,14 @@ export default function App() {
     packetGenerator.setDissectorEngine(dissectorEngine);
   };
 
-  // Compute live telemetry for bottom footer
+  // Live capture telemetry, surfaced in the Header's buffer status badge
   const totalBytes = useMemo(
     () => packets.reduce((sum, p) => sum + p.length, 0),
     [packets],
   );
-  const activeThreatsCount = useMemo(
-    () => packets.filter((p) => p.anomaly || p.status === "alert").length,
-    [packets],
-  );
-
   return (
     <div className="h-screen w-screen flex font-sans overflow-hidden transition-colors bg-background text-foreground">
-      {/* 1. Geometric Balance Geometric Aside Dock (Hidden on tiny mobile, visible on tablet+) */}
-      <aside className="w-14 sm:w-16 border-r flex flex-col items-center py-4 space-y-6 shrink-0 z-30 transition-colors bg-card border-border shadow-sm">
-        {/* Geometric Logo Badge */}
-        <div
-          onClick={() => setShowStatsModal(true)}
-          className="w-10 h-10 bg-cyan-500 hover:bg-cyan-400 rounded-md flex items-center justify-center text-slate-950 font-black text-sm cursor-pointer shadow-md shadow-cyan-500/20 transition-transform active:scale-95"
-          title="Net View Network Telemetry"
-        >
-          NV
-        </div>
-
-        {/* Action Icon Navigation */}
-        <nav className="flex flex-col space-y-3">
-          <button
-            onClick={() => setSidebarActiveView("capture")}
-            className={`p-2.5 rounded-md transition-all ${
-              sidebarActiveView === "capture"
-                ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-            }`}
-            title="Live Packet Capture"
-          >
-            <Zap className="w-5 h-5" />
-          </button>
-
-          <button
-            onClick={() => setShowRightAnalytics(!showRightAnalytics)}
-            className={`p-2.5 rounded-md transition-all ${
-              showRightAnalytics
-                ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-            }`}
-            title="Toggle Right Analytics Panel"
-          >
-            <Activity className="w-5 h-5" />
-          </button>
-
-          <button
-            onClick={() => setShowDissectorModal(true)}
-            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-            title="Custom Protocol Dissectors"
-          >
-            <Code className="w-5 h-5 text-cyan-400/80" />
-          </button>
-
-          <button
-            onClick={() => setShowStatsModal(true)}
-            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-            title="Protocol Hierarchy Statistics"
-          >
-            <BarChart2 className="w-5 h-5 text-purple-400/80" />
-          </button>
-
-          <button
-            onClick={() => setShowExportModal(true)}
-            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-            title="PCAP / JSON Import & Export"
-          >
-            <Download className="w-5 h-5 text-sky-400/80" />
-          </button>
-
-          <button
-            onClick={() => setShowColorRulesModal(true)}
-            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-            title="Color Highlighting Rules"
-          >
-            <Palette className="w-5 h-5 text-pink-400/80" />
-          </button>
-
-          <button
-            onClick={() => setShowIspModal(true)}
-            className="p-2.5 rounded-md transition-all text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-            title="ISP Network Statistics"
-          >
-            <Globe className="w-5 h-5 text-sky-400/80" />
-          </button>
-        </nav>
-
-        {/* Bottom Sidebar Status indicator & RBAC */}
-        <div className="mt-auto flex flex-col items-center space-y-3">
-          {activeThreatsCount > 0 ? (
-            <div
-              className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping"
-              title={`${activeThreatsCount} Threats Detected`}
-            />
-          ) : (
-            <div
-              className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"
-              title="Stream Healthy - Zero Threats"
-            />
-          )}
-        </div>
-      </aside>
-
-      {/* 2. Main Workstation Body */}
+      {/* 1. Main Workstation Body */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top Command Bar & Stream Interface */}
 
@@ -553,9 +428,12 @@ export default function App() {
           onOpenExportModal={() => setShowExportModal(true)}
           onOpenColorRulesModal={() => setShowColorRulesModal(true)}
           onOpenIspModal={() => setShowIspModal(true)}
+          onOpenSettingsModal={() => setShowSettingsModal(true)}
           agentStatus={agentStatus}
           totalPacketsCount={packets.length}
           filteredPacketsCount={filteredPackets.length}
+          totalBytes={totalBytes}
+          onApplyFilterPreset={handleQuickFilter}
         />
 
         {/* Filter Toolbar (Geometric Balance style) */}
@@ -567,7 +445,8 @@ export default function App() {
           }
           totalPackets={packets.length}
           filteredPackets={filteredPackets.length}
-          isDark={isDark}
+          packetSearchText={packetSearchText}
+          onPacketSearchChange={setPacketSearchText}
         />
 
         {/* Mobile Tab Switcher */}
@@ -642,7 +521,7 @@ export default function App() {
                 }}
                 onFollowStream={handleFollowStream}
                 onQuickFilter={handleQuickFilter}
-                onReplayPackets={handleReplayPackets}
+                searchText={packetSearchText}
                 colorEngine={colorEngine}
                 permissions={permissions}
                 isDark={isDark}
@@ -678,7 +557,6 @@ export default function App() {
                   onHoverByteRange={setActiveByteRange}
                   activeByteRange={activeByteRange}
                   permissions={permissions}
-                  isDark={isDark}
                 />
               </div>
 
@@ -697,7 +575,6 @@ export default function App() {
                     else setActiveByteRange(null);
                   }}
                   permissions={permissions}
-                  isDark={isDark}
                 />
               </div>
             </div>
@@ -705,26 +582,20 @@ export default function App() {
 
           {/* Right Analytics Aside (Geometric Balance style) */}
           <aside
-            className={`w-80 lg:w-96 border-l border-border p-4 space-y-4 flex flex-col overflow-y-auto custom-scrollbar shrink-0 transition-colors bg-background ${
-              showRightAnalytics ? "hidden lg:flex" : "hidden"
-            } ${mobileTab === "graphs" ? "!flex !w-full !border-l-0" : ""}`}
+            className={`w-80 lg:w-96 border-l border-border p-4 space-y-4 flex-col overflow-y-auto custom-scrollbar shrink-0 transition-colors bg-background hidden lg:flex ${
+              mobileTab === "graphs" ? "!flex !w-full !border-l-0" : ""
+            }`}
           >
+            {/* Geo-IP Map */}
+            <div className="h-64 shrink-0 rounded-lg overflow-hidden border border-border">
+              <GeoMap packets={packets} isDark={isDark} />
+            </div>
+
             {/* Real-time D3 Throughput & Traffic Spikes */}
             <div>
               <TrafficTimelineChart
                 packets={packets}
                 isCapturing={isCapturing}
-                onTimeWindowSelect={(t0, t1) => {
-                  if (t0 !== null && t1 !== null) {
-                    const expr = `time >= ${t0} && time <= ${t1}`;
-                    setFilterText(expr);
-                    setAppliedFilter(expr);
-                  }
-                }}
-                onJumpToPacket={(pkt) => {
-                  setSelectedPacket(pkt);
-                  if (window.innerWidth < 768) setMobileTab("tree");
-                }}
                 isDark={isDark}
               />
             </div>
@@ -735,20 +606,14 @@ export default function App() {
                 packets={packets}
                 onSelectProtocol={handleSelectProtocol}
                 selectedProtocolFilter={appliedFilter}
-                isDark={isDark}
               />
             </div>
 
-            {/* Geo-IP Map */}
-            <div className="h-64 shrink-0 rounded-lg overflow-hidden border border-border">
-              <GeoMap packets={packets} isDark={isDark} />
-            </div>
             {/* Flow Matrix & Top Talkers */}
             <div>
               <NetworkMatrix
                 packets={packets}
                 onFilterHost={handleFilterHost}
-                isDark={isDark}
               />
             </div>
 
@@ -761,30 +626,10 @@ export default function App() {
                   if (window.innerWidth < 768) setMobileTab("tree");
                 }}
                 onFilterAnomaly={() => handleQuickFilter("anomaly")}
-                isDark={isDark}
               />
             </div>
           </aside>
         </div>
-
-        {/* 3. Geometric Balance Status Bar (High-Contrast Cyan Footer) */}
-        <footer className="h-8 bg-cyan-600 text-slate-950 flex items-center px-4 justify-between text-[11px] font-bold font-mono tracking-wider select-none shrink-0">
-          <div className="flex items-center space-x-4 sm:space-x-6">
-            <span>PACKETS: {packets.length.toLocaleString()}</span>
-            <span className="hidden sm:inline">DROPPED: 0</span>
-            <span>FILTERED: {filteredPackets.length.toLocaleString()}</span>
-            <span className="hidden md:inline">
-              BUFFER: {((packets.length / 4000) * 100).toFixed(0)}%
-            </span>
-          </div>
-
-          <div className="flex items-center space-x-3 sm:space-x-5 uppercase">
-            <span className="hidden sm:inline">NIC: Live Agent</span>
-            <span className="hidden lg:inline">
-              VOL: {(totalBytes / 1024).toFixed(1)} KB
-            </span>
-          </div>
-        </footer>
       </main>
 
       {/* 4. Modals */}
@@ -793,51 +638,67 @@ export default function App() {
           streamId={streamToFollow}
           packets={packets}
           onClose={() => setStreamToFollow(null)}
-          isDark={isDark}
         />
       )}
 
-      {showDissectorModal && (
-        <CustomDissectorModal
-          dissectorEngine={dissectorEngine}
-          onUpdateDissectors={handleUpdateDissectors}
-          onClose={() => setShowDissectorModal(false)}
-          permissions={permissions}
-          isDark={isDark}
-        />
-      )}
+      <AnimatePresence>
+        {showDissectorModal && (
+          <CustomDissectorModal
+            key="dissector-modal"
+            dissectorEngine={dissectorEngine}
+            onUpdateDissectors={handleUpdateDissectors}
+            onClose={() => setShowDissectorModal(false)}
+            permissions={permissions}
+          />
+        )}
+      </AnimatePresence>
 
-      {showStatsModal && (
-        <StatisticsModal
-          packets={packets}
-          onClose={() => setShowStatsModal(false)}
-          isDark={isDark}
-        />
-      )}
+      <AnimatePresence>
+        {showStatsModal && (
+          <StatisticsModal
+            key="stats-modal"
+            packets={packets}
+            onClose={() => setShowStatsModal(false)}
+          />
+        )}
+      </AnimatePresence>
 
-      {showExportModal && (
-        <ExportImportModal
-          packets={packets}
-          onImportPackets={handleImportPackets}
-          onClose={() => setShowExportModal(false)}
-          permissions={permissions}
-          isDark={isDark}
-        />
-      )}
+      <AnimatePresence>
+        {showExportModal && (
+          <ExportImportModal
+            key="export-modal"
+            packets={packets}
+            onImportPackets={handleImportPackets}
+            onClose={() => setShowExportModal(false)}
+            permissions={permissions}
+            isDark={isDark}
+          />
+        )}
+      </AnimatePresence>
 
-      {showColorRulesModal && (
-        <ColorRulesModal
-          colorEngine={colorEngine}
-          onUpdateRules={() => setPackets([...packets])}
-          onClose={() => setShowColorRulesModal(false)}
-          permissions={permissions}
-          isDark={isDark}
-        />
-      )}
+      <AnimatePresence>
+        {showColorRulesModal && (
+          <ColorRulesModal
+            key="color-rules-modal"
+            colorEngine={colorEngine}
+            onUpdateRules={() => setPackets([...packets])}
+            onClose={() => setShowColorRulesModal(false)}
+            permissions={permissions}
+          />
+        )}
+      </AnimatePresence>
 
-      {showIspModal && (
-        <IspStatsModal isDark={isDark} onClose={() => setShowIspModal(false)} />
-      )}
+      <AnimatePresence>
+        {showIspModal && (
+          <IspStatsModal key="isp-modal" onClose={() => setShowIspModal(false)} />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showSettingsModal && (
+          <SettingsModal key="settings-modal" onClose={() => setShowSettingsModal(false)} />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

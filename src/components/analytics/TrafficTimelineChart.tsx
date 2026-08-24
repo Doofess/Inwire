@@ -4,22 +4,16 @@ import { Packet } from '../../types/packet';
 import {
   Activity,
   AlertTriangle,
-  RefreshCw,
-  Zap,
-  ArrowRight,
-  Clock,
-  Compass,
-  Play,
+  Maximize2,
+  X,
+  Plus,
+  Minus,
   RotateCcw,
-  Sparkles,
-  Search,
 } from 'lucide-react';
 
 interface TrafficTimelineProps {
   packets: Packet[];
   isCapturing: boolean;
-  onTimeWindowSelect?: (startTime: number | null, endTime: number | null) => void;
-  onJumpToPacket?: (packet: Packet) => void;
   isDark: boolean;
 }
 
@@ -37,26 +31,39 @@ interface TimelineBucket {
 export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
   packets,
   isCapturing,
-  onTimeWindowSelect,
-  onJumpToPacket,
   isDark,
 }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const zoomBehaviorRef = useRef<d3.ZoomBehavior<SVGRectElement, unknown> | null>(null);
+  const zoomRectNodeRef = useRef<SVGRectElement | null>(null);
   const [metric, setMetric] = useState<'packets' | 'bandwidth'>('packets');
-  const [selectedRange, setSelectedRange] = useState<[number, number] | null>(null);
-  const [activeJumpTime, setActiveJumpTime] = useState<number | null>(null);
   const [hoveredBucket, setHoveredBucket] = useState<TimelineBucket | null>(null);
-  const [customJumpInput, setCustomJumpInput] = useState('');
-  const [windowSpan, setWindowSpan] = useState<number>(5); // default ±5s span
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [zoomTransform, setZoomTransform] = useState<d3.ZoomTransform>(d3.zoomIdentity);
+  const [visibleDomain, setVisibleDomain] = useState<[number, number]>([0, 10]);
+
+  const handleZoomIn = () => {
+    if (!zoomRectNodeRef.current || !zoomBehaviorRef.current) return;
+    d3.select(zoomRectNodeRef.current).transition().duration(200).call(zoomBehaviorRef.current.scaleBy, 1.5);
+  };
+
+  const handleZoomOut = () => {
+    if (!zoomRectNodeRef.current || !zoomBehaviorRef.current) return;
+    d3.select(zoomRectNodeRef.current).transition().duration(200).call(zoomBehaviorRef.current.scaleBy, 1 / 1.5);
+  };
+
+  const handleResetZoom = () => {
+    if (!zoomRectNodeRef.current || !zoomBehaviorRef.current) return;
+    d3.select(zoomRectNodeRef.current).transition().duration(200).call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
+  };
 
   // Compute time bounds & buckets
-  const { buckets, minTime, maxTime, anomalyEvents } = React.useMemo(() => {
-    if (packets.length === 0) return { buckets: [], minTime: 0, maxTime: 10, anomalyEvents: [] };
+  const { buckets, maxTime } = React.useMemo(() => {
+    if (packets.length === 0) return { buckets: [], minTime: 0, maxTime: 10 };
 
     const bucketMap = new Map<number, { count: number; bytes: number; hasAnomaly: boolean; anomalyTitle?: string; firstPacket?: Packet }>();
-    const anomalies: { sec: number; title: string; packet: Packet }[] = [];
-    
+
     let minT = Math.floor(packets[0].relativeTime);
     let maxT = Math.ceil(packets[packets.length - 1].relativeTime);
     if (maxT - minT < 10) maxT = minT + 10;
@@ -74,16 +81,9 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       existing.bytes += p.length;
       if (!existing.firstPacket) existing.firstPacket = p;
 
-      if (p.status === 'alert' || p.anomaly) {
+      if (p.status === 'alert' || (p.anomalies && p.anomalies.length > 0)) {
         existing.hasAnomaly = true;
-        existing.anomalyTitle = p.anomaly?.title || 'Security Alert';
-        if (!anomalies.some(a => a.sec === sec)) {
-          anomalies.push({
-            sec,
-            title: p.anomaly?.title || 'Security Spike',
-            packet: p,
-          });
-        }
+        existing.anomalyTitle = p.anomalies?.[0]?.title || 'Security Alert';
       }
       bucketMap.set(sec, existing);
     }
@@ -104,56 +104,40 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       });
     }
 
-    return { buckets: result, minTime: minT, maxTime: maxT, anomalyEvents: anomalies.slice(-4) };
+    return { buckets: result, minTime: minT, maxTime: maxT };
   }, [packets]);
 
-  // Jump to specific time offset handler
-  const handleJumpToOffset = (targetSec: number, span = windowSpan) => {
-    setActiveJumpTime(targetSec);
-    const t0 = Math.max(0, Math.floor(targetSec - span / 2));
-    const t1 = Math.ceil(targetSec + span / 2);
-    setSelectedRange([t0, t1]);
+  // During active capture `buckets` recomputes on literally every incoming
+  // packet, and the draw effect below fully tears down and rebuilds the SVG
+  // (axes, gradient, area path, grid) on each run. Doing that on every
+  // packet - rather than at most a few times a second - meant the
+  // `clientWidth` read at the top of that effect kept forcing a synchronous
+  // layout flush against the previous run's still-pending DOM writes
+  // (measured via Chrome's performance trace: ~650ms of forced reflow
+  // attributed to this exact effect during a single capture session) -
+  // the dominant cause of the reported UI stutter during capture. Coalesce
+  // bursts into one redraw per DRAW_THROTTLE_MS: the ref always holds the
+  // latest buckets, but the draw effect only fires on the throttled copy.
+  const DRAW_THROTTLE_MS = 150;
+  const [throttledBuckets, setThrottledBuckets] = useState<TimelineBucket[]>(buckets);
+  const latestBucketsRef = useRef(buckets);
+  const bucketsThrottleRef = useRef<number | null>(null);
+  latestBucketsRef.current = buckets;
 
-    if (onTimeWindowSelect) {
-      onTimeWindowSelect(t0, t1);
-    }
-
-    // Find closest packet to targetSec and trigger inspection
-    if (onJumpToPacket && packets.length > 0) {
-      let closest = packets[0];
-      let minDiff = Math.abs(packets[0].relativeTime - targetSec);
-      for (const p of packets) {
-        const diff = Math.abs(p.relativeTime - targetSec);
-        if (diff < minDiff) {
-          minDiff = diff;
-          closest = p;
-        }
-      }
-      onJumpToPacket(closest);
-    }
-  };
-
-  const handleCustomJumpSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const val = parseFloat(customJumpInput);
-    if (!isNaN(val) && val >= 0) {
-      handleJumpToOffset(val);
-      setCustomJumpInput('');
-    }
-  };
-
-  const handleResetZoom = () => {
-    setSelectedRange(null);
-    setActiveJumpTime(null);
-    if (onTimeWindowSelect) onTimeWindowSelect(null, null);
-  };
+  useEffect(() => {
+    if (bucketsThrottleRef.current !== null) return;
+    bucketsThrottleRef.current = window.setTimeout(() => {
+      setThrottledBuckets(latestBucketsRef.current);
+      bucketsThrottleRef.current = null;
+    }, DRAW_THROTTLE_MS);
+  }, [buckets]);
 
   // Render D3 chart
   useEffect(() => {
-    if (!svgRef.current || !containerRef.current || buckets.length === 0) return;
+    if (!svgRef.current || !containerRef.current || throttledBuckets.length === 0) return;
 
     const containerWidth = containerRef.current.clientWidth || 320;
-    const height = 120;
+    const height = isExpanded ? 360 : 120;
     const margin = { top: 10, right: 12, bottom: 20, left: 30 };
     const width = containerWidth - margin.left - margin.right;
     const innerHeight = height - margin.top - margin.bottom;
@@ -168,13 +152,15 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
 
     const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
 
-    // X Scale
-    const xExtent = d3.extent(buckets, (d: TimelineBucket) => d.timeSec) as [number, number];
-    const xScale = d3.scaleLinear().domain([xExtent[0] || 0, xExtent[1] || 10]).range([0, width]);
+    // X Scale (base domain, then rescaled by the current zoom transform)
+    const xExtent = d3.extent(throttledBuckets, (d: TimelineBucket) => d.timeSec) as [number, number];
+    const baseXScale = d3.scaleLinear().domain([xExtent[0] || 0, xExtent[1] || 10]).range([0, width]);
+    const xScale = zoomTransform.rescaleX(baseXScale);
+    setVisibleDomain(xScale.domain() as [number, number]);
 
     // Y Scale
     const yVal = (d: TimelineBucket) => (metric === 'packets' ? d.packetCount : d.kbps);
-    const maxY = Math.max(8, d3.max(buckets, yVal) || 8);
+    const maxY = Math.max(8, d3.max(throttledBuckets, yVal) || 8);
     const yScale = d3.scaleLinear().domain([0, maxY * 1.15]).range([innerHeight, 0]);
 
     // Grid lines
@@ -222,37 +208,16 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       .y(d => yScale(yVal(d)))
       .curve(d3.curveMonotoneX);
 
-    g.append('path').datum(buckets).attr('fill', `url(#${gradId})`).attr('d', area);
+    g.append('path').datum(throttledBuckets).attr('fill', `url(#${gradId})`).attr('d', area);
     g.append('path')
-      .datum(buckets)
+      .datum(throttledBuckets)
       .attr('fill', 'none')
       .attr('stroke', metric === 'packets' ? '#06b6d4' : '#10b981')
       .attr('stroke-width', 2)
       .attr('d', line);
 
-    // Active Jump Target Marker Line
-    if (activeJumpTime !== null && activeJumpTime >= (xExtent[0] || 0) && activeJumpTime <= (xExtent[1] || 10)) {
-      const jumpX = xScale(activeJumpTime);
-      g.append('line')
-        .attr('x1', jumpX)
-        .attr('x2', jumpX)
-        .attr('y1', 0)
-        .attr('y2', innerHeight)
-        .attr('stroke', '#38bdf8')
-        .attr('stroke-width', 2)
-        .attr('stroke-dasharray', '3,3');
-
-      g.append('circle')
-        .attr('cx', jumpX)
-        .attr('cy', 4)
-        .attr('r', 4)
-        .attr('fill', '#38bdf8')
-        .attr('stroke', '#020617')
-        .attr('stroke-width', 1.5);
-    }
-
     // Anomaly / Spike Alert Indicators
-    const anomalyBuckets = buckets.filter(d => d.hasAnomaly && yVal(d) > 0);
+    const anomalyBuckets = throttledBuckets.filter(d => d.hasAnomaly && yVal(d) > 0);
     g.selectAll<SVGCircleElement, TimelineBucket>('.anomaly-pulse')
       .data(anomalyBuckets)
       .enter()
@@ -262,10 +227,8 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       .attr('cy', (d: TimelineBucket) => yScale(yVal(d)))
       .attr('r', 4.5)
       .attr('fill', '#f43f5e')
-      .attr('stroke', '#020617')
+      .attr('stroke', isDark ? '#020617' : '#ffffff')
       .attr('stroke-width', 1.5)
-      .attr('cursor', 'pointer')
-      .on('click', (_, d: TimelineBucket) => handleJumpToOffset(d.timeSec))
       .on('mouseenter', (_, d: TimelineBucket) => setHoveredBucket(d))
       .on('mouseleave', () => setHoveredBucket(null));
 
@@ -273,7 +236,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
     const xAxis = d3.axisBottom(xScale).ticks(4).tickFormat(d => `${d}s`);
     g.append('g')
       .attr('transform', `translate(0,${innerHeight})`)
-      .attr('color', isDark ? '#64748b' : '#94a3b8')
+      .attr('color', isDark ? '#94a3b8' : '#64748b')
       .call(xAxis)
       .selectAll('text')
       .attr('font-size', '9px')
@@ -286,54 +249,43 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
     });
     g.append('g')
-      .attr('color', isDark ? '#64748b' : '#94a3b8')
+      .attr('color', isDark ? '#94a3b8' : '#64748b')
       .call(yAxis)
       .selectAll('text')
       .attr('font-size', '9px')
       .attr('font-family', 'monospace');
 
-    // Brush Tool
-    const brush = d3
-      .brushX()
-      .extent([
-        [0, 0],
-        [width, innerHeight],
-      ])
-      .on('end', event => {
-        if (!event.selection) {
-          if (!activeJumpTime) {
-            setSelectedRange(null);
-            if (onTimeWindowSelect) onTimeWindowSelect(null, null);
-          }
-          return;
-        }
-        const [x0, x1] = event.selection as [number, number];
-        const t0 = Math.max(0, Math.floor(xScale.invert(x0)));
-        const t1 = Math.ceil(xScale.invert(x1));
-        setSelectedRange([t0, t1]);
-        setActiveJumpTime((t0 + t1) / 2);
-        if (onTimeWindowSelect) onTimeWindowSelect(t0, t1);
-      });
+    // Zoom & Pan: transparent overlay rect captures wheel-zoom and drag-pan
+    // gestures over the plot area. The behavior is re-seeded (silently, before
+    // the 'zoom' listener is attached) to the current React zoomTransform on
+    // every redraw, since the rect itself is a fresh DOM node each time.
+    const zoomBehavior = d3
+      .zoom<SVGRectElement, unknown>()
+      .scaleExtent([1, 20])
+      .translateExtent([[0, 0], [width, innerHeight]])
+      .extent([[0, 0], [width, innerHeight]]);
 
-    g.append('g').attr('class', 'brush').call(brush);
-  }, [buckets, metric, isDark, activeJumpTime]);
+    const zoomRect = g
+      .append('rect')
+      .attr('width', width)
+      .attr('height', innerHeight)
+      .attr('fill', 'transparent')
+      .attr('cursor', zoomTransform.k > 1 ? 'grab' : 'default')
+      .style('pointer-events', 'all')
+      .call(zoomBehavior);
 
-  // Available quick-jump presets relative to current capture
-  const nowSec = maxTime;
-  const tMinus60 = Math.max(0, nowSec - 60);
-  const tMinus30 = Math.max(0, nowSec - 30);
-  const tMinus10 = Math.max(0, nowSec - 10);
+    zoomBehavior.transform(zoomRect, zoomTransform);
+    zoomBehavior.on('zoom', event => setZoomTransform(event.transform));
 
-  return (
-    <div
-      ref={containerRef}
-      className={`rounded-lg border p-3.5 transition-colors select-none ${
-        isDark ? 'bg-slate-900/90 border-slate-800 text-slate-200' : 'bg-white border-slate-200 text-slate-800'
-      } shadow-sm space-y-2.5`}
-    >
+    zoomBehaviorRef.current = zoomBehavior;
+    zoomRectNodeRef.current = zoomRect.node();
+  }, [throttledBuckets, metric, isDark, isExpanded, zoomTransform]);
+
+  const body = (
+    <>
       {/* Title & Metric Toggles */}
       <div className="flex items-center justify-between">
-        <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5 font-mono">
+        <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1.5 font-mono">
           <Activity className="w-3.5 h-3.5 text-cyan-400" />
           <span>Traffic Timeline</span>
         </h3>
@@ -342,7 +294,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
           <button
             onClick={() => setMetric('packets')}
             className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-              metric === 'packets' ? 'bg-cyan-500 text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-300'
+              metric === 'packets' ? 'bg-cyan-500 text-slate-950 shadow-sm' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             PKT/S
@@ -350,144 +302,58 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
           <button
             onClick={() => setMetric('bandwidth')}
             className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-              metric === 'bandwidth' ? 'bg-cyan-500 text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-300'
+              metric === 'bandwidth' ? 'bg-cyan-500 text-slate-950 shadow-sm' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             KBPS
           </button>
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors ml-1"
+            title={isExpanded ? "Close expanded view" : "Expand chart"}
+          >
+            {isExpanded ? <X className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+          </button>
         </div>
-      </div>
-
-      {/* 🚀 QUICK-JUMP NAVIGATION BAR */}
-      <div className="bg-slate-950/80 rounded-md border border-slate-800 p-2 space-y-2">
-        {/* Top Row: Quick Presets & Live Jump */}
-        <div className="flex items-center justify-between gap-1.5">
-          <div className="flex items-center gap-1 text-[10px] font-mono text-cyan-400 font-bold uppercase tracking-wider shrink-0">
-            <Compass className="w-3.5 h-3.5 text-cyan-400 animate-spin-slow" />
-            <span>Quick-Jump:</span>
-          </div>
-
-          <div className="flex items-center gap-1 overflow-x-auto custom-scrollbar text-[10px] font-mono">
-            <button
-              onClick={() => handleJumpToOffset(0)}
-              className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-cyan-300 transition-colors shrink-0 cursor-pointer"
-              title="Jump to beginning of packet capture (T=0s)"
-            >
-              ⏮ T=0s
-            </button>
-
-            {nowSec > 35 && (
-              <button
-                onClick={() => handleJumpToOffset(tMinus30)}
-                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-cyan-300 transition-colors shrink-0 cursor-pointer"
-                title={`Jump to -30s (T=${tMinus30}s)`}
-              >
-                -30s
-              </button>
-            )}
-
-            {nowSec > 15 && (
-              <button
-                onClick={() => handleJumpToOffset(tMinus10)}
-                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:text-cyan-300 transition-colors shrink-0 cursor-pointer"
-                title={`Jump to -10s (T=${tMinus10}s)`}
-              >
-                -10s
-              </button>
-            )}
-
-            <button
-              onClick={() => handleJumpToOffset(nowSec)}
-              className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30 font-bold transition-colors shrink-0 cursor-pointer flex items-center gap-1"
-              title="Jump to current live time head"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
-              <span>LIVE</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Second Row: Direct Seconds Jump Input & Window Span */}
-        <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800/80">
-          <form onSubmit={handleCustomJumpSubmit} className="flex items-center gap-1 flex-1">
-            <span className="text-[10px] text-slate-500 font-mono shrink-0">Offset:</span>
-            <div className="flex items-center bg-slate-900 rounded border border-slate-700 px-1.5 py-0.5 flex-1 max-w-[100px]">
-              <input
-                type="number"
-                step="0.1"
-                min="0"
-                max={maxTime}
-                value={customJumpInput}
-                onChange={e => setCustomJumpInput(e.target.value)}
-                placeholder={`${nowSec.toFixed(1)}s`}
-                className="w-full bg-transparent text-[11px] font-mono text-slate-100 outline-none placeholder:text-slate-600"
-              />
-              <span className="text-[10px] text-slate-500 font-mono">s</span>
-            </div>
-            <button
-              type="submit"
-              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-400 font-bold text-[10px] font-mono transition-colors cursor-pointer"
-            >
-              Go
-            </button>
-          </form>
-
-          {/* Span Window Selector */}
-          <div className="flex items-center gap-1 text-[10px] font-mono shrink-0">
-            <span className="text-slate-500">Span:</span>
-            {[2, 5, 10].map(s => (
-              <button
-                key={s}
-                onClick={() => {
-                  setWindowSpan(s);
-                  if (activeJumpTime !== null) handleJumpToOffset(activeJumpTime, s);
-                }}
-                className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition-colors cursor-pointer ${
-                  windowSpan === s
-                    ? 'bg-cyan-500 text-slate-950'
-                    : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                ±{s}s
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Third Row: Anomaly Quick Jump Pills (if threats exist) */}
-        {anomalyEvents.length > 0 && (
-          <div className="flex items-center gap-1.5 pt-1 border-t border-slate-800/80 overflow-x-auto custom-scrollbar">
-            <span className="text-[9px] font-mono font-bold text-rose-400 uppercase tracking-tight shrink-0 flex items-center gap-1">
-              <AlertTriangle className="w-2.5 h-2.5" />
-              <span>Spikes:</span>
-            </span>
-            {anomalyEvents.map(evt => (
-              <button
-                key={evt.sec}
-                onClick={() => handleJumpToOffset(evt.sec)}
-                className="px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 hover:bg-rose-500/25 text-rose-300 text-[9px] font-mono transition-colors shrink-0 flex items-center gap-1 cursor-pointer"
-                title={`Jump to ${evt.title} at ${evt.sec}s`}
-              >
-                <span>⚡ {evt.sec}s</span>
-                <span className="truncate max-w-[60px] opacity-80">{evt.title}</span>
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* SVG Canvas */}
-      <div className="relative w-full h-[120px] overflow-hidden">
+      <div className={`relative w-full overflow-hidden ${isExpanded ? 'h-[360px]' : 'h-[120px]'}`}>
         <svg ref={svgRef} className="w-full h-full" />
+
+        {/* Zoom Controls */}
+        <div className="absolute top-1 right-1 flex flex-col gap-1 z-10">
+          <button
+            onClick={handleZoomIn}
+            className="p-1 rounded border transition-colors bg-secondary border-border hover:bg-accent text-foreground"
+            title="Zoom in"
+          >
+            <Plus className="w-3 h-3" />
+          </button>
+          <button
+            onClick={handleZoomOut}
+            className="p-1 rounded border transition-colors bg-secondary border-border hover:bg-accent text-foreground"
+            title="Zoom out"
+          >
+            <Minus className="w-3 h-3" />
+          </button>
+          {zoomTransform.k !== 1 && (
+            <button
+              onClick={handleResetZoom}
+              className="p-1 rounded border transition-colors bg-secondary border-border hover:bg-accent text-foreground"
+              title="Reset zoom"
+            >
+              <RotateCcw className="w-3 h-3" />
+            </button>
+          )}
+        </div>
 
         {hoveredBucket && (
           <div
-            className={`absolute top-1 right-1 text-xs px-2 py-1 rounded border pointer-events-none shadow-xl ${
-              isDark ? 'bg-slate-950 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'
-            }`}
+            className="absolute top-1 left-1 text-xs px-2 py-1 rounded border pointer-events-none shadow-xl bg-popover border-border text-popover-foreground"
           >
             <div className="font-mono text-[10px] text-cyan-400 font-bold">T = {hoveredBucket.timeLabel}</div>
-            <div className="text-[10px] text-slate-300 font-mono mt-0.5">
+            <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
               <span>{hoveredBucket.packetCount} pkts</span> • <span>{hoveredBucket.kbps.toFixed(1)} Kbps</span>
             </div>
             {hoveredBucket.hasAnomaly && (
@@ -500,22 +366,35 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
         )}
       </div>
 
-      {/* Timeline bounds & Reset action */}
-      <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono uppercase tracking-wider">
-        <span>T={minTime}s</span>
-        {selectedRange ? (
-          <button
-            onClick={handleResetZoom}
-            className="text-amber-400 hover:text-amber-300 flex items-center gap-1 normal-case font-bold cursor-pointer"
-          >
-            <RotateCcw className="w-3 h-3" />
-            <span>Reset Zoom [{selectedRange[0]}s-{selectedRange[1]}s]</span>
-          </button>
-        ) : (
-          <span className="text-slate-400">Drag to brush or click jump</span>
-        )}
-        <span className="text-cyan-400 font-bold">T={maxTime}s (NOW)</span>
+      {/* Timeline bounds (reflects the current zoomed/panned view) */}
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono uppercase tracking-wider">
+        <span>T={Math.round(visibleDomain[0])}s</span>
+        <span className="text-cyan-400 font-bold">
+          T={Math.round(visibleDomain[1])}s{Math.round(visibleDomain[1]) >= maxTime ? ' (NOW)' : ''}
+        </span>
       </div>
+    </>
+  );
+
+  if (isExpanded) {
+    return (
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div
+          ref={containerRef}
+          className="w-full max-w-6xl rounded-lg border p-4 transition-colors select-none bg-card border-border text-card-foreground shadow-2xl space-y-2.5"
+        >
+          {body}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="rounded-lg border p-3.5 transition-colors select-none bg-card border-border text-card-foreground shadow-sm space-y-2.5"
+    >
+      {body}
     </div>
   );
 };

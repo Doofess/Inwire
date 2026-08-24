@@ -7,7 +7,6 @@ interface HexViewerProps {
   activeByteRange: [number, number] | null;
   onHoverByte: (byteIndex: number | null) => void;
   permissions: UserRolePermissions;
-  isDark: boolean;
 }
 
 export const HexViewer: React.FC<HexViewerProps> = ({
@@ -15,18 +14,17 @@ export const HexViewer: React.FC<HexViewerProps> = ({
   activeByteRange,
   onHoverByte,
   permissions,
-  isDark,
 }) => {
   const [copiedFormat, setCopiedFormat] = useState<string | null>(null);
   const [hoveredByteIdx, setHoveredByteIdx] = useState<number | null>(null);
 
   if (!packet) {
     return (
-      <div className="h-full flex items-center justify-center p-6 text-center text-slate-500 font-mono text-xs">
+      <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
         <div className="flex flex-col items-center gap-1.5">
-          <Binary className="w-6 h-6 text-slate-600 mb-1" />
+          <Binary className="w-6 h-6 text-muted-foreground/70 mb-1" />
           <span className="uppercase tracking-wider">Hex Dump Inspector</span>
-          <span className="text-[10px] text-slate-600">Select a frame to inspect raw hexadecimal & ASCII dump</span>
+          <span className="text-[10px] text-muted-foreground/70">Select a frame to inspect raw hexadecimal & ASCII dump</span>
         </div>
       </div>
     );
@@ -92,12 +90,10 @@ export const HexViewer: React.FC<HexViewerProps> = ({
     <div className="h-full flex flex-col overflow-hidden select-none font-mono text-xs">
       {/* Header Toolbar */}
       <div
-        className={`px-4 py-2 border-b flex items-center justify-between transition-colors ${
-          isDark ? 'bg-slate-900 border-slate-800 text-slate-200' : 'bg-[#f8fafc] border-slate-200 text-slate-800 shadow-sm'
-        }`}
+        className="px-4 py-2 border-b flex items-center justify-between transition-colors bg-card border-border text-card-foreground shadow-sm"
       >
         <div className="flex items-center gap-2 font-semibold">
-          <span className="text-slate-500 uppercase tracking-tighter">Hex View</span>
+          <span className="text-muted-foreground uppercase tracking-tighter">Hex View</span>
           <span className="text-cyan-400 font-mono">({rawBytes.length} bytes)</span>
         </div>
 
@@ -105,7 +101,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
           <button
             onClick={() => copyAsFormat('hex')}
             className={`px-2 py-0.5 rounded text-[10px] font-mono border transition-colors flex items-center gap-1 cursor-pointer ${
-              isDark ? 'border-slate-700 hover:bg-slate-800 text-slate-300' : 'border-slate-200 hover:bg-white hover:shadow-sm text-slate-700 bg-slate-50'
+              'border-border hover:bg-accent text-foreground bg-secondary/50'
             }`}
             title="Copy raw hex sequence"
           >
@@ -116,7 +112,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
           <button
             onClick={() => copyAsFormat('c_array')}
             className={`px-2 py-0.5 rounded text-[10px] font-mono border transition-colors flex items-center gap-1 cursor-pointer ${
-              isDark ? 'border-slate-700 hover:bg-slate-800 text-slate-300' : 'border-slate-200 hover:bg-white hover:shadow-sm text-slate-700 bg-slate-50'
+              'border-border hover:bg-accent text-foreground bg-secondary/50'
             }`}
             title="Copy as C array"
           >
@@ -127,7 +123,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
           <button
             onClick={() => copyAsFormat('python')}
             className={`px-2 py-0.5 rounded text-[10px] font-mono border transition-colors flex items-center gap-1 cursor-pointer ${
-              isDark ? 'border-slate-700 hover:bg-slate-800 text-slate-300' : 'border-slate-200 hover:bg-white hover:shadow-sm text-slate-700 bg-slate-50'
+              'border-border hover:bg-accent text-foreground bg-secondary/50'
             }`}
             title="Copy as Python bytes"
           >
@@ -156,12 +152,10 @@ export const HexViewer: React.FC<HexViewerProps> = ({
           return (
             <div
               key={rowIdx}
-              className={`flex items-center gap-3 px-1 py-0.5 rounded transition-colors ${
-                isDark ? 'hover:bg-slate-800/50' : 'hover:bg-slate-50/80'
-              }`}
+              className="flex items-center gap-3 px-1 py-0.5 rounded transition-colors hover:bg-accent/50"
             >
               {/* Offset Column (0000, 0010, 0020 ...) */}
-              <span className="text-slate-600 font-mono font-bold w-10 shrink-0 select-none">{offsetHex}</span>
+              <span className="text-muted-foreground font-mono font-bold w-10 shrink-0 select-none">{offsetHex}</span>
 
               {/* Hex Bytes Column (16 bytes in two 8-byte blocks) */}
               <div className="flex items-center gap-1 shrink-0">
@@ -187,10 +181,8 @@ export const HexViewer: React.FC<HexViewerProps> = ({
                           isHovered
                             ? 'bg-cyan-500 text-slate-950 font-bold scale-110 shadow-sm'
                             : isInRange
-                            ? isDark ? 'bg-cyan-500/30 text-cyan-200 font-bold ring-1 ring-cyan-400' : 'bg-cyan-200/50 text-cyan-900 font-bold ring-1 ring-cyan-400'
-                            : isDark
-                            ? 'text-slate-400 hover:text-cyan-200 hover:bg-slate-700'
-                            : 'text-slate-700 hover:text-black hover:bg-slate-200'
+                            ? 'bg-cyan-200/50 dark:bg-cyan-500/30 text-cyan-900 dark:text-cyan-200 font-bold ring-1 ring-cyan-400'
+                            : 'text-muted-foreground hover:text-cyan-700 dark:hover:text-cyan-200 hover:bg-accent'
                         }`}
                       >
                         {byte.toString(16).padStart(2, '0').toUpperCase()}
@@ -199,7 +191,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
                   })}
                 </div>
 
-                <span className="text-slate-700 select-none"> </span>
+                <span className="text-muted-foreground select-none"> </span>
 
                 {/* Second 8 bytes */}
                 <div className="flex items-center gap-1 w-44">
@@ -223,10 +215,8 @@ export const HexViewer: React.FC<HexViewerProps> = ({
                           isHovered
                             ? 'bg-cyan-500 text-slate-950 font-bold scale-110 shadow-sm'
                             : isInRange
-                            ? isDark ? 'bg-cyan-500/30 text-cyan-200 font-bold ring-1 ring-cyan-400' : 'bg-cyan-200/50 text-cyan-900 font-bold ring-1 ring-cyan-400'
-                            : isDark
-                            ? 'text-slate-400 hover:text-cyan-200 hover:bg-slate-700'
-                            : 'text-slate-700 hover:text-black hover:bg-slate-200'
+                            ? 'bg-cyan-200/50 dark:bg-cyan-500/30 text-cyan-900 dark:text-cyan-200 font-bold ring-1 ring-cyan-400'
+                            : 'text-muted-foreground hover:text-cyan-700 dark:hover:text-cyan-200 hover:bg-accent'
                         }`}
                       >
                         {byte.toString(16).padStart(2, '0').toUpperCase()}
@@ -237,7 +227,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
               </div>
 
               {/* ASCII Decode Column */}
-              <div className="flex items-center pl-3 border-l border-slate-800 text-slate-400 tracking-widest shrink-0">
+              <div className="flex items-center pl-3 border-l border-border text-muted-foreground tracking-widest shrink-0">
                 {rowBytes.map((byte: number, bIdx: number) => {
                   const absIdx = startOffset + bIdx;
                   const isHovered = hoveredByteIdx === absIdx;
@@ -259,7 +249,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
                         isHovered
                           ? 'bg-cyan-500 text-slate-950 font-bold rounded'
                           : isInRange
-                          ? isDark ? 'text-cyan-300 font-bold bg-cyan-950/60 rounded' : 'text-cyan-900 font-bold bg-cyan-200/80 rounded'
+                          ? 'text-cyan-900 dark:text-cyan-300 font-bold bg-cyan-200/80 dark:bg-cyan-950/60 rounded'
                           : ''
                       }`}
                     >
@@ -275,17 +265,15 @@ export const HexViewer: React.FC<HexViewerProps> = ({
 
       {/* Hovered Byte Inspector Footer */}
       <div
-        className={`px-4 py-1.5 border-t text-[10px] font-mono flex items-center justify-between transition-colors ${
-          isDark ? 'bg-slate-950 border-slate-800 text-slate-500' : 'bg-slate-50 border-slate-200 text-slate-600 shadow-inner'
-        }`}
+        className="px-4 py-1.5 border-t text-[10px] font-mono flex items-center justify-between transition-colors bg-secondary/50 border-border text-muted-foreground shadow-inner"
       >
         {hoveredByteIdx !== null && hoveredByteVal !== null ? (
           <div className="flex items-center gap-3">
             <span>
-              OFFSET: <b className="text-slate-200">{hoveredByteIdx} (0x{hoveredByteIdx.toString(16).toUpperCase()})</b>
+              OFFSET: <b className="text-foreground">{hoveredByteIdx} (0x{hoveredByteIdx.toString(16).toUpperCase()})</b>
             </span>
             <span>
-              DEC: <b className="text-slate-200">{hoveredByteVal}</b>
+              DEC: <b className="text-foreground">{hoveredByteVal}</b>
             </span>
             <span>
               HEX: <b className="text-cyan-400">0x{hoveredByteVal.toString(16).padStart(2, '0').toUpperCase()}</b>
@@ -303,7 +291,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
         ) : (
           <span>Hover any byte to inspect raw bitwise & numerical representation</span>
         )}
-        <span className="text-[10px] text-slate-600 font-mono uppercase">Byte Dump</span>
+        <span className="text-[10px] text-muted-foreground font-mono uppercase">Byte Dump</span>
       </div>
     </div>
   );

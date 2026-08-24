@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
+import { motion } from 'motion/react';
 import { Packet } from '../../types/packet';
 import { BarChart2, X, PieChart, Network, Layers, Activity, ShieldAlert } from 'lucide-react';
+import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 
 interface StatisticsModalProps {
   packets: Packet[];
   onClose: () => void;
-  isDark: boolean;
 }
 
-export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClose, isDark }) => {
+export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClose }) => {
   const [activeTab, setActiveTab] = useState<'hierarchy' | 'endpoints' | 'conversations' | 'sizes'>('hierarchy');
 
   // Compute total statistics
@@ -61,14 +62,18 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
   }, [packets]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-      <div
+    <motion.div
+      {...modalBackdropMotion}
+      className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+    >
+      <motion.div
+        {...modalPanelMotion}
         className={`w-full max-w-4xl max-h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors ${
-          isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-zinc-300 text-zinc-900'
+          'bg-card border-border text-card-foreground'
         }`}
       >
         {/* Header */}
-        <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between">
+        <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="p-2 rounded-lg bg-purple-500/20 text-purple-400">
               <BarChart2 className="w-5 h-5" />
@@ -80,27 +85,25 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
                   {totalPackets.toLocaleString()} Frames
                 </span>
               </div>
-              <p className={`text-xs ${isDark ? "text-zinc-400" : "text-slate-600"} font-mono`}>
+              <p className={`text-xs ${"text-muted-foreground"} font-mono`}>
                 Total Bandwidth: {(totalBytes / 1024).toFixed(1)} KB ({(totalBytes * 8 / 1000).toFixed(1)} Kbits)
               </p>
             </div>
           </div>
 
-          <button onClick={onClose} className={`p-1.5 rounded-md hover:bg-zinc-800 ${isDark ? "text-zinc-400" : "text-slate-600"} hover:text-zinc-200`}>
+          <button onClick={onClose} className={`p-1.5 rounded-md hover:bg-accent ${"text-muted-foreground"} hover:text-foreground`}>
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Tab Navigation */}
-        <div className="px-5 py-2 border-b border-zinc-800 flex items-center gap-2 text-xs">
+        <div className="px-5 py-2 border-b border-border flex items-center gap-2 text-xs">
           <button
             onClick={() => setActiveTab('hierarchy')}
             className={`px-3 py-1.5 rounded-md font-medium transition-colors flex items-center gap-1.5 ${
               activeTab === 'hierarchy'
                 ? 'bg-purple-600 text-white shadow-sm'
-                : isDark
-                ? 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
-                : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'
+                : 'text-muted-foreground hover:text-foreground hover:bg-accent'
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
@@ -112,9 +115,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
             className={`px-3 py-1.5 rounded-md font-medium transition-colors flex items-center gap-1.5 ${
               activeTab === 'sizes'
                 ? 'bg-purple-600 text-white shadow-sm'
-                : isDark
-                ? 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
-                : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'
+                : 'text-muted-foreground hover:text-foreground hover:bg-accent'
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
@@ -128,7 +129,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
             <div className="space-y-3">
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className={`border-b border-zinc-800 ${isDark ? "text-zinc-400" : "text-slate-600"} text-[11px] font-sans font-semibold`}>
+                  <tr className={`border-b border-border ${"text-muted-foreground"} text-[11px] font-sans font-semibold`}>
                     <th className="py-2 px-3">Protocol Tree Node</th>
                     <th className="py-2 px-3 text-right">% Packets</th>
                     <th className="py-2 px-3 text-right">Packets</th>
@@ -136,9 +137,9 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
                     <th className="py-2 px-3 text-right">Bytes</th>
                   </tr>
                 </thead>
-                <tbody className={`divide-y divide-zinc-800/40 ${isDark ? "text-zinc-200" : "text-slate-800"}`}>
+                <tbody className="divide-y divide-border/60 text-foreground">
                   {/* Base Frame & Ethernet Layers */}
-                  <tr className="hover:bg-zinc-900/40">
+                  <tr className="hover:bg-accent/40">
                     <td className="py-2 px-3 font-semibold text-sky-400">▾ Frame / Ethernet II</td>
                     <td className="py-2 px-3 text-right font-mono">100.0%</td>
                     <td className="py-2 px-3 text-right font-mono">{totalPackets}</td>
@@ -147,8 +148,8 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
                   </tr>
 
                   {/* IPv4 Parent */}
-                  <tr className="hover:bg-zinc-900/40">
-                    <td className="py-2 px-3 pl-8 text-indigo-300">▾ Internet Protocol Version 4</td>
+                  <tr className="hover:bg-accent/40">
+                    <td className="py-2 px-3 pl-8 text-indigo-600 dark:text-indigo-300">▾ Internet Protocol Version 4</td>
                     <td className="py-2 px-3 text-right font-mono">98.4%</td>
                     <td className="py-2 px-3 text-right font-mono">{Math.floor(totalPackets * 0.98)}</td>
                     <td className="py-2 px-3 text-right font-mono">99.1%</td>
@@ -157,15 +158,15 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
 
                   {/* Individual Sub-protocols */}
                   {protocolHierarchy.map(item => (
-                    <tr key={item.protocol} className="hover:bg-zinc-900/40">
-                      <td className={`py-1.5 px-3 pl-14 font-semibold ${isDark ? "text-zinc-100" : "text-slate-800"} flex items-center gap-2`}>
+                    <tr key={item.protocol} className="hover:bg-accent/40">
+                      <td className={`py-1.5 px-3 pl-14 font-semibold ${"text-foreground"} flex items-center gap-2`}>
                         <span className="w-2 h-2 rounded-full bg-purple-400" />
                         <span>{item.protocol}</span>
                       </td>
-                      <td className={`py-1.5 px-3 text-right font-mono ${isDark ? "text-zinc-300" : "text-slate-700"}`}>{item.packetPercent.toFixed(1)}%</td>
-                      <td className={`py-1.5 px-3 text-right font-mono ${isDark ? "text-zinc-100" : "text-slate-800"}`}>{item.packetCount}</td>
-                      <td className={`py-1.5 px-3 text-right font-mono ${isDark ? "text-zinc-300" : "text-slate-700"}`}>{item.bytesPercent.toFixed(1)}%</td>
-                      <td className={`py-1.5 px-3 text-right font-mono ${isDark ? "text-zinc-100" : "text-slate-800"}`}>{item.bytes.toLocaleString()}</td>
+                      <td className={`py-1.5 px-3 text-right font-mono ${"text-foreground/80"}`}>{item.packetPercent.toFixed(1)}%</td>
+                      <td className={`py-1.5 px-3 text-right font-mono ${"text-foreground"}`}>{item.packetCount}</td>
+                      <td className={`py-1.5 px-3 text-right font-mono ${"text-foreground/80"}`}>{item.bytesPercent.toFixed(1)}%</td>
+                      <td className={`py-1.5 px-3 text-right font-mono ${"text-foreground"}`}>{item.bytes.toLocaleString()}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -175,7 +176,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
 
           {activeTab === 'sizes' && (
             <div className="space-y-4">
-              <div className={`${isDark ? "text-zinc-400" : "text-slate-600"} font-sans text-xs`}>
+              <div className={`${"text-muted-foreground"} font-sans text-xs`}>
                 Distribution of frame lengths captured across the active network buffer.
               </div>
 
@@ -183,16 +184,16 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
                 {lengthBuckets.map((b, idx) => {
                   const percent = totalPackets > 0 ? (b.count / totalPackets) * 100 : 0;
                   return (
-                    <div key={idx} className="p-2 rounded bg-zinc-900 border border-zinc-800 space-y-1">
+                    <div key={idx} className="p-2 rounded bg-muted border border-border space-y-1">
                       <div className="flex items-center justify-between text-xs">
-                        <span className={`font-semibold ${isDark ? "text-zinc-200" : "text-slate-800"}`}>{b.label}</span>
+                        <span className={`font-semibold ${"text-foreground"}`}>{b.label}</span>
                         <div className="flex items-center gap-3">
-                          <span className={`${isDark ? "text-zinc-400" : "text-slate-600"}`}>{b.count} frames</span>
+                          <span className={`${"text-muted-foreground"}`}>{b.count} frames</span>
                           <span className="text-purple-400 font-bold w-12 text-right">{percent.toFixed(1)}%</span>
                         </div>
                       </div>
 
-                      <div className={`w-full h-2 rounded-full ${isDark ? "bg-zinc-800" : "bg-slate-200"} overflow-hidden`}>
+                      <div className="w-full h-2 rounded-full bg-muted overflow-hidden">
                         <div
                           className="h-full bg-gradient-to-r from-purple-500 to-sky-400 rounded-full transition-all duration-300"
                           style={{ width: `${percent}%` }}
@@ -207,15 +208,15 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-zinc-800 flex justify-end">
+        <div className="px-5 py-3 border-t border-border flex justify-end">
           <button
             onClick={onClose}
-            className={`px-4 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 ${isDark ? "text-zinc-200" : "text-slate-800"} text-xs font-medium transition-colors`}
+            className={`px-4 py-1.5 rounded-md bg-secondary hover:bg-accent ${"text-foreground"} text-xs font-medium transition-colors`}
           >
             Close
           </button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };

@@ -6,14 +6,12 @@ interface StreamFollowerModalProps {
   streamId: number | null;
   packets: Packet[];
   onClose: () => void;
-  isDark: boolean;
 }
 
 export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
   streamId,
   packets,
   onClose,
-  isDark,
 }) => {
   const [viewFormat, setViewFormat] = useState<'ascii' | 'hex' | 'raw'>('ascii');
   const [copied, setCopied] = useState(false);
@@ -67,13 +65,9 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-      <div
-        className={`w-full max-w-4xl max-h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors ${
-          isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-zinc-300 text-zinc-900'
-        }`}
-      >
+      <div className="w-full max-w-4xl max-h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground">
         {/* Modal Header */}
-        <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="p-1.5 rounded-lg bg-sky-500/20 text-sky-400">
               <MessageSquare className="w-5 h-5" />
@@ -81,27 +75,25 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
             <div>
               <div className="flex items-center gap-2 font-bold text-sm">
                 <span>Follow Stream #{streamId}</span>
-                <span className={`text-xs px-2 py-0.5 rounded bg-zinc-800 ${isDark ? "text-zinc-300" : "text-slate-700"} font-mono`}>
+                <span className="text-xs px-2 py-0.5 rounded bg-secondary text-foreground/80 font-mono">
                   {streamPackets.length} frames
                 </span>
               </div>
-              <p className={`text-xs ${isDark ? "text-zinc-400" : "text-slate-600"} font-mono`}>
-                {clientIp} <span className={`${isDark ? "text-zinc-500" : "text-slate-600"}`}>⇄</span> {serverIp}
+              <p className="text-xs text-muted-foreground font-mono">
+                {clientIp} <span className="text-muted-foreground">⇄</span> {serverIp}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             {/* View Format Switcher */}
-            <div className={`flex rounded-md border ${isDark ? 'border-zinc-800 bg-zinc-900' : 'border-zinc-300 bg-zinc-100'} p-0.5 text-xs`}>
+            <div className="flex rounded-md border border-border bg-secondary p-0.5 text-xs">
               <button
                 onClick={() => setViewFormat('ascii')}
                 className={`px-2 py-1 rounded font-medium transition-all ${
                   viewFormat === 'ascii'
                     ? 'bg-sky-600 text-white shadow-sm'
-                    : isDark
-                    ? 'text-zinc-400 hover:text-zinc-200'
-                    : 'text-zinc-600 hover:text-zinc-900'
+                    : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
                 ASCII / UTF-8
@@ -111,9 +103,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
                 className={`px-2 py-1 rounded font-medium transition-all ${
                   viewFormat === 'hex'
                     ? 'bg-sky-600 text-white shadow-sm'
-                    : isDark
-                    ? 'text-zinc-400 hover:text-zinc-200'
-                    : 'text-zinc-600 hover:text-zinc-900'
+                    : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
                 Hex Dump
@@ -123,9 +113,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
                 className={`px-2 py-1 rounded font-medium transition-all ${
                   viewFormat === 'raw'
                     ? 'bg-sky-600 text-white shadow-sm'
-                    : isDark
-                    ? 'text-zinc-400 hover:text-zinc-200'
-                    : 'text-zinc-600 hover:text-zinc-900'
+                    : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
                 Raw Byte
@@ -134,9 +122,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
 
             <button
               onClick={handleCopyStream}
-              className={`p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 ${
-                isDark ? 'border-zinc-700 hover:bg-zinc-800 text-zinc-300' : 'border-zinc-300 hover:bg-zinc-100 text-zinc-700'
-              }`}
+              className="p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 border-border hover:bg-accent text-foreground/80"
               title="Copy conversation dialogue to clipboard"
             >
               {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
@@ -144,9 +130,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
 
             <button
               onClick={handleSaveStream}
-              className={`p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 ${
-                isDark ? 'border-zinc-700 hover:bg-zinc-800 text-zinc-300' : 'border-zinc-300 hover:bg-zinc-100 text-zinc-700'
-              }`}
+              className="p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 border-border hover:bg-accent text-foreground/80"
               title="Download stream text file"
             >
               <Download className="w-4 h-4 text-sky-400" />
@@ -154,7 +138,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
 
             <button
               onClick={onClose}
-              className={`p-1.5 rounded-md hover:bg-zinc-800 ${isDark ? "text-zinc-400" : "text-slate-600"} hover:text-zinc-200`}
+              className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground"
             >
               <X className="w-5 h-5" />
             </button>
@@ -162,11 +146,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
         </div>
 
         {/* Legend */}
-        <div
-          className={`px-4 py-2 border-b text-xs flex items-center justify-between ${
-            isDark ? 'bg-zinc-900/50 border-zinc-800 text-zinc-300' : 'bg-zinc-50 border-zinc-200 text-zinc-700'
-          }`}
-        >
+        <div className="px-4 py-2 border-b text-xs flex items-center justify-between bg-secondary/50 border-border text-foreground/80">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-1.5">
               <span className="w-3 h-3 rounded-full bg-rose-500" />
@@ -177,13 +157,13 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
               <span className="font-semibold text-sky-400">Server Traffic ({totalServerBytes} bytes)</span>
             </div>
           </div>
-          <span className={`text-[11px] font-mono ${isDark ? "text-zinc-500" : "text-slate-600"}`}>Wireshark Stream Follower Engine</span>
+          <span className="text-[11px] font-mono text-muted-foreground">Wireshark Stream Follower Engine</span>
         </div>
 
         {/* Stream Dialogue Viewport */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs custom-scrollbar">
           {streamPackets.length === 0 ? (
-            <div className={`text-center py-12 ${isDark ? "text-zinc-500" : "text-slate-600"}`}>No stream payload data recorded for stream #{streamId}.</div>
+            <div className="text-center py-12 text-muted-foreground">No stream payload data recorded for stream #{streamId}.</div>
           ) : (
             streamPackets.map(p => {
               const isClient = p.source === clientIp;
@@ -194,12 +174,8 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
                   key={p.id}
                   className={`p-3 rounded-lg border leading-relaxed ${
                     isClient
-                      ? isDark
-                        ? 'bg-rose-950/20 border-rose-900/40 text-rose-300'
-                        : 'bg-rose-50 border-rose-200 text-rose-900'
-                      : isDark
-                      ? 'bg-sky-950/20 border-sky-900/40 text-sky-300'
-                      : 'bg-sky-50 border-sky-200 text-sky-900'
+                      ? 'bg-rose-50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/40 text-rose-900 dark:text-rose-300'
+                      : 'bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-900/40 text-sky-900 dark:text-sky-300'
                   }`}
                 >
                   <div className="flex items-center justify-between pb-1 mb-1 border-b border-current/20 text-[10px] opacity-75 font-sans">
@@ -219,13 +195,13 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-4 py-2.5 border-t border-zinc-800 flex items-center justify-between text-xs">
-          <span className={`${isDark ? "text-zinc-500" : "text-slate-600"} font-mono`}>
+        <div className="px-4 py-2.5 border-t border-border flex items-center justify-between text-xs">
+          <span className="text-muted-foreground font-mono">
             Total {streamPackets.length} Packets ({totalClientBytes + totalServerBytes} bytes exchanged)
           </span>
           <button
             onClick={onClose}
-            className={`px-4 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 ${isDark ? "text-zinc-200" : "text-slate-800"} font-medium transition-colors`}
+            className="px-4 py-1.5 rounded-md bg-secondary hover:bg-accent text-foreground font-medium transition-colors"
           >
             Close
           </button>

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { motion } from 'motion/react';
 import {
   Filter,
   Check,
@@ -7,6 +8,7 @@ import {
   Bookmark,
   ChevronDown,
   Sparkles,
+  Search,
 } from 'lucide-react';
 import { FilterEngine, DEFAULT_FILTER_PRESETS, FilterValidationResult } from '../../services/filterEngine';
 import { FilterPreset } from '../../types/packet';
@@ -17,7 +19,8 @@ interface FilterBarProps {
   onApplyFilter: (newFilter?: string) => void;
   totalPackets: number;
   filteredPackets: number;
-  isDark: boolean;
+  packetSearchText: string;
+  onPacketSearchChange: (text: string) => void;
 }
 
 export const FilterBar: React.FC<FilterBarProps> = ({
@@ -26,15 +29,33 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   onApplyFilter,
   totalPackets,
   filteredPackets,
-  isDark,
+  packetSearchText,
+  onPacketSearchChange,
 }) => {
   const [validation, setValidation] = useState<FilterValidationResult>({ isValid: true });
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [showPresetsDropdown, setShowPresetsDropdown] = useState(false);
   const [presets, setPresets] = useState<FilterPreset[]>(DEFAULT_FILTER_PRESETS);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const isSearchExpanded = isSearchOpen || packetSearchText.trim().length > 0;
+
+  const clearSearch = () => {
+    onPacketSearchChange('');
+    setIsSearchOpen(false);
+  };
+
+  const toggleSearch = () => {
+    if (isSearchExpanded) {
+      clearSearch();
+    } else {
+      setIsSearchOpen(true);
+      requestAnimationFrame(() => searchInputRef.current?.focus());
+    }
+  };
 
   // Validate syntax as user types
   useEffect(() => {
@@ -100,36 +121,26 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   return (
     <div
       ref={containerRef}
-      className={`px-4 py-2 border-b transition-colors z-30 relative shrink-0 ${
-        isDark ? 'bg-slate-900 border-slate-800' : 'bg-slate-100 border-slate-200'
-      }`}
+      className="px-4 py-2 border-b transition-colors z-30 relative shrink-0 bg-secondary border-border"
     >
       <div className="flex flex-wrap items-center gap-3">
         {/* Preset Selector Dropdown */}
         <div className="relative">
           <button
             onClick={() => setShowPresetsDropdown(!showPresetsDropdown)}
-            className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border font-medium transition-colors cursor-pointer ${
-              isDark
-                ? 'bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-200'
-                : 'bg-white border-slate-300 hover:bg-slate-50 text-slate-800'
-            }`}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border font-medium transition-colors cursor-pointer bg-card hover:bg-accent border-border text-foreground"
             title="Choose a filter preset"
           >
             <Bookmark className="w-3.5 h-3.5 text-cyan-400" />
             <span className="hidden sm:inline font-mono">Presets</span>
-            <ChevronDown className="w-3 h-3 text-slate-400" />
+            <ChevronDown className="w-3 h-3 text-muted-foreground" />
           </button>
 
           {showPresetsDropdown && (
-            <div
-              className={`absolute left-0 top-full mt-2 w-80 rounded-lg border p-1.5 shadow-2xl z-50 transition-all ${
-                isDark ? 'bg-slate-950 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-800 shadow-md rounded-lg'
-              }`}
-            >
-              <div className="text-[10px] font-bold text-slate-400 px-2 py-1 uppercase tracking-wider flex items-center justify-between font-mono">
+            <div className="absolute left-0 top-full mt-2 w-80 rounded-lg border p-1.5 shadow-2xl z-50 transition-all bg-popover border-border text-popover-foreground">
+              <div className="text-[10px] font-bold text-muted-foreground px-2 py-1 uppercase tracking-wider flex items-center justify-between font-mono">
                 <span>Display Filter Presets</span>
-                <span className="text-[10px] text-slate-500">{presets.length} presets</span>
+                <span className="text-[10px] text-muted-foreground">{presets.length} presets</span>
               </div>
               <div className="max-h-64 overflow-y-auto space-y-0.5 custom-scrollbar">
                 {presets.map(p => (
@@ -138,22 +149,20 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                     onClick={() => handleSelectPreset(p)}
                     className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors flex flex-col ${
                       filterText === p.filter
-                        ? isDark
-                          ? 'bg-slate-800 border border-slate-700 text-cyan-300'
-                          : 'bg-slate-100 border border-slate-300'
-                        : 'hover:bg-slate-800/60'
+                        ? 'bg-accent border border-border text-cyan-700 dark:text-cyan-300'
+                        : 'hover:bg-accent/60'
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-100">{p.name}</span>
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 font-mono">
+                      <span className="font-semibold text-foreground">{p.name}</span>
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-muted text-muted-foreground font-mono">
                         {p.category}
                       </span>
                     </div>
                     {p.filter ? (
                       <code className="text-[10px] text-cyan-400 font-mono mt-0.5 truncate">{p.filter}</code>
                     ) : (
-                      <span className="text-[10px] text-slate-500 italic">No filter (Show All)</span>
+                      <span className="text-[10px] text-muted-foreground italic">No filter (Show All)</span>
                     )}
                   </button>
                 ))}
@@ -165,13 +174,11 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         {/* Geometric Balance Filter Box Container */}
         <div className="relative flex-1 min-w-[260px]">
           <div
-            className={`flex items-center rounded-md border w-full px-3 py-1.5 transition-all shadow-inner ${
-              isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-300'
-            } ${
+            className={`flex items-center rounded-md border w-full px-3 py-1.5 transition-all shadow-inner bg-card border-border ${
               isNotEmpty && !validation.isValid
-                ? 'border-rose-500 bg-rose-950/20'
+                ? '!border-rose-500 bg-rose-100 dark:bg-rose-950/20'
                 : isNotEmpty && validation.isValid
-                ? 'border-cyan-500/80'
+                ? '!border-cyan-500/80'
                 : ''
             }`}
           >
@@ -191,9 +198,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               onFocus={() => setShowSuggestions(true)}
               onKeyDown={handleKeyDown}
               placeholder='ip.addr == 192.168.1.1 || tcp.port == 443 || proto == http'
-              className={`bg-transparent outline-none text-xs font-mono w-full ${
-                isDark ? 'text-slate-100 placeholder:text-slate-500' : 'text-slate-900 placeholder:text-slate-400'
-              }`}
+              className="bg-transparent outline-none text-xs font-mono w-full text-foreground placeholder:text-muted-foreground"
             />
 
             {/* Clear, Bookmark & Apply Controls inside input */}
@@ -204,7 +209,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                     onFilterChange('');
                     onApplyFilter('');
                   }}
-                  className="p-1 rounded text-slate-400 hover:text-slate-200 transition-colors"
+                  className="p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
                   title="Clear filter"
                 >
                   <X className="w-3 h-3" />
@@ -236,14 +241,10 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 
           {/* Autocomplete Suggestions Box */}
           {showSuggestions && suggestions.length > 0 && (
-            <div
-              className={`absolute left-0 top-full mt-1.5 w-full rounded-lg border p-1.5 shadow-2xl z-50 transition-all ${
-                isDark ? 'bg-slate-950 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-800 shadow-md rounded-lg'
-              }`}
-            >
-              <div className="text-[10px] font-bold text-slate-500 px-2 py-0.5 uppercase tracking-wider flex items-center justify-between font-mono">
+            <div className="absolute left-0 top-full mt-1.5 w-full rounded-lg border p-1.5 shadow-2xl z-50 transition-all bg-popover border-border text-popover-foreground">
+              <div className="text-[10px] font-bold text-muted-foreground px-2 py-0.5 uppercase tracking-wider flex items-center justify-between font-mono">
                 <span>Filter Suggestions</span>
-                <span className="text-slate-600">Click to autofill</span>
+                <span className="text-muted-foreground">Click to autofill</span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 mt-1">
                 {suggestions.map((sug, idx) => (
@@ -261,22 +262,62 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 
           {/* Syntax Error Notice */}
           {!validation.isValid && validation.errorMessage && (
-            <div className="absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-950 text-rose-300 text-[11px] border border-rose-800 shadow-lg">
+            <div className="absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 text-[11px] border border-rose-300 dark:border-rose-800 shadow-lg">
               <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
               <span>{validation.errorMessage}</span>
             </div>
           )}
         </div>
 
-        {/* Packet Count Status Badge */}
+        {/* Find Packet - quick substring search applied on top of the
+            display filter above (relocated from PacketList's own toolbar
+            row, which no longer exists). */}
         <div
-          className={`flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border shrink-0 ${
-            isDark ? 'bg-slate-800/80 border-slate-700 text-slate-300' : 'bg-white border-slate-300 text-slate-700'
+          className={`flex items-center gap-1.5 px-1.5 py-1.5 rounded-md border transition-colors overflow-hidden shrink-0 ${
+            isSearchExpanded ? 'bg-card border-border' : 'bg-transparent border-transparent'
           }`}
         >
-          <span className="text-slate-500">PACKETS:</span>
-          <span className="font-semibold text-slate-100">
-            {filteredPackets.toLocaleString()} <span className="text-slate-500">/</span> {totalPackets.toLocaleString()}
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={toggleSearch}
+            title="Find packet"
+            className="p-0.5 shrink-0 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+          >
+            <Search className="w-3.5 h-3.5" />
+          </button>
+          <motion.input
+            ref={searchInputRef}
+            type="text"
+            placeholder="Find packet (IP, protocol, info)..."
+            value={packetSearchText}
+            onChange={e => onPacketSearchChange(e.target.value)}
+            onFocus={() => setIsSearchOpen(true)}
+            onBlur={() => {
+              if (!packetSearchText.trim()) setIsSearchOpen(false);
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Escape') {
+                clearSearch();
+                searchInputRef.current?.blur();
+              }
+            }}
+            initial={false}
+            animate={{ width: isSearchExpanded ? 224 : 0 }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+            className="bg-transparent outline-none text-xs font-mono text-foreground placeholder-muted-foreground"
+          />
+          {packetSearchText && (
+            <button onClick={clearSearch} className="p-0.5 shrink-0 rounded-full hover:bg-accent text-muted-foreground">
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
+        {/* Packet Count Status Badge */}
+        <div className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border shrink-0 bg-card border-border text-foreground/80">
+          <span className="text-muted-foreground">PACKETS:</span>
+          <span className="font-semibold text-foreground">
+            {filteredPackets.toLocaleString()} <span className="text-muted-foreground">/</span> {totalPackets.toLocaleString()}
           </span>
           <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-400 font-bold">
             {filterPercentage}%

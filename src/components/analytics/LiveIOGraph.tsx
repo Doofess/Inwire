@@ -4,10 +4,9 @@ import { Packet } from '../../types/packet';
 
 interface LiveIOGraphProps {
   packets: Packet[];
-  isDark: boolean;
 }
 
-export const LiveIOGraph: React.FC<LiveIOGraphProps> = ({ packets, isDark }) => {
+export const LiveIOGraph: React.FC<LiveIOGraphProps> = ({ packets }) => {
   // Aggregate packets by second for the last 60 seconds
   const data = useMemo(() => {
     if (!packets || packets.length === 0) return [];
@@ -38,8 +37,12 @@ export const LiveIOGraph: React.FC<LiveIOGraphProps> = ({ packets, isDark }) => 
     return chartData;
   }, [packets]);
 
+  const rootStyle = typeof document !== 'undefined' ? getComputedStyle(document.documentElement) : null;
+  const popoverColor = rootStyle?.getPropertyValue('--popover').trim() || '#ffffff';
+  const borderColor = rootStyle?.getPropertyValue('--border').trim() || '#e2e8f0';
+
   return (
-    <div className={`w-full h-full flex flex-col ${isDark ? 'text-zinc-300' : 'text-slate-700'}`}>
+    <div className="w-full h-full flex flex-col text-card-foreground">
       <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider opacity-70 border-b border-inherit border-opacity-10">
         Live I/O (pkts/sec)
       </div>
@@ -53,10 +56,10 @@ export const LiveIOGraph: React.FC<LiveIOGraphProps> = ({ packets, isDark }) => 
               </linearGradient>
             </defs>
             <YAxis hide domain={['dataMin', 'dataMax + 5']} />
-            <Tooltip 
-              contentStyle={{ 
-                backgroundColor: isDark ? '#18181b' : '#ffffff', 
-                border: isDark ? '1px solid #27272a' : '1px solid #e2e8f0',
+            <Tooltip
+              contentStyle={{
+                backgroundColor: popoverColor,
+                border: `1px solid ${borderColor}`,
                 fontSize: '11px',
                 padding: '4px 8px'
               }}

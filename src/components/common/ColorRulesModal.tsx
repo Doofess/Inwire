@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { motion } from 'motion/react';
 import { ColorRule, UserRolePermissions } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
+import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { Palette, Plus, Trash2, Check, X, Shield } from 'lucide-react';
 
 interface ColorRulesModalProps {
@@ -8,7 +10,6 @@ interface ColorRulesModalProps {
   onUpdateRules: () => void;
   onClose: () => void;
   permissions: UserRolePermissions;
-  isDark: boolean;
 }
 
 export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
@@ -16,7 +17,6 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
   onUpdateRules,
   onClose,
   permissions,
-  isDark,
 }) => {
   const [rules, setRules] = useState<ColorRule[]>([...colorEngine.getRules()]);
 
@@ -50,25 +50,27 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-      <div
-        className={`w-full max-w-3xl max-h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors ${
-          isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-zinc-300 text-zinc-900'
-        }`}
+    <motion.div
+      {...modalBackdropMotion}
+      className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+    >
+      <motion.div
+        {...modalPanelMotion}
+        className="w-full max-w-3xl max-h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground"
       >
         {/* Header */}
-        <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between">
+        <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="p-2 rounded-lg bg-pink-500/20 text-pink-400">
               <Palette className="w-5 h-5" />
             </div>
             <div>
               <div className="font-bold text-base">Packet Coloring Rules</div>
-              <p className="text-xs text-zinc-400">Customize visual highlighting based on protocol, port, or alert expressions</p>
+              <p className="text-xs text-muted-foreground">Customize visual highlighting based on protocol, port, or alert expressions</p>
             </div>
           </div>
 
-          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200">
+          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -78,9 +80,7 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
           {rules.map(rule => (
             <div
               key={rule.id}
-              className={`p-3 rounded-lg border flex items-center justify-between gap-3 text-xs transition-colors ${
-                isDark ? 'bg-zinc-900/60 border-zinc-800' : 'bg-zinc-50 border-zinc-200'
-              }`}
+              className="p-3 rounded-lg border flex items-center justify-between gap-3 text-xs transition-colors bg-muted/60 border-border"
               style={{ borderLeftColor: rule.textColor, borderLeftWidth: '4px' }}
             >
               <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -92,8 +92,8 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
                 />
 
                 <div className="min-w-0">
-                  <div className="font-semibold text-zinc-100">{rule.name}</div>
-                  <code className="text-[11px] text-zinc-400 font-mono block truncate">{rule.filter}</code>
+                  <div className="font-semibold text-foreground">{rule.name}</div>
+                  <code className="text-[11px] text-muted-foreground font-mono block truncate">{rule.filter}</code>
                 </div>
               </div>
 
@@ -118,7 +118,7 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-zinc-800 flex items-center justify-between text-xs">
+        <div className="px-5 py-3 border-t border-border flex items-center justify-between text-xs">
           <button
             onClick={handleAddRule}
             disabled={!permissions.canChangeColorRules}
@@ -130,12 +130,12 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
 
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-medium transition-colors"
+            className="px-4 py-1.5 rounded-md bg-secondary hover:bg-accent text-foreground font-medium transition-colors"
           >
             Save Rules
           </button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };

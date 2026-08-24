@@ -26,6 +26,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir=output
 OutputBaseFilename=NetView-Agent-Setup
+SetupIconFile=..\icon.ico
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin

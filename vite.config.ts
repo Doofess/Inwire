@@ -11,6 +11,15 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    optimizeDeps: {
+      // maplibre-gl ships its own web worker as a separate asset; esbuild's
+      // dependency pre-bundler doesn't resolve that worker's URL correctly,
+      // which leaves the map's tile-parsing worker silently dead (map loads
+      // its style but never renders a single tile). Exclude it so Vite serves
+      // it as native ESM instead, where maplibre's own build handles this
+      // correctly.
+      exclude: ['maplibre-gl'],
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.

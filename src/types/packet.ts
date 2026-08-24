@@ -69,7 +69,7 @@ export interface Packet {
   rawBytes: Uint8Array;
   hexDump: string;
   asciiDump: string;
-  anomaly?: AnomalyInfo;
+  anomalies?: AnomalyInfo[];
   interfaceName: string;
   colorRuleName?: string;
 }
