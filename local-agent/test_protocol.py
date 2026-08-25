@@ -143,6 +143,56 @@ sc_sniffing.start_threads(FakeSpawnCalls())
 sniffing_msg = sc_sniffing.state_message([("eth0", "Ethernet")])
 check("state_message sniffing state", sniffing_msg["state"], "sniffing")
 
+# --- config: origin normalization ---
+import config
+
+check("normalize lowercases scheme and host", config.normalize_origin("HTTP://LocalHost:3000"), "http://localhost:3000")
+check("normalize strips a trailing slash", config.normalize_origin("http://localhost:3000/"), "http://localhost:3000")
+check("normalize strips surrounding whitespace", config.normalize_origin("  http://localhost:3000  "), "http://localhost:3000")
+
+# --- config: origin matching ---
+allowed = ["http://localhost:3000", "http://127.0.0.1:4173"]
+check_true("exact origin allowed", config.is_origin_allowed("http://localhost:3000", allowed))
+check_true("second listed origin allowed", config.is_origin_allowed("http://127.0.0.1:4173", allowed))
+check("unlisted origin rejected", config.is_origin_allowed("https://evil.com", allowed), False)
+check("different port rejected", config.is_origin_allowed("http://localhost:9999", allowed), False)
+check("missing origin rejected", config.is_origin_allowed(None, allowed), False)
+check("empty origin rejected", config.is_origin_allowed("", allowed), False)
+check("non-string origin rejected", config.is_origin_allowed(1234, allowed), False)
+check_true("case-insensitive match", config.is_origin_allowed("HTTP://LOCALHOST:3000", allowed))
+check_true("trailing slash tolerated", config.is_origin_allowed("http://localhost:3000/", allowed))
+
+# --- config: parsing and fallback ---
+check(
+    "valid config is used",
+    config.parse_config('{"allowedOrigins": ["http://example.test"]}')["allowedOrigins"],
+    ["http://example.test"],
+)
+check("absent file falls back to defaults", config.parse_config(None)["allowedOrigins"], config.DEFAULT_ALLOWED_ORIGINS)
+check("malformed JSON falls back to defaults", config.parse_config("{not json")["allowedOrigins"], config.DEFAULT_ALLOWED_ORIGINS)
+check("non-object JSON falls back to defaults", config.parse_config('["a"]')["allowedOrigins"], config.DEFAULT_ALLOWED_ORIGINS)
+check("missing allowedOrigins key falls back", config.parse_config('{"other": 1}')["allowedOrigins"], config.DEFAULT_ALLOWED_ORIGINS)
+check("non-list allowedOrigins falls back", config.parse_config('{"allowedOrigins": "nope"}')["allowedOrigins"], config.DEFAULT_ALLOWED_ORIGINS)
+check("non-string entries fall back", config.parse_config('{"allowedOrigins": [1, 2]}')["allowedOrigins"], config.DEFAULT_ALLOWED_ORIGINS)
+check("config origins are normalized on load", config.parse_config('{"allowedOrigins": ["HTTP://Example.test/"]}')["allowedOrigins"], ["http://example.test"])
+
+warnings = []
+config.parse_config("{not json", on_warning=warnings.append)
+check("malformed JSON emits exactly one warning", len(warnings), 1)
+
+no_warnings = []
+config.parse_config('{"allowedOrigins": ["http://example.test"]}', on_warning=no_warnings.append)
+check("valid config emits no warning", no_warnings, [])
+
+check("defaults are the four documented origins", config.DEFAULT_ALLOWED_ORIGINS, [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+])
+check_true("config_path ends with config.json", config.config_path().endswith("config.json"))
+check_true("config_path lives under the config dir", config.config_path().startswith(config.config_dir()))
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")
