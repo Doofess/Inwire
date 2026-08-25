@@ -53,8 +53,27 @@ export const Header: React.FC<HeaderProps> = ({
   const bufferPercent = Math.min(100, (totalPacketsCount / PACKET_BUFFER_CAP) * 100);
   return (
     <header className="h-16 px-4 sm:px-6 border-b flex items-center justify-between gap-4 transition-colors z-40 shrink-0 select-none bg-card border-border text-card-foreground">
-      {/* Left: Branding & Capture Stream Controls */}
+      {/* Left: App Menu, Branding & Capture Stream Controls */}
       <div className="flex items-center space-x-3 sm:space-x-4">
+        {/* App Menu - Actions, Views, Filter Presets (Ctrl/Cmd+K). Leads the
+            header the way GitHub's own hamburger leads its header, ahead of
+            the logo rather than trailing every other control. */}
+        <AppMenu
+          isCapturing={isCapturing}
+          onStartCapture={onStartCapture}
+          onPauseCapture={onPauseCapture}
+          onClearPackets={onClearPackets}
+          onOpenDissectorModal={onOpenDissectorModal}
+          onOpenStatsModal={onOpenStatsModal}
+          onOpenExportModal={onOpenExportModal}
+          onOpenColorRulesModal={onOpenColorRulesModal}
+          onOpenIspModal={onOpenIspModal}
+          onOpenSettingsModal={onOpenSettingsModal}
+          onApplyFilterPreset={onApplyFilterPreset}
+          permissions={permissions}
+          totalPacketsCount={totalPacketsCount}
+        />
+
         {/* Title */}
         <div className="hidden xl:flex flex-col">
           <div className="flex items-center gap-1.5">
@@ -115,7 +134,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Right: Buffer Status, Agent Status, App Menu */}
+      {/* Right: Buffer Status, Agent Status */}
       <div className="flex items-center space-x-2 sm:space-x-2.5">
         {/* Capture Buffer Status - relocated from the old bottom status bar.
             Packet/filtered counts were dropped here since FilterBar already
@@ -166,26 +185,6 @@ export const Header: React.FC<HeaderProps> = ({
               : 'Agent Disconnected'}
           </span>
         </div>
-
-        {/* App Menu - Actions, Views, Filter Presets (Ctrl/Cmd+K). Now the
-            last thing in the header, flush against its right edge - the
-            Download Driver button that used to sit here moved into the
-            menu itself as an Actions item. */}
-        <AppMenu
-          isCapturing={isCapturing}
-          onStartCapture={onStartCapture}
-          onPauseCapture={onPauseCapture}
-          onClearPackets={onClearPackets}
-          onOpenDissectorModal={onOpenDissectorModal}
-          onOpenStatsModal={onOpenStatsModal}
-          onOpenExportModal={onOpenExportModal}
-          onOpenColorRulesModal={onOpenColorRulesModal}
-          onOpenIspModal={onOpenIspModal}
-          onOpenSettingsModal={onOpenSettingsModal}
-          onApplyFilterPreset={onApplyFilterPreset}
-          permissions={permissions}
-          totalPacketsCount={totalPacketsCount}
-        />
       </div>
     </header>
   );
