@@ -91,8 +91,8 @@ export const REQUIRED_AGENT_VERSION = '1.1.0';
  */
 export function isAgentOutdated(reportedVersion: string, requiredVersion: string): boolean {
   const parse = (v: string) => v.split('.').map((n) => parseInt(n, 10) || 0);
-  const [rMajor, rMinor, rPatch] = parse(reportedVersion);
-  const [qMajor, qMinor, qPatch] = parse(requiredVersion);
+  const [rMajor = 0, rMinor = 0, rPatch = 0] = parse(reportedVersion);
+  const [qMajor = 0, qMinor = 0, qPatch = 0] = parse(requiredVersion);
   if (rMajor !== qMajor) return rMajor < qMajor;
   if (rMinor !== qMinor) return rMinor < qMinor;
   return rPatch < qPatch;
