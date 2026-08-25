@@ -495,6 +495,7 @@ export default function App() {
           onStartCapture={() => setIsCapturing(true)}
           onPauseCapture={() => setIsCapturing(false)}
           onStopCapture={() => setIsCapturing(false)}
+          onSendAgentCommand={sendAgentCommand}
           onClearPackets={() => setPackets([])}
           permissions={permissions}
           onOpenDissectorModal={() => setShowDissectorModal(true)}

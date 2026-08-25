@@ -6,12 +6,14 @@ import {
 } from 'react-icons/tb';
 import { UserRole, UserRolePermissions } from '../../types/packet';
 import { AppMenu } from './AppMenu';
+import type { AgentCommand } from '../../services/agentProtocol';
 
 interface HeaderProps {
   isCapturing: boolean;
   onStartCapture: () => void;
   onPauseCapture: () => void;
   onStopCapture: () => void;
+  onSendAgentCommand: (command: AgentCommand) => void;
   onClearPackets: () => void;
   permissions: UserRolePermissions;
   onOpenDissectorModal: () => void;
@@ -62,6 +64,7 @@ export const Header: React.FC<HeaderProps> = ({
   onStartCapture,
   onPauseCapture,
   onStopCapture,
+  onSendAgentCommand,
   onClearPackets,
   permissions,
   onOpenDissectorModal,
@@ -90,6 +93,7 @@ export const Header: React.FC<HeaderProps> = ({
           isCapturing={isCapturing}
           onStartCapture={onStartCapture}
           onPauseCapture={onPauseCapture}
+          onSendAgentCommand={onSendAgentCommand}
           onClearPackets={onClearPackets}
           onOpenDissectorModal={onOpenDissectorModal}
           onOpenStatsModal={onOpenStatsModal}
@@ -113,7 +117,10 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center space-x-2">
           {isCapturing ? (
             <button
-              onClick={onPauseCapture}
+              onClick={() => {
+                onPauseCapture();
+                onSendAgentCommand({ type: 'stop_capture' });
+              }}
               className="bg-rose-500 hover:bg-rose-600 active:scale-95 text-white text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-rose-500/20 transition-all cursor-pointer"
               title="Stop / Pause Capture Stream"
             >
@@ -122,7 +129,10 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           ) : (
             <button
-              onClick={onStartCapture}
+              onClick={() => {
+                onStartCapture();
+                onSendAgentCommand({ type: 'start_capture' });
+              }}
               disabled={!permissions.canCapture}
               className={`bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-cyan-500/20 transition-all cursor-pointer ${
                 !permissions.canCapture ? 'opacity-50 cursor-not-allowed' : ''
@@ -136,7 +146,10 @@ export const Header: React.FC<HeaderProps> = ({
 
           {isCapturing && (
             <button
-              onClick={onStopCapture}
+              onClick={() => {
+                onStopCapture();
+                onSendAgentCommand({ type: 'stop_capture' });
+              }}
               className="bg-secondary hover:bg-accent text-rose-500 dark:text-rose-400 hover:text-rose-600 dark:hover:text-rose-300 text-xs px-3 py-2 rounded font-bold border border-border flex items-center gap-1.5 transition-colors cursor-pointer"
               title="Halt Capture"
             >
