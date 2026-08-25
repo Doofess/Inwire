@@ -107,3 +107,17 @@ export type AgentCommand =
 export function encodeAgentCommand(command: AgentCommand): string {
   return JSON.stringify(command);
 }
+
+const PAIRING_TOKEN_STORAGE_KEY = 'netview.agentPairingToken';
+
+export function getStoredPairingToken(): string | null {
+  return localStorage.getItem(PAIRING_TOKEN_STORAGE_KEY);
+}
+
+export function storePairingToken(token: string): void {
+  localStorage.setItem(PAIRING_TOKEN_STORAGE_KEY, token);
+}
+
+export function clearStoredPairingToken(): void {
+  localStorage.removeItem(PAIRING_TOKEN_STORAGE_KEY);
+}
