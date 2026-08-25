@@ -15,6 +15,7 @@ import {
   TbBookmark,
   TbSettings,
   TbX,
+  TbCheck,
 } from 'react-icons/tb';
 import { UserRolePermissions } from '../../types/packet';
 import { DEFAULT_FILTER_PRESETS } from '../../services/filterEngine';
@@ -27,6 +28,8 @@ interface AppMenuProps {
   onPauseCapture: () => void;
   onSendAgentCommand: (command: AgentCommand) => void;
   onClearPackets: () => void;
+  agentInterfaces: { name: string; label: string }[];
+  selectedInterfaces: string[];
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
   onOpenExportModal: () => void;
@@ -63,6 +66,8 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   onPauseCapture,
   onSendAgentCommand,
   onClearPackets,
+  agentInterfaces,
+  selectedInterfaces,
   onOpenDissectorModal,
   onOpenStatsModal,
   onOpenExportModal,
@@ -273,6 +278,35 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       <TbSettings className="w-3.5 h-3.5 text-foreground shrink-0" />
                       <span>Settings</span>
                     </Command.Item>
+                    {agentInterfaces.length > 0 && (
+                      <>
+                        <Command.Separator className="my-1 h-px bg-border" />
+                        <div className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider font-mono text-muted-foreground">
+                          Capture Interfaces
+                        </div>
+                        {agentInterfaces.map((iface) => {
+                          const isSelected = selectedInterfaces.includes(iface.name);
+                          return (
+                            <Command.Item
+                              key={iface.name}
+                              value={`interface-${iface.name}`}
+                              onSelect={() => {
+                                const next = isSelected
+                                  ? selectedInterfaces.filter((n) => n !== iface.name)
+                                  : [...selectedInterfaces, iface.name];
+                                onSendAgentCommand({ type: 'set_interfaces', interfaces: next });
+                              }}
+                              className={itemClass}
+                            >
+                              <span className={`w-3.5 h-3.5 shrink-0 rounded border flex items-center justify-center ${isSelected ? 'bg-cyan-500 border-cyan-500' : 'border-border'}`}>
+                                {isSelected && <TbCheck className="w-3 h-3 text-slate-950" />}
+                              </span>
+                              <span className="truncate">{iface.label}</span>
+                            </Command.Item>
+                          );
+                        })}
+                      </>
+                    )}
                   </Command.Group>
 
                   <Command.Separator className="my-1 h-px bg-border" />
