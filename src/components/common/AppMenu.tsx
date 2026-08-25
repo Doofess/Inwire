@@ -8,6 +8,7 @@ import {
   Pause,
   Trash2,
   Download,
+  DownloadCloud,
   BarChart2,
   Code,
   Palette,
@@ -17,6 +18,7 @@ import {
 } from 'lucide-react';
 import { UserRolePermissions } from '../../types/packet';
 import { DEFAULT_FILTER_PRESETS } from '../../services/filterEngine';
+import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
 
 interface AppMenuProps {
   isCapturing: boolean;
@@ -44,6 +46,16 @@ const itemClass =
 // FilterBar's own preset dropdown instead.
 const NAMED_PRESETS = DEFAULT_FILTER_PRESETS.filter((p) => p.filter);
 
+function downloadAgentInstaller() {
+  const { url, filename } = getAgentDownloadForCurrentOS();
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 export const AppMenu: React.FC<AppMenuProps> = ({
   isCapturing,
   onStartCapture,
@@ -62,6 +74,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   const [open, setOpen] = useState(false);
   const [presetsExpanded, setPresetsExpanded] = useState(false);
   const commandRef = useRef<HTMLDivElement | null>(null);
+  const agentDownload = getAgentDownloadForCurrentOS();
 
   useEffect(() => {
     if (open) {
@@ -201,6 +214,17 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                     >
                       <Download className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
                       <span>Export / Import PCAP</span>
+                    </Command.Item>
+                    {/* Was its own always-visible header button; folded in here
+                        now that the header has nothing right of the trigger
+                        for it to sit next to. */}
+                    <Command.Item
+                      value="download-driver"
+                      onSelect={() => run(downloadAgentInstaller)}
+                      className={itemClass}
+                    >
+                      <DownloadCloud className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400 shrink-0" />
+                      <span>Download Driver ({agentDownload.label})</span>
                     </Command.Item>
                   </Command.Group>
 
