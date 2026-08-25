@@ -17,6 +17,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PcapService } from '../../src/services/pcapParser';
+import { ColorRulesEngine } from '../../src/services/colorRules';
 import type { Packet } from '../../src/types/packet';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -137,9 +138,30 @@ async function main() {
     }
   }
 
+  // Coloring is a separate pass: it runs the packets back through the rule
+  // chain the UI uses, so a rule reordering or a filter-engine regression
+  // shows up here rather than only being visible on screen.
+  const engine = new ColorRulesEngine();
+  const colorDiffs: string[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const theirs = colors.get(rows[i].number) ?? '';
+    const ours = engine.getMatchedRuleName(packets[i]) ?? '';
+    if (ours !== theirs) {
+      colorDiffs.push(`  #${rows[i].number}\n    wireshark: ${theirs || '(no rule)'}\n    netview:   ${ours || '(no rule)'}`);
+    }
+  }
+  if (colorDiffs.length > 0) {
+    console.log(`\n--- Coloring rule: ${colorDiffs.length} mismatch(es) ---`);
+    const cap = process.env.PARITY_MAX_DIFFS === undefined ? 12 : Number(process.env.PARITY_MAX_DIFFS);
+    const shown = cap === 0 ? colorDiffs : colorDiffs.slice(0, cap);
+    console.log(shown.join('\n'));
+    if (shown.length < colorDiffs.length) console.log(`  ... and ${colorDiffs.length - shown.length} more`);
+  }
+  summary.push(`${colorDiffs.length === 0 ? 'PASS' : 'FAIL'}  ${'Color rule'.padEnd(12)} ${rows.length - colorDiffs.length}/${rows.length}`);
+  totalMismatches += colorDiffs.length;
+
   console.log('\n=== SUMMARY ===');
   summary.forEach(line => console.log(line));
-  console.log(`\ncoloring-rule ground truth loaded for ${colors.size} frames (compared once colorRules matches Wireshark's ruleset)`);
 
   process.exit(totalMismatches === 0 ? 0 : 1);
 }

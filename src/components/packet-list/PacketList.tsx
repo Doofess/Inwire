@@ -10,7 +10,6 @@ import {
   MessageSquare,
   Filter,
   Copy,
-  AlertTriangle,
 } from 'lucide-react';
 
 interface PacketListProps {
@@ -36,11 +35,11 @@ type ColumnKey = 'id' | 'relativeTime' | 'source' | 'destination' | 'protocol' |
 const COLUMN_WIDTHS_STORAGE_KEY = 'netview.packetListColumnWidths';
 const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
   id: 64,
-  relativeTime: 96,
-  source: 144,
-  destination: 144,
-  protocol: 96,
-  length: 80,
+  relativeTime: 116,
+  source: 280,
+  destination: 280,
+  protocol: 76,
+  length: 68,
 };
 const MIN_COLUMN_WIDTH = 36;
 const MAX_COLUMN_WIDTH = 480;
@@ -91,6 +90,68 @@ export const PacketList: React.FC<PacketListProps> = ({
     }
   }, [columnWidths]);
 
+  // Columns the user has dragged; these opt out of auto-sizing for good.
+  const userSizedColumnsRef = useRef<Set<ColumnKey>>(new Set());
+
+  // Address columns auto-size to their widest value, Wireshark-style: an IPv6
+  // address is far too wide for a fixed default, and truncating it to an
+  // ellipsis hides the part that distinguishes one host from another. A column
+  // the user has dragged is theirs from then on and stops auto-sizing.
+  const autoSizeRef = useRef({ firstPacketId: -1, measuredCount: 0, source: 0, destination: 0 });
+  const textMeasureRef = useRef<CanvasRenderingContext2D | null>(null);
+
+  useEffect(() => {
+    const state = autoSizeRef.current;
+
+    // A new capture (or a cleared buffer) restarts the measurement; the live
+    // buffer also drops its oldest packets once full, but always keeps
+    // appending, so a *changed* first id is what identifies a genuine reset.
+    const firstPacketId = packets.length > 0 ? packets[0].id : -1;
+    if (packets.length < state.measuredCount || firstPacketId !== state.firstPacketId) {
+      state.firstPacketId = firstPacketId;
+      state.measuredCount = 0;
+      state.source = 0;
+      state.destination = 0;
+    }
+    if (packets.length === state.measuredCount) return;
+
+    if (!textMeasureRef.current) {
+      const cell = tableContainerRef.current?.querySelector('tbody td');
+      const context = document.createElement('canvas').getContext('2d');
+      if (!context) return;
+      const style = cell ? getComputedStyle(cell) : null;
+      context.font = style ? `${style.fontSize} ${style.fontFamily}` : '11px monospace';
+      textMeasureRef.current = context;
+    }
+    const measure = textMeasureRef.current;
+
+    // Only the packets appended since last time are measured, so sustained
+    // live capture stays O(new packets) rather than re-walking the buffer.
+    for (let i = state.measuredCount; i < packets.length; i++) {
+      state.source = Math.max(state.source, measure.measureText(packets[i].source).width);
+      state.destination = Math.max(state.destination, measure.measureText(packets[i].destination).width);
+    }
+    state.measuredCount = packets.length;
+
+    const CELL_PADDING = 18; // px-2 either side, plus a little breathing room
+    setColumnWidths(prev => {
+      const next = { ...prev };
+      let changed = false;
+      for (const column of ['source', 'destination'] as const) {
+        if (userSizedColumnsRef.current.has(column)) continue;
+        const fitted = Math.min(
+          MAX_COLUMN_WIDTH,
+          Math.max(MIN_COLUMN_WIDTH, Math.ceil(state[column] + CELL_PADDING))
+        );
+        if (fitted !== prev[column]) {
+          next[column] = fitted;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [packets]);
+
   const handleColumnResizePointerDown = (column: ColumnKey) => (e: React.PointerEvent<HTMLDivElement>) => {
     e.stopPropagation();
     columnResizeRef.current = { column, startX: e.clientX, startWidth: columnWidths[column] };
@@ -100,6 +161,7 @@ export const PacketList: React.FC<PacketListProps> = ({
     e.stopPropagation();
     const drag = columnResizeRef.current;
     if (!drag) return;
+    userSizedColumnsRef.current.add(drag.column);
     const nextWidth = Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, drag.startWidth + (e.clientX - drag.startX)));
     setColumnWidths(prev => ({ ...prev, [drag.column]: nextWidth }));
   };
@@ -169,7 +231,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   // incoming packet once the buffer approached its 4000-packet cap. Fixed
   // row height is a safe assumption here: every cell uses whitespace-nowrap
   // + truncate, so no row ever wraps to a second line.
-  const ROW_HEIGHT_FALLBACK = 29;
+  const ROW_HEIGHT_FALLBACK = 21;
   const OVERSCAN_ROWS = 15;
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
@@ -298,7 +360,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             <tr className="text-[11px] uppercase tracking-wider divide-x divide-border/60">
               <th
                 onClick={() => handleSort('id')}
-                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>No.</span>
@@ -309,7 +371,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               <th
                 onClick={() => handleSort('relativeTime')}
-                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Time</span>
@@ -320,7 +382,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               <th
                 onClick={() => handleSort('source')}
-                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Source</span>
@@ -331,7 +393,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               <th
                 onClick={() => handleSort('destination')}
-                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Destination</span>
@@ -342,7 +404,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               <th
                 onClick={() => handleSort('protocol')}
-                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Protocol</span>
@@ -353,7 +415,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               <th
                 onClick={() => handleSort('length')}
-                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Length</span>
@@ -367,7 +429,7 @@ export const PacketList: React.FC<PacketListProps> = ({
           </thead>
 
           {/* Table Body */}
-          <tbody className="divide-y divide-border font-mono text-[11px]">
+          <tbody className="font-mono text-[11px] leading-[1.15]">
             {sortedPackets.length === 0 ? (
               <tr>
                 <td colSpan={7} className="text-center py-16 text-muted-foreground">
@@ -395,62 +457,61 @@ export const PacketList: React.FC<PacketListProps> = ({
                     ref={i === 0 ? measuredRowRef : undefined}
                     onClick={() => onSelectPacket(packet)}
                     onContextMenu={e => handleContextMenu(e, packet)}
-                    className={`cursor-pointer transition-colors duration-75 ${
+                    className={`cursor-pointer ${
                       isSelected
                         ? '!bg-accent !text-cyan-800 dark:!text-cyan-200 ring-1 ring-inset ring-cyan-500 font-bold'
-                        : 'hover:bg-accent text-foreground dark:text-cyan-200/90'
+                        : 'hover:brightness-125'
                     }`}
-                    style={!isSelected && style.background ? { backgroundColor: style.background } : undefined}
+                    // The matched rule's foreground applies to the whole row,
+                    // including the Protocol and Length cells - that is how
+                    // Wireshark's coloring reads at a glance. Individual cells
+                    // below inherit rather than setting their own color.
+                    style={
+                      !isSelected
+                        ? { backgroundColor: style.background, color: style.color }
+                        : undefined
+                    }
                   >
-                    {/* No. */}
-                    <td className="px-4 py-2 font-mono whitespace-nowrap text-muted-foreground">
-                      <div className="flex items-center gap-1.5">
+                    {/* No. - right-aligned with tabular figures so the column
+                        stays a clean edge as the number of digits grows. */}
+                    <td className="px-2 py-1 font-mono whitespace-nowrap text-right tabular-nums">
+                      <div className="flex items-center justify-end gap-1">
                         {(packet.anomalies && packet.anomalies.length > 0) || packet.status === 'alert' ? (
-                          <ShieldAlert className="w-3.5 h-3.5 text-rose-500 shrink-0 animate-pulse" />
-                        ) : packet.status === 'warning' ? (
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                          <ShieldAlert className="w-3 h-3 text-rose-500 shrink-0" />
                         ) : null}
                         <span>{packet.id}</span>
                       </div>
                     </td>
 
                     {/* Time */}
-                    <td className="px-4 py-2 whitespace-nowrap font-mono text-muted-foreground">
+                    <td className="px-2 py-1 whitespace-nowrap font-mono text-right tabular-nums">
                       {typeof packet.relativeTime === 'number'
                         ? packet.relativeTime.toFixed(packet.tsPrecision ?? 6)
                         : (0).toFixed(packet.tsPrecision ?? 6)}
                     </td>
 
                     {/* Source - address only; Wireshark keeps ports in the Info column */}
-                    <td className="px-4 py-2 whitespace-nowrap truncate" title={packet.source}>
+                    <td className="px-2 py-1 whitespace-nowrap truncate" title={packet.source}>
                       {packet.source}
                     </td>
 
                     {/* Destination */}
-                    <td className="px-4 py-2 whitespace-nowrap truncate" title={packet.destination}>
+                    <td className="px-2 py-1 whitespace-nowrap truncate" title={packet.destination}>
                       {packet.destination}
                     </td>
 
-                    {/* Protocol */}
-                    <td className="px-4 py-2 whitespace-nowrap font-bold">
-                      <span
-                        className="px-1.5 py-0.5 rounded text-[10px] uppercase"
-                        style={{ color: style.color || (isDark ? '#22d3ee' : '#0891b2') }}
-                      >
-                        {packet.protocol}
-                      </span>
+                    {/* Protocol - plain text in the row's own color. A badge
+                        would fight the coloring chain and waste width. */}
+                    <td className="px-2 py-1 whitespace-nowrap truncate">
+                      {packet.protocolLabel ?? packet.protocol}
                     </td>
 
                     {/* Length */}
-                    <td className="px-4 py-2 whitespace-nowrap text-muted-foreground">{packet.length}</td>
+                    <td className="px-2 py-1 whitespace-nowrap text-right tabular-nums">{packet.length}</td>
 
-                    {/* Info */}
-                    <td
-                      className={`px-4 py-2 truncate max-w-xl ${
-                        packet.anomalies && packet.anomalies.length > 0 ? 'text-rose-600 dark:text-rose-300 font-semibold' : ''
-                      }`}
-                      title={packet.info}
-                    >
+                    {/* Info - absorbs the remaining width and clips; Wireshark
+                        scrolls the list horizontally rather than ellipsising. */}
+                    <td className="px-2 py-1 whitespace-nowrap overflow-hidden" title={packet.info}>
                       {packet.info}
                     </td>
                   </tr>

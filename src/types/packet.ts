@@ -78,6 +78,23 @@ export interface Packet {
    * segment from a routine keep-alive.
    */
   analysisFlags?: string[];
+  /**
+   * The protocol layers actually dissected in this frame, lowercase, outermost
+   * first - Wireshark's `frame.protocols` (["eth","ethertype","ipv6","tcp"]).
+   *
+   * Display filters and color rules test protocol *presence* against this
+   * rather than against `protocol`, which names only the top-most layer. A
+   * TLSv1.2 frame has to satisfy the `tcp` rule, and a frame whose transport
+   * layer failed to dissect must not, which a single top-most name can't
+   * express.
+   */
+  frameProtocols?: string[];
+  /**
+   * Dissected field values under their Wireshark names ("tcp.flags",
+   * "ipv6.hlim", "icmpv6.type"), so display filters can reference any field a
+   * dissector produced without the filter engine needing a case for each one.
+   */
+  fields?: Record<string, string | number>;
   length: number; // in bytes
   info: string;
   status: PacketStatus;

@@ -1,4 +1,5 @@
 import { Packet, FilterPreset } from '../types/packet';
+import { addressInCidr } from './addressFormat';
 
 export const DEFAULT_FILTER_PRESETS: FilterPreset[] = [
   {
@@ -191,11 +192,24 @@ const KNOWN_FIELD_NAMES = new Set([
   'tcp.srcport', 'udp.srcport', 'srcport',
   'tcp.dstport', 'udp.dstport', 'dstport',
   'protocol', 'proto',
-  'len', 'length', 'frame.len',
+  'len', 'length', 'frame.len', 'frame.number',
   'status',
   'stream', 'tcp.stream',
   'info',
   'anomaly.severity',
+  // Fields the dissectors publish into Packet.fields. These resolve through
+  // the generic lookup rather than the switch, but still need naming here so
+  // a filter that uses them isn't reported as a typo.
+  'ip.ttl', 'ip.proto',
+  'ipv6.src', 'ipv6.dst', 'ipv6.hlim', 'ipv6.nxt',
+  'tcp.flags', 'tcp.flags.syn', 'tcp.flags.fin', 'tcp.flags.reset',
+  'tcp.flags.push', 'tcp.flags.ack', 'tcp.window_size', 'tcp.len',
+  'udp.length',
+  'icmp.type', 'icmp.code', 'icmpv6.type', 'icmpv6.code',
+  'arp.opcode', 'arp.src.proto_ipv4', 'arp.dst.proto_ipv4',
+  'arp.src.hw_mac', 'arp.dst.hw_mac',
+  'stp.type', 'stp.version', 'stp.root.cost', 'stp.port',
+  'ieee1905.message.type', 'ieee1905.message.id',
 ]);
 
 function checkFilterSemantics(expr: string): string | null {
@@ -308,12 +322,127 @@ function splitTopLevel(str: string, delimiter: string): string[] {
   return result;
 }
 
+/**
+ * Protocols that show up as dissected layers in Packet.frameProtocols. For
+ * these, presence is decided by what the frame actually contains rather than
+ * by its top-most protocol name: a TLSv1.2 frame must satisfy `tcp`, and a
+ * frame whose transport layer failed to dissect must not, which the single
+ * top-most name can't express.
+ */
+const LAYER_PROTOCOL_NAMES = new Set([
+  'frame', 'eth', 'vlan', 'ip', 'ipv6', 'tcp', 'udp', 'icmp', 'icmpv6', 'arp', 'stp', 'ieee1905',
+]);
+
+/** Reads a numeric literal in decimal or 0x-prefixed hex. */
+function parseNumericLiteral(text: string): number | null {
+  const trimmed = text.trim();
+  if (/^0x[0-9a-f]+$/i.test(trimmed)) return parseInt(trimmed.slice(2), 16);
+  if (/^-?\d+$/.test(trimmed)) return Number(trimmed);
+  return null;
+}
+
+/**
+ * Expands a display-filter set literal - "{ 3..5, 11 }" or "{1, 64, 255}" -
+ * into the numbers it contains. Wireshark's `in` operator accepts both bare
+ * values and inclusive ranges in the same braces.
+ */
+function parseSetLiteral(text: string): number[] | null {
+  const body = text.trim().replace(/^\{/, '').replace(/\}$/, '');
+  const values: number[] = [];
+  for (const entry of body.split(',')) {
+    const range = entry.trim().match(/^(\S+)\s*\.\.\s*(\S+)$/);
+    if (range) {
+      const from = parseNumericLiteral(range[1]);
+      const to = parseNumericLiteral(range[2]);
+      if (from === null || to === null || to < from || to - from > 65535) return null;
+      for (let v = from; v <= to; v++) values.push(v);
+    } else {
+      const value = parseNumericLiteral(entry);
+      if (value === null) return null;
+      values.push(value);
+    }
+  }
+  return values.length > 0 ? values : null;
+}
+
+/**
+ * Resolves a field name to its dissected value, checking the generic field bag
+ * the dissectors populate before falling back to the shaped Packet properties.
+ * Returns undefined when the frame simply doesn't carry the field, which a
+ * filter must treat as "no match" rather than as an error.
+ */
+function lookupField(field: string, packet: Packet): string | number | undefined {
+  const fromDissector = packet.fields?.[field];
+  if (fromDissector !== undefined) return fromDissector;
+
+  switch (field) {
+    case 'frame.len': case 'len': case 'length': return packet.length;
+    case 'frame.number': return packet.id;
+    case 'ip.src': case 'ipv6.src': case 'src': return packet.source;
+    case 'ip.dst': case 'ipv6.dst': case 'dst': return packet.destination;
+    case 'info': return packet.info;
+    case 'status': return packet.status;
+    case 'protocol': case 'proto': return packet.protocolLabel ?? packet.protocol;
+    case 'tcp.stream': case 'stream': return packet.streamId;
+    default: return undefined;
+  }
+}
+
 function evaluateAtomicCondition(cond: string, packet: Packet): boolean {
   const c = cond.trim();
   if (!c) return true;
 
   // Single keyword checks (e.g. "http", "dns", "tls", "anomaly")
   const lower = c.toLowerCase();
+
+  // Layer presence, decided from what the frame actually contains.
+  if (LAYER_PROTOCOL_NAMES.has(lower)) {
+    return packet.frameProtocols?.includes(lower)
+      // Packets from sources that don't record layers (the metadata-only
+      // agent fallback) still answer from their top-most protocol name.
+      ?? packet.protocol.toLowerCase() === lower;
+  }
+
+  // A bare "tcp.analysis.flags" asks whether *any* analysis flag fired;
+  // a bare "tcp.analysis.retransmission" asks about that one specifically.
+  if (lower.startsWith('tcp.analysis.')) {
+    const flags = packet.analysisFlags ?? [];
+    const which = lower.slice('tcp.analysis.'.length);
+    return which === 'flags' ? flags.length > 0 : flags.includes(which);
+  }
+
+  // Byte-slice bitmask, as in Broadcast's "eth[0] & 1" - the low bit of the
+  // first destination-MAC byte is the multicast bit.
+  const byteSliceMatch = c.match(/^eth\[(\d+)\]\s*&\s*(\S+)$/i);
+  if (byteSliceMatch) {
+    const index = Number(byteSliceMatch[1]);
+    const mask = parseNumericLiteral(byteSliceMatch[2]);
+    if (mask === null || index >= packet.rawBytes.length) return false;
+    return (packet.rawBytes[index] & mask) !== 0;
+  }
+
+  // Bitmask test on a named field, as in TCP SYN/FIN's "tcp.flags & 0x02".
+  const bitmaskMatch = c.match(/^([a-z0-9_.]+)\s*&\s*(\S+)$/i);
+  if (bitmaskMatch) {
+    const value = lookupField(bitmaskMatch[1].toLowerCase(), packet);
+    const mask = parseNumericLiteral(bitmaskMatch[2]);
+    if (typeof value !== 'number' || mask === null) return false;
+    return (value & mask) !== 0;
+  }
+
+  // Set membership: "icmp.type in { 3..5, 11 }" and its negation.
+  const setMatch = c.match(/^([a-z0-9_.]+)\s+(not\s+in|in)\s*(\{.*\})$/i);
+  if (setMatch) {
+    const value = lookupField(setMatch[1].toLowerCase(), packet);
+    const set = parseSetLiteral(setMatch[3]);
+    if (set === null) return false;
+    const negated = /not/i.test(setMatch[2]);
+    // A field the frame doesn't carry is not in the set, and equally is not
+    // "not in" it - an absent field never matches either way.
+    if (typeof value !== 'number') return false;
+    return negated ? !set.includes(value) : set.includes(value);
+  }
+
   if (lower === 'http') return packet.protocol === 'HTTP';
   if (lower === 'https') return packet.protocol === 'HTTPS';
   if (lower === 'tls') return packet.protocol === 'TLS' || packet.protocol === 'HTTPS';
@@ -335,8 +464,14 @@ function evaluateAtomicCondition(cond: string, packet: Packet): boolean {
     return packet.info.toLowerCase().includes(containsMatch[1].toLowerCase());
   }
 
-  // Operator comparisons: `key == val`, `key != val`, `key >= val`, `key <= val`, `key > val`, `key < val`
-  const compMatch = c.match(/^([a-zA-Z0-9_.]+)\s*(==|!=|>=|<=|>|<|=)\s*["']?([^"']+)["']?$/);
+  // Operator comparisons. Wireshark accepts both symbolic and worded
+  // operators ("tcp.flags.reset eq 1"), so the worded ones are normalized to
+  // their symbols before matching.
+  const normalized = c.replace(/\s+(eq|ne|gt|lt|ge|le)\s+/gi, (_, word: string) => {
+    const symbols: Record<string, string> = { eq: '==', ne: '!=', gt: '>', lt: '<', ge: '>=', le: '<=' };
+    return ` ${symbols[word.toLowerCase()]} `;
+  });
+  const compMatch = normalized.match(/^([a-zA-Z0-9_.]+)\s*(==|!=|>=|<=|>|<|=)\s*["']?([^"']+)["']?$/);
   if (!compMatch) {
     // Fallback: substring search in packet summary
     return (
@@ -352,6 +487,18 @@ function evaluateAtomicCondition(cond: string, packet: Packet): boolean {
   const val = rawVal.trim();
   const numVal = Number(val);
   const isNumeric = !isNaN(numVal);
+
+  // A CIDR on the right-hand side compares networks, not text. This has to be
+  // decided before the switch below, because the address cases there would
+  // otherwise treat "224.0.0.0/4" as a literal string - making
+  // "ip.dst != 224.0.0.0/4" true for every multicast address, the exact
+  // opposite of what it means.
+  if (val.includes('/') && /^\d|^[0-9a-f]*:/i.test(val)) {
+    const address = lookupField(field, packet);
+    if (typeof address !== 'string') return false;
+    const inside = addressInCidr(address, val);
+    return op === '!=' ? !inside : inside;
+  }
 
   switch (field) {
     case 'ip.src':
@@ -390,7 +537,11 @@ function evaluateAtomicCondition(cond: string, packet: Packet): boolean {
 
     case 'protocol':
     case 'proto':
-      return compareStrings(packet.protocol, val, op);
+      // Matches either the displayed name ("TLSv1.2") or the coarse type
+      // ("TLS"), so both `proto == tlsv1.2` from a clicked breakdown segment
+      // and a hand-typed `proto == tls` resolve to the same frames.
+      return compareStrings(packet.protocolLabel ?? packet.protocol, val, op)
+        || compareStrings(packet.protocol, val, op);
 
     case 'len':
     case 'length':
@@ -410,8 +561,30 @@ function evaluateAtomicCondition(cond: string, packet: Packet): boolean {
     case 'anomaly.severity':
       return !!packet.anomalies?.some(a => compareStrings(a.severity, val, op));
 
-    default:
-      return true;
+    default: {
+      // A CIDR on the right-hand side compares networks, not text - "ip.dst ==
+      // 224.0.0.0/4" must match every multicast address, not the literal
+      // string. Checked before the generic path so the address fields resolve
+      // through it.
+      if (val.includes('/')) {
+        const address = lookupField(field, packet);
+        if (typeof address !== 'string') return false;
+        const inside = addressInCidr(address, val);
+        return op === '!=' ? !inside : inside;
+      }
+
+      const value = lookupField(field, packet);
+      // An absent field never matches - including under "!=", since a frame
+      // that has no ip.ttl at all is not a frame whose ttl differs. Returning
+      // true here (as this used to) makes any rule mentioning an unknown field
+      // match every packet, which would paint the whole list one color.
+      if (value === undefined) return false;
+      if (typeof value === 'number') {
+        const literal = parseNumericLiteral(val);
+        return literal !== null && compareNumbers(value, literal, op);
+      }
+      return compareStrings(String(value), val, op);
+    }
   }
 }
 

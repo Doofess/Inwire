@@ -30,9 +30,13 @@ export const ProtocolDonutChart: React.FC<ProtocolDonutProps> = ({
   const data: ProtocolDatum[] = React.useMemo(() => {
     if (packets.length === 0) return [];
 
+    // Grouped by the displayed protocol name, so the breakdown reads the way
+    // the packet list does - "TLSv1.2", "QUIC", "ICMPv6" - rather than
+    // collapsing everything onto the handful of coarse ProtocolType values.
     const counts: Record<string, number> = {};
     for (const p of packets) {
-      counts[p.protocol] = (counts[p.protocol] || 0) + 1;
+      const label = p.protocolLabel ?? p.protocol;
+      counts[label] = (counts[label] || 0) + 1;
     }
 
     const total = packets.length;

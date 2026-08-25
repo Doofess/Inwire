@@ -406,6 +406,9 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'User Datagram Protocol': 'udp',
   'Internet Control Message Protocol': 'icmp',
   'Internet Control Message Protocol v6': 'icmpv6',
+  'Address Resolution Protocol': 'arp',
+  'Spanning Tree Protocol': 'stp',
+  'IEEE 1905.1a': 'ieee1905',
 };
 
 export function decodeRawEthernetPacket(
@@ -445,6 +448,9 @@ export function decodeRawEthernetPacket(
   let protocolLabel: string | undefined;
   // Wireshark's tcp.analysis.* field names that fired for this frame, if any.
   let analysisFlags: string[] | undefined;
+  // Dissected values under their Wireshark field names, for display filters
+  // and color rules to reference generically.
+  const filterFields: Record<string, string | number> = {};
   let srcPort: number | undefined;
   let dstPort: number | undefined;
   let info = `Frame (${rawBytes.length} bytes)`;
@@ -531,6 +537,7 @@ export function decodeRawEthernetPacket(
   }
 
   if (l2Result) {
+    Object.assign(filterFields, l2Result.fields);
     protocolLabel = l2Result.protocolLabel;
     proto = l2Result.protocolLabel === 'ARP' ? 'ARP' : 'TCP';
     info = l2Result.info;
@@ -609,11 +616,17 @@ export function decodeRawEthernetPacket(
     layers.push(ipLayer);
 
     const transportOffset = l3Offset + ipHeaderLen;
+    filterFields['ip.ttl'] = ttl;
+    filterFields['ip.src'] = srcIp;
+    filterFields['ip.dst'] = dstIp;
+    filterFields['ip.proto'] = ipProtocolNum;
+
     const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen, quicTracker);
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
       analysisFlags = transport.analysisFlags;
+      Object.assign(filterFields, transport.fields);
       srcPort = transport.srcPort;
       dstPort = transport.dstPort;
       info = transport.info;
@@ -657,6 +670,11 @@ export function decodeRawEthernetPacket(
     // everything that follows, silently suppressing the lost-segment and
     // ACKed-unseen-segment analysis on every later frame in that stream.
     // Wireshark stops here and labels the frame malformed; so do we.
+    filterFields['ipv6.hlim'] = hopLimit;
+    filterFields['ipv6.src'] = srcIp;
+    filterFields['ipv6.dst'] = dstIp;
+    filterFields['ipv6.nxt'] = nextHeader;
+
     const isMalformedJumbo = ipv6PayloadLen === 0 && rawBytes.length > l3Offset + 40;
     if (isMalformedJumbo) {
       proto = 'TCP';
@@ -673,6 +691,7 @@ export function decodeRawEthernetPacket(
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
       analysisFlags = transport.analysisFlags;
+      Object.assign(filterFields, transport.fields);
       srcPort = transport.srcPort;
       dstPort = transport.dstPort;
       info = transport.info;
@@ -687,8 +706,8 @@ export function decodeRawEthernetPacket(
     }
   }
 
-  const protocolsInFrame = layers.map(l => PROTOCOL_NAME_MAP[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_')).join(':');
-  layers[0].fields.push({ name: '[Protocols in frame]', value: protocolsInFrame });
+  const frameProtocols = layers.map(l => PROTOCOL_NAME_MAP[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_'));
+  layers[0].fields.push({ name: '[Protocols in frame]', value: frameProtocols.join(':') });
 
   return {
     packet: {
@@ -703,6 +722,8 @@ export function decodeRawEthernetPacket(
       protocol: proto,
       protocolLabel,
       analysisFlags,
+      frameProtocols,
+      fields: filterFields,
       // The on-wire frame size, which is what Wireshark's Length column shows.
       // It differs from rawBytes.length whenever the capture used a snaplen.
       // Falls back to the captured size if a source didn't report a wire size.
@@ -858,6 +879,7 @@ function decodeTransportLayer(
   streamId?: number;
   status?: Packet['status'];
   analysisFlags?: string[];
+  fields?: Record<string, string | number>;
   anomalies?: AnomalyInfo[];
   icmpMatchedRequestFrameId?: number;
 } | null {
@@ -1088,6 +1110,18 @@ function decodeTransportLayer(
       dstPort,
       info,
       streamId,
+      fields: {
+        'tcp.flags': flags,
+        'tcp.flags.syn': syn ? 1 : 0,
+        'tcp.flags.fin': fin ? 1 : 0,
+        'tcp.flags.reset': rst ? 1 : 0,
+        'tcp.flags.push': psh ? 1 : 0,
+        'tcp.flags.ack': ack ? 1 : 0,
+        'tcp.srcport': srcPort,
+        'tcp.dstport': dstPort,
+        'tcp.window_size': windowSize,
+        'tcp.len': payloadLength,
+      },
       status: status ?? (analysisFlags.length > 0 && !isKeepAlive && !isKeepAliveAck ? 'warning' : undefined),
       analysisFlags,
       anomalies,
@@ -1211,6 +1245,11 @@ function decodeTransportLayer(
       srcPort,
       dstPort,
       info,
+      fields: {
+        'udp.srcport': srcPort,
+        'udp.dstport': dstPort,
+        'udp.length': udpLen,
+      },
       layer: {
         name: 'User Datagram Protocol',
         summary: `User Datagram Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
@@ -1301,6 +1340,9 @@ function decodeTransportLayer(
     return {
       proto: 'ICMP',
       protocolLabel: icmpProtocolLabel,
+      fields: isIcmpv6
+        ? { 'icmpv6.type': icmpType, 'icmpv6.code': icmpCode }
+        : { 'icmp.type': icmpType, 'icmp.code': icmpCode },
       info,
       icmpMatchedRequestFrameId,
       layer: {
