@@ -96,7 +96,12 @@ def load_config(on_warning=None) -> dict:
         # Not a warning: no config file is the normal state until someone
         # customizes one, and the installer only seeds it on Windows.
         return parse_config(None, on_warning=on_warning)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError catches UnicodeDecodeError, which is not an OSError: a
+        # config.json saved in a non-UTF-8 encoding (e.g. Notepad's ANSI
+        # default on Windows) must fall back to defaults like any other
+        # unreadable file, not raise out of every caller - including the
+        # origin gate, which re-reads this on every connection.
         if on_warning is not None:
             on_warning(f"could not read config.json ({exc}) - using default allowed origins")
         return parse_config(None, on_warning=on_warning)

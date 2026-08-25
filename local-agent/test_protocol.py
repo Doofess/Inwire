@@ -9,6 +9,7 @@ Run:  python local-agent/test_protocol.py
 import os
 import re
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent
@@ -172,6 +173,20 @@ check("defaults are the four documented origins", config.DEFAULT_ALLOWED_ORIGINS
 ])
 check_true("config_path ends with config.json", config.config_path().endswith("config.json"))
 check_true("config_path lives under the config dir", config.config_path().startswith(config.config_dir()))
+
+_tmpdir = tempfile.mkdtemp()
+_badenc = os.path.join(_tmpdir, "config.json")
+with open(_badenc, "wb") as _fh:
+    _fh.write(b'{"allowedOrigins": ["http://caf\xe9.local"]}')
+_real_config_path = config.config_path
+config.config_path = lambda: _badenc
+_warnings = []
+try:
+    _result = config.load_config(on_warning=_warnings.append)
+    check("non-UTF-8 config falls back to defaults", _result["allowedOrigins"], config.DEFAULT_ALLOWED_ORIGINS)
+    check_true("non-UTF-8 config emits a warning", len(_warnings) == 1)
+finally:
+    config.config_path = _real_config_path
 
 # --- origin gate (process_request) ---
 class FakeHeaders(dict):
