@@ -232,6 +232,45 @@ check_true("missing Origin header is rejected", result_none is not None)
 check_true("missing Origin responds 403", conn_none.responded is not None and conn_none.responded[0] == 403)
 check("missing Origin is recorded as None", rejected[-1], None)
 
+# --- capture lifecycle: auto-stop when the last client disconnects ---
+class FakeSpawn:
+    def __call__(self, iface_name, stop_event):
+        return None
+
+
+# agent.sniffer is a module global that only exists once main() has run, so
+# getattr (not agent.sniffer) is required here - importing the module alone
+# leaves the name undefined.
+previous_sniffer = getattr(agent, "sniffer", None)
+try:
+    agent.sniffer = agent.SnifferController(default_interfaces=["eth0"])
+    server = agent.AgentServer()
+    a, b = object(), object()
+    server.connections.update({a, b})
+    agent.sniffer.start_threads(FakeSpawn())
+    check_true("sniffing before any disconnect", agent.sniffer.is_sniffing())
+
+    server.handle_disconnect(a)
+    check("one client left: still sniffing", agent.sniffer.is_sniffing(), True)
+    check("disconnected socket removed", a in server.connections, False)
+
+    server.handle_disconnect(b)
+    check("last client gone: sniffing stopped", agent.sniffer.is_sniffing(), False)
+    check("no connections remain", len(server.connections), 0)
+
+    # Disconnecting when already idle must be a no-op, not an error.
+    server.handle_disconnect(b)
+    check("repeat disconnect is harmless", agent.sniffer.is_sniffing(), False)
+
+    # A fresh connection must not resume capture on its own.
+    server.connections.add(a)
+    check("reconnect does not auto-resume capture", agent.sniffer.is_sniffing(), False)
+finally:
+    if previous_sniffer is None:
+        del agent.sniffer
+    else:
+        agent.sniffer = previous_sniffer
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")
