@@ -1217,7 +1217,11 @@ function decodeTransportLayer(
           ? quicTracker?.matchConnectionId(srcIp, srcPort, dstIp, dstPort, rawBytes, udpPayloadStart + 1)
           : undefined;
         const quic = dissectQuicDatagram(
-          rawBytes, udpPayloadStart, Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen), knownConnectionId
+          rawBytes,
+          udpPayloadStart,
+          Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen),
+          knownConnectionId,
+          quicTracker?.createInitialDecryptor(srcIp, srcPort, dstIp, dstPort, rawBytes)
         );
         if (quic) {
           if (quic.isLongHeader) {
