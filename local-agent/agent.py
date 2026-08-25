@@ -217,21 +217,24 @@ def packet_to_dict(pkt):
 
 class AgentServer:
     def __init__(self):
-        self.clients = set()
+        # ws -> ConnectionAuth, rather than a bare set of sockets: broadcast
+        # needs each connection's auth state at fan-out time to gate packet
+        # messages (see _send_all), not just at command-handling time.
+        self.connections = {}
         self.loop = None
 
     async def register(self, ws):
-        self.clients.add(ws)
-        print(f"[agent] client connected ({len(self.clients)} total)")
         auth = ConnectionAuth(PAIRING_TOKEN)
+        self.connections[ws] = auth
+        print(f"[agent] client connected ({len(self.connections)} total)")
         state = "sniffing" if sniffer.is_sniffing() else "idle"
         await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, AVAILABLE_INTERFACES, auth_required=True)))
         try:
             async for raw in ws:
                 await self._handle_message(ws, auth, raw)
         finally:
-            self.clients.discard(ws)
-            print(f"[agent] client disconnected ({len(self.clients)} total)")
+            self.connections.pop(ws, None)
+            print(f"[agent] client disconnected ({len(self.connections)} total)")
 
     async def _handle_message(self, ws, auth, raw):
         try:
@@ -244,17 +247,22 @@ class AgentServer:
         if message.get("type") == "auth":
             if auth.try_authenticate(message):
                 print("[agent] client authenticated")
+                # Positive on-the-wire confirmation, not just a console log -
+                # the frontend uses this to know pairing actually succeeded
+                # (vs. still waiting) and to re-sync capture/interface state
+                # after a reconnect. Reuses the existing state message shape.
+                await ws.send(json.dumps(sniffer.state_message(AVAILABLE_INTERFACES)))
             else:
                 # Explicit rejection, not silence - the frontend needs this to
                 # tell "stale token from a previous agent launch" apart from
                 # "no response yet", otherwise a wrong/outdated stored token
                 # just looks like nothing happened and the pairing banner
                 # never comes back (see Task 12 Step 6).
-                await ws.send(json.dumps({"type": "error", "message": "Invalid pairing code."}))
+                await ws.send(json.dumps({"type": "error", "code": "invalid_token", "message": "Invalid pairing code."}))
             return
 
         if not is_command_allowed(auth, message):
-            await ws.send(json.dumps({"type": "error", "message": "Not authenticated. Enter the pairing code shown in the agent console."}))
+            await ws.send(json.dumps({"type": "error", "code": "not_authenticated", "message": "Not authenticated. Enter the pairing code shown in the agent console."}))
             return
 
         msg_type = message.get("type")
@@ -265,6 +273,13 @@ class AgentServer:
         elif msg_type == "set_interfaces":
             interfaces = message.get("interfaces")
             if isinstance(interfaces, list) and all(isinstance(i, str) for i in interfaces):
+                if not interfaces:
+                    # Sniffing "on zero interfaces" would otherwise succeed
+                    # silently and broadcast state=sniffing while nothing is
+                    # actually captured - reject it the same way any other
+                    # invalid command is rejected.
+                    await ws.send(json.dumps({"type": "error", "code": "empty_interfaces", "message": "At least one interface must be selected."}))
+                    return
                 sniffer.set_interfaces(interfaces)
                 sniffer.restart_threads(spawn_sniffer_thread)
         else:
@@ -275,20 +290,29 @@ class AgentServer:
     def broadcast(self, message: dict):
         """Called from the sniffer thread (packet_to_dict results) as well as
         from _handle_message above - hop back onto the asyncio loop either way."""
-        if not self.clients or self.loop is None:
+        if not self.connections or self.loop is None:
             return
-        data = json.dumps(message)
-        asyncio.run_coroutine_threadsafe(self._send_all(data), self.loop)
+        asyncio.run_coroutine_threadsafe(self._send_all(message), self.loop)
 
-    async def _send_all(self, data: str):
+    async def _send_all(self, message: dict):
+        # Packet messages (raw captured frame bytes) only go to connections
+        # that have completed pairing - hello/state/error still reach every
+        # connection, since a client needs hello before it can even
+        # authenticate. list(...) snapshots the mapping before awaiting
+        # inside the loop, since a client connecting mid-broadcast would
+        # otherwise mutate self.connections while it's being iterated.
+        data = json.dumps(message)
+        is_packet = message.get("type") == "packet"
         dead = []
-        for ws in self.clients:
+        for ws, auth in list(self.connections.items()):
+            if is_packet and not auth.authenticated:
+                continue
             try:
                 await ws.send(data)
             except websockets.ConnectionClosed:
                 dead.append(ws)
         for ws in dead:
-            self.clients.discard(ws)
+            self.connections.pop(ws, None)
 
 
 agent = AgentServer()
