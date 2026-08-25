@@ -14,9 +14,22 @@
  * One instance represents one capture session; call reset() when the packet
  * buffer is cleared or a new file is imported.
  */
+import { deriveInitialKeys, saltForVersion, decryptInitialPacket, QUIC_VERSION_2, InitialKeys } from './dissectors/quicCrypto';
+import type { InitialDecryptor } from './dissectors/quic';
+
+interface InitialSession {
+  keys: InitialKeys;
+  /** "ip:port" of whichever endpoint sent the connection's first Initial. */
+  clientEndpoint: string;
+}
+
 export class QuicFlowTracker {
   /** Connection IDs (hex) seen in long headers, keyed by normalized flow. */
   private flowConnectionIds = new Map<string, Set<string>>();
+  /** Initial keys and client identity, keyed by normalized flow. */
+  private initialSessions = new Map<string, InitialSession>();
+  /** Highest packet number decrypted per sending direction. */
+  private largestPacketNumber = new Map<string, number>();
 
   /** Order-independent key, so both directions of a flow share their state. */
   private flowKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
@@ -77,7 +90,57 @@ export class QuicFlowTracker {
     return undefined;
   }
 
+  /**
+   * Builds a decryptor bound to one direction of one flow.
+   *
+   * All the per-connection state Initial decryption needs lives here rather
+   * than in the dissector: which endpoint is the client (the one that sent the
+   * first Initial), the original Destination Connection ID the keys derive
+   * from, and the largest packet number seen per direction, which is what
+   * resolves a truncated packet number back to its full value.
+   */
+  public createInitialDecryptor(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number,
+    bytes: Uint8Array
+  ): InitialDecryptor {
+    const flowKey = this.flowKey(srcIp, srcPort, dstIp, dstPort);
+    const senderKey = `${flowKey}>${srcIp}:${srcPort}`;
+
+    return (packetStart, packetNumberOffset, packetEnd, version, destinationConnectionId) => {
+      const salt = saltForVersion(version);
+      if (!salt) return null;
+
+      let session = this.initialSessions.get(flowKey);
+      if (!session) {
+        // The first Initial on a flow is the client's, and its Destination
+        // Connection ID is the one RFC 9001 derives both directions' keys
+        // from - including for every later Initial, whose DCID will have
+        // changed to the server's chosen value.
+        if (destinationConnectionId.length === 0) return null;
+        session = {
+          keys: deriveInitialKeys(destinationConnectionId, salt, version === QUIC_VERSION_2),
+          clientEndpoint: `${srcIp}:${srcPort}`,
+        };
+        this.initialSessions.set(flowKey, session);
+      }
+
+      const isFromClient = session.clientEndpoint === `${srcIp}:${srcPort}`;
+      const keys = isFromClient ? session.keys.client : session.keys.server;
+      const largest = this.largestPacketNumber.get(senderKey) ?? -1;
+
+      const decrypted = decryptInitialPacket(bytes, packetStart, packetNumberOffset, packetEnd, keys, largest);
+      if (!decrypted) return null;
+
+      if (decrypted.packetNumber > largest) {
+        this.largestPacketNumber.set(senderKey, decrypted.packetNumber);
+      }
+      return decrypted;
+    };
+  }
+
   public reset(): void {
     this.flowConnectionIds.clear();
+    this.initialSessions.clear();
+    this.largestPacketNumber.clear();
   }
 }
