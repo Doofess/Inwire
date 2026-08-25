@@ -207,9 +207,14 @@ class AgentServer:
     async def register(self, ws):
         self.connections.add(ws)
         log.info("client connected (%d total)", len(self.connections))
-        state = "sniffing" if sniffer.is_sniffing() else "idle"
-        await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, AVAILABLE_INTERFACES)))
         try:
+            # The hello send is inside the try because a client dropping
+            # mid-handshake would otherwise leak the connection and permanently
+            # disable auto-stop: handle_disconnect only stops capture when
+            # not self.connections, so any stuck entry means the condition
+            # can never be true again. Every exit path must reach finally.
+            state = "sniffing" if sniffer.is_sniffing() else "idle"
+            await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, AVAILABLE_INTERFACES)))
             async for raw in ws:
                 await self._handle_message(ws, raw)
         finally:
