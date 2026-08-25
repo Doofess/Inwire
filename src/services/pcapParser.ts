@@ -591,9 +591,15 @@ function decodeTransportLayer(
     // length so Ethernet's 60-byte minimum padding isn't counted as payload
     // (a bare 54-byte ACK would otherwise report Len=6). Clamping against
     // what was actually captured keeps snaplen-truncated captures honest:
-    // they degrade to "however much was captured", never more.
+    // they degrade to "however much was captured", never more. Require
+    // l4SegmentLen to at least cover the TCP header itself - TCP
+    // segmentation offload leaves IP Total Length at 0 on outbound frames
+    // captured on the sending host's own NIC (this app's primary capture
+    // setup), and without this guard that reads as "0 bytes of payload" on
+    // segments that may carry a full MSS or more, silently disabling
+    // retransmission/out-of-order detection for that entire direction.
     const capturedPayloadLength = Math.max(0, rawBytes.length - tcpPayloadStart);
-    const payloadLength = l4SegmentLen !== undefined
+    const payloadLength = l4SegmentLen !== undefined && l4SegmentLen >= tcpHeaderLen
       ? Math.max(0, Math.min(capturedPayloadLength, l4SegmentLen - tcpHeaderLen))
       : capturedPayloadLength;
     // TLS payloads are encrypted from essentially the first byte - never
