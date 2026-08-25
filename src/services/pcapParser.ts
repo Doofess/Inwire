@@ -663,7 +663,13 @@ function decodeTransportLayer(
     }
 
     const keepAliveLabel = isKeepAlive ? ' [TCP Keep-Alive]' : isKeepAliveAck ? ' [TCP Keep-Alive ACK]' : '';
-    const info = `${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${relSeq} Ack=${relAck} Len=${payloadLength}${optionsSummary}${keepAliveLabel}${tcpHost ? ' ' + tcpHost : ''}`;
+    // Wireshark prepends this bracketed tag to the Info column itself (not
+    // just a side-channel status/anomaly) so it's visible at a glance in the
+    // packet list without opening the detail tree - mirror that placement.
+    const analysisLabel = status === 'retransmit' ? '[TCP Retransmission] '
+      : status === 'warning' ? '[TCP Out-Of-Order] '
+      : '';
+    const info = `${analysisLabel}${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${relSeq} Ack=${relAck} Len=${payloadLength}${optionsSummary}${keepAliveLabel}${tcpHost ? ' ' + tcpHost : ''}`;
 
     return {
       proto,
