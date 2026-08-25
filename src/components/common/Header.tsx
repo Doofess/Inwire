@@ -78,9 +78,6 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="hidden xl:flex flex-col">
           <div className="flex items-center gap-1.5">
             <span className="font-mono font-black text-sm tracking-tight text-cyan-400">NET VIEW</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-mono font-bold uppercase">
-              PRO
-            </span>
           </div>
           <span className="text-[10px] text-muted-foreground font-mono">Packet Analyzer</span>
         </div>
