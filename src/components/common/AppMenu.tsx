@@ -15,6 +15,7 @@ import {
   Globe,
   Bookmark,
   Settings,
+  X,
 } from 'lucide-react';
 import { UserRolePermissions } from '../../types/packet';
 import { DEFAULT_FILTER_PRESETS } from '../../services/filterEngine';
@@ -165,9 +166,16 @@ export const AppMenu: React.FC<AppMenuProps> = ({
               >
                 <div className="flex items-center justify-between border-b border-border px-3.5 py-2.5 shrink-0">
                   <span className="text-xs font-bold text-foreground">Menu</span>
-                  <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0 border-border text-muted-foreground">
-                    ESC
-                  </kbd>
+                  {/* Was an inert "ESC" hint; Escape itself still closes the
+                      menu via the keydown handler above, this just gives the
+                      hint something to do when clicked instead of typed. */}
+                  <button
+                    onClick={() => setOpen(false)}
+                    aria-label="Close menu"
+                    className="p-1 rounded-md shrink-0 text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
 
                 <Command.List
