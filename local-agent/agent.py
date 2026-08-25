@@ -35,6 +35,7 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
+AGENT_VERSION = "1.1.0"
 
 
 def make_id() -> str:
@@ -200,6 +201,7 @@ def packet_to_dict(pkt):
             source, destination = "unknown", "unknown"
 
     return {
+        "type": "packet",
         "id": make_id(),
         "timestamp": int(time.time() * 1000),
         "source": source,
@@ -221,14 +223,58 @@ class AgentServer:
     async def register(self, ws):
         self.clients.add(ws)
         print(f"[agent] client connected ({len(self.clients)} total)")
+        auth = ConnectionAuth(PAIRING_TOKEN)
+        state = "sniffing" if sniffer.is_sniffing() else "idle"
+        await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, AVAILABLE_INTERFACES, auth_required=True)))
         try:
-            await ws.wait_closed()
+            async for raw in ws:
+                await self._handle_message(ws, auth, raw)
         finally:
             self.clients.discard(ws)
             print(f"[agent] client disconnected ({len(self.clients)} total)")
 
+    async def _handle_message(self, ws, auth, raw):
+        try:
+            message = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(message, dict):
+            return
+
+        if message.get("type") == "auth":
+            if auth.try_authenticate(message):
+                print("[agent] client authenticated")
+            else:
+                # Explicit rejection, not silence - the frontend needs this to
+                # tell "stale token from a previous agent launch" apart from
+                # "no response yet", otherwise a wrong/outdated stored token
+                # just looks like nothing happened and the pairing banner
+                # never comes back (see Task 12 Step 6).
+                await ws.send(json.dumps({"type": "error", "message": "Invalid pairing code."}))
+            return
+
+        if not is_command_allowed(auth, message):
+            await ws.send(json.dumps({"type": "error", "message": "Not authenticated. Enter the pairing code shown in the agent console."}))
+            return
+
+        msg_type = message.get("type")
+        if msg_type == "start_capture":
+            sniffer.start_threads(spawn_sniffer_thread)
+        elif msg_type == "stop_capture":
+            sniffer.stop_threads()
+        elif msg_type == "set_interfaces":
+            interfaces = message.get("interfaces")
+            if isinstance(interfaces, list) and all(isinstance(i, str) for i in interfaces):
+                sniffer.set_interfaces(interfaces)
+                sniffer.restart_threads(spawn_sniffer_thread)
+        else:
+            return
+
+        self.broadcast(sniffer.state_message(AVAILABLE_INTERFACES))
+
     def broadcast(self, message: dict):
-        """Called from the sniffer thread - hop back onto the asyncio loop."""
+        """Called from the sniffer thread (packet_to_dict results) as well as
+        from _handle_message above - hop back onto the asyncio loop either way."""
         if not self.clients or self.loop is None:
             return
         data = json.dumps(message)
@@ -246,7 +292,6 @@ class AgentServer:
 
 
 agent = AgentServer()
-sniffer_error = None
 
 
 _captured_count = 0
@@ -292,64 +337,32 @@ def list_interfaces():
     return [(name, name) for name in get_if_list()]
 
 
-def sniff_on_interface(iface_name, iface_label):
+def sniff_on_interface(iface_name, iface_label, stop_event):
     try:
         # No BPF filter: capture every frame on the wire, the way Wireshark
         # does by default. This used to be "ip or ip6", which silently
         # discarded ARP, STP and every other non-IP protocol before they
         # could reach the browser - the frontend dissects all of them.
         # store=False keeps memory flat during long-running captures.
-        sniff(prn=sniff_callback, store=False, iface=iface_name)
+        # stop_filter is checked after every captured packet (or scapy's own
+        # read timeout on a quiet interface) - that's what makes stop_capture
+        # actually stop the thread instead of blocking forever.
+        sniff(prn=sniff_callback, store=False, iface=iface_name,
+              stop_filter=lambda pkt: stop_event.is_set())
     except Exception as exc:  # e.g. an adapter that's disabled/down, or Npcap missing on Windows
         print(f"[agent] WARNING: capture failed on interface {iface_label!r} ({iface_name}): {exc}", file=sys.stderr)
 
 
-def start_sniffer():
-    global sniffer_error
-    iface_override = os.environ.get("NETVIEW_IFACE") or None
-
-    try:
-        interfaces = list_interfaces()
-    except Exception as exc:
-        sniffer_error = exc
-        print(f"[agent] ERROR: could not enumerate network interfaces: {exc}", file=sys.stderr)
-        return
-
-    print(f"[agent] detected {len(interfaces)} network interface(s):", file=sys.stderr)
-    for name, label in interfaces:
-        print(f"[agent]   {label} -> {name}", file=sys.stderr)
-
-    if iface_override:
-        print(f"[agent] NETVIEW_IFACE override set - capturing ONLY on: {iface_override}", file=sys.stderr)
-        targets = [(iface_override, iface_override)]
-    else:
-        print(f"[agent] no NETVIEW_IFACE override set - capturing on ALL {len(interfaces)} interface(s) "
-              "simultaneously (like Wireshark's 'any' capture). Note this can show the same real-world "
-              "traffic twice if a virtual adapter bridges the same link as a physical one - set "
-              "NETVIEW_IFACE to a single interface from the list above if you need to avoid that.",
-              file=sys.stderr)
-        targets = interfaces
-
-    if not targets:
-        sniffer_error = RuntimeError("no network interfaces found")
-        print("[agent] ERROR: no network interfaces available to capture on.", file=sys.stderr)
-        return
-
-    # Each interface gets its own thread and its own try/except (inside
-    # sniff_on_interface) so one disabled/inactive adapter can't take capture
-    # down on the rest - this call blocks (via join) since start_sniffer()
-    # already runs in its own background thread, started from main().
-    threads = [
-        threading.Thread(target=sniff_on_interface, args=(name, label), daemon=True)
-        for name, label in targets
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+def spawn_sniffer_thread(iface_name, stop_event):
+    label = INTERFACE_LABELS.get(iface_name, iface_name)
+    t = threading.Thread(target=sniff_on_interface, args=(iface_name, label, stop_event), daemon=True)
+    t.start()
+    return t
 
 
 async def main():
+    global AVAILABLE_INTERFACES, INTERFACE_LABELS, sniffer, PAIRING_TOKEN
+
     if not has_admin_privileges():
         hint = (
             "Right-click and choose 'Run as administrator'."
@@ -359,10 +372,26 @@ async def main():
         print(f"ERROR: Packet capture requires elevated privileges.\n{hint}", file=sys.stderr)
         sys.exit(1)
 
-    agent.loop = asyncio.get_running_loop()
+    try:
+        AVAILABLE_INTERFACES = list_interfaces()
+    except Exception as exc:
+        print(f"[agent] ERROR: could not enumerate network interfaces: {exc}", file=sys.stderr)
+        sys.exit(1)
+    INTERFACE_LABELS = dict(AVAILABLE_INTERFACES)
 
-    sniffer_thread = threading.Thread(target=start_sniffer, daemon=True)
-    sniffer_thread.start()
+    print(f"[agent] detected {len(AVAILABLE_INTERFACES)} network interface(s):", file=sys.stderr)
+    for name, label in AVAILABLE_INTERFACES:
+        print(f"[agent]   {label} -> {name}", file=sys.stderr)
+
+    # Starts idle on purpose - sniffing now only begins when a paired client
+    # sends start_capture, not automatically at process launch.
+    sniffer = SnifferController(default_interfaces=[name for name, _ in AVAILABLE_INTERFACES])
+
+    PAIRING_TOKEN = generate_pairing_token()
+    print(f"[agent] Pairing code: {PAIRING_TOKEN}", file=sys.stderr)
+    print("[agent] Enter this code in NetView to connect.", file=sys.stderr)
+
+    agent.loop = asyncio.get_running_loop()
 
     async with websockets.serve(agent.register, HOST, PORT):
         print(f"[agent] WebSocket server listening on ws://{HOST}:{PORT}")
