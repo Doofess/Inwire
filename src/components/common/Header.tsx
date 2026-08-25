@@ -3,11 +3,8 @@ import {
   Play,
   Pause,
   Square,
-  Download,
 } from 'lucide-react';
 import { UserRole, UserRolePermissions } from '../../types/packet';
-import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
-import { Button } from '../ui/button';
 import { AppMenu } from './AppMenu';
 
 interface HeaderProps {
@@ -34,16 +31,6 @@ interface HeaderProps {
 // (oldest packets are dropped once the live buffer exceeds this size).
 const PACKET_BUFFER_CAP = 4000;
 
-function downloadAgentInstaller() {
-  const { url, filename } = getAgentDownloadForCurrentOS();
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
 export const Header: React.FC<HeaderProps> = ({
   isCapturing,
   onStartCapture,
@@ -64,7 +51,6 @@ export const Header: React.FC<HeaderProps> = ({
   onApplyFilterPreset,
 }) => {
   const bufferPercent = Math.min(100, (totalPacketsCount / PACKET_BUFFER_CAP) * 100);
-  const agentDownload = getAgentDownloadForCurrentOS();
   return (
     <header className="h-16 px-4 sm:px-6 border-b flex items-center justify-between gap-4 transition-colors z-40 shrink-0 select-none bg-card border-border text-card-foreground">
       {/* Left: Branding & Capture Stream Controls */}
@@ -129,7 +115,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Right: Buffer Status, Agent Status, Downloads, App Menu */}
+      {/* Right: Buffer Status, Agent Status, App Menu */}
       <div className="flex items-center space-x-2 sm:space-x-2.5">
         {/* Capture Buffer Status - relocated from the old bottom status bar.
             Packet/filtered counts were dropped here since FilterBar already
@@ -181,18 +167,10 @@ export const Header: React.FC<HeaderProps> = ({
           </span>
         </div>
 
-        {/* Download Driver Button - detects OS, downloads the matching one-click installer directly (no modal) */}
-        <Button
-          variant="outline"
-          onClick={downloadAgentInstaller}
-          className="bg-secondary hover:bg-accent border-border text-foreground text-xs"
-          title={`Download the one-click NetView agent installer for ${agentDownload.label}`}
-        >
-          <Download className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
-          <span className="hidden sm:inline">Download Driver ({agentDownload.label})</span>
-        </Button>
-
-        {/* App Menu - Actions, Views, Filter Presets (Ctrl/Cmd+K) */}
+        {/* App Menu - Actions, Views, Filter Presets (Ctrl/Cmd+K). Now the
+            last thing in the header, flush against its right edge - the
+            Download Driver button that used to sit here moved into the
+            menu itself as an Actions item. */}
         <AppMenu
           isCapturing={isCapturing}
           onStartCapture={onStartCapture}
