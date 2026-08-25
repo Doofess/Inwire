@@ -3,14 +3,14 @@ import { Packet, UserRolePermissions } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
 import { PacketListMinimap } from './PacketListMinimap';
 import {
-  ArrowUpDown,
-  ArrowUp,
-  ArrowDown,
-  ShieldAlert,
-  MessageSquare,
-  Filter,
-  Copy,
-} from 'lucide-react';
+  TbArrowsSort,
+  TbArrowUp,
+  TbArrowDown,
+  TbShieldExclamation,
+  TbMessage,
+  TbFilter,
+  TbCopy,
+} from 'react-icons/tb';
 
 interface PacketListProps {
   packets: Packet[];
@@ -322,11 +322,11 @@ export const PacketList: React.FC<PacketListProps> = ({
   }, []);
 
   const renderSortIcon = (field: SortField) => {
-    if (sortField !== field) return <ArrowUpDown className="w-3 h-3 text-muted-foreground opacity-30 group-hover:opacity-100 transition-opacity" />;
+    if (sortField !== field) return <TbArrowsSort className="w-3 h-3 text-muted-foreground opacity-30 group-hover:opacity-100 transition-opacity" />;
     return sortOrder === 'asc' ? (
-      <ArrowUp className="w-3 h-3 text-cyan-400" />
+      <TbArrowUp className="w-3 h-3 text-cyan-400" />
     ) : (
-      <ArrowDown className="w-3 h-3 text-cyan-400" />
+      <TbArrowDown className="w-3 h-3 text-cyan-400" />
     );
   };
 
@@ -434,7 +434,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               <tr>
                 <td colSpan={7} className="text-center py-16 text-muted-foreground">
                   <div className="flex flex-col items-center justify-center gap-1">
-                    <Filter className="w-6 h-6 text-muted-foreground/70 mb-1" />
+                    <TbFilter className="w-6 h-6 text-muted-foreground/70 mb-1" />
                     <span>No packets match current display filter or capture is empty.</span>
                     <span className="text-[10px] text-muted-foreground/70">Start capture or clear filter to resume telemetry</span>
                   </div>
@@ -477,7 +477,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     <td className="px-2 py-1 font-mono whitespace-nowrap text-right tabular-nums">
                       <div className="flex items-center justify-end gap-1">
                         {(packet.anomalies && packet.anomalies.length > 0) || packet.status === 'alert' ? (
-                          <ShieldAlert className="w-3 h-3 text-rose-500 shrink-0" />
+                          <TbShieldExclamation className="w-3 h-3 text-rose-500 shrink-0" />
                         ) : null}
                         <span>{packet.id}</span>
                       </div>
@@ -553,7 +553,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               onClick={() => onFollowStream(contextMenu.packet.streamId!)}
               className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
             >
-              <MessageSquare className="w-3.5 h-3.5 text-cyan-400" />
+              <TbMessage className="w-3.5 h-3.5 text-foreground" />
               <span>Follow Stream (#{contextMenu.packet.streamId})</span>
             </button>
           )}
@@ -562,7 +562,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             onClick={() => onQuickFilter(`ip.src == "${contextMenu.packet.source}"`)}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
           >
-            <Filter className="w-3.5 h-3.5" />
+            <TbFilter className="w-3.5 h-3.5" />
             <span>Filter by Source ({contextMenu.packet.source})</span>
           </button>
 
@@ -570,7 +570,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             onClick={() => onQuickFilter(`ip.dst == "${contextMenu.packet.destination}"`)}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
           >
-            <Filter className="w-3.5 h-3.5" />
+            <TbFilter className="w-3.5 h-3.5" />
             <span>Filter by Destination ({contextMenu.packet.destination})</span>
           </button>
 
@@ -578,7 +578,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             onClick={() => onQuickFilter(`proto == ${contextMenu.packet.protocol.toLowerCase()}`)}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
           >
-            <Filter className="w-3.5 h-3.5" />
+            <TbFilter className="w-3.5 h-3.5" />
             <span>Filter by Protocol ({contextMenu.packet.protocol})</span>
           </button>
 
@@ -590,7 +590,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             }}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
           >
-            <Copy className="w-3.5 h-3.5 text-emerald-400" />
+            <TbCopy className="w-3.5 h-3.5 text-foreground" />
             <span>Copy Raw Hex Stream</span>
           </button>
         </div>

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Packet } from '../../types/packet';
-import { PieChart } from 'lucide-react';
+import { TbChartPie } from 'react-icons/tb';
 
 interface ProtocolDonutProps {
   packets: Packet[];
@@ -55,7 +55,7 @@ export const ProtocolDonutChart: React.FC<ProtocolDonutProps> = ({
     <div className="rounded-lg border p-3.5 flex flex-col transition-colors select-none bg-card border-border text-card-foreground shadow-sm">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1.5">
-          <PieChart className="w-3.5 h-3.5 text-purple-400" />
+          <TbChartPie className="w-3.5 h-3.5 text-foreground" />
           <span>Protocol Breakdown</span>
         </h3>
         <span className="text-[10px] text-muted-foreground font-mono">CLICK TO FILTER</span>

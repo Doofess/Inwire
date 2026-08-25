@@ -40,11 +40,11 @@ import { LiveIOGraph } from "./components/analytics/LiveIOGraph";
 import { GeoMap } from "./components/analytics/GeoMap";
 
 import {
-  Activity,
-  List,
-  Layers,
-  Binary,
-} from "lucide-react";
+  TbActivity,
+  TbList,
+  TbStack2,
+  TbBinary,
+} from "react-icons/tb";
 
 export default function App() {
   // Theme & Layout
@@ -480,7 +480,7 @@ export default function App() {
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            <List className="w-3.5 h-3.5" />
+            <TbList className="w-3.5 h-3.5" />
             <span>Packets ({filteredPackets.length})</span>
           </button>
 
@@ -492,7 +492,7 @@ export default function App() {
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
+            <TbStack2 className="w-3.5 h-3.5" />
             <span>Protocol Tree</span>
           </button>
 
@@ -504,7 +504,7 @@ export default function App() {
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            <Binary className="w-3.5 h-3.5" />
+            <TbBinary className="w-3.5 h-3.5" />
             <span>Hex View</span>
           </button>
 
@@ -516,7 +516,7 @@ export default function App() {
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            <Activity className="w-3.5 h-3.5" />
+            <TbActivity className="w-3.5 h-3.5" />
             <span>Analytics</span>
           </button>
         </div>

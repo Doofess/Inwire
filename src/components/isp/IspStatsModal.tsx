@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { X, Globe, MapPin, Activity, Server, Database, Shield } from 'lucide-react';
+import { TbX, TbGlobe, TbMapPin, TbServer, TbDatabase, TbShield } from 'react-icons/tb';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 
 interface IspStatsModalProps {
@@ -78,8 +78,8 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-border">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-sky-500/20 text-sky-400">
-              <Globe className="w-5 h-5" />
+            <div className="p-2 rounded-lg bg-sky-500/20">
+              <TbGlobe className="w-5 h-5 text-foreground" />
             </div>
             <div>
               <h2 className="font-bold text-foreground">Local ISP Diagnostics</h2>
@@ -89,7 +89,7 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground">
-            <X className="w-5 h-5" />
+            <TbX className="w-5 h-5" />
           </button>
         </div>
 
@@ -102,7 +102,7 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
             </div>
           ) : error ? (
             <div className="text-center py-12 px-4 rounded-lg border bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/30 text-rose-700 dark:text-rose-300">
-              <Shield className="w-10 h-10 mx-auto mb-3 opacity-80" />
+              <TbShield className="w-10 h-10 mx-auto mb-3 opacity-80" />
               <p className="font-semibold">{error}</p>
               <p className="text-sm mt-1 opacity-80">Check your internet connection or ad-blocker settings.</p>
             </div>
@@ -112,7 +112,7 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
               {/* Primary Info */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="p-4 rounded-lg border flex items-start gap-4 bg-muted/50 border-border">
-                  <Server className="w-8 h-8 mt-1 shrink-0 text-muted-foreground" />
+                  <TbServer className="w-8 h-8 mt-1 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
                     <div className="text-[11px] uppercase tracking-wider font-semibold mb-1 truncate text-muted-foreground">
                       Internet Service Provider (ISP)
@@ -123,7 +123,7 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
                 </div>
 
                 <div className="p-4 rounded-lg border flex items-start gap-4 bg-muted/50 border-border">
-                  <Database className="w-8 h-8 mt-1 shrink-0 text-muted-foreground" />
+                  <TbDatabase className="w-8 h-8 mt-1 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
                     <div className="text-[11px] uppercase tracking-wider font-semibold mb-1 truncate text-muted-foreground">
                       Public IP Address
@@ -137,7 +137,7 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
               {/* Secondary Details Table */}
               <div className="rounded-lg overflow-hidden border border-border">
                 <div className="px-4 py-2 flex items-center gap-2 border-b text-xs font-semibold uppercase tracking-wider bg-secondary border-border text-muted-foreground">
-                  <MapPin className="w-4 h-4" />
+                  <TbMapPin className="w-4 h-4" />
                   Geolocation & Network Telemetry
                 </div>
 

@@ -3,19 +3,19 @@ import { Command } from 'cmdk';
 import { AnimatePresence, motion } from 'motion/react';
 import { HamburgerIcon } from './HamburgerIcon';
 import {
-  ChevronRight,
-  Play,
-  Pause,
-  Trash2,
-  Download,
-  DownloadCloud,
-  BarChart2,
-  Code,
-  Globe,
-  Bookmark,
-  Settings,
-  X,
-} from 'lucide-react';
+  TbChevronRight,
+  TbPlayerPlay,
+  TbPlayerPause,
+  TbTrash,
+  TbDownload,
+  TbCloudDownload,
+  TbChartBar,
+  TbCode,
+  TbHome,
+  TbBookmark,
+  TbSettings,
+  TbX,
+} from 'react-icons/tb';
 import { UserRolePermissions } from '../../types/packet';
 import { DEFAULT_FILTER_PRESETS } from '../../services/filterEngine';
 import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
@@ -171,7 +171,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                     aria-label="Close menu"
                     className="p-1 rounded-md shrink-0 text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer"
                   >
-                    <X className="w-4 h-4" />
+                    <TbX className="w-4 h-4" />
                   </button>
                 </div>
 
@@ -189,7 +189,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                         onSelect={() => run(onPauseCapture)}
                         className={itemClass}
                       >
-                        <Pause className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                        <TbPlayerPause className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                         <span>Stop Capture</span>
                       </Command.Item>
                     ) : (
@@ -199,7 +199,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                         onSelect={() => run(onStartCapture)}
                         className={itemClass}
                       >
-                        <Play className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                        <TbPlayerPlay className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
                         <span>Start Capture</span>
                       </Command.Item>
                     )}
@@ -209,7 +209,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       onSelect={() => run(onClearPackets)}
                       className={itemClass}
                     >
-                      <Trash2 className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                      <TbTrash className="w-3.5 h-3.5 text-foreground shrink-0" />
                       <span>Clear Packet Buffer</span>
                     </Command.Item>
                     <Command.Item
@@ -217,7 +217,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       onSelect={() => run(onOpenExportModal)}
                       className={itemClass}
                     >
-                      <Download className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                      <TbDownload className="w-3.5 h-3.5 text-foreground shrink-0" />
                       <span>Export / Import PCAP</span>
                     </Command.Item>
                     {/* Was its own always-visible header button; folded in here
@@ -228,7 +228,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       onSelect={() => run(downloadAgentInstaller)}
                       className={itemClass}
                     >
-                      <DownloadCloud className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400 shrink-0" />
+                      <TbCloudDownload className="w-3.5 h-3.5 text-foreground shrink-0" />
                       <span>Download Driver ({agentDownload.label})</span>
                     </Command.Item>
                   </Command.Group>
@@ -241,7 +241,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       onSelect={() => run(onOpenStatsModal)}
                       className={itemClass}
                     >
-                      <BarChart2 className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                      <TbChartBar className="w-3.5 h-3.5 text-foreground shrink-0" />
                       <span>Statistics</span>
                     </Command.Item>
                     <Command.Item
@@ -249,7 +249,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       onSelect={() => run(onOpenDissectorModal)}
                       className={itemClass}
                     >
-                      <Code className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                      <TbCode className="w-3.5 h-3.5 text-foreground shrink-0" />
                       <span>Custom Dissectors</span>
                     </Command.Item>
                     {onOpenIspModal && (
@@ -258,7 +258,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                         onSelect={() => run(onOpenIspModal)}
                         className={itemClass}
                       >
-                        <Globe className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                        <TbHome className="w-3.5 h-3.5 text-foreground shrink-0" />
                         <span>ISP Stats</span>
                       </Command.Item>
                     )}
@@ -267,7 +267,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       onSelect={() => run(onOpenSettingsModal)}
                       className={itemClass}
                     >
-                      <Settings className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <TbSettings className="w-3.5 h-3.5 text-foreground shrink-0" />
                       <span>Settings</span>
                     </Command.Item>
                   </Command.Group>
@@ -285,7 +285,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                         transition={{ duration: 0.15 }}
                         className="shrink-0 flex items-center justify-center w-3.5 h-3.5"
                       >
-                        <ChevronRight className="w-3.5 h-3.5 text-cyan-400" />
+                        <TbChevronRight className="w-3.5 h-3.5 text-foreground" />
                       </motion.span>
                       <span className="flex-1">
                         {presetsExpanded ? 'Hide' : 'Show'} {NAMED_PRESETS.length} Presets
@@ -309,7 +309,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                               onSelect={() => run(() => onApplyFilterPreset(preset.filter))}
                               className={itemClass}
                             >
-                              <Bookmark className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                              <TbBookmark className="w-3.5 h-3.5 text-foreground shrink-0" />
                               <div className="flex flex-col min-w-0">
                                 <span className="truncate">{preset.name}</span>
                                 <code className="text-[10px] text-muted-foreground truncate">

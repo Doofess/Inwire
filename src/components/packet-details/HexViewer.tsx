@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
-import { Binary, Copy, Check, Shield } from 'lucide-react';
+import { TbBinary, TbCopy, TbCheck, TbShield } from 'react-icons/tb';
 
 interface HexViewerProps {
   packet: Packet | null;
@@ -22,7 +22,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
     return (
       <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
         <div className="flex flex-col items-center gap-1.5">
-          <Binary className="w-6 h-6 text-muted-foreground/70 mb-1" />
+          <TbBinary className="w-6 h-6 text-muted-foreground/70 mb-1" />
           <span className="uppercase tracking-wider">Hex Dump Inspector</span>
           <span className="text-[10px] text-muted-foreground/70">Select a frame to inspect raw hexadecimal & ASCII dump</span>
         </div>
@@ -105,7 +105,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
             }`}
             title="Copy raw hex sequence"
           >
-            {copiedFormat === 'hex' ? <Check className="w-3 h-3 text-cyan-400" /> : <Copy className="w-3 h-3" />}
+            {copiedFormat === 'hex' ? <TbCheck className="w-3 h-3 text-emerald-400" /> : <TbCopy className="w-3 h-3" />}
             <span>HEX</span>
           </button>
 
@@ -116,7 +116,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
             }`}
             title="Copy as C array"
           >
-            {copiedFormat === 'c_array' ? <Check className="w-3 h-3 text-cyan-400" /> : <Copy className="w-3 h-3" />}
+            {copiedFormat === 'c_array' ? <TbCheck className="w-3 h-3 text-emerald-400" /> : <TbCopy className="w-3 h-3" />}
             <span>C-ARRAY</span>
           </button>
 
@@ -127,7 +127,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
             }`}
             title="Copy as Python bytes"
           >
-            {copiedFormat === 'python' ? <Check className="w-3 h-3 text-cyan-400" /> : <Copy className="w-3 h-3" />}
+            {copiedFormat === 'python' ? <TbCheck className="w-3 h-3 text-emerald-400" /> : <TbCopy className="w-3 h-3" />}
             <span>PY</span>
           </button>
         </div>
@@ -138,7 +138,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
         {/* Auditor Role Mask notice if permissions restricted */}
         {!permissions.canViewPayloads && (
           <div className="mb-2 p-2 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px] flex items-center gap-2">
-            <Shield className="w-4 h-4 text-amber-400 shrink-0" />
+            <TbShield className="w-4 h-4 text-foreground shrink-0" />
             <span>Auditor / Guest Role Active: Payload inspection sanitized according to compliance policy.</span>
           </div>
         )}

@@ -6,17 +6,16 @@ import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import {
-  Download,
-  Upload,
-  FileCode,
-  FileText,
-  Check,
-  AlertCircle,
-  X,
-  Shield,
-  Layers,
-  FileImage,
-} from 'lucide-react';
+  TbDownload,
+  TbUpload,
+  TbFileCode,
+  TbFileText,
+  TbCheck,
+  TbAlertCircle,
+  TbX,
+  TbShield,
+  TbPhoto,
+} from 'react-icons/tb';
 
 interface ExportImportModalProps {
   packets: Packet[];
@@ -206,8 +205,8 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-sky-500/20 text-sky-400">
-              <Download className="w-5 h-5" />
+            <div className="p-2 rounded-lg bg-sky-500/20">
+              <TbDownload className="w-5 h-5 text-foreground" />
             </div>
             <div>
               <div className="font-bold text-base">Capture Import & Export Center</div>
@@ -216,7 +215,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
           </div>
 
           <button onClick={onClose} className={`p-1.5 rounded-md hover:bg-accent ${"text-muted-foreground"} hover:text-foreground`}>
-            <X className="w-5 h-5" />
+            <TbX className="w-5 h-5" />
           </button>
         </div>
 
@@ -225,7 +224,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
           {/* Permission notice */}
           {!permissions.canExportPcap && (
             <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 flex items-center gap-2">
-              <Shield className="w-4 h-4 text-amber-400 shrink-0" />
+              <TbShield className="w-4 h-4 text-foreground shrink-0" />
               <span>Exporting raw captures is restricted for the Auditor / Guest role.</span>
             </div>
           )}
@@ -248,7 +247,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-xs">Libpcap (.pcap)</span>
-                  <Download className="w-4 h-4 text-sky-400" />
+                  <TbDownload className="w-4 h-4 text-foreground" />
                 </div>
                 <p className={`text-[11px] ${"text-muted-foreground"}`}>
                   Standard binary libpcap 2.4 file compatible with Wireshark & Tcpdump
@@ -267,7 +266,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-xs">JSON Telemetry</span>
-                  <FileCode className="w-4 h-4 text-purple-400" />
+                  <TbFileCode className="w-4 h-4 text-foreground" />
                 </div>
                 <p className={`text-[11px] ${"text-muted-foreground"}`}>
                   Structured packet metadata with decoded protocol layer fields
@@ -286,7 +285,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-xs">Spreadsheet CSV</span>
-                  <FileText className="w-4 h-4 text-emerald-400" />
+                  <TbFileText className="w-4 h-4 text-foreground" />
                 </div>
                 <p className={`text-[11px] ${"text-muted-foreground"}`}>
                   Tabular packet summary for reports, Excel, and SIEM pipelines
@@ -307,7 +306,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-xs">PDF Report</span>
-                  <FileImage className="w-4 h-4 text-red-400" />
+                  <TbPhoto className="w-4 h-4 text-foreground" />
                 </div>
                 <p className={`text-[11px] ${"text-muted-foreground"}`}>
                   Formatted document with stats, alerts, and packet summary
@@ -323,7 +322,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                 'border-border hover:border-sky-500 bg-muted/30'
               }`}
             >
-              <Upload className="w-8 h-8 text-sky-400 mb-2" />
+              <TbUpload className="w-8 h-8 text-foreground mb-2" />
               <span className={`font-semibold ${"text-foreground"}`}>Click to upload .pcap or drag & drop</span>
               <span className={`text-[11px] ${"text-muted-foreground"} mt-1 font-mono`}>Supports standard Libpcap 2.4 captures</span>
               <input type="file" accept=".pcap,.pcapng,.cap,.json" onChange={handleFileUpload} className="hidden" />
@@ -331,14 +330,14 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
 
             {importStatus && (
               <div className="mt-2 text-emerald-400 flex items-center gap-1.5 font-medium">
-                <Check className="w-4 h-4 text-emerald-400" />
+                <TbCheck className="w-4 h-4 text-emerald-400" />
                 <span>{importStatus}</span>
               </div>
             )}
 
             {importError && (
-              <div className="mt-2 text-red-400 flex items-center gap-1.5 font-medium">
-                <AlertCircle className="w-4 h-4 text-red-400" />
+              <div className="mt-2 text-rose-400 flex items-center gap-1.5 font-medium">
+                <TbAlertCircle className="w-4 h-4 text-rose-400" />
                 <span>{importError}</span>
               </div>
             )}
