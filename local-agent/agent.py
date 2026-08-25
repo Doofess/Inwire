@@ -399,13 +399,13 @@ async def main(to_stderr=True):
             else "Re-run with sudo, e.g.: sudo python3 agent.py"
         )
         log.error("packet capture requires elevated privileges. %s", hint)
-        return
+        return False
 
     try:
         AVAILABLE_INTERFACES = list_interfaces()
     except Exception as exc:
         log.error("could not enumerate network interfaces: %s", exc)
-        return
+        return False
     INTERFACE_LABELS = dict(AVAILABLE_INTERFACES)
 
     log.info("detected %d network interface(s)", len(AVAILABLE_INTERFACES))
@@ -430,9 +430,14 @@ async def main(to_stderr=True):
         log.info("WebSocket server listening on ws://%s:%d", HOST, PORT)
         await asyncio.Future()  # run forever
 
+    return True
+
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        _ok = asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[agent] shutting down.")
+    else:
+        if _ok is False:
+            sys.exit(1)

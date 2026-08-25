@@ -309,6 +309,66 @@ finally:
     else:
         agent.AVAILABLE_INTERFACES = _prev_avail
 
+# --- logging_setup: to_stderr / degraded-directory handling ---
+import logging
+
+import logging_setup
+
+_netview_logger = logging.getLogger("netview")
+_saved_handlers = list(_netview_logger.handlers)
+_saved_configured_with = logging_setup._configured_with
+_saved_level = _netview_logger.level
+_saved_propagate = _netview_logger.propagate
+try:
+    # A changed to_stderr on a second call must actually take effect: a
+    # stale StreamHandler from an earlier to_stderr=True call must not keep
+    # writing to a stderr the caller just asked us not to use.
+    for _h in list(_netview_logger.handlers):
+        _netview_logger.removeHandler(_h)
+        _h.close()
+    logging_setup._configured_with = None
+
+    _tmpdir1 = tempfile.mkdtemp()
+    logging_setup.setup_logging(_tmpdir1, to_stderr=True)
+    _stderr_handlers_before = [h for h in _netview_logger.handlers if getattr(h, "stream", None) is sys.stderr]
+    check_true("to_stderr=True attaches a stderr stream handler", len(_stderr_handlers_before) == 1)
+
+    logging_setup.setup_logging(_tmpdir1, to_stderr=False)
+    # RotatingFileHandler is also a StreamHandler subclass, so this must
+    # filter by the stderr stream specifically, not just the class.
+    _stderr_handlers_after = [h for h in _netview_logger.handlers if getattr(h, "stream", None) is sys.stderr]
+    check("to_stderr=False on a second call removes the stale stderr handler", _stderr_handlers_after, [])
+
+    # An unwritable log directory plus to_stderr=False must still leave the
+    # logger with a handler (a NullHandler), so logging.lastResort never
+    # writes WARNING+ records to the real stderr behind the SCM's back.
+    for _h in list(_netview_logger.handlers):
+        _netview_logger.removeHandler(_h)
+        _h.close()
+    logging_setup._configured_with = None
+
+    _blocking_file = tempfile.NamedTemporaryFile(delete=False)
+    _blocking_file.close()
+    _unwritable_dir = _blocking_file.name  # a file, not a directory: os.makedirs must fail
+    try:
+        logging_setup.setup_logging(_unwritable_dir, to_stderr=False)
+        check_true("unwritable dir + to_stderr=False still leaves at least one handler", len(_netview_logger.handlers) >= 1)
+        check_true(
+            "that handler is a NullHandler, so logging.lastResort cannot engage",
+            any(isinstance(h, logging.NullHandler) for h in _netview_logger.handlers),
+        )
+    finally:
+        os.remove(_unwritable_dir)
+finally:
+    for _h in list(_netview_logger.handlers):
+        _netview_logger.removeHandler(_h)
+        _h.close()
+    for _h in _saved_handlers:
+        _netview_logger.addHandler(_h)
+    logging_setup._configured_with = _saved_configured_with
+    _netview_logger.level = _saved_level
+    _netview_logger.propagate = _saved_propagate
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")

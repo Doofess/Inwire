@@ -17,19 +17,26 @@ LOG_FILENAME = "agent.log"
 MAX_BYTES = 1_000_000
 BACKUP_COUNT = 3
 
-_configured = False
+_configured_with = None
 
 
 def setup_logging(directory, to_stderr=True, level=logging.INFO):
     """Configures and returns the shared `netview` logger.
 
-    Idempotent: calling it twice returns the same logger without stacking
-    duplicate handlers (which would print every line twice).
+    Idempotent: calling it twice with the same (directory, to_stderr) returns
+    the same logger without stacking duplicate handlers (which would print
+    every line twice). A second call with *different* settings must actually
+    take effect - a stale StreamHandler from an earlier to_stderr=True call
+    would otherwise keep writing to a stderr the service has no console for.
     """
-    global _configured
+    global _configured_with
     logger = logging.getLogger("netview")
-    if _configured:
+    if _configured_with == (directory, to_stderr):
         return logger
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
 
     logger.setLevel(level)
     # propagate=False keeps these records out of the root logger, so a library
@@ -59,5 +66,13 @@ def setup_logging(directory, to_stderr=True, level=logging.INFO):
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
 
-    _configured = True
+    if not logger.handlers:
+        # No file handler (unwritable directory) and no stderr handler:
+        # without an explicit NullHandler, Python's logging.lastResort would
+        # write WARNING+ records to the real stderr, which under the SCM is
+        # not a console anyone can see and is precisely what to_stderr=False
+        # asked us not to do.
+        logger.addHandler(logging.NullHandler())
+
+    _configured_with = (directory, to_stderr)
     return logger
