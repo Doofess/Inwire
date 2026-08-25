@@ -27,6 +27,12 @@ function mapField(f: ProtocolField): { name: string; value: string | number | bo
   };
 }
 
+interface ExtractedFrame {
+  rawBytes: Uint8Array;
+  epochMs: number;
+  origLen: number;
+}
+
 export class PcapService {
   /**
    * Generates a compliant binary Libpcap 2.4 file from packet stream
@@ -84,21 +90,29 @@ export class PcapService {
   }
 
   /**
-   * Parse a binary .pcap file uploaded by user
+   * Parse a binary .pcap or .pcapng file uploaded by user
    */
   public static async parsePcapFile(file: File): Promise<Packet[]> {
     const arrayBuffer = await file.arrayBuffer();
-    const view = new DataView(arrayBuffer);
-    const parsedPackets: Packet[] = [];
+
+    if (arrayBuffer.byteLength < 8) {
+      throw new Error('File is too small to be a valid PCAP file.');
+    }
+
+    const magic = new DataView(arrayBuffer).getUint32(0, false);
+
+    // pcapng's Section Header Block type (0x0A0D0D0A) is a byte-palindrome,
+    // so it reads identically regardless of the file's actual byte order -
+    // no endianness detection needed before recognizing it.
+    if (magic === 0x0a0d0d0a) {
+      return PcapService.buildPacketsFromFrames(PcapService.extractPcapNgFrames(arrayBuffer));
+    }
 
     if (arrayBuffer.byteLength < 24) {
       throw new Error('File is too small to be a valid PCAP file.');
     }
 
-    // Read magic number
-    const magic = view.getUint32(0, false);
     let isLittleEndian = true;
-
     if (magic === 0xa1b2c3d4) {
       isLittleEndian = false; // Big endian
     } else if (magic === 0xd4c3b2a1) {
@@ -107,7 +121,7 @@ export class PcapService {
       // Nanosecond pcap
       isLittleEndian = magic === 0x4d3cb2a1;
     } else {
-      // Might be pcapng or json
+      // Might be a JSON export
       try {
         const text = new TextDecoder().decode(arrayBuffer);
         const json = JSON.parse(text);
@@ -119,35 +133,145 @@ export class PcapService {
       }
     }
 
-    let offset = 24;
-    let packetIndex = 1;
-    let baseTime: number | null = null;
-    let prevTime = 0;
-    const tcpTracker = new TcpStreamTracker();
-    const icmpTracker = new IcmpEchoTracker();
+    return PcapService.buildPacketsFromFrames(PcapService.extractClassicPcapFrames(arrayBuffer, isLittleEndian));
+  }
 
-    while (offset + 16 <= arrayBuffer.byteLength) {
+  /**
+   * Extracts raw frames + timestamps from a classic Libpcap 2.4 file.
+   */
+  private static extractClassicPcapFrames(buffer: ArrayBuffer, isLittleEndian: boolean): ExtractedFrame[] {
+    const view = new DataView(buffer);
+    const frames: ExtractedFrame[] = [];
+    let offset = 24;
+
+    while (offset + 16 <= buffer.byteLength) {
       const tsSec = view.getUint32(offset, isLittleEndian);
       const tsUsec = view.getUint32(offset + 4, isLittleEndian);
       const capLen = view.getUint32(offset + 8, isLittleEndian);
       const origLen = view.getUint32(offset + 12, isLittleEndian);
       offset += 16;
 
-      if (offset + capLen > arrayBuffer.byteLength) {
-        break; // Truncated final packet
-      }
+      if (offset + capLen > buffer.byteLength) break; // Truncated final packet
 
-      const rawBytes = new Uint8Array(arrayBuffer.slice(offset, offset + capLen));
+      frames.push({
+        rawBytes: new Uint8Array(buffer.slice(offset, offset + capLen)),
+        epochMs: tsSec * 1000 + Math.floor(tsUsec / 1000),
+        origLen,
+      });
       offset += capLen;
 
-      const epochMs = tsSec * 1000 + Math.floor(tsUsec / 1000);
-      if (baseTime === null) baseTime = epochMs;
-      const relativeTime = (epochMs - baseTime) / 1000;
-      const timeDelta = prevTime === 0 ? 0 : (epochMs - prevTime) / 1000;
-      prevTime = epochMs;
+      if (frames.length >= 10000) break; // Safety limit for memory in browser
+    }
 
-      // Extract basic layers from Ethernet frame
-      const { packet, icmpMatchedRequestFrameId } = decodeRawEthernetPacket(rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, origLen, tcpTracker, icmpTracker);
+    return frames;
+  }
+
+  /**
+   * Extracts raw frames + timestamps from a pcapng file by walking its
+   * block structure: a Section Header Block establishes byte order for
+   * everything that follows it, Interface Description Blocks record each
+   * interface's timestamp resolution, and Enhanced Packet Blocks carry the
+   * actual frame bytes. Any other block type (interface stats, name
+   * resolution, decryption secrets, vendor-specific blocks, ...) is safely
+   * skipped using its own declared length - a reader doesn't need to
+   * understand every block kind to walk past it, which is the whole point
+   * of the block-based format.
+   */
+  private static extractPcapNgFrames(buffer: ArrayBuffer): ExtractedFrame[] {
+    const view = new DataView(buffer);
+    const frames: ExtractedFrame[] = [];
+    let offset = 0;
+    let isLittleEndian = true;
+    // Per-interface timestamp resolution (seconds per tick), indexed by
+    // declaration order within the current section - this is exactly what
+    // an Enhanced Packet Block's Interface ID field refers to.
+    let interfaceResolutions: number[] = [];
+
+    while (offset + 8 <= buffer.byteLength) {
+      const blockType = view.getUint32(offset, isLittleEndian);
+      const blockLen = view.getUint32(offset + 4, isLittleEndian);
+
+      if (blockLen < 12 || offset + blockLen > buffer.byteLength) break; // truncated/corrupt
+
+      if (blockType === 0x0a0d0d0a) {
+        // Section Header Block - the byte-order magic right after the
+        // length field re-establishes endianness for the rest of this
+        // section (multiple sections, each with their own byte order, are
+        // technically legal - reset per new SHB encountered).
+        const boMagicAsLE = view.getUint32(offset + 8, true);
+        isLittleEndian = boMagicAsLE === 0x1a2b3c4d;
+        interfaceResolutions = [];
+      } else if (blockType === 0x00000001) {
+        // Interface Description Block: LinkType(2) Reserved(2) SnapLen(4), then options.
+        let tsresol = 1e-6; // default per spec: microseconds
+        const optionsEnd = offset + blockLen - 4;
+        let optOffset = offset + 16;
+        while (optOffset + 4 <= optionsEnd) {
+          const optCode = view.getUint16(optOffset, isLittleEndian);
+          const optLen = view.getUint16(optOffset + 2, isLittleEndian);
+          if (optCode === 0) break; // opt_endofopt
+          if (optCode === 9 && optLen >= 1 && optOffset + 4 < optionsEnd) {
+            // if_tsresol: high bit set means a power of 2, otherwise a power of 10.
+            const raw = view.getUint8(optOffset + 4);
+            const exponent = raw & 0x7f;
+            tsresol = (raw & 0x80) !== 0 ? 2 ** -exponent : 10 ** -exponent;
+          }
+          optOffset += 4 + optLen + ((4 - (optLen % 4)) % 4); // options are 4-byte padded too
+        }
+        interfaceResolutions.push(tsresol);
+      } else if (blockType === 0x00000006) {
+        // Enhanced Packet Block: InterfaceID(4) TsHigh(4) TsLow(4) CapLen(4) OrigLen(4), then data.
+        const interfaceId = view.getUint32(offset + 8, isLittleEndian);
+        const tsHigh = view.getUint32(offset + 12, isLittleEndian);
+        const tsLow = view.getUint32(offset + 16, isLittleEndian);
+        const capLen = view.getUint32(offset + 20, isLittleEndian);
+        const origLen = view.getUint32(offset + 24, isLittleEndian);
+        const dataStart = offset + 28;
+
+        if (dataStart + capLen <= buffer.byteLength) {
+          const resolution = interfaceResolutions[interfaceId] ?? 1e-6;
+          // Reassemble the 64-bit tick count without the precision loss a
+          // naive (tsHigh << 32) would cause - JS's << truncates to 32 bits.
+          const ticks = tsHigh * 2 ** 32 + tsLow;
+          frames.push({
+            rawBytes: new Uint8Array(buffer.slice(dataStart, dataStart + capLen)),
+            epochMs: Math.floor(ticks * resolution * 1000),
+            origLen,
+          });
+        }
+      }
+      // Every other block type carries no frame data we need.
+
+      offset += blockLen;
+      if (frames.length >= 10000) break; // Safety limit for memory in browser
+    }
+
+    return frames;
+  }
+
+  /**
+   * Shared decode pass used by both the classic-pcap and pcapng extractors:
+   * runs each extracted frame through the same dissection pipeline used for
+   * live-captured packets, so imported files and live capture produce
+   * identical Packet shapes.
+   */
+  private static buildPacketsFromFrames(frames: ExtractedFrame[]): Packet[] {
+    const parsedPackets: Packet[] = [];
+    let packetIndex = 1;
+    let baseTime: number | null = null;
+    let prevTime = 0;
+    const tcpTracker = new TcpStreamTracker();
+    const icmpTracker = new IcmpEchoTracker();
+
+    for (const frame of frames) {
+      if (baseTime === null) baseTime = frame.epochMs;
+      const relativeTime = (frame.epochMs - baseTime) / 1000;
+      const timeDelta = prevTime === 0 ? 0 : (frame.epochMs - prevTime) / 1000;
+      prevTime = frame.epochMs;
+
+      const { packet, icmpMatchedRequestFrameId } = decodeRawEthernetPacket(
+        frame.rawBytes, packetIndex++, frame.epochMs, relativeTime, timeDelta, frame.origLen, tcpTracker, icmpTracker
+      );
       parsedPackets.push(packet);
 
       if (icmpMatchedRequestFrameId !== undefined) {
@@ -155,10 +279,6 @@ export class PcapService {
         if (requestPacket) {
           requestPacket.info += ` (reply in ${packet.id})`;
         }
-      }
-
-      if (parsedPackets.length >= 10000) {
-        break; // Safety limit for memory in browser
       }
     }
 
