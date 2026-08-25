@@ -16,6 +16,7 @@ import { FilterEngine } from "./services/filterEngine";
 import { CustomDissectorEngine } from "./services/customDissectorEngine";
 import { ColorRulesEngine } from "./services/colorRules";
 import { ROLE_PERMISSIONS } from "./services/rbacService";
+import { parseAgentMessage, encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION, getStoredPairingToken, storePairingToken, clearStoredPairingToken, type AgentCommand } from "./services/agentProtocol";
 
 // UI Components
 import { Header } from "./components/common/Header";
@@ -87,6 +88,11 @@ export default function App() {
   const [agentStatus, setAgentStatus] = useState<
     "disconnected" | "connecting" | "connected" | "error"
   >("disconnected");
+  const [agentCaptureState, setAgentCaptureState] = useState<'idle' | 'sniffing'>('idle');
+  const [agentVersion, setAgentVersion] = useState<string | null>(null);
+  const [agentInterfaces, setAgentInterfaces] = useState<{ name: string; label: string }[]>([]);
+  const [pairingRequired, setPairingRequired] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
 
   // RBAC Role (Simplified: Always Admin)
   const permissions = {
@@ -156,7 +162,6 @@ export default function App() {
   useEffect(() => {
     if (!permissions.canCapture) return;
 
-    let ws: WebSocket | null = null;
     let reconnectTimeout: NodeJS.Timeout;
     let connectedDelay: NodeJS.Timeout | null = null;
     // Only the very first connection attempt shows "Connecting..." - once we
@@ -170,24 +175,63 @@ export default function App() {
       if (isFirstAttempt) {
         setAgentStatus("connecting");
       }
-      ws = new WebSocket("ws://localhost:8999");
+      wsRef.current = new WebSocket("ws://localhost:8999");
 
-      ws.onopen = () => {
+      wsRef.current.onopen = () => {
         console.log("[WirePulse] Connected to Local Agent");
         // Hold "Connecting..." for a beat after the handshake succeeds so
         // the button doesn't flash instantly - and so a socket that drops
         // right back off (e.g. a page reload racing the connection) reads
         // as still-connecting rather than a confusing connect/disconnect flicker.
         connectedDelay = setTimeout(() => setAgentStatus("connected"), 2000);
+
+        const storedToken = getStoredPairingToken();
+        if (storedToken) {
+          wsRef.current?.send(encodeAgentCommand({ type: 'auth', token: storedToken }));
+        }
       };
 
-      ws.onmessage = (event) => {
+      wsRef.current.onmessage = (event) => {
+        const message = parseAgentMessage(event.data);
+        if (!message) return;
+
+        if (message.type === 'hello') {
+          setAgentVersion(message.version);
+          setAgentCaptureState(message.state);
+          setAgentInterfaces(message.interfaces);
+          setPairingRequired(message.authRequired && !getStoredPairingToken());
+          return;
+        }
+
+        if (message.type === 'state') {
+          setAgentCaptureState(message.state);
+          setAgentInterfaces(message.interfaces);
+          return;
+        }
+
+        if (message.type === 'error') {
+          console.warn('[WirePulse] Agent error:', message.message);
+          // The only error the agent currently sends is an auth rejection
+          // (wrong or stale token - e.g. the agent restarted and generated a
+          // new pairing code since this token was stored). Clearing it and
+          // re-showing the prompt is what makes Task 12's reconnect
+          // walkthrough actually work, instead of the banner just never
+          // coming back because a token *was* stored, even though it no
+          // longer matches.
+          clearStoredPairingToken();
+          setPairingRequired(true);
+          return;
+        }
+
+        // message.type === 'packet' from here on - the existing decode path.
         if (!isCapturingRef.current) return; // agent detected, but capture not started yet
 
         try {
-          const rawPkt = JSON.parse(event.data);
-          if (!rawPkt || typeof rawPkt !== 'object') return;
-
+          // AgentPacketMessage's extra fields are typed `unknown` (it only
+          // guarantees `type: 'packet'`) - the decode logic below is
+          // unchanged from before this task and still expects the same
+          // loosely-typed shape JSON.parse used to hand it directly.
+          const rawPkt = message as any;
           const epochMs = typeof rawPkt.timestamp === 'number' ? rawPkt.timestamp : Date.now();
 
           // Decoding (which mutates tcpTracker/icmpTracker with one-shot,
@@ -272,13 +316,13 @@ export default function App() {
         }
       };
 
-      ws.onerror = (error) => {
+      wsRef.current.onerror = (error) => {
         console.warn("[WirePulse] WebSocket connection failed. Agent might not be running.");
         if (connectedDelay) clearTimeout(connectedDelay);
         if (isFirstAttempt) setAgentStatus("error");
       };
 
-      ws.onclose = () => {
+      wsRef.current.onclose = () => {
         console.log(
           "[WirePulse] Disconnected from Local Agent. Reconnecting in 3s...",
         );
@@ -294,13 +338,21 @@ export default function App() {
     return () => {
       clearTimeout(reconnectTimeout);
       if (connectedDelay) clearTimeout(connectedDelay);
-      if (ws) {
-        ws.onclose = null; // prevent reconnect loop on intentional unmount/stop
-        ws.close();
+      if (wsRef.current) {
+        wsRef.current.onclose = null; // prevent reconnect loop on intentional unmount/stop
+        wsRef.current.close();
       }
       setAgentStatus("disconnected");
     };
   }, [permissions.canCapture, packetGenerator]);
+
+  const sendAgentCommand = (command: AgentCommand) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(encodeAgentCommand(command));
+    }
+  };
+
+  const agentOutdated = agentVersion !== null && isAgentOutdated(agentVersion, REQUIRED_AGENT_VERSION);
 
   // Display Filter Evaluation
   const filteredPackets = useMemo(() => {
