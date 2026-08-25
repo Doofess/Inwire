@@ -42,12 +42,11 @@ AGENT_VERSION = "2.0.0"
 
 import logging
 
-# Replaced in Task 5 by logging_setup.setup_logging(). Until then this is a
-# bare logger with no handlers, which is silent - the print() calls elsewhere
-# in this file are still the visible output.
+import logging_setup
+
+# Configured for real in main(); until then this is a plain logger, so an
+# import-time failure still has somewhere to go.
 log = logging.getLogger("netview")
-log.addHandler(logging.StreamHandler(sys.stderr))
-log.setLevel(logging.INFO)
 
 
 def make_id() -> str:
@@ -328,14 +327,14 @@ def sniff_callback(pkt):
     global _captured_count
     _captured_count += 1
     if _captured_count == 1:
-        print("[agent] first packet captured - capture is working", file=sys.stderr)
+        log.info("first packet captured - capture is working")
     elif _captured_count % 100 == 0:
-        print(f"[agent] {_captured_count} packets captured so far", file=sys.stderr)
+        log.info("%d packets captured so far", _captured_count)
 
     try:
         info = packet_to_dict(pkt)
     except Exception as exc:
-        print(f"[agent] WARNING: failed to process a captured packet: {exc}", file=sys.stderr)
+        log.warning("failed to process a captured packet: %s", exc)
         return
     if info is not None:
         agent.broadcast(info)
@@ -359,7 +358,7 @@ def list_interfaces():
             if interfaces:
                 return interfaces
         except Exception as exc:
-            print(f"[agent] could not resolve friendly adapter names ({exc}); falling back to raw list", file=sys.stderr)
+            log.warning("could not resolve friendly adapter names (%s); falling back to raw list", exc)
 
     return [(name, name) for name in get_if_list()]
 
@@ -377,7 +376,7 @@ def sniff_on_interface(iface_name, iface_label, stop_event):
         sniff(prn=sniff_callback, store=False, iface=iface_name,
               stop_filter=lambda pkt: stop_event.is_set())
     except Exception as exc:  # e.g. an adapter that's disabled/down, or Npcap missing on Windows
-        print(f"[agent] WARNING: capture failed on interface {iface_label!r} ({iface_name}): {exc}", file=sys.stderr)
+        log.warning("capture failed on interface %r (%s): %s", iface_label, iface_name, exc)
 
 
 def spawn_sniffer_thread(iface_name, stop_event):
@@ -387,8 +386,11 @@ def spawn_sniffer_thread(iface_name, stop_event):
     return t
 
 
-async def main():
-    global AVAILABLE_INTERFACES, INTERFACE_LABELS, sniffer
+async def main(to_stderr=True):
+    global AVAILABLE_INTERFACES, INTERFACE_LABELS, sniffer, log
+
+    log = logging_setup.setup_logging(config.config_dir(), to_stderr=to_stderr)
+    log.info("NetView agent %s starting", AGENT_VERSION)
 
     if not has_admin_privileges():
         hint = (
@@ -396,19 +398,19 @@ async def main():
             if os.name == "nt"
             else "Re-run with sudo, e.g.: sudo python3 agent.py"
         )
-        print(f"ERROR: Packet capture requires elevated privileges.\n{hint}", file=sys.stderr)
-        sys.exit(1)
+        log.error("packet capture requires elevated privileges. %s", hint)
+        return
 
     try:
         AVAILABLE_INTERFACES = list_interfaces()
     except Exception as exc:
-        print(f"[agent] ERROR: could not enumerate network interfaces: {exc}", file=sys.stderr)
-        sys.exit(1)
+        log.error("could not enumerate network interfaces: %s", exc)
+        return
     INTERFACE_LABELS = dict(AVAILABLE_INTERFACES)
 
-    print(f"[agent] detected {len(AVAILABLE_INTERFACES)} network interface(s):", file=sys.stderr)
+    log.info("detected %d network interface(s)", len(AVAILABLE_INTERFACES))
     for name, label in AVAILABLE_INTERFACES:
-        print(f"[agent]   {label} -> {name}", file=sys.stderr)
+        log.info("  %s -> %s", label, name)
 
     # Starts idle on purpose - sniffing now only begins when a paired client
     # sends start_capture, not automatically at process launch.
