@@ -111,8 +111,11 @@ export const AppMenu: React.FC<AppMenuProps> = ({
       <AnimatePresence>
         {open && (
           <React.Fragment key="app-menu-overlay">
-            {/* Invisible click-outside layer - a corner menu shouldn't dim
-                the whole app the way the old full-screen search overlay did. */}
+            {/* GitHub dims the page behind its Global navigation menu (a
+                scrim, not the near-opaque backdrop a centered modal gets) -
+                appropriate now that this is a full-height drawer rather than
+                a corner popover that only needed an invisible click-outside
+                layer. */}
             <motion.div
               key="app-menu-backdrop"
               initial={{ opacity: 0 }}
@@ -120,21 +123,24 @@ export const AppMenu: React.FC<AppMenuProps> = ({
               exit={{ opacity: 0 }}
               transition={{ duration: 0.15 }}
               onClick={() => setOpen(false)}
-              className="fixed inset-0 z-40"
+              className="fixed inset-0 z-40 bg-black/40"
             />
-            {/* GitHub's own panel has no entrance animation at all - it is a
-                full-screen takeover that simply appears, and all the motion
-                lives in the icon. A corner dropdown that popped in with no
-                transition beside a half-second icon morph would just read as
-                unfinished, so this keeps a short fade-and-drop on the same
-                easing curve, letting the icon stay the slower of the two. */}
+            {/* Measured from GitHub's own Global navigation menu (the ☰
+                trigger at the top-LEFT of github.com's header, not the
+                avatar menu - that one is a small anchored dropdown with no
+                slide at all): a 320px-wide, full-height panel flush against
+                the left edge, sliding in as translate(-100%) -> none over
+                250ms on cubic-bezier(0.33, 1, 0.68, 1). Unlike that trigger,
+                which stays a plain three-bar glyph, this one keeps the
+                hamburger-to-cross morph from the marketing header - GitHub
+                doesn't animate this particular icon, but a static icon next
+                to a quarter-second panel slide reads as unfinished here. */}
             <motion.div
-              initial={{ opacity: 0, y: -8, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -8, scale: 0.98 }}
-              transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-              style={{ transformOrigin: 'top right' }}
-              className="fixed top-20 right-4 sm:right-6 z-50 w-80 max-w-[calc(100vw-2rem)]"
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ duration: 0.25, ease: [0.33, 1, 0.68, 1] }}
+              className="fixed inset-y-0 left-0 z-50 w-80 max-w-full"
             >
               <Command
                 ref={commandRef}
@@ -142,9 +148,9 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                 loop
                 shouldFilter={false}
                 tabIndex={0}
-                className="w-full rounded-xl border shadow-2xl overflow-hidden bg-popover border-border text-popover-foreground outline-none"
+                className="flex flex-col h-full rounded-r-xl border shadow-2xl overflow-hidden bg-popover border-border text-popover-foreground outline-none"
               >
-                <div className="flex items-center justify-between border-b border-border px-3.5 py-2.5">
+                <div className="flex items-center justify-between border-b border-border px-3.5 py-2.5 shrink-0">
                   <span className="text-xs font-bold text-foreground">Menu</span>
                   <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0 border-border text-muted-foreground">
                     ESC
@@ -152,7 +158,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                 </div>
 
                 <Command.List
-                  className="max-h-[28rem] overflow-y-auto custom-scrollbar p-1.5
+                  className="flex-1 overflow-y-auto custom-scrollbar p-1.5
                     [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5
                     [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:font-bold
                     [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider
