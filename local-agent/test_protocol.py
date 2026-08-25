@@ -31,46 +31,26 @@ def check_true(name, condition):
     check(name, bool(condition), True)
 
 
-# --- generate_pairing_token ---
-token = agent.generate_pairing_token()
-check_true("pairing token matches XXXX-XXXX shape", re.fullmatch(r"[0-9A-F]{4}-[0-9A-F]{4}", token))
-check_true("pairing tokens are not constant across calls", agent.generate_pairing_token() != agent.generate_pairing_token())
-
 # --- build_hello_message ---
 hello = agent.build_hello_message(
-    version="1.1.0",
+    version="2.0.0",
     state="idle",
     interfaces=[("\\Device\\NPF_{ABC}", "Wi-Fi")],
-    auth_required=True,
 )
 check("hello type", hello["type"], "hello")
-check("hello version", hello["version"], "1.1.0")
+check("hello version", hello["version"], "2.0.0")
 check("hello state", hello["state"], "idle")
-check("hello authRequired", hello["authRequired"], True)
 check("hello interfaces", hello["interfaces"], [{"name": "\\Device\\NPF_{ABC}", "label": "Wi-Fi"}])
+check("hello no longer advertises authRequired", "authRequired" in hello, False)
 
-hello_no_ifaces = agent.build_hello_message(version="1.1.0", state="sniffing", interfaces=[], auth_required=False)
-check("hello with empty interfaces", hello_no_ifaces["interfaces"], [])
+hello_no_ifaces = agent.build_hello_message(version="2.0.0", state="sniffing", interfaces=[])
+check("hello with no interfaces", hello_no_ifaces["interfaces"], [])
 check("hello sniffing state", hello_no_ifaces["state"], "sniffing")
 
-# --- ConnectionAuth / is_command_allowed ---
-auth = agent.ConnectionAuth(expected_token="AAAA-BBBB")
-check("starts unauthenticated", auth.authenticated, False)
-check("wrong token rejected", auth.try_authenticate({"type": "auth", "token": "WRONG"}), False)
-check("still unauthenticated after wrong token", auth.authenticated, False)
-check("correct token accepted", auth.try_authenticate({"type": "auth", "token": "AAAA-BBBB"}), True)
-check("authenticated after correct token", auth.authenticated, True)
-
-check("start_capture gated when unauthenticated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "start_capture"}), False)
-check("stop_capture gated when unauthenticated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "stop_capture"}), False)
-check("set_interfaces gated when unauthenticated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "set_interfaces"}), False)
-
-authed = agent.ConnectionAuth("X")
-authed.try_authenticate({"type": "auth", "token": "X"})
-check("start_capture allowed once authenticated", agent.is_command_allowed(authed, {"type": "start_capture"}), True)
-
-check("auth message itself is not gated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "auth"}), True)
-check("unknown message type is not gated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "something_else"}), True)
+check("agent version is 2.0.0", agent.AGENT_VERSION, "2.0.0")
+check("pairing token generation is gone", hasattr(agent, "generate_pairing_token"), False)
+check("ConnectionAuth is gone", hasattr(agent, "ConnectionAuth"), False)
+check("is_command_allowed is gone", hasattr(agent, "is_command_allowed"), False)
 
 # --- SnifferController ---
 class FakeSpawnCalls:

@@ -35,7 +35,16 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "2.0.0"
+
+import logging
+
+# Replaced in Task 5 by logging_setup.setup_logging(). Until then this is a
+# bare logger with no handlers, which is silent - the print() calls elsewhere
+# in this file are still the visible output.
+log = logging.getLogger("netview")
+log.addHandler(logging.StreamHandler(sys.stderr))
+log.setLevel(logging.INFO)
 
 
 def make_id() -> str:
@@ -57,51 +66,19 @@ def has_admin_privileges() -> bool:
         return False
 
 
-def generate_pairing_token() -> str:
-    """A short, easy-to-type code printed to the agent's console and typed
-    once into NetView to pair. Not persisted - the agent regenerates it on
-    every launch, matching this phase's "still manually launched, console
-    visible" scope (see spec)."""
-    import secrets
-    raw = secrets.token_hex(4).upper()
-    return f"{raw[:4]}-{raw[4:]}"
+def build_hello_message(version: str, state: str, interfaces) -> dict:
+    """The first message sent on every new connection, before anything else.
 
-
-def build_hello_message(version: str, state: str, interfaces, auth_required: bool) -> dict:
-    """The first message sent on every new connection, before anything else."""
+    No `authRequired` field: by the time this is sent the connection has
+    already passed the origin check during the HTTP handshake, so there is no
+    second authentication step left to advertise.
+    """
     return {
         "type": "hello",
         "version": version,
         "state": state,
-        "authRequired": auth_required,
         "interfaces": [{"name": name, "label": label} for name, label in interfaces],
     }
-
-
-class ConnectionAuth:
-    """Per-connection pairing state. One instance per WebSocket connection -
-    pairing is not shared across connections or persisted to disk."""
-
-    def __init__(self, expected_token: str):
-        self.expected_token = expected_token
-        self.authenticated = False
-
-    def try_authenticate(self, message: dict) -> bool:
-        if message.get("type") == "auth" and message.get("token") == self.expected_token:
-            self.authenticated = True
-            return True
-        return False
-
-
-GATED_COMMAND_TYPES = {"start_capture", "stop_capture", "set_interfaces"}
-
-
-def is_command_allowed(auth: ConnectionAuth, message: dict) -> bool:
-    """Only start_capture/stop_capture/set_interfaces require pairing - hello
-    is sent unconditionally, and auth itself obviously can't require auth."""
-    if message.get("type") not in GATED_COMMAND_TYPES:
-        return True
-    return auth.authenticated
 
 
 class SnifferController:
@@ -217,26 +194,26 @@ def packet_to_dict(pkt):
 
 class AgentServer:
     def __init__(self):
-        # ws -> ConnectionAuth, rather than a bare set of sockets: broadcast
-        # needs each connection's auth state at fan-out time to gate packet
-        # messages (see _send_all), not just at command-handling time.
-        self.connections = {}
+        # A plain set of sockets. Phase 1 needed a ws -> ConnectionAuth map so
+        # packet fan-out could check each connection's pairing state; the
+        # origin check now rejects disallowed clients during the handshake, so
+        # every connection in this set is by construction an allowed one.
+        self.connections = set()
         self.loop = None
 
     async def register(self, ws):
-        auth = ConnectionAuth(PAIRING_TOKEN)
-        self.connections[ws] = auth
-        print(f"[agent] client connected ({len(self.connections)} total)")
+        self.connections.add(ws)
+        log.info("client connected (%d total)", len(self.connections))
         state = "sniffing" if sniffer.is_sniffing() else "idle"
-        await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, AVAILABLE_INTERFACES, auth_required=True)))
+        await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, AVAILABLE_INTERFACES)))
         try:
             async for raw in ws:
-                await self._handle_message(ws, auth, raw)
+                await self._handle_message(ws, raw)
         finally:
-            self.connections.pop(ws, None)
-            print(f"[agent] client disconnected ({len(self.connections)} total)")
+            self.connections.discard(ws)
+            log.info("client disconnected (%d remaining)", len(self.connections))
 
-    async def _handle_message(self, ws, auth, raw):
+    async def _handle_message(self, ws, raw):
         try:
             message = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
@@ -244,31 +221,12 @@ class AgentServer:
         if not isinstance(message, dict):
             return
 
-        if message.get("type") == "auth":
-            if auth.try_authenticate(message):
-                print("[agent] client authenticated")
-                # Positive on-the-wire confirmation, not just a console log -
-                # the frontend uses this to know pairing actually succeeded
-                # (vs. still waiting) and to re-sync capture/interface state
-                # after a reconnect. Reuses the existing state message shape.
-                await ws.send(json.dumps(sniffer.state_message(AVAILABLE_INTERFACES)))
-            else:
-                # Explicit rejection, not silence - the frontend needs this to
-                # tell "stale token from a previous agent launch" apart from
-                # "no response yet", otherwise a wrong/outdated stored token
-                # just looks like nothing happened and the pairing banner
-                # never comes back (see Task 12 Step 6).
-                await ws.send(json.dumps({"type": "error", "code": "invalid_token", "message": "Invalid pairing code."}))
-            return
-
-        if not is_command_allowed(auth, message):
-            await ws.send(json.dumps({"type": "error", "code": "not_authenticated", "message": "Not authenticated. Enter the pairing code shown in the agent console."}))
-            return
-
         msg_type = message.get("type")
         if msg_type == "start_capture":
+            log.info("start_capture requested on %d interface(s)", len(sniffer.selected_interfaces))
             sniffer.start_threads(spawn_sniffer_thread)
         elif msg_type == "stop_capture":
+            log.info("stop_capture requested")
             sniffer.stop_threads()
         elif msg_type == "set_interfaces":
             interfaces = message.get("interfaces")
@@ -276,10 +234,14 @@ class AgentServer:
                 if not interfaces:
                     # Sniffing "on zero interfaces" would otherwise succeed
                     # silently and broadcast state=sniffing while nothing is
-                    # actually captured - reject it the same way any other
-                    # invalid command is rejected.
-                    await ws.send(json.dumps({"type": "error", "code": "empty_interfaces", "message": "At least one interface must be selected."}))
+                    # actually captured.
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "code": "empty_interfaces",
+                        "message": "At least one interface must be selected.",
+                    }))
                     return
+                log.info("set_interfaces: %d interface(s) selected", len(interfaces))
                 sniffer.set_interfaces(interfaces)
                 sniffer.restart_threads(spawn_sniffer_thread)
         else:
@@ -295,24 +257,18 @@ class AgentServer:
         asyncio.run_coroutine_threadsafe(self._send_all(message), self.loop)
 
     async def _send_all(self, message: dict):
-        # Packet messages (raw captured frame bytes) only go to connections
-        # that have completed pairing - hello/state/error still reach every
-        # connection, since a client needs hello before it can even
-        # authenticate. list(...) snapshots the mapping before awaiting
-        # inside the loop, since a client connecting mid-broadcast would
-        # otherwise mutate self.connections while it's being iterated.
+        # list(...) snapshots the set before awaiting inside the loop, since a
+        # client connecting or dropping mid-broadcast would otherwise mutate
+        # self.connections while it is being iterated.
         data = json.dumps(message)
-        is_packet = message.get("type") == "packet"
         dead = []
-        for ws, auth in list(self.connections.items()):
-            if is_packet and not auth.authenticated:
-                continue
+        for ws in list(self.connections):
             try:
                 await ws.send(data)
             except websockets.ConnectionClosed:
                 dead.append(ws)
         for ws in dead:
-            self.connections.pop(ws, None)
+            self.connections.discard(ws)
 
 
 agent = AgentServer()
@@ -385,7 +341,7 @@ def spawn_sniffer_thread(iface_name, stop_event):
 
 
 async def main():
-    global AVAILABLE_INTERFACES, INTERFACE_LABELS, sniffer, PAIRING_TOKEN
+    global AVAILABLE_INTERFACES, INTERFACE_LABELS, sniffer
 
     if not has_admin_privileges():
         hint = (
@@ -410,10 +366,6 @@ async def main():
     # Starts idle on purpose - sniffing now only begins when a paired client
     # sends start_capture, not automatically at process launch.
     sniffer = SnifferController(default_interfaces=[name for name, _ in AVAILABLE_INTERFACES])
-
-    PAIRING_TOKEN = generate_pairing_token()
-    print(f"[agent] Pairing code: {PAIRING_TOKEN}", file=sys.stderr)
-    print("[agent] Enter this code in NetView to connect.", file=sys.stderr)
 
     agent.loop = asyncio.get_running_loop()
 
