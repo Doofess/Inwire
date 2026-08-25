@@ -22,6 +22,12 @@ export interface AgentStateMessage {
 export interface AgentErrorMessage {
   type: 'error';
   message: string;
+  // Discriminates why the agent rejected something - e.g. 'invalid_token'
+  // (stale/wrong pairing code, the one case that should clear the stored
+  // token) vs. 'not_authenticated' or 'empty_interfaces' (neither of which
+  // means the stored token itself is bad). Optional since older agent
+  // builds only ever sent `message`.
+  code?: string;
 }
 
 export interface AgentPacketMessage {
