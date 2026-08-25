@@ -24,6 +24,7 @@ interface HeaderProps {
   onOpenExportModal: () => void;
   onOpenIspModal?: () => void;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+  agentCaptureState: 'idle' | 'sniffing';
   agentOutdated: boolean;
   pairingRequired: boolean;
   onSubmitPairingToken: (token: string) => void;
@@ -78,6 +79,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenExportModal,
   onOpenIspModal,
   agentStatus,
+  agentCaptureState,
   agentOutdated,
   pairingRequired,
   onSubmitPairingToken,
@@ -112,6 +114,7 @@ export const Header: React.FC<HeaderProps> = ({
           onApplyFilterPreset={onApplyFilterPreset}
           permissions={permissions}
           totalPacketsCount={totalPacketsCount}
+          agentOutdated={agentOutdated}
         />
 
         {/* Title */}
@@ -177,6 +180,22 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <span>Clear Cache</span>
           </button>
+
+          {/* The agent's own `state` message is the only source of truth for
+              whether it's actually sniffing - isCapturing is just local
+              intent, which can go stale (a pre-auth click, a command sent
+              while the socket was closed, another tab stopping capture).
+              Matches the amber styling of the Agent Outdated pill rather
+              than inventing a new visual language for "something's off". */}
+          {isCapturing && agentCaptureState === 'idle' && (
+            <span
+              className="hidden sm:inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-full border font-mono bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400"
+              title="Capture was requested but the agent reports it is idle - it may not be paired yet, or the command didn't reach it."
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 dark:bg-amber-400" />
+              <span>Agent Idle</span>
+            </span>
+          )}
         </div>
       </div>
 
