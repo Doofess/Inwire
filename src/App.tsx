@@ -11,6 +11,7 @@ import { PacketGenerator } from "./services/packetGenerator";
 import { decodeRawEthernetPacket } from "./services/pcapParser";
 import { TcpStreamTracker } from "./services/tcpStreamTracker";
 import { IcmpEchoTracker } from "./services/icmpEchoTracker";
+import { QuicFlowTracker } from "./services/quicFlowTracker";
 import { FilterEngine } from "./services/filterEngine";
 import { CustomDissectorEngine } from "./services/customDissectorEngine";
 import { ColorRulesEngine } from "./services/colorRules";
@@ -136,6 +137,7 @@ export default function App() {
   );
   const tcpTracker = useMemo(() => new TcpStreamTracker(), []);
   const icmpTracker = useMemo(() => new IcmpEchoTracker(), []);
+  const quicTracker = useMemo(() => new QuicFlowTracker(), []);
 
   // Track the latest isCapturing value for the always-on agent connection
   // below, whose handlers are set up once and must not go stale.
@@ -219,7 +221,7 @@ export default function App() {
             // like an imported pcap file would be dissected.
             const binaryString = atob(rawPkt.raw);
             const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
-            const decoded = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker, icmpTracker);
+            const decoded = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker, icmpTracker, quicTracker);
             safePkt = decoded.packet;
             icmpMatchedRequestFrameId = decoded.icmpMatchedRequestFrameId;
           } else {
@@ -382,6 +384,7 @@ export default function App() {
     packetGenerator.reset();
     tcpTracker.reset();
     icmpTracker.reset();
+    quicTracker.reset();
     // Clearing the buffer is the only way a fresh capture begins, so this is
     // where the relative-time clock resets. captureStartRef === null is then
     // a reliable, side-effect-free "this is the first packet of a capture"

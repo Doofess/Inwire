@@ -20,6 +20,7 @@ export class TcpStreamTracker {
   private connState = new Map<number, { sawSyn: boolean; sawSynAck: boolean; sawFinOrRst: boolean }>();
   private lastWasKeepAlive = new Map<string, boolean>();
   private windowScaleShift = new Map<string, number>();
+  private highestAckSent = new Map<string, number>();
 
   private connectionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
     const a = `${srcIp}:${srcPort}`;
@@ -152,13 +153,30 @@ export class TcpStreamTracker {
    * True when this packet acknowledges data the capture never contained -
    * Wireshark's "[TCP ACKed unseen segment]". Compares against how far the
    * *peer* direction has actually been seen to send.
+   *
+   * Only an ack that *advances* past the highest one already flagged counts.
+   * A gap is reported once, when it is first revealed; a burst of ACKs that
+   * all name the same missing byte describes one gap, not several, and
+   * Wireshark flags only the first. Without this, a retransmitted or
+   * duplicate ACK re-flags a gap that was already accounted for.
    */
   public isAckingUnseenSegment(
     srcIp: string, srcPort: number, dstIp: string, dstPort: number, ackNum: number
   ): boolean {
     const peerExpectedNext = this.getExpectedNext(dstIp, dstPort, srcIp, srcPort);
     if (peerExpectedNext === undefined) return false;
-    return ((ackNum - peerExpectedNext) | 0) > 0;
+
+    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
+    const highestAcked = this.highestAckSent.get(directionKey);
+    const threshold =
+      highestAcked !== undefined && ((highestAcked - peerExpectedNext) | 0) > 0
+        ? highestAcked
+        : peerExpectedNext;
+
+    if (highestAcked === undefined || ((ackNum - highestAcked) | 0) > 0) {
+      this.highestAckSent.set(directionKey, ackNum);
+    }
+    return ((ackNum - threshold) | 0) > 0;
   }
 
   /**
@@ -250,6 +268,7 @@ export class TcpStreamTracker {
     this.connState.clear();
     this.lastWasKeepAlive.clear();
     this.windowScaleShift.clear();
+    this.highestAckSent.clear();
     this.nextStreamId = 0;
   }
 }

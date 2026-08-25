@@ -1,6 +1,13 @@
 import { Packet, ProtocolLayer, ProtocolField, AnomalyInfo } from '../types/packet';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacVendor, resolveMacName } from './macVendors';
+import { formatMac, formatIpv4Address, formatIpv6Address } from './addressFormat';
+import { dissectArp, dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
+import { dissectTls } from './dissectors/tls';
+import { dissectDns } from './dissectors/dns';
+import { dissectQuicDatagram } from './dissectors/quic';
+import { dissectIeee1905 } from './dissectors/ieee1905';
+import { QuicFlowTracker } from './quicFlowTracker';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 
 /**
@@ -307,6 +314,7 @@ export class PcapService {
     let prevNanos: bigint | null = null;
     const tcpTracker = new TcpStreamTracker();
     const icmpTracker = new IcmpEchoTracker();
+    const quicTracker = new QuicFlowTracker();
 
     for (const frame of frames) {
       if (baseNanos === null) baseNanos = frame.tsNanos;
@@ -320,7 +328,7 @@ export class PcapService {
       const epochMs = Number(frame.tsNanos / 1_000_000n);
 
       const { packet, icmpMatchedRequestFrameId } = decodeRawEthernetPacket(
-        frame.rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, frame.origLen, tcpTracker, icmpTracker
+        frame.rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, frame.origLen, tcpTracker, icmpTracker, quicTracker
       );
       packet.tsPrecision = frame.tsPrecision;
       parsedPackets.push(packet);
@@ -408,7 +416,8 @@ export function decodeRawEthernetPacket(
   timeDelta: number,
   origLen: number,
   tcpTracker?: TcpStreamTracker,
-  icmpTracker?: IcmpEchoTracker
+  icmpTracker?: IcmpEchoTracker,
+  quicTracker?: QuicFlowTracker
 ): { packet: Packet; icmpMatchedRequestFrameId?: number } {
   const hexDump = formatHexDump(rawBytes);
   const asciiDump = formatAsciiDump(rawBytes);
@@ -503,6 +512,36 @@ export function decodeRawEthernetPacket(
     vlanDepth++;
   }
 
+  // Link-layer protocols that carry no IP header. These have to be dispatched
+  // before the IPv4/IPv6 branches, and without them a frame keeps this
+  // function's fallback protocol - which is why ARP and STP frames used to be
+  // labeled "TCP" and summarized as "Frame (N bytes)".
+  //
+  // An ethertype field <= 1500 is really an 802.3 *length*, and what follows
+  // is an LLC header (DSAP/SSAP/Control) rather than a network-layer header.
+  // DSAP 0x42 is the Spanning Tree Protocol's service access point.
+  const isLlcFrame = currentEtherType <= 1500;
+  let l2Result: L2DissectorResult | null = null;
+  if (currentEtherType === 0x0806) {
+    l2Result = dissectArp(rawBytes, l3Offset);
+  } else if (currentEtherType === 0x893a) {
+    l2Result = dissectIeee1905(rawBytes, l3Offset);
+  } else if (isLlcFrame && rawBytes.length > l3Offset && rawBytes[l3Offset] === 0x42) {
+    l2Result = dissectStp(rawBytes, l3Offset);
+  }
+
+  if (l2Result) {
+    protocolLabel = l2Result.protocolLabel;
+    proto = l2Result.protocolLabel === 'ARP' ? 'ARP' : 'TCP';
+    info = l2Result.info;
+    layers.push(l2Result.layer);
+  } else if (currentEtherType !== 0x0800 && currentEtherType !== 0x86dd) {
+    // Not dissected, but still nameable from the ethertype - better an honest
+    // "ieee1905" than an inherited default of "TCP".
+    protocolLabel = labelForEtherType(currentEtherType)
+      ?? (isLlcFrame ? 'LLC' : `0x${currentEtherType.toString(16).padStart(4, '0')}`);
+  }
+
   // IPv4 Decode
   if (currentEtherType === 0x0800 && rawBytes.length >= l3Offset + 20) {
     const ipHeaderLen = (rawBytes[l3Offset] & 0x0f) * 4;
@@ -570,7 +609,7 @@ export function decodeRawEthernetPacket(
     layers.push(ipLayer);
 
     const transportOffset = l3Offset + ipHeaderLen;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen);
+    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen, quicTracker);
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
@@ -629,7 +668,7 @@ export function decodeRawEthernetPacket(
     const transportOffset = l3Offset + 40;
     const transport = isMalformedJumbo
       ? null
-      : decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, ipv6PayloadLen);
+      : decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, ipv6PayloadLen, quicTracker);
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
@@ -682,11 +721,6 @@ export function decodeRawEthernetPacket(
   };
 }
 
-function formatMac(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join(':');
-}
 
 function describeEtherType(etherType: number): string {
   switch (etherType) {
@@ -709,35 +743,85 @@ function describeEtherType(etherType: number): string {
  * Without this an address renders as 39 characters of zero-padded groups,
  * which both diverges from Wireshark and overflows the address column.
  */
-function formatIpv6Address(bytes: Uint8Array, offset: number): string {
-  const groups: number[] = [];
-  for (let i = 0; i < 8; i++) {
-    groups.push((bytes[offset + i * 2] << 8) | bytes[offset + i * 2 + 1]);
+
+/**
+ * Reads the first CRLF-terminated ASCII line of a text protocol payload
+ * (SSDP's "M-SEARCH * HTTP/1.1", HTTP's request line). Returns null unless the
+ * line is entirely printable and plausibly a request line, so binary payloads
+ * on the same port don't produce mojibake in the Info column.
+ */
+function readAsciiRequestLine(rawBytes: Uint8Array, payloadStart: number): string | null {
+  const limit = Math.min(rawBytes.length, payloadStart + 256);
+  let end = payloadStart;
+  while (end < limit && rawBytes[end] !== 0x0d && rawBytes[end] !== 0x0a) {
+    const byte = rawBytes[end];
+    if (byte < 0x20 || byte > 0x7e) return null;
+    end++;
   }
+  if (end === payloadStart || end >= limit) return null;
+  return new TextDecoder().decode(rawBytes.subarray(payloadStart, end));
+}
 
-  let bestStart = -1;
-  let bestLen = 0;
-  let runStart = -1;
-  for (let i = 0; i <= 8; i++) {
-    if (i < 8 && groups[i] === 0) {
-      if (runStart === -1) runStart = i;
-    } else if (runStart !== -1) {
-      const runLen = i - runStart;
-      // Strictly greater keeps the leftmost run when two are the same length.
-      if (runLen > bestLen) {
-        bestStart = runStart;
-        bestLen = runLen;
-      }
-      runStart = -1;
-    }
+/**
+ * Walks an ICMPv6 Neighbor Discovery option list, looking for one option type.
+ * Options start after the message body and are each a type byte, a length in
+ * 8-byte units (a zero length would mean an infinite loop, so it terminates),
+ * and the option data.
+ */
+function findNdpOption(rawBytes: Uint8Array, optionsStart: number, wantedType: number): Uint8Array | null {
+  let offset = optionsStart;
+  while (offset + 2 <= rawBytes.length) {
+    const type = rawBytes[offset];
+    const lengthUnits = rawBytes[offset + 1];
+    if (lengthUnits === 0) return null;
+    const optionEnd = offset + lengthUnits * 8;
+    if (optionEnd > rawBytes.length) return null;
+    if (type === wantedType) return rawBytes.subarray(offset + 2, optionEnd);
+    offset = optionEnd;
   }
+  return null;
+}
 
-  const hex = groups.map(g => g.toString(16));
-  if (bestLen < 2) return hex.join(':');
+/**
+ * "Neighbor Solicitation for fe80::17a6:fd9a:5a8c:e5bf from 44:15:24:5d:cc:62"
+ *
+ * Layout after the 4-byte ICMPv6 header: 4 reserved bytes, the 16-byte target
+ * address, then options. Option type 1 is the sender's link-layer address.
+ */
+function describeNeighborSolicitation(rawBytes: Uint8Array, transportOffset: number): string {
+  const targetOffset = transportOffset + 8;
+  if (targetOffset + 16 > rawBytes.length) return 'Neighbor Solicitation';
 
-  const head = hex.slice(0, bestStart).join(':');
-  const tail = hex.slice(bestStart + bestLen).join(':');
-  return `${head}::${tail}`;
+  const target = formatIpv6Address(rawBytes, targetOffset);
+  const sourceLinkAddr = findNdpOption(rawBytes, targetOffset + 16, 1);
+  return sourceLinkAddr && sourceLinkAddr.length >= 6
+    ? `Neighbor Solicitation for ${target} from ${formatMac(sourceLinkAddr.subarray(0, 6))}`
+    : `Neighbor Solicitation for ${target}`;
+}
+
+/**
+ * "Neighbor Advertisement fe80::17a6:... (sol, ovr) is at 04:7c:16:52:db:17"
+ *
+ * Same layout as a solicitation, except the first reserved byte carries the
+ * Router/Solicited/Override flags, and option type 2 is the target's
+ * link-layer address.
+ */
+function describeNeighborAdvertisement(rawBytes: Uint8Array, transportOffset: number): string {
+  const targetOffset = transportOffset + 8;
+  if (targetOffset + 16 > rawBytes.length) return 'Neighbor Advertisement';
+
+  const target = formatIpv6Address(rawBytes, targetOffset);
+  const flagBits = rawBytes[transportOffset + 4];
+  const flags: string[] = [];
+  if (flagBits & 0x80) flags.push('rtr');
+  if (flagBits & 0x40) flags.push('sol');
+  if (flagBits & 0x20) flags.push('ovr');
+  const flagText = flags.length > 0 ? ` (${flags.join(', ')})` : '';
+
+  const targetLinkAddr = findNdpOption(rawBytes, targetOffset + 16, 2);
+  return targetLinkAddr && targetLinkAddr.length >= 6
+    ? `Neighbor Advertisement ${target}${flagText} is at ${formatMac(targetLinkAddr.subarray(0, 6))}`
+    : `Neighbor Advertisement ${target}${flagText}`;
 }
 
 /**
@@ -762,7 +846,8 @@ function decodeTransportLayer(
    * padded up to a 60-byte minimum, so deriving TCP payload length from
    * rawBytes.length would count that padding as payload.
    */
-  l4SegmentLen?: number
+  l4SegmentLen?: number,
+  quicTracker?: QuicFlowTracker
 ): {
   proto: Packet['protocol'];
   protocolLabel?: string;
@@ -814,8 +899,14 @@ function decodeTransportLayer(
     if (ece) flagList.push('ECE');
     if (cwr) flagList.push('CWR');
 
+    // Port only *hints* at the protocol. Whether the frame actually gets a TLS
+    // label depends on it containing a real TLS record, checked further down
+    // once the payload boundaries are known - a bare ACK or keep-alive on a
+    // 443 connection is a plain TCP frame to Wireshark, not a TLS one.
+    const isTlsPort = srcPort === 443 || dstPort === 443;
     let proto: Packet['protocol'] = 'TCP';
-    if (srcPort === 443 || dstPort === 443) proto = 'TLS';
+    let protocolLabel: string | undefined;
+    if (isTlsPort) proto = 'TLS';
     else if (srcPort === 80 || dstPort === 80) proto = 'HTTP';
     else if (srcPort === 22 || dstPort === 22) proto = 'SSH';
 
@@ -846,10 +937,23 @@ function decodeTransportLayer(
     const payloadLength = l4SegmentLen !== undefined && l4SegmentLen >= tcpHeaderLen
       ? Math.max(0, Math.min(capturedPayloadLength, l4SegmentLen - tcpHeaderLen))
       : capturedPayloadLength;
+    // Try the TLS record layer before anything else claims the payload. A hit
+    // gives both the versioned Protocol label and the Info summary; a miss
+    // means the frame is plain TCP however suggestive its port number is.
+    const tlsResult = payloadLength > 0
+      ? dissectTls(rawBytes, tcpPayloadStart, Math.min(rawBytes.length, tcpPayloadStart + payloadLength))
+      : null;
+    if (tlsResult) {
+      proto = 'TLS';
+      protocolLabel = tlsResult.protocolLabel;
+    } else if (proto === 'TLS') {
+      proto = 'TCP';
+    }
+
     // TLS payloads are encrypted from essentially the first byte - never
     // scan them, since any "match" there would be a false positive.
     const tcpHost =
-      proto !== 'TLS' && tcpPayloadStart < rawBytes.length
+      !isTlsPort && tcpPayloadStart < rawBytes.length
         ? extractLiteralUrlOrHost(rawBytes, tcpPayloadStart)
         : null;
     // Register this direction's window scale before anything reads it back, so
@@ -959,20 +1063,27 @@ function decodeTransportLayer(
     if (status === 'retransmit') { expertTags.push('[TCP Retransmission]'); analysisFlags.push('retransmission'); }
     else if (status === 'warning') { expertTags.push('[TCP Out-Of-Order]'); analysisFlags.push('out_of_order'); }
 
-    const infoParts = [
-      `${srcPort} → ${dstPort}`,
-      `[${flagList.join(', ')}]`,
-      `Seq=${relSeq}`,
-      ...(ack ? [`Ack=${relAck}`] : []),
-      `Win=${windowSize}`,
-      `Len=${payloadLength}`,
-      ...(optionsSummary ? [optionsSummary] : []),
-      ...(tcpHost ? [tcpHost] : []),
-    ];
+    // When a subdissector claimed the payload, its summary *replaces* the TCP
+    // one - Wireshark shows "Application Data", not the ports and sequence
+    // numbers underneath it. Expert tags still lead, since they describe the
+    // segment rather than its contents.
+    const infoParts = tlsResult
+      ? [tlsResult.info]
+      : [
+          `${srcPort} → ${dstPort}`,
+          `[${flagList.join(', ')}]`,
+          `Seq=${relSeq}`,
+          ...(ack ? [`Ack=${relAck}`] : []),
+          `Win=${windowSize}`,
+          `Len=${payloadLength}`,
+          ...(optionsSummary ? [optionsSummary] : []),
+          ...(tcpHost ? [tcpHost] : []),
+        ];
     const info = `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
 
     return {
       proto,
+      protocolLabel,
       srcPort,
       dstPort,
       info,
@@ -1019,7 +1130,16 @@ function decodeTransportLayer(
     const udpLen = (rawBytes[transportOffset + 4] << 8) | rawBytes[transportOffset + 5];
 
     let proto: Packet['protocol'] = 'UDP';
-    if (srcPort === 53 || dstPort === 53) proto = 'DNS';
+    let protocolLabel: string | undefined;
+    // The DNS wire format is reused verbatim by mDNS, LLMNR and NBNS; each
+    // keeps its own name in the Protocol column while sharing the dissector.
+    const dnsPortLabel =
+      srcPort === 53 || dstPort === 53 ? 'DNS' :
+      srcPort === 5353 || dstPort === 5353 ? 'MDNS' :
+      srcPort === 5355 || dstPort === 5355 ? 'LLMNR' :
+      srcPort === 137 || dstPort === 137 ? 'NBNS' :
+      undefined;
+    if (dnsPortLabel) proto = 'DNS';
     else if (srcPort === 1883 || dstPort === 1883) proto = 'MQTT';
 
     // QUIC (HTTP/3) rides on UDP:443 and, like TLS, is encrypted from
@@ -1027,19 +1147,67 @@ function decodeTransportLayer(
     // wire-format decode, everything else gets the literal-prefix scan.
     const udpPayloadStart = transportOffset + 8;
     const isQuic = srcPort === 443 || dstPort === 443;
-    let udpHost: string | null = null;
-    if (proto === 'DNS') {
-      udpHost = decodeDnsQueryName(rawBytes, udpPayloadStart);
-    } else if (!isQuic && udpPayloadStart < rawBytes.length) {
-      udpHost = extractLiteralUrlOrHost(rawBytes, udpPayloadStart);
-    }
+    const isSsdp = srcPort === 1900 || dstPort === 1900;
+
     // The UDP header's Length field counts the 8-byte header itself, but
     // Wireshark's "Len=" - like TCP's - reports payload only.
     const udpPayloadLen = Math.max(0, udpLen - 8);
-    const info = `${srcPort} → ${dstPort} Len=${udpPayloadLen}${udpHost ? ' ' + udpHost : ''}`;
+
+    // Each subdissector that claims the payload replaces the generic
+    // "src → dst Len=n" summary entirely, the way Wireshark does.
+    let info: string | null = null;
+
+    if (dnsPortLabel) {
+      const dnsInfo = dissectDns(rawBytes, udpPayloadStart);
+      if (dnsInfo) {
+        protocolLabel = dnsPortLabel;
+        info = dnsInfo;
+      }
+    } else if (isSsdp) {
+      const requestLine = readAsciiRequestLine(rawBytes, udpPayloadStart);
+      if (requestLine) {
+        protocolLabel = 'SSDP';
+        // Wireshark's HTTP-style dissectors emit a trailing space after the
+        // request line; kept so the diff against tshark is exact.
+        info = `${requestLine} `;
+      }
+    } else if (isQuic) {
+      // A short header is only identifiable as QUIC in the context of a
+      // handshake already seen on this flow, so packets that precede one stay
+      // plain UDP - which is what Wireshark reports for them too.
+      const isShortHeaderCandidate = udpPayloadStart < rawBytes.length && (rawBytes[udpPayloadStart] & 0x80) === 0;
+      const flowIsKnown = quicTracker?.isKnownFlow(srcIp, srcPort, dstIp, dstPort) ?? false;
+
+      if (!isShortHeaderCandidate || flowIsKnown) {
+        const knownConnectionId = isShortHeaderCandidate
+          ? quicTracker?.matchConnectionId(srcIp, srcPort, dstIp, dstPort, rawBytes, udpPayloadStart + 1)
+          : undefined;
+        const quic = dissectQuicDatagram(
+          rawBytes, udpPayloadStart, Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen), knownConnectionId
+        );
+        if (quic) {
+          if (quic.isLongHeader) {
+            quicTracker?.noteLongHeader(srcIp, srcPort, dstIp, dstPort, quic.connectionIds);
+          }
+          proto = 'QUIC';
+          protocolLabel = 'QUIC';
+          info = quic.info;
+        }
+      }
+    }
+
+    if (info === null) {
+      // QUIC and DNS payloads are either encrypted or already structured, so
+      // the literal-prefix scan only runs on everything else.
+      const udpHost = !isQuic && !dnsPortLabel && udpPayloadStart < rawBytes.length
+        ? extractLiteralUrlOrHost(rawBytes, udpPayloadStart)
+        : null;
+      info = `${srcPort} → ${dstPort} Len=${udpPayloadLen}${udpHost ? ' ' + udpHost : ''}`;
+    }
 
     return {
       proto,
+      protocolLabel,
       srcPort,
       dstPort,
       info,
@@ -1061,6 +1229,7 @@ function decodeTransportLayer(
     // Neighbor Discovery messages (router/neighbor solicitation/advertisement)
     // that make up most real-world ICMPv6 traffic.
     const isIcmpv6 = ipProtocolNum === 58;
+    const icmpProtocolLabel = isIcmpv6 ? 'ICMPv6' : 'ICMP';
     const icmpType = rawBytes[transportOffset];
     const icmpCode = rawBytes[transportOffset + 1];
     const isEchoRequest = isIcmpv6 ? icmpType === 128 : icmpType === 8;
@@ -1080,9 +1249,13 @@ function decodeTransportLayer(
         case 129: info = 'Echo (ping) reply'; break;
         case 133: info = 'Router Solicitation'; break;
         case 134: info = 'Router Advertisement'; break;
-        case 135: info = 'Neighbor Solicitation'; break;
-        case 136: info = 'Neighbor Advertisement'; break;
+        case 135: info = describeNeighborSolicitation(rawBytes, transportOffset); break;
+        case 136: info = describeNeighborAdvertisement(rawBytes, transportOffset); break;
         case 137: info = 'Redirect'; break;
+        case 130: info = 'Multicast Listener Query'; break;
+        case 131: info = 'Multicast Listener Report'; break;
+        case 132: info = 'Multicast Listener Done'; break;
+        case 143: info = 'Multicast Listener Report Message v2'; break;
         default: info = `ICMPv6 Type ${icmpType} Code ${icmpCode}`;
       }
     } else if (icmpType === 8) {
@@ -1127,6 +1300,7 @@ function decodeTransportLayer(
 
     return {
       proto: 'ICMP',
+      protocolLabel: icmpProtocolLabel,
       info,
       icmpMatchedRequestFrameId,
       layer: {

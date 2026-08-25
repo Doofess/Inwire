@@ -128,9 +128,12 @@ async function main() {
 
     if (diffs.length > 0) {
       console.log(`\n--- ${column.name}: ${diffs.length} mismatch(es) ---`);
-      // Cap the dump so one badly-broken column doesn't bury the others.
-      console.log(diffs.slice(0, 12).join('\n'));
-      if (diffs.length > 12) console.log(`  ... and ${diffs.length - 12} more`);
+      // Cap the dump so one badly-broken column doesn't bury the others;
+      // PARITY_MAX_DIFFS=0 shows everything when working a specific column.
+      const cap = process.env.PARITY_MAX_DIFFS === undefined ? 12 : Number(process.env.PARITY_MAX_DIFFS);
+      const shown = cap === 0 ? diffs : diffs.slice(0, cap);
+      console.log(shown.join('\n'));
+      if (shown.length < diffs.length) console.log(`  ... and ${diffs.length - shown.length} more`);
     }
   }
 
