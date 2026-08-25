@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { ColorRule, UserRolePermissions } from '../../types/packet';
-import { ColorRulesEngine } from '../../services/colorRules';
+import { ColorRulesEngine, resolveRuleColors } from '../../services/colorRules';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { Palette, Plus, Trash2, Check, X, Shield } from 'lucide-react';
 
@@ -10,6 +10,7 @@ interface ColorRulesModalProps {
   onUpdateRules: () => void;
   onClose: () => void;
   permissions: UserRolePermissions;
+  isDark: boolean;
 }
 
 export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
@@ -17,6 +18,7 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
   onUpdateRules,
   onClose,
   permissions,
+  isDark,
 }) => {
   const [rules, setRules] = useState<ColorRule[]>([...colorEngine.getRules()]);
 
@@ -77,11 +79,15 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
 
         {/* Rules Table */}
         <div className="flex-1 overflow-y-auto p-5 space-y-2 custom-scrollbar">
-          {rules.map(rule => (
+          {rules.map(rule => {
+            // Preview the pair the packet list will actually paint under the
+            // current theme, not the dark one unconditionally.
+            const swatch = resolveRuleColors(rule, isDark);
+            return (
             <div
               key={rule.id}
               className="p-3 rounded-lg border flex items-center justify-between gap-3 text-xs transition-colors bg-muted/60 border-border"
-              style={{ borderLeftColor: rule.textColor, borderLeftWidth: '4px' }}
+              style={{ borderLeftColor: swatch.color, borderLeftWidth: '4px' }}
             >
               <div className="flex items-center gap-3 flex-1 min-w-0">
                 <input
@@ -100,7 +106,7 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
               {/* Color swatch preview */}
               <div
                 className="px-3 py-1 rounded font-mono text-[11px] font-semibold border"
-                style={{ backgroundColor: rule.bgColor, color: rule.textColor, borderColor: rule.textColor }}
+                style={{ backgroundColor: swatch.background, color: swatch.color, borderColor: swatch.color }}
               >
                 Sample Frame
               </div>
@@ -114,7 +120,8 @@ export const ColorRulesModal: React.FC<ColorRulesModalProps> = ({
                 </button>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Footer */}

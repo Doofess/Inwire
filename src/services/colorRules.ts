@@ -11,10 +11,19 @@ import { FilterEngine } from './filterEngine';
  * kept identical to Wireshark's because that is what makes a frame-by-frame
  * diff against `tshark -e frame.coloring_rule.name` a meaningful test.
  *
- * The colors are not Wireshark's. Its defaults are pastel fills designed for a
- * light packet list (TCP #E7E6FF, UDP #DAEEFF, Broadcast pure white); dropped
- * into a dark UI they read as glare. Each rule keeps Wireshark's *hue* and its
- * relative emphasis, re-derived for a dark ground.
+ * Each rule carries two palettes, because NetView's packet list follows the
+ * app theme and a single pair cannot serve both grounds:
+ *
+ *   - `lightBgColor`/`lightTextColor` are Wireshark's own defaults, taken
+ *     verbatim from its shipped `colorfilters` file and converted from its
+ *     16-bit channels to hex. In light mode the list is pixel-comparable to
+ *     Wireshark, including the details that look like bugs but aren't: the
+ *     Broadcast rule really does paint a white row, and the five "something is
+ *     wrong" rules really do use a dark slate fill even in the light profile.
+ *   - `bgColor`/`textColor` are dark-adapted. Wireshark's pastel fills (TCP
+ *     #e7e5ff, UDP #daeeff, Broadcast pure white) read as glare on a dark UI,
+ *     so each rule keeps Wireshark's *hue* and relative emphasis, re-derived
+ *     for a dark ground.
  */
 export const DEFAULT_COLOR_RULES: ColorRule[] = [
   {
@@ -25,6 +34,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'tcp.analysis.flags && !tcp.analysis.window_update && !tcp.analysis.keep_alive && !tcp.analysis.keep_alive_ack',
     bgColor: '#2a1416',
     textColor: '#f78787',
+    lightBgColor: '#12272e',
+    lightTextColor: '#f78787',
     enabled: true,
   },
   {
@@ -33,6 +44,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'hsrp.state != 8 && hsrp.state != 16',
     bgColor: '#2b2716',
     textColor: '#fffc9c',
+    lightBgColor: '#12272e',
+    lightTextColor: '#fffc9c',
     enabled: true,
   },
   {
@@ -43,6 +56,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'stp.type == 0x80',
     bgColor: '#2b2716',
     textColor: '#fffc9c',
+    lightBgColor: '#12272e',
+    lightTextColor: '#fffc9c',
     enabled: true,
   },
   {
@@ -51,6 +66,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'ospf.msg != 1',
     bgColor: '#2b2716',
     textColor: '#fffc9c',
+    lightBgColor: '#12272e',
+    lightTextColor: '#fffc9c',
     enabled: true,
   },
   {
@@ -59,6 +76,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'icmp.type in { 3..5, 11 } || icmpv6.type in { 1..4 }',
     bgColor: '#1c2a18',
     textColor: '#b7f774',
+    lightBgColor: '#12272e',
+    lightTextColor: '#b7f774',
     enabled: true,
   },
   {
@@ -67,6 +86,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'arp',
     bgColor: '#2e2a1c',
     textColor: '#e8dca8',
+    lightBgColor: '#faf0d7',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -75,6 +96,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'icmp || icmpv6',
     bgColor: '#2b1e2e',
     textColor: '#f0c4f7',
+    lightBgColor: '#fce0ff',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -83,6 +106,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'tcp.flags.reset eq 1',
     bgColor: '#4a0000',
     textColor: '#fffc9c',
+    lightBgColor: '#a40000',
+    lightTextColor: '#fffc9c',
     enabled: true,
   },
   {
@@ -91,6 +116,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'sctp.chunk_type eq ABORT',
     bgColor: '#4a0000',
     textColor: '#fffc9c',
+    lightBgColor: '#a40000',
+    lightTextColor: '#fffc9c',
     enabled: true,
   },
   {
@@ -99,6 +126,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: '(ip.dst != 224.0.0.0/4 && ip.ttl < 5 && !(pim || ospf || eigrp || bgp || tcp.port == 179)) || (ip.dst == 224.0.0.0/24 && ip.dst != 224.0.0.251 && ip.ttl != 1 && !(vrrp || carp || eigrp || rip || glbp))',
     bgColor: '#4a0000',
     textColor: '#ecf0eb',
+    lightBgColor: '#a40000',
+    lightTextColor: '#ecf0eb',
     enabled: true,
   },
   {
@@ -107,6 +136,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: '(ipv6.dst != ff00::/8 && ipv6.hlim < 5 && !(ospf || bgp || tcp.port == 179)) || (ipv6.dst == ff00::/8 && ipv6.hlim not in { 1, 64, 255 })',
     bgColor: '#4a0000',
     textColor: '#ecf0eb',
+    lightBgColor: '#a40000',
+    lightTextColor: '#ecf0eb',
     enabled: true,
   },
   {
@@ -115,6 +146,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'eth.fcs.status == "Bad" || ip.checksum.status == "Bad" || tcp.checksum.status == "Bad" || udp.checksum.status == "Bad"',
     bgColor: '#2a1416',
     textColor: '#f78787',
+    lightBgColor: '#12272e',
+    lightTextColor: '#f78787',
     // Off by default, matching Wireshark: NIC checksum offload means a frame
     // captured on the host that sent it has not had its checksum filled in
     // yet, so validating locally-captured traffic paints half the list red.
@@ -126,6 +159,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'smb || nbss || nbns || netbios',
     bgColor: '#2c2c18',
     textColor: '#f2f0c0',
+    lightBgColor: '#feffd0',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -134,6 +169,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'http || tcp.port == 80 || http2',
     bgColor: '#1c2a18',
     textColor: '#c8f0a0',
+    lightBgColor: '#e4ffc7',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -142,6 +179,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'dcerpc',
     bgColor: '#241a30',
     textColor: '#c797ff',
+    lightBgColor: '#c797ff',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -150,6 +189,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'hsrp || eigrp || ospf || bgp || cdp || vrrp || carp || gvrp || igmp || ismp',
     bgColor: '#2b2418',
     textColor: '#ecd9a8',
+    lightBgColor: '#fff3d5',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -158,6 +199,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'tcp.flags & 0x02 || tcp.flags.fin == 1',
     bgColor: '#262626',
     textColor: '#c8c8c8',
+    lightBgColor: '#a0a0a0',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -166,6 +209,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'tcp',
     bgColor: '#1e1e2a',
     textColor: '#c5c4e8',
+    lightBgColor: '#e7e5ff',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -174,6 +219,8 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'udp',
     bgColor: '#182430',
     textColor: '#afd4f0',
+    lightBgColor: '#daeeff',
+    lightTextColor: '#12272e',
     enabled: true,
   },
   {
@@ -184,6 +231,10 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'eth[0] & 1',
     bgColor: '#202020',
     textColor: '#7a7d76',
+    // White, exactly as Wireshark has it: a broadcast row is deliberately the
+    // plainest thing in the list, distinguished only by its grey text.
+    lightBgColor: '#ffffff',
+    lightTextColor: '#babdb6',
     enabled: true,
   },
 ];
@@ -191,6 +242,21 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
 interface CompiledRule {
   rule: ColorRule;
   matcher: (p: Packet) => boolean;
+}
+
+/**
+ * The background/foreground one rule contributes on the current theme.
+ *
+ * A rule with no light palette - which every user-defined rule is, since the
+ * editor collects a single pair - falls back to its dark one rather than
+ * rendering nothing, so a custom rule still colors its rows in both themes.
+ */
+export function resolveRuleColors(rule: ColorRule, isDark: boolean): { background: string; color: string } {
+  if (isDark) return { background: rule.bgColor, color: rule.textColor };
+  return {
+    background: rule.lightBgColor ?? rule.bgColor,
+    color: rule.lightTextColor ?? rule.textColor,
+  };
 }
 
 export class ColorRulesEngine {
@@ -253,8 +319,7 @@ export class ColorRulesEngine {
       try {
         if (matcher(packet)) {
           return {
-            background: rule.bgColor,
-            color: rule.textColor,
+            ...resolveRuleColors(rule, isDark),
             borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)',
           };
         }

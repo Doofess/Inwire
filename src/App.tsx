@@ -708,6 +708,7 @@ export default function App() {
             onUpdateRules={() => setPackets([...packets])}
             onClose={() => setShowColorRulesModal(false)}
             permissions={permissions}
+            isDark={isDark}
           />
         )}
       </AnimatePresence>

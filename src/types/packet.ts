@@ -139,8 +139,17 @@ export interface ColorRule {
   id: string;
   name: string;
   filter: string;
+  /** Colors used on a dark packet list. */
   bgColor: string;
   textColor: string;
+  /**
+   * Colors used on a light packet list. Optional so a user-defined rule can
+   * supply a single pair and have it apply to both themes; the built-in rules
+   * set both, because a palette tuned for a dark ground is unreadable on a
+   * light one (and vice versa).
+   */
+  lightBgColor?: string;
+  lightTextColor?: string;
   enabled: boolean;
 }
 
