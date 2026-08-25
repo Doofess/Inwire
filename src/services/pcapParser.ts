@@ -1,6 +1,6 @@
 import { Packet, ProtocolLayer, ProtocolField, AnomalyInfo } from '../types/packet';
 import { TcpStreamTracker } from './tcpStreamTracker';
-import { resolveMacVendor } from './macVendors';
+import { resolveMacVendor, resolveMacName } from './macVendors';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 
 /**
@@ -29,8 +29,35 @@ function mapField(f: ProtocolField): { name: string; value: string | number | bo
 
 interface ExtractedFrame {
   rawBytes: Uint8Array;
-  epochMs: number;
+  /**
+   * Epoch time in nanoseconds. Deliberately a bigint: epoch-nanoseconds is
+   * ~1.8e18, well past Number.MAX_SAFE_INTEGER (9e15), so a float64 would
+   * silently quantize timestamps to ~256 ns and lose the very precision a
+   * nanosecond capture exists to record.
+   */
+  tsNanos: bigint;
   origLen: number;
+  /** Decimal places the capture's timestamps are meaningful to (6 = us, 9 = ns). */
+  tsPrecision: number;
+}
+
+/**
+ * Converts a raw tick count plus a seconds-per-tick resolution into exact
+ * epoch nanoseconds. Integer nanosecond-per-tick resolutions - which covers
+ * every power-of-10 resolution pcapng uses in practice - stay in bigint math
+ * and are exact; the rare power-of-2 resolutions fall back to float, where a
+ * sub-nanosecond rounding error is irrelevant anyway.
+ */
+function ticksToNanos(ticks: bigint, secondsPerTick: number): bigint {
+  const nanosPerTick = secondsPerTick * 1e9;
+  return Number.isInteger(nanosPerTick)
+    ? ticks * BigInt(nanosPerTick)
+    : BigInt(Math.round(Number(ticks) * nanosPerTick));
+}
+
+/** Decimal places to display for a given seconds-per-tick resolution. */
+function precisionFor(secondsPerTick: number): number {
+  return Math.min(9, Math.max(0, Math.round(-Math.log10(secondsPerTick))));
 }
 
 export class PcapService {
@@ -113,6 +140,7 @@ export class PcapService {
     }
 
     let isLittleEndian = true;
+    let subSecondIsNanos = false;
     if (magic === 0xa1b2c3d4) {
       isLittleEndian = false; // Big endian
     } else if (magic === 0xd4c3b2a1) {
@@ -120,6 +148,7 @@ export class PcapService {
     } else if (magic === 0x4d3cb2a1 || magic === 0xa1b23c4d) {
       // Nanosecond pcap
       isLittleEndian = magic === 0x4d3cb2a1;
+      subSecondIsNanos = true;
     } else {
       // Might be a JSON export
       try {
@@ -133,20 +162,33 @@ export class PcapService {
       }
     }
 
-    return PcapService.buildPacketsFromFrames(PcapService.extractClassicPcapFrames(arrayBuffer, isLittleEndian));
+    return PcapService.buildPacketsFromFrames(
+      PcapService.extractClassicPcapFrames(arrayBuffer, isLittleEndian, subSecondIsNanos)
+    );
   }
 
   /**
    * Extracts raw frames + timestamps from a classic Libpcap 2.4 file.
+   *
+   * `subSecondIsNanos` distinguishes the two libpcap flavors: the original
+   * format's second timestamp field is microseconds, while the nanosecond
+   * variant (magic 0x4d3cb2a1 / 0xa1b23c4d) puts nanoseconds in the exact
+   * same field. Reading one as the other is off by a factor of 1000.
    */
-  private static extractClassicPcapFrames(buffer: ArrayBuffer, isLittleEndian: boolean): ExtractedFrame[] {
+  private static extractClassicPcapFrames(
+    buffer: ArrayBuffer,
+    isLittleEndian: boolean,
+    subSecondIsNanos: boolean
+  ): ExtractedFrame[] {
     const view = new DataView(buffer);
     const frames: ExtractedFrame[] = [];
+    const nanosPerSubSecondUnit = subSecondIsNanos ? 1n : 1000n;
+    const tsPrecision = subSecondIsNanos ? 9 : 6;
     let offset = 24;
 
     while (offset + 16 <= buffer.byteLength) {
       const tsSec = view.getUint32(offset, isLittleEndian);
-      const tsUsec = view.getUint32(offset + 4, isLittleEndian);
+      const tsSubSecond = view.getUint32(offset + 4, isLittleEndian);
       const capLen = view.getUint32(offset + 8, isLittleEndian);
       const origLen = view.getUint32(offset + 12, isLittleEndian);
       offset += 16;
@@ -155,8 +197,9 @@ export class PcapService {
 
       frames.push({
         rawBytes: new Uint8Array(buffer.slice(offset, offset + capLen)),
-        epochMs: tsSec * 1000 + Math.floor(tsUsec / 1000),
+        tsNanos: BigInt(tsSec) * 1_000_000_000n + BigInt(tsSubSecond) * nanosPerSubSecondUnit,
         origLen,
+        tsPrecision,
       });
       offset += capLen;
 
@@ -230,13 +273,15 @@ export class PcapService {
 
         if (dataStart + capLen <= buffer.byteLength) {
           const resolution = interfaceResolutions[interfaceId] ?? 1e-6;
-          // Reassemble the 64-bit tick count without the precision loss a
-          // naive (tsHigh << 32) would cause - JS's << truncates to 32 bits.
-          const ticks = tsHigh * 2 ** 32 + tsLow;
+          // Reassemble the 64-bit tick count in bigint: a nanosecond-resolution
+          // capture's tick count exceeds float64's exact-integer range, so
+          // doing this as (tsHigh * 2**32 + tsLow) quantizes the timestamp.
+          const ticks = (BigInt(tsHigh) << 32n) | BigInt(tsLow);
           frames.push({
             rawBytes: new Uint8Array(buffer.slice(dataStart, dataStart + capLen)),
-            epochMs: Math.floor(ticks * resolution * 1000),
+            tsNanos: ticksToNanos(ticks, resolution),
             origLen,
+            tsPrecision: precisionFor(resolution),
           });
         }
       }
@@ -258,20 +303,26 @@ export class PcapService {
   private static buildPacketsFromFrames(frames: ExtractedFrame[]): Packet[] {
     const parsedPackets: Packet[] = [];
     let packetIndex = 1;
-    let baseTime: number | null = null;
-    let prevTime = 0;
+    let baseNanos: bigint | null = null;
+    let prevNanos: bigint | null = null;
     const tcpTracker = new TcpStreamTracker();
     const icmpTracker = new IcmpEchoTracker();
 
     for (const frame of frames) {
-      if (baseTime === null) baseTime = frame.epochMs;
-      const relativeTime = (frame.epochMs - baseTime) / 1000;
-      const timeDelta = prevTime === 0 ? 0 : (frame.epochMs - prevTime) / 1000;
-      prevTime = frame.epochMs;
+      if (baseNanos === null) baseNanos = frame.tsNanos;
+      // Subtracting in bigint *before* converting to a float is what keeps
+      // nanosecond precision: the difference is a small number of seconds, so
+      // it lands well inside float64's exact range even though the absolute
+      // epoch-nanosecond value does not.
+      const relativeTime = Number(frame.tsNanos - baseNanos) / 1e9;
+      const timeDelta = prevNanos === null ? 0 : Number(frame.tsNanos - prevNanos) / 1e9;
+      prevNanos = frame.tsNanos;
+      const epochMs = Number(frame.tsNanos / 1_000_000n);
 
       const { packet, icmpMatchedRequestFrameId } = decodeRawEthernetPacket(
-        frame.rawBytes, packetIndex++, frame.epochMs, relativeTime, timeDelta, frame.origLen, tcpTracker, icmpTracker
+        frame.rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, frame.origLen, tcpTracker, icmpTracker
       );
+      packet.tsPrecision = frame.tsPrecision;
       parsedPackets.push(packet);
 
       if (icmpMatchedRequestFrameId !== undefined) {
@@ -372,9 +423,19 @@ export function decodeRawEthernetPacket(
     etherType = (rawBytes[12] << 8) | rawBytes[13];
   }
 
-  let srcIp = srcMac;
-  let dstIp = dstMac;
+  // Frames with no network layer (ARP, STP, other pure-L2 traffic) show their
+  // MAC addresses in the address columns, resolved to names the way Wireshark
+  // does - "SagemcomBroa_aa:bb:cc", "Broadcast", "Nearest-Customer-Bridge".
+  // The IPv4/IPv6 branches below overwrite these when an L3 address exists.
+  let srcIp = resolveMacName(srcMac);
+  let dstIp = resolveMacName(dstMac);
   let proto: Packet['protocol'] = 'TCP';
+  // The Protocol column's free-form label, when it differs from the coarse
+  // ProtocolType - "TLSv1.2", "ICMPv6", "STP". Left undefined when the two
+  // would read the same.
+  let protocolLabel: string | undefined;
+  // Wireshark's tcp.analysis.* field names that fired for this frame, if any.
+  let analysisFlags: string[] | undefined;
   let srcPort: number | undefined;
   let dstPort: number | undefined;
   let info = `Frame (${rawBytes.length} bytes)`;
@@ -386,13 +447,13 @@ export function decodeRawEthernetPacket(
   const layers: ProtocolLayer[] = [
     {
       name: 'Frame',
-      summary: `Frame ${id}: ${rawBytes.length} bytes on wire (${rawBytes.length * 8} bits), ${origLen} bytes captured`,
+      summary: `Frame ${id}: ${origLen || rawBytes.length} bytes on wire (${(origLen || rawBytes.length) * 8} bits), ${rawBytes.length} bytes captured (${rawBytes.length * 8} bits)`,
       rawBytesRange: [0, rawBytes.length - 1],
       fields: [
         { name: 'Interface id', value: '0 (eth0)' },
         { name: 'Frame Number', value: id },
-        { name: 'Frame Length', value: `${rawBytes.length} bytes` },
-        { name: 'Capture Length', value: `${origLen} bytes` },
+        { name: 'Frame Length', value: `${origLen || rawBytes.length} bytes` },
+        { name: 'Capture Length', value: `${rawBytes.length} bytes` },
         { name: 'Epoch Time', value: new Date(epochMs).toISOString() },
         { name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(6)} seconds` },
         { name: '[Time since reference or first frame]', value: `${relativeTime.toFixed(6)} seconds` },
@@ -512,6 +573,8 @@ export function decodeRawEthernetPacket(
     const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen);
     if (transport) {
       proto = transport.proto;
+      protocolLabel = transport.protocolLabel;
+      analysisFlags = transport.analysisFlags;
       srcPort = transport.srcPort;
       dstPort = transport.dstPort;
       info = transport.info;
@@ -546,10 +609,31 @@ export function decodeRawEthernetPacket(
     };
     layers.push(ipv6Layer);
 
+    // A zero IPv6 payload length is only legal for a jumbogram (RFC 2675),
+    // which must carry a Hop-by-Hop Jumbo Payload option - anything else is
+    // malformed, and in practice it means the NIC coalesced receive segments
+    // (LRO) without fixing the length field up. The bytes after the header are
+    // then not a single coherent segment: dissecting them anyway invents a
+    // multi-kilobyte TCP payload that advances the sequence tracker past
+    // everything that follows, silently suppressing the lost-segment and
+    // ACKed-unseen-segment analysis on every later frame in that stream.
+    // Wireshark stops here and labels the frame malformed; so do we.
+    const isMalformedJumbo = ipv6PayloadLen === 0 && rawBytes.length > l3Offset + 40;
+    if (isMalformedJumbo) {
+      proto = 'TCP';
+      protocolLabel = 'IPv6';
+      info = '[Malformed Packet]';
+      status = 'warning';
+    }
+
     const transportOffset = l3Offset + 40;
-    const transport = decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, ipv6PayloadLen);
+    const transport = isMalformedJumbo
+      ? null
+      : decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, ipv6PayloadLen);
     if (transport) {
       proto = transport.proto;
+      protocolLabel = transport.protocolLabel;
+      analysisFlags = transport.analysisFlags;
       srcPort = transport.srcPort;
       dstPort = transport.dstPort;
       info = transport.info;
@@ -578,7 +662,12 @@ export function decodeRawEthernetPacket(
       sourcePort: srcPort,
       destPort: dstPort,
       protocol: proto,
-      length: rawBytes.length,
+      protocolLabel,
+      analysisFlags,
+      // The on-wire frame size, which is what Wireshark's Length column shows.
+      // It differs from rawBytes.length whenever the capture used a snaplen.
+      // Falls back to the captured size if a source didn't report a wire size.
+      length: origLen || rawBytes.length,
       info,
       status,
       streamId,
@@ -611,16 +700,44 @@ function describeEtherType(etherType: number): string {
 }
 
 /**
- * Formats a 16-byte IPv6 address (starting at `offset` within `bytes`) as
- * 8 colon-separated 4-hex-digit groups. No double-colon zero-compression.
+ * Formats a 16-byte IPv6 address (starting at `offset` within `bytes`) in the
+ * RFC 5952 canonical form Wireshark displays: leading zeros stripped from each
+ * group, lowercase hex, and the *longest* run of two or more all-zero groups
+ * collapsed to "::" (leftmost run wins a tie, and a single zero group is never
+ * collapsed - "2001:db8:0:1:1:1:1:1" stays as-is).
+ *
+ * Without this an address renders as 39 characters of zero-padded groups,
+ * which both diverges from Wireshark and overflows the address column.
  */
 function formatIpv6Address(bytes: Uint8Array, offset: number): string {
-  const groups: string[] = [];
+  const groups: number[] = [];
   for (let i = 0; i < 8; i++) {
-    const word = (bytes[offset + i * 2] << 8) | bytes[offset + i * 2 + 1];
-    groups.push(word.toString(16).padStart(4, '0'));
+    groups.push((bytes[offset + i * 2] << 8) | bytes[offset + i * 2 + 1]);
   }
-  return groups.join(':');
+
+  let bestStart = -1;
+  let bestLen = 0;
+  let runStart = -1;
+  for (let i = 0; i <= 8; i++) {
+    if (i < 8 && groups[i] === 0) {
+      if (runStart === -1) runStart = i;
+    } else if (runStart !== -1) {
+      const runLen = i - runStart;
+      // Strictly greater keeps the leftmost run when two are the same length.
+      if (runLen > bestLen) {
+        bestStart = runStart;
+        bestLen = runLen;
+      }
+      runStart = -1;
+    }
+  }
+
+  const hex = groups.map(g => g.toString(16));
+  if (bestLen < 2) return hex.join(':');
+
+  const head = hex.slice(0, bestStart).join(':');
+  const tail = hex.slice(bestStart + bestLen).join(':');
+  return `${head}::${tail}`;
 }
 
 /**
@@ -648,12 +765,14 @@ function decodeTransportLayer(
   l4SegmentLen?: number
 ): {
   proto: Packet['protocol'];
+  protocolLabel?: string;
   srcPort?: number;
   dstPort?: number;
   info: string;
   layer: ProtocolLayer;
   streamId?: number;
   status?: Packet['status'];
+  analysisFlags?: string[];
   anomalies?: AnomalyInfo[];
   icmpMatchedRequestFrameId?: number;
 } | null {
@@ -678,13 +797,22 @@ function decodeTransportLayer(
     const fin = (flags & 0x01) !== 0;
     const rst = (flags & 0x04) !== 0;
     const psh = (flags & 0x08) !== 0;
+    const urg = (flags & 0x20) !== 0;
+    const ece = (flags & 0x40) !== 0;
+    const cwr = (flags & 0x80) !== 0;
+    const rawWindow = (rawBytes[transportOffset + 14] << 8) | rawBytes[transportOffset + 15];
 
+    // Wireshark's fixed flag order, which is *not* the bit order: a typical
+    // data segment reads "[PSH, ACK]", never "[ACK, PSH]".
     const flagList: string[] = [];
     if (syn) flagList.push('SYN');
-    if (ack) flagList.push('ACK');
     if (fin) flagList.push('FIN');
     if (rst) flagList.push('RST');
     if (psh) flagList.push('PSH');
+    if (ack) flagList.push('ACK');
+    if (urg) flagList.push('URG');
+    if (ece) flagList.push('ECE');
+    if (cwr) flagList.push('CWR');
 
     let proto: Packet['protocol'] = 'TCP';
     if (srcPort === 443 || dstPort === 443) proto = 'TLS';
@@ -692,19 +820,15 @@ function decodeTransportLayer(
     else if (srcPort === 22 || dstPort === 22) proto = 'SSH';
 
     const tcpOptions = tcpHeaderLen > 20 ? parseTcpOptions(rawBytes, transportOffset + 20, transportOffset + tcpHeaderLen) : null;
-    const optionsSummaryParts: string[] = [];
-    if (tcpOptions) {
-      if (syn) {
-        if (tcpOptions.mss !== undefined) optionsSummaryParts.push(`MSS=${tcpOptions.mss}`);
-        if (tcpOptions.windowScale !== undefined) optionsSummaryParts.push(`WS=${2 ** tcpOptions.windowScale}`);
-        if (tcpOptions.sackPermitted) optionsSummaryParts.push('SACK_PERM');
-      } else {
-        for (const block of tcpOptions.sackBlocks) {
-          optionsSummaryParts.push(`SLE=${block.leftEdge} SRE=${block.rightEdge}`);
-        }
-      }
+    // Handshake-only options. SACK blocks are handled further down, once the
+    // stream tracker is available, because their edges display relative to the
+    // peer's sequence space just like Ack= does.
+    const handshakeOptionParts: string[] = [];
+    if (tcpOptions && syn) {
+      if (tcpOptions.mss !== undefined) handshakeOptionParts.push(`MSS=${tcpOptions.mss}`);
+      if (tcpOptions.windowScale !== undefined) handshakeOptionParts.push(`WS=${2 ** tcpOptions.windowScale}`);
+      if (tcpOptions.sackPermitted) handshakeOptionParts.push('SACK_PERM');
     }
-    const optionsSummary = optionsSummaryParts.length > 0 ? ' ' + optionsSummaryParts.join(' ') : '';
 
     const tcpPayloadStart = transportOffset + tcpHeaderLen;
     // Prefer the network layer's declared segment length over the raw frame
@@ -728,8 +852,31 @@ function decodeTransportLayer(
       proto !== 'TLS' && tcpPayloadStart < rawBytes.length
         ? extractLiteralUrlOrHost(rawBytes, tcpPayloadStart)
         : null;
-    const relSeq = tcpTracker ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, seqNum) : seqNum;
+    // Register this direction's window scale before anything reads it back, so
+    // a SYN's own advertised window still displays unscaled (scaling only takes
+    // effect from the first non-SYN segment, per RFC 7323).
+    if (tcpTracker && syn && tcpOptions?.windowScale !== undefined) {
+      tcpTracker.setWindowScaleShift(srcIp, srcPort, dstIp, dstPort, tcpOptions.windowScale);
+    }
+    const windowScaleShift = tcpTracker && !syn ? tcpTracker.getWindowScaleShift(srcIp, srcPort, dstIp, dstPort) : 0;
+    const windowSize = rawWindow * 2 ** windowScaleShift;
+
+    const relSeq = tcpTracker ? tcpTracker.getRelativeSeq(srcIp, srcPort, dstIp, dstPort, seqNum, syn) : seqNum;
     const relAck = tcpTracker && ack ? tcpTracker.getRelativeSeq(dstIp, dstPort, srcIp, srcPort, ackNum) : ackNum;
+
+    // SACK edges name bytes in the *peer's* sequence space - they acknowledge
+    // what the other end sent - so they map through the peer direction's base,
+    // exactly like Ack= does. Printing them raw shows 10-digit absolute
+    // sequence numbers next to a single-digit Seq=/Ack= pair.
+    const sackParts: string[] = [];
+    if (tcpOptions && !syn) {
+      for (const block of tcpOptions.sackBlocks) {
+        const left = tcpTracker ? tcpTracker.getRelativeSeq(dstIp, dstPort, srcIp, srcPort, block.leftEdge) : block.leftEdge;
+        const right = tcpTracker ? tcpTracker.getRelativeSeq(dstIp, dstPort, srcIp, srcPort, block.rightEdge) : block.rightEdge;
+        sackParts.push(`SLE=${left} SRE=${right}`);
+      }
+    }
+    const optionsSummary = [...handshakeOptionParts, ...sackParts].join(' ');
 
     // This segment's *own* next sequence number - deliberately independent of
     // the tracker's per-direction high-water mark, which would report the
@@ -747,6 +894,8 @@ function decodeTransportLayer(
     let conversationCompleteness: string | undefined;
     let isKeepAlive = false;
     let isKeepAliveAck = false;
+    let lostSegment = false;
+    let ackedUnseenSegment = false;
     if (tcpTracker) {
       streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
       streamPacketNumber = tcpTracker.recordStreamPacket(streamId);
@@ -755,6 +904,17 @@ function decodeTransportLayer(
       isKeepAlive = tcpTracker.checkKeepAlive(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength, syn, fin, rst);
       isKeepAliveAck = !isKeepAlive && payloadLength === 0 && ack && !syn && !fin && !rst
         && tcpTracker.consumeKeepAliveAck(srcIp, srcPort, dstIp, dstPort);
+
+      // Both gap checks must run *before* checkSequence() advances this
+      // direction's high-water mark, otherwise the segment that reveals the
+      // gap is the same one that closes it and neither ever fires. A
+      // keep-alive deliberately sits one byte behind, so it is never a gap.
+      if (!isKeepAlive) {
+        lostSegment = tcpTracker.isPreviousSegmentMissing(srcIp, srcPort, dstIp, dstPort, seqNum);
+      }
+      if (ack && !isKeepAliveAck) {
+        ackedUnseenSegment = tcpTracker.isAckingUnseenSegment(srcIp, srcPort, dstIp, dstPort, ackNum);
+      }
 
       if (!isKeepAlive) {
         const seqResult = tcpTracker.checkSequence(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength);
@@ -782,14 +942,34 @@ function decodeTransportLayer(
       conversationCompleteness = tcpTracker.getConversationCompleteness(streamId);
     }
 
-    const keepAliveLabel = isKeepAlive ? ' [TCP Keep-Alive]' : isKeepAliveAck ? ' [TCP Keep-Alive ACK]' : '';
-    // Wireshark prepends this bracketed tag to the Info column itself (not
-    // just a side-channel status/anomaly) so it's visible at a glance in the
-    // packet list without opening the detail tree - mirror that placement.
-    const analysisLabel = status === 'retransmit' ? '[TCP Retransmission] '
-      : status === 'warning' ? '[TCP Out-Of-Order] '
-      : '';
-    const info = `${analysisLabel}${srcPort} → ${dstPort} [${flagList.join(', ')}] Seq=${relSeq} Ack=${relAck} Len=${payloadLength}${optionsSummary}${keepAliveLabel}${tcpHost ? ' ' + tcpHost : ''}`;
+    // Every expert annotation is a bracketed *prefix* on the Info column, and
+    // several can stack on one segment - Wireshark shows e.g.
+    // "[TCP Previous segment not captured] [TCP Out-Of-Order] 443 → 51685 ...".
+    // They are ordered here the way Wireshark emits them: the gap that
+    // explains the segment first, then the segment's own classification.
+    const expertTags: string[] = [];
+    // Wireshark's own tcp.analysis.* field names, kept alongside the display
+    // tags so color rules and display filters can match on them the way
+    // Wireshark's do ("tcp.analysis.flags && !tcp.analysis.keep_alive").
+    const analysisFlags: string[] = [];
+    if (lostSegment) { expertTags.push('[TCP Previous segment not captured]'); analysisFlags.push('lost_segment'); }
+    if (ackedUnseenSegment) { expertTags.push('[TCP ACKed unseen segment]'); analysisFlags.push('ack_lost_segment'); }
+    if (isKeepAlive) { expertTags.push('[TCP Keep-Alive]'); analysisFlags.push('keep_alive'); }
+    if (isKeepAliveAck) { expertTags.push('[TCP Keep-Alive ACK]'); analysisFlags.push('keep_alive_ack'); }
+    if (status === 'retransmit') { expertTags.push('[TCP Retransmission]'); analysisFlags.push('retransmission'); }
+    else if (status === 'warning') { expertTags.push('[TCP Out-Of-Order]'); analysisFlags.push('out_of_order'); }
+
+    const infoParts = [
+      `${srcPort} → ${dstPort}`,
+      `[${flagList.join(', ')}]`,
+      `Seq=${relSeq}`,
+      ...(ack ? [`Ack=${relAck}`] : []),
+      `Win=${windowSize}`,
+      `Len=${payloadLength}`,
+      ...(optionsSummary ? [optionsSummary] : []),
+      ...(tcpHost ? [tcpHost] : []),
+    ];
+    const info = `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
 
     return {
       proto,
@@ -797,7 +977,8 @@ function decodeTransportLayer(
       dstPort,
       info,
       streamId,
-      status,
+      status: status ?? (analysisFlags.length > 0 && !isKeepAlive && !isKeepAliveAck ? 'warning' : undefined),
+      analysisFlags,
       anomalies,
       layer: {
         name: 'Transmission Control Protocol',
@@ -852,7 +1033,10 @@ function decodeTransportLayer(
     } else if (!isQuic && udpPayloadStart < rawBytes.length) {
       udpHost = extractLiteralUrlOrHost(rawBytes, udpPayloadStart);
     }
-    const info = `${srcPort} → ${dstPort} Len=${udpLen}${udpHost ? ' ' + udpHost : ''}`;
+    // The UDP header's Length field counts the 8-byte header itself, but
+    // Wireshark's "Len=" - like TCP's - reports payload only.
+    const udpPayloadLen = Math.max(0, udpLen - 8);
+    const info = `${srcPort} → ${dstPort} Len=${udpPayloadLen}${udpHost ? ' ' + udpHost : ''}`;
 
     return {
       proto,

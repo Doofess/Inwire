@@ -19,6 +19,7 @@ export class TcpStreamTracker {
   private packetCountByStream = new Map<number, number>();
   private connState = new Map<number, { sawSyn: boolean; sawSynAck: boolean; sawFinOrRst: boolean }>();
   private lastWasKeepAlive = new Map<string, boolean>();
+  private windowScaleShift = new Map<string, number>();
 
   private connectionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
     const a = `${srcIp}:${srcPort}`;
@@ -81,20 +82,83 @@ export class TcpStreamTracker {
   }
 
   /**
-   * Returns the sequence number relative to the first one seen in this
-   * direction (Wireshark's default display), establishing that base the
-   * first time a direction is seen. Wraparound-safe: uses unsigned modular
-   * subtraction rather than naive arithmetic, since raw TCP sequence numbers
-   * legitimately wrap past 2**32 on long-lived connections.
+   * Returns the sequence number relative to this direction's base (Wireshark's
+   * default display), establishing that base the first time a direction is
+   * seen. Wraparound-safe: uses unsigned modular subtraction rather than naive
+   * arithmetic, since raw TCP sequence numbers legitimately wrap past 2**32 on
+   * long-lived connections.
+   *
+   * The base depends on whether the handshake was captured, and getting this
+   * wrong shifts every Seq= and Ack= in the stream by one:
+   *
+   *   - SYN seen: base = the SYN's own sequence number, so the SYN reports
+   *     Seq=0 and the first byte of data reports Seq=1.
+   *   - Mid-stream capture (no SYN): base = first seen sequence *minus one*,
+   *     so the first observed segment also reports Seq=1. Wireshark does this
+   *     so that a capture started mid-connection reads the same way as one
+   *     that caught the handshake.
    */
-  public getRelativeSeq(srcIp: string, srcPort: number, dstIp: string, dstPort: number, seqNum: number): number {
+  public getRelativeSeq(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number,
+    seqNum: number, isSyn: boolean = false
+  ): number {
     const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
     let base = this.baseSeq.get(directionKey);
     if (base === undefined) {
-      base = seqNum;
+      base = isSyn ? seqNum : (seqNum - 1 + 2 ** 32) % 2 ** 32;
       this.baseSeq.set(directionKey, base);
     }
     return ((seqNum - base) + 2 ** 32) % 2 ** 32;
+  }
+
+  /**
+   * Records the window scale shift negotiated by this direction's SYN. Scaling
+   * only applies once *both* ends have advertised support, which is why this
+   * is stored per direction and checked pairwise in getWindowScaleShift().
+   */
+  public setWindowScaleShift(srcIp: string, srcPort: number, dstIp: string, dstPort: number, shift: number): void {
+    this.windowScaleShift.set(this.directionKey(srcIp, srcPort, dstIp, dstPort), shift);
+  }
+
+  /**
+   * Returns the shift to apply to this direction's advertised window, or 0
+   * when scaling isn't in effect. A mid-stream capture never saw either SYN,
+   * so nothing scales and the raw window value is displayed as-is - matching
+   * what Wireshark shows when it can't observe the negotiation.
+   */
+  public getWindowScaleShift(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
+    const own = this.windowScaleShift.get(this.directionKey(srcIp, srcPort, dstIp, dstPort));
+    const peer = this.windowScaleShift.get(this.directionKey(dstIp, dstPort, srcIp, srcPort));
+    return own !== undefined && peer !== undefined ? own : 0;
+  }
+
+  /**
+   * True when this segment's sequence number is ahead of where the sender left
+   * off, meaning the capture missed whatever filled the gap - Wireshark's
+   * "[TCP Previous segment not captured]". Skipped for the first segment of a
+   * direction, which has no predecessor to be missing.
+   */
+  public isPreviousSegmentMissing(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number, seqNum: number
+  ): boolean {
+    const expectedNext = this.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
+    if (expectedNext === undefined) return false;
+    // 32-bit signed comparison, so a sequence space that has wrapped past
+    // 2**32 doesn't read as an enormous backwards jump.
+    return ((seqNum - expectedNext) | 0) > 0;
+  }
+
+  /**
+   * True when this packet acknowledges data the capture never contained -
+   * Wireshark's "[TCP ACKed unseen segment]". Compares against how far the
+   * *peer* direction has actually been seen to send.
+   */
+  public isAckingUnseenSegment(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number, ackNum: number
+  ): boolean {
+    const peerExpectedNext = this.getExpectedNext(dstIp, dstPort, srcIp, srcPort);
+    if (peerExpectedNext === undefined) return false;
+    return ((ackNum - peerExpectedNext) | 0) > 0;
   }
 
   /**
@@ -185,6 +249,7 @@ export class TcpStreamTracker {
     this.packetCountByStream.clear();
     this.connState.clear();
     this.lastWasKeepAlive.clear();
+    this.windowScaleShift.clear();
     this.nextStreamId = 0;
   }
 }
