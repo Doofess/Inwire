@@ -19,11 +19,13 @@ import {
 import { UserRolePermissions } from '../../types/packet';
 import { DEFAULT_FILTER_PRESETS } from '../../services/filterEngine';
 import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
+import type { AgentCommand } from '../../services/agentProtocol';
 
 interface AppMenuProps {
   isCapturing: boolean;
   onStartCapture: () => void;
   onPauseCapture: () => void;
+  onSendAgentCommand: (command: AgentCommand) => void;
   onClearPackets: () => void;
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
@@ -59,6 +61,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   isCapturing,
   onStartCapture,
   onPauseCapture,
+  onSendAgentCommand,
   onClearPackets,
   onOpenDissectorModal,
   onOpenStatsModal,
@@ -186,7 +189,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                     {isCapturing ? (
                       <Command.Item
                         value="stop-capture"
-                        onSelect={() => run(onPauseCapture)}
+                        onSelect={() => run(() => { onPauseCapture(); onSendAgentCommand({ type: 'stop_capture' }); })}
                         className={itemClass}
                       >
                         <TbPlayerPause className="w-3.5 h-3.5 text-rose-500 shrink-0" />
@@ -196,7 +199,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       <Command.Item
                         value="start-capture"
                         disabled={!permissions.canCapture}
-                        onSelect={() => run(onStartCapture)}
+                        onSelect={() => run(() => { onStartCapture(); onSendAgentCommand({ type: 'start_capture' }); })}
                         className={itemClass}
                       >
                         <TbPlayerPlay className="w-3.5 h-3.5 text-cyan-500 shrink-0" />

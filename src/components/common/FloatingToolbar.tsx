@@ -1,12 +1,14 @@
 import React from 'react';
 import { TbPlayerPlay, TbSquare, TbTrash } from 'react-icons/tb';
 import { UserRolePermissions } from '../../types/packet';
+import type { AgentCommand } from '../../services/agentProtocol';
 
 interface FloatingToolbarProps {
   isCapturing: boolean;
   onStartCapture: () => void;
   onPauseCapture: () => void;
   onStopCapture: () => void;
+  onSendAgentCommand: (command: AgentCommand) => void;
   onClearPackets: () => void;
   permissions: UserRolePermissions;
   totalPacketsCount: number;
@@ -14,7 +16,7 @@ interface FloatingToolbarProps {
 }
 
 export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
-  isCapturing, onStartCapture, onStopCapture, onClearPackets,
+  isCapturing, onStartCapture, onStopCapture, onSendAgentCommand, onClearPackets,
   permissions, totalPacketsCount, agentStatus
 }) => {
   return (
@@ -22,7 +24,10 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
       <div className="flex items-center gap-1">
         {!isCapturing ? (
           <button
-            onClick={onStartCapture}
+            onClick={() => {
+              onStartCapture();
+              onSendAgentCommand({ type: 'start_capture' });
+            }}
             disabled={!permissions.canCapture || (agentStatus !== 'connected' && agentStatus !== 'disconnected')}
             className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${
               !permissions.canCapture ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
@@ -34,7 +39,10 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
           </button>
         ) : (
           <button
-            onClick={onStopCapture}
+            onClick={() => {
+              onStopCapture();
+              onSendAgentCommand({ type: 'stop_capture' });
+            }}
             className="w-9 h-9 rounded-full bg-rose-500 hover:bg-rose-400 text-slate-950 flex items-center justify-center transition-all shadow-[0_0_15px_rgba(244,63,94,0.5)]"
             title="Stop Capture"
           >
