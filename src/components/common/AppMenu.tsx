@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Command } from 'cmdk';
 import { AnimatePresence, motion } from 'motion/react';
+import { HamburgerIcon } from './HamburgerIcon';
 import {
-  Menu,
   ChevronRight,
   Play,
   Pause,
@@ -60,18 +60,11 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   totalPacketsCount,
 }) => {
   const [open, setOpen] = useState(false);
-  // Selecting an item closes the menu differently from Escape/backdrop-click:
-  // instead of morphing back into the trigger button (the "returning to
-  // idle" motion), it plays a plain shrink+fade in place, timed to overlap
-  // with the destination modal's own fade+grow-in, so the two read as one
-  // continuous handoff rather than a close followed by a separate pop-in.
-  const [closingViaSelection, setClosingViaSelection] = useState(false);
   const [presetsExpanded, setPresetsExpanded] = useState(false);
   const commandRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (open) {
-      setClosingViaSelection(false);
       // No search input to autofocus - focus the command root itself so
       // arrow keys/Enter work immediately without the user clicking first.
       commandRef.current?.focus();
@@ -94,21 +87,26 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   }, []);
 
   const run = (action: () => void) => {
-    setClosingViaSelection(true);
     setOpen(false);
     action();
   };
 
   return (
     <>
-      <motion.button
-        layoutId="app-menu-shell"
-        onClick={() => setOpen(true)}
+      {/* The trigger stays put and its icon morphs to a cross, rather than the
+          button itself expanding into the panel as it used to. A shared-layout
+          morph and a hamburger-to-cross morph are mutually exclusive: the first
+          consumes the button, leaving nothing on screen to become the cross.
+          Sits above the backdrop so clicking it closes the menu directly. */}
+      <button
+        onClick={() => setOpen((o) => !o)}
         title="Menu (Ctrl/Cmd + K)"
-        className="flex items-center justify-center w-9 h-9 rounded-md border transition-colors cursor-pointer bg-secondary hover:bg-accent border-border text-foreground"
+        aria-expanded={open}
+        aria-label="Toggle menu"
+        className="relative z-50 flex items-center justify-center w-9 h-9 rounded-md border transition-colors cursor-pointer bg-secondary hover:bg-accent border-border text-foreground"
       >
-        <Menu className="w-4 h-4" />
-      </motion.button>
+        <HamburgerIcon open={open} />
+      </button>
 
       <AnimatePresence>
         {open && (
@@ -124,14 +122,18 @@ export const AppMenu: React.FC<AppMenuProps> = ({
               onClick={() => setOpen(false)}
               className="fixed inset-0 z-40"
             />
+            {/* GitHub's own panel has no entrance animation at all - it is a
+                full-screen takeover that simply appears, and all the motion
+                lives in the icon. A corner dropdown that popped in with no
+                transition beside a half-second icon morph would just read as
+                unfinished, so this keeps a short fade-and-drop on the same
+                easing curve, letting the icon stay the slower of the two. */}
             <motion.div
-              layoutId={closingViaSelection ? undefined : 'app-menu-shell'}
-              exit={{ opacity: 0, scale: closingViaSelection ? 0.96 : 1 }}
-              transition={
-                closingViaSelection
-                  ? { duration: 0.18, ease: 'easeOut' }
-                  : { type: 'spring', stiffness: 420, damping: 38 }
-              }
+              initial={{ opacity: 0, y: -8, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.98 }}
+              transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+              style={{ transformOrigin: 'top right' }}
               className="fixed top-20 right-4 sm:right-6 z-50 w-80 max-w-[calc(100vw-2rem)]"
             >
               <Command
