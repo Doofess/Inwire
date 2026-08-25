@@ -6,6 +6,7 @@ convention this mirrors).
 
 Run:  python local-agent/test_protocol.py
 """
+import asyncio
 import os
 import re
 import sys
@@ -270,6 +271,43 @@ finally:
         del agent.sniffer
     else:
         agent.sniffer = previous_sniffer
+
+# --- failed handshake: connection leak prevention ---
+class FailingHelloWS:
+    """A client that drops during the handshake, before hello lands."""
+    async def send(self, data):
+        raise ConnectionResetError("client vanished mid-handshake")
+    def __aiter__(self):
+        return self
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+_prev = getattr(agent, "sniffer", None)
+_prev_avail = getattr(agent, "AVAILABLE_INTERFACES", None)
+try:
+    agent.sniffer = agent.SnifferController(default_interfaces=["eth0"])
+    agent.sniffer.start_threads(FakeSpawn())
+    agent.AVAILABLE_INTERFACES = [("eth0", "Ethernet")]
+    _srv = agent.AgentServer()
+    _ws = FailingHelloWS()
+    try:
+        asyncio.run(_srv.register(_ws))
+    except ConnectionResetError:
+        pass
+    check("failed hello does not leak the connection", len(_srv.connections), 0)
+    check("failed hello still triggers auto-stop", agent.sniffer.is_sniffing(), False)
+finally:
+    if _prev is None:
+        if hasattr(agent, "sniffer"):
+            del agent.sniffer
+    else:
+        agent.sniffer = _prev
+    if _prev_avail is None:
+        if hasattr(agent, "AVAILABLE_INTERFACES"):
+            del agent.AVAILABLE_INTERFACES
+    else:
+        agent.AVAILABLE_INTERFACES = _prev_avail
 
 print()
 if failures:
