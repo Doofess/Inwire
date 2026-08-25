@@ -20,6 +20,9 @@ import random
 import sys
 import threading
 import time
+from http import HTTPStatus
+
+import config
 
 try:
     from scapy.all import sniff, ARP, Dot3, Ether, IP, IPv6, TCP, UDP
@@ -274,6 +277,29 @@ class AgentServer:
 agent = AgentServer()
 
 
+def make_process_request(on_reject=None):
+    """Builds the callback websockets invokes before completing the upgrade
+    handshake. Returning None accepts the connection; returning a Response
+    rejects it outright, so a disallowed page never receives `hello` and
+    never receives a packet.
+
+    The config is re-read here, on every connection, rather than once at
+    startup. The file is tiny and connections are rare, so the cost is
+    irrelevant - and it means adding an origin takes effect without
+    restarting a service that has no UI to restart it from.
+    """
+    def process_request(connection, request):
+        origin = request.headers.get("Origin")
+        settings = config.load_config(on_warning=lambda msg: log.warning("config: %s", msg))
+        if not config.is_origin_allowed(origin, settings["allowedOrigins"]):
+            if on_reject is not None:
+                on_reject(origin)
+            return connection.respond(HTTPStatus.FORBIDDEN, "Origin not allowed\n")
+        return None
+
+    return process_request
+
+
 _captured_count = 0
 
 
@@ -369,8 +395,16 @@ async def main():
 
     agent.loop = asyncio.get_running_loop()
 
-    async with websockets.serve(agent.register, HOST, PORT):
-        print(f"[agent] WebSocket server listening on ws://{HOST}:{PORT}")
+    def log_rejection(origin):
+        log.warning("rejected connection from disallowed origin: %r", origin)
+
+    async with websockets.serve(
+        agent.register,
+        HOST,
+        PORT,
+        process_request=make_process_request(on_reject=log_rejection),
+    ):
+        log.info("WebSocket server listening on ws://%s:%d", HOST, PORT)
         await asyncio.Future()  # run forever
 
 
