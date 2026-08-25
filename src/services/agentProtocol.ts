@@ -75,3 +75,35 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
       return null;
   }
 }
+
+/**
+ * Bumped alongside AGENT_VERSION in local-agent/agent.py. Compared against
+ * whatever the connected agent reports in its hello message to flag a
+ * stale build in the UI.
+ */
+export const REQUIRED_AGENT_VERSION = '1.1.0';
+
+/**
+ * Simple major.minor.patch comparison - good enough for this agent's
+ * versioning (no pre-release tags, no build metadata). Plain string
+ * inequality would get "1.9.9" vs "1.10.0" backwards, which is why this
+ * parses each segment as a number instead.
+ */
+export function isAgentOutdated(reportedVersion: string, requiredVersion: string): boolean {
+  const parse = (v: string) => v.split('.').map((n) => parseInt(n, 10) || 0);
+  const [rMajor, rMinor, rPatch] = parse(reportedVersion);
+  const [qMajor, qMinor, qPatch] = parse(requiredVersion);
+  if (rMajor !== qMajor) return rMajor < qMajor;
+  if (rMinor !== qMinor) return rMinor < qMinor;
+  return rPatch < qPatch;
+}
+
+export type AgentCommand =
+  | { type: 'auth'; token: string }
+  | { type: 'start_capture' }
+  | { type: 'stop_capture' }
+  | { type: 'set_interfaces'; interfaces: string[] };
+
+export function encodeAgentCommand(command: AgentCommand): string {
+  return JSON.stringify(command);
+}
