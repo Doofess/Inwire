@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
+import { PacketListMinimap } from './PacketListMinimap';
 import {
   ArrowUpDown,
   ArrowUp,
@@ -120,7 +121,8 @@ export const PacketList: React.FC<PacketListProps> = ({
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden select-none relative">
-      {/* Table Container */}
+      {/* Table Container + Minimap */}
+      <div className="flex-1 flex overflow-hidden min-h-0">
       <div
         ref={tableContainerRef}
         onScroll={handleScroll}
@@ -282,6 +284,15 @@ export const PacketList: React.FC<PacketListProps> = ({
             )}
           </tbody>
         </table>
+      </div>
+
+      <PacketListMinimap
+        packets={sortedPackets}
+        selectedPacket={selectedPacket}
+        colorEngine={colorEngine}
+        isDark={isDark}
+        containerRef={tableContainerRef}
+      />
       </div>
 
       {/* Right Click Context Menu */}
