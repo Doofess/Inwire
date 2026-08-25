@@ -19,7 +19,6 @@ interface HeaderProps {
   onOpenExportModal: () => void;
   onOpenIspModal?: () => void;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
-  onOpenColorRulesModal: () => void;
   onOpenSettingsModal: () => void;
   totalPacketsCount: number;
   filteredPacketsCount: number;
@@ -43,7 +42,6 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenExportModal,
   onOpenIspModal,
   agentStatus,
-  onOpenColorRulesModal,
   onOpenSettingsModal,
   totalPacketsCount,
   filteredPacketsCount,
@@ -66,7 +64,6 @@ export const Header: React.FC<HeaderProps> = ({
           onOpenDissectorModal={onOpenDissectorModal}
           onOpenStatsModal={onOpenStatsModal}
           onOpenExportModal={onOpenExportModal}
-          onOpenColorRulesModal={onOpenColorRulesModal}
           onOpenIspModal={onOpenIspModal}
           onOpenSettingsModal={onOpenSettingsModal}
           onApplyFilterPreset={onApplyFilterPreset}

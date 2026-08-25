@@ -11,7 +11,6 @@ import {
   DownloadCloud,
   BarChart2,
   Code,
-  Palette,
   Globe,
   Bookmark,
   Settings,
@@ -29,7 +28,6 @@ interface AppMenuProps {
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
   onOpenExportModal: () => void;
-  onOpenColorRulesModal: () => void;
   onOpenIspModal?: () => void;
   onOpenSettingsModal: () => void;
   onApplyFilterPreset: (filter: string) => void;
@@ -65,7 +63,6 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   onOpenDissectorModal,
   onOpenStatsModal,
   onOpenExportModal,
-  onOpenColorRulesModal,
   onOpenIspModal,
   onOpenSettingsModal,
   onApplyFilterPreset,
@@ -254,14 +251,6 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                     >
                       <Code className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                       <span>Custom Dissectors</span>
-                    </Command.Item>
-                    <Command.Item
-                      value="color-rules"
-                      onSelect={() => run(onOpenColorRulesModal)}
-                      className={itemClass}
-                    >
-                      <Palette className="w-3.5 h-3.5 text-pink-400 shrink-0" />
-                      <span>Color Rules</span>
                     </Command.Item>
                     {onOpenIspModal && (
                       <Command.Item

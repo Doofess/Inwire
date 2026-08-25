@@ -259,22 +259,14 @@ export function resolveRuleColors(rule: ColorRule, isDark: boolean): { backgroun
   };
 }
 
+// Coloring rules are fixed to Wireshark's own chain (above) - there is no UI
+// path left to view or edit them, matching Wireshark parity rather than being
+// a user-customizable feature.
 export class ColorRulesEngine {
-  private rules: ColorRule[];
   private compiled: CompiledRule[];
 
-  constructor(initialRules?: ColorRule[]) {
-    this.rules = initialRules || [...DEFAULT_COLOR_RULES];
-    this.compiled = ColorRulesEngine.compile(this.rules);
-  }
-
-  public getRules(): ColorRule[] {
-    return this.rules;
-  }
-
-  public setRules(rules: ColorRule[]): void {
-    this.rules = rules;
-    this.compiled = ColorRulesEngine.compile(rules);
+  constructor() {
+    this.compiled = ColorRulesEngine.compile(DEFAULT_COLOR_RULES);
   }
 
   // Compiling each rule's filter once here - instead of re-parsing the

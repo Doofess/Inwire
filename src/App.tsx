@@ -31,7 +31,6 @@ import { StreamFollowerModal } from "./components/stream-follower/StreamFollower
 import { CustomDissectorModal } from "./components/dissectors/CustomDissectorModal";
 import { StatisticsModal } from "./components/statistics/StatisticsModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
-import { ColorRulesModal } from "./components/common/ColorRulesModal";
 import { IspStatsModal } from "./components/isp/IspStatsModal";
 import { SettingsModal } from "./components/common/SettingsModal";
 
@@ -83,7 +82,6 @@ export default function App() {
   const [showDissectorModal, setShowDissectorModal] = useState(false);
   const [showStatsModal, setShowStatsModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
-  const [showColorRulesModal, setShowColorRulesModal] = useState(false);
   const [showIspModal, setShowIspModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [agentStatus, setAgentStatus] = useState<
@@ -450,7 +448,6 @@ export default function App() {
           onOpenDissectorModal={() => setShowDissectorModal(true)}
           onOpenStatsModal={() => setShowStatsModal(true)}
           onOpenExportModal={() => setShowExportModal(true)}
-          onOpenColorRulesModal={() => setShowColorRulesModal(true)}
           onOpenIspModal={() => setShowIspModal(true)}
           onOpenSettingsModal={() => setShowSettingsModal(true)}
           agentStatus={agentStatus}
@@ -694,19 +691,6 @@ export default function App() {
             packets={packets}
             onImportPackets={handleImportPackets}
             onClose={() => setShowExportModal(false)}
-            permissions={permissions}
-            isDark={isDark}
-          />
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {showColorRulesModal && (
-          <ColorRulesModal
-            key="color-rules-modal"
-            colorEngine={colorEngine}
-            onUpdateRules={() => setPackets([...packets])}
-            onClose={() => setShowColorRulesModal(false)}
             permissions={permissions}
             isDark={isDark}
           />
