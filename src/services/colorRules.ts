@@ -76,11 +76,18 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
   },
 ];
 
+interface CompiledRule {
+  rule: ColorRule;
+  matcher: (p: Packet) => boolean;
+}
+
 export class ColorRulesEngine {
   private rules: ColorRule[];
+  private compiled: CompiledRule[];
 
   constructor(initialRules?: ColorRule[]) {
     this.rules = initialRules || [...DEFAULT_COLOR_RULES];
+    this.compiled = ColorRulesEngine.compile(this.rules);
   }
 
   public getRules(): ColorRule[] {
@@ -89,14 +96,33 @@ export class ColorRulesEngine {
 
   public setRules(rules: ColorRule[]): void {
     this.rules = rules;
+    this.compiled = ColorRulesEngine.compile(rules);
+  }
+
+  // Compiling each rule's filter once here - instead of re-parsing the
+  // filter string from scratch on every getPacketStyle call, as before -
+  // is what makes this viable at real capture volume: getPacketStyle runs
+  // per row per redraw (including the packet-list minimap's full redraw of
+  // every buffered packet), and a Chrome performance trace showed
+  // re-parsing every rule's filter on every single call as the dominant
+  // cost behind a full tab freeze once the buffer reached a few thousand
+  // packets.
+  private static compile(rules: ColorRule[]): CompiledRule[] {
+    return rules
+      .filter(rule => rule.enabled)
+      .map(rule => {
+        try {
+          return { rule, matcher: FilterEngine.compileFilter(rule.filter) };
+        } catch {
+          return { rule, matcher: () => false };
+        }
+      });
   }
 
   public getPacketStyle(packet: Packet, isDark: boolean = true): { background?: string; color?: string; borderColor?: string } {
-    for (const rule of this.rules) {
-      if (!rule.enabled) continue;
+    for (const { rule, matcher } of this.compiled) {
       try {
-        const matches = FilterEngine.filterPackets([packet], rule.filter).length > 0;
-        if (matches) {
+        if (matcher(packet)) {
           return {
             background: rule.bgColor,
             color: rule.textColor,
@@ -104,7 +130,7 @@ export class ColorRulesEngine {
           };
         }
       } catch {
-        // Ignore parsing errors for custom rules
+        // Ignore evaluation errors for custom rules
       }
     }
 
