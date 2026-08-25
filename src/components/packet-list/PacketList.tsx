@@ -460,7 +460,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     className={`cursor-pointer ${
                       isSelected
                         ? '!bg-accent !text-cyan-800 dark:!text-cyan-200 ring-1 ring-inset ring-cyan-500 font-bold'
-                        : 'hover:brightness-125'
+                        : 'hover:brightness-95 dark:hover:brightness-125'
                     }`}
                     // The matched rule's foreground applies to the whole row,
                     // including the Protocol and Length cells - that is how
