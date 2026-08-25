@@ -8,6 +8,14 @@ interface PacketListMinimapProps {
   colorEngine: ColorRulesEngine;
   isDark: boolean;
   containerRef: React.RefObject<HTMLDivElement | null>;
+  /**
+   * Called whenever a click/drag here is about to move the table's scroll
+   * position, so PacketList can treat it the same as a direct wheel/touch
+   * scroll on the table itself (i.e. it's allowed to disable, or re-enable,
+   * stick-to-bottom auto-scroll) rather than being silently ignored as an
+   * untrusted scroll event.
+   */
+  onUserScrollIntent?: () => void;
 }
 
 const FALLBACK_BAND_COLOR_DARK = 'rgba(148, 163, 184, 0.35)';
@@ -65,6 +73,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   colorEngine,
   isDark,
   containerRef,
+  onUserScrollIntent,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -117,8 +126,11 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   }, [containerRef, updateViewport]);
 
   useEffect(() => {
+    // Depend on the array reference, not packets.length: once the live
+    // buffer hits its cap, length stops changing on new packets even
+    // though the underlying data (and scroll geometry) keeps shifting.
     updateViewport();
-  }, [packets.length, updateViewport]);
+  }, [packets, updateViewport]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -177,8 +189,13 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
     if (!wrapper || !el) return;
     const rect = wrapper.getBoundingClientRect();
     const fraction = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+    // Arm PacketList's user-scroll detection before moving scrollTop, the
+    // same way a direct wheel/touch scroll on the table itself would - a
+    // click/drag here is just as much a deliberate scroll as those, and
+    // should be able to disable (or re-enable) stick-to-bottom auto-scroll.
+    onUserScrollIntent?.();
     el.scrollTop = fraction * (el.scrollHeight - el.clientHeight);
-  }, [containerRef]);
+  }, [containerRef, onUserScrollIntent]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     draggingRef.current = true;

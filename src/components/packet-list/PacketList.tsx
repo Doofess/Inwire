@@ -160,12 +160,78 @@ export const PacketList: React.FC<PacketListProps> = ({
     }
   };
 
+  // Virtualization: render only the rows actually scrolled into view (plus
+  // a small overscan buffer), not the entire buffer, using two spacer rows
+  // to preserve the table's true scroll height. Rendering every buffered
+  // packet as a real <tr> is what locks up the tab under sustained
+  // high-volume capture - confirmed via a Chrome performance trace showing
+  // 17k+ DOM elements and 45-97ms style recalculations on every single
+  // incoming packet once the buffer approached its 4000-packet cap. Fixed
+  // row height is a safe assumption here: every cell uses whitespace-nowrap
+  // + truncate, so no row ever wraps to a second line.
+  const ROW_HEIGHT_FALLBACK = 29;
+  const OVERSCAN_ROWS = 15;
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [rowHeight, setRowHeight] = useState(ROW_HEIGHT_FALLBACK);
+  const hasMeasuredRowHeightRef = useRef(false);
+
+  // getBoundingClientRect() forces a synchronous layout, so this must only
+  // ever run once: the ref callback re-fires on every render where a
+  // different packet lands in the first visible slot (i.e. nearly every
+  // incoming packet while auto-scrolled), and doing this measurement on
+  // every one of those was itself measured as the single largest forced-
+  // reflow cost in the app once the earlier full-DOM freeze was fixed.
+  const measuredRowRef = (node: HTMLTableRowElement | null) => {
+    if (!node || hasMeasuredRowHeightRef.current) return;
+    const height = node.getBoundingClientRect().height;
+    if (height > 0) {
+      hasMeasuredRowHeightRef.current = true;
+      if (Math.abs(height - rowHeight) > 0.5) setRowHeight(height);
+    }
+  };
+
+  useEffect(() => {
+    const el = tableContainerRef.current;
+    if (!el) return;
+    const update = () => setViewportHeight(el.clientHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const totalRows = sortedPackets.length;
+  const startIndex = totalRows === 0 ? 0 : Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS);
+  const endIndex = totalRows === 0 ? 0 : Math.min(totalRows, Math.ceil((scrollTop + viewportHeight) / rowHeight) + OVERSCAN_ROWS);
+  const visiblePackets = sortedPackets.slice(startIndex, endIndex);
+  const topSpacerHeight = startIndex * rowHeight;
+  const bottomSpacerHeight = (totalRows - endIndex) * rowHeight;
+
   // Auto scroll to bottom
   const shouldAutoScrollRef = useRef(true);
+  // A 'scroll' event only updates shouldAutoScrollRef when it was just
+  // "armed" by a genuine user input gesture (wheel/touch/scrollbar drag).
+  // Our own per-packet scrollTop assignment below also fires 'scroll'
+  // events, and at real capture rates (hundreds of packets/sec) those
+  // interleave with genuine user scrolls far too fast to reliably tell them
+  // apart after the fact from the event alone - an earlier "ignore the
+  // event our own assignment causes" approach still raced, because a real
+  // user scroll landing in between two of our own re-assertions could get
+  // silently stomped before a 'scroll' event distinct from ours was even
+  // dispatched. Gating on real input events sidesteps that: only those can
+  // arm it, so our own assignments can never be mistaken for one.
+  const userScrollArmedRef = useRef(false);
+  const armUserScroll = () => {
+    userScrollArmedRef.current = true;
+  };
   const handleScroll = () => {
     if (!tableContainerRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = tableContainerRef.current;
-    shouldAutoScrollRef.current = scrollHeight - (scrollTop + clientHeight) < 50;
+    const { scrollTop: currentScrollTop, scrollHeight, clientHeight } = tableContainerRef.current;
+    setScrollTop(currentScrollTop); // keep the virtualization window in sync regardless of cause
+    if (!userScrollArmedRef.current) return;
+    userScrollArmedRef.current = false;
+    shouldAutoScrollRef.current = scrollHeight - (currentScrollTop + clientHeight) < 50;
   };
 
   useEffect(() => {
@@ -175,6 +241,9 @@ export const PacketList: React.FC<PacketListProps> = ({
     // data keeps arriving - length alone would silently stop autoscroll.
     if (shouldAutoScrollRef.current && tableContainerRef.current) {
       tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
+      // Update the virtualization window synchronously too, rather than
+      // waiting for the resulting scroll event to do it.
+      setScrollTop(tableContainerRef.current.scrollTop);
     }
   }, [packets]);
 
@@ -206,6 +275,10 @@ export const PacketList: React.FC<PacketListProps> = ({
       <div
         ref={tableContainerRef}
         onScroll={handleScroll}
+        onWheel={armUserScroll}
+        onTouchStart={armUserScroll}
+        onMouseDown={armUserScroll}
+        onKeyDown={armUserScroll}
         className="flex-1 overflow-y-auto overflow-x-auto custom-scrollbar"
       >
         <table className="w-full table-fixed text-left border-collapse font-mono text-xs">
@@ -306,13 +379,20 @@ export const PacketList: React.FC<PacketListProps> = ({
                 </td>
               </tr>
             ) : (
-              sortedPackets.map(packet => {
+              <>
+                {topSpacerHeight > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={7} style={{ height: topSpacerHeight, padding: 0, border: 'none' }} />
+                  </tr>
+                )}
+                {visiblePackets.map((packet, i) => {
                 const isSelected = selectedPacket?.id === packet.id;
                 const style = colorEngine.getPacketStyle(packet, isDark);
 
                 return (
                   <tr
                     key={packet.id}
+                    ref={i === 0 ? measuredRowRef : undefined}
                     onClick={() => onSelectPacket(packet)}
                     onContextMenu={e => handleContextMenu(e, packet)}
                     className={`cursor-pointer transition-colors duration-75 ${
@@ -375,7 +455,13 @@ export const PacketList: React.FC<PacketListProps> = ({
                     </td>
                   </tr>
                 );
-              })
+                })}
+                {bottomSpacerHeight > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={7} style={{ height: bottomSpacerHeight, padding: 0, border: 'none' }} />
+                  </tr>
+                )}
+              </>
             )}
           </tbody>
         </table>
@@ -387,6 +473,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         colorEngine={colorEngine}
         isDark={isDark}
         containerRef={tableContainerRef}
+        onUserScrollIntent={armUserScroll}
       />
       </div>
 
