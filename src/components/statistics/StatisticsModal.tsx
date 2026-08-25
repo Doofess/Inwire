@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Packet } from '../../types/packet';
-import { BarChart2, X, PieChart, Network, Layers, Activity, ShieldAlert } from 'lucide-react';
+import { TbChartBar, TbX, TbStack2, TbActivity } from 'react-icons/tb';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 
 interface StatisticsModalProps {
@@ -75,8 +75,8 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-purple-500/20 text-purple-400">
-              <BarChart2 className="w-5 h-5" />
+            <div className="p-2 rounded-lg bg-purple-500/20">
+              <TbChartBar className="w-5 h-5 text-foreground" />
             </div>
             <div>
               <div className="flex items-center gap-2 font-bold text-base">
@@ -92,7 +92,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
           </div>
 
           <button onClick={onClose} className={`p-1.5 rounded-md hover:bg-accent ${"text-muted-foreground"} hover:text-foreground`}>
-            <X className="w-5 h-5" />
+            <TbX className="w-5 h-5" />
           </button>
         </div>
 
@@ -106,7 +106,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
                 : 'text-muted-foreground hover:text-foreground hover:bg-accent'
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
+            <TbStack2 className="w-3.5 h-3.5" />
             <span>Protocol Hierarchy</span>
           </button>
 
@@ -118,7 +118,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({ packets, onClo
                 : 'text-muted-foreground hover:text-foreground hover:bg-accent'
             }`}
           >
-            <Activity className="w-3.5 h-3.5" />
+            <TbActivity className="w-3.5 h-3.5" />
             <span>Packet Length Distribution</span>
           </button>
         </div>

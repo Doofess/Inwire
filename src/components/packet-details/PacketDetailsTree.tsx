@@ -1,15 +1,14 @@
 import React, { useState } from 'react';
 import { Packet, ProtocolField, UserRolePermissions } from '../../types/packet';
 import {
-  ChevronRight,
-  ChevronDown,
-  Layers,
-  Copy,
-  Check,
-  ShieldAlert,
-  Maximize2,
-  Minimize2,
-} from 'lucide-react';
+  TbChevronRight,
+  TbChevronDown,
+  TbStack2,
+  TbCopy,
+  TbCheck,
+  TbMaximize,
+  TbMinimize,
+} from 'react-icons/tb';
 
 interface PacketDetailsTreeProps {
   packet: Packet | null;
@@ -37,7 +36,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
     return (
       <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
         <div className="flex flex-col items-center gap-1.5">
-          <Layers className="w-6 h-6 text-muted-foreground/70 mb-1" />
+          <TbStack2 className="w-6 h-6 text-muted-foreground/70 mb-1" />
           <span className="uppercase tracking-wider">No packet selected</span>
           <span className="text-[10px] text-muted-foreground/70">Select any packet from the list above for deep protocol dissection</span>
         </div>
@@ -111,9 +110,9 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
               title="Copy field value"
             >
               {copiedField === field.name ? (
-                <Check className="w-3 h-3 text-emerald-400" />
+                <TbCheck className="w-3 h-3 text-emerald-400" />
               ) : (
-                <Copy className="w-3 h-3" />
+                <TbCopy className="w-3 h-3" />
               )}
             </button>
           </div>
@@ -144,14 +143,14 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
             className="p-1 rounded text-xs transition-colors cursor-pointer hover:bg-accent text-muted-foreground"
             title="Expand all protocol layers"
           >
-            <Maximize2 className="w-3.5 h-3.5" />
+            <TbMaximize className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={handleCollapseAll}
             className="p-1 rounded text-xs transition-colors cursor-pointer hover:bg-accent text-muted-foreground"
             title="Collapse all protocol layers"
           >
-            <Minimize2 className="w-3.5 h-3.5" />
+            <TbMinimize className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
@@ -204,9 +203,9 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
               >
                 <div className="flex items-center gap-2 truncate">
                   {isExpanded ? (
-                    <ChevronDown className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    <TbChevronDown className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                   ) : (
-                    <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                    <TbChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                   )}
                   <span className="font-semibold truncate text-foreground">{layer.summary}</span>
                 </div>

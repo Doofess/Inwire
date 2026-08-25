@@ -1,9 +1,9 @@
 import React from 'react';
 import {
-  Play,
-  Pause,
-  Square,
-} from 'lucide-react';
+  TbPlayerPlay,
+  TbPlayerPause,
+  TbSquare,
+} from 'react-icons/tb';
 import { UserRole, UserRolePermissions } from '../../types/packet';
 import { AppMenu } from './AppMenu';
 
@@ -87,7 +87,7 @@ export const Header: React.FC<HeaderProps> = ({
               className="bg-rose-500 hover:bg-rose-600 active:scale-95 text-white text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-rose-500/20 transition-all cursor-pointer"
               title="Stop / Pause Capture Stream"
             >
-              <Pause className="w-3.5 h-3.5 fill-current" />
+              <TbPlayerPause className="w-3.5 h-3.5 fill-current" />
               <span>Stop Capture</span>
             </button>
           ) : (
@@ -99,7 +99,7 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
               title="Start Live Packet Capture"
             >
-              <Play className="w-3.5 h-3.5 fill-current" />
+              <TbPlayerPlay className="w-3.5 h-3.5 fill-current" />
               <span>Start Capture</span>
             </button>
           )}
@@ -110,7 +110,7 @@ export const Header: React.FC<HeaderProps> = ({
               className="bg-secondary hover:bg-accent text-rose-500 dark:text-rose-400 hover:text-rose-600 dark:hover:text-rose-300 text-xs px-3 py-2 rounded font-bold border border-border flex items-center gap-1.5 transition-colors cursor-pointer"
               title="Halt Capture"
             >
-              <Square className="w-3.5 h-3.5 fill-current" />
+              <TbSquare className="w-3.5 h-3.5 fill-current" />
               <span className="hidden sm:inline">Halt</span>
             </button>
           )}

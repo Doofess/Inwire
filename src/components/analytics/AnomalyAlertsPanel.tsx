@@ -1,6 +1,5 @@
 import React from 'react';
 import { Packet, AnomalyInfo } from '../../types/packet';
-import { ShieldAlert, CheckCircle2, ChevronRight } from 'lucide-react';
 
 interface AnomalyAlertsPanelProps {
   packets: Packet[];

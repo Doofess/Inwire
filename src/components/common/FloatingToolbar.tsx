@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Square, Trash2 } from 'lucide-react';
+import { TbPlayerPlay, TbSquare, TbTrash } from 'react-icons/tb';
 import { UserRolePermissions } from '../../types/packet';
 
 interface FloatingToolbarProps {
@@ -30,7 +30,7 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
             }`}
             title="Start Capture"
           >
-            <Play className="w-4 h-4 fill-current ml-0.5" />
+            <TbPlayerPlay className="w-4 h-4 fill-current ml-0.5" />
           </button>
         ) : (
           <button
@@ -38,7 +38,7 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
             className="w-9 h-9 rounded-full bg-rose-500 hover:bg-rose-400 text-slate-950 flex items-center justify-center transition-all shadow-[0_0_15px_rgba(244,63,94,0.5)]"
             title="Stop Capture"
           >
-            <Square className="w-4 h-4 fill-current" />
+            <TbSquare className="w-4 h-4 fill-current" />
           </button>
         )}
 
@@ -52,7 +52,7 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
           }`}
           title="Clear Buffer"
         >
-          <Trash2 className="w-4 h-4" />
+          <TbTrash className="w-4 h-4" />
         </button>
       </div>
     </div>

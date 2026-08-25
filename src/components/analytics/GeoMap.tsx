@@ -8,7 +8,7 @@ import {
   GeoLocation,
   isPrivateIP,
 } from "../../services/geoIpService";
-import { Globe, Home, Maximize2, X } from "lucide-react";
+import { TbGlobe, TbHome, TbMaximize, TbX } from "react-icons/tb";
 
 // MapLibre's glyph renderer doesn't shape or bidi-reorder Arabic/Hebrew
 // script on its own - without this plugin, place labels in RTL languages
@@ -416,13 +416,13 @@ export const GeoMap: React.FC<GeoMapProps> = ({ packets, isDark }) => {
       >
         <div className="flex items-center justify-between px-3 py-1 text-[10px] font-bold uppercase tracking-wider opacity-70 border-b border-inherit border-opacity-10 shrink-0">
           <div className="flex items-center gap-2">
-            <Globe className="w-3.5 h-3.5" />
+            <TbGlobe className="w-3.5 h-3.5" />
             Live Geo-IP Map
           </div>
           <div className="flex items-center gap-2">
             {ispLocation && (
               <div className="flex items-center gap-1.5 text-cyan-500">
-                <Home className="w-3 h-3" />
+                <TbHome className="w-3 h-3" />
                 <span>
                   ISP:{" "}
                   {ispLocation.city !== "Unknown" ? ispLocation.city + ", " : ""}
@@ -435,7 +435,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({ packets, isDark }) => {
               className="p-1 -m-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
               title={isExpanded ? "Close expanded view" : "Expand map"}
             >
-              {isExpanded ? <X className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+              {isExpanded ? <TbX className="w-3.5 h-3.5" /> : <TbMaximize className="w-3.5 h-3.5" />}
             </button>
           </div>
         </div>

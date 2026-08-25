@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Packet } from '../../types/packet';
-import { MessageSquare, X, Copy, Check, Download, ArrowRightLeft, Shield } from 'lucide-react';
+import { TbMessage, TbX, TbCopy, TbCheck, TbDownload } from 'react-icons/tb';
 
 interface StreamFollowerModalProps {
   streamId: number | null;
@@ -69,8 +69,8 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
         {/* Modal Header */}
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-lg bg-sky-500/20 text-sky-400">
-              <MessageSquare className="w-5 h-5" />
+            <div className="p-1.5 rounded-lg bg-sky-500/20">
+              <TbMessage className="w-5 h-5 text-foreground" />
             </div>
             <div>
               <div className="flex items-center gap-2 font-bold text-sm">
@@ -125,7 +125,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
               className="p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 border-border hover:bg-accent text-foreground/80"
               title="Copy conversation dialogue to clipboard"
             >
-              {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              {copied ? <TbCheck className="w-4 h-4 text-emerald-400" /> : <TbCopy className="w-4 h-4" />}
             </button>
 
             <button
@@ -133,14 +133,14 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
               className="p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 border-border hover:bg-accent text-foreground/80"
               title="Download stream text file"
             >
-              <Download className="w-4 h-4 text-sky-400" />
+              <TbDownload className="w-4 h-4 text-foreground" />
             </button>
 
             <button
               onClick={onClose}
               className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground"
             >
-              <X className="w-5 h-5" />
+              <TbX className="w-5 h-5" />
             </button>
           </div>
         </div>

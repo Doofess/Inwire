@@ -1,7 +1,7 @@
 import React from 'react';
 import { motion } from 'motion/react';
 import { useTheme } from 'next-themes';
-import { Settings, X, Check } from 'lucide-react';
+import { TbSettings, TbX, TbCheck } from 'react-icons/tb';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { THEME_OPTIONS } from '../../lib/themeOptions';
 
@@ -24,8 +24,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-amber-500/20 text-amber-400">
-              <Settings className="w-5 h-5" />
+            <div className="p-2 rounded-lg bg-amber-500/20">
+              <TbSettings className="w-5 h-5 text-foreground" />
             </div>
             <div>
               <div className="font-bold text-base">Settings</div>
@@ -34,7 +34,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           </div>
 
           <button onClick={onClose} className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground">
-            <X className="w-5 h-5" />
+            <TbX className="w-5 h-5" />
           </button>
         </div>
 
@@ -54,7 +54,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                       : 'border-border bg-muted/40 text-muted-foreground hover:bg-accent hover:text-foreground'
                   }`}
                 >
-                  {isActive && <Check className="w-3.5 h-3.5 absolute top-1.5 right-1.5" />}
+                  {isActive && <TbCheck className="w-3.5 h-3.5 absolute top-1.5 right-1.5" />}
                   <Icon className="w-5 h-5" />
                   <span>{label}</span>
                 </button>

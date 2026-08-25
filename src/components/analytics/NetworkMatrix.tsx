@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Packet } from '../../types/packet';
-import { Network, ArrowRightLeft, ShieldAlert } from 'lucide-react';
+import { TbNetwork, TbArrowsExchange, TbShieldExclamation } from 'react-icons/tb';
 
 interface NetworkMatrixProps {
   packets: Packet[];
@@ -77,7 +77,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
     <div className="rounded-lg border p-3.5 flex flex-col justify-between transition-colors select-none bg-card border-border text-card-foreground shadow-sm">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1.5">
-          <Network className="w-3.5 h-3.5 text-emerald-400" />
+          <TbNetwork className="w-3.5 h-3.5 text-foreground" />
           <span>Top Talkers & Matrix</span>
         </h3>
 
@@ -120,7 +120,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
                 }`}
               >
                 <div className="flex items-center gap-1.5 font-mono text-[10px] truncate">
-                  {conv.hasAnomaly && <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0 animate-pulse" />}
+                  {conv.hasAnomaly && <TbShieldExclamation className="w-3.5 h-3.5 text-rose-400 shrink-0 animate-pulse" />}
                   <button
                     onClick={() => onFilterHost(conv.hostA)}
                     className="hover:underline hover:text-cyan-400 truncate max-w-[85px] cursor-pointer"
@@ -128,7 +128,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
                   >
                     {conv.hostA}
                   </button>
-                  <ArrowRightLeft className="w-3 h-3 text-muted-foreground shrink-0" />
+                  <TbArrowsExchange className="w-3 h-3 text-muted-foreground shrink-0" />
                   <button
                     onClick={() => onFilterHost(conv.hostB)}
                     className="hover:underline hover:text-cyan-400 truncate max-w-[85px] cursor-pointer"
@@ -159,7 +159,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
               }`}
             >
               <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                {ep.anomalies > 0 && <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0 animate-pulse" />}
+                {ep.anomalies > 0 && <TbShieldExclamation className="w-3.5 h-3.5 text-rose-400 shrink-0 animate-pulse" />}
                 <button
                   onClick={() => onFilterHost(ep.ip)}
                   className="hover:underline hover:text-cyan-400 font-medium cursor-pointer"
