@@ -90,10 +90,23 @@ export default function App() {
   >("disconnected");
   const [agentCaptureState, setAgentCaptureState] = useState<'idle' | 'sniffing'>('idle');
   const [agentVersion, setAgentVersion] = useState<string | null>(null);
+  // Set when a connection's socket opened but no `hello` arrived within the
+  // grace period below - the only signal available for a pre-Task-4 agent,
+  // which never sends `hello` at all (see final review finding #5).
+  const [agentIncompatible, setAgentIncompatible] = useState(false);
   const [agentInterfaces, setAgentInterfaces] = useState<{ name: string; label: string }[]>([]);
   const [selectedInterfaces, setSelectedInterfaces] = useState<string[]>([]);
   const [pairingRequired, setPairingRequired] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  // Set right before sending an `auth` command (stored-token auto-auth on
+  // open, or the manual pairing-prompt submit below) and consumed by the
+  // first `state` message that follows - the agent now sends one
+  // immediately on successful auth, which is the "auth actually succeeded"
+  // signal used to re-sync interface selection/capture state after a
+  // reconnect (see final review finding #3). Cleared as soon as it's used
+  // so later `state` messages (from our own start/stop_capture) don't
+  // re-trigger the resync.
+  const pendingAuthAckRef = useRef(false);
 
   // RBAC Role (Simplified: Always Admin)
   const permissions = {
@@ -151,6 +164,14 @@ export default function App() {
     isCapturingRef.current = isCapturing;
   }, [isCapturing]);
 
+  // Same reasoning as isCapturingRef: the post-reconnect resync (see
+  // pendingAuthAckRef above) needs the *current* interface selection, not
+  // whatever it was when the WebSocket effect's handlers were created.
+  const selectedInterfacesRef = useRef(selectedInterfaces);
+  useEffect(() => {
+    selectedInterfacesRef.current = selectedInterfaces;
+  }, [selectedInterfaces]);
+
   // Live-capture relative-time clock (Wireshark-style): resets whenever the
   // packet buffer is emptied and a fresh capture begins.
   const captureStartRef = useRef<number | null>(null);
@@ -165,6 +186,12 @@ export default function App() {
 
     let reconnectTimeout: NodeJS.Timeout;
     let connectedDelay: NodeJS.Timeout | null = null;
+    // A pre-Task-4 agent never sends `hello` at all, so its absence within
+    // this window (started on every fresh socket open, cleared the moment
+    // `hello` arrives) is the only way to flag it as incompatible instead of
+    // silently showing a normal "Agent Connected" with zero packets ever
+    // arriving (final review finding #5).
+    let helloTimeout: NodeJS.Timeout | null = null;
     // Only the very first connection attempt shows "Connecting..." - once we
     // know the agent isn't there, silent background retries every 3s keep
     // the status calmly on "disconnected" instead of flashing "Connecting"
@@ -176,9 +203,14 @@ export default function App() {
       if (isFirstAttempt) {
         setAgentStatus("connecting");
       }
-      wsRef.current = new WebSocket("ws://localhost:8999");
+      // Captured in a local const and closed over by every handler below,
+      // rather than re-reading wsRef.current from inside each handler -
+      // closes a rapid-reconnect race where a handler could otherwise end up
+      // reading a newer socket than the one it was actually attached to.
+      const socket = new WebSocket("ws://localhost:8999");
+      wsRef.current = socket;
 
-      wsRef.current.onopen = () => {
+      socket.onopen = () => {
         console.log("[WirePulse] Connected to Local Agent");
         // Hold "Connecting..." for a beat after the handshake succeeds so
         // the button doesn't flash instantly - and so a socket that drops
@@ -186,17 +218,29 @@ export default function App() {
         // as still-connecting rather than a confusing connect/disconnect flicker.
         connectedDelay = setTimeout(() => setAgentStatus("connected"), 2000);
 
+        setAgentIncompatible(false);
+        helloTimeout = setTimeout(() => {
+          console.warn("[WirePulse] No hello received from agent within 5s - treating it as incompatible.");
+          setAgentIncompatible(true);
+        }, 5000);
+
         const storedToken = getStoredPairingToken();
         if (storedToken) {
-          wsRef.current?.send(encodeAgentCommand({ type: 'auth', token: storedToken }));
+          pendingAuthAckRef.current = true;
+          socket.send(encodeAgentCommand({ type: 'auth', token: storedToken }));
         }
       };
 
-      wsRef.current.onmessage = (event) => {
+      socket.onmessage = (event) => {
         const message = parseAgentMessage(event.data);
         if (!message) return;
 
         if (message.type === 'hello') {
+          if (helloTimeout) {
+            clearTimeout(helloTimeout);
+            helloTimeout = null;
+          }
+          setAgentIncompatible(false);
           setAgentVersion(message.version);
           setAgentCaptureState(message.state);
           setAgentInterfaces(message.interfaces);
@@ -208,20 +252,33 @@ export default function App() {
         if (message.type === 'state') {
           setAgentCaptureState(message.state);
           setAgentInterfaces(message.interfaces);
+          // The agent now sends a state message immediately after a
+          // successful auth - if we were waiting on that confirmation (a
+          // fresh pairing, or a reconnect replaying the stored token), this
+          // is the signal that it's safe to push our desired state back to
+          // what may well be a freshly-restarted, idle-on-everything agent.
+          if (pendingAuthAckRef.current) {
+            pendingAuthAckRef.current = false;
+            if (selectedInterfacesRef.current.length > 0) {
+              sendAgentCommand({ type: 'set_interfaces', interfaces: selectedInterfacesRef.current });
+            }
+            if (isCapturingRef.current) {
+              sendAgentCommand({ type: 'start_capture' });
+            }
+          }
           return;
         }
 
         if (message.type === 'error') {
           console.warn('[WirePulse] Agent error:', message.message);
-          // The only error the agent currently sends is an auth rejection
-          // (wrong or stale token - e.g. the agent restarted and generated a
-          // new pairing code since this token was stored). Clearing it and
-          // re-showing the prompt is what makes Task 12's reconnect
-          // walkthrough actually work, instead of the banner just never
-          // coming back because a token *was* stored, even though it no
-          // longer matches.
-          clearStoredPairingToken();
-          setPairingRequired(true);
+          // Only an actual bad/stale pairing token means the stored token is
+          // wrong and the pairing banner should come back - a command sent
+          // before auth completed, or a rejected empty interface list,
+          // isn't evidence the stored token itself is invalid.
+          if (message.code === 'invalid_token') {
+            clearStoredPairingToken();
+            setPairingRequired(true);
+          }
           return;
         }
 
@@ -318,18 +375,23 @@ export default function App() {
         }
       };
 
-      wsRef.current.onerror = (error) => {
+      socket.onerror = (error) => {
         console.warn("[WirePulse] WebSocket connection failed. Agent might not be running.");
         if (connectedDelay) clearTimeout(connectedDelay);
         if (isFirstAttempt) setAgentStatus("error");
       };
 
-      wsRef.current.onclose = () => {
+      socket.onclose = () => {
         console.log(
           "[WirePulse] Disconnected from Local Agent. Reconnecting in 3s...",
         );
         if (connectedDelay) clearTimeout(connectedDelay);
+        if (helloTimeout) {
+          clearTimeout(helloTimeout);
+          helloTimeout = null;
+        }
         setAgentStatus("disconnected");
+        setAgentIncompatible(false);
         isFirstAttempt = false;
         reconnectTimeout = setTimeout(connect, 3000);
       };
@@ -340,6 +402,7 @@ export default function App() {
     return () => {
       clearTimeout(reconnectTimeout);
       if (connectedDelay) clearTimeout(connectedDelay);
+      if (helloTimeout) clearTimeout(helloTimeout);
       if (wsRef.current) {
         wsRef.current.onclose = null; // prevent reconnect loop on intentional unmount/stop
         wsRef.current.close();
@@ -368,7 +431,12 @@ export default function App() {
     sendAgentCommand({ type: 'set_interfaces', interfaces: next });
   };
 
-  const agentOutdated = agentVersion !== null && isAgentOutdated(agentVersion, REQUIRED_AGENT_VERSION);
+  // Reuses the existing "outdated" amber pill for a second, related case: an
+  // agent old enough to predate `hello` entirely can't be caught by the
+  // version comparison below (agentVersion just stays null forever), so
+  // agentIncompatible - set by the hello-grace-period timer above - folds
+  // into the same flag rather than needing its own UI treatment.
+  const agentOutdated = (agentVersion !== null && isAgentOutdated(agentVersion, REQUIRED_AGENT_VERSION)) || agentIncompatible;
 
   // Display Filter Evaluation
   const filteredPackets = useMemo(() => {
@@ -523,10 +591,12 @@ export default function App() {
           onOpenIspModal={() => setShowIspModal(true)}
           onOpenSettingsModal={() => setShowSettingsModal(true)}
           agentStatus={agentStatus}
+          agentCaptureState={agentCaptureState}
           agentOutdated={agentOutdated}
           pairingRequired={pairingRequired}
           onSubmitPairingToken={(token) => {
             storePairingToken(token);
+            pendingAuthAckRef.current = true;
             sendAgentCommand({ type: 'auth', token });
             setPairingRequired(false);
           }}
