@@ -24,6 +24,9 @@ check('lower major is outdated', isAgentOutdated('1.1.0', '2.0.0'), true);
 check('higher patch is not outdated', isAgentOutdated('1.1.5', '1.1.0'), false);
 check('minor beats patch: 1.9.9 vs 1.10.0 is outdated', isAgentOutdated('1.9.9', '1.10.0'), true);
 check('minor beats patch: 1.10.0 vs 1.9.9 is not outdated', isAgentOutdated('1.10.0', '1.9.9'), false);
+check('missing patch segment treated as 0: 1.0 vs 1.0.5 is outdated', isAgentOutdated('1.0', '1.0.5'), true);
+check('missing patch segment treated as 0: 1.0.5 vs 1.0 is not outdated', isAgentOutdated('1.0.5', '1.0'), false);
+check('missing minor and patch: 1 vs 1.0.1 is outdated', isAgentOutdated('1', '1.0.1'), true);
 
 check('auth command encodes', encodeAgentCommand({ type: 'auth', token: 'ABCD-1234' }), '{"type":"auth","token":"ABCD-1234"}');
 check('start_capture encodes', encodeAgentCommand({ type: 'start_capture' }), '{"type":"start_capture"}');
