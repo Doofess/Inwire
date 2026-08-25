@@ -56,6 +56,28 @@ export interface Packet {
   sourcePort?: number;
   destPort?: number;
   protocol: ProtocolType;
+  /**
+   * The free-form protocol name shown in the Protocol column, matching what
+   * Wireshark displays for the top-most dissected layer: "TLSv1.2", "ICMPv6",
+   * "SSDP", "ieee1905". `protocol` above stays the coarse, closed-union key
+   * that filters and color rules match on; this is display only. Absent when
+   * the two would be identical.
+   */
+  protocolLabel?: string;
+  /**
+   * Decimal places the capture's timestamps are meaningful to - 6 for a
+   * microsecond capture, 9 for nanosecond. Drives how many digits the Time
+   * column renders, the way Wireshark follows the file's own resolution.
+   */
+  tsPrecision?: number;
+  /**
+   * Wireshark's tcp.analysis.* field names that fired for this frame
+   * ("retransmission", "lost_segment", "keep_alive", ...). Empty or absent
+   * when the segment looks normal. Display filters and color rules match on
+   * these, which is how the "Bad TCP" rule distinguishes a genuinely broken
+   * segment from a routine keep-alive.
+   */
+  analysisFlags?: string[];
   length: number; // in bytes
   info: string;
   status: PacketStatus;

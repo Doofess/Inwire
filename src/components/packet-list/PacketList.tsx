@@ -416,19 +416,19 @@ export const PacketList: React.FC<PacketListProps> = ({
 
                     {/* Time */}
                     <td className="px-4 py-2 whitespace-nowrap font-mono text-muted-foreground">
-                      {typeof packet.relativeTime === 'number' ? packet.relativeTime.toFixed(2) : '0.00'}
+                      {typeof packet.relativeTime === 'number'
+                        ? packet.relativeTime.toFixed(packet.tsPrecision ?? 6)
+                        : (0).toFixed(packet.tsPrecision ?? 6)}
                     </td>
 
-                    {/* Source */}
+                    {/* Source - address only; Wireshark keeps ports in the Info column */}
                     <td className="px-4 py-2 whitespace-nowrap truncate" title={packet.source}>
                       {packet.source}
-                      {packet.sourcePort && <span className={'text-muted-foreground text-[10px]'}>:{packet.sourcePort}</span>}
                     </td>
 
                     {/* Destination */}
                     <td className="px-4 py-2 whitespace-nowrap truncate" title={packet.destination}>
                       {packet.destination}
-                      {packet.destPort && <span className={'text-muted-foreground text-[10px]'}>:{packet.destPort}</span>}
                     </td>
 
                     {/* Protocol */}
