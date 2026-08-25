@@ -56,6 +56,27 @@ def has_admin_privileges() -> bool:
         return False
 
 
+def generate_pairing_token() -> str:
+    """A short, easy-to-type code printed to the agent's console and typed
+    once into NetView to pair. Not persisted - the agent regenerates it on
+    every launch, matching this phase's "still manually launched, console
+    visible" scope (see spec)."""
+    import secrets
+    raw = secrets.token_hex(4).upper()
+    return f"{raw[:4]}-{raw[4:]}"
+
+
+def build_hello_message(version: str, state: str, interfaces, auth_required: bool) -> dict:
+    """The first message sent on every new connection, before anything else."""
+    return {
+        "type": "hello",
+        "version": version,
+        "state": state,
+        "authRequired": auth_required,
+        "interfaces": [{"name": name, "label": label} for name, label in interfaces],
+    }
+
+
 def packet_to_dict(pkt):
     """Builds the JSON message for one captured frame.
 
