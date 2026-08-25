@@ -30,6 +30,7 @@ interface AppMenuProps {
   onClearPackets: () => void;
   agentInterfaces: { name: string; label: string }[];
   selectedInterfaces: string[];
+  onToggleInterface: (interfaceName: string) => void;
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
   onOpenExportModal: () => void;
@@ -68,6 +69,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   onClearPackets,
   agentInterfaces,
   selectedInterfaces,
+  onToggleInterface,
   onOpenDissectorModal,
   onOpenStatsModal,
   onOpenExportModal,
@@ -290,12 +292,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                             <Command.Item
                               key={iface.name}
                               value={`interface-${iface.name}`}
-                              onSelect={() => {
-                                const next = isSelected
-                                  ? selectedInterfaces.filter((n) => n !== iface.name)
-                                  : [...selectedInterfaces, iface.name];
-                                onSendAgentCommand({ type: 'set_interfaces', interfaces: next });
-                              }}
+                              onSelect={() => onToggleInterface(iface.name)}
                               className={itemClass}
                             >
                               <span className={`w-3.5 h-3.5 shrink-0 rounded border flex items-center justify-center ${isSelected ? 'bg-cyan-500 border-cyan-500' : 'border-border'}`}>

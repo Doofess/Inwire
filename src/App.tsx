@@ -354,6 +354,20 @@ export default function App() {
     }
   };
 
+  // Optimistic local update: the agent's `state` message always echoes back
+  // the full list of *available* interfaces (never the currently-selected
+  // subset - see AgentStateMessage/SnifferController.state_message()), so
+  // there's no round-trip confirmation to wait on here. Update local state
+  // immediately, matching how Start/Stop Capture already behave elsewhere
+  // in this app.
+  const handleToggleInterface = (interfaceName: string) => {
+    const next = selectedInterfaces.includes(interfaceName)
+      ? selectedInterfaces.filter((n) => n !== interfaceName)
+      : [...selectedInterfaces, interfaceName];
+    setSelectedInterfaces(next);
+    sendAgentCommand({ type: 'set_interfaces', interfaces: next });
+  };
+
   const agentOutdated = agentVersion !== null && isAgentOutdated(agentVersion, REQUIRED_AGENT_VERSION);
 
   // Display Filter Evaluation
@@ -501,6 +515,7 @@ export default function App() {
           onClearPackets={() => setPackets([])}
           agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
+          onToggleInterface={handleToggleInterface}
           permissions={permissions}
           onOpenDissectorModal={() => setShowDissectorModal(true)}
           onOpenStatsModal={() => setShowStatsModal(true)}
