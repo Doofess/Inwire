@@ -39,6 +39,7 @@ interface AppMenuProps {
   onApplyFilterPreset: (filter: string) => void;
   permissions: UserRolePermissions;
   totalPacketsCount: number;
+  agentOutdated: boolean;
 }
 
 const itemClass =
@@ -78,6 +79,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   onApplyFilterPreset,
   permissions,
   totalPacketsCount,
+  agentOutdated,
 }) => {
   const [open, setOpen] = useState(false);
   const [presetsExpanded, setPresetsExpanded] = useState(false);
@@ -239,7 +241,15 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       className={itemClass}
                     >
                       <TbCloudDownload className="w-3.5 h-3.5 text-foreground shrink-0" />
-                      <span>Download Driver ({agentDownload.label})</span>
+                      <span className="flex-1">Download Driver ({agentDownload.label})</span>
+                      {agentOutdated && (
+                        <span
+                          className="shrink-0 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400"
+                          title="A newer agent build is available"
+                        >
+                          Update
+                        </span>
+                      )}
                     </Command.Item>
                   </Command.Group>
 
