@@ -91,6 +91,7 @@ export default function App() {
   const [agentCaptureState, setAgentCaptureState] = useState<'idle' | 'sniffing'>('idle');
   const [agentVersion, setAgentVersion] = useState<string | null>(null);
   const [agentInterfaces, setAgentInterfaces] = useState<{ name: string; label: string }[]>([]);
+  const [selectedInterfaces, setSelectedInterfaces] = useState<string[]>([]);
   const [pairingRequired, setPairingRequired] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -199,6 +200,7 @@ export default function App() {
           setAgentVersion(message.version);
           setAgentCaptureState(message.state);
           setAgentInterfaces(message.interfaces);
+          setSelectedInterfaces((prev) => (prev.length > 0 ? prev : message.interfaces.map((i) => i.name)));
           setPairingRequired(message.authRequired && !getStoredPairingToken());
           return;
         }
@@ -497,6 +499,8 @@ export default function App() {
           onStopCapture={() => setIsCapturing(false)}
           onSendAgentCommand={sendAgentCommand}
           onClearPackets={() => setPackets([])}
+          agentInterfaces={agentInterfaces}
+          selectedInterfaces={selectedInterfaces}
           permissions={permissions}
           onOpenDissectorModal={() => setShowDissectorModal(true)}
           onOpenStatsModal={() => setShowStatsModal(true)}

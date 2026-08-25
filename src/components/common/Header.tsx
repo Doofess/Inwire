@@ -15,6 +15,8 @@ interface HeaderProps {
   onStopCapture: () => void;
   onSendAgentCommand: (command: AgentCommand) => void;
   onClearPackets: () => void;
+  agentInterfaces: { name: string; label: string }[];
+  selectedInterfaces: string[];
   permissions: UserRolePermissions;
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
@@ -66,6 +68,8 @@ export const Header: React.FC<HeaderProps> = ({
   onStopCapture,
   onSendAgentCommand,
   onClearPackets,
+  agentInterfaces,
+  selectedInterfaces,
   permissions,
   onOpenDissectorModal,
   onOpenStatsModal,
@@ -95,6 +99,8 @@ export const Header: React.FC<HeaderProps> = ({
           onPauseCapture={onPauseCapture}
           onSendAgentCommand={onSendAgentCommand}
           onClearPackets={onClearPackets}
+          agentInterfaces={agentInterfaces}
+          selectedInterfaces={selectedInterfaces}
           onOpenDissectorModal={onOpenDissectorModal}
           onOpenStatsModal={onOpenStatsModal}
           onOpenExportModal={onOpenExportModal}
