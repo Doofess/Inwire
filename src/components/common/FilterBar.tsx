@@ -1,15 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion } from 'motion/react';
 import {
-  Filter,
-  Check,
-  AlertCircle,
-  X,
-  Bookmark,
-  ChevronDown,
-  Sparkles,
-  Search,
-} from 'lucide-react';
+  TbCheck,
+  TbAlertCircle,
+  TbX,
+  TbBookmark,
+  TbChevronDown,
+  TbSearch,
+} from 'react-icons/tb';
 import { FilterEngine, DEFAULT_FILTER_PRESETS, FilterValidationResult } from '../../services/filterEngine';
 import { FilterPreset } from '../../types/packet';
 
@@ -131,9 +129,9 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border font-medium transition-colors cursor-pointer bg-card hover:bg-accent border-border text-foreground"
             title="Choose a filter preset"
           >
-            <Bookmark className="w-3.5 h-3.5 text-cyan-400" />
+            <TbBookmark className="w-3.5 h-3.5 text-cyan-400" />
             <span className="hidden sm:inline font-mono">Presets</span>
-            <ChevronDown className="w-3 h-3 text-muted-foreground" />
+            <TbChevronDown className="w-3 h-3 text-muted-foreground" />
           </button>
 
           {showPresetsDropdown && (
@@ -212,7 +210,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   className="p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
                   title="Clear filter"
                 >
-                  <X className="w-3 h-3" />
+                  <TbX className="w-3 h-3" />
                 </button>
               )}
 
@@ -222,7 +220,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   className="p-1 rounded text-cyan-400 hover:text-cyan-300 transition-colors"
                   title="Save current filter expression"
                 >
-                  <Bookmark className="w-3 h-3" />
+                  <TbBookmark className="w-3 h-3" />
                 </button>
               )}
 
@@ -234,7 +232,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 className="p-1 px-1.5 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold transition-all shadow-sm active:scale-95 cursor-pointer"
                 title="Apply display filter (Enter)"
               >
-                <Check className="w-3 h-3 stroke-[3]" />
+                <TbCheck className="w-3 h-3 stroke-[3]" />
               </button>
             </div>
           </div>
@@ -263,7 +261,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
           {/* Syntax Error Notice */}
           {!validation.isValid && validation.errorMessage && (
             <div className="absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 text-[11px] border border-rose-300 dark:border-rose-800 shadow-lg">
-              <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              <TbAlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
               <span>{validation.errorMessage}</span>
             </div>
           )}
@@ -283,7 +281,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             title="Find packet"
             className="p-0.5 shrink-0 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
           >
-            <Search className="w-3.5 h-3.5" />
+            <TbSearch className="w-3.5 h-3.5" />
           </button>
           <motion.input
             ref={searchInputRef}
@@ -308,7 +306,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
           />
           {packetSearchText && (
             <button onClick={clearSearch} className="p-0.5 shrink-0 rounded-full hover:bg-accent text-muted-foreground">
-              <X className="w-3 h-3" />
+              <TbX className="w-3 h-3" />
             </button>
           )}
         </div>
