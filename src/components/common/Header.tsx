@@ -17,6 +17,7 @@ interface HeaderProps {
   onClearPackets: () => void;
   agentInterfaces: { name: string; label: string }[];
   selectedInterfaces: string[];
+  onToggleInterface: (interfaceName: string) => void;
   permissions: UserRolePermissions;
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
@@ -70,6 +71,7 @@ export const Header: React.FC<HeaderProps> = ({
   onClearPackets,
   agentInterfaces,
   selectedInterfaces,
+  onToggleInterface,
   permissions,
   onOpenDissectorModal,
   onOpenStatsModal,
@@ -101,6 +103,7 @@ export const Header: React.FC<HeaderProps> = ({
           onClearPackets={onClearPackets}
           agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
+          onToggleInterface={onToggleInterface}
           onOpenDissectorModal={onOpenDissectorModal}
           onOpenStatsModal={onOpenStatsModal}
           onOpenExportModal={onOpenExportModal}
