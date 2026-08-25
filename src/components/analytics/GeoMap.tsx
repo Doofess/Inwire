@@ -8,7 +8,7 @@ import {
   GeoLocation,
   isPrivateIP,
 } from "../../services/geoIpService";
-import { TbGlobe, TbHome, TbMaximize, TbX } from "react-icons/tb";
+import { TbWorld, TbHome, TbMaximize, TbX } from "react-icons/tb";
 
 // MapLibre's glyph renderer doesn't shape or bidi-reorder Arabic/Hebrew
 // script on its own - without this plugin, place labels in RTL languages
@@ -416,7 +416,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({ packets, isDark }) => {
       >
         <div className="flex items-center justify-between px-3 py-1 text-[10px] font-bold uppercase tracking-wider opacity-70 border-b border-inherit border-opacity-10 shrink-0">
           <div className="flex items-center gap-2">
-            <TbGlobe className="w-3.5 h-3.5" />
+            <TbWorld className="w-3.5 h-3.5" />
             Live Geo-IP Map
           </div>
           <div className="flex items-center gap-2">
