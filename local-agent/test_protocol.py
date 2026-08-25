@@ -173,6 +173,50 @@ check("defaults are the four documented origins", config.DEFAULT_ALLOWED_ORIGINS
 check_true("config_path ends with config.json", config.config_path().endswith("config.json"))
 check_true("config_path lives under the config dir", config.config_path().startswith(config.config_dir()))
 
+# --- origin gate (process_request) ---
+class FakeHeaders(dict):
+    """Stands in for websockets' case-insensitive header mapping. Only .get()
+    is used by the code under test."""
+
+
+class FakeRequest:
+    def __init__(self, origin):
+        self.headers = FakeHeaders()
+        if origin is not None:
+            self.headers["Origin"] = origin
+
+
+class FakeConnection:
+    """Records what the gate tried to respond with, instead of writing HTTP."""
+
+    def __init__(self):
+        self.responded = None
+
+    def respond(self, status, text):
+        self.responded = (status, text)
+        return self.responded
+
+
+rejected = []
+gate = agent.make_process_request(on_reject=rejected.append)
+
+conn_ok = FakeConnection()
+check("allowed origin passes the gate", gate(conn_ok, FakeRequest("http://localhost:3000")), None)
+check("allowed origin produces no response", conn_ok.responded, None)
+check("allowed origin is not recorded as rejected", rejected, [])
+
+conn_bad = FakeConnection()
+result_bad = gate(conn_bad, FakeRequest("https://evil.com"))
+check_true("disallowed origin is rejected (non-None response)", result_bad is not None)
+check_true("disallowed origin responds 403", conn_bad.responded is not None and conn_bad.responded[0] == 403)
+check("disallowed origin is recorded", rejected, ["https://evil.com"])
+
+conn_none = FakeConnection()
+result_none = gate(conn_none, FakeRequest(None))
+check_true("missing Origin header is rejected", result_none is not None)
+check_true("missing Origin responds 403", conn_none.responded is not None and conn_none.responded[0] == 403)
+check("missing Origin is recorded as None", rejected[-1], None)
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")
