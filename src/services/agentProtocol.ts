@@ -31,6 +31,16 @@ export interface AgentPacketMessage {
 
 export type AgentMessage = AgentHelloMessage | AgentStateMessage | AgentErrorMessage | AgentPacketMessage;
 
+function isValidState(state: unknown): state is 'idle' | 'sniffing' {
+  return state === 'idle' || state === 'sniffing';
+}
+
+function isValidInterfaceList(interfaces: unknown): interfaces is { name: string; label: string }[] {
+  return Array.isArray(interfaces) && interfaces.every(
+    (i) => i && typeof i === 'object' && typeof (i as any).name === 'string' && typeof (i as any).label === 'string'
+  );
+}
+
 /**
  * Every agent message carries a `type` now - a clean break from the old
  * untyped packet-only stream (see spec: "there's no need to keep supporting
@@ -51,10 +61,10 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
 
   switch (msg.type) {
     case 'hello':
-      if (typeof msg.version !== 'string' || !Array.isArray(msg.interfaces)) return null;
+      if (typeof msg.version !== 'string' || typeof msg.authRequired !== 'boolean' || !isValidState(msg.state) || !isValidInterfaceList(msg.interfaces)) return null;
       return msg as unknown as AgentHelloMessage;
     case 'state':
-      if (typeof msg.state !== 'string' || !Array.isArray(msg.interfaces)) return null;
+      if (!isValidState(msg.state) || !isValidInterfaceList(msg.interfaces)) return null;
       return msg as unknown as AgentStateMessage;
     case 'error':
       if (typeof msg.message !== 'string') return null;

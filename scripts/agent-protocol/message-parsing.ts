@@ -37,6 +37,13 @@ check('error missing message returns null', parseAgentMessage('{"type":"error"}'
 const pkt = parseAgentMessage('{"type":"packet","source":"1.2.3.4","destination":"5.6.7.8"}');
 check('packet passes through with all its fields', pkt, { type: 'packet', source: '1.2.3.4', destination: '5.6.7.8' });
 
+check('hello missing authRequired returns null', parseAgentMessage('{"type":"hello","version":"1.0.0","state":"idle","interfaces":[]}'), null);
+check('hello with non-boolean authRequired returns null', parseAgentMessage('{"type":"hello","version":"1.0.0","state":"idle","authRequired":"yes","interfaces":[]}'), null);
+check('hello with invalid state enum value returns null', parseAgentMessage('{"type":"hello","version":"1.0.0","state":"exploded","authRequired":true,"interfaces":[]}'), null);
+check('state with invalid enum value returns null', parseAgentMessage('{"type":"state","state":"exploded","interfaces":[]}'), null);
+check('state with malformed interface entries returns null', parseAgentMessage('{"type":"state","state":"idle","interfaces":["oops"]}'), null);
+check('state with interface entry missing label returns null', parseAgentMessage('{"type":"state","state":"idle","interfaces":[{"name":"eth0"}]}'), null);
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
