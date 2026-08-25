@@ -503,6 +503,13 @@ export default function App() {
           onOpenIspModal={() => setShowIspModal(true)}
           onOpenSettingsModal={() => setShowSettingsModal(true)}
           agentStatus={agentStatus}
+          agentOutdated={agentOutdated}
+          pairingRequired={pairingRequired}
+          onSubmitPairingToken={(token) => {
+            storePairingToken(token);
+            sendAgentCommand({ type: 'auth', token });
+            setPairingRequired(false);
+          }}
           totalPacketsCount={packets.length}
           filteredPacketsCount={filteredPackets.length}
           totalBytes={totalBytes}

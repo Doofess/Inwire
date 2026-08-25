@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   TbPlayerPlay,
   TbPlayerPause,
@@ -19,6 +19,9 @@ interface HeaderProps {
   onOpenExportModal: () => void;
   onOpenIspModal?: () => void;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+  agentOutdated: boolean;
+  pairingRequired: boolean;
+  onSubmitPairingToken: (token: string) => void;
   onOpenSettingsModal: () => void;
   totalPacketsCount: number;
   filteredPacketsCount: number;
@@ -29,6 +32,30 @@ interface HeaderProps {
 // Matches the capture buffer cap enforced in App.tsx's WebSocket handler
 // (oldest packets are dropped once the live buffer exceeds this size).
 const PACKET_BUFFER_CAP = 4000;
+
+const PairingPrompt: React.FC<{ onSubmit: (token: string) => void }> = ({ onSubmit }) => {
+  const [value, setValue] = useState('');
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (value.trim()) onSubmit(value.trim());
+      }}
+      className="hidden lg:flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full border bg-secondary border-border"
+    >
+      <span className="text-muted-foreground">Pairing code:</span>
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="XXXX-XXXX"
+        className="w-20 bg-transparent outline-none font-mono placeholder:text-muted-foreground"
+      />
+      <button type="submit" className="text-cyan-500 font-semibold hover:text-cyan-400">
+        Connect
+      </button>
+    </form>
+  );
+};
 
 export const Header: React.FC<HeaderProps> = ({
   isCapturing,
@@ -42,6 +69,9 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenExportModal,
   onOpenIspModal,
   agentStatus,
+  agentOutdated,
+  pairingRequired,
+  onSubmitPairingToken,
   onOpenSettingsModal,
   totalPacketsCount,
   filteredPacketsCount,
@@ -148,7 +178,9 @@ export const Header: React.FC<HeaderProps> = ({
             small pill reflects the (sometimes flickery) live connection state. */}
         <div
           className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full border font-mono ${
-            agentStatus === 'connected'
+            agentStatus === 'connected' && agentOutdated
+              ? 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
+              : agentStatus === 'connected'
               ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
               : agentStatus === 'connecting'
               ? 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
@@ -160,7 +192,9 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <span
             className={`w-1.5 h-1.5 rounded-full ${
-              agentStatus === 'connected'
+              agentStatus === 'connected' && agentOutdated
+                ? 'bg-amber-500 dark:bg-amber-400'
+                : agentStatus === 'connected'
                 ? 'bg-emerald-500 dark:bg-emerald-400'
                 : agentStatus === 'connecting'
                 ? 'bg-amber-500 dark:bg-amber-400 animate-pulse'
@@ -170,7 +204,9 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           />
           <span>
-            {agentStatus === 'connected'
+            {agentStatus === 'connected' && agentOutdated
+              ? 'Agent Outdated'
+              : agentStatus === 'connected'
               ? 'Agent Connected'
               : agentStatus === 'connecting'
               ? 'Connecting...'
@@ -179,6 +215,10 @@ export const Header: React.FC<HeaderProps> = ({
               : 'Agent Disconnected'}
           </span>
         </div>
+
+        {pairingRequired && (
+          <PairingPrompt onSubmit={onSubmitPairingToken} />
+        )}
       </div>
     </header>
   );
