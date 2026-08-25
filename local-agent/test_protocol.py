@@ -53,6 +53,25 @@ hello_no_ifaces = agent.build_hello_message(version="1.1.0", state="sniffing", i
 check("hello with empty interfaces", hello_no_ifaces["interfaces"], [])
 check("hello sniffing state", hello_no_ifaces["state"], "sniffing")
 
+# --- ConnectionAuth / is_command_allowed ---
+auth = agent.ConnectionAuth(expected_token="AAAA-BBBB")
+check("starts unauthenticated", auth.authenticated, False)
+check("wrong token rejected", auth.try_authenticate({"type": "auth", "token": "WRONG"}), False)
+check("still unauthenticated after wrong token", auth.authenticated, False)
+check("correct token accepted", auth.try_authenticate({"type": "auth", "token": "AAAA-BBBB"}), True)
+check("authenticated after correct token", auth.authenticated, True)
+
+check("start_capture gated when unauthenticated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "start_capture"}), False)
+check("stop_capture gated when unauthenticated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "stop_capture"}), False)
+check("set_interfaces gated when unauthenticated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "set_interfaces"}), False)
+
+authed = agent.ConnectionAuth("X")
+authed.try_authenticate({"type": "auth", "token": "X"})
+check("start_capture allowed once authenticated", agent.is_command_allowed(authed, {"type": "start_capture"}), True)
+
+check("auth message itself is not gated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "auth"}), True)
+check("unknown message type is not gated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "something_else"}), True)
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")
