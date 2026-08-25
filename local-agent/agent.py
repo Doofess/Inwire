@@ -77,6 +77,32 @@ def build_hello_message(version: str, state: str, interfaces, auth_required: boo
     }
 
 
+class ConnectionAuth:
+    """Per-connection pairing state. One instance per WebSocket connection -
+    pairing is not shared across connections or persisted to disk."""
+
+    def __init__(self, expected_token: str):
+        self.expected_token = expected_token
+        self.authenticated = False
+
+    def try_authenticate(self, message: dict) -> bool:
+        if message.get("type") == "auth" and message.get("token") == self.expected_token:
+            self.authenticated = True
+            return True
+        return False
+
+
+GATED_COMMAND_TYPES = {"start_capture", "stop_capture", "set_interfaces"}
+
+
+def is_command_allowed(auth: ConnectionAuth, message: dict) -> bool:
+    """Only start_capture/stop_capture/set_interfaces require pairing - hello
+    is sent unconditionally, and auth itself obviously can't require auth."""
+    if message.get("type") not in GATED_COMMAND_TYPES:
+        return True
+    return auth.authenticated
+
+
 def packet_to_dict(pkt):
     """Builds the JSON message for one captured frame.
 
