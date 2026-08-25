@@ -9,6 +9,8 @@ export interface L2DissectorResult {
   protocolLabel: string;
   info: string;
   layer: ProtocolLayer;
+  /** Dissected values under their Wireshark field names, for display filters. */
+  fields?: Record<string, string | number>;
 }
 
 /**
@@ -56,6 +58,13 @@ export function dissectArp(rawBytes: Uint8Array, l3Offset: number): L2DissectorR
   return {
     protocolLabel: 'ARP',
     info,
+    fields: {
+      'arp.opcode': opcode,
+      'arp.src.proto_ipv4': senderIp,
+      'arp.dst.proto_ipv4': targetIp,
+      'arp.src.hw_mac': senderMac,
+      'arp.dst.hw_mac': targetMac,
+    },
     layer: {
       name: 'Address Resolution Protocol',
       summary: `Address Resolution Protocol (${opcodeName})`,
@@ -110,6 +119,7 @@ export function dissectStp(rawBytes: Uint8Array, llcOffset: number): L2Dissector
     return {
       protocolLabel: 'STP',
       info: 'Topology Change Notification',
+      fields: { 'stp.type': bpduType, 'stp.version': version },
       layer: {
         name: 'Spanning Tree Protocol',
         summary: 'Spanning Tree Protocol, Topology Change Notification',
@@ -140,6 +150,12 @@ export function dissectStp(rawBytes: Uint8Array, llcOffset: number): L2Dissector
   return {
     protocolLabel: bpduType === 0x02 ? 'RSTP' : 'STP',
     info,
+    fields: {
+      'stp.type': bpduType,
+      'stp.version': version,
+      'stp.root.cost': rootCost,
+      'stp.port': portId,
+    },
     layer: {
       name: 'Spanning Tree Protocol',
       summary: `Spanning Tree Protocol, ${info}`,

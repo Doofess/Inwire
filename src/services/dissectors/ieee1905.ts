@@ -68,6 +68,7 @@ export interface Ieee1905DissectorResult {
   protocolLabel: string;
   info: string;
   layer: ProtocolLayer;
+  fields?: Record<string, string | number>;
 }
 
 /**
@@ -88,6 +89,7 @@ export function dissectIeee1905(rawBytes: Uint8Array, start: number): Ieee1905Di
   return {
     protocolLabel: 'ieee1905',
     info: typeName,
+    fields: { 'ieee1905.message.type': messageType, 'ieee1905.message.id': messageId },
     layer: {
       name: 'IEEE 1905.1a',
       summary: `IEEE 1905.1a, ${typeName}`,
