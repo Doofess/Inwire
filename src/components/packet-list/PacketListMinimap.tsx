@@ -13,6 +13,24 @@ interface PacketListMinimapProps {
 const FALLBACK_BAND_COLOR_DARK = 'rgba(148, 163, 184, 0.35)';
 const FALLBACK_BAND_COLOR_LIGHT = 'rgba(100, 116, 139, 0.3)';
 
+const MINIMAP_WIDTH_STORAGE_KEY = 'netview.packetListMinimapWidth';
+const DEFAULT_MINIMAP_WIDTH = 16;
+const MIN_MINIMAP_WIDTH = 8;
+const MAX_MINIMAP_WIDTH = 120;
+
+function loadStoredMinimapWidth(): number {
+  try {
+    const raw = localStorage.getItem(MINIMAP_WIDTH_STORAGE_KEY);
+    const parsed = raw ? Number(raw) : NaN;
+    if (Number.isFinite(parsed)) {
+      return Math.min(MAX_MINIMAP_WIDTH, Math.max(MIN_MINIMAP_WIDTH, parsed));
+    }
+  } catch {
+    // localStorage unavailable (private browsing, etc.) - fall back to the default
+  }
+  return DEFAULT_MINIMAP_WIDTH;
+}
+
 // A throwaway 1x1 canvas used purely to resolve any valid CSS color string
 // (hex from custom color rules, rgba() from the built-in ones, named colors)
 // into concrete RGBA bytes, so the downsampled minimap rows can be averaged
@@ -51,8 +69,18 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const draggingRef = useRef(false);
+  const resizingRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [viewport, setViewport] = useState({ top: 0, height: 0 });
+  const [mapWidth, setMapWidth] = useState(loadStoredMinimapWidth);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(MINIMAP_WIDTH_STORAGE_KEY, String(mapWidth));
+    } catch {
+      // ignore write failures (private browsing, storage disabled, etc.)
+    }
+  }, [mapWidth]);
 
   useEffect(() => {
     const el = wrapperRef.current;
@@ -166,19 +194,47 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
     e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
+  // Dragging the handle on the left edge grows/shrinks the strip itself,
+  // independent of the click/drag-to-scroll handlers above (which live on
+  // the wrapper and would otherwise also fire on the same pointer events).
+  const handleResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    resizingRef.current = { startX: e.clientX, startWidth: mapWidth };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const handleResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    if (!resizingRef.current) return;
+    const delta = resizingRef.current.startX - e.clientX;
+    setMapWidth(Math.min(MAX_MINIMAP_WIDTH, Math.max(MIN_MINIMAP_WIDTH, resizingRef.current.startWidth + delta)));
+  };
+  const handleResizePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    resizingRef.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
   return (
     <div
       ref={wrapperRef}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      className="relative w-4 shrink-0 border-l border-border bg-secondary/40 cursor-pointer select-none"
+      className="relative shrink-0 border-l border-border bg-secondary/40 cursor-pointer select-none"
+      style={{ width: mapWidth }}
       title="Packet map - click or drag to scroll"
     >
       <canvas ref={canvasRef} className="absolute inset-0 block" style={{ width: size.width, height: size.height }} />
       <div
         className="absolute left-0 w-full rounded-sm bg-foreground/15 border border-foreground/40 pointer-events-none"
         style={{ top: viewport.top, height: viewport.height }}
+      />
+      <div
+        onPointerDown={handleResizePointerDown}
+        onPointerMove={handleResizePointerMove}
+        onPointerUp={handleResizePointerUp}
+        className="absolute left-0 top-0 h-full w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-cyan-500/50 z-10"
+        title="Drag to resize packet map"
       />
     </div>
   );

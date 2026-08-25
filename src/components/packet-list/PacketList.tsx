@@ -28,6 +28,41 @@ interface PacketListProps {
 type SortField = 'id' | 'relativeTime' | 'source' | 'destination' | 'protocol' | 'length' | 'info';
 type SortOrder = 'asc' | 'desc';
 
+// 'info' is deliberately excluded: it's the last column and always absorbs
+// whatever width the fixed-width columns don't use, the same way VS Code's
+// rightmost panel does - it never needs its own draggable handle.
+type ColumnKey = 'id' | 'relativeTime' | 'source' | 'destination' | 'protocol' | 'length';
+
+const COLUMN_WIDTHS_STORAGE_KEY = 'netview.packetListColumnWidths';
+const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
+  id: 64,
+  relativeTime: 96,
+  source: 144,
+  destination: 144,
+  protocol: 96,
+  length: 80,
+};
+const MIN_COLUMN_WIDTH = 36;
+const MAX_COLUMN_WIDTH = 480;
+
+function loadStoredColumnWidths(): Record<ColumnKey, number> {
+  try {
+    const raw = localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_COLUMN_WIDTHS };
+    const parsed = JSON.parse(raw);
+    const result = { ...DEFAULT_COLUMN_WIDTHS };
+    (Object.keys(DEFAULT_COLUMN_WIDTHS) as ColumnKey[]).forEach(key => {
+      const value = parsed?.[key];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        result[key] = Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, value));
+      }
+    });
+    return result;
+  } catch {
+    return { ...DEFAULT_COLUMN_WIDTHS };
+  }
+}
+
 export const PacketList: React.FC<PacketListProps> = ({
   packets,
   selectedPacket,
@@ -43,6 +78,47 @@ export const PacketList: React.FC<PacketListProps> = ({
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; packet: Packet } | null>(null);
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Resizable columns
+  const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(loadStoredColumnWidths);
+  const columnResizeRef = useRef<{ column: ColumnKey; startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
+    } catch {
+      // ignore write failures (private browsing, storage disabled, etc.)
+    }
+  }, [columnWidths]);
+
+  const handleColumnResizePointerDown = (column: ColumnKey) => (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    columnResizeRef.current = { column, startX: e.clientX, startWidth: columnWidths[column] };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const handleColumnResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    const drag = columnResizeRef.current;
+    if (!drag) return;
+    const nextWidth = Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, drag.startWidth + (e.clientX - drag.startX)));
+    setColumnWidths(prev => ({ ...prev, [drag.column]: nextWidth }));
+  };
+  const handleColumnResizePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    columnResizeRef.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
+  const renderColumnResizeHandle = (column: ColumnKey) => (
+    <div
+      onPointerDown={handleColumnResizePointerDown(column)}
+      onPointerMove={handleColumnResizePointerMove}
+      onPointerUp={handleColumnResizePointerUp}
+      onClick={e => e.stopPropagation()}
+      className="absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-cyan-500/50 z-10"
+      title="Drag to resize column"
+    />
+  );
 
   // Sorting & Filtering
   const sortedPackets = React.useMemo(() => {
@@ -128,7 +204,16 @@ export const PacketList: React.FC<PacketListProps> = ({
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto overflow-x-auto custom-scrollbar"
       >
-        <table className="w-full text-left border-collapse font-mono text-xs">
+        <table className="w-full table-fixed text-left border-collapse font-mono text-xs">
+          <colgroup>
+            <col style={{ width: columnWidths.id }} />
+            <col style={{ width: columnWidths.relativeTime }} />
+            <col style={{ width: columnWidths.source }} />
+            <col style={{ width: columnWidths.destination }} />
+            <col style={{ width: columnWidths.protocol }} />
+            <col style={{ width: columnWidths.length }} />
+            <col />
+          </colgroup>
           {/* Table Header */}
           <thead
             className="sticky top-0 z-20 border-b transition-colors select-none bg-secondary border-border text-muted-foreground"
@@ -136,62 +221,68 @@ export const PacketList: React.FC<PacketListProps> = ({
             <tr className="text-[11px] uppercase tracking-wider divide-x divide-border/60">
               <th
                 onClick={() => handleSort('id')}
-                className={`w-16 px-4 py-2.5 cursor-pointer group font-bold ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>No.</span>
                   {renderSortIcon('id')}
                 </div>
+                {renderColumnResizeHandle('id')}
               </th>
 
               <th
                 onClick={() => handleSort('relativeTime')}
-                className={`w-24 px-4 py-2.5 cursor-pointer group font-bold ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Time</span>
                   {renderSortIcon('relativeTime')}
                 </div>
+                {renderColumnResizeHandle('relativeTime')}
               </th>
 
               <th
                 onClick={() => handleSort('source')}
-                className={`w-36 px-4 py-2.5 cursor-pointer group font-bold ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Source</span>
                   {renderSortIcon('source')}
                 </div>
+                {renderColumnResizeHandle('source')}
               </th>
 
               <th
                 onClick={() => handleSort('destination')}
-                className={`w-36 px-4 py-2.5 cursor-pointer group font-bold ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Destination</span>
                   {renderSortIcon('destination')}
                 </div>
+                {renderColumnResizeHandle('destination')}
               </th>
 
               <th
                 onClick={() => handleSort('protocol')}
-                className={`w-24 px-4 py-2.5 cursor-pointer group font-bold ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Protocol</span>
                   {renderSortIcon('protocol')}
                 </div>
+                {renderColumnResizeHandle('protocol')}
               </th>
 
               <th
                 onClick={() => handleSort('length')}
-                className={`w-20 px-4 py-2.5 cursor-pointer group font-bold ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-4 py-2.5 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <div className="flex items-center gap-1">
                   <span>Length</span>
                   {renderSortIcon('length')}
                 </div>
+                {renderColumnResizeHandle('length')}
               </th>
 
               <th onClick={() => handleSort('info')} className={`px-4 py-2.5 cursor-pointer group font-bold ${"hover:bg-accent text-muted-foreground"}`}><div className="flex items-center gap-1"><span>Info</span>{renderSortIcon('info')}</div></th>
@@ -245,13 +336,13 @@ export const PacketList: React.FC<PacketListProps> = ({
                     </td>
 
                     {/* Source */}
-                    <td className="px-4 py-2 whitespace-nowrap truncate max-w-[140px]" title={packet.source}>
+                    <td className="px-4 py-2 whitespace-nowrap truncate" title={packet.source}>
                       {packet.source}
                       {packet.sourcePort && <span className={'text-muted-foreground text-[10px]'}>:{packet.sourcePort}</span>}
                     </td>
 
                     {/* Destination */}
-                    <td className="px-4 py-2 whitespace-nowrap truncate max-w-[140px]" title={packet.destination}>
+                    <td className="px-4 py-2 whitespace-nowrap truncate" title={packet.destination}>
                       {packet.destination}
                       {packet.destPort && <span className={'text-muted-foreground text-[10px]'}>:{packet.destPort}</span>}
                     </td>
