@@ -169,10 +169,14 @@ export const PacketList: React.FC<PacketListProps> = ({
   };
 
   useEffect(() => {
+    // Depend on the array reference itself, not packets.length: once the
+    // live-capture buffer hits its cap (4000, see App.tsx), each new packet
+    // also drops the oldest one, so length stops changing even though new
+    // data keeps arriving - length alone would silently stop autoscroll.
     if (shouldAutoScrollRef.current && tableContainerRef.current) {
       tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
     }
-  }, [packets.length]);
+  }, [packets]);
 
   // Context Menu handlers
   const handleContextMenu = (e: React.MouseEvent, packet: Packet) => {
