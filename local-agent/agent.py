@@ -103,6 +103,60 @@ def is_command_allowed(auth: ConnectionAuth, message: dict) -> bool:
     return auth.authenticated
 
 
+class SnifferController:
+    """Tracks whether the agent should be sniffing and on which interfaces,
+    independent of the actual scapy/thread machinery. Thread creation is
+    injected via spawn_fn(iface_name, stop_event) so this orchestration logic
+    - start/stop/reconfigure - is unit-testable with a fake spawn_fn and no
+    real interfaces or scapy involved. The real spawn_fn (wired up in main())
+    starts a daemon thread running sniff_on_interface.
+
+    A fresh threading.Event is created on every start_threads/restart_threads
+    call rather than reusing one persistent Event: a still-exiting thread from
+    a previous stop keeps checking the Event object it was given, so clearing
+    and reusing one Event could make that lingering thread think a *new*
+    session told it to keep going.
+    """
+
+    def __init__(self, default_interfaces):
+        self.selected_interfaces = list(default_interfaces)
+        self._sniffing = False
+        self.stop_event = threading.Event()
+
+    def is_sniffing(self) -> bool:
+        return self._sniffing
+
+    def set_interfaces(self, interfaces) -> None:
+        self.selected_interfaces = list(interfaces)
+
+    def start_threads(self, spawn_fn) -> None:
+        if self._sniffing:
+            return
+        self.stop_event = threading.Event()
+        for name in self.selected_interfaces:
+            spawn_fn(name, self.stop_event)
+        self._sniffing = True
+
+    def stop_threads(self) -> None:
+        if not self._sniffing:
+            return
+        self.stop_event.set()
+        self._sniffing = False
+
+    def restart_threads(self, spawn_fn) -> None:
+        was_sniffing = self._sniffing
+        self.stop_threads()
+        if was_sniffing:
+            self.start_threads(spawn_fn)
+
+    def state_message(self, available_interfaces) -> dict:
+        return {
+            "type": "state",
+            "state": "sniffing" if self._sniffing else "idle",
+            "interfaces": [{"name": name, "label": label} for name, label in available_interfaces],
+        }
+
+
 def packet_to_dict(pkt):
     """Builds the JSON message for one captured frame.
 

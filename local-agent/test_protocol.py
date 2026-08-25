@@ -72,6 +72,71 @@ check("start_capture allowed once authenticated", agent.is_command_allowed(authe
 check("auth message itself is not gated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "auth"}), True)
 check("unknown message type is not gated", agent.is_command_allowed(agent.ConnectionAuth("X"), {"type": "something_else"}), True)
 
+# --- SnifferController ---
+class FakeSpawnCalls:
+    """Records (iface_name, stop_event) calls instead of starting real threads,
+    so orchestration logic is testable without scapy or real interfaces."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, iface_name, stop_event):
+        self.calls.append((iface_name, stop_event))
+        return object()
+
+
+sc = agent.SnifferController(default_interfaces=["eth0", "eth1"])
+check("starts idle", sc.is_sniffing(), False)
+check("default interfaces set", sc.selected_interfaces, ["eth0", "eth1"])
+
+spawn = FakeSpawnCalls()
+sc.start_threads(spawn)
+check("sniffing after start_threads", sc.is_sniffing(), True)
+check("start_threads spawns one call per selected interface", [c[0] for c in spawn.calls], ["eth0", "eth1"])
+first_stop_event = spawn.calls[0][1]
+check("both threads share the same stop_event", spawn.calls[1][1] is first_stop_event, True)
+
+spawn2 = FakeSpawnCalls()
+sc.start_threads(spawn2)
+check("start_threads is a no-op while already sniffing", spawn2.calls, [])
+
+sc.stop_threads()
+check("idle after stop_threads", sc.is_sniffing(), False)
+check("stop_threads sets the stop_event so old threads notice", first_stop_event.is_set(), True)
+
+spawn3 = FakeSpawnCalls()
+sc.stop_threads()
+check("stop_threads is a no-op while already idle", sc.is_sniffing(), False)
+
+sc.set_interfaces(["eth2"])
+check("set_interfaces updates selected_interfaces", sc.selected_interfaces, ["eth2"])
+
+sc.start_threads(spawn3)
+check("start_threads after set_interfaces uses the new list", [c[0] for c in spawn3.calls], ["eth2"])
+second_stop_event = spawn3.calls[0][1]
+
+spawn4 = FakeSpawnCalls()
+sc.set_interfaces(["eth3", "eth4"])
+sc.restart_threads(spawn4)
+check("restart_threads stops the old stop_event", second_stop_event.is_set(), True)
+check("restart_threads starts threads for the new interface set", [c[0] for c in spawn4.calls], ["eth3", "eth4"])
+check("restart_threads leaves the controller sniffing", sc.is_sniffing(), True)
+
+sc.stop_threads()
+spawn5 = FakeSpawnCalls()
+sc.restart_threads(spawn5)
+check("restart_threads while already idle stays idle (no spurious start)", sc.is_sniffing(), False)
+check("restart_threads while idle does not spawn anything", spawn5.calls, [])
+
+idle_msg = agent.SnifferController(default_interfaces=[]).state_message([("eth0", "Ethernet")])
+check("state_message type", idle_msg["type"], "state")
+check("state_message idle state", idle_msg["state"], "idle")
+check("state_message reports available interfaces regardless of selection", idle_msg["interfaces"], [{"name": "eth0", "label": "Ethernet"}])
+
+sc_sniffing = agent.SnifferController(default_interfaces=["eth0"])
+sc_sniffing.start_threads(FakeSpawnCalls())
+sniffing_msg = sc_sniffing.state_message([("eth0", "Ethernet")])
+check("state_message sniffing state", sniffing_msg["state"], "sniffing")
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")
