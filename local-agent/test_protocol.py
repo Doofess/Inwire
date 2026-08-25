@@ -94,6 +94,7 @@ check("sniffing after start_threads", sc.is_sniffing(), True)
 check("start_threads spawns one call per selected interface", [c[0] for c in spawn.calls], ["eth0", "eth1"])
 first_stop_event = spawn.calls[0][1]
 check("both threads share the same stop_event", spawn.calls[1][1] is first_stop_event, True)
+check("stop_event starts unset after start_threads", first_stop_event.is_set(), False)
 
 spawn2 = FakeSpawnCalls()
 sc.start_threads(spawn2)
@@ -113,12 +114,17 @@ check("set_interfaces updates selected_interfaces", sc.selected_interfaces, ["et
 sc.start_threads(spawn3)
 check("start_threads after set_interfaces uses the new list", [c[0] for c in spawn3.calls], ["eth2"])
 second_stop_event = spawn3.calls[0][1]
+check("fresh stop_event after set_interfaces (different object)", second_stop_event is not first_stop_event, True)
+check("new stop_event starts unset", second_stop_event.is_set(), False)
 
 spawn4 = FakeSpawnCalls()
 sc.set_interfaces(["eth3", "eth4"])
 sc.restart_threads(spawn4)
 check("restart_threads stops the old stop_event", second_stop_event.is_set(), True)
 check("restart_threads starts threads for the new interface set", [c[0] for c in spawn4.calls], ["eth3", "eth4"])
+third_stop_event = spawn4.calls[0][1]
+check("fresh stop_event on restart (different object)", third_stop_event is not second_stop_event, True)
+check("restarted stop_event starts unset", third_stop_event.is_set(), False)
 check("restart_threads leaves the controller sniffing", sc.is_sniffing(), True)
 
 sc.stop_threads()
