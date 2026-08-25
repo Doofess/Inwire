@@ -22,7 +22,7 @@ import threading
 import time
 
 try:
-    from scapy.all import sniff, IP, IPv6, TCP, UDP
+    from scapy.all import sniff, ARP, Dot3, Ether, IP, IPv6, TCP, UDP
 except ImportError:
     print("ERROR: scapy is not installed. Run: pip install scapy", file=sys.stderr)
     sys.exit(1)
@@ -57,12 +57,21 @@ def has_admin_privileges() -> bool:
 
 
 def packet_to_dict(pkt):
+    """Builds the JSON message for one captured frame.
+
+    These metadata fields are only a *fallback*: whenever "raw" is present the
+    browser re-dissects the frame itself with the same code path an imported
+    pcap goes through, and overwrites all of them. So the job here is to send
+    every frame with its bytes intact, not to classify it - which is why a
+    frame with no IP layer is described from its Ethernet header rather than
+    being dropped.
+    """
     if IP in pkt:
         ip_layer = pkt[IP]
     elif IPv6 in pkt:
         ip_layer = pkt[IPv6]
     else:
-        return None  # non-IP traffic (ARP, etc.) - skip to keep the schema simple
+        ip_layer = None
 
     if TCP in pkt:
         proto, sport, dport = "TCP", int(pkt[TCP].sport), int(pkt[TCP].dport)
@@ -71,11 +80,29 @@ def packet_to_dict(pkt):
     else:
         proto, sport, dport = "Other", None, None
 
+    if ip_layer is not None:
+        source, destination = ip_layer.src, ip_layer.dst
+    else:
+        # A frame with no network layer - ARP, STP, IEEE 1905 - shows its MAC
+        # addresses, which is what Wireshark puts in those columns too. The
+        # browser resolves them to vendor names once it re-dissects.
+        #
+        # Both link layers have to be checked: an 802.3 frame (where bytes
+        # 12-13 are a length rather than an ethertype, as in every STP BPDU)
+        # parses as Dot3, not Ether, so testing only for Ether loses exactly
+        # the frames this fallback exists to describe.
+        link_layer = pkt.getlayer(Ether) or pkt.getlayer(Dot3)
+        if link_layer is not None:
+            source, destination = link_layer.src, link_layer.dst
+            proto = "ARP" if ARP in pkt else "Other"
+        else:
+            source, destination = "unknown", "unknown"
+
     return {
         "id": make_id(),
         "timestamp": int(time.time() * 1000),
-        "source": ip_layer.src,
-        "destination": ip_layer.dst,
+        "source": source,
+        "destination": destination,
         "protocol": proto,
         "sourcePort": sport,
         "destPort": dport,
@@ -166,8 +193,12 @@ def list_interfaces():
 
 def sniff_on_interface(iface_name, iface_label):
     try:
+        # No BPF filter: capture every frame on the wire, the way Wireshark
+        # does by default. This used to be "ip or ip6", which silently
+        # discarded ARP, STP and every other non-IP protocol before they
+        # could reach the browser - the frontend dissects all of them.
         # store=False keeps memory flat during long-running captures.
-        sniff(prn=sniff_callback, store=False, filter="ip or ip6", iface=iface_name)
+        sniff(prn=sniff_callback, store=False, iface=iface_name)
     except Exception as exc:  # e.g. an adapter that's disabled/down, or Npcap missing on Windows
         print(f"[agent] WARNING: capture failed on interface {iface_label!r} ({iface_name}): {exc}", file=sys.stderr)
 
