@@ -213,8 +213,24 @@ class AgentServer:
             async for raw in ws:
                 await self._handle_message(ws, raw)
         finally:
-            self.connections.discard(ws)
-            log.info("client disconnected (%d remaining)", len(self.connections))
+            self.handle_disconnect(ws)
+
+    def handle_disconnect(self, ws):
+        """Capture is scoped to live connections: with nobody watching,
+        nothing should be captured. Closing the last NetView tab therefore
+        stops the sniffer (see spec: Capture lifecycle).
+
+        Sniffing deliberately does not resume when a client reconnects - a
+        fresh connection arrives idle and must send start_capture again.
+        Inferring intent across a disconnect would mean capturing traffic
+        nobody explicitly asked for, which is the whole property that makes
+        an always-running background capture agent acceptable.
+        """
+        self.connections.discard(ws)
+        log.info("client disconnected (%d remaining)", len(self.connections))
+        if not self.connections and sniffer.is_sniffing():
+            log.info("last client disconnected - stopping capture")
+            sniffer.stop_threads()
 
     async def _handle_message(self, ws, raw):
         try:
