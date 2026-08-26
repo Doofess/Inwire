@@ -54,7 +54,7 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "2.0.0"
+AGENT_VERSION = "2.1.0"
 
 import logging_setup
 
