@@ -7,6 +7,7 @@ convention this mirrors).
 Run:  python local-agent/test_protocol.py
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -592,6 +593,77 @@ except Exception:
     _raised = True
 check("a raising sink never propagates into the caller", _raised, False)
 _handler_logger.removeHandler(_raising_handler)
+
+# --- agent log: server wiring ---
+class RecordingWS:
+    """Captures what the server sent, instead of writing to a socket."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, data):
+        self.sent.append(json.loads(data))
+
+
+_prev_sniffer = getattr(agent, "sniffer", None)
+_prev_interfaces = getattr(agent, "AVAILABLE_INTERFACES", None)
+try:
+    agent.sniffer = agent.SnifferController(default_interfaces=["eth0"])
+    agent.AVAILABLE_INTERFACES = [("eth0", "Ethernet")]
+    srv = agent.AgentServer()
+    ws = RecordingWS()
+
+    check("a fresh server has no log subscribers", len(srv.log_subscribers), 0)
+
+    asyncio.run(srv._handle_message(ws, json.dumps({"type": "subscribe_logs"})))
+    check("subscribe_logs registers the socket", ws in srv.log_subscribers, True)
+    check("subscribe_logs sends exactly one message", len(ws.sent), 1)
+    check("subscribe_logs replies with a log message", ws.sent[0]["type"], "log")
+    check_true("subscribe_logs backlog is a list", isinstance(ws.sent[0]["lines"], list))
+    check_true(
+        "backlog entries carry the protocol shape",
+        all(set(e) == {"time", "level", "message"} for e in ws.sent[0]["lines"]),
+    )
+
+    # Subscribing must not touch capture state or broadcast a state message.
+    check("subscribe_logs does not start capture", agent.sniffer.is_sniffing(), False)
+    check("subscribe_logs sends no state message", [m for m in ws.sent if m["type"] == "state"], [])
+
+    asyncio.run(srv._handle_message(ws, json.dumps({"type": "unsubscribe_logs"})))
+    check("unsubscribe_logs deregisters the socket", ws in srv.log_subscribers, False)
+    check("unsubscribe_logs sends nothing further", len(ws.sent), 1)
+
+    # Unsubscribing when not subscribed must be a no-op, not an error.
+    asyncio.run(srv._handle_message(ws, json.dumps({"type": "unsubscribe_logs"})))
+    check("repeat unsubscribe is harmless", len(srv.log_subscribers), 0)
+
+    # A dropped connection must not leave a subscriber behind. A socket
+    # stuck in log_subscribers is the same leak class as the register()
+    # handshake leak: it would keep the fan-out trying to write to a dead
+    # socket forever.
+    srv.connections.add(ws)
+    srv.log_subscribers.add(ws)
+    srv.handle_disconnect(ws)
+    check("disconnect clears the connection", ws in srv.connections, False)
+    check("disconnect clears the log subscription", ws in srv.log_subscribers, False)
+
+    # broadcast_log must be free when nobody is watching.
+    srv.loop = None
+    srv.broadcast_log({"time": None, "level": "INFO", "message": "nobody is listening"})
+    check("broadcast_log with no subscribers is a no-op", len(srv.log_subscribers), 0)
+
+    check_true("log_file_path ends in agent.log", srv.log_file_path().endswith("agent.log"))
+finally:
+    if _prev_sniffer is None:
+        if hasattr(agent, "sniffer"):
+            del agent.sniffer
+    else:
+        agent.sniffer = _prev_sniffer
+    if _prev_interfaces is None:
+        if hasattr(agent, "AVAILABLE_INTERFACES"):
+            del agent.AVAILABLE_INTERFACES
+    else:
+        agent.AVAILABLE_INTERFACES = _prev_interfaces
 
 print()
 if failures:
