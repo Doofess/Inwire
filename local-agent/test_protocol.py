@@ -33,6 +33,46 @@ def check_true(name, condition):
     check(name, bool(condition), True)
 
 
+# --- agent version stays in sync across all three locations ---
+# Any change to the agent's wire protocol or behavior must bump
+# AGENT_VERSION, and all three locations below must move together. This
+# reads the other two files by regex (resolved relative to this file's own
+# location, not the CWD) rather than pinning a literal, so a legitimate
+# version bump doesn't make this suite fail - it fails only if the three
+# values drift apart, or if one of them isn't a MAJOR.MINOR.PATCH string.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_AGENT_PROTOCOL_TS = os.path.join(_REPO_ROOT, "src", "services", "agentProtocol.ts")
+_SETUP_ISS = os.path.join(_REPO_ROOT, "local-agent", "installer", "setup.iss")
+
+
+def _read_required_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        raise AssertionError(f"could not read {path!r} for version sync check: {exc}") from exc
+
+
+def _extract(pattern, text, path):
+    match = re.search(pattern, text)
+    if not match:
+        raise AssertionError(f"could not find version pattern {pattern!r} in {path!r}")
+    return match.group(1)
+
+
+_ts_text = _read_required_text(_AGENT_PROTOCOL_TS)
+_iss_text = _read_required_text(_SETUP_ISS)
+
+_ts_version = _extract(r"REQUIRED_AGENT_VERSION\s*=\s*'([^']+)'", _ts_text, _AGENT_PROTOCOL_TS)
+_iss_version = _extract(r'#define\s+MyAppVersion\s+"([^"]+)"', _iss_text, _SETUP_ISS)
+
+check("agentProtocol.ts REQUIRED_AGENT_VERSION matches agent.py AGENT_VERSION", _ts_version, agent.AGENT_VERSION)
+check("setup.iss MyAppVersion matches agent.py AGENT_VERSION", _iss_version, agent.AGENT_VERSION)
+check_true(
+    "agent.py AGENT_VERSION is MAJOR.MINOR.PATCH",
+    re.fullmatch(r"\d+\.\d+\.\d+", agent.AGENT_VERSION) is not None,
+)
+
 # --- build_hello_message ---
 hello = agent.build_hello_message(
     version="2.0.0",
@@ -49,7 +89,6 @@ hello_no_ifaces = agent.build_hello_message(version="2.0.0", state="sniffing", i
 check("hello with no interfaces", hello_no_ifaces["interfaces"], [])
 check("hello sniffing state", hello_no_ifaces["state"], "sniffing")
 
-check("agent version is 2.0.0", agent.AGENT_VERSION, "2.0.0")
 check("pairing token generation is gone", hasattr(agent, "generate_pairing_token"), False)
 check("ConnectionAuth is gone", hasattr(agent, "ConnectionAuth"), False)
 check("is_command_allowed is gone", hasattr(agent, "is_command_allowed"), False)
