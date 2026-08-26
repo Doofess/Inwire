@@ -130,6 +130,40 @@ begin
   end;
 end;
 
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+
+  // A running service holds an open handle on its own executable, and Windows
+  // refuses to replace a file that is in use. Without this, upgrading over an
+  // existing install dies partway through extraction with "An error occurred
+  // while trying to replace the existing file: DeleteFile failed; code 5.
+  // Access is denied." naming netview-agent-windows.exe - and the only
+  // remaining choices are to skip the file (leaving the OLD binary behind
+  // under a NEW version's install) or abandon the install.
+  //
+  // [UninstallRun] already stops the service, but that only runs on uninstall;
+  // an upgrade-in-place never passed through it.
+  //
+  // net.exe rather than sc.exe: `sc stop` returns as soon as the stop has been
+  // REQUESTED, so extraction could begin while the process is still on its way
+  // down. `net stop` blocks until the service has actually stopped.
+  //
+  // A non-zero result is expected and ignored: on a first-time install there
+  // is no service to stop. If a stop genuinely fails the extraction below
+  // fails exactly as it does today, which is no worse than the status quo.
+  if Exec(ExpandConstant('{sys}\net.exe'), 'stop NetViewAgent', '',
+          SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode = 0 then
+      // The SCM reports the service stopped a moment before the process has
+      // finished exiting and released the handle on its own exe.
+      Sleep(2000);
+  end;
+end;
+
 procedure WriteDefaultConfig;
 var
   ConfigPath: String;
