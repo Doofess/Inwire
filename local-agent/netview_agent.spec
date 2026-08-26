@@ -21,6 +21,7 @@ a = Analysis(
         # Our own modules - imported inside functions or via sys.path, so
         # PyInstaller's static analysis does not see them.
         'agent',
+        'agent_log',
         'config',
         'logging_setup',
         # Scapy's dynamically loaded layers.

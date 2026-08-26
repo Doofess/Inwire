@@ -118,11 +118,18 @@ class WebSocketLogHandler(logging.Handler):
         self._local = threading.local()
 
     def emit(self, record):
-        # Any log call reachable from the sink re-enters emit(), which calls
-        # the sink again, unboundedly. Nothing on today's send path logs, but
-        # one warning added there later would produce an infinite loop with
-        # no obvious cause. This makes that structurally impossible instead
-        # of relying on nobody ever adding it.
+        # This guard only covers a synchronous sink: it stops a log call
+        # made directly from within this emit() call from re-entering and
+        # calling the sink again. The real sink, AgentServer.broadcast_log,
+        # is not synchronous - it schedules _send_logs onto the asyncio loop
+        # and returns immediately, so _send_logs runs later on the loop
+        # thread with this thread-local flag already cleared, and the guard
+        # cannot see it. Nothing on that async path logs today, so there is
+        # no live loop, but any exception handler added to _send_logs in the
+        # future (e.g. broadening its `except websockets.ConnectionClosed`
+        # to `except Exception`) must discard the failure silently rather
+        # than log it - logging there would re-enter emit() on a cleared
+        # flag and schedule another failing send, unboundedly.
         if getattr(self._local, "emitting", False):
             return
         self._local.emitting = True

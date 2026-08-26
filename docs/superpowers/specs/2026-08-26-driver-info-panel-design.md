@@ -215,11 +215,12 @@ present a stale timeline stitched onto a fresh one.
 ## Security
 
 Any origin on the allowlist can read the agent's log. The log contains
-interface names and device paths, the origins of rejected connections, and
-capture start/stop events — no packet contents, and nothing an allowlisted
-client cannot already obtain through the protocol it is already speaking.
-The default allowlist is localhost-only. This does not widen the agent's
-exposure.
+interface names and device paths, capture start/stop events, and the origins
+of rejected connections — the last of these is the one thing here an
+allowlisted client could not otherwise learn through the protocol it is
+already speaking, and it is not packet contents or anything sensitive about
+the network being captured. The default allowlist is localhost-only. This
+does not meaningfully widen the agent's exposure.
 
 ## Testing
 

@@ -72,6 +72,12 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   // Subscribe for as long as this panel is mounted, and only that long -
   // the whole point of the subscription model is that a closed panel costs
   // nothing on the wire.
+  //
+  // Under React StrictMode (main.tsx), this effect runs subscribe ->
+  // unsubscribe -> subscribe in development, and App.tsx's setAgentLog([])
+  // on each subscribe lands before either backlog arrives - so the dev-mode
+  // pane can briefly show the backlog twice. StrictMode-only, harmless, and
+  // absent in production.
   useEffect(() => {
     onSubscribe();
     return onUnsubscribe;
@@ -92,6 +98,18 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
     // line; returning to the bottom opts back in.
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     setAutoScroll(atBottom);
+  };
+
+  const handleClear = () => {
+    onClearLog();
+    // An emptied pane renders only the short empty-state div, so
+    // scrollHeight collapses to clientHeight and the element is not
+    // scrollable at all - no scroll event can fire to re-arm autoScroll via
+    // handleScroll. Without this, clearing while paused (scrolled up) would
+    // leave the "paused" banner up with no way for the user to satisfy it
+    // short of waiting for enough new lines to make the pane scrollable
+    // again.
+    setAutoScroll(true);
   };
 
   const listening = agentInterfaces.filter((i) => selectedInterfaces.includes(i.name));
@@ -148,7 +166,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
             )}
           </div>
           <button
-            onClick={onClearLog}
+            onClick={handleClear}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
           >
             <TbTrash className="w-3.5 h-3.5" />
