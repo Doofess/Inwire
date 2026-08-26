@@ -1,5 +1,10 @@
 ; NetView Agent installer
-; Build with Inno Setup 6.1 or newer:  iscc setup.iss
+; Build with Inno Setup 6.3.0 or newer:  iscc setup.iss
+;
+; 6.3.0 is the floor because [Setup] uses ArchitecturesInstallIn64BitMode=
+; x64compatible, an identifier introduced in 6.3.0 that replaced the older
+; bare `x64`. CreateDownloadPage (used in [Code]) needs only 6.1, so the
+; architecture identifier is what sets the requirement.
 ;
 ; Installs the agent as a Windows service that starts at boot and shows no
 ; UI of any kind. Npcap is downloaded from the official distribution at
