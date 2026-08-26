@@ -7,6 +7,7 @@ convention this mirrors).
 Run:  python local-agent/test_protocol.py
 """
 import asyncio
+import logging
 import os
 import re
 import sys
@@ -529,6 +530,68 @@ check_true("read_log_tail replaces undecodable bytes rather than raising", "not 
 _empty_file = os.path.join(_log_dir, "empty.log")
 open(_empty_file, "w", encoding="utf-8").close()
 check("read_log_tail on an empty file returns []", agent_log.read_log_tail(_empty_file), [])
+
+# --- agent log: live handler ---
+_captured = []
+_handler_logger = logging.getLogger("netview.test.handler")
+_handler_logger.setLevel(logging.INFO)
+_handler_logger.propagate = False
+_handler = agent_log.WebSocketLogHandler(_captured.append)
+_handler_logger.addHandler(_handler)
+
+_handler_logger.info("hello %s", "world")
+check("handler forwards one entry per record", len(_captured), 1)
+check("handler applies logging's % args", _captured[0]["message"], "hello world")
+check("handler reports the record's level", _captured[0]["level"], "INFO")
+check_true(
+    "handler's timestamp matches the log file format",
+    agent_log.LOG_LINE_RE.match(f"{_captured[0]['time']} INFO    x") is not None,
+)
+
+_handler_logger.warning("careful")
+check("handler forwards a second record", len(_captured), 2)
+check("handler reports WARNING", _captured[1]["level"], "WARNING")
+
+# A sink that logs re-enters emit(). Without the guard this recurses until
+# the stack blows; with it, the nested record is dropped and the original
+# call returns normally.
+_recursive = []
+
+
+def _recursive_sink(entry):
+    _recursive.append(entry)
+    _handler_logger.error("the sink itself failed")
+
+
+_handler_logger.removeHandler(_handler)
+_recursive_handler = agent_log.WebSocketLogHandler(_recursive_sink)
+_handler_logger.addHandler(_recursive_handler)
+_handler_logger.info("trigger")
+check("reentrancy guard stops the sink's own logging from recursing", len(_recursive), 1)
+check("reentrancy guard lets the original entry through", _recursive[0]["message"], "trigger")
+
+# The guard must reset, or the handler would forward exactly one line ever.
+_handler_logger.info("after recursion")
+check("reentrancy guard resets between records", len(_recursive), 2)
+
+# A raising sink must not propagate into whatever called log.info().
+_handler_logger.removeHandler(_recursive_handler)
+
+
+def _raising_sink(entry):
+    raise RuntimeError("sink exploded")
+
+
+_raising_handler = agent_log.WebSocketLogHandler(_raising_sink)
+_raising_handler.handleError = lambda record: None  # silence the stderr report
+_handler_logger.addHandler(_raising_handler)
+_raised = False
+try:
+    _handler_logger.info("this must not raise")
+except Exception:
+    _raised = True
+check("a raising sink never propagates into the caller", _raised, False)
+_handler_logger.removeHandler(_raising_handler)
 
 print()
 if failures:
