@@ -37,8 +37,10 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
-; Config and log live here. Readable by every user, writable only by admins,
-; and present before anyone logs in - which a LocalSystem service needs.
+; Config and log live here, present before anyone logs in - which a
+; LocalSystem service needs. Inherits ProgramData's default ACLs, which
+; typically restrict writes to administrators; this does not itself set any
+; permissions.
 Name: "{commonappdata}\NetView"
 
 [Icons]

@@ -35,6 +35,12 @@ import win32serviceutil
 # defense in depth in case that default ever changes.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Set to True only when launched as `... debug` (see __main__ below). Under the
+# SCM there is no console, so stderr logging must stay off; `debug` exists
+# specifically to run in the foreground with stderr as the point of the
+# exercise, so it needs this flipped on before SvcDoRun configures logging.
+DEBUG_MODE = False
+
 
 class NetViewAgentService(win32serviceutil.ServiceFramework):
     _svc_name_ = "NetViewAgent"
@@ -74,21 +80,39 @@ class NetViewAgentService(win32serviceutil.ServiceFramework):
             servicemanager.PYS_SERVICE_STARTED,
             (self._svc_name_, ""),
         )
-        import agent
+        # Configured before `import agent` so that an exception raised during
+        # agent.py's own module-level import (e.g. a broken dependency) still
+        # has somewhere to go, instead of escaping with nothing written to
+        # agent.log and no LogErrorMsg - an invisible boot-time crash. config
+        # and logging_setup import safely: neither pulls in scapy or
+        # websockets, the two dependencies most likely to be missing or broken.
+        import config
+        import logging_setup
+
+        logging_setup.setup_logging(config.config_dir(), to_stderr=DEBUG_MODE)
 
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
         if self._stop_requested:
-            # Stop arrived while `import agent` was still running - honor it
-            # instead of entering a server that never returns.
+            # Stop arrived while startup was still running - honor it instead
+            # of entering a server that never returns.
             logging.getLogger("netview").info(
                 "stop requested before startup completed - not starting"
             )
             return
 
         try:
-            started_ok = self.loop.run_until_complete(agent.main(to_stderr=False))
+            # Imported inside the try so a failure here (missing/broken scapy
+            # or websockets, or any other module-level error in agent.py) is
+            # caught, logged, and reported below like any other startup
+            # failure, rather than escaping SvcDoRun unlogged.
+            import agent
+
+            # agent.main() calls setup_logging again with this same
+            # (directory, to_stderr) pair; that is safe since setup_logging is
+            # idempotent when the pair is unchanged from the call above.
+            started_ok = self.loop.run_until_complete(agent.main(to_stderr=DEBUG_MODE))
             if started_ok is False:
                 # agent.main() logs its own reason and returns False rather than
                 # raising, so without this the SCM cannot tell a service that never
@@ -132,4 +156,6 @@ if __name__ == "__main__":
         servicemanager.PrepareToHostSingle(NetViewAgentService)
         servicemanager.StartServiceCtrlDispatcher()
     else:
+        if len(sys.argv) > 1 and sys.argv[1].lower() == "debug":
+            DEBUG_MODE = True
         win32serviceutil.HandleCommandLine(NetViewAgentService)

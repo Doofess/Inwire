@@ -446,10 +446,15 @@ export default function App() {
 
       if (e.code === "Space") {
         e.preventDefault();
-        setIsCapturing((prev) => {
-          if (!permissions.canCapture) return false;
-          return !prev;
-        });
+        // Mirror the Header start/stop buttons: flip local state and tell the
+        // agent, rather than just flipping local state (which used to be
+        // enough when the old agent sniffed unconditionally from launch).
+        const wasCapturing = isCapturingRef.current;
+        const next = permissions.canCapture ? !wasCapturing : false;
+        setIsCapturing(next);
+        if (next !== wasCapturing) {
+          sendAgentCommand(next ? { type: "start_capture" } : { type: "stop_capture" });
+        }
         return;
       }
 
