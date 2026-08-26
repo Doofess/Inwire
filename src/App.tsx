@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { AnimatePresence } from "motion/react";
 import { useTheme } from "next-themes";
 import { Packet, UserRole } from "./types/packet";
@@ -17,6 +17,7 @@ import { CustomDissectorEngine } from "./services/customDissectorEngine";
 import { ColorRulesEngine } from "./services/colorRules";
 import { ROLE_PERMISSIONS } from "./services/rbacService";
 import { parseAgentMessage, encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION, type AgentCommand } from "./services/agentProtocol";
+import type { AgentLogEntry } from "./services/agentProtocol";
 
 // UI Components
 import { Header } from "./components/common/Header";
@@ -46,6 +47,10 @@ import {
   TbStack2,
   TbBinary,
 } from "react-icons/tb";
+
+// Same policy as the 4000-packet buffer: bounded, oldest dropped first. A
+// session left open for hours must not grow the log pane without limit.
+const AGENT_LOG_BUFFER_LIMIT = 1000;
 
 export default function App() {
   // Theme & Layout
@@ -96,6 +101,11 @@ export default function App() {
   const [agentIncompatible, setAgentIncompatible] = useState(false);
   const [agentInterfaces, setAgentInterfaces] = useState<{ name: string; label: string }[]>([]);
   const [selectedInterfaces, setSelectedInterfaces] = useState<string[]>([]);
+  const [agentLog, setAgentLog] = useState<AgentLogEntry[]>([]);
+  // Whether the Driver Info panel currently wants log lines. Read inside the
+  // WebSocket handlers, so it must be a ref: those close over their first
+  // render's values and would otherwise never see this change.
+  const logSubscribedRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   // RBAC Role (Simplified: Always Admin)
@@ -245,6 +255,14 @@ export default function App() {
           if (isCapturingRef.current) {
             socket.send(encodeAgentCommand({ type: 'start_capture' }));
           }
+          // A log subscription lives on the agent's socket, so a reconnect
+          // drops it. Resubscribing here, and clearing first, avoids showing
+          // a fresh backlog stitched onto the tail of the dead connection's
+          // timeline as though it were continuous.
+          if (logSubscribedRef.current) {
+            setAgentLog([]);
+            socket.send(encodeAgentCommand({ type: 'subscribe_logs' }));
+          }
           return;
         }
 
@@ -256,6 +274,16 @@ export default function App() {
 
         if (message.type === 'error') {
           console.warn('[WirePulse] Agent error:', message.message);
+          return;
+        }
+
+        if (message.type === 'log') {
+          setAgentLog((prev) => {
+            const next = prev.concat(message.lines);
+            return next.length > AGENT_LOG_BUFFER_LIMIT
+              ? next.slice(next.length - AGENT_LOG_BUFFER_LIMIT)
+              : next;
+          });
           return;
         }
 
@@ -407,6 +435,27 @@ export default function App() {
     setSelectedInterfaces(next);
     sendAgentCommand({ type: 'set_interfaces', interfaces: next });
   };
+
+  // Memoized with an empty dep array on purpose: DriverInfoPanel subscribes
+  // in a mount effect keyed on these identities, so a fresh function each
+  // render would drive an unsubscribe/subscribe loop. That is safe only
+  // while sendAgentCommand reads nothing but wsRef (a ref) and module-level
+  // helpers - if it ever depends on state, these captures go stale.
+  const handleSubscribeAgentLog = useCallback(() => {
+    logSubscribedRef.current = true;
+    setAgentLog([]);
+    sendAgentCommand({ type: 'subscribe_logs' });
+    // A closed socket is not an error: the hello handler resubscribes on
+    // reconnect, so opening the panel while the agent is down and having it
+    // fill in when the agent returns is the intended behavior.
+  }, []);
+
+  const handleUnsubscribeAgentLog = useCallback(() => {
+    logSubscribedRef.current = false;
+    sendAgentCommand({ type: 'unsubscribe_logs' });
+  }, []);
+
+  const handleClearAgentLog = useCallback(() => setAgentLog([]), []);
 
   // Reuses the existing "outdated" amber pill for a second, related case: an
   // agent old enough to predate `hello` entirely can't be caught by the
