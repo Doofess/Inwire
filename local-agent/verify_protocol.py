@@ -14,6 +14,8 @@ Coverage:
     error instead of silently succeeding
   - the origin allowlist - the agent's only authentication - actually
     rejects a disallowed Origin, and a missing Origin, with HTTP 403
+  - subscribe_logs returns a backlog and then streams live lines, and
+    unsubscribe_logs stops them
 
 Start the agent first (as Administrator), then:
   python local-agent/verify_protocol.py
@@ -133,6 +135,53 @@ async def main():
             restored_state2 = await recv_type(ws, "state")
             check("state message received after re-restoring full interface selection", restored_state2.get("type") == "state")
             print(f"      interface selection restored to all {len(all_interfaces)} interface(s)")
+
+        # --- log streaming ---
+        await ws.send(json.dumps({"type": "subscribe_logs"}))
+        backlog = await recv_type(ws, "log")
+        check("subscribe_logs returns a log message", backlog.get("type") == "log")
+        check("backlog lines is a list", isinstance(backlog.get("lines"), list))
+        check(
+            "backlog entries have the protocol shape",
+            all(set(e) == {"time", "level", "message"} for e in backlog["lines"]),
+        )
+        check(
+            "backlog is capped at 200 lines",
+            len(backlog["lines"]) <= 200,
+        )
+
+        # start_capture makes the agent log a line of its own; that line must
+        # arrive live, which is the whole feature.
+        await ws.send(json.dumps({"type": "start_capture"}))
+        live_seen = False
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                msg = await recv_type(ws, "log", timeout=max(0.1, deadline - time.monotonic()))
+            except asyncio.TimeoutError:
+                break
+            if any("start_capture" in entry["message"] for entry in msg["lines"]):
+                live_seen = True
+                break
+        check("a live log line arrives after start_capture", live_seen)
+
+        await ws.send(json.dumps({"type": "stop_capture"}))
+        await recv_type(ws, "state")
+
+        await ws.send(json.dumps({"type": "unsubscribe_logs"}))
+        # Nothing acknowledges an unsubscribe, so prove it took by generating log
+        # traffic and showing none of it arrives.
+        await ws.send(json.dumps({"type": "start_capture"}))
+        await recv_type(ws, "state")
+        quiet = True
+        try:
+            await recv_type(ws, "log", timeout=2)
+            quiet = False
+        except asyncio.TimeoutError:
+            pass
+        check("no log lines arrive after unsubscribe_logs", quiet)
+        await ws.send(json.dumps({"type": "stop_capture"}))
+        await recv_type(ws, "state")
 
     # --- origin allowlist actually rejects disallowed/missing origins ---
     # This is the agent's ONLY authentication mechanism. If either of these
