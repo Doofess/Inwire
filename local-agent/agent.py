@@ -41,6 +41,7 @@ def _report_missing_dependency(name: str, install_hint: str) -> None:
 
 try:
     from scapy.all import sniff, ARP, Dot3, Ether, IP, IPv6, TCP, UDP
+    from scapy.all import conf as scapy_conf
 except ImportError:
     _report_missing_dependency("scapy", "pip install scapy")
     sys.exit(1)
@@ -366,9 +367,12 @@ def build_interface_label(name, description) -> str:
     """Builds the "{name} ({description})" label scapy/Windows interfaces are
     shown with, stripping the Unicode RTL marks (U+200E, U+200F) that
     Windows embeds in localized adapter names/descriptions. Falls back to
-    just the (cleaned) name when there's no distinct description."""
+    just the (cleaned) name - or, if that's empty, just the (cleaned)
+    description - when there's no distinct pair to combine."""
     clean_name = _strip_rtl_marks(name or "")
     clean_description = _strip_rtl_marks(description or "")
+    if not clean_name:
+        return clean_description
     if not clean_description or clean_description == clean_name:
         return clean_name
     return f"{clean_name} ({clean_description})"
@@ -386,12 +390,31 @@ def list_interfaces():
     adapters, ...), most of which Npcap cannot actually capture on. Sniffing
     on those floods the log with "Interface '...' not found !" warnings and
     makes any capture-interface picker built from the list unusable.
+
+    conf.ifaces only reflects the true pcap_findalldevs() results when scapy
+    successfully loaded Npcap's wpcap.dll (conf.use_pcap is True). When it
+    couldn't, scapy silently degrades conf.ifaces to yield the raw Windows
+    adapter list instead - i.e. the exact ~51-binding over-enumeration this
+    function exists to avoid, returned as if it were trustworthy. That case
+    is detected and treated as a hard failure (empty list, logged error)
+    rather than a fallback, since get_if_list() on Windows is itself derived
+    from that same degraded conf.ifaces and would just return the same wrong
+    list.
     """
     from scapy.all import get_if_list
 
     if os.name == "nt":
+        if not getattr(scapy_conf, "use_pcap", False):
+            # scapy could not load wpcap.dll, so conf.ifaces (and
+            # get_if_list()) would silently degrade to the raw ~51-binding
+            # Windows adapter list - exactly what this function exists to
+            # avoid. Without Npcap there is nothing to capture on anyway.
+            log.error(
+                "Npcap's packet driver is not available (scapy could not load wpcap.dll). "
+                "Packet capture will not work. Install Npcap from https://npcap.com/#download"
+            )
+            return []
         try:
-            from scapy.all import conf as scapy_conf
             interfaces = []
             for iface in scapy_conf.ifaces.values():
                 device_name = getattr(iface, "network_name", "") or ""
@@ -452,6 +475,9 @@ async def main(to_stderr=True):
         AVAILABLE_INTERFACES = list_interfaces()
     except Exception as exc:
         log.error("could not enumerate network interfaces: %s", exc)
+        return False
+    if not AVAILABLE_INTERFACES:
+        log.error("no capturable network interfaces found - cannot start")
         return False
     INTERFACE_LABELS = dict(AVAILABLE_INTERFACES)
 
