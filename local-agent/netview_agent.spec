@@ -1,24 +1,42 @@
-# PyInstaller spec for the NetView local agent - Windows one-click build.
+# PyInstaller spec for the NetView local agent - Windows service build.
 # Build with:  pyinstaller netview_agent.spec
 #
-# Entry point is bootstrap_windows.py, which installs Npcap if missing and
-# then runs agent.py in-process - both files get bundled into one exe.
-# Scapy loads many optional protocol layers dynamically, so they must be
-# listed explicitly as hidden imports or PyInstaller will silently drop them.
+# Entry point is service_windows.py: the Service Control Manager host, and
+# also the install/remove/start/stop/debug CLI the Inno Setup installer
+# drives. agent.py, config.py and logging_setup.py are imported lazily or by
+# name, so they are listed as hidden imports rather than discovered.
+#
+# Scapy loads many optional protocol layers dynamically, and pywin32's
+# service machinery pulls win32timezone at runtime - both must be declared
+# explicitly or PyInstaller silently drops them and the exe fails at start.
 
 block_cipher = None
 
 a = Analysis(
-    ['bootstrap_windows.py'],
+    ['service_windows.py'],
     pathex=[],
     binaries=[],
     datas=[],
     hiddenimports=[
+        # Our own modules - imported inside functions or via sys.path, so
+        # PyInstaller's static analysis does not see them.
+        'agent',
+        'config',
+        'logging_setup',
+        # Scapy's dynamically loaded layers.
         'scapy.layers.all',
         'scapy.layers.inet',
         'scapy.layers.inet6',
         'scapy.arch.windows',
         'websockets.legacy.server',
+        # pywin32 service machinery. win32timezone is the classic omission:
+        # it is imported at runtime by pywintypes and its absence shows up
+        # only as a service that refuses to start.
+        'win32timezone',
+        'servicemanager',
+        'win32serviceutil',
+        'win32service',
+        'win32event',
     ],
     hookspath=[],
     runtime_hooks=[],
@@ -41,7 +59,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,          # keep a console window so capture/install errors are visible
-    uac_admin=True,        # embeds requireAdministrator - Windows shows UAC on double-click
+    console=False,         # no console window, ever - this is the whole point
+    uac_admin=True,        # install/remove need elevation when run by hand;
+                           # the SCM ignores the manifest when it starts a service
     icon='icon.ico',
 )
