@@ -15,7 +15,6 @@ import {
   TbBookmark,
   TbSettings,
   TbX,
-  TbCheck,
 } from 'react-icons/tb';
 import { UserRolePermissions } from '../../types/packet';
 import { DEFAULT_FILTER_PRESETS } from '../../services/filterEngine';
@@ -25,12 +24,13 @@ import type { AgentCommand } from '../../services/agentProtocol';
 interface AppMenuProps {
   isCapturing: boolean;
   onStartCapture: () => void;
+  onStartCaptureOn: (interfaceName: string) => void;
   onPauseCapture: () => void;
   onSendAgentCommand: (command: AgentCommand) => void;
   onClearPackets: () => void;
   agentInterfaces: { name: string; label: string }[];
   selectedInterfaces: string[];
-  onToggleInterface: (interfaceName: string) => void;
+  onSelectInterface: (interfaceName: string) => void;
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
   onOpenExportModal: () => void;
@@ -65,12 +65,13 @@ function downloadAgentInstaller() {
 export const AppMenu: React.FC<AppMenuProps> = ({
   isCapturing,
   onStartCapture,
+  onStartCaptureOn,
   onPauseCapture,
   onSendAgentCommand,
   onClearPackets,
   agentInterfaces,
   selectedInterfaces,
-  onToggleInterface,
+  onSelectInterface,
   onOpenDissectorModal,
   onOpenStatsModal,
   onOpenExportModal,
@@ -83,6 +84,11 @@ export const AppMenu: React.FC<AppMenuProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const [presetsExpanded, setPresetsExpanded] = useState(false);
+  // Start Capture expands in place into the adapter list rather than opening
+  // a nested popover: this is a command palette, and a dropdown inside a
+  // dropdown fights its keyboard navigation. Mirrors the Filter Presets
+  // expander directly below.
+  const [startExpanded, setStartExpanded] = useState(false);
   const commandRef = useRef<HTMLDivElement | null>(null);
   const agentDownload = getAgentDownloadForCurrentOS();
 
@@ -204,16 +210,63 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                         <TbPlayerPause className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                         <span>Stop Capture</span>
                       </Command.Item>
-                    ) : (
+                    ) : agentInterfaces.length === 0 ? (
+                      // No agent, so no adapters to choose between. Start
+                      // immediately rather than expanding into an empty list.
                       <Command.Item
                         value="start-capture"
                         disabled={!permissions.canCapture}
-                        onSelect={() => run(() => { onStartCapture(); onSendAgentCommand({ type: 'start_capture' }); })}
+                        onSelect={() => run(onStartCapture)}
                         className={itemClass}
                       >
                         <TbPlayerPlay className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
                         <span>Start Capture</span>
                       </Command.Item>
+                    ) : (
+                      <>
+                        <Command.Item
+                          value="start-capture"
+                          disabled={!permissions.canCapture}
+                          onSelect={() => setStartExpanded((v) => !v)}
+                          className={itemClass}
+                        >
+                          <TbPlayerPlay className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                          <span className="flex-1">Start Capture</span>
+                          <motion.span
+                            animate={{ rotate: startExpanded ? 90 : 0 }}
+                            transition={{ duration: 0.15 }}
+                            className="shrink-0 flex items-center justify-center w-3.5 h-3.5"
+                          >
+                            <TbChevronRight className="w-3.5 h-3.5 text-muted-foreground" />
+                          </motion.span>
+                        </Command.Item>
+
+                        <AnimatePresence initial={false}>
+                          {startExpanded && (
+                            <motion.div
+                              key="start-interfaces"
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: 'auto', opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.18, ease: 'easeOut' }}
+                              style={{ overflow: 'hidden' }}
+                            >
+                              {agentInterfaces.map((iface) => (
+                                <Command.Item
+                                  key={iface.name}
+                                  value={`start-on-${iface.name}`}
+                                  onSelect={() => run(() => onStartCaptureOn(iface.name))}
+                                  className={`${itemClass} pl-8`}
+                                  title={iface.name}
+                                >
+                                  <TbPlayerPlay className="w-3 h-3 text-cyan-500 shrink-0" />
+                                  <span className="truncate">{iface.label}</span>
+                                </Command.Item>
+                              ))}
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </>
                     )}
                     <Command.Item
                       value="clear-buffer"
@@ -296,17 +349,23 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                         <div className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider font-mono text-muted-foreground">
                           Capture Interfaces
                         </div>
+                        {/* Round markers, not square boxes: capture reads from
+                            exactly one adapter, so this is a radio group and
+                            picking one deselects the rest. Checkboxes here
+                            would promise a multi-adapter capture the app no
+                            longer performs. */}
                         {agentInterfaces.map((iface) => {
-                          const isSelected = selectedInterfaces.includes(iface.name);
+                          const isSelected = selectedInterfaces[0] === iface.name;
                           return (
                             <Command.Item
                               key={iface.name}
                               value={`interface-${iface.name}`}
-                              onSelect={() => onToggleInterface(iface.name)}
+                              onSelect={() => onSelectInterface(iface.name)}
                               className={itemClass}
+                              title={iface.name}
                             >
-                              <span className={`w-3.5 h-3.5 shrink-0 rounded border flex items-center justify-center ${isSelected ? 'bg-cyan-500 border-cyan-500' : 'border-border'}`}>
-                                {isSelected && <TbCheck className="w-3 h-3 text-slate-950" />}
+                              <span className={`w-3.5 h-3.5 shrink-0 rounded-full border flex items-center justify-center ${isSelected ? 'bg-cyan-500 border-cyan-500' : 'border-border'}`}>
+                                {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-slate-950" />}
                               </span>
                               <span className="truncate">{iface.label}</span>
                             </Command.Item>

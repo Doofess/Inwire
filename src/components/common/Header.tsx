@@ -6,18 +6,23 @@ import {
 } from 'react-icons/tb';
 import { UserRole, UserRolePermissions } from '../../types/packet';
 import { AppMenu } from './AppMenu';
+import { CaptureInterfacePicker } from './CaptureInterfacePicker';
 import type { AgentCommand } from '../../services/agentProtocol';
 
 interface HeaderProps {
   isCapturing: boolean;
+  /** Starts without naming an adapter. Only used when no agent is connected
+   *  and there is therefore nothing to choose between. */
   onStartCapture: () => void;
+  /** The normal path: start capturing on exactly this adapter. */
+  onStartCaptureOn: (interfaceName: string) => void;
   onPauseCapture: () => void;
   onStopCapture: () => void;
   onSendAgentCommand: (command: AgentCommand) => void;
   onClearPackets: () => void;
   agentInterfaces: { name: string; label: string }[];
   selectedInterfaces: string[];
-  onToggleInterface: (interfaceName: string) => void;
+  onSelectInterface: (interfaceName: string) => void;
   permissions: UserRolePermissions;
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
@@ -40,13 +45,14 @@ const PACKET_BUFFER_CAP = 4000;
 export const Header: React.FC<HeaderProps> = ({
   isCapturing,
   onStartCapture,
+  onStartCaptureOn,
   onPauseCapture,
   onStopCapture,
   onSendAgentCommand,
   onClearPackets,
   agentInterfaces,
   selectedInterfaces,
-  onToggleInterface,
+  onSelectInterface,
   permissions,
   onOpenDissectorModal,
   onOpenStatsModal,
@@ -62,6 +68,18 @@ export const Header: React.FC<HeaderProps> = ({
   onApplyFilterPreset,
 }) => {
   const bufferPercent = Math.min(100, (totalPacketsCount / PACKET_BUFFER_CAP) * 100);
+
+  // The Start button renders two ways - wrapped in an interface picker, or
+  // as a plain button when there is nothing to pick from - and both must look
+  // identical, so the styling lives here rather than being duplicated twice
+  // and drifting.
+  const startCapture = {
+    needsPicker: agentInterfaces.length > 0,
+    className: `bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-cyan-500/20 transition-all cursor-pointer ${
+      !permissions.canCapture ? 'opacity-50 cursor-not-allowed' : ''
+    }`,
+  };
+
   return (
     <header className="h-16 px-4 sm:px-6 border-b flex items-center justify-between gap-4 transition-colors z-40 shrink-0 select-none bg-card border-border text-card-foreground">
       {/* Left: App Menu, Branding & Capture Stream Controls */}
@@ -72,12 +90,13 @@ export const Header: React.FC<HeaderProps> = ({
         <AppMenu
           isCapturing={isCapturing}
           onStartCapture={onStartCapture}
+          onStartCaptureOn={onStartCaptureOn}
           onPauseCapture={onPauseCapture}
           onSendAgentCommand={onSendAgentCommand}
           onClearPackets={onClearPackets}
           agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
-          onToggleInterface={onToggleInterface}
+          onSelectInterface={onSelectInterface}
           onOpenDissectorModal={onOpenDissectorModal}
           onOpenStatsModal={onOpenStatsModal}
           onOpenExportModal={onOpenExportModal}
@@ -112,20 +131,37 @@ export const Header: React.FC<HeaderProps> = ({
               <span>Stop Capture</span>
             </button>
           ) : (
-            <button
-              onClick={() => {
-                onStartCapture();
-                onSendAgentCommand({ type: 'start_capture' });
-              }}
-              disabled={!permissions.canCapture}
-              className={`bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-cyan-500/20 transition-all cursor-pointer ${
-                !permissions.canCapture ? 'opacity-50 cursor-not-allowed' : ''
-              }`}
-              title="Start Live Packet Capture"
-            >
-              <TbPlayerPlay className="w-3.5 h-3.5 fill-current" />
-              <span>Start Capture</span>
-            </button>
+            // The picker only wraps the button when there is something to
+            // pick from. With no agent connected the interface list is empty,
+            // and a dropdown with no entries would leave Start unable to
+            // start anything at all.
+            startCapture.needsPicker ? (
+              <CaptureInterfacePicker
+                interfaces={agentInterfaces}
+                selectedInterface={selectedInterfaces[0] ?? null}
+                onSelect={onStartCaptureOn}
+                align="start"
+              >
+                <button
+                  disabled={!permissions.canCapture}
+                  className={startCapture.className}
+                  title="Choose an interface and start capturing"
+                >
+                  <TbPlayerPlay className="w-3.5 h-3.5 fill-current" />
+                  <span>Start Capture</span>
+                </button>
+              </CaptureInterfacePicker>
+            ) : (
+              <button
+                onClick={onStartCapture}
+                disabled={!permissions.canCapture}
+                className={startCapture.className}
+                title="Start Live Packet Capture"
+              >
+                <TbPlayerPlay className="w-3.5 h-3.5 fill-current" />
+                <span>Start Capture</span>
+              </button>
+            )
           )}
 
           {isCapturing && (
