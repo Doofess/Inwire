@@ -63,6 +63,24 @@ check(
   'hello',
 );
 
+const logMsg = parseAgentMessage('{"type":"log","lines":[{"time":"2026-08-26 22:14:02,123","level":"INFO","message":"client connected"}]}');
+check('valid log message parses', logMsg, {
+  type: 'log',
+  lines: [{ time: '2026-08-26 22:14:02,123', level: 'INFO', message: 'client connected' }],
+});
+check('log with an empty lines array parses', parseAgentMessage('{"type":"log","lines":[]}'), { type: 'log', lines: [] });
+check(
+  'log entry with null time and level parses (unparseable backlog line)',
+  parseAgentMessage('{"type":"log","lines":[{"time":null,"level":null,"message":"  File \\"agent.py\\", line 42"}]}'),
+  { type: 'log', lines: [{ time: null, level: null, message: '  File "agent.py", line 42' }] },
+);
+check('log missing lines returns null', parseAgentMessage('{"type":"log"}'), null);
+check('log with lines not an array returns null', parseAgentMessage('{"type":"log","lines":"nope"}'), null);
+check('log with a non-object entry returns null', parseAgentMessage('{"type":"log","lines":["nope"]}'), null);
+check('log with an entry missing message returns null', parseAgentMessage('{"type":"log","lines":[{"time":null,"level":"INFO"}]}'), null);
+check('log with a non-string message returns null', parseAgentMessage('{"type":"log","lines":[{"time":null,"level":null,"message":42}]}'), null);
+check('log with a non-string level returns null', parseAgentMessage('{"type":"log","lines":[{"time":null,"level":7,"message":"x"}]}'), null);
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);

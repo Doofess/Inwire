@@ -38,6 +38,9 @@ check('a 2.0.0 agent is outdated against 2.1.0', isAgentOutdated('2.0.0', '2.1.0
 check('a 2.1.0 agent is current', isAgentOutdated('2.1.0', '2.1.0'), false);
 check('a 2.2.0 agent is not outdated', isAgentOutdated('2.2.0', '2.1.0'), false);
 
+check('subscribe_logs encodes', encodeAgentCommand({ type: 'subscribe_logs' }), '{"type":"subscribe_logs"}');
+check('unsubscribe_logs encodes', encodeAgentCommand({ type: 'unsubscribe_logs' }), '{"type":"unsubscribe_logs"}');
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
