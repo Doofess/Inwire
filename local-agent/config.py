@@ -24,9 +24,10 @@ DEFAULT_ALLOWED_ORIGINS = [
 
 
 def config_dir() -> str:
-    """%ProgramData%\\NetView on Windows: readable by every user, writable
-    only by administrators, and populated before anyone logs in - which a
-    LocalSystem service needs, since it starts at boot with no user session.
+    """%ProgramData%\\NetView on Windows: populated before anyone logs in -
+    which a LocalSystem service needs, since it starts at boot with no user
+    session. Inherits ProgramData's default ACLs, which typically restrict
+    writes to administrators, though nothing here enforces that itself.
     Falls back to ~/.netview elsewhere purely so this module stays importable
     for development on macOS/Linux."""
     if os.name == "nt":

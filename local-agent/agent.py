@@ -15,6 +15,7 @@ import asyncio
 import base64
 import ctypes
 import json
+import logging
 import os
 import random
 import sys
@@ -24,23 +25,35 @@ from http import HTTPStatus
 
 import config
 
+
+def _report_missing_dependency(name: str, install_hint: str) -> None:
+    """Runs at import time, before logging is configured, and possibly in a
+    frozen console=False build where sys.stderr is None - so it must not
+    assume a console exists."""
+    message = f"ERROR: {name} is not installed. Run: {install_hint}"
+    if sys.stderr is not None:
+        print(message, file=sys.stderr)
+    try:
+        logging.getLogger("netview").critical(message)
+    except Exception:
+        pass
+
+
 try:
     from scapy.all import sniff, ARP, Dot3, Ether, IP, IPv6, TCP, UDP
 except ImportError:
-    print("ERROR: scapy is not installed. Run: pip install scapy", file=sys.stderr)
+    _report_missing_dependency("scapy", "pip install scapy")
     sys.exit(1)
 
 try:
     import websockets
 except ImportError:
-    print("ERROR: websockets is not installed. Run: pip install websockets", file=sys.stderr)
+    _report_missing_dependency("websockets", "pip install websockets")
     sys.exit(1)
 
 HOST = "localhost"
 PORT = 8999
 AGENT_VERSION = "2.0.0"
-
-import logging
 
 import logging_setup
 
