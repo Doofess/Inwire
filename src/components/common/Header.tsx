@@ -3,6 +3,7 @@ import {
   TbPlayerPlay,
   TbPlayerPause,
   TbSquare,
+  TbNetwork,
 } from 'react-icons/tb';
 import { UserRole, UserRolePermissions } from '../../types/packet';
 import { AppMenu } from './AppMenu';
@@ -11,10 +12,12 @@ import type { AgentCommand } from '../../services/agentProtocol';
 
 interface HeaderProps {
   isCapturing: boolean;
-  /** Starts without naming an adapter. Only used when no agent is connected
-   *  and there is therefore nothing to choose between. */
+  /** Starts capturing on whatever adapter is currently selected. The Start
+   *  button is disabled until one is, so this never begins a capture with
+   *  no adapter named. */
   onStartCapture: () => void;
-  /** The normal path: start capturing on exactly this adapter. */
+  /** Forwarded to AppMenu, whose Start Capture item still picks and starts
+   *  in one action - a command palette has no room for a separate button. */
   onStartCaptureOn: (interfaceName: string) => void;
   onPauseCapture: () => void;
   onStopCapture: () => void;
@@ -69,16 +72,46 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const bufferPercent = Math.min(100, (totalPacketsCount / PACKET_BUFFER_CAP) * 100);
 
-  // The Start button renders two ways - wrapped in an interface picker, or
-  // as a plain button when there is nothing to pick from - and both must look
-  // identical, so the styling lives here rather than being duplicated twice
-  // and drifting.
-  const startCapture = {
-    needsPicker: agentInterfaces.length > 0,
-    className: `bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-cyan-500/20 transition-all cursor-pointer ${
-      !permissions.canCapture ? 'opacity-50 cursor-not-allowed' : ''
-    }`,
-  };
+  const selectedInterface = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
+
+  // The Interfaces button carries the whole adapter story in one control:
+  // red when the agent reports nothing to capture from (driver missing,
+  // service down, Npcap broken), amber when adapters exist but none is
+  // chosen yet, green once one is. Colour and label are derived together
+  // here so a state can never show one without the other.
+  // Red means a settled answer, not "haven't heard yet". While the socket is
+  // still opening the interface list is legitimately empty, and flashing
+  // "No interfaces detected" during every page load would cry wolf on the
+  // one state that should mean something is actually wrong.
+  const adapterStateKnown = agentStatus !== 'connecting';
+  const interfaceButton = agentInterfaces.length === 0
+    ? adapterStateKnown
+      ? {
+          label: 'No interfaces detected',
+          title: 'The agent reported no capture interfaces. Check that it is installed and running.',
+          className: 'bg-rose-500 hover:bg-rose-600 text-white shadow-rose-500/20',
+        }
+      : {
+          label: 'Interfaces',
+          title: 'Waiting for the agent to report its capture interfaces...',
+          className: 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-500/20',
+        }
+    : selectedInterface === null
+      ? {
+          label: 'Interfaces',
+          title: 'Choose which adapter to capture from',
+          className: 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-500/20',
+        }
+      : {
+          // Just the adapter name, not the full "Wi-Fi (Intel(R) Wi-Fi 6E
+          // AX211 160MHz)" label - the description is what makes these
+          // unreadable at button width. The full text stays in the tooltip.
+          label: selectedInterface.label.split(' (')[0],
+          title: selectedInterface.label,
+          className: 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20',
+        };
+
+  const interfaceButtonClass = `${interfaceButton.className} active:scale-95 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md transition-all max-w-[14rem] cursor-pointer`;
 
   return (
     <header className="h-16 px-4 sm:px-6 border-b flex items-center justify-between gap-4 transition-colors z-40 shrink-0 select-none bg-card border-border text-card-foreground">
@@ -118,6 +151,27 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Capture Buttons */}
         <div className="flex items-center space-x-2">
+          {/* Sits ahead of Start Capture because it gates it: with no adapter
+              chosen there is nothing to start. */}
+          {agentInterfaces.length === 0 ? (
+            <button disabled className={`${interfaceButtonClass} cursor-not-allowed`} title={interfaceButton.title}>
+              <TbNetwork className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{interfaceButton.label}</span>
+            </button>
+          ) : (
+            <CaptureInterfacePicker
+              interfaces={agentInterfaces}
+              selectedInterface={selectedInterfaces[0] ?? null}
+              onSelect={onSelectInterface}
+              align="start"
+            >
+              <button className={interfaceButtonClass} title={interfaceButton.title}>
+                <TbNetwork className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{interfaceButton.label}</span>
+              </button>
+            </CaptureInterfacePicker>
+          )}
+
           {isCapturing ? (
             <button
               onClick={() => {
@@ -131,37 +185,17 @@ export const Header: React.FC<HeaderProps> = ({
               <span>Stop Capture</span>
             </button>
           ) : (
-            // The picker only wraps the button when there is something to
-            // pick from. With no agent connected the interface list is empty,
-            // and a dropdown with no entries would leave Start unable to
-            // start anything at all.
-            startCapture.needsPicker ? (
-              <CaptureInterfacePicker
-                interfaces={agentInterfaces}
-                selectedInterface={selectedInterfaces[0] ?? null}
-                onSelect={onStartCaptureOn}
-                align="start"
-              >
-                <button
-                  disabled={!permissions.canCapture}
-                  className={startCapture.className}
-                  title="Choose an interface and start capturing"
-                >
-                  <TbPlayerPlay className="w-3.5 h-3.5 fill-current" />
-                  <span>Start Capture</span>
-                </button>
-              </CaptureInterfacePicker>
-            ) : (
-              <button
-                onClick={onStartCapture}
-                disabled={!permissions.canCapture}
-                className={startCapture.className}
-                title="Start Live Packet Capture"
-              >
-                <TbPlayerPlay className="w-3.5 h-3.5 fill-current" />
-                <span>Start Capture</span>
-              </button>
-            )
+            <button
+              onClick={onStartCapture}
+              disabled={!permissions.canCapture || !selectedInterface}
+              className={`bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-cyan-500/20 transition-all cursor-pointer ${
+                !permissions.canCapture || !selectedInterface ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+              title={selectedInterface ? 'Start Live Packet Capture' : 'Choose an interface first'}
+            >
+              <TbPlayerPlay className="w-3.5 h-3.5 fill-current" />
+              <span>Start Capture</span>
+            </button>
           )}
 
           {isCapturing && (
