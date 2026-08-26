@@ -26,13 +26,22 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {
-        // local-agent/ holds the Python source + PyInstaller build output for
-        // the local capture agent, and public/downloads/ holds its compiled
-        // installers - neither is part of the web app itself. Without this,
-        // rebuilding the agent (or copying a new installer into downloads/)
-        // triggers a full page reload, which tears down and reopens the
-        // live WebSocket to the agent and reads as a connect/disconnect loop.
-        ignored: ['**/local-agent/**', '**/public/downloads/**'],
+        // local-agent/ holds the Python source and the PyInstaller build
+        // output for the local capture agent - thousands of files churning
+        // during a build, none of them part of the web app. Without this,
+        // rebuilding the agent triggers a full page reload, which tears down
+        // and reopens the live WebSocket and reads as a connect/disconnect
+        // loop.
+        //
+        // public/downloads/ is deliberately NOT ignored, despite belonging to
+        // the same build chain. Vite keeps a Set of public file paths built at
+        // startup and refreshes it from this watcher; a path the watcher never
+        // reports is treated as absent, so requests for it fall through to the
+        // SPA fallback and the browser silently downloads index.html renamed
+        // to NetView-Agent-Setup.exe - a ~1 KB "corrupted installer" with no
+        // error anywhere to explain it. One page reload when a new installer
+        // is copied in is the cheaper failure.
+        ignored: ['**/local-agent/**'],
       },
     },
   };
