@@ -8,8 +8,12 @@ coverage/
 !.env.example
 !.env.local.example
 
-# Compiled local-agent installers (~18MB Windows exe) - regenerate via
-# `pyinstaller netview_agent.spec` + copy into public/downloads, don't track.
+# Compiled local-agent build artifacts (~19-21MB Windows binaries). Regenerate
+# rather than tracking them:
+#   pyinstaller local-agent/netview_agent.spec   -> local-agent/dist/ (ignored by dist/ above)
+#   iscc local-agent/installer/setup.iss         -> local-agent/installer/output/
+#   copy the installer into public/downloads/    -> served by the web app
+local-agent/installer/output/
 public/downloads/
 
 # Pre-existing scratch script from before this repo's git history; targets a
