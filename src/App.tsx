@@ -238,7 +238,12 @@ export default function App() {
           setAgentVersion(message.version);
           setAgentCaptureState(message.state);
           setAgentInterfaces(message.interfaces);
-          setSelectedInterfaces((prev) => (prev.length > 0 ? prev : message.interfaces.map((i) => i.name)));
+          // Deliberately does NOT default to every interface. Capture is
+          // single-interface and the user has to name the adapter before a
+          // capture can start; pre-selecting all nine would hand Start a
+          // ready-made selection and quietly defeat that. An existing
+          // selection survives a reconnect untouched.
+          setSelectedInterfaces((prev) => (prev.length > 1 ? [prev[0]] : prev));
 
           // Reconnect resync. A fresh connection always finds the agent idle
           // with every interface selected - it stops capturing when the last
@@ -422,20 +427,6 @@ export default function App() {
     }
   };
 
-  // Optimistic local update: the agent's `state` message always echoes back
-  // the full list of *available* interfaces (never the currently-selected
-  // subset - see AgentStateMessage/SnifferController.state_message()), so
-  // there's no round-trip confirmation to wait on here. Update local state
-  // immediately, matching how Start/Stop Capture already behave elsewhere
-  // in this app.
-  const handleToggleInterface = (interfaceName: string) => {
-    const next = selectedInterfaces.includes(interfaceName)
-      ? selectedInterfaces.filter((n) => n !== interfaceName)
-      : [...selectedInterfaces, interfaceName];
-    setSelectedInterfaces(next);
-    sendAgentCommand({ type: 'set_interfaces', interfaces: next });
-  };
-
   // Memoized with an empty dep array on purpose: DriverInfoPanel subscribes
   // in a mount effect keyed on these identities, so a fresh function each
   // render would drive an unsubscribe/subscribe loop. That is safe only
@@ -499,6 +490,13 @@ export default function App() {
         // agent, rather than just flipping local state (which used to be
         // enough when the old agent sniffed unconditionally from launch).
         const wasCapturing = isCapturingRef.current;
+        // Starting needs an adapter, and a keyboard handler has nowhere to
+        // pop a picker. So space resumes on whatever was already chosen and
+        // otherwise does nothing - the first capture of a session has to be
+        // started from a control that can ask. Stopping is always allowed:
+        // being unable to stop a running capture from the keyboard would be
+        // a far worse trade than being unable to start one.
+        if (!wasCapturing && selectedInterfacesRef.current.length === 0) return;
         const next = permissions.canCapture ? !wasCapturing : false;
         setIsCapturing(next);
         if (next !== wasCapturing) {
@@ -541,9 +539,38 @@ export default function App() {
   }, [selectedPacket, filteredPackets, permissions.canCapture]);
 
   // Actions
-  const handleStartCapture = () => setIsCapturing(true);
-  const handlePauseCapture = () => setIsCapturing(false);
-  const handleStopCapture = () => setIsCapturing(false);
+  //
+  // Capture is single-interface: starting always names exactly one adapter,
+  // so there is no way to begin capturing without having said where from.
+  // set_interfaces is sent before start_capture because the agent restarts
+  // its sniffer threads on a selection change - sending it after would spend
+  // the first moments of the capture on the previous adapter.
+  // Choosing an adapter without starting. A running capture follows the
+  // change: the agent restarts its sniffer threads on set_interfaces, so
+  // switching adapters mid-capture keeps capturing, just from the new one.
+  const handleSelectInterface = (interfaceName: string) => {
+    setSelectedInterfaces([interfaceName]);
+    sendAgentCommand({ type: 'set_interfaces', interfaces: [interfaceName] });
+  };
+
+  const handleStartCaptureOn = (interfaceName: string) => {
+    handleSelectInterface(interfaceName);
+    sendAgentCommand({ type: 'start_capture' });
+    setIsCapturing(true);
+  };
+
+  // The no-agent path. With no connection there are no adapters to choose
+  // from, so the controls start immediately rather than opening a picker
+  // that would be empty and leave Start unable to start anything.
+  const handleStartCapture = () => {
+    sendAgentCommand({ type: 'start_capture' });
+    setIsCapturing(true);
+  };
+
+  const handlePauseCapture = () => {
+    sendAgentCommand({ type: 'stop_capture' });
+    setIsCapturing(false);
+  };
 
   const handleClearPackets = () => {
     packetGenerator.reset();
@@ -607,14 +634,18 @@ export default function App() {
 
         <Header
           isCapturing={isCapturing}
-          onStartCapture={() => setIsCapturing(true)}
-          onPauseCapture={() => setIsCapturing(false)}
-          onStopCapture={() => setIsCapturing(false)}
+          onStartCapture={handleStartCapture}
+          onStartCaptureOn={handleStartCaptureOn}
+          onPauseCapture={handlePauseCapture}
+          onStopCapture={handlePauseCapture}
           onSendAgentCommand={sendAgentCommand}
-          onClearPackets={() => setPackets([])}
+          // Was `() => setPackets([])`, which emptied the list but left the
+          // packet-number counter and the relative-time clock running, so a
+          // cleared buffer kept counting from wherever the last one stopped.
+          onClearPackets={handleClearPackets}
           agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
-          onToggleInterface={handleToggleInterface}
+          onSelectInterface={handleSelectInterface}
           permissions={permissions}
           onOpenDissectorModal={() => setShowDissectorModal(true)}
           onOpenStatsModal={() => setShowStatsModal(true)}
