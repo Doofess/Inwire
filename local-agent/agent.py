@@ -353,21 +353,55 @@ def sniff_callback(pkt):
         agent.broadcast(info)
 
 
+_RTL_MARKS = ("‎", "‏")
+
+
+def _strip_rtl_marks(text: str) -> str:
+    for mark in _RTL_MARKS:
+        text = text.replace(mark, "")
+    return text.strip()
+
+
+def build_interface_label(name, description) -> str:
+    """Builds the "{name} ({description})" label scapy/Windows interfaces are
+    shown with, stripping the Unicode RTL marks (U+200E, U+200F) that
+    Windows embeds in localized adapter names/descriptions. Falls back to
+    just the (cleaned) name when there's no distinct description."""
+    clean_name = _strip_rtl_marks(name or "")
+    clean_description = _strip_rtl_marks(description or "")
+    if not clean_description or clean_description == clean_name:
+        return clean_name
+    return f"{clean_name} ({clean_description})"
+
+
 def list_interfaces():
     """Returns a list of (device_name, friendly_label) tuples to capture on.
-    On Windows this cross-references Npcap's raw NPF_{GUID} device paths
-    against Windows' own adapter list so failures/logs are readable."""
+
+    On Windows this enumerates devices via scapy's `conf.ifaces`, which is
+    populated from libpcap/Npcap's pcap_findalldevs() - the same source
+    Wireshark's interface list comes from. `get_windows_if_list()` is
+    deliberately NOT used here: it returns every Windows adapter *binding*
+    (LightWeight Filter bindings, QoS Packet Scheduler bindings, Npcap
+    Packet Driver bindings, WAN Miniports, Teredo/6to4/IP-HTTPS tunneling
+    adapters, ...), most of which Npcap cannot actually capture on. Sniffing
+    on those floods the log with "Interface '...' not found !" warnings and
+    makes any capture-interface picker built from the list unusable.
+    """
     from scapy.all import get_if_list
 
     if os.name == "nt":
         try:
-            from scapy.arch.windows import get_windows_if_list
+            from scapy.all import conf as scapy_conf
             interfaces = []
-            for w in get_windows_if_list():
-                guid = w.get("guid", "")
-                npf_name = f"\\Device\\NPF_{guid}" if guid else w.get("name", "")
-                label = f"{w.get('name', '?')} ({w.get('description', '?')})"
-                interfaces.append((npf_name, label))
+            for iface in scapy_conf.ifaces.values():
+                device_name = getattr(iface, "network_name", "") or ""
+                if not device_name:
+                    continue
+                label = build_interface_label(
+                    getattr(iface, "name", "") or "",
+                    getattr(iface, "description", "") or "",
+                )
+                interfaces.append((device_name, label))
             if interfaces:
                 return interfaces
         except Exception as exc:

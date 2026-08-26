@@ -369,6 +369,43 @@ finally:
     _netview_logger.level = _saved_level
     _netview_logger.propagate = _saved_propagate
 
+# --- build_interface_label ---
+check(
+    "build_interface_label strips RTL marks from name",
+    agent.build_interface_label("‏‏Ethernet 2", "Intel(R) Ethernet Controller"),
+    "Ethernet 2 (Intel(R) Ethernet Controller)",
+)
+check(
+    "build_interface_label strips RTL marks from description",
+    agent.build_interface_label("Wi-Fi", "‏‏Intel(R) Wi-Fi 6E AX211 160MHz"),
+    "Wi-Fi (Intel(R) Wi-Fi 6E AX211 160MHz)",
+)
+check(
+    "build_interface_label name + description",
+    agent.build_interface_label("Wi-Fi", "Intel(R) Wi-Fi 6E AX211 160MHz"),
+    "Wi-Fi (Intel(R) Wi-Fi 6E AX211 160MHz)",
+)
+check(
+    "build_interface_label with empty description",
+    agent.build_interface_label("Loopback Pseudo-Interface 1", ""),
+    "Loopback Pseudo-Interface 1",
+)
+check(
+    "build_interface_label with None description",
+    agent.build_interface_label("Loopback Pseudo-Interface 1", None),
+    "Loopback Pseudo-Interface 1",
+)
+check(
+    "build_interface_label with description equal to name avoids duplication",
+    agent.build_interface_label("Ethernet 2", "Ethernet 2"),
+    "Ethernet 2",
+)
+check(
+    "build_interface_label trims surrounding whitespace",
+    agent.build_interface_label("  Wi-Fi  ", "  Intel Wi-Fi  "),
+    "Wi-Fi (Intel Wi-Fi)",
+)
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")
