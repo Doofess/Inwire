@@ -20,14 +20,22 @@ The project originated in Google AI Studio (see README.md); `vite.config.ts` sti
 ### Local capture agent (`local-agent/`)
 
 This is a separate Python project, not built by the npm scripts:
-- `pip install -r local-agent/requirements.txt` (scapy, websockets, pyinstaller)
-- `python local-agent/agent.py` (run as Administrator/root — raw packet capture requires elevation on every OS)
-- Platform installers (`bootstrap_windows.py`, `bootstrap_macos.command`, `bootstrap_linux.sh`) are one-click wrappers that install OS capture drivers (Npcap on Windows) and then launch the agent; they're compiled into the executables under `local-agent/dist/` via `pyinstaller netview_agent.spec`, and the compiled installers get copied into `public/downloads/` for the web app to serve. Neither `local-agent/dist/` nor `public/downloads/` is tracked in git (rebuild via PyInstaller rather than editing binaries).
+- `pip install -r local-agent/requirements.txt` (scapy, websockets, pyinstaller, pywin32 on Windows)
+- `python local-agent/agent.py` (run as Administrator/root — raw packet capture requires elevation on every OS). On Windows this development path needs Npcap installed already; the installer normally handles that, so install it from https://npcap.com/#download if you haven't run the installer.
+- The agent speaks a typed WebSocket protocol (`hello`/`state`/`error`/`packet` from the agent; `start_capture`/`stop_capture`/`set_interfaces` to it) and starts **idle** — it only sniffs once a client sends `start_capture`, and stops again when the last client disconnects.
+- Browsers are authenticated by **origin**, not a token: a connection whose `Origin` header isn't listed in `%ProgramData%\NetView\config.json` is rejected with a 403 during the handshake. Defaults cover localhost:3000 and localhost:4173. The file is re-read per connection, so adding an origin needs no restart.
+- Logs go to `%ProgramData%\NetView\agent.log` (rotating). When the agent runs as a service there is no console, so this is the only place to look.
+
+**Windows distribution** — the agent ships as a Windows service, installed once and thereafter invisible (no console, no tray icon, no UAC prompt):
+- `pyinstaller local-agent/netview_agent.spec` builds `local-agent/dist/netview-agent-windows.exe` — the service host, entry point `service_windows.py`, built with `console=False`. It accepts `install` / `remove` / `start` / `stop` / `debug`; `debug` requires the service to already be `install`ed first (pywin32's `debug` verb checks the SCM registry before running any agent code), so the practical loop is `install` once, then `debug` to run the service body in the foreground for iteration.
+- `iscc local-agent/installer/setup.iss` (Inno Setup 6.3.0+ — `setup.iss` uses `ArchitecturesInstallIn64BitMode=x64compatible`, which older Inno Setup releases don't support) wraps that into `local-agent/installer/output/NetView-Agent-Setup.exe`, which downloads Npcap if missing, registers the `NetViewAgent` service as LocalSystem/auto-start, and seeds the config. Copy that installer into `public/downloads/` for the web app to serve.
+- macOS and Linux keep the manual-launch bootstrap scripts (`bootstrap_macos.command`, `bootstrap_linux.sh`); the service model is Windows-only.
+- Neither `local-agent/dist/` nor `public/downloads/` is tracked in git (rebuild rather than editing binaries).
 
 ## Architecture
 
 ### Data flow
-`local-agent/agent.py` (Scapy sniff → JSON over WebSocket) → `App.tsx`'s always-on WebSocket client (auto-reconnects every 3s, tracks `agentStatus` independent of whether capture is active) → when a raw base64 frame is present, `services/pcapParser.ts` (`decodeRawEthernetPacket`) dissects it into a `Packet` the same way an imported `.pcap` file would be; when the agent sends metadata-only (no raw bytes), a minimal fallback `Packet` is built without fabricating payload data. The packet buffer is capped at 4000 entries (oldest dropped first).
+`local-agent/agent.py` (Scapy sniff → JSON over WebSocket, idle until told to start) → `App.tsx`'s always-on WebSocket client (auto-reconnects every 3s, tracks `agentStatus` independent of whether capture is active) → when a raw base64 frame is present, `services/pcapParser.ts` (`decodeRawEthernetPacket`) dissects it into a `Packet` the same way an imported `.pcap` file would be; when the agent sends metadata-only (no raw bytes), a minimal fallback `Packet` is built without fabricating payload data. The packet buffer is capped at 4000 entries (oldest dropped first).
 
 Imported PCAP files go through the same `pcapParser.ts` path via `ExportImportModal`, so live capture and file import produce identical `Packet` shapes.
 
