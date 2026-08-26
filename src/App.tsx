@@ -878,7 +878,20 @@ export default function App() {
 
       <AnimatePresence>
         {showSettingsModal && (
-          <SettingsModal key="settings-modal" onClose={() => setShowSettingsModal(false)} />
+          <SettingsModal
+            key="settings-modal"
+            onClose={() => setShowSettingsModal(false)}
+            agentStatus={agentStatus}
+            agentVersion={agentVersion}
+            agentOutdated={agentOutdated}
+            agentCaptureState={agentCaptureState}
+            agentInterfaces={agentInterfaces}
+            selectedInterfaces={selectedInterfaces}
+            agentLog={agentLog}
+            onSubscribeAgentLog={handleSubscribeAgentLog}
+            onUnsubscribeAgentLog={handleUnsubscribeAgentLog}
+            onClearAgentLog={handleClearAgentLog}
+          />
         )}
       </AnimatePresence>
     </div>
