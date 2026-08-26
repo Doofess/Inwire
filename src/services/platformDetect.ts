@@ -18,8 +18,11 @@ export function detectOS(): DetectedOS {
 
 export const AGENT_DOWNLOADS: Record<Exclude<DetectedOS, 'unknown'>, AgentDownload> = {
   windows: {
-    url: '/downloads/netview-agent-windows.exe',
-    filename: 'netview-agent-windows.exe',
+    // The Inno Setup installer, not the bare exe: the bare exe is a service
+    // host that installs nothing when double-clicked (see the agent
+    // background-service spec).
+    url: '/downloads/NetView-Agent-Setup.exe',
+    filename: 'NetView-Agent-Setup.exe',
     label: 'Windows',
   },
   macos: {
