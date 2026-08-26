@@ -405,6 +405,16 @@ check(
     agent.build_interface_label("  Wi-Fi  ", "  Intel Wi-Fi  "),
     "Wi-Fi (Intel Wi-Fi)",
 )
+check(
+    "build_interface_label with empty name returns just the description, unparenthesized",
+    agent.build_interface_label("", "Software Loopback Interface 1"),
+    "Software Loopback Interface 1",
+)
+check(
+    "build_interface_label with both empty returns an empty string",
+    agent.build_interface_label("", ""),
+    "",
+)
 
 print()
 if failures:
