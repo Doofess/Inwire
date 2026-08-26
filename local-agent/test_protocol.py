@@ -455,6 +455,81 @@ check(
     "",
 )
 
+# --- agent log: line parsing ---
+import agent_log
+
+check(
+    "parse_log_line splits a well-formed INFO line",
+    agent_log.parse_log_line("2026-08-26 22:14:02,123 INFO    client connected (1 total)"),
+    {"time": "2026-08-26 22:14:02,123", "level": "INFO", "message": "client connected (1 total)"},
+)
+check(
+    "parse_log_line handles a level whose name is longer than the padding",
+    agent_log.parse_log_line("2026-08-26 22:14:02,123 CRITICAL scapy is not installed"),
+    {"time": "2026-08-26 22:14:02,123", "level": "CRITICAL", "message": "scapy is not installed"},
+)
+check(
+    "parse_log_line keeps a traceback continuation line intact rather than dropping it",
+    agent_log.parse_log_line('  File "agent.py", line 42, in main'),
+    {"time": None, "level": None, "message": '  File "agent.py", line 42, in main'},
+)
+check(
+    "parse_log_line handles an empty line",
+    agent_log.parse_log_line(""),
+    {"time": None, "level": None, "message": ""},
+)
+# agent.py logs its interface list with two leading spaces per line
+# (log.info("  %s -> %s", ...)). With "INFO" padded to 7 and one separator
+# space, those two spaces sit at the end of a six-space run - a greedy \s+
+# would eat them along with the padding and silently flatten the startup
+# banner. This is the regression test for that.
+check(
+    "parse_log_line preserves a message's own leading indentation",
+    agent_log.parse_log_line("2026-08-26 22:14:02,123 INFO      Wi-Fi -> \\Device\\NPF_{GUID}"),
+    {"time": "2026-08-26 22:14:02,123", "level": "INFO", "message": "  Wi-Fi -> \\Device\\NPF_{GUID}"},
+)
+
+# --- agent log: tail reading ---
+_log_dir = tempfile.mkdtemp()
+_log_file = os.path.join(_log_dir, "agent.log")
+
+with open(_log_file, "w", encoding="utf-8") as fh:
+    for i in range(10):
+        fh.write(f"2026-08-26 22:14:{i:02d},000 INFO    line {i}\n")
+
+_tail = agent_log.read_log_tail(_log_file, max_lines=200)
+check("read_log_tail returns every line of a short file", len(_tail), 10)
+check("read_log_tail returns lines oldest first", _tail[0].endswith("line 0"), True)
+check("read_log_tail's last entry is the newest line", _tail[-1].endswith("line 9"), True)
+
+_tail_3 = agent_log.read_log_tail(_log_file, max_lines=3)
+check("read_log_tail caps at max_lines", len(_tail_3), 3)
+check("read_log_tail keeps the NEWEST lines when capping", _tail_3[-1].endswith("line 9"), True)
+check("read_log_tail drops the oldest lines when capping", _tail_3[0].endswith("line 7"), True)
+
+# A byte window that lands mid-line must not emit a truncated fragment.
+_tail_bytes = agent_log.read_log_tail(_log_file, max_lines=200, max_bytes=60)
+check_true(
+    "read_log_tail discards the partial line its byte window started in",
+    all(line.startswith("2026-") for line in _tail_bytes),
+)
+check_true("read_log_tail honours the byte window", 0 < len(_tail_bytes) < 10)
+
+check("read_log_tail on a missing file returns []", agent_log.read_log_tail(os.path.join(_log_dir, "nope.log")), [])
+check("read_log_tail on a directory path returns []", agent_log.read_log_tail(_log_dir), [])
+
+# Undecodable bytes must not take down a subscribe - errors="replace", not an exception.
+_binary_file = os.path.join(_log_dir, "binary.log")
+with open(_binary_file, "wb") as fh:
+    fh.write(b"2026-08-26 22:14:02,123 INFO    caf\xe9 not utf-8\n")
+_binary_tail = agent_log.read_log_tail(_binary_file)
+check("read_log_tail survives undecodable bytes", len(_binary_tail), 1)
+check_true("read_log_tail replaces undecodable bytes rather than raising", "not utf-8" in _binary_tail[0])
+
+_empty_file = os.path.join(_log_dir, "empty.log")
+open(_empty_file, "w", encoding="utf-8").close()
+check("read_log_tail on an empty file returns []", agent_log.read_log_tail(_empty_file), [])
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")
