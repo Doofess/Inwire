@@ -64,12 +64,10 @@ Root: HKCR; Subkey: "netview\shell\open\command"; ValueType: string; ValueName: 
 Filename: "{tmp}\npcap-installer.exe"; Parameters: "/S /winpcap_mode=no"; \
     StatusMsg: "Installing the Npcap capture driver..."; \
     Check: NeedsNpcap; Flags: waituntilterminated
-Filename: "{app}\{#MyAppExeName}"; Parameters: "install --startup auto"; \
-    StatusMsg: "Registering the NetView Agent service..."; \
-    Flags: runhidden waituntilterminated
-Filename: "{app}\{#MyAppExeName}"; Parameters: "start"; \
-    StatusMsg: "Starting the NetView Agent service..."; \
-    Flags: runhidden waituntilterminated
+; Service registration is NOT done here. [Run] entries ignore exit codes, and
+; a failed registration would leave a "successful" install with no service and
+; nothing on screen to say so. RegisterAgentService (in [Code]) runs it with
+; Exec() and checks the result instead.
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "stop"; \
@@ -155,8 +153,53 @@ begin
   SaveStringsToFile(ConfigPath, Lines, False);
 end;
 
+procedure RegisterAgentService;
+var
+  ExePath, LogPath: String;
+  ResultCode: Integer;
+begin
+  ExePath := ExpandConstant('{app}\{#MyAppExeName}');
+  LogPath := ExpandConstant('{commonappdata}\NetView\agent.log');
+
+  // Options MUST precede the command. pywin32's HandleCommandLine parses with
+  // getopt, which stops at the first non-option token - so "install --startup
+  // auto" never sees --startup at all: it prints its usage screen and exits 1
+  // without registering anything.
+  if not Exec(ExePath, '--startup auto install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    SuppressibleMsgBox('Could not launch the NetView Agent service installer.' + #13#10#13#10 +
+      SysErrorMessage(ResultCode), mbCriticalError, MB_OK, IDOK);
+    Exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    SuppressibleMsgBox('Registering the NetView Agent service failed (exit code ' +
+      IntToStr(ResultCode) + ').' + #13#10#13#10 +
+      'The files were installed but the service is not registered, so capture will not work.' + #13#10#13#10 +
+      'See ' + LogPath + ' for details.', mbCriticalError, MB_OK, IDOK);
+    Exit;
+  end;
+
+  if not Exec(ExePath, 'start', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    SuppressibleMsgBox('Could not launch the NetView Agent service.' + #13#10#13#10 +
+      SysErrorMessage(ResultCode), mbCriticalError, MB_OK, IDOK);
+    Exit;
+  end;
+  if ResultCode <> 0 then
+    SuppressibleMsgBox('The NetView Agent service was registered but did not start (exit code ' +
+      IntToStr(ResultCode) + ').' + #13#10#13#10 +
+      'It is set to start automatically, so a reboot may resolve it.' + #13#10#13#10 +
+      'See ' + LogPath + ' for details.', mbError, MB_OK, IDOK);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
+    // Config first: the service reads it on every connection, and seeding it
+    // before the service starts avoids a first-run window with no allowlist.
     WriteDefaultConfig;
+    RegisterAgentService;
+  end;
 end;
