@@ -57,6 +57,7 @@ PORT = 8999
 AGENT_VERSION = "2.1.0"
 
 import logging_setup
+import agent_log
 
 # Configured for real in main(); until then this is a plain logger, so an
 # import-time failure still has somewhere to go.
@@ -215,6 +216,11 @@ class AgentServer:
         # origin check now rejects disallowed clients during the handshake, so
         # every connection in this set is by construction an allowed one.
         self.connections = set()
+        # Sockets that asked for log lines, always a subset of connections.
+        # Separate from connections because the common case is a client that
+        # never opens Driver Info at all, and log fan-out should cost nothing
+        # for those.
+        self.log_subscribers = set()
         self.loop = None
 
     async def register(self, ws):
@@ -245,6 +251,9 @@ class AgentServer:
         an always-running background capture agent acceptable.
         """
         self.connections.discard(ws)
+        # A socket left here after its connection died would make the log
+        # fan-out write to a dead socket on every line, forever.
+        self.log_subscribers.discard(ws)
         log.info("client disconnected (%d remaining)", len(self.connections))
         if not self.connections and sniffer.is_sniffing():
             log.info("last client disconnected - stopping capture")
@@ -281,6 +290,23 @@ class AgentServer:
                 log.info("set_interfaces: %d interface(s) selected", len(interfaces))
                 sniffer.set_interfaces(interfaces)
                 sniffer.restart_threads(spawn_sniffer_thread)
+        elif msg_type == "subscribe_logs":
+            backlog = agent_log.read_log_tail(self.log_file_path())
+            await ws.send(json.dumps({
+                "type": "log",
+                "lines": [agent_log.parse_log_line(line) for line in backlog],
+            }))
+            # Registered only after the backlog is on the wire. Registering
+            # first would let a line logged during the read arrive ahead of
+            # the backlog it also appears in - a duplicated, out-of-order
+            # timeline. This way the worst case is one line logged during the
+            # send being missed, which is invisible next to a 200-line
+            # backlog.
+            self.log_subscribers.add(ws)
+            return
+        elif msg_type == "unsubscribe_logs":
+            self.log_subscribers.discard(ws)
+            return
         else:
             return
 
@@ -306,6 +332,36 @@ class AgentServer:
                 dead.append(ws)
         for ws in dead:
             self.connections.discard(ws)
+            self.log_subscribers.discard(ws)
+
+    def log_file_path(self) -> str:
+        return os.path.join(config.config_dir(), logging_setup.LOG_FILENAME)
+
+    def broadcast_log(self, entry: dict):
+        """Sink for WebSocketLogHandler. Called from any thread that logs.
+
+        Returns immediately when nobody is subscribed, which is the normal
+        case: with the Driver Info panel closed the whole feature costs one
+        set-emptiness check per log line.
+        """
+        if not self.log_subscribers or self.loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._send_logs({"type": "log", "lines": [entry]}), self.loop
+        )
+
+    async def _send_logs(self, message: dict):
+        # Separate from _send_all so a client watching logs is not also sent
+        # packets, and vice versa. list(...) snapshots before awaiting, since
+        # a client subscribing or dropping mid-send would otherwise mutate
+        # the set while it is being iterated.
+        data = json.dumps(message)
+        for ws in list(self.log_subscribers):
+            try:
+                await ws.send(data)
+            except websockets.ConnectionClosed:
+                self.log_subscribers.discard(ws)
+                self.connections.discard(ws)
 
 
 agent = AgentServer()
@@ -460,6 +516,9 @@ async def main(to_stderr=True):
     global AVAILABLE_INTERFACES, INTERFACE_LABELS, sniffer, log
 
     log = logging_setup.setup_logging(config.config_dir(), to_stderr=to_stderr)
+    # Must come after setup_logging, which tears down existing handlers when
+    # reconfigured - installing before it would silently remove this one.
+    log.addHandler(agent_log.WebSocketLogHandler(agent.broadcast_log))
     log.info("NetView agent %s starting", AGENT_VERSION)
 
     if not has_admin_privileges():
