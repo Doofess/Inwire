@@ -1,21 +1,17 @@
 ; NetView Agent installer
-; Build with Inno Setup 6: iscc setup.iss
+; Build with Inno Setup 6.1 or newer:  iscc setup.iss
 ;
-; Bundles the PyInstaller exe, silently installs Npcap if missing, and
-; registers the netview:// custom URI scheme so the browser can launch
-; the agent with a single click (same pattern Zoom/Slack/VS Code use).
-;
-; NOTE ON LICENSING: redistributing/silently installing the Npcap installer
-; in a packaged product requires an Npcap OEM license (https://npcap.com/oem/).
-; The free Npcap installer is fine for personal/internal use but its EULA
-; restricts silent bundling in distributed software. Confirm your license
-; covers this before shipping the installer below.
+; Installs the agent as a Windows service that starts at boot and shows no
+; UI of any kind. Npcap is downloaded from the official distribution at
+; install time rather than bundled: redistributing and silently installing
+; the Npcap installer inside a packaged product requires an Npcap OEM
+; licence, and downloading it on the user's machine is not redistribution.
 
 #define MyAppName "NetView Agent"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
 #define MyAppExeName "netview-agent-windows.exe"
 #define MyAppPublisher "NetView"
-#define NpcapInstaller "npcap-1.79.exe"
+#define NpcapUrl "https://npcap.com/dist/npcap-1.79.exe"
 
 [Setup]
 AppId={{4C2F8E1A-6B3D-4E9F-8A2C-1D5E7F9A3B6C}}
@@ -34,14 +30,20 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 [Files]
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "redist\{#NpcapInstaller}"; DestDir: "{tmp}"; Flags: deleteafterinstall
+
+[Dirs]
+; Config and log live here. Readable by every user, writable only by admins,
+; and present before anyone logs in - which a LocalSystem service needs.
+Name: "{commonappdata}\NetView"
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Registry]
-; --- netview:// custom URI scheme -> launches the agent exe ---
+; --- netview:// custom URI scheme ---
+; Vestigial: its purpose was launching a manually-started agent from the
+; browser, which an always-running service makes unnecessary. Left registered
+; rather than removed, to avoid churn in a file this release already rewrites.
 Root: HKCR; Subkey: "netview"; ValueType: string; ValueName: ""; \
     ValueData: "URL:NetView Agent Protocol"; Flags: uninsdeletekey
 Root: HKCR; Subkey: "netview"; ValueType: string; ValueName: "URL Protocol"; \
@@ -52,18 +54,102 @@ Root: HKCR; Subkey: "netview\shell\open\command"; ValueType: string; ValueName: 
     ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
-; Install Npcap silently only if it isn't already present on the system.
-Filename: "{tmp}\{#NpcapInstaller}"; Parameters: "/S /winpcap_mode=no"; \
-    StatusMsg: "Installing Npcap packet capture driver..."; Check: not IsNpcapInstalled
-; Optional: launch the agent right after setup finishes.
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; \
-    Flags: nowait postinstall skipifsilent
+Filename: "{tmp}\npcap-installer.exe"; Parameters: "/S /winpcap_mode=no"; \
+    StatusMsg: "Installing the Npcap capture driver..."; \
+    Check: NeedsNpcap; Flags: waituntilterminated
+Filename: "{app}\{#MyAppExeName}"; Parameters: "install --startup auto"; \
+    StatusMsg: "Registering the NetView Agent service..."; \
+    Flags: runhidden waituntilterminated
+Filename: "{app}\{#MyAppExeName}"; Parameters: "start"; \
+    StatusMsg: "Starting the NetView Agent service..."; \
+    Flags: runhidden waituntilterminated
+
+[UninstallRun]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "stop"; \
+    Flags: runhidden waituntilterminated; RunOnceId: "StopNetViewAgent"
+Filename: "{app}\{#MyAppExeName}"; Parameters: "remove"; \
+    Flags: runhidden waituntilterminated; RunOnceId: "RemoveNetViewAgent"
 
 [Code]
+var
+  DownloadPage: TDownloadWizardPage;
+
 function IsNpcapInstalled: Boolean;
 begin
   Result :=
     RegKeyExists(HKLM, 'SOFTWARE\WOW6432Node\Npcap') or
     RegKeyExists(HKLM, 'SOFTWARE\Npcap') or
     FileExists(ExpandConstant('{sys}\Npcap\npcap.sys'));
+end;
+
+function NeedsNpcap: Boolean;
+begin
+  Result := not IsNpcapInstalled;
+end;
+
+function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
+begin
+  Result := True;
+end;
+
+procedure InitializeWizard;
+begin
+  DownloadPage := CreateDownloadPage(
+    SetupMessage(msgWizardPreparing), SetupMessage(msgPreparingDesc), @OnDownloadProgress);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpReady) and NeedsNpcap then
+  begin
+    DownloadPage.Clear;
+    DownloadPage.Add('{#NpcapUrl}', 'npcap-installer.exe', '');
+    DownloadPage.Show;
+    try
+      try
+        DownloadPage.Download;
+      except
+        // Abort rather than continue: finishing the install would leave a
+        // registered service that can never capture anything.
+        SuppressibleMsgBox(
+          'Could not download the Npcap capture driver.'#13#10#13#10 +
+          AddPeriod(GetExceptionMessage) + #13#10#13#10 +
+          'Install it manually from https://npcap.com/#download and run this setup again.',
+          mbCriticalError, MB_OK, IDOK);
+        Result := False;
+      end;
+    finally
+      DownloadPage.Hide;
+    end;
+  end;
+end;
+
+procedure WriteDefaultConfig;
+var
+  ConfigPath: String;
+  Lines: TArrayOfString;
+begin
+  ConfigPath := ExpandConstant('{commonappdata}\NetView\config.json');
+  // Never overwrite an existing config: a reinstall or upgrade must not
+  // silently discard a customized origin allowlist.
+  if FileExists(ConfigPath) then
+    Exit;
+
+  SetArrayLength(Lines, 8);
+  Lines[0] := '{';
+  Lines[1] := '  "allowedOrigins": [';
+  Lines[2] := '    "http://localhost:3000",';
+  Lines[3] := '    "http://127.0.0.1:3000",';
+  Lines[4] := '    "http://localhost:4173",';
+  Lines[5] := '    "http://127.0.0.1:4173"';
+  Lines[6] := '  ]';
+  Lines[7] := '}';
+  SaveStringsToFile(ConfigPath, Lines, False);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    WriteDefaultConfig;
 end;
