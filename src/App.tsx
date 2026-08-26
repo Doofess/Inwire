@@ -16,7 +16,7 @@ import { FilterEngine } from "./services/filterEngine";
 import { CustomDissectorEngine } from "./services/customDissectorEngine";
 import { ColorRulesEngine } from "./services/colorRules";
 import { ROLE_PERMISSIONS } from "./services/rbacService";
-import { parseAgentMessage, encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION, getStoredPairingToken, storePairingToken, clearStoredPairingToken, type AgentCommand } from "./services/agentProtocol";
+import { parseAgentMessage, encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION, type AgentCommand } from "./services/agentProtocol";
 
 // UI Components
 import { Header } from "./components/common/Header";
@@ -96,17 +96,7 @@ export default function App() {
   const [agentIncompatible, setAgentIncompatible] = useState(false);
   const [agentInterfaces, setAgentInterfaces] = useState<{ name: string; label: string }[]>([]);
   const [selectedInterfaces, setSelectedInterfaces] = useState<string[]>([]);
-  const [pairingRequired, setPairingRequired] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  // Set right before sending an `auth` command (stored-token auto-auth on
-  // open, or the manual pairing-prompt submit below) and consumed by the
-  // first `state` message that follows - the agent now sends one
-  // immediately on successful auth, which is the "auth actually succeeded"
-  // signal used to re-sync interface selection/capture state after a
-  // reconnect (see final review finding #3). Cleared as soon as it's used
-  // so later `state` messages (from our own start/stop_capture) don't
-  // re-trigger the resync.
-  const pendingAuthAckRef = useRef(false);
 
   // RBAC Role (Simplified: Always Admin)
   const permissions = {
@@ -164,8 +154,8 @@ export default function App() {
     isCapturingRef.current = isCapturing;
   }, [isCapturing]);
 
-  // Same reasoning as isCapturingRef: the post-reconnect resync (see
-  // pendingAuthAckRef above) needs the *current* interface selection, not
+  // Same reasoning as isCapturingRef: the post-reconnect resync in the
+  // `hello` handler below needs the *current* interface selection, not
   // whatever it was when the WebSocket effect's handlers were created.
   const selectedInterfacesRef = useRef(selectedInterfaces);
   useEffect(() => {
@@ -223,12 +213,6 @@ export default function App() {
           console.warn("[WirePulse] No hello received from agent within 5s - treating it as incompatible.");
           setAgentIncompatible(true);
         }, 5000);
-
-        const storedToken = getStoredPairingToken();
-        if (storedToken) {
-          pendingAuthAckRef.current = true;
-          socket.send(encodeAgentCommand({ type: 'auth', token: storedToken }));
-        }
       };
 
       socket.onmessage = (event) => {
@@ -245,40 +229,33 @@ export default function App() {
           setAgentCaptureState(message.state);
           setAgentInterfaces(message.interfaces);
           setSelectedInterfaces((prev) => (prev.length > 0 ? prev : message.interfaces.map((i) => i.name)));
-          setPairingRequired(message.authRequired && !getStoredPairingToken());
+
+          // Reconnect resync. A fresh connection always finds the agent idle
+          // with every interface selected - it stops capturing when the last
+          // client drops - so push our desired state back to it. Phase 1 hung
+          // this off the post-auth `state` message; with pairing gone, `hello`
+          // is the only per-connection signal there is.
+          //
+          // On a first-ever connection selectedInterfacesRef is still empty
+          // (it gets populated from this very message), so nothing is sent and
+          // the agent keeps its own default of every interface. That is correct.
+          if (selectedInterfacesRef.current.length > 0) {
+            socket.send(encodeAgentCommand({ type: 'set_interfaces', interfaces: selectedInterfacesRef.current }));
+          }
+          if (isCapturingRef.current) {
+            socket.send(encodeAgentCommand({ type: 'start_capture' }));
+          }
           return;
         }
 
         if (message.type === 'state') {
           setAgentCaptureState(message.state);
           setAgentInterfaces(message.interfaces);
-          // The agent now sends a state message immediately after a
-          // successful auth - if we were waiting on that confirmation (a
-          // fresh pairing, or a reconnect replaying the stored token), this
-          // is the signal that it's safe to push our desired state back to
-          // what may well be a freshly-restarted, idle-on-everything agent.
-          if (pendingAuthAckRef.current) {
-            pendingAuthAckRef.current = false;
-            if (selectedInterfacesRef.current.length > 0) {
-              sendAgentCommand({ type: 'set_interfaces', interfaces: selectedInterfacesRef.current });
-            }
-            if (isCapturingRef.current) {
-              sendAgentCommand({ type: 'start_capture' });
-            }
-          }
           return;
         }
 
         if (message.type === 'error') {
           console.warn('[WirePulse] Agent error:', message.message);
-          // Only an actual bad/stale pairing token means the stored token is
-          // wrong and the pairing banner should come back - a command sent
-          // before auth completed, or a rejected empty interface list,
-          // isn't evidence the stored token itself is invalid.
-          if (message.code === 'invalid_token') {
-            clearStoredPairingToken();
-            setPairingRequired(true);
-          }
           return;
         }
 
@@ -593,13 +570,6 @@ export default function App() {
           agentStatus={agentStatus}
           agentCaptureState={agentCaptureState}
           agentOutdated={agentOutdated}
-          pairingRequired={pairingRequired}
-          onSubmitPairingToken={(token) => {
-            storePairingToken(token);
-            pendingAuthAckRef.current = true;
-            sendAgentCommand({ type: 'auth', token });
-            setPairingRequired(false);
-          }}
           totalPacketsCount={packets.length}
           filteredPacketsCount={filteredPackets.length}
           totalBytes={totalBytes}

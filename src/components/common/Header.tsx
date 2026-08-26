@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   TbPlayerPlay,
   TbPlayerPause,
@@ -26,8 +26,6 @@ interface HeaderProps {
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   agentCaptureState: 'idle' | 'sniffing';
   agentOutdated: boolean;
-  pairingRequired: boolean;
-  onSubmitPairingToken: (token: string) => void;
   onOpenSettingsModal: () => void;
   totalPacketsCount: number;
   filteredPacketsCount: number;
@@ -38,30 +36,6 @@ interface HeaderProps {
 // Matches the capture buffer cap enforced in App.tsx's WebSocket handler
 // (oldest packets are dropped once the live buffer exceeds this size).
 const PACKET_BUFFER_CAP = 4000;
-
-const PairingPrompt: React.FC<{ onSubmit: (token: string) => void }> = ({ onSubmit }) => {
-  const [value, setValue] = useState('');
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (value.trim()) onSubmit(value.trim());
-      }}
-      className="hidden lg:flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full border bg-secondary border-border"
-    >
-      <span className="text-muted-foreground">Pairing code:</span>
-      <input
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="XXXX-XXXX"
-        className="w-20 bg-transparent outline-none font-mono placeholder:text-muted-foreground"
-      />
-      <button type="submit" className="text-cyan-500 font-semibold hover:text-cyan-400">
-        Connect
-      </button>
-    </form>
-  );
-};
 
 export const Header: React.FC<HeaderProps> = ({
   isCapturing,
@@ -81,8 +55,6 @@ export const Header: React.FC<HeaderProps> = ({
   agentStatus,
   agentCaptureState,
   agentOutdated,
-  pairingRequired,
-  onSubmitPairingToken,
   onOpenSettingsModal,
   totalPacketsCount,
   filteredPacketsCount,
@@ -256,10 +228,6 @@ export const Header: React.FC<HeaderProps> = ({
               : 'Agent Disconnected'}
           </span>
         </div>
-
-        {pairingRequired && (
-          <PairingPrompt onSubmit={onSubmitPairingToken} />
-        )}
       </div>
     </header>
   );
