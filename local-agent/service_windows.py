@@ -26,8 +26,13 @@ import win32event
 import win32service
 import win32serviceutil
 
-# A frozen exe runs from a temp extraction directory; a plain script runs from
-# local-agent/. Either way agent.py sits beside this file.
+# Harmless in both cases, not load-bearing in either: when frozen, agent.py/
+# config.py/logging_setup.py are embedded in the PYZ archive (declared as
+# hiddenimports in netview_agent.spec) and load via PyInstaller's own
+# meta-path importer, never as loose files from sys._MEIPASS - there is
+# nothing at this path for them to shadow. Running from source, the
+# interpreter already puts the script's own directory on sys.path. Kept for
+# defense in depth in case that default ever changes.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
