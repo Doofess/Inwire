@@ -21,8 +21,8 @@ check('non-object JSON returns null', parseAgentMessage('42'), null);
 check('unknown type returns null', parseAgentMessage('{"type":"mystery"}'), null);
 check('missing type returns null (legacy untyped packet is dropped, per spec)', parseAgentMessage('{"source":"1.2.3.4"}'), null);
 
-const hello = parseAgentMessage('{"type":"hello","version":"1.1.0","state":"idle","authRequired":true,"interfaces":[{"name":"eth0","label":"Ethernet"}]}');
-check('valid hello parses', hello, { type: 'hello', version: '1.1.0', state: 'idle', authRequired: true, interfaces: [{ name: 'eth0', label: 'Ethernet' }] });
+const hello = parseAgentMessage('{"type":"hello","version":"1.1.0","state":"idle","interfaces":[{"name":"eth0","label":"Ethernet"}]}');
+check('valid hello parses', hello, { type: 'hello', version: '1.1.0', state: 'idle', interfaces: [{ name: 'eth0', label: 'Ethernet' }] });
 check('hello missing version returns null', parseAgentMessage('{"type":"hello","state":"idle","interfaces":[]}'), null);
 check('hello missing interfaces returns null', parseAgentMessage('{"type":"hello","version":"1.0.0"}'), null);
 
@@ -37,12 +37,31 @@ check('error missing message returns null', parseAgentMessage('{"type":"error"}'
 const pkt = parseAgentMessage('{"type":"packet","source":"1.2.3.4","destination":"5.6.7.8"}');
 check('packet passes through with all its fields', pkt, { type: 'packet', source: '1.2.3.4', destination: '5.6.7.8' });
 
-check('hello missing authRequired returns null', parseAgentMessage('{"type":"hello","version":"1.0.0","state":"idle","interfaces":[]}'), null);
-check('hello with non-boolean authRequired returns null', parseAgentMessage('{"type":"hello","version":"1.0.0","state":"idle","authRequired":"yes","interfaces":[]}'), null);
-check('hello with invalid state enum value returns null', parseAgentMessage('{"type":"hello","version":"1.0.0","state":"exploded","authRequired":true,"interfaces":[]}'), null);
+check('hello with invalid state enum value returns null', parseAgentMessage('{"type":"hello","version":"1.0.0","state":"exploded","interfaces":[]}'), null);
 check('state with invalid enum value returns null', parseAgentMessage('{"type":"state","state":"exploded","interfaces":[]}'), null);
 check('state with malformed interface entries returns null', parseAgentMessage('{"type":"state","state":"idle","interfaces":["oops"]}'), null);
 check('state with interface entry missing label returns null', parseAgentMessage('{"type":"state","state":"idle","interfaces":[{"name":"eth0"}]}'), null);
+
+// A hello with no authRequired field must still parse - the field is gone
+// from the 2.0.0 protocol entirely.
+check(
+  'hello parses without authRequired',
+  parseAgentMessage(JSON.stringify({
+    type: 'hello', version: '2.0.0', state: 'idle',
+    interfaces: [{ name: 'eth0', label: 'Ethernet' }],
+  }))?.type,
+  'hello',
+);
+
+// A stray authRequired from an older agent is ignored, not rejected.
+check(
+  'hello tolerates a leftover authRequired field',
+  parseAgentMessage(JSON.stringify({
+    type: 'hello', version: '1.1.0', state: 'idle', authRequired: true,
+    interfaces: [],
+  }))?.type,
+  'hello',
+);
 
 console.log();
 if (failures) {

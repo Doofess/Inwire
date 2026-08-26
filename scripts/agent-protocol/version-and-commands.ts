@@ -4,7 +4,7 @@
  *
  *   npx tsx scripts/agent-protocol/version-and-commands.ts
  */
-import { encodeAgentCommand, isAgentOutdated } from '../../src/services/agentProtocol';
+import { encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION } from '../../src/services/agentProtocol';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -28,10 +28,14 @@ check('missing patch segment treated as 0: 1.0 vs 1.0.5 is outdated', isAgentOut
 check('missing patch segment treated as 0: 1.0.5 vs 1.0 is not outdated', isAgentOutdated('1.0.5', '1.0'), false);
 check('missing minor and patch: 1 vs 1.0.1 is outdated', isAgentOutdated('1', '1.0.1'), true);
 
-check('auth command encodes', encodeAgentCommand({ type: 'auth', token: 'ABCD-1234' }), '{"type":"auth","token":"ABCD-1234"}');
 check('start_capture encodes', encodeAgentCommand({ type: 'start_capture' }), '{"type":"start_capture"}');
 check('stop_capture encodes', encodeAgentCommand({ type: 'stop_capture' }), '{"type":"stop_capture"}');
 check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', interfaces: ['eth0', 'eth1'] }), '{"type":"set_interfaces","interfaces":["eth0","eth1"]}');
+
+check('required agent version is 2.0.0', REQUIRED_AGENT_VERSION, '2.0.0');
+check('a 1.1.0 agent is outdated against 2.0.0', isAgentOutdated('1.1.0', '2.0.0'), true);
+check('a 2.0.0 agent is current', isAgentOutdated('2.0.0', '2.0.0'), false);
+check('a 2.1.0 agent is not outdated', isAgentOutdated('2.1.0', '2.0.0'), false);
 
 console.log();
 if (failures) {

@@ -1,15 +1,14 @@
 /**
  * The typed WebSocket protocol spoken with the local capture agent
- * (ws://localhost:8999) - message parsing, version comparison, and pairing
- * token storage. Kept dependency-free and pure so it's testable without a
- * real WebSocket (see scripts/agent-protocol/).
+ * (ws://localhost:8999) - message parsing, version comparison, and command
+ * encoding. Kept dependency-free and pure so it's testable without a real
+ * WebSocket (see scripts/agent-protocol/).
  */
 
 export interface AgentHelloMessage {
   type: 'hello';
   version: string;
   state: 'idle' | 'sniffing';
-  authRequired: boolean;
   interfaces: { name: string; label: string }[];
 }
 
@@ -22,11 +21,9 @@ export interface AgentStateMessage {
 export interface AgentErrorMessage {
   type: 'error';
   message: string;
-  // Discriminates why the agent rejected something - e.g. 'invalid_token'
-  // (stale/wrong pairing code, the one case that should clear the stored
-  // token) vs. 'not_authenticated' or 'empty_interfaces' (neither of which
-  // means the stored token itself is bad). Optional since older agent
-  // builds only ever sent `message`.
+  // Discriminates why the agent rejected a command - currently only
+  // 'empty_interfaces'. Optional, so an agent that sends a bare message
+  // still parses.
   code?: string;
 }
 
@@ -67,7 +64,7 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
 
   switch (msg.type) {
     case 'hello':
-      if (typeof msg.version !== 'string' || typeof msg.authRequired !== 'boolean' || !isValidState(msg.state) || !isValidInterfaceList(msg.interfaces)) return null;
+      if (typeof msg.version !== 'string' || !isValidState(msg.state) || !isValidInterfaceList(msg.interfaces)) return null;
       return msg as unknown as AgentHelloMessage;
     case 'state':
       if (!isValidState(msg.state) || !isValidInterfaceList(msg.interfaces)) return null;
@@ -87,7 +84,7 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
  * whatever the connected agent reports in its hello message to flag a
  * stale build in the UI.
  */
-export const REQUIRED_AGENT_VERSION = '1.1.0';
+export const REQUIRED_AGENT_VERSION = '2.0.0';
 
 /**
  * Simple major.minor.patch comparison - good enough for this agent's
@@ -105,25 +102,10 @@ export function isAgentOutdated(reportedVersion: string, requiredVersion: string
 }
 
 export type AgentCommand =
-  | { type: 'auth'; token: string }
   | { type: 'start_capture' }
   | { type: 'stop_capture' }
   | { type: 'set_interfaces'; interfaces: string[] };
 
 export function encodeAgentCommand(command: AgentCommand): string {
   return JSON.stringify(command);
-}
-
-const PAIRING_TOKEN_STORAGE_KEY = 'netview.agentPairingToken';
-
-export function getStoredPairingToken(): string | null {
-  return localStorage.getItem(PAIRING_TOKEN_STORAGE_KEY);
-}
-
-export function storePairingToken(token: string): void {
-  localStorage.setItem(PAIRING_TOKEN_STORAGE_KEY, token);
-}
-
-export function clearStoredPairingToken(): void {
-  localStorage.removeItem(PAIRING_TOKEN_STORAGE_KEY);
 }
