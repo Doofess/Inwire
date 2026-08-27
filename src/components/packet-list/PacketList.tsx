@@ -417,7 +417,11 @@ export const PacketList: React.FC<PacketListProps> = ({
                 onClick={() => handleSort('length')}
                 className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <div className="flex items-center gap-1">
+                {/* Right-aligned to match the numbers below it. With the
+                    header left-aligned and the values right-aligned, resizing
+                    this column dragged the two apart in opposite directions
+                    and pushed the value up against the Info text. */}
+                <div className="flex items-center justify-end gap-1">
                   <span>Length</span>
                   {renderSortIcon('length')}
                 </div>
@@ -507,11 +511,11 @@ export const PacketList: React.FC<PacketListProps> = ({
                     </td>
 
                     {/* Length */}
-                    <td className="px-2 py-1 whitespace-nowrap text-right tabular-nums">{packet.length}</td>
+                    <td className="pl-2 pr-3 py-1 whitespace-nowrap text-right tabular-nums">{packet.length}</td>
 
                     {/* Info - absorbs the remaining width and clips; Wireshark
                         scrolls the list horizontally rather than ellipsising. */}
-                    <td className="px-2 py-1 whitespace-nowrap overflow-hidden" title={packet.info}>
+                    <td className="px-4 py-1 whitespace-nowrap overflow-hidden" title={packet.info}>
                       {packet.info}
                     </td>
                   </tr>
