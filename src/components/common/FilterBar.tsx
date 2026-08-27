@@ -117,11 +117,16 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   }, []);
 
   return (
+    // Renders inline inside the header rather than as its own row: it has no
+    // background, border or vertical padding of its own, and takes the width
+    // the header gives it. flex-nowrap because the header is a fixed 4rem
+    // tall - wrapping here would push controls out of the bar entirely
+    // instead of onto a second line.
     <div
       ref={containerRef}
-      className="px-4 py-2 border-b transition-colors z-30 relative shrink-0 bg-secondary border-border"
+      className="relative z-30 flex-1 min-w-0"
     >
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-nowrap items-center gap-2">
         {/* Preset Selector Dropdown */}
         <div className="relative">
           <button
@@ -170,9 +175,9 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         </div>
 
         {/* Geometric Balance Filter Box Container */}
-        <div className="relative flex-1 min-w-[260px]">
+        <div className="relative flex-1 min-w-[140px]">
           <div
-            className={`flex items-center rounded-md border w-full px-3 py-1.5 transition-all shadow-inner bg-card border-border ${
+            className={`flex items-center rounded-md border w-full px-3 py-1.5 transition-all shadow-inner bg-background border-border ${
               isNotEmpty && !validation.isValid
                 ? '!border-rose-500 bg-rose-100 dark:bg-rose-950/20'
                 : isNotEmpty && validation.isValid
@@ -272,7 +277,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             row, which no longer exists). */}
         <div
           className={`flex items-center gap-1.5 px-1.5 py-1.5 rounded-md border transition-colors overflow-hidden shrink-0 ${
-            isSearchExpanded ? 'bg-card border-border' : 'bg-transparent border-transparent'
+            isSearchExpanded ? 'bg-background border-border' : 'bg-transparent border-transparent'
           }`}
         >
           <button
@@ -312,7 +317,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         </div>
 
         {/* Packet Count Status Badge */}
-        <div className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border shrink-0 bg-card border-border text-foreground/80">
+        <div className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border shrink-0 bg-background border-border text-foreground/80">
           <span className="text-muted-foreground">PACKETS:</span>
           <span className="font-semibold text-foreground">
             {filteredPackets.toLocaleString()} <span className="text-muted-foreground">/</span> {totalPackets.toLocaleString()}

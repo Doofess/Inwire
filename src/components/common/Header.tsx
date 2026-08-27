@@ -32,6 +32,10 @@ interface HeaderProps {
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   agentCaptureState: 'idle' | 'sniffing';
   agentOutdated: boolean;
+  /** The display-filter controls, rendered inline in this bar rather than in
+   *  a row of their own. Passed in rather than imported so the header stays
+   *  a layout component with no opinion about what the filter UI is. */
+  filterSlot: React.ReactNode;
   onOpenSettingsModal: () => void;
   totalPacketsCount: number;
   filteredPacketsCount: number;
@@ -55,6 +59,7 @@ export const Header: React.FC<HeaderProps> = ({
   agentStatus,
   agentCaptureState,
   agentOutdated,
+  filterSlot,
   onOpenSettingsModal,
   totalPacketsCount,
   filteredPacketsCount,
@@ -98,9 +103,11 @@ export const Header: React.FC<HeaderProps> = ({
   const interfaceButtonClass = `${interfaceButton.className} active:scale-95 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md transition-all max-w-[14rem] cursor-pointer`;
 
   return (
-    <header className="h-16 px-4 sm:px-6 border-b flex items-center justify-between gap-4 transition-colors z-40 shrink-0 select-none bg-card border-border text-card-foreground">
-      {/* Left: App Menu, Branding & Capture Stream Controls */}
-      <div className="flex items-center space-x-3 sm:space-x-4">
+    <header className="h-16 px-4 sm:px-6 border-b flex items-center gap-4 transition-colors z-40 shrink-0 bg-card border-border text-card-foreground">
+      {/* Left: App Menu, Branding & Capture Stream Controls. select-none is
+          scoped to this cluster rather than the whole bar now - the filter
+          controls that share the row contain an editable input. */}
+      <div className="flex items-center space-x-3 sm:space-x-4 select-none shrink-0">
         {/* App Menu - Actions, Views, Filter Presets (Ctrl/Cmd+K). Leads the
             header the way GitHub's own hamburger leads its header, ahead of
             the logo rather than trailing every other control. */}
@@ -221,51 +228,12 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Right: Buffer Status, Agent Status */}
-      <div className="flex items-center space-x-2 sm:space-x-2.5">
-        {/* Agent Connectivity Indicator - separate from the download button so
-            the button stays a stable, always-clickable action and only this
-            small pill reflects the (sometimes flickery) live connection state. */}
-        <div
-          className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full border font-mono ${
-            agentStatus === 'connected' && agentOutdated
-              ? 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
-              : agentStatus === 'connected'
-              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
-              : agentStatus === 'connecting'
-              ? 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
-              : agentStatus === 'error'
-              ? 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-400'
-              : 'bg-secondary border-border text-muted-foreground'
-          }`}
-          title="NetView Agent connection status (ws://localhost:8999)"
-        >
-          <span
-            className={`w-1.5 h-1.5 rounded-full ${
-              agentStatus === 'connected' && agentOutdated
-                ? 'bg-amber-500 dark:bg-amber-400'
-                : agentStatus === 'connected'
-                ? 'bg-emerald-500 dark:bg-emerald-400'
-                : agentStatus === 'connecting'
-                ? 'bg-amber-500 dark:bg-amber-400 animate-pulse'
-                : agentStatus === 'error'
-                ? 'bg-rose-500 dark:bg-rose-400'
-                : 'bg-muted-foreground'
-            }`}
-          />
-          <span>
-            {agentStatus === 'connected' && agentOutdated
-              ? 'Agent Outdated'
-              : agentStatus === 'connected'
-              ? 'Agent Connected'
-              : agentStatus === 'connecting'
-              ? 'Connecting...'
-              : agentStatus === 'error'
-              ? 'Connection Error'
-              : 'Agent Disconnected'}
-          </span>
-        </div>
-      </div>
+      {/* The display-filter controls, formerly a row of their own directly
+          below this one. Agent connection state used to sit here as a pill;
+          it is gone because the Interfaces button already carries it - red
+          and "No interfaces detected" is what an unreachable agent looks
+          like - and Settings > Driver Info has the full detail. */}
+      {filterSlot}
     </header>
   );
 };
