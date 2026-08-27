@@ -32,11 +32,11 @@ check('start_capture encodes', encodeAgentCommand({ type: 'start_capture' }), '{
 check('stop_capture encodes', encodeAgentCommand({ type: 'stop_capture' }), '{"type":"stop_capture"}');
 check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', interfaces: ['eth0', 'eth1'] }), '{"type":"set_interfaces","interfaces":["eth0","eth1"]}');
 
-check('required agent version is 2.1.0', REQUIRED_AGENT_VERSION, '2.1.0');
-check('a 1.1.0 agent is outdated against 2.1.0', isAgentOutdated('1.1.0', '2.1.0'), true);
-check('a 2.0.0 agent is outdated against 2.1.0', isAgentOutdated('2.0.0', '2.1.0'), true);
-check('a 2.1.0 agent is current', isAgentOutdated('2.1.0', '2.1.0'), false);
-check('a 2.2.0 agent is not outdated', isAgentOutdated('2.2.0', '2.1.0'), false);
+check('required agent version is 2.2.0', REQUIRED_AGENT_VERSION, '2.2.0');
+check('a 1.1.0 agent is outdated against 2.2.0', isAgentOutdated('1.1.0', '2.2.0'), true);
+check('a 2.1.0 agent is outdated against 2.2.0', isAgentOutdated('2.1.0', '2.2.0'), true);
+check('a 2.2.0 agent is current', isAgentOutdated('2.2.0', '2.2.0'), false);
+check('a 2.3.0 agent is not outdated', isAgentOutdated('2.3.0', '2.2.0'), false);
 
 check('subscribe_logs encodes', encodeAgentCommand({ type: 'subscribe_logs' }), '{"type":"subscribe_logs"}');
 check('unsubscribe_logs encodes', encodeAgentCommand({ type: 'unsubscribe_logs' }), '{"type":"unsubscribe_logs"}');

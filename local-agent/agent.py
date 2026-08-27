@@ -54,7 +54,18 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "2.1.0"
+AGENT_VERSION = "2.2.0"
+
+# The most packet sends that may be queued onto the event loop at once. Past
+# this, frames are dropped instead of queued (see AgentServer.broadcast). A
+# few hundred is roughly a quarter-second of a busy interface: enough to ride
+# out a normal render hitch on the client, far too little to accumulate into
+# the gigabyte-scale backlog that previously wedged the agent.
+MAX_PENDING_SENDS = 400
+
+# How often the watchdog checks that capture is not running with nobody
+# watching (see watch_for_orphaned_capture).
+ORPHAN_CHECK_SECONDS = 2
 
 import logging_setup
 import agent_log
@@ -222,6 +233,11 @@ class AgentServer:
         # for those.
         self.log_subscribers = set()
         self.loop = None
+        # How many _send_all coroutines are scheduled but have not yet run.
+        # Bounding this is what stops a fast interface growing the agent
+        # without limit - see broadcast().
+        self._pending_sends = 0
+        self._dropped_sends = 0
 
     async def register(self, ws):
         self.connections.add(ws)
@@ -314,25 +330,59 @@ class AgentServer:
 
     def broadcast(self, message: dict):
         """Called from the sniffer thread (packet_to_dict results) as well as
-        from _handle_message above - hop back onto the asyncio loop either way."""
+        from _handle_message above - hop back onto the asyncio loop either way.
+
+        Drops the message rather than queueing it when the loop is already
+        behind. This bound is not an optimization, it is the difference
+        between a bad minute and an unusable machine: without it every
+        captured frame scheduled a coroutine plus its JSON string with
+        nothing limiting how many could pile up, so an interface faster than
+        the client could drain - loopback runs ~1200 packets/sec - grew the
+        agent to 1.2 GB and starved its own event loop until it stopped
+        answering the service manager's stop request and could no longer even
+        be shut down.
+
+        Dropping is the correct trade. This is a live view of traffic, not a
+        recording: a viewer that cannot keep up wants the newest frames, not
+        an ever-growing backlog of stale ones it will never catch up on.
+        """
         if not self.connections or self.loop is None:
             return
+        if self._pending_sends >= MAX_PENDING_SENDS:
+            self._dropped_sends += 1
+            # Logged sparsely and only on crossings of a power-of-ten-ish
+            # boundary: the drop path is the hot path when it is running at
+            # all, and logging per drop would recreate the flood one level up
+            # (log records also fan out to subscribed clients).
+            if self._dropped_sends in (1, 100, 1000) or self._dropped_sends % 10000 == 0:
+                log.warning(
+                    "dropped %d packet(s): the client is not keeping up with this interface",
+                    self._dropped_sends,
+                )
+            return
+        self._pending_sends += 1
         asyncio.run_coroutine_threadsafe(self._send_all(message), self.loop)
 
     async def _send_all(self, message: dict):
         # list(...) snapshots the set before awaiting inside the loop, since a
         # client connecting or dropping mid-broadcast would otherwise mutate
         # self.connections while it is being iterated.
-        data = json.dumps(message)
-        dead = []
-        for ws in list(self.connections):
-            try:
-                await ws.send(data)
-            except websockets.ConnectionClosed:
-                dead.append(ws)
-        for ws in dead:
-            self.connections.discard(ws)
-            self.log_subscribers.discard(ws)
+        try:
+            data = json.dumps(message)
+            dead = []
+            for ws in list(self.connections):
+                try:
+                    await ws.send(data)
+                except websockets.ConnectionClosed:
+                    dead.append(ws)
+            for ws in dead:
+                self.connections.discard(ws)
+                self.log_subscribers.discard(ws)
+        finally:
+            # In a finally so any unexpected failure still frees the slot.
+            # Leaking slots would silently ratchet the agent down to sending
+            # nothing at all, which is far harder to diagnose than dropping.
+            self._pending_sends -= 1
 
     def log_file_path(self) -> str:
         return os.path.join(config.config_dir(), logging_setup.LOG_FILENAME)
@@ -398,7 +448,12 @@ def sniff_callback(pkt):
     _captured_count += 1
     if _captured_count == 1:
         log.info("first packet captured - capture is working")
-    elif _captured_count % 100 == 0:
+    elif _captured_count % 10000 == 0:
+        # Every 10,000 rather than every 100. At 100 this single line was 82%
+        # of the log file (930 of 1129 lines in one session), which churned
+        # the 1MB rotation fast enough to discard real history - and once the
+        # Driver Info panel could subscribe to the log, it also meant a
+        # capture drowned every genuine diagnostic in the viewer.
         log.info("%d packets captured so far", _captured_count)
 
     try:
@@ -512,6 +567,28 @@ def spawn_sniffer_thread(iface_name, stop_event):
     return t
 
 
+async def watch_for_orphaned_capture():
+    """Stops capture whenever nothing is watching.
+
+    handle_disconnect already stops on the last client leaving, and in normal
+    operation that is what fires. This exists because that path is a single
+    point of failure for a promise the agent has to keep unconditionally: a
+    background service with no UI must never sit capturing traffic once the
+    app is closed. Any way of losing a connection that does not run
+    handle_disconnect - a dropped TCP session the library reports oddly, an
+    exception on an unexpected path, a future edit - would otherwise leave a
+    capture running invisibly and indefinitely.
+
+    Polling is the right shape for a guarantee like this precisely because it
+    does not depend on any event arriving.
+    """
+    while True:
+        await asyncio.sleep(ORPHAN_CHECK_SECONDS)
+        if sniffer is not None and sniffer.is_sniffing() and not agent.connections:
+            log.warning("capture was running with no clients connected - stopping it")
+            sniffer.stop_threads()
+
+
 async def main(to_stderr=True):
     global AVAILABLE_INTERFACES, INTERFACE_LABELS, sniffer, log
 
@@ -560,6 +637,7 @@ async def main(to_stderr=True):
         process_request=make_process_request(on_reject=log_rejection),
     ):
         log.info("WebSocket server listening on ws://%s:%d", HOST, PORT)
+        asyncio.create_task(watch_for_orphaned_capture())
         await asyncio.Future()  # run forever
 
     return True
