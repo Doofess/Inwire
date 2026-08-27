@@ -726,6 +726,19 @@ export default function App() {
           onOpenStatsModal={() => setShowStatsModal(true)}
           onOpenExportModal={() => setShowExportModal(true)}
           onOpenIspModal={() => setShowIspModal(true)}
+          filterSlot={
+          <FilterBar
+            filterText={filterText}
+            onFilterChange={setFilterText}
+            onApplyFilter={(newFilter?: string) =>
+              setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
+            }
+            totalPackets={packets.length}
+            filteredPackets={filteredPackets.length}
+            packetSearchText={packetSearchText}
+            onPacketSearchChange={setPacketSearchText}
+          />
+          }
           onOpenSettingsModal={() => setShowSettingsModal(true)}
           agentStatus={agentStatus}
           agentCaptureState={agentCaptureState}
@@ -734,18 +747,6 @@ export default function App() {
           filteredPacketsCount={filteredPackets.length}
         />
 
-        {/* Filter Toolbar (Geometric Balance style) */}
-        <FilterBar
-          filterText={filterText}
-          onFilterChange={setFilterText}
-          onApplyFilter={(newFilter?: string) =>
-            setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
-          }
-          totalPackets={packets.length}
-          filteredPackets={filteredPackets.length}
-          packetSearchText={packetSearchText}
-          onPacketSearchChange={setPacketSearchText}
-        />
 
         {/* Mobile Tab Switcher */}
         <div className="flex md:hidden border-b border-border bg-card text-xs overflow-x-auto shrink-0">
