@@ -770,6 +770,44 @@ finally:
         agent.sniffer = _prev_sniffer
 
 
+# --- capture timestamps come from the wire, not the wall clock ---
+class _StampedPkt:
+    """Stands in for a scapy packet carrying libpcap's capture time. scapy
+    returns an EDecimal, which json cannot serialize - Decimal reproduces
+    that hazard faithfully."""
+
+    def __init__(self, stamp):
+        self.time = stamp
+
+
+import decimal
+
+_ms = agent.capture_time_ms(_StampedPkt(decimal.Decimal("1787795981.131456")))
+check("capture_time_ms converts seconds to milliseconds", round(_ms, 3), 1787795981131.456)
+check_true("capture_time_ms returns a JSON-serializable float", isinstance(_ms, float))
+check_true(
+    "sub-millisecond precision survives - this is the whole point",
+    agent.capture_time_ms(_StampedPkt(decimal.Decimal("1.000100")))
+    != agent.capture_time_ms(_StampedPkt(decimal.Decimal("1.000900"))),
+)
+
+# Two frames a quarter-millisecond apart must not collapse onto one stamp,
+# which is exactly what int(time.time() * 1000) did.
+_a = agent.capture_time_ms(_StampedPkt(decimal.Decimal("100.000250")))
+_b = agent.capture_time_ms(_StampedPkt(decimal.Decimal("100.000500")))
+check_true("frames within the same millisecond stay distinguishable", _a != _b)
+
+
+class _NoTimePkt:
+    pass
+
+
+check_true(
+    "a packet with no capture time falls back to the wall clock rather than failing",
+    agent.capture_time_ms(_NoTimePkt()) > 0,
+)
+
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")

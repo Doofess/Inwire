@@ -13,7 +13,7 @@
 ; licence, and downloading it on the user's machine is not redistribution.
 
 #define MyAppName "NetView Agent"
-#define MyAppVersion "2.2.0"
+#define MyAppVersion "2.3.0"
 #define MyAppExeName "netview-agent-windows.exe"
 #define MyAppPublisher "NetView"
 #define NpcapUrl "https://npcap.com/dist/npcap-1.79.exe"
