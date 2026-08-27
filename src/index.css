@@ -100,6 +100,23 @@
   background: rgba(6, 182, 212, 0.7);
 }
 
+/* The packet list scrolls vertically through its minimap, which is a scrollbar
+   with the capture drawn inside it - so a plain bar beside it is a second
+   control for the same axis. This hides that bar without disabling the
+   scrolling itself: the wheel, keyboard, and the minimap's own click/drag all
+   still move the container.
+
+   Only the vertical bar goes. The horizontal one stays, because the Info
+   column deliberately runs off the right edge and is scrolled to, the way
+   Wireshark does it, and nothing else offers that axis.
+
+   Firefox has no per-axis equivalent of ::-webkit-scrollbar:vertical -
+   scrollbar-width is all-or-nothing - so it is deliberately left alone there
+   rather than taking the horizontal bar down with it. */
+.minimap-scroll::-webkit-scrollbar:vertical {
+  width: 0;
+}
+
 /* MapLibre GL popup/control theming - keep the library's chrome in sync with
    our light/dark tokens instead of its hardcoded white default. */
 .netview-geo-popup .maplibregl-popup-content {
