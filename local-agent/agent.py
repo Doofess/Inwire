@@ -54,7 +54,7 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "2.2.0"
+AGENT_VERSION = "2.3.0"
 
 # The most packet sends that may be queued onto the event loop at once. Past
 # this, frames are dropped instead of queued (see AgentServer.broadcast). A
@@ -163,6 +163,21 @@ class SnifferController:
         }
 
 
+def capture_time_ms(pkt):
+    """Epoch milliseconds for when the frame was actually captured.
+
+    scapy sets pkt.time from libpcap's per-packet header, which carries
+    microsecond resolution. Falls back to the current wall clock only if a
+    packet somehow arrives without one - a frame with no time at all would
+    otherwise break the browser's relative-time column outright, which is a
+    worse outcome than one slightly-late timestamp.
+    """
+    stamp = getattr(pkt, "time", None)
+    if stamp is None:
+        return time.time() * 1000
+    return float(stamp) * 1000
+
+
 def packet_to_dict(pkt):
     """Builds the JSON message for one captured frame.
 
@@ -208,7 +223,19 @@ def packet_to_dict(pkt):
     return {
         "type": "packet",
         "id": make_id(),
-        "timestamp": int(time.time() * 1000),
+        # The frame's real capture time, from libpcap, in fractional
+        # milliseconds. Was int(time.time() * 1000): the wall clock read when
+        # Python happened to process the frame, truncated to a whole
+        # millisecond. That is wrong twice over - it measures this process's
+        # scheduling rather than the wire, and at even modest rates several
+        # frames land on the same millisecond and become indistinguishable in
+        # time. A 1368-frame sample held only 604 distinct timestamps, with up
+        # to six frames sharing one.
+        #
+        # float() because scapy hands back an EDecimal, which json cannot
+        # serialize. Kept fractional rather than rounded so sub-millisecond
+        # ordering survives into the packet list and the pcap export.
+        "timestamp": capture_time_ms(pkt),
         "source": source,
         "destination": destination,
         "protocol": proto,
