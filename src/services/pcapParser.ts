@@ -420,8 +420,16 @@ export function decodeRawEthernetPacket(
   origLen: number,
   tcpTracker?: TcpStreamTracker,
   icmpTracker?: IcmpEchoTracker,
-  quicTracker?: QuicFlowTracker
+  quicTracker?: QuicFlowTracker,
+  /**
+   * The adapter this frame was captured from, for the Frame layer's interface
+   * rows. Absent for imported captures, which carry no live interface - the
+   * rows then say so rather than inventing one.
+   */
+  captureInterface?: { name: string; label: string }
 ): { packet: Packet; icmpMatchedRequestFrameId?: number } {
+  const interfaceName = captureInterface?.name ?? 'unknown';
+  const interfaceDescription = captureInterface?.label ?? 'Imported capture';
   // hexDump/asciiDump are deliberately NOT built here. They are display
   // artifacts for the ONE packet a user has selected, but building them
   // eagerly stored them for every packet in the buffer: for a 1500-byte
@@ -469,14 +477,32 @@ export function decodeRawEthernetPacket(
       name: 'Frame',
       summary: `Frame ${id}: ${origLen || rawBytes.length} bytes on wire (${(origLen || rawBytes.length) * 8} bits), ${rawBytes.length} bytes captured (${rawBytes.length * 8} bits)`,
       rawBytesRange: [0, rawBytes.length - 1],
+      // Ordered as Wireshark orders it: identity, then encapsulation, then the
+      // three clocks, then the generated deltas, then the frame's own numbers.
       fields: [
-        { name: 'Interface id', value: '0 (eth0)' },
+        { name: 'Section number', value: 1, generated: true },
+        {
+          name: 'Interface id',
+          value: `0 (${interfaceName})`,
+          generated: true,
+          children: [
+            { name: 'Interface name', value: interfaceName, generated: true },
+            { name: 'Interface description', value: interfaceDescription, generated: true },
+          ],
+        },
+        { name: 'Encapsulation type', value: 'Ethernet (1)' },
+        { name: 'Arrival Time', value: formatArrivalTime(epochMs) },
+        { name: 'UTC Arrival Time', value: formatArrivalTime(epochMs, true) },
+        { name: 'Epoch Arrival Time', value: (epochMs / 1000).toFixed(9) },
+        { name: '[Time shift for this packet]', value: '0.000000000 seconds', generated: true },
+        { name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
+        { name: '[Time delta from previous displayed frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
+        { name: '[Time since reference or first frame]', value: `${relativeTime.toFixed(9)} seconds`, generated: true },
         { name: 'Frame Number', value: id },
-        { name: 'Frame Length', value: `${origLen || rawBytes.length} bytes` },
-        { name: 'Capture Length', value: `${rawBytes.length} bytes` },
-        { name: 'Epoch Time', value: new Date(epochMs).toISOString() },
-        { name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(6)} seconds`, generated: true },
-        { name: '[Time since reference or first frame]', value: `${relativeTime.toFixed(6)} seconds`, generated: true },
+        { name: 'Frame Length', value: `${origLen || rawBytes.length} bytes (${(origLen || rawBytes.length) * 8} bits)` },
+        { name: 'Capture Length', value: `${rawBytes.length} bytes (${rawBytes.length * 8} bits)` },
+        { name: '[Frame is marked]', value: 'False', generated: true },
+        { name: '[Frame is ignored]', value: 'False', generated: true },
       ],
     },
     {
@@ -487,6 +513,7 @@ export function decodeRawEthernetPacket(
         { name: 'Destination', value: resolveMacVendor(dstMac), rawBytesRange: [0, 5], children: macAddressFields(dstMac, 0) },
         { name: 'Source', value: resolveMacVendor(srcMac), rawBytesRange: [6, 11], children: macAddressFields(srcMac, 6) },
         { name: 'Type', value: `0x${etherType.toString(16).padStart(4, '0')} (${describeEtherType(etherType)})`, rawBytesRange: [12, 13] },
+        { name: '[Stream index]', value: 0, generated: true },
       ],
     },
   ];
@@ -636,6 +663,17 @@ export function decodeRawEthernetPacket(
       dstPort = transport.dstPort;
       info = transport.info;
       layers.push(transport.layer);
+      // Timing lives here, not in the transport decoder, so the [Timestamps]
+      // subtree Wireshark nests under UDP/TCP is attached from this side.
+      transport.layer.fields.push({
+        name: '[Timestamps]',
+        value: '',
+        generated: true,
+        children: [
+          { name: '[Time since first frame]', value: `${relativeTime.toFixed(9)} seconds`, generated: true },
+          { name: '[Time since previous frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
+        ],
+      });
       if (transport.extraLayers) layers.push(...transport.extraLayers);
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
@@ -679,8 +717,14 @@ export function decodeRawEthernetPacket(
         { name: 'Payload Length', value: ipv6PayloadLen, rawBytesRange: [l3Offset + 4, l3Offset + 5] },
         { name: 'Next Header', value: nextHeader === 6 ? 'TCP (6)' : nextHeader === 17 ? 'UDP (17)' : nextHeader === 58 ? 'ICMPv6 (58)' : `${nextHeader}`, rawBytesRange: [l3Offset + 6, l3Offset + 6] },
         { name: 'Hop Limit', value: hopLimit, rawBytesRange: [l3Offset + 7, l3Offset + 7] },
-        { name: 'Source Address', value: srcIp, rawBytesRange: [l3Offset + 8, l3Offset + 23] },
-        { name: 'Destination Address', value: dstIp, rawBytesRange: [l3Offset + 24, l3Offset + 39] },
+        {
+          name: 'Source Address', value: srcIp, rawBytesRange: [l3Offset + 8, l3Offset + 23],
+          children: [{ name: '[Address Space]', value: ipv6AddressSpace(srcIp), generated: true }],
+        },
+        {
+          name: 'Destination Address', value: dstIp, rawBytesRange: [l3Offset + 24, l3Offset + 39],
+          children: [{ name: '[Address Space]', value: ipv6AddressSpace(dstIp), generated: true }],
+        },
       ],
     };
     layers.push(ipv6Layer);
@@ -720,6 +764,17 @@ export function decodeRawEthernetPacket(
       dstPort = transport.dstPort;
       info = transport.info;
       layers.push(transport.layer);
+      // Timing lives here, not in the transport decoder, so the [Timestamps]
+      // subtree Wireshark nests under UDP/TCP is attached from this side.
+      transport.layer.fields.push({
+        name: '[Timestamps]',
+        value: '',
+        generated: true,
+        children: [
+          { name: '[Time since first frame]', value: `${relativeTime.toFixed(9)} seconds`, generated: true },
+          { name: '[Time since previous frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
+        ],
+      });
       if (transport.extraLayers) layers.push(...transport.extraLayers);
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
@@ -732,7 +787,10 @@ export function decodeRawEthernetPacket(
   }
 
   const frameProtocols = layers.map(l => PROTOCOL_NAME_MAP[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_'));
-  layers[0].fields.push({ name: '[Protocols in frame]', value: frameProtocols.join(':'), generated: true });
+  layers[0].fields.push(
+    { name: '[Protocols in frame]', value: frameProtocols.join(':'), generated: true },
+    { name: 'Character encoding', value: 'ASCII (0)' },
+  );
 
   return {
     packet: {
@@ -759,7 +817,7 @@ export function decodeRawEthernetPacket(
       layers,
       rawBytes,
       anomalies,
-      interfaceName: 'eth0',
+      interfaceName: captureInterface?.label ?? 'eth0',
     },
     icmpMatchedRequestFrameId,
   };
@@ -893,6 +951,41 @@ function macAddressFields(mac: string, offset: number): ProtocolField[] {
       bitfield: { bitOffset: 7, bitLength: 1, totalBits: 24 },
     },
   ];
+}
+
+/**
+ * Wireshark's arrival-time format: `Aug 25, 2026 20:16:40.351587600 Jerusalem
+ * Daylight Time`. The spelled-out zone name comes from Intl rather than an
+ * offset, because that is what Wireshark prints and an offset would not match.
+ *
+ * Sub-millisecond digits are zero-padded rather than invented: the agent
+ * timestamps to microsecond resolution, so the last three digits of the
+ * nanosecond field are genuinely unknown, not measured.
+ */
+/** Wireshark's [Address Space] classification for an IPv6 address. */
+function ipv6AddressSpace(address: string): string {
+  const a = address.toLowerCase();
+  if (a === '::1') return 'Loopback';
+  if (a === '::') return 'Unspecified';
+  if (a.startsWith('ff')) return 'Multicast';
+  if (a.startsWith('fe8') || a.startsWith('fe9') || a.startsWith('fea') || a.startsWith('feb')) return 'Link-Local Unicast';
+  if (a.startsWith('fc') || a.startsWith('fd')) return 'Unique Local Unicast';
+  return 'Global Unicast';
+}
+
+function formatArrivalTime(epochMs: number, utc = false): string {
+  const d = new Date(epochMs);
+  const opts: Intl.DateTimeFormatOptions = {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+    timeZone: utc ? 'UTC' : undefined,
+    timeZoneName: 'long',
+  };
+  const parts = new Intl.DateTimeFormat('en-US', opts).formatToParts(d);
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  const fractional = String(Math.round((epochMs % 1000) * 1e6)).padStart(9, '0');
+  return `${get('month')} ${get('day')}, ${get('year')} ${get('hour')}:${get('minute')}:${get('second')}.${fractional} ${get('timeZoneName')}`;
 }
 
 function describeEtherType(etherType: number): string {
@@ -1439,6 +1532,15 @@ function decodeTransportLayer(
           { name: 'Source Port', value: srcPort, rawBytesRange: [transportOffset, transportOffset + 1] },
           { name: 'Destination Port', value: dstPort, rawBytesRange: [transportOffset + 2, transportOffset + 3] },
           { name: 'Length', value: udpLen, rawBytesRange: [transportOffset + 4, transportOffset + 5] },
+          {
+            // Checksum validation is deliberately off, and Wireshark words an
+            // unvalidated checksum exactly this way rather than hiding it.
+            name: 'Checksum',
+            value: `0x${(((rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7]) >>> 0).toString(16).padStart(4, '0')} [unverified]`,
+            rawBytesRange: [transportOffset + 6, transportOffset + 7],
+            children: [{ name: '[Checksum Status]', value: 'Unverified', generated: true }],
+          },
+          { name: 'UDP payload', value: `${Math.max(0, udpLen - 8)} bytes`, rawBytesRange: [transportOffset + 8, transportOffset + Math.max(8, udpLen - 1)] },
         ],
       },
     };
