@@ -9,6 +9,7 @@ import {
   isPrivateIP,
 } from "../../services/geoIpService";
 import { TbWorld, TbHome, TbMaximize, TbX } from "react-icons/tb";
+import { themeColor } from '../../lib/themeColor';
 
 // MapLibre's glyph renderer doesn't shape or bidi-reorder Arabic/Hebrew
 // script on its own - without this plugin, place labels in RTL languages
@@ -43,6 +44,9 @@ const CONNECTIONS_SYNC_THROTTLE_MS = 600;
 interface GeoMapProps {
   packets: Packet[];
   isDark: boolean;
+  /** See TrafficTimelineChart: forces a redraw when the theme changes, which
+   *  isDark cannot signal between two dark themes. */
+  themeKey?: string;
 }
 
 const escapeHtml = (value: string) =>
@@ -60,7 +64,7 @@ function buildPopupHtml(ip: string, loc: GeoLocation, hostname: string | null) {
   const locationLabel = loc.city !== "Unknown" ? `${loc.city}, ${loc.country}` : loc.country;
   return `
     <div class="font-mono text-xs min-w-[150px] max-w-[220px]">
-      <div class="font-bold text-cyan-500 break-all mb-1">${escapeHtml(ip)}</div>
+      <div class="font-bold text-primary break-all mb-1">${escapeHtml(ip)}</div>
       <div class="text-foreground mb-1">${escapeHtml(locationLabel)}</div>
       ${hostname ? `<a href="https://${escapeHtml(hostname)}" target="_blank" rel="noopener noreferrer" class="text-[10px] text-sky-500 hover:underline break-all block">${escapeHtml(hostname)}</a>` : ""}
     </div>
@@ -105,7 +109,7 @@ function createMarkerElement(color: string, size: number) {
   return el;
 }
 
-export const GeoMap: React.FC<GeoMapProps> = ({ packets, isDark }) => {
+export const GeoMap: React.FC<GeoMapProps> = ({ packets, isDark, themeKey }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<Map<string, maplibregl.Marker>>(new Map());
@@ -323,7 +327,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({ packets, isDark }) => {
       return;
     }
     mapRef.current.setStyle(isDark ? DARK_STYLE : LIGHT_STYLE);
-  }, [isDark]);
+  }, [isDark, themeKey]);
 
   // Cooperative gestures only make sense in the small, scroll-competing
   // compact card - the expanded view is a full-screen focused surface.
@@ -383,7 +387,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({ packets, isDark }) => {
 
     ispMarkerRef.current?.remove();
 
-    const el = createMarkerElement("#06b6d4", 14);
+    const el = createMarkerElement(themeColor('--primary', '#06b6d4'), 14);
     const marker = new maplibregl.Marker({ element: el })
       .setLngLat([ispLocation.longitude, ispLocation.latitude])
       .addTo(map);
@@ -421,7 +425,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({ packets, isDark }) => {
           </div>
           <div className="flex items-center gap-2">
             {ispLocation && (
-              <div className="flex items-center gap-1.5 text-cyan-500">
+              <div className="flex items-center gap-1.5 text-primary">
                 <TbHome className="w-3 h-3" />
                 <span>
                   ISP:{" "}

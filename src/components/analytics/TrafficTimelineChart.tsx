@@ -10,11 +10,17 @@ import {
   TbMinus,
   TbRotate,
 } from 'react-icons/tb';
+import { themeColor } from '../../lib/themeColor';
 
 interface TrafficTimelineProps {
   packets: Packet[];
   isCapturing: boolean;
   isDark: boolean;
+  /** The active theme's name. Not used for styling - it exists so this
+   *  imperative D3 draw re-runs when the theme changes. isDark alone cannot
+   *  do that: Dark and Mono are both dark, so it stays true across a switch
+   *  between them and the chart would keep the previous accent. */
+  themeKey?: string;
 }
 
 interface TimelineBucket {
@@ -32,6 +38,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
   packets,
   isCapturing,
   isDark,
+  themeKey,
 }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -187,8 +194,8 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       .attr('y2', '100%');
 
     if (metric === 'packets') {
-      gradient.append('stop').attr('offset', '0%').attr('stop-color', '#06b6d4').attr('stop-opacity', 0.6);
-      gradient.append('stop').attr('offset', '100%').attr('stop-color', '#06b6d4').attr('stop-opacity', 0.01);
+      gradient.append('stop').attr('offset', '0%').attr('stop-color', themeColor('--primary', '#06b6d4')).attr('stop-opacity', 0.6);
+      gradient.append('stop').attr('offset', '100%').attr('stop-color', themeColor('--primary', '#06b6d4')).attr('stop-opacity', 0.01);
     } else {
       gradient.append('stop').attr('offset', '0%').attr('stop-color', '#10b981').attr('stop-opacity', 0.6);
       gradient.append('stop').attr('offset', '100%').attr('stop-color', '#10b981').attr('stop-opacity', 0.01);
@@ -212,7 +219,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
     g.append('path')
       .datum(throttledBuckets)
       .attr('fill', 'none')
-      .attr('stroke', metric === 'packets' ? '#06b6d4' : '#10b981')
+      .attr('stroke', metric === 'packets' ? themeColor('--primary', '#06b6d4') : '#10b981')
       .attr('stroke-width', 2)
       .attr('d', line);
 
@@ -279,7 +286,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
 
     zoomBehaviorRef.current = zoomBehavior;
     zoomRectNodeRef.current = zoomRect.node();
-  }, [throttledBuckets, metric, isDark, isExpanded, zoomTransform]);
+  }, [throttledBuckets, metric, isDark, themeKey, isExpanded, zoomTransform]);
 
   const body = (
     <>
@@ -294,7 +301,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
           <button
             onClick={() => setMetric('packets')}
             className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-              metric === 'packets' ? 'bg-cyan-500 text-slate-950 shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              metric === 'packets' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             PKT/S
@@ -302,7 +309,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
           <button
             onClick={() => setMetric('bandwidth')}
             className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-              metric === 'bandwidth' ? 'bg-cyan-500 text-slate-950 shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              metric === 'bandwidth' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             KBPS
@@ -352,7 +359,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
           <div
             className="absolute top-1 left-1 text-xs px-2 py-1 rounded border pointer-events-none shadow-xl bg-popover border-border text-popover-foreground"
           >
-            <div className="font-mono text-[10px] text-cyan-400 font-bold">T = {hoveredBucket.timeLabel}</div>
+            <div className="font-mono text-[10px] text-primary font-bold">T = {hoveredBucket.timeLabel}</div>
             <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
               <span>{hoveredBucket.packetCount} pkts</span> • <span>{hoveredBucket.kbps.toFixed(1)} Kbps</span>
             </div>
@@ -369,7 +376,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       {/* Timeline bounds (reflects the current zoomed/panned view) */}
       <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono uppercase tracking-wider">
         <span>T={Math.round(visibleDomain[0])}s</span>
-        <span className="text-cyan-400 font-bold">
+        <span className="text-primary font-bold">
           T={Math.round(visibleDomain[1])}s{Math.round(visibleDomain[1]) >= maxTime ? ' (NOW)' : ''}
         </span>
       </div>

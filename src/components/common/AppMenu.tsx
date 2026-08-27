@@ -196,7 +196,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                         onSelect={() => run(onStartCapture)}
                         className={itemClass}
                       >
-                        <TbPlayerPlay className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                        <TbPlayerPlay className="w-3.5 h-3.5 text-primary shrink-0" />
                         <span>Start Capture</span>
                       </Command.Item>
                     )}

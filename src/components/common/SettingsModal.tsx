@@ -110,7 +110,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {section === 'appearance' && (
               <>
                 <div className="text-xs font-semibold text-foreground mb-2">Appearance</div>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-4 gap-2">
                   {THEME_OPTIONS.map(({ value, label, icon: Icon }) => {
                     const isActive = theme === value;
                     return (
@@ -119,7 +119,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         onClick={() => setTheme(value)}
                         className={`relative flex flex-col items-center gap-1.5 py-3 rounded-lg border text-xs font-medium transition-colors ${
                           isActive
-                            ? 'border-cyan-500 bg-cyan-500/10 text-cyan-600 dark:text-cyan-300'
+                            ? 'border-primary bg-primary/10 text-primary'
                             : 'border-border bg-muted/40 text-muted-foreground hover:bg-accent hover:text-foreground'
                         }`}
                       >
@@ -141,7 +141,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div className="text-xs font-semibold text-foreground mb-2">Capture buffer</div>
                   <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
                     <div
-                      className={`h-full transition-all ${bufferPercent >= 99 ? 'bg-rose-500' : bufferPercent >= 75 ? 'bg-amber-500' : 'bg-cyan-500'}`}
+                      className={`h-full transition-all ${bufferPercent >= 99 ? 'bg-rose-500' : bufferPercent >= 75 ? 'bg-amber-500' : 'bg-primary'}`}
                       style={{ width: `${bufferPercent}%` }}
                     />
                   </div>

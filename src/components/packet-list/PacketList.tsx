@@ -23,6 +23,7 @@ interface PacketListProps {
   colorEngine: ColorRulesEngine;
   permissions: UserRolePermissions;
   isDark: boolean;
+  themeKey?: string;
 }
 
 type SortField = 'id' | 'relativeTime' | 'source' | 'destination' | 'protocol' | 'length' | 'info';
@@ -73,6 +74,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   colorEngine,
   permissions,
   isDark,
+  themeKey,
 }) => {
   const [sortField, setSortField] = useState<SortField>('id');
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
@@ -178,7 +180,7 @@ export const PacketList: React.FC<PacketListProps> = ({
       onPointerMove={handleColumnResizePointerMove}
       onPointerUp={handleColumnResizePointerUp}
       onClick={e => e.stopPropagation()}
-      className="absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-cyan-500/50 z-10"
+      className="absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-primary/50 z-10"
       title="Drag to resize column"
     />
   );
@@ -325,9 +327,9 @@ export const PacketList: React.FC<PacketListProps> = ({
   const renderSortIcon = (field: SortField) => {
     if (sortField !== field) return <TbArrowsSort className="w-3 h-3 text-muted-foreground opacity-30 group-hover:opacity-100 transition-opacity" />;
     return sortOrder === 'asc' ? (
-      <TbArrowUp className="w-3 h-3 text-cyan-400" />
+      <TbArrowUp className="w-3 h-3 text-primary" />
     ) : (
-      <TbArrowDown className="w-3 h-3 text-cyan-400" />
+      <TbArrowDown className="w-3 h-3 text-primary" />
     );
   };
 
@@ -464,7 +466,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     onContextMenu={e => handleContextMenu(e, packet)}
                     className={`cursor-pointer ${
                       isSelected
-                        ? '!bg-accent !text-cyan-800 dark:!text-cyan-200 ring-1 ring-inset ring-cyan-500 font-bold'
+                        ? '!bg-accent !text-primary dark:!text-primary ring-1 ring-inset ring-primary font-bold'
                         : 'hover:brightness-95 dark:hover:brightness-125'
                     }`}
                     // The matched rule's foreground applies to the whole row,
@@ -538,6 +540,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         selectedPacket={selectedPacket}
         colorEngine={colorEngine}
         isDark={isDark}
+        themeKey={themeKey}
         containerRef={tableContainerRef}
         onUserScrollIntent={armUserScroll}
       />
@@ -556,7 +559,7 @@ export const PacketList: React.FC<PacketListProps> = ({
           {contextMenu.packet.streamId !== undefined && (
             <button
               onClick={() => onFollowStream(contextMenu.packet.streamId!)}
-              className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
+              className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
             >
               <TbMessage className="w-3.5 h-3.5 text-foreground" />
               <span>Follow Stream (#{contextMenu.packet.streamId})</span>
@@ -565,7 +568,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
           <button
             onClick={() => onQuickFilter(`ip.src == "${contextMenu.packet.source}"`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
+            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
             <TbFilter className="w-3.5 h-3.5" />
             <span>Filter by Source ({contextMenu.packet.source})</span>
@@ -573,7 +576,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
           <button
             onClick={() => onQuickFilter(`ip.dst == "${contextMenu.packet.destination}"`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
+            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
             <TbFilter className="w-3.5 h-3.5" />
             <span>Filter by Destination ({contextMenu.packet.destination})</span>
@@ -581,7 +584,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
           <button
             onClick={() => onQuickFilter(`proto == ${contextMenu.packet.protocol.toLowerCase()}`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
+            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
             <TbFilter className="w-3.5 h-3.5" />
             <span>Filter by Protocol ({contextMenu.packet.protocol})</span>
@@ -593,7 +596,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             onClick={() => {
               navigator.clipboard.writeText(packetHexDump(contextMenu.packet));
             }}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
+            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
             <TbCopy className="w-3.5 h-3.5 text-foreground" />
             <span>Copy Raw Hex Stream</span>

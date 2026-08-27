@@ -89,7 +89,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
           }}
           className={`flex items-center justify-between px-2 py-0.5 rounded group transition-colors ${indentClass} ${
             isFieldActive
-              ? 'bg-cyan-100 dark:bg-cyan-500/20 text-cyan-800 dark:text-cyan-300 font-bold'
+              ? 'bg-primary/15 dark:bg-primary/20 text-primary font-bold'
               : 'hover:bg-accent/60 text-muted-foreground'
           }`}
         >
@@ -134,7 +134,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
       >
         <div className="flex items-center gap-2 text-xs font-mono font-bold">
           <span className="text-muted-foreground uppercase tracking-tighter">Packet Inspection</span>
-          <span className="text-cyan-400">#Frame {packet.id} ({packet.length} bytes)</span>
+          <span className="text-primary">#Frame {packet.id} ({packet.length} bytes)</span>
         </div>
 
         <div className="flex items-center gap-1">
@@ -190,7 +190,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
               key={idx}
               className={`rounded-md border transition-colors ${
                 isLayerActive
-                  ? 'border-cyan-500/80 bg-cyan-50 dark:bg-cyan-950/30'
+                  ? 'border-primary/80 bg-primary/15'
                   : 'border-border bg-card/60'
               }`}
             >
@@ -203,7 +203,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
               >
                 <div className="flex items-center gap-2 truncate">
                   {isExpanded ? (
-                    <TbChevronDown className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    <TbChevronDown className="w-3.5 h-3.5 text-primary shrink-0" />
                   ) : (
                     <TbChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                   )}

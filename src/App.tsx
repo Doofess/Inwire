@@ -754,7 +754,7 @@ export default function App() {
             onClick={() => setMobileTab("packets")}
             className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
               mobileTab === "packets"
-                ? "border-b-2 border-cyan-400 text-cyan-400 bg-cyan-950/20"
+                ? "border-b-2 border-primary text-primary bg-primary/15"
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -766,7 +766,7 @@ export default function App() {
             onClick={() => setMobileTab("tree")}
             className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
               mobileTab === "tree"
-                ? "border-b-2 border-cyan-400 text-cyan-400 bg-cyan-950/20"
+                ? "border-b-2 border-primary text-primary bg-primary/15"
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -778,7 +778,7 @@ export default function App() {
             onClick={() => setMobileTab("hex")}
             className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
               mobileTab === "hex"
-                ? "border-b-2 border-cyan-400 text-cyan-400 bg-cyan-950/20"
+                ? "border-b-2 border-primary text-primary bg-primary/15"
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -790,7 +790,7 @@ export default function App() {
             onClick={() => setMobileTab("graphs")}
             className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
               mobileTab === "graphs"
-                ? "border-b-2 border-cyan-400 text-cyan-400 bg-cyan-950/20"
+                ? "border-b-2 border-primary text-primary bg-primary/15"
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -811,6 +811,7 @@ export default function App() {
             >
               <PacketList
                 packets={filteredPackets}
+                themeKey={resolvedTheme}
                 selectedPacket={selectedPacket}
                 onSelectPacket={(pkt) => {
                   setSelectedPacket(pkt);
@@ -829,7 +830,7 @@ export default function App() {
 
             {/* Resize Drag Handle */}
             <div
-              className="hidden md:block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-cyan-500/50"
+              className="hidden md:block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50"
               onMouseDown={() => {
                 isDraggingRef.current = true;
                 document.body.style.cursor = "row-resize";
@@ -887,7 +888,7 @@ export default function App() {
           >
             {/* Geo-IP Map */}
             <div className="h-64 shrink-0 rounded-lg overflow-hidden border border-border">
-              <GeoMap packets={packets} isDark={isDark} />
+              <GeoMap packets={packets} isDark={isDark} themeKey={resolvedTheme} />
             </div>
 
             {/* Real-time D3 Throughput & Traffic Spikes */}
@@ -895,7 +896,7 @@ export default function App() {
               <TrafficTimelineChart
                 packets={packets}
                 isCapturing={isCapturing}
-                isDark={isDark}
+                isDark={isDark} themeKey={resolvedTheme}
               />
             </div>
 

@@ -19,8 +19,8 @@ interface ProtocolDatum {
 // All protocols share the same cyan accent used broadly across the app
 // (Start Capture button, active-filter states, etc.) rather than each
 // getting its own hue.
-const PROTOCOL_BAR_COLOR = 'bg-cyan-500';
-const PROTOCOL_TEXT_COLOR = 'text-cyan-400';
+const PROTOCOL_BAR_COLOR = 'bg-primary';
+const PROTOCOL_TEXT_COLOR = 'text-primary';
 
 export const ProtocolDonutChart: React.FC<ProtocolDonutProps> = ({
   packets,
