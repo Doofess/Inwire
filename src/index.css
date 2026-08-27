@@ -2,8 +2,13 @@
 
 /* Tailwind v4 has no JS config file, so class-based dark mode (toggled by
    next-themes adding/removing .dark on <html>) is opted into here instead
-   of the default prefers-color-scheme-only behavior. */
-@custom-variant dark (&:where(.dark, .dark *));
+   of the default prefers-color-scheme-only behavior.
+
+   .mono is listed alongside .dark because it is a second DARK theme, not a
+   third mode: every `dark:` variant in the app must apply under it too, or
+   components that branch on `dark:` would render their light treatment on a
+   near-black canvas. */
+@custom-variant dark (&:where(.dark, .dark *, .mono, .mono *));
 
 :root {
   --background: #f4f7f9;
@@ -12,7 +17,12 @@
   --card-foreground: #1e293b;
   --popover: #ffffff;
   --popover-foreground: #1e293b;
-  --primary: #06b6d4;
+  /* Light keeps its existing look; only the accent moves off cyan. This is a
+     classic interface blue carrying some green - hue 200, which sits between
+     the old cyan (189) and a pure blue (221), so it reads as blue rather
+     than teal while staying clearly distinct from the cyan it replaces. Dark
+     enough against white to be used for text, which cyan was not. */
+  --primary: #0284c7;
   --primary-foreground: #ffffff;
   --secondary: #f1f5f9;
   --secondary-foreground: #1e293b;
@@ -24,7 +34,7 @@
   --destructive-foreground: #ffffff;
   --border: #e2e8f0;
   --input: #e2e8f0;
-  --ring: #22d3ee;
+  --ring: #0ea5e9;
 }
 
 .dark {
@@ -49,7 +59,14 @@
   --ring: #22d3ee;
 }
 
-@theme inline {
+/* NOT `@theme inline`. With `inline`, Tailwind substitutes each token's value
+   as resolved against :root directly into the utilities, so `bg-primary`
+   compiled to the light theme's blue and stayed that colour under .dark and
+   .mono no matter what those blocks declared - the variable updated, the
+   painted pixel did not. Without `inline`, Tailwind emits --color-primary as
+   a real runtime variable pointing at var(--primary), which then follows
+   whichever theme class is on <html>. */
+@theme {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -97,7 +114,8 @@
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(6, 182, 212, 0.7);
+  /* Was a literal cyan, which would have stayed cyan in every theme. */
+  background: color-mix(in srgb, var(--primary) 70%, transparent);
 }
 
 /* The packet list scrolls vertically through its minimap, which is a scrollbar
@@ -143,7 +161,42 @@
   border-top: 1px solid var(--border);
 }
 
-.dark .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+/* Mono - the second dark theme. Near-black canvas, white as the accent in
+   place of cyan, and structure carried by borders rather than by colour,
+   which is what makes a dense tool read as calm at this density.
+
+   The greys are deliberately not pure: #0a0c10 rather than #000 keeps the
+   card and popover layers above it distinguishable, and #e6edf3 rather than
+   #fff takes the glare off a screen full of monospace text.
+
+   Only --primary and the greys change. destructive stays rose here, and the
+   rose/amber/emerald used directly by components stays too: colour is
+   reserved for meaning - a failed capture, a warning, a healthy agent - and
+   flattening those would make the states indistinguishable. */
+.mono {
+  --background: #0a0c10;
+  --foreground: #e6edf3;
+  --card: #0d1117;
+  --card-foreground: #e6edf3;
+  --popover: #161b22;
+  --popover-foreground: #e6edf3;
+  --primary: #ffffff;
+  --primary-foreground: #0a0c10;
+  --secondary: #161b22;
+  --secondary-foreground: #e6edf3;
+  --muted: #161b22;
+  --muted-foreground: #8b949e;
+  --accent: #21262d;
+  --accent-foreground: #ffffff;
+  --destructive: #f85149;
+  --destructive-foreground: #ffffff;
+  --border: #30363d;
+  --input: #30363d;
+  --ring: #f0f6fc;
+}
+
+.dark .maplibregl-ctrl-group button .maplibregl-ctrl-icon,
+.mono .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
   filter: invert(1);
 }
 

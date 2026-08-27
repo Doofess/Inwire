@@ -86,7 +86,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
             onClick={() => setActiveTab('conversations')}
             className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
               activeTab === 'conversations'
-                ? 'bg-cyan-500 text-slate-950 font-bold'
+                ? 'bg-primary text-primary-foreground font-bold'
                 : 'text-muted-foreground hover:text-foreground'
             }`}
           >
@@ -96,7 +96,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
             onClick={() => setActiveTab('endpoints')}
             className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
               activeTab === 'endpoints'
-                ? 'bg-cyan-500 text-slate-950 font-bold'
+                ? 'bg-primary text-primary-foreground font-bold'
                 : 'text-muted-foreground hover:text-foreground'
             }`}
           >
@@ -123,7 +123,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
                   {conv.hasAnomaly && <TbShieldExclamation className="w-3.5 h-3.5 text-rose-400 shrink-0 animate-pulse" />}
                   <button
                     onClick={() => onFilterHost(conv.hostA)}
-                    className="hover:underline hover:text-cyan-400 truncate max-w-[85px] cursor-pointer"
+                    className="hover:underline hover:text-primary truncate max-w-[85px] cursor-pointer"
                     title={conv.hostA}
                   >
                     {conv.hostA}
@@ -131,7 +131,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
                   <TbArrowsExchange className="w-3 h-3 text-muted-foreground shrink-0" />
                   <button
                     onClick={() => onFilterHost(conv.hostB)}
-                    className="hover:underline hover:text-cyan-400 truncate max-w-[85px] cursor-pointer"
+                    className="hover:underline hover:text-primary truncate max-w-[85px] cursor-pointer"
                     title={conv.hostB}
                   >
                     {conv.hostB}
@@ -139,7 +139,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
                 </div>
 
                 <div className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground shrink-0">
-                  <span className="text-cyan-400 font-bold">
+                  <span className="text-primary font-bold">
                     {conv.totalBytes >= 1024 ? `${(conv.totalBytes / 1024).toFixed(1)}K` : `${conv.totalBytes}B`}
                   </span>
                 </div>
@@ -162,7 +162,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
                 {ep.anomalies > 0 && <TbShieldExclamation className="w-3.5 h-3.5 text-rose-400 shrink-0 animate-pulse" />}
                 <button
                   onClick={() => onFilterHost(ep.ip)}
-                  className="hover:underline hover:text-cyan-400 font-medium cursor-pointer"
+                  className="hover:underline hover:text-primary font-medium cursor-pointer"
                 >
                   {ep.ip}
                 </button>
@@ -170,7 +170,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
 
               <div className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
                 <span>{ep.txPkts + ep.rxPkts} pkts</span>
-                <span className="text-cyan-400 font-bold">
+                <span className="text-primary font-bold">
                   {ep.bytes >= 1024 ? `${(ep.bytes / 1024).toFixed(1)}K` : `${ep.bytes}B`}
                 </span>
               </div>

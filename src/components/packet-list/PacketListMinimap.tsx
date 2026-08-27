@@ -1,12 +1,16 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { Packet } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
+import { themeColor } from '../../lib/themeColor';
 
 interface PacketListMinimapProps {
   packets: Packet[];
   selectedPacket: Packet | null;
   colorEngine: ColorRulesEngine;
   isDark: boolean;
+  /** Forces this canvas to repaint when the theme changes. isDark cannot
+   *  signal a switch between two dark themes - see themeColor. */
+  themeKey?: string;
   containerRef: React.RefObject<HTMLDivElement | null>;
   /**
    * Called whenever a click/drag here is about to move the table's scroll
@@ -72,6 +76,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   selectedPacket,
   colorEngine,
   isDark,
+  themeKey,
   containerRef,
   onUserScrollIntent,
 }) => {
@@ -177,11 +182,12 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
       const idx = packets.findIndex(p => p.id === selectedPacket.id);
       if (idx !== -1) {
         const y = (idx / total) * size.height;
-        ctx.fillStyle = isDark ? '#22d3ee' : '#0891b2';
+        // The selected-packet marker, in the theme's accent.
+        ctx.fillStyle = themeColor('--primary', isDark ? '#22d3ee' : '#0891b2');
         ctx.fillRect(0, Math.max(0, y - 1), size.width, 2);
       }
     }
-  }, [packets, colorEngine, isDark, size, selectedPacket]);
+  }, [packets, colorEngine, isDark, themeKey, size, selectedPacket]);
 
   const scrollToClientY = useCallback((clientY: number) => {
     const wrapper = wrapperRef.current;
@@ -250,7 +256,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         onPointerDown={handleResizePointerDown}
         onPointerMove={handleResizePointerMove}
         onPointerUp={handleResizePointerUp}
-        className="absolute left-0 top-0 h-full w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-cyan-500/50 z-10"
+        className="absolute left-0 top-0 h-full w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/50 z-10"
         title="Drag to resize packet map"
       />
     </div>

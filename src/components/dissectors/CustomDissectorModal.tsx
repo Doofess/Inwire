@@ -154,13 +154,13 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-cyan-500/20">
+            <div className="p-2 rounded-lg bg-primary/20">
               <TbCode className="w-5 h-5 text-foreground" />
             </div>
             <div>
               <div className="flex items-center gap-2 font-bold text-base">
                 <span>Modular Custom Protocol Dissector Plugin Engine</span>
-                <span className="text-xs px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-700 dark:text-cyan-300 font-mono">
+                <span className="text-xs px-2 py-0.5 rounded bg-primary/20 text-primary font-mono">
                   Active Plugins ({dissectors.length})
                 </span>
               </div>
@@ -193,7 +193,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
                   }}
                   className={`p-2.5 rounded-lg border text-xs cursor-pointer transition-colors ${
                     !isCreating && selectedDissector?.id === d.id
-                      ? 'bg-cyan-50 dark:bg-cyan-950/40 border-cyan-500/60 text-cyan-800 dark:text-cyan-200'
+                      ? 'bg-primary/15 border-primary/60 text-primary'
                       : 'bg-muted/50 border-border hover:bg-accent text-foreground/80'
                   }`}
                 >
@@ -206,13 +206,13 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
                         e.stopPropagation();
                         handleToggleDissector(d.id, e.target.checked);
                       }}
-                      className="accent-cyan-400"
+                      className="accent-primary"
                       title="Enable / Disable Dissector"
                     />
                   </div>
                   <div className={`flex items-center justify-between mt-1`}>
                     <div className={`flex items-center gap-2 font-mono text-[10px] ${"text-muted-foreground"}`}>
-                      <span className="text-cyan-400 font-bold">{d.protocolName}</span>
+                      <span className="text-primary font-bold">{d.protocolName}</span>
                       <span>•</span>
                       <span>{d.transport}</span>
                       {d.port && <span>:{d.port}</span>}
@@ -260,7 +260,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
                   setFormMagicHex('4D59'); // "MY"
                   setFormDescription('Proprietary microservice messaging protocol');
                 }}
-                className="mt-3 w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-zinc-950 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm"
+                className="mt-3 w-full py-2 px-3 rounded-lg bg-primary hover:bg-primary/90 text-zinc-950 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm"
               >
                 <TbPlus className="w-4 h-4" />
                 <span>Create New Dissector</span>
@@ -279,7 +279,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
               // Create New Dissector Form
               <div className="space-y-4">
                 <div className="flex items-center justify-between border-b border-border pb-2">
-                  <div className="font-bold text-sm text-cyan-400">Define New Custom Protocol Dissector</div>
+                  <div className="font-bold text-sm text-primary">Define New Custom Protocol Dissector</div>
                   <button
                     onClick={() => setIsCreating(false)}
                     className={`text-xs ${"text-muted-foreground"} hover:text-foreground`}
@@ -364,7 +364,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
                     <span>Protocol Header & Payload Field Layout</span>
                     <button
                       onClick={handleAddField}
-                      className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-cyan-600 hover:bg-cyan-500 text-zinc-950 font-semibold"
+                      className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-primary hover:bg-primary/90 text-zinc-950 font-semibold"
                     >
                       <TbPlus className="w-3 h-3" />
                       Add Field
@@ -430,7 +430,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
                   </button>
                   <button
                     onClick={handleSaveNewDissector}
-                    className="px-4 py-1.5 rounded-md bg-cyan-500 hover:bg-cyan-400 text-zinc-950 font-bold text-xs shadow-sm"
+                    className="px-4 py-1.5 rounded-md bg-primary hover:bg-primary/90 text-zinc-950 font-bold text-xs shadow-sm"
                   >
                     Save & Register Dissector
                   </button>
@@ -442,7 +442,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
                 <div className="flex items-center justify-between border-b border-border pb-2">
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="font-bold text-base text-cyan-700 dark:text-cyan-300">{selectedDissector.name}</span>
+                      <span className="font-bold text-base text-primary">{selectedDissector.name}</span>
                       <span className={`text-xs px-2 py-0.5 rounded bg-secondary ${"text-foreground/80"} font-mono`}>
                         {selectedDissector.protocolName}
                       </span>
@@ -467,7 +467,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 font-mono text-xs">
                     {selectedDissector.fields.map((field, idx) => (
                       <div key={idx} className="p-2 rounded bg-muted border border-border">
-                        <div className="font-semibold text-cyan-400">{field.name}</div>
+                        <div className="font-semibold text-primary">{field.name}</div>
                         <div className={`text-[10px] ${"text-muted-foreground"} mt-1`}>
                           Offset: {field.offset} • Len: {field.length}B • Type: {field.type}
                         </div>

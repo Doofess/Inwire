@@ -95,7 +95,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
       >
         <div className="flex items-center gap-2 font-semibold">
           <span className="text-muted-foreground uppercase tracking-tighter">Hex View</span>
-          <span className="text-cyan-400 font-mono">({rawBytes.length} bytes)</span>
+          <span className="text-primary font-mono">({rawBytes.length} bytes)</span>
         </div>
 
         <div className="flex items-center gap-1.5">
@@ -180,10 +180,10 @@ export const HexViewer: React.FC<HexViewerProps> = ({
                         }}
                         className={`w-4 text-center cursor-pointer transition-all rounded px-0.5 ${
                           isHovered
-                            ? 'bg-cyan-500 text-slate-950 font-bold scale-110 shadow-sm'
+                            ? 'bg-primary text-primary-foreground font-bold scale-110 shadow-sm'
                             : isInRange
-                            ? 'bg-cyan-200/50 dark:bg-cyan-500/30 text-cyan-900 dark:text-cyan-200 font-bold ring-1 ring-cyan-400'
-                            : 'text-muted-foreground hover:text-cyan-700 dark:hover:text-cyan-200 hover:bg-accent'
+                            ? 'bg-primary/15 dark:bg-primary/30 text-primary font-bold ring-1 ring-primary'
+                            : 'text-muted-foreground hover:text-primary hover:bg-accent'
                         }`}
                       >
                         {byte.toString(16).padStart(2, '0').toUpperCase()}
@@ -214,10 +214,10 @@ export const HexViewer: React.FC<HexViewerProps> = ({
                         }}
                         className={`w-4 text-center cursor-pointer transition-all rounded px-0.5 ${
                           isHovered
-                            ? 'bg-cyan-500 text-slate-950 font-bold scale-110 shadow-sm'
+                            ? 'bg-primary text-primary-foreground font-bold scale-110 shadow-sm'
                             : isInRange
-                            ? 'bg-cyan-200/50 dark:bg-cyan-500/30 text-cyan-900 dark:text-cyan-200 font-bold ring-1 ring-cyan-400'
-                            : 'text-muted-foreground hover:text-cyan-700 dark:hover:text-cyan-200 hover:bg-accent'
+                            ? 'bg-primary/15 dark:bg-primary/30 text-primary font-bold ring-1 ring-primary'
+                            : 'text-muted-foreground hover:text-primary hover:bg-accent'
                         }`}
                       >
                         {byte.toString(16).padStart(2, '0').toUpperCase()}
@@ -248,9 +248,9 @@ export const HexViewer: React.FC<HexViewerProps> = ({
                       }}
                       className={`cursor-pointer transition-colors ${
                         isHovered
-                          ? 'bg-cyan-500 text-slate-950 font-bold rounded'
+                          ? 'bg-primary text-primary-foreground font-bold rounded'
                           : isInRange
-                          ? 'text-cyan-900 dark:text-cyan-300 font-bold bg-cyan-200/80 dark:bg-cyan-950/60 rounded'
+                          ? 'text-primary font-bold bg-primary/15 rounded'
                           : ''
                       }`}
                     >
@@ -277,7 +277,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
               DEC: <b className="text-foreground">{hoveredByteVal}</b>
             </span>
             <span>
-              HEX: <b className="text-cyan-400">0x{hoveredByteVal.toString(16).padStart(2, '0').toUpperCase()}</b>
+              HEX: <b className="text-primary">0x{hoveredByteVal.toString(16).padStart(2, '0').toUpperCase()}</b>
             </span>
             <span>
               BITS: <b className="text-emerald-400">0b{hoveredByteVal.toString(2).padStart(8, '0')}</b>

@@ -131,7 +131,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Title */}
         <div className="hidden xl:flex flex-col">
           <div className="flex items-center gap-1.5">
-            <span className="font-mono font-black text-sm tracking-tight text-cyan-400">NET VIEW</span>
+            <span className="font-mono font-black text-sm tracking-tight text-primary">NET VIEW</span>
           </div>
           <span className="text-[10px] text-muted-foreground font-mono">Packet Analyzer</span>
         </div>
@@ -175,7 +175,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               onClick={onStartCapture}
               disabled={!permissions.canCapture || !selectedInterface}
-              className={`bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-cyan-500/20 transition-all cursor-pointer ${
+              className={`bg-primary hover:bg-primary/90 active:scale-95 text-primary-foreground text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-primary/20 transition-all cursor-pointer ${
                 !permissions.canCapture || !selectedInterface ? 'opacity-50 cursor-not-allowed' : ''
               }`}
               title={selectedInterface ? 'Start Live Packet Capture' : 'Choose an interface first'}
@@ -202,7 +202,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={onClearPackets}
             disabled={!permissions.canClearBuffer || totalPacketsCount === 0}
-            className={`bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider shadow-md shadow-cyan-500/20 transition-all cursor-pointer ${
+            className={`bg-primary hover:bg-primary/90 active:scale-95 text-primary-foreground text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider shadow-md shadow-primary/20 transition-all cursor-pointer ${
               !permissions.canClearBuffer || totalPacketsCount === 0 ? 'opacity-50 cursor-not-allowed' : ''
             }`}
             title="Clear Packet Buffer"

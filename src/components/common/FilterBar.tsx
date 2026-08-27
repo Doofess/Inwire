@@ -134,7 +134,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border font-medium transition-colors cursor-pointer bg-card hover:bg-accent border-border text-foreground"
             title="Choose a filter preset"
           >
-            <TbBookmark className="w-3.5 h-3.5 text-cyan-400" />
+            <TbBookmark className="w-3.5 h-3.5 text-primary" />
             <span className="hidden sm:inline font-mono">Presets</span>
             <TbChevronDown className="w-3 h-3 text-muted-foreground" />
           </button>
@@ -152,7 +152,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                     onClick={() => handleSelectPreset(p)}
                     className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors flex flex-col ${
                       filterText === p.filter
-                        ? 'bg-accent border border-border text-cyan-700 dark:text-cyan-300'
+                        ? 'bg-accent border border-border text-primary'
                         : 'hover:bg-accent/60'
                     }`}
                   >
@@ -163,7 +163,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                       </span>
                     </div>
                     {p.filter ? (
-                      <code className="text-[10px] text-cyan-400 font-mono mt-0.5 truncate">{p.filter}</code>
+                      <code className="text-[10px] text-primary font-mono mt-0.5 truncate">{p.filter}</code>
                     ) : (
                       <span className="text-[10px] text-muted-foreground italic">No filter (Show All)</span>
                     )}
@@ -181,12 +181,12 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               isNotEmpty && !validation.isValid
                 ? '!border-rose-500 bg-rose-100 dark:bg-rose-950/20'
                 : isNotEmpty && validation.isValid
-                ? '!border-cyan-500/80'
+                ? '!border-primary/80'
                 : ''
             }`}
           >
             {/* Geometric FILTER prefix */}
-            <span className="text-cyan-500 font-mono text-xs font-bold mr-2.5 select-none shrink-0">
+            <span className="text-primary font-mono text-xs font-bold mr-2.5 select-none shrink-0">
               FILTER:
             </span>
 
@@ -222,7 +222,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               {isNotEmpty && validation.isValid && (
                 <button
                   onClick={handleSaveCurrentFilter}
-                  className="p-1 rounded text-cyan-400 hover:text-cyan-300 transition-colors"
+                  className="p-1 rounded text-primary hover:text-primary transition-colors"
                   title="Save current filter expression"
                 >
                   <TbBookmark className="w-3 h-3" />
@@ -234,7 +234,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   setShowSuggestions(false);
                   onApplyFilter(filterText);
                 }}
-                className="p-1 px-1.5 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold transition-all shadow-sm active:scale-95 cursor-pointer"
+                className="p-1 px-1.5 rounded bg-primary hover:bg-primary/90 text-primary-foreground font-bold transition-all shadow-sm active:scale-95 cursor-pointer"
                 title="Apply display filter (Enter)"
               >
                 <TbCheck className="w-3 h-3 stroke-[3]" />
@@ -254,7 +254,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   <button
                     key={idx}
                     onClick={() => handleSelectSuggestion(sug)}
-                    className="text-left px-2 py-1 rounded text-xs font-mono text-cyan-400 hover:bg-cyan-500/10 hover:text-cyan-300 transition-colors truncate"
+                    className="text-left px-2 py-1 rounded text-xs font-mono text-primary hover:bg-primary/10 hover:text-primary transition-colors truncate"
                   >
                     {sug}
                   </button>
@@ -322,7 +322,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
           <span className="font-semibold text-foreground">
             {filteredPackets.toLocaleString()} <span className="text-muted-foreground">/</span> {totalPackets.toLocaleString()}
           </span>
-          <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-400 font-bold">
+          <span className="text-[10px] px-1.5 py-0.2 rounded bg-primary/20 text-primary font-bold">
             {filterPercentage}%
           </span>
         </div>
