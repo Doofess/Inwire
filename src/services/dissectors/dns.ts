@@ -10,6 +10,7 @@
  * mDNS (5353), LLMNR (5355) and NBNS (137) reuse this same wire format.
  */
 import { formatIpv4Address, formatIpv6Address } from '../addressFormat';
+import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 
 const OPCODE_NAMES: Record<number, string> = {
   0: 'Standard query',
@@ -121,6 +122,119 @@ function formatRdata(
     default:
       return null;
   }
+}
+
+/**
+ * The DNS flags word, as the sixteen-bit rows Wireshark draws beneath it.
+ *
+ * The row set is conditional, not a fixed template: a query shows six rows,
+ * while a response additionally carries Authoritative, Recursion available,
+ * Answer authenticated and Reply code. Emitting the response-only rows on a
+ * query would invent flags the message does not have - verified against
+ * `tshark -V` for both directions.
+ */
+function dnsFlagFields(flags: number, flagsOffset: number): ProtocolField[] {
+  const isResponse = (flags & 0x8000) !== 0;
+  const opcode = (flags >> 11) & 0x0f;
+  const rcode = flags & 0x0f;
+  const bit = (n: number) => (flags >> (15 - n)) & 1;
+
+  const range: [number, number] = [flagsOffset, flagsOffset + 1];
+  const row = (
+    name: string,
+    bitOffset: number,
+    bitLength: number,
+    value: string,
+  ): ProtocolField => ({
+    name,
+    value,
+    rawBytesRange: range,
+    bitfield: { bitOffset, bitLength, totalBits: 16 },
+  });
+
+  const rows: ProtocolField[] = [
+    row('Response', 0, 1, isResponse ? 'Message is a response' : 'Message is a query'),
+    row('Opcode', 1, 4, `${OPCODE_NAMES[opcode] ?? 'Unknown'} (${opcode})`),
+  ];
+
+  if (isResponse) {
+    rows.push(row('Authoritative', 5, 1,
+      bit(5) ? 'Server is an authority for domain' : 'Server is not an authority for domain'));
+  }
+
+  rows.push(
+    row('Truncated', 6, 1,
+      bit(6) ? 'Message is truncated' : 'Message is not truncated'),
+    row('Recursion desired', 7, 1,
+      bit(7) ? 'Do query recursively' : 'Do not query recursively'),
+  );
+
+  if (isResponse) {
+    rows.push(row('Recursion available', 8, 1,
+      bit(8) ? 'Server can do recursive queries' : 'Server cannot do recursive queries'));
+  }
+
+  rows.push(row('Z', 9, 1, `reserved (${bit(9)})`));
+
+  if (isResponse) {
+    rows.push(row('Answer authenticated', 10, 1,
+      bit(10)
+        ? 'Answer/authority portion was authenticated by the server'
+        : 'Answer/authority portion was not authenticated by the server'));
+  }
+
+  rows.push(row('Non-authenticated data', 11, 1,
+    bit(11) ? 'Acceptable' : 'Unacceptable'));
+
+  if (isResponse) {
+    // RCODE_NAMES deliberately has no entry for 0: the Info string must not
+    // append "No error" to a successful response, matching Wireshark's
+    // packet-list column. The detail tree does name it, so it is spelled out
+    // here rather than by adding a 0 that would leak into the Info string.
+    const rcodeName = rcode === 0 ? 'No error' : RCODE_NAMES[rcode] ?? 'Unknown';
+    rows.push(row('Reply code', 12, 4, `${rcodeName} (${rcode})`));
+  }
+
+  return rows;
+}
+
+/**
+ * The DNS protocol layer for the detail tree.
+ *
+ * Separate from dissectDns, which produces only the packet-list Info string -
+ * until now DNS contributed no tree at all, so there was nothing for the flag
+ * bits to hang off.
+ */
+export function buildDnsLayer(bytes: Uint8Array, messageStart: number): ProtocolLayer | null {
+  if (messageStart + 12 > bytes.length) return null;
+
+  const transactionId = (bytes[messageStart] << 8) | bytes[messageStart + 1];
+  const flags = (bytes[messageStart + 2] << 8) | bytes[messageStart + 3];
+  const opcode = (flags >> 11) & 0x0f;
+  if (OPCODE_NAMES[opcode] === undefined) return null;
+
+  const isResponse = (flags & 0x8000) !== 0;
+  const counts = [4, 6, 8, 10].map(o => (bytes[messageStart + o] << 8) | bytes[messageStart + o + 1]);
+  const rcodeName = isResponse ? RCODE_NAMES[flags & 0x0f] : undefined;
+
+  return {
+    name: 'Domain Name System',
+    summary: `Domain Name System (${isResponse ? 'response' : 'query'})`,
+    rawBytesRange: [messageStart, bytes.length - 1],
+    fields: [
+      { name: 'Transaction ID', value: `0x${transactionId.toString(16).padStart(4, '0')}`, rawBytesRange: [messageStart, messageStart + 1] },
+      {
+        name: 'Flags',
+        value: `0x${flags.toString(16).padStart(4, '0')} ${OPCODE_NAMES[opcode]}${isResponse ? ' response' : ''}${rcodeName ? `, ${rcodeName}` : ''}`,
+        rawBytesRange: [messageStart + 2, messageStart + 3],
+        children: dnsFlagFields(flags, messageStart + 2),
+      },
+      { name: 'Questions', value: counts[0], rawBytesRange: [messageStart + 4, messageStart + 5] },
+      { name: 'Answer RRs', value: counts[1], rawBytesRange: [messageStart + 6, messageStart + 7] },
+      { name: 'Authority RRs', value: counts[2], rawBytesRange: [messageStart + 8, messageStart + 9] },
+      { name: 'Additional RRs', value: counts[3], rawBytesRange: [messageStart + 10, messageStart + 11] },
+    ],
+  };
 }
 
 /**

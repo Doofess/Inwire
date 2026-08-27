@@ -855,6 +855,10 @@ export default function App() {
                 <PacketDetailsTree
                   packet={selectedPacket}
                   onHoverByteRange={setActiveByteRange}
+                  onSelectFrame={frameNumber => {
+                    const target = packets.find(p => p.id === frameNumber);
+                    if (target) setSelectedPacket(target);
+                  }}
                   activeByteRange={activeByteRange}
                   permissions={permissions}
                 />
