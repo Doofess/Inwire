@@ -8,6 +8,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
+import { shortInterfaceLabel } from '../../services/captureInterfaces';
 
 interface CaptureInterfacePickerProps {
   interfaces: { name: string; label: string }[];
@@ -56,8 +57,11 @@ export const CaptureInterfacePicker: React.FC<CaptureInterfacePickerProps> = ({
           onValueChange={onSelect}
         >
           {interfaces.map((iface) => (
-            <DropdownMenuRadioItem key={iface.name} value={iface.name} title={iface.name}>
-              <span className="truncate">{iface.label}</span>
+            // Short name in the row, full label in the tooltip: the driver
+            // description is what makes these unreadable, and three of this
+            // machine's adapters differ only inside their parentheses.
+            <DropdownMenuRadioItem key={iface.name} value={iface.name} title={iface.label}>
+              <span className="truncate">{shortInterfaceLabel(iface.label)}</span>
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>

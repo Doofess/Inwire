@@ -8,6 +8,7 @@ import {
 import { UserRole, UserRolePermissions } from '../../types/packet';
 import { AppMenu } from './AppMenu';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
+import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import type { AgentCommand } from '../../services/agentProtocol';
 
 interface HeaderProps {
@@ -16,9 +17,6 @@ interface HeaderProps {
    *  button is disabled until one is, so this never begins a capture with
    *  no adapter named. */
   onStartCapture: () => void;
-  /** Forwarded to AppMenu, whose Start Capture item still picks and starts
-   *  in one action - a command palette has no room for a separate button. */
-  onStartCaptureOn: (interfaceName: string) => void;
   onPauseCapture: () => void;
   onStopCapture: () => void;
   onSendAgentCommand: (command: AgentCommand) => void;
@@ -48,7 +46,6 @@ const PACKET_BUFFER_CAP = 4000;
 export const Header: React.FC<HeaderProps> = ({
   isCapturing,
   onStartCapture,
-  onStartCaptureOn,
   onPauseCapture,
   onStopCapture,
   onSendAgentCommand,
@@ -103,10 +100,7 @@ export const Header: React.FC<HeaderProps> = ({
           className: 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-500/20',
         }
       : {
-          // Just the adapter name, not the full "Wi-Fi (Intel(R) Wi-Fi 6E
-          // AX211 160MHz)" label - the description is what makes these
-          // unreadable at button width. The full text stays in the tooltip.
-          label: selectedInterface.label.split(' (')[0],
+          label: shortInterfaceLabel(selectedInterface.label),
           title: selectedInterface.label,
           className: 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20',
         };
@@ -123,13 +117,10 @@ export const Header: React.FC<HeaderProps> = ({
         <AppMenu
           isCapturing={isCapturing}
           onStartCapture={onStartCapture}
-          onStartCaptureOn={onStartCaptureOn}
           onPauseCapture={onPauseCapture}
           onSendAgentCommand={onSendAgentCommand}
           onClearPackets={onClearPackets}
-          agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
-          onSelectInterface={onSelectInterface}
           onOpenDissectorModal={onOpenDissectorModal}
           onOpenStatsModal={onOpenStatsModal}
           onOpenExportModal={onOpenExportModal}

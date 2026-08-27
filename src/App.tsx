@@ -18,6 +18,9 @@ import { ColorRulesEngine } from "./services/colorRules";
 import { ROLE_PERMISSIONS } from "./services/rbacService";
 import { parseAgentMessage, encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION, type AgentCommand } from "./services/agentProtocol";
 import type { AgentLogEntry } from "./services/agentProtocol";
+// Loopback is dropped here, at the single point where the agent's list
+// enters app state, so every consumer below sees the same adapters.
+import { filterCapturableInterfaces } from "./services/captureInterfaces";
 
 // UI Components
 import { Header } from "./components/common/Header";
@@ -237,7 +240,7 @@ export default function App() {
           setAgentIncompatible(false);
           setAgentVersion(message.version);
           setAgentCaptureState(message.state);
-          setAgentInterfaces(message.interfaces);
+          setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
           // Deliberately does NOT default to every interface. Capture is
           // single-interface and the user has to name the adapter before a
           // capture can start; pre-selecting all nine would hand Start a
@@ -273,7 +276,7 @@ export default function App() {
 
         if (message.type === 'state') {
           setAgentCaptureState(message.state);
-          setAgentInterfaces(message.interfaces);
+          setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
           return;
         }
 
@@ -553,11 +556,6 @@ export default function App() {
     sendAgentCommand({ type: 'set_interfaces', interfaces: [interfaceName] });
   };
 
-  const handleStartCaptureOn = (interfaceName: string) => {
-    handleSelectInterface(interfaceName);
-    sendAgentCommand({ type: 'start_capture' });
-    setIsCapturing(true);
-  };
 
   // The no-agent path. With no connection there are no adapters to choose
   // from, so the controls start immediately rather than opening a picker
@@ -635,7 +633,6 @@ export default function App() {
         <Header
           isCapturing={isCapturing}
           onStartCapture={handleStartCapture}
-          onStartCaptureOn={handleStartCaptureOn}
           onPauseCapture={handlePauseCapture}
           onStopCapture={handlePauseCapture}
           onSendAgentCommand={sendAgentCommand}
