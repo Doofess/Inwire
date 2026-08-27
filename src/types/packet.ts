@@ -28,6 +28,38 @@ export interface ProtocolField {
   description?: string;
   children?: ProtocolField[];
   isExpanded?: boolean;
+
+  /**
+   * Renders this field as Wireshark's dotted-binary row - `0110 .... =
+   * Version: 6` - instead of the plain `name: value` line.
+   *
+   * `totalBits` is the width of the binary string to draw and is emitted by
+   * the dissector, never derived here: IPv6 renders Version over 8 bits,
+   * Traffic Class over 32 and Flow Label over 24, all inside the same 4-byte
+   * word, so there is no rule the renderer could infer it from. Bits are
+   * counted from the MSB of the byte at rawBytesRange[0].
+   */
+  bitfield?: {
+    bitOffset: number;
+    bitLength: number;
+    totalBits: number;
+  };
+
+  /**
+   * A synthetic field the dissector computed rather than read off the wire -
+   * Wireshark shows these in [brackets]. They describe no bytes, so the tree
+   * must not offer a byte highlight for them.
+   */
+  generated?: boolean;
+
+  /** A reference to another frame (`[Response In: 11]`). Clicking selects it. */
+  linkToFrame?: number;
+
+  /** Analysis output surfaced inline, e.g. a suspected retransmission. */
+  expertInfo?: {
+    severity: 'chat' | 'note' | 'warn' | 'error';
+    message: string;
+  };
 }
 
 export interface ProtocolLayer {

@@ -4,7 +4,7 @@ import { resolveMacVendor, resolveMacName } from './macVendors';
 import { formatMac, formatIpv4Address, formatIpv6Address } from './addressFormat';
 import { dissectArp, dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
 import { dissectTls } from './dissectors/tls';
-import { dissectDns } from './dissectors/dns';
+import { dissectDns, buildDnsLayer } from './dissectors/dns';
 import { dissectQuicDatagram } from './dissectors/quic';
 import { dissectIeee1905 } from './dissectors/ieee1905';
 import { QuicFlowTracker } from './quicFlowTracker';
@@ -475,8 +475,8 @@ export function decodeRawEthernetPacket(
         { name: 'Frame Length', value: `${origLen || rawBytes.length} bytes` },
         { name: 'Capture Length', value: `${rawBytes.length} bytes` },
         { name: 'Epoch Time', value: new Date(epochMs).toISOString() },
-        { name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(6)} seconds` },
-        { name: '[Time since reference or first frame]', value: `${relativeTime.toFixed(6)} seconds` },
+        { name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(6)} seconds`, generated: true },
+        { name: '[Time since reference or first frame]', value: `${relativeTime.toFixed(6)} seconds`, generated: true },
       ],
     },
     {
@@ -484,8 +484,8 @@ export function decodeRawEthernetPacket(
       summary: `Ethernet II, Src: ${srcMac}, Dst: ${dstMac}`,
       rawBytesRange: [0, 13],
       fields: [
-        { name: 'Destination', value: resolveMacVendor(dstMac), rawBytesRange: [0, 5] },
-        { name: 'Source', value: resolveMacVendor(srcMac), rawBytesRange: [6, 11] },
+        { name: 'Destination', value: resolveMacVendor(dstMac), rawBytesRange: [0, 5], children: macAddressFields(dstMac, 0) },
+        { name: 'Source', value: resolveMacVendor(srcMac), rawBytesRange: [6, 11], children: macAddressFields(srcMac, 6) },
         { name: 'Type', value: `0x${etherType.toString(16).padStart(4, '0')} (${describeEtherType(etherType)})`, rawBytesRange: [12, 13] },
       ],
     },
@@ -611,7 +611,7 @@ export function decodeRawEthernetPacket(
           value: `0x${headerChecksumActual.toString(16).padStart(4, '0')} [${checksumCorrect ? 'correct' : 'incorrect'}]`,
           rawBytesRange: [l3Offset + 10, l3Offset + 11],
           children: [
-            { name: '[Header checksum status]', value: checksumCorrect ? 'Correct' : `Incorrect, should be 0x${headerChecksumComputed.toString(16).padStart(4, '0')}` },
+            { name: '[Header checksum status]', value: checksumCorrect ? 'Correct' : `Incorrect, should be 0x${headerChecksumComputed.toString(16).padStart(4, '0')}`, generated: true },
           ],
         },
         { name: 'Source Address', value: srcIp, rawBytesRange: [l3Offset + 12, l3Offset + 15] },
@@ -636,12 +636,13 @@ export function decodeRawEthernetPacket(
       dstPort = transport.dstPort;
       info = transport.info;
       layers.push(transport.layer);
+      if (transport.extraLayers) layers.push(...transport.extraLayers);
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
       anomalies = transport.anomalies;
       icmpMatchedRequestFrameId = transport.icmpMatchedRequestFrameId;
       if (transport.streamId !== undefined) {
-        ipLayer.fields.push({ name: '[Stream index]', value: transport.streamId });
+        ipLayer.fields.push({ name: '[Stream index]', value: transport.streamId, generated: true });
       }
     }
   } else if (currentEtherType === 0x86dd && rawBytes.length >= l3Offset + 40) {
@@ -657,7 +658,25 @@ export function decodeRawEthernetPacket(
       summary: `Internet Protocol Version 6, Src: ${srcIp}, Dst: ${dstIp}`,
       rawBytesRange: [l3Offset, l3Offset + 39],
       fields: [
-        { name: 'Version', value: '6', rawBytesRange: [l3Offset, l3Offset] },
+        // The first 4 bytes are one word carrying three fields at three
+        // different render widths - 8, 32 and 24 bits. That is why totalBits
+        // is dissector-supplied: nothing about the fields themselves implies
+        // these widths, they are Wireshark's presentation convention, matched
+        // here against `tshark -V`.
+        {
+          name: 'Version',
+          value: '6',
+          rawBytesRange: [l3Offset, l3Offset],
+          bitfield: { bitOffset: 0, bitLength: 4, totalBits: 8 },
+        },
+        ...ipv6TrafficClassFields(rawBytes, l3Offset),
+        {
+          name: 'Flow Label',
+          value: `0x${(((rawBytes[l3Offset + 1] & 0x0f) << 16) | (rawBytes[l3Offset + 2] << 8) | rawBytes[l3Offset + 3]).toString(16).padStart(5, '0')}`,
+          rawBytesRange: [l3Offset + 1, l3Offset + 3],
+          bitfield: { bitOffset: 4, bitLength: 20, totalBits: 24 },
+        },
+        { name: 'Payload Length', value: ipv6PayloadLen, rawBytesRange: [l3Offset + 4, l3Offset + 5] },
         { name: 'Next Header', value: nextHeader === 6 ? 'TCP (6)' : nextHeader === 17 ? 'UDP (17)' : nextHeader === 58 ? 'ICMPv6 (58)' : `${nextHeader}`, rawBytesRange: [l3Offset + 6, l3Offset + 6] },
         { name: 'Hop Limit', value: hopLimit, rawBytesRange: [l3Offset + 7, l3Offset + 7] },
         { name: 'Source Address', value: srcIp, rawBytesRange: [l3Offset + 8, l3Offset + 23] },
@@ -701,18 +720,19 @@ export function decodeRawEthernetPacket(
       dstPort = transport.dstPort;
       info = transport.info;
       layers.push(transport.layer);
+      if (transport.extraLayers) layers.push(...transport.extraLayers);
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
       anomalies = transport.anomalies;
       icmpMatchedRequestFrameId = transport.icmpMatchedRequestFrameId;
       if (transport.streamId !== undefined) {
-        ipv6Layer.fields.push({ name: '[Stream index]', value: transport.streamId });
+        ipv6Layer.fields.push({ name: '[Stream index]', value: transport.streamId, generated: true });
       }
     }
   }
 
   const frameProtocols = layers.map(l => PROTOCOL_NAME_MAP[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_'));
-  layers[0].fields.push({ name: '[Protocols in frame]', value: frameProtocols.join(':') });
+  layers[0].fields.push({ name: '[Protocols in frame]', value: frameProtocols.join(':'), generated: true });
 
   return {
     packet: {
@@ -745,6 +765,135 @@ export function decodeRawEthernetPacket(
   };
 }
 
+
+/**
+ * The nine flag bits plus Reserved, as Wireshark lists them.
+ *
+ * Drawn as a 12-bit window starting 4 bits into the data-offset byte: the
+ * low nibble of byte 12 plus all of byte 13. Offsets below are relative to
+ * that window, which is what the rendered string shows.
+ */
+const TCP_FLAG_ROWS: { name: string; bitOffset: number; bitLength: number; set: string; unset: string }[] = [
+  { name: 'Reserved', bitOffset: 0, bitLength: 3, set: 'Set', unset: 'Not set' },
+  { name: 'Accurate ECN', bitOffset: 3, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Congestion Window Reduced', bitOffset: 4, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'ECN-Echo', bitOffset: 5, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Urgent', bitOffset: 6, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Acknowledgment', bitOffset: 7, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Push', bitOffset: 8, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Reset', bitOffset: 9, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Syn', bitOffset: 10, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Fin', bitOffset: 11, bitLength: 1, set: 'Set', unset: 'Not set' },
+];
+
+function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolField[] {
+  // The 12 drawn bits as one number, so each row can read its own bits out of
+  // it without repeating the mid-byte window arithmetic.
+  const window12 = ((rawBytes[transportOffset + 12] & 0x0f) << 8) | rawBytes[transportOffset + 13];
+
+  return TCP_FLAG_ROWS.map(row => {
+    const shift = 12 - row.bitOffset - row.bitLength;
+    const mask = (1 << row.bitLength) - 1;
+    const isSet = ((window12 >> shift) & mask) !== 0;
+    return {
+      name: row.name,
+      value: isSet ? row.set : row.unset,
+      rawBytesRange: [transportOffset + 12, transportOffset + 13] as [number, number],
+      bitfield: {
+        bitOffset: row.bitOffset,
+        bitLength: row.bitLength,
+        totalBits: 12,
+        windowStartBit: 4,
+      },
+    };
+  });
+}
+
+const DSCP_NAMES: Record<number, string> = {
+  0: 'Default (0)', 8: 'CS1 (8)', 10: 'AF11 (10)', 16: 'CS2 (16)', 18: 'AF21 (18)',
+  24: 'CS3 (24)', 26: 'AF31 (26)', 32: 'CS4 (32)', 34: 'AF41 (34)', 40: 'CS5 (40)',
+  46: 'EF PHB (46)', 48: 'CS6 (48)', 56: 'CS7 (56)',
+};
+
+const ECN_NAMES = [
+  'Not ECN-Capable Transport (0)',
+  'ECN-Capable Transport codepoint 1 (1)',
+  'ECN-Capable Transport codepoint 0 (2)',
+  'Congestion Experienced (3)',
+];
+
+/**
+ * Traffic Class and the DSCP/ECN pair nested beneath it.
+ *
+ * All three render at 32 bits even though the class is 8 bits and its parts
+ * are 6 and 2: Wireshark draws a child at its parent's width so the nested
+ * rows line up as one ruler down the column. Verified against `tshark -V`.
+ */
+function ipv6TrafficClassFields(rawBytes: Uint8Array, l3Offset: number): ProtocolField[] {
+  const trafficClass = ((rawBytes[l3Offset] & 0x0f) << 4) | ((rawBytes[l3Offset + 1] & 0xf0) >> 4);
+  const dscp = trafficClass >> 2;
+  const ecn = trafficClass & 0x03;
+  const dscpName = DSCP_NAMES[dscp] ?? `${dscp}`;
+  const shortDscp = dscp === 0 ? 'CS0' : (dscpName.split(' ')[0]);
+  const shortEcn = ecn === 0 ? 'Not-ECT' : ECN_NAMES[ecn].split(' ')[0];
+
+  return [
+    {
+      name: 'Traffic Class',
+      value: `0x${trafficClass.toString(16).padStart(2, '0')} (DSCP: ${shortDscp}, ECN: ${shortEcn})`,
+      rawBytesRange: [l3Offset, l3Offset + 3],
+      bitfield: { bitOffset: 4, bitLength: 8, totalBits: 32 },
+      children: [
+        {
+          name: 'Differentiated Services Codepoint',
+          value: dscpName,
+          rawBytesRange: [l3Offset, l3Offset + 3],
+          bitfield: { bitOffset: 4, bitLength: 6, totalBits: 32 },
+        },
+        {
+          name: 'Explicit Congestion Notification',
+          value: ECN_NAMES[ecn],
+          rawBytesRange: [l3Offset, l3Offset + 3],
+          bitfield: { bitOffset: 10, bitLength: 2, totalBits: 32 },
+        },
+      ],
+    },
+  ];
+}
+
+/**
+ * The children Wireshark nests under each MAC address: the address itself,
+ * then the two flag bits carried in the first byte.
+ *
+ * Both bits render over 24 bits - the OUI, not the whole 6-byte address -
+ * because that is the half of the address the IEEE assigns the flags in, and
+ * it is the width `tshark -V` prints them at.
+ */
+function macAddressFields(mac: string, offset: number): ProtocolField[] {
+  const firstByte = parseInt(mac.slice(0, 2), 16);
+  const locallyAdministered = (firstByte & 0x02) !== 0;
+  const groupAddress = (firstByte & 0x01) !== 0;
+
+  return [
+    { name: 'Address', value: resolveMacVendor(mac), rawBytesRange: [offset, offset + 5] },
+    {
+      name: 'LG bit',
+      value: locallyAdministered
+        ? 'Locally administered address (this is NOT the factory default)'
+        : 'Globally unique address (factory default)',
+      rawBytesRange: [offset, offset + 2],
+      bitfield: { bitOffset: 6, bitLength: 1, totalBits: 24 },
+    },
+    {
+      name: 'IG bit',
+      value: groupAddress
+        ? 'Group address (multicast/broadcast)'
+        : 'Individual address (unicast)',
+      rawBytesRange: [offset, offset + 2],
+      bitfield: { bitOffset: 7, bitLength: 1, totalBits: 24 },
+    },
+  ];
+}
 
 function describeEtherType(etherType: number): string {
   switch (etherType) {
@@ -879,6 +1028,13 @@ function decodeTransportLayer(
   dstPort?: number;
   info: string;
   layer: ProtocolLayer;
+  /**
+   * Layers sitting above the transport header - DNS over UDP, for instance.
+   * Separate from `layer` because the transport decoder owns exactly one
+   * header of its own, and a subdissector that claims the payload adds to the
+   * stack rather than replacing it.
+   */
+  extraLayers?: ProtocolLayer[];
   streamId?: number;
   status?: Packet['status'];
   analysisFlags?: string[];
@@ -1151,11 +1307,23 @@ function decodeTransportLayer(
               { name: 'Acknowledgment Number (raw)', value: ackNum, rawBytesRange: [transportOffset + 8, transportOffset + 11] },
             ],
           },
-          { name: 'Header Length', value: `${tcpHeaderLen} bytes`, rawBytesRange: [transportOffset + 12, transportOffset + 12] },
-          { name: 'Flags', value: `0x${flags.toString(16).padStart(3, '0')} (${flagList.join(', ')})`, rawBytesRange: [transportOffset + 12, transportOffset + 13] },
-          ...(expectedNextRel !== undefined ? [{ name: '[Next Sequence Number]', value: expectedNextRel }] : []),
-          ...(streamPacketNumber !== undefined ? [{ name: '[Stream Packet Number]', value: streamPacketNumber }] : []),
-          ...(conversationCompleteness !== undefined ? [{ name: '[Conversation completeness]', value: conversationCompleteness }] : []),
+          {
+            // The data-offset nibble. Wireshark names it Header Length and
+            // shows both the byte count and the raw nibble it decoded from.
+            name: 'Header Length',
+            value: `${tcpHeaderLen} bytes (${tcpHeaderLen / 4})`,
+            rawBytesRange: [transportOffset + 12, transportOffset + 12],
+            bitfield: { bitOffset: 0, bitLength: 4, totalBits: 8 },
+          },
+          {
+            name: 'Flags',
+            value: `0x${flags.toString(16).padStart(3, '0')} (${flagList.join(', ')})`,
+            rawBytesRange: [transportOffset + 12, transportOffset + 13],
+            children: tcpFlagFields(rawBytes, transportOffset),
+          },
+          ...(expectedNextRel !== undefined ? [{ name: '[Next Sequence Number]', value: expectedNextRel, generated: true }] : []),
+          ...(streamPacketNumber !== undefined ? [{ name: '[Stream Packet Number]', value: streamPacketNumber, generated: true }] : []),
+          ...(conversationCompleteness !== undefined ? [{ name: '[Conversation completeness]', value: conversationCompleteness, generated: true }] : []),
           ...(tcpOptions ? tcpOptions.fields : []),
         ],
       },
@@ -1193,12 +1361,17 @@ function decodeTransportLayer(
     // Each subdissector that claims the payload replaces the generic
     // "src → dst Len=n" summary entirely, the way Wireshark does.
     let info: string | null = null;
+    const extraLayers: ProtocolLayer[] = [];
 
     if (dnsPortLabel) {
       const dnsInfo = dissectDns(rawBytes, udpPayloadStart);
       if (dnsInfo) {
         protocolLabel = dnsPortLabel;
         info = dnsInfo;
+        // DNS previously contributed only this Info string; the layer gives
+        // the flag bits somewhere to live in the detail tree.
+        const dnsLayer = buildDnsLayer(rawBytes, udpPayloadStart);
+        if (dnsLayer) extraLayers.push(dnsLayer);
       }
     } else if (isSsdp) {
       const requestLine = readAsciiRequestLine(rawBytes, udpPayloadStart);
@@ -1252,6 +1425,7 @@ function decodeTransportLayer(
       srcPort,
       dstPort,
       info,
+      extraLayers,
       fields: {
         'udp.srcport': srcPort,
         'udp.dstport': dstPort,
@@ -1356,7 +1530,21 @@ function decodeTransportLayer(
         name: isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol',
         summary: `${isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol'}, ${info}`,
         rawBytesRange: [transportOffset, transportOffset + (icmpId !== undefined ? 7 : 3)],
-        fields,
+        fields: icmpMatchedRequestFrameId !== undefined
+          ? [
+              ...fields,
+              // The echo request this reply answers. Generated - it describes
+              // another frame, not bytes in this one - and clickable, so the
+              // pairing the tracker already computes is navigable instead of
+              // only appearing as text in the Info column.
+              {
+                name: '[Request In]',
+                value: icmpMatchedRequestFrameId,
+                generated: true,
+                linkToFrame: icmpMatchedRequestFrameId,
+              },
+            ]
+          : fields,
       },
     };
   }

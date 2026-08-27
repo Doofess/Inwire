@@ -9,19 +9,32 @@ import {
   TbMaximize,
   TbMinimize,
 } from 'react-icons/tb';
+import { renderBitfield } from '../../lib/bitfield';
 
 interface PacketDetailsTreeProps {
   packet: Packet | null;
   onHoverByteRange: (range: [number, number] | null) => void;
   activeByteRange: [number, number] | null;
   permissions: UserRolePermissions;
+  /** Follows a cross-packet reference such as `[Response In: 11]`. */
+  onSelectFrame?: (frameNumber: number) => void;
 }
+
+// Expert-info severities reuse the palette the anomaly banners in this file
+// already use, so one severity means one colour across the whole app.
+const EXPERT_SEVERITY_CLASS: Record<string, string> = {
+  error: 'text-rose-600 dark:text-rose-400',
+  warn: 'text-amber-600 dark:text-amber-400',
+  note: 'text-sky-600 dark:text-sky-400',
+  chat: 'text-muted-foreground',
+};
 
 export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
   packet,
   onHoverByteRange,
   activeByteRange,
   permissions,
+  onSelectFrame,
 }) => {
   const [expandedLayers, setExpandedLayers] = useState<Record<string, boolean>>({
     '0': true,
@@ -76,12 +89,29 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
 
     const indentClass = depth === 0 ? '' : depth === 1 ? 'ml-4' : 'ml-8';
 
+    // A generated field is the dissector's own commentary - a stream index, a
+    // time delta - so there are no bytes to point at. Offering a highlight
+    // would light up whatever range the parent layer happens to occupy and
+    // imply the field lives there.
+    const hoverRange = field.generated
+      ? null
+      : field.rawBytesRange || fallbackRange || null;
+
+    // Wireshark draws a sub-byte field as the containing word in binary with
+    // everything outside the field dotted, which is the only way its position
+    // and width are visible. Needs the frame bytes, so it degrades to the
+    // plain row if a packet ever arrives without them.
+    const bitfieldText =
+      field.bitfield && field.rawBytesRange && packet.rawBytes?.length
+        ? renderBitfield(packet.rawBytes, field.rawBytesRange[0], field.bitfield)
+        : null;
+
     return (
       <div key={key}>
         <div
           onMouseEnter={e => {
             e.stopPropagation();
-            onHoverByteRange(field.rawBytesRange || fallbackRange || null);
+            onHoverByteRange(hoverRange);
           }}
           onMouseLeave={e => {
             e.stopPropagation();
@@ -94,8 +124,38 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
           }`}
         >
           <div className="flex items-center gap-2 truncate">
-            <span className="text-muted-foreground">{field.name}:</span>
-            <span className="font-semibold text-foreground truncate">{String(field.value)}</span>
+            {bitfieldText && (
+              // Fixed-width and dimmed so the binary reads as a ruler behind
+              // the value rather than competing with it.
+              <span className="text-muted-foreground/70 whitespace-pre shrink-0">{bitfieldText} =</span>
+            )}
+            <span className={`text-muted-foreground ${field.generated ? 'italic' : ''}`}>
+              {field.name}:
+            </span>
+            {field.linkToFrame !== undefined && onSelectFrame ? (
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  onSelectFrame(field.linkToFrame!);
+                }}
+                className="font-semibold text-primary underline underline-offset-2 truncate cursor-pointer hover:opacity-80"
+                title={`Go to frame ${field.linkToFrame}`}
+              >
+                {String(field.value)}
+              </button>
+            ) : (
+              <span
+                className={`font-semibold truncate ${
+                  field.expertInfo
+                    ? EXPERT_SEVERITY_CLASS[field.expertInfo.severity] ?? 'text-foreground'
+                    : field.generated
+                      ? 'text-muted-foreground italic'
+                      : 'text-foreground'
+                }`}
+              >
+                {String(field.value)}
+              </span>
+            )}
             {field.description && (
               <span className="text-[10px] text-muted-foreground italic hidden sm:inline truncate">
                 ({field.description})
