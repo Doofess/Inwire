@@ -44,6 +44,15 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
     '4': true,
   });
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  // Collapsed nested fields, keyed by their path through the tree. Wireshark
+  // gives every node with children its own disclosure triangle, independent of
+  // its layer - Traffic Class can be shut while the rest of IPv6 stays open.
+  // Tracking what is CLOSED rather than what is open keeps the default
+  // expanded, which is how Wireshark opens a packet.
+  const [collapsedPaths, setCollapsedPaths] = useState<Record<string, boolean>>({});
+
+  const togglePath = (path: string) =>
+    setCollapsedPaths(prev => ({ ...prev, [path]: !prev[path] }));
 
   if (!packet) {
     return (
@@ -80,14 +89,20 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
     setTimeout(() => setCopiedField(null), 1500);
   };
 
-  const renderField = (field: ProtocolField, key: string | number, depth: number, fallbackRange: [number, number] | null): React.ReactNode => {
+  const renderField = (field: ProtocolField, key: string | number, depth: number, fallbackRange: [number, number] | null, path = ''): React.ReactNode => {
+    const nodePath = `${path}/${key}`;
+    const hasChildren = !!field.children?.length;
+    const isOpen = hasChildren && !collapsedPaths[nodePath];
     const isFieldActive =
       activeByteRange &&
       field.rawBytesRange &&
       activeByteRange[0] === field.rawBytesRange[0] &&
       activeByteRange[1] === field.rawBytesRange[1];
 
-    const indentClass = depth === 0 ? '' : depth === 1 ? 'ml-4' : 'ml-8';
+    // One step per level rather than capping at two: Wireshark nests four
+    // deep in places (Queries > record, Flags > bit rows) and a flat cap makes
+    // those levels indistinguishable.
+    const indentStyle = { marginLeft: `${depth * 0.9}rem` };
 
     // A generated field is the dissector's own commentary - a stream index, a
     // time delta - so there are no bytes to point at. Offering a highlight
@@ -117,20 +132,37 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
             e.stopPropagation();
             onHoverByteRange(null);
           }}
-          className={`flex items-center justify-between px-2 py-0.5 rounded group transition-colors ${indentClass} ${
+          style={indentStyle}
+          className={`flex items-center justify-between px-2 py-0.5 rounded group transition-colors ${
             isFieldActive
               ? 'bg-primary/15 dark:bg-primary/20 text-primary font-bold'
               : 'hover:bg-accent/60 text-muted-foreground'
           }`}
         >
           <div className="flex items-center gap-2 truncate">
+            {hasChildren ? (
+              <button
+                onClick={e => { e.stopPropagation(); togglePath(nodePath); }}
+                className="shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
+                title={isOpen ? 'Collapse' : 'Expand'}
+              >
+                {isOpen ? <TbChevronDown className="w-3 h-3" /> : <TbChevronRight className="w-3 h-3" />}
+              </button>
+            ) : (
+              // Keeps every label on the same left edge whether or not the row
+              // has a triangle, which is what makes the tree scannable.
+              <span className="w-3 shrink-0" />
+            )}
             {bitfieldText && (
               // Fixed-width and dimmed so the binary reads as a ruler behind
               // the value rather than competing with it.
               <span className="text-muted-foreground/70 whitespace-pre shrink-0">{bitfieldText} =</span>
             )}
+            {/* A grouping node such as Queries or [Timestamps] carries no
+                value of its own, and Wireshark prints no trailing colon for
+                those - only nodes that actually hold a value get one. */}
             <span className={`text-muted-foreground ${field.generated ? 'italic' : ''}`}>
-              {field.name}:
+              {field.name}{field.value === '' ? '' : ':'}
             </span>
             {field.linkToFrame !== undefined && onSelectFrame ? (
               <button
@@ -177,9 +209,9 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
             </button>
           </div>
         </div>
-        {field.children && field.children.length > 0 && (
+        {hasChildren && isOpen && (
           <div className="space-y-1 mt-1">
-            {field.children.map((child, cIdx) => renderField(child, cIdx, depth + 1, fallbackRange))}
+            {field.children!.map((child, cIdx) => renderField(child, cIdx, depth + 1, fallbackRange, nodePath))}
           </div>
         )}
       </div>
@@ -280,7 +312,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
               {/* Layer Fields */}
               {isExpanded && layer.fields && layer.fields.length > 0 && (
                 <div className="pl-6 pr-3 py-1.5 space-y-1 border-t border-border/60 text-[11px]">
-                  {layer.fields.map((field, fIdx) => renderField(field, fIdx, 0, layer.rawBytesRange || null))}
+                  {layer.fields.map((field, fIdx) => renderField(field, fIdx, 0, layer.rawBytesRange || null, `L${idx}`))}
                 </div>
               )}
             </div>

@@ -199,6 +199,43 @@ function dnsFlagFields(flags: number, flagsOffset: number): ProtocolField[] {
 }
 
 /**
+ * The Queries node: one child per question, worded as Wireshark words it
+ * (`www.googleapis.com: type AAAA, class IN`).
+ *
+ * Returns nothing when there are no questions, rather than an empty parent -
+ * Wireshark omits the node entirely in that case.
+ */
+function dnsQuerySection(bytes: Uint8Array, messageStart: number, questionCount: number): ProtocolField[] {
+  if (questionCount < 1) return [];
+
+  const queries: ProtocolField[] = [];
+  let cursor = messageStart + 12;
+
+  for (let i = 0; i < questionCount && cursor < bytes.length; i++) {
+    const start = cursor;
+    const { name, nextOffset } = readName(bytes, messageStart, cursor);
+    cursor = nextOffset;
+    if (cursor + 4 > bytes.length) break;
+    const qtype = (bytes[cursor] << 8) | bytes[cursor + 1];
+    const qclass = (bytes[cursor + 2] << 8) | bytes[cursor + 3];
+    cursor += 4;
+
+    queries.push({
+      name,
+      value: `type ${typeName(qtype)}, class ${qclass === 1 ? 'IN' : qclass}`,
+      rawBytesRange: [start, cursor - 1],
+      children: [
+        { name: 'Name', value: name, rawBytesRange: [start, nextOffset - 1] },
+        { name: 'Type', value: `${typeName(qtype)} (${qtype})`, rawBytesRange: [nextOffset, nextOffset + 1] },
+        { name: 'Class', value: `${qclass === 1 ? 'IN' : 'Unknown'} (0x${qclass.toString(16).padStart(4, '0')})`, rawBytesRange: [nextOffset + 2, nextOffset + 3] },
+      ],
+    });
+  }
+
+  return queries.length ? [{ name: 'Queries', value: '', children: queries }] : [];
+}
+
+/**
  * The DNS protocol layer for the detail tree.
  *
  * Separate from dissectDns, which produces only the packet-list Info string -
@@ -233,6 +270,7 @@ export function buildDnsLayer(bytes: Uint8Array, messageStart: number): Protocol
       { name: 'Answer RRs', value: counts[1], rawBytesRange: [messageStart + 6, messageStart + 7] },
       { name: 'Authority RRs', value: counts[2], rawBytesRange: [messageStart + 8, messageStart + 9] },
       { name: 'Additional RRs', value: counts[3], rawBytesRange: [messageStart + 10, messageStart + 11] },
+      ...dnsQuerySection(bytes, messageStart, counts[0]),
     ],
   };
 }
