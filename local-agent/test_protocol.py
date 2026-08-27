@@ -665,6 +665,111 @@ finally:
     else:
         agent.AVAILABLE_INTERFACES = _prev_interfaces
 
+# --- broadcast backpressure: the bound that keeps the agent from wedging ---
+class _FakeLoop:
+    """Records scheduled coroutines instead of running them, which is exactly
+    the backed-up-loop condition the bound exists for."""
+
+    def __init__(self):
+        self.scheduled = []
+
+
+def _fake_schedule(coro, loop):
+    loop.scheduled.append(coro)
+    coro.close()  # never awaited; closing avoids "coroutine was never awaited"
+    return None
+
+
+_prev_schedule = agent.asyncio.run_coroutine_threadsafe
+try:
+    agent.asyncio.run_coroutine_threadsafe = _fake_schedule
+    srv = agent.AgentServer()
+    srv.loop = _FakeLoop()
+    srv.connections.add(object())
+
+    for _ in range(agent.MAX_PENDING_SENDS):
+        srv.broadcast({"type": "packet"})
+    check(
+        "broadcast schedules up to the cap",
+        len(srv.loop.scheduled),
+        agent.MAX_PENDING_SENDS,
+    )
+    check("nothing dropped while under the cap", srv._dropped_sends, 0)
+
+    # The loop is now "behind" - nothing has run, so pending stays at the cap.
+    for _ in range(5000):
+        srv.broadcast({"type": "packet"})
+    check(
+        "past the cap, broadcast drops instead of queueing",
+        len(srv.loop.scheduled),
+        agent.MAX_PENDING_SENDS,
+    )
+    check("dropped packets are counted", srv._dropped_sends, 5000)
+    check_true(
+        "pending never exceeds the cap - this is what bounds memory",
+        srv._pending_sends <= agent.MAX_PENDING_SENDS,
+    )
+finally:
+    agent.asyncio.run_coroutine_threadsafe = _prev_schedule
+
+
+# A send that blows up must still free its slot, or the agent ratchets down to
+# sending nothing at all - a far worse failure than dropping.
+class _ExplodingWS:
+    async def send(self, data):
+        raise RuntimeError("nic on fire")
+
+
+_srv2 = agent.AgentServer()
+_srv2._pending_sends = 1
+_srv2.connections.add(_ExplodingWS())
+try:
+    asyncio.run(_srv2._send_all({"type": "packet"}))
+except RuntimeError:
+    pass
+check("a failed send still releases its slot", _srv2._pending_sends, 0)
+
+
+# --- watchdog: capture must never outlive the app ---
+_prev_sniffer = getattr(agent, "sniffer", None)
+try:
+    agent.sniffer = agent.SnifferController(default_interfaces=["eth0"])
+    agent.sniffer.start_threads(lambda name, ev: None)
+    check_true("sniffing before the watchdog runs", agent.sniffer.is_sniffing())
+
+    _watch_srv = agent.AgentServer()
+    _prev_agent = agent.agent
+    agent.agent = _watch_srv
+    try:
+        agent.ORPHAN_CHECK_SECONDS = 0.01
+
+        async def _run_watchdog_once():
+            task = asyncio.ensure_future(agent.watch_for_orphaned_capture())
+            await asyncio.sleep(0.05)
+            task.cancel()
+
+        # With a client connected, capture is left alone.
+        _watch_srv.connections.add(object())
+        asyncio.run(_run_watchdog_once())
+        check("watchdog leaves capture alone while a client is connected",
+              agent.sniffer.is_sniffing(), True)
+
+        # With nobody connected, it stops capture.
+        _watch_srv.connections.clear()
+        asyncio.run(_run_watchdog_once())
+        check("watchdog stops capture once no clients remain",
+              agent.sniffer.is_sniffing(), False)
+    finally:
+        agent.agent = _prev_agent
+        agent.ORPHAN_CHECK_SECONDS = 2
+finally:
+    if _prev_sniffer is None:
+        if hasattr(agent, "sniffer"):
+            del agent.sniffer
+    else:
+        agent.sniffer = _prev_sniffer
+
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")
