@@ -342,7 +342,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         onTouchStart={armUserScroll}
         onMouseDown={armUserScroll}
         onKeyDown={armUserScroll}
-        className="flex-1 overflow-y-auto overflow-x-auto custom-scrollbar"
+        className="flex-1 overflow-y-auto overflow-x-auto custom-scrollbar minimap-scroll"
       >
         <table className="w-full table-fixed text-left border-collapse font-mono text-xs">
           <colgroup>
