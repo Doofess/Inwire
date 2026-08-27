@@ -3,7 +3,6 @@ import { Command } from 'cmdk';
 import { AnimatePresence, motion } from 'motion/react';
 import { HamburgerIcon } from './HamburgerIcon';
 import {
-  TbChevronRight,
   TbPlayerPlay,
   TbPlayerPause,
   TbTrash,
@@ -12,12 +11,10 @@ import {
   TbChartBar,
   TbCode,
   TbHome,
-  TbBookmark,
   TbSettings,
   TbX,
 } from 'react-icons/tb';
 import { UserRolePermissions } from '../../types/packet';
-import { DEFAULT_FILTER_PRESETS } from '../../services/filterEngine';
 import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
 import type { AgentCommand } from '../../services/agentProtocol';
 
@@ -33,7 +30,6 @@ interface AppMenuProps {
   onOpenExportModal: () => void;
   onOpenIspModal?: () => void;
   onOpenSettingsModal: () => void;
-  onApplyFilterPreset: (filter: string) => void;
   permissions: UserRolePermissions;
   totalPacketsCount: number;
   agentOutdated: boolean;
@@ -43,11 +39,6 @@ const itemClass =
   'flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm cursor-pointer text-foreground ' +
   'data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground ' +
   'data-[disabled=true]:opacity-40 data-[disabled=true]:pointer-events-none';
-
-// Presets without a filter expression ("All Traffic") don't make sense as a
-// menu action - there's nothing to jump to, so they're left to the
-// FilterBar's own preset dropdown instead.
-const NAMED_PRESETS = DEFAULT_FILTER_PRESETS.filter((p) => p.filter);
 
 function downloadAgentInstaller() {
   const { url, filename } = getAgentDownloadForCurrentOS();
@@ -71,13 +62,11 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   onOpenExportModal,
   onOpenIspModal,
   onOpenSettingsModal,
-  onApplyFilterPreset,
   permissions,
   totalPacketsCount,
   agentOutdated,
 }) => {
   const [open, setOpen] = useState(false);
-  const [presetsExpanded, setPresetsExpanded] = useState(false);
   const commandRef = useRef<HTMLDivElement | null>(null);
   const agentDownload = getAgentDownloadForCurrentOS();
 
@@ -86,8 +75,6 @@ export const AppMenu: React.FC<AppMenuProps> = ({
       // No search input to autofocus - focus the command root itself so
       // arrow keys/Enter work immediately without the user clicking first.
       commandRef.current?.focus();
-    } else {
-      setPresetsExpanded(false);
     }
   }, [open]);
 
@@ -291,56 +278,6 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                     </Command.Item>
                   </Command.Group>
 
-                  <Command.Separator className="my-1 h-px bg-border" />
-
-                  <Command.Group heading="Filter Presets">
-                    <Command.Item
-                      value="toggle-filter-presets"
-                      onSelect={() => setPresetsExpanded((v) => !v)}
-                      className={itemClass}
-                    >
-                      <motion.span
-                        animate={{ rotate: presetsExpanded ? 90 : 0 }}
-                        transition={{ duration: 0.15 }}
-                        className="shrink-0 flex items-center justify-center w-3.5 h-3.5"
-                      >
-                        <TbChevronRight className="w-3.5 h-3.5 text-foreground" />
-                      </motion.span>
-                      <span className="flex-1">
-                        {presetsExpanded ? 'Hide' : 'Show'} {NAMED_PRESETS.length} Presets
-                      </span>
-                    </Command.Item>
-
-                    <AnimatePresence initial={false}>
-                      {presetsExpanded && (
-                        <motion.div
-                          key="presets-list"
-                          initial={{ height: 0, opacity: 0 }}
-                          animate={{ height: 'auto', opacity: 1 }}
-                          exit={{ height: 0, opacity: 0 }}
-                          transition={{ duration: 0.18, ease: 'easeOut' }}
-                          style={{ overflow: 'hidden' }}
-                        >
-                          {NAMED_PRESETS.map((preset) => (
-                            <Command.Item
-                              key={preset.id}
-                              value={`preset-${preset.id}`}
-                              onSelect={() => run(() => onApplyFilterPreset(preset.filter))}
-                              className={itemClass}
-                            >
-                              <TbBookmark className="w-3.5 h-3.5 text-foreground shrink-0" />
-                              <div className="flex flex-col min-w-0">
-                                <span className="truncate">{preset.name}</span>
-                                <code className="text-[10px] text-muted-foreground truncate">
-                                  {preset.filter}
-                                </code>
-                              </div>
-                            </Command.Item>
-                          ))}
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </Command.Group>
                 </Command.List>
               </Command>
             </motion.div>

@@ -35,13 +35,7 @@ interface HeaderProps {
   onOpenSettingsModal: () => void;
   totalPacketsCount: number;
   filteredPacketsCount: number;
-  totalBytes: number;
-  onApplyFilterPreset: (filter: string) => void;
 }
-
-// Matches the capture buffer cap enforced in App.tsx's WebSocket handler
-// (oldest packets are dropped once the live buffer exceeds this size).
-const PACKET_BUFFER_CAP = 4000;
 
 export const Header: React.FC<HeaderProps> = ({
   isCapturing,
@@ -64,11 +58,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSettingsModal,
   totalPacketsCount,
   filteredPacketsCount,
-  totalBytes,
-  onApplyFilterPreset,
 }) => {
-  const bufferPercent = Math.min(100, (totalPacketsCount / PACKET_BUFFER_CAP) * 100);
-
   const selectedInterface = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
 
   // The Interfaces button carries the whole adapter story in one control:
@@ -126,7 +116,6 @@ export const Header: React.FC<HeaderProps> = ({
           onOpenExportModal={onOpenExportModal}
           onOpenIspModal={onOpenIspModal}
           onOpenSettingsModal={onOpenSettingsModal}
-          onApplyFilterPreset={onApplyFilterPreset}
           permissions={permissions}
           totalPacketsCount={totalPacketsCount}
           agentOutdated={agentOutdated}
@@ -234,19 +223,6 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right: Buffer Status, Agent Status */}
       <div className="flex items-center space-x-2 sm:space-x-2.5">
-        {/* Capture Buffer Status - relocated from the old bottom status bar.
-            Packet/filtered counts were dropped here since FilterBar already
-            shows filtered/total right below the header; "DROPPED: 0" was a
-            hardcoded placeholder with no real data behind it. */}
-        <div
-          className="hidden md:flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-full border font-mono shrink-0 bg-secondary border-border text-muted-foreground"
-          title={`Capture buffer: ${totalPacketsCount.toLocaleString()} / ${PACKET_BUFFER_CAP.toLocaleString()} packets`}
-        >
-          <span className="text-foreground font-semibold">Buffer {bufferPercent.toFixed(0)}%</span>
-          <span className="text-border">·</span>
-          <span>{(totalBytes / 1024).toFixed(1)} KB</span>
-        </div>
-
         {/* Agent Connectivity Indicator - separate from the download button so
             the button stays a stable, always-clickable action and only this
             small pill reflects the (sometimes flickery) live connection state. */}

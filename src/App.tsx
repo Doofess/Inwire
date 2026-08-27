@@ -51,9 +51,36 @@ import {
   TbBinary,
 } from "react-icons/tb";
 
-// Same policy as the 4000-packet buffer: bounded, oldest dropped first. A
-// session left open for hours must not grow the log pane without limit.
+// Bounded, oldest dropped first. A session left open for hours must not grow
+// the log pane without limit.
 const AGENT_LOG_BUFFER_LIMIT = 1000;
+
+/**
+ * How many captured packets the live buffer holds before the oldest are
+ * dropped.
+ *
+ * Raised from 4,000 once two things stopped scaling with it: packets are now
+ * committed to state in batches rather than one at a time, and hex/ASCII
+ * dumps are derived on demand instead of stored per packet (which had cost
+ * ~13KB of strings for every full-size frame). Both were required - the old
+ * ingest path would have frozen the tab well before a buffer this size ever
+ * filled.
+ */
+const PACKET_BUFFER_CAP = 50000;
+
+/**
+ * Capture stops on its own at this fraction of the buffer, so a full buffer
+ * is a deliberate stop rather than packets silently falling off the back
+ * while the user believes they are still recording everything.
+ */
+const AUTO_PAUSE_AT = 0.99;
+
+/**
+ * How often queued packets are committed to React state. Fast enough that
+ * the list still reads as live, slow enough that a burst costs a handful of
+ * renders rather than one per packet.
+ */
+const PACKET_FLUSH_MS = 100;
 
 export default function App() {
   // Theme & Layout
@@ -105,11 +132,61 @@ export default function App() {
   const [agentInterfaces, setAgentInterfaces] = useState<{ name: string; label: string }[]>([]);
   const [selectedInterfaces, setSelectedInterfaces] = useState<string[]>([]);
   const [agentLog, setAgentLog] = useState<AgentLogEntry[]>([]);
+  // Set when capture stopped itself because the buffer filled, so the reason
+  // is visible rather than the capture appearing to have stopped for no
+  // reason. Cleared by anything that makes room or deliberately restarts.
+  const [bufferAutoPaused, setBufferAutoPaused] = useState(false);
   // Whether the Driver Info panel currently wants log lines. Read inside the
   // WebSocket handlers, so it must be a ref: those close over their first
   // render's values and would otherwise never see this change.
   const logSubscribedRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
+  // Packets arrive one WebSocket message at a time but are committed to state
+  // in batches - see the ingest comment in the socket handler below.
+  const pendingPacketsRef = useRef<Packet[]>([]);
+  // ICMP replies patch an EARLIER packet's info text. Collected alongside the
+  // new packets so the patch is applied once per flush over one array pass,
+  // rather than mapping the whole buffer per reply.
+  const pendingIcmpRepliesRef = useRef<{ requestFrameId: number; replyId: number }[]>([]);
+
+  // Drains the ingest queue into state on a fixed cadence. Runs for the life
+  // of the app rather than only while capturing, so packets queued in the
+  // instant before a stop still land instead of being stranded.
+  useEffect(() => {
+    const flush = () => {
+      const incoming = pendingPacketsRef.current;
+      const replies = pendingIcmpRepliesRef.current;
+      if (incoming.length === 0 && replies.length === 0) return;
+      pendingPacketsRef.current = [];
+      pendingIcmpRepliesRef.current = [];
+
+      setPackets((prev) => {
+        let next = prev;
+        if (replies.length > 0) {
+          const replyByFrameId = new Map(replies.map((r) => [r.requestFrameId, r.replyId]));
+          next = next.map((p) => {
+            const replyId = replyByFrameId.get(p.id);
+            return replyId === undefined ? p : { ...p, info: p.info + ` (reply in ${replyId})` };
+          });
+        }
+        next = next === prev ? prev.concat(incoming) : next.concat(incoming);
+        if (next.length > PACKET_BUFFER_CAP) {
+          next = next.slice(next.length - PACKET_BUFFER_CAP);
+        }
+        // Stopping is decided here, where the true post-trim size is known.
+        // isCapturingRef rather than isCapturing: this effect is set up once
+        // and its closure would otherwise never see a later capture start.
+        if (isCapturingRef.current && next.length >= PACKET_BUFFER_CAP * AUTO_PAUSE_AT) {
+          setIsCapturing(false);
+          setBufferAutoPaused(true);
+          sendAgentCommand({ type: 'stop_capture' });
+        }
+        return next;
+      });
+    };
+    const timer = window.setInterval(flush, PACKET_FLUSH_MS);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // RBAC Role (Simplified: Always Admin)
   const permissions = {
@@ -367,22 +444,21 @@ export default function App() {
                 }
               ],
               rawBytes: new Uint8Array(0),
-              hexDump: '',
-              asciiDump: '',
               interfaceName: 'Live Agent'
             };
           }
 
-          setPackets((prev) => {
-            const patchedPrev = icmpMatchedRequestFrameId !== undefined
-              ? prev.map((p) => (p.id === icmpMatchedRequestFrameId ? { ...p, info: p.info + ` (reply in ${id})` } : p))
-              : prev;
-            const updated = [...patchedPrev, safePkt];
-            if (updated.length > 4000) {
-              return updated.slice(updated.length - 4000);
-            }
-            return updated;
-          });
+          // Queued, not committed. Setting state per packet copied the whole
+          // buffer on every arrival and re-ran every consumer that reads it -
+          // two useMemos here plus eight analytics components - so the cost
+          // per packet scaled with the buffer size. At loopback rates that
+          // saturated the render loop and froze the tab. The queue is drained
+          // on an interval instead, which decouples ingest rate from render
+          // cost and is what lets the buffer be large.
+          pendingPacketsRef.current.push(safePkt);
+          if (icmpMatchedRequestFrameId !== undefined) {
+            pendingIcmpRepliesRef.current.push({ requestFrameId: icmpMatchedRequestFrameId, replyId: id });
+          }
         } catch (err) {
           console.warn("[WirePulse] Failed to parse agent packet", err);
         }
@@ -561,6 +637,7 @@ export default function App() {
   // from, so the controls start immediately rather than opening a picker
   // that would be empty and leave Start unable to start anything.
   const handleStartCapture = () => {
+    setBufferAutoPaused(false);
     sendAgentCommand({ type: 'start_capture' });
     setIsCapturing(true);
   };
@@ -571,6 +648,7 @@ export default function App() {
   };
 
   const handleClearPackets = () => {
+    setBufferAutoPaused(false);
     packetGenerator.reset();
     tcpTracker.reset();
     icmpTracker.reset();
@@ -654,8 +732,6 @@ export default function App() {
           agentOutdated={agentOutdated}
           totalPacketsCount={packets.length}
           filteredPacketsCount={filteredPackets.length}
-          totalBytes={totalBytes}
-          onApplyFilterPreset={handleQuickFilter}
         />
 
         {/* Filter Toolbar (Geometric Balance style) */}
@@ -919,6 +995,11 @@ export default function App() {
             onSubscribeAgentLog={handleSubscribeAgentLog}
             onUnsubscribeAgentLog={handleUnsubscribeAgentLog}
             onClearAgentLog={handleClearAgentLog}
+            totalPacketsCount={packets.length}
+            totalBytes={totalBytes}
+            packetBufferCap={PACKET_BUFFER_CAP}
+            bufferAutoPaused={bufferAutoPaused}
+            onClearPackets={handleClearPackets}
           />
         )}
       </AnimatePresence>

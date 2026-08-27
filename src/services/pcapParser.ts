@@ -422,8 +422,13 @@ export function decodeRawEthernetPacket(
   icmpTracker?: IcmpEchoTracker,
   quicTracker?: QuicFlowTracker
 ): { packet: Packet; icmpMatchedRequestFrameId?: number } {
-  const hexDump = formatHexDump(rawBytes);
-  const asciiDump = formatAsciiDump(rawBytes);
+  // hexDump/asciiDump are deliberately NOT built here. They are display
+  // artifacts for the ONE packet a user has selected, but building them
+  // eagerly stored them for every packet in the buffer: for a 1500-byte
+  // frame the two strings cost roughly 13KB of UTF-16 on top of the 1.5KB
+  // of rawBytes they were both derived from. Deriving them on demand via
+  // packetHexDump()/packetAsciiDump() below is what makes a 50,000-packet
+  // buffer fit in memory at all.
 
   let srcMac = '00:00:00:00:00:00';
   let dstMac = '00:00:00:00:00:00';
@@ -733,8 +738,6 @@ export function decodeRawEthernetPacket(
       streamId,
       layers,
       rawBytes,
-      hexDump,
-      asciiDump,
       anomalies,
       interfaceName: 'eth0',
     },
@@ -1449,6 +1452,23 @@ function computeIpHeaderChecksum(rawBytes: Uint8Array, l3Offset: number, ipHeade
     sum = (sum & 0xffff) + (sum >> 16);
   }
   return (~sum) & 0xffff;
+}
+
+/**
+ * The hex dump for a packet, built on demand.
+ *
+ * Prefers a stored dump if one exists - imported captures and older code
+ * paths may still carry them - and otherwise renders from rawBytes. Cheap
+ * enough to call per render for a single selected packet; do not map it
+ * across the whole buffer.
+ */
+export function packetHexDump(packet: { hexDump?: string; rawBytes: Uint8Array }): string {
+  return packet.hexDump ?? formatHexDump(packet.rawBytes);
+}
+
+/** The ASCII dump for a packet, built on demand. See packetHexDump. */
+export function packetAsciiDump(packet: { asciiDump?: string; rawBytes: Uint8Array }): string {
+  return packet.asciiDump ?? formatAsciiDump(packet.rawBytes);
 }
 
 export function formatHexDump(bytes: Uint8Array): string {

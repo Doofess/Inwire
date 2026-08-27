@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Packet } from '../../types/packet';
 import { TbMessage, TbX, TbCopy, TbCheck, TbDownload } from 'react-icons/tb';
+import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 
 interface StreamFollowerModalProps {
   streamId: number | null;
@@ -37,7 +38,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
     const fullDialogue = streamPackets
       .map(p => {
         const prefix = p.source === clientIp ? `[CLIENT -> SERVER (${p.source})]` : `[SERVER -> CLIENT (${p.source})]`;
-        return `${prefix}\n${p.streamPayload?.payloadText || p.asciiDump}\n`;
+        return `${prefix}\n${p.streamPayload?.payloadText || packetAsciiDump(p)}\n`;
       })
       .join('\n');
 
@@ -50,7 +51,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
     const fullDialogue = streamPackets
       .map(p => {
         const prefix = p.source === clientIp ? `>>> [CLIENT -> SERVER] ${p.source}:${p.sourcePort}` : `<<< [SERVER -> CLIENT] ${p.source}:${p.sourcePort}`;
-        return `${prefix}\n${p.streamPayload?.payloadText || p.asciiDump}\n`;
+        return `${prefix}\n${p.streamPayload?.payloadText || packetAsciiDump(p)}\n`;
       })
       .join('\n');
 
@@ -167,7 +168,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
           ) : (
             streamPackets.map(p => {
               const isClient = p.source === clientIp;
-              const payload = p.streamPayload?.payloadText || p.asciiDump;
+              const payload = p.streamPayload?.payloadText || packetAsciiDump(p);
 
               return (
                 <div
@@ -186,7 +187,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
                   </div>
 
                   <pre className="whitespace-pre-wrap font-mono text-xs break-all">
-                    {viewFormat === 'hex' ? p.hexDump : payload}
+                    {viewFormat === 'hex' ? packetHexDump(p) : payload}
                   </pre>
                 </div>
               );

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
 import { TbBinary, TbCopy, TbCheck, TbShield } from 'react-icons/tb';
+import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 
 interface HexViewerProps {
   packet: Packet | null;
@@ -36,7 +37,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
   const copyAsFormat = async (format: 'hex' | 'c_array' | 'python' | 'ascii') => {
     let text = '';
     if (format === 'hex') {
-      text = packet.hexDump;
+      text = packetHexDump(packet);
     } else if (format === 'c_array') {
       const bytesArr = Array.from(rawBytes);
       text = `unsigned char pkt[${rawBytes.length}] = {\n  ` +
@@ -48,7 +49,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
       const bytesArr = Array.from(rawBytes);
       text = `b"${bytesArr.map((b: number) => `\\x${b.toString(16).padStart(2, '0')}`).join('')}"`;
     } else if (format === 'ascii') {
-      text = packet.asciiDump;
+      text = packetAsciiDump(packet);
     }
 
     try {
