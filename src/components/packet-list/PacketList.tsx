@@ -11,6 +11,7 @@ import {
   TbFilter,
   TbCopy,
 } from 'react-icons/tb';
+import { packetHexDump } from '../../services/pcapParser';
 
 interface PacketListProps {
   packets: Packet[];
@@ -590,7 +591,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
           <button
             onClick={() => {
-              navigator.clipboard.writeText(contextMenu.packet.hexDump);
+              navigator.clipboard.writeText(packetHexDump(contextMenu.packet));
             }}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-cyan-500/10 hover:text-cyan-400 transition-colors flex items-center gap-2 cursor-pointer"
           >

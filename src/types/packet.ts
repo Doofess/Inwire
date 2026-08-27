@@ -106,8 +106,11 @@ export interface Packet {
   };
   layers: ProtocolLayer[];
   rawBytes: Uint8Array;
-  hexDump: string;
-  asciiDump: string;
+  /** Optional: derived on demand via packetHexDump() rather than stored, so
+   *  a large capture buffer does not carry a rendered dump per packet. */
+  hexDump?: string;
+  /** Optional: see hexDump. Use packetAsciiDump(). */
+  asciiDump?: string;
   anomalies?: AnomalyInfo[];
   interfaceName: string;
   colorRuleName?: string;

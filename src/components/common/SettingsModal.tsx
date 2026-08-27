@@ -1,21 +1,30 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { useTheme } from 'next-themes';
-import { TbSettings, TbX, TbCheck, TbPalette, TbActivity } from 'react-icons/tb';
+import { TbSettings, TbX, TbCheck, TbPalette, TbActivity, TbDatabase } from 'react-icons/tb';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { THEME_OPTIONS } from '../../lib/themeOptions';
 import { DriverInfoPanel } from './DriverInfoPanel';
 import type { AgentLogEntry } from '../../services/agentProtocol';
 
-type SettingsSection = 'appearance' | 'driver';
+// Mirrors AUTO_PAUSE_AT in App.tsx, purely for the explanatory copy below.
+const AUTO_PAUSE_PERCENT = 99;
+
+type SettingsSection = 'appearance' | 'capture' | 'driver';
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'appearance', label: 'Appearance', icon: TbPalette },
+  { id: 'capture', label: 'Capture', icon: TbDatabase },
   { id: 'driver', label: 'Driver Info', icon: TbActivity },
 ];
 
 interface SettingsModalProps {
   onClose: () => void;
+  totalPacketsCount: number;
+  totalBytes: number;
+  packetBufferCap: number;
+  bufferAutoPaused: boolean;
+  onClearPackets: () => void;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   agentVersion: string | null;
   agentOutdated: boolean;
@@ -30,6 +39,11 @@ interface SettingsModalProps {
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
+  totalPacketsCount,
+  totalBytes,
+  packetBufferCap,
+  bufferAutoPaused,
+  onClearPackets,
   agentStatus,
   agentVersion,
   agentOutdated,
@@ -43,6 +57,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const { theme, setTheme } = useTheme();
   const [section, setSection] = useState<SettingsSection>('appearance');
+  const bufferPercent = packetBufferCap > 0
+    ? Math.min(100, (totalPacketsCount / packetBufferCap) * 100)
+    : 0;
 
   return (
     <motion.div
@@ -118,6 +135,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {/* Mounted only while selected, so the log subscription starts
                 and stops with the section rather than with the modal. */}
+            {section === 'capture' && (
+              <div className="flex flex-col gap-4">
+                <div>
+                  <div className="text-xs font-semibold text-foreground mb-2">Capture buffer</div>
+                  <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${bufferPercent >= 99 ? 'bg-rose-500' : bufferPercent >= 75 ? 'bg-amber-500' : 'bg-cyan-500'}`}
+                      style={{ width: `${bufferPercent}%` }}
+                    />
+                  </div>
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs mt-3">
+                    <dt className="text-muted-foreground">Used</dt>
+                    <dd className="font-mono">
+                      {totalPacketsCount.toLocaleString()} / {packetBufferCap.toLocaleString()} packets
+                      <span className="text-muted-foreground"> ({bufferPercent.toFixed(1)}%)</span>
+                    </dd>
+                    <dt className="text-muted-foreground">Captured</dt>
+                    <dd className="font-mono">{(totalBytes / 1024 / 1024).toFixed(2)} MB</dd>
+                  </dl>
+                </div>
+
+                {bufferAutoPaused && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-600 dark:text-amber-400">
+                    Capture stopped automatically: the buffer reached {(AUTO_PAUSE_PERCENT).toFixed(0)}% and
+                    older packets would have started falling off the back. Clear the buffer to start again.
+                  </div>
+                )}
+
+                <button
+                  onClick={onClearPackets}
+                  disabled={totalPacketsCount === 0}
+                  className={`self-start px-4 py-1.5 rounded-md bg-secondary hover:bg-accent text-foreground text-xs font-medium transition-colors ${
+                    totalPacketsCount === 0 ? 'opacity-50 cursor-not-allowed' : ''
+                  }`}
+                >
+                  Clear buffer
+                </button>
+              </div>
+            )}
+
             {section === 'driver' && (
               <DriverInfoPanel
                 agentStatus={agentStatus}
