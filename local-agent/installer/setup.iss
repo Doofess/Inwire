@@ -140,28 +140,39 @@ begin
   // refuses to replace a file that is in use. Without this, upgrading over an
   // existing install dies partway through extraction with "An error occurred
   // while trying to replace the existing file: DeleteFile failed; code 5.
-  // Access is denied." naming netview-agent-windows.exe - and the only
-  // remaining choices are to skip the file (leaving the OLD binary behind
-  // under a NEW version's install) or abandon the install.
+  // Access is denied." naming netview-agent-windows.exe - leaving only bad
+  // choices: skip the file and keep the OLD binary under a NEW version's
+  // install, or abandon setup. [UninstallRun] stops the service too, but only
+  // on uninstall; an upgrade-in-place never goes through it.
   //
-  // [UninstallRun] already stops the service, but that only runs on uninstall;
-  // an upgrade-in-place never passed through it.
-  //
-  // net.exe rather than sc.exe: `sc stop` returns as soon as the stop has been
-  // REQUESTED, so extraction could begin while the process is still on its way
-  // down. `net stop` blocks until the service has actually stopped.
-  //
-  // A non-zero result is expected and ignored: on a first-time install there
-  // is no service to stop. If a stop genuinely fails the extraction below
-  // fails exactly as it does today, which is no worse than the status quo.
-  if Exec(ExpandConstant('{sys}\net.exe'), 'stop NetViewAgent', '',
-          SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-  begin
-    if ResultCode = 0 then
-      // The SCM reports the service stopped a moment before the process has
-      // finished exiting and released the handle on its own exe.
-      Sleep(2000);
-  end;
+  // Three steps, because a graceful stop alone is not enough. The agent can be
+  // alive but unable to service a stop request - its packet fan-out queues
+  // work onto the asyncio loop without backpressure, so a high-rate interface
+  // can starve the loop until the SCM's stop control is never processed. In
+  // that state `net stop` fails, and an installer that only asked politely
+  // walks straight into the locked file. That is the state a machine is most
+  // likely to be in when the user has gone looking for an update.
+
+  // 1. Ask nicely. sc.exe rather than net.exe: sc returns as soon as the stop
+  //    has been REQUESTED, so a wedged service costs a moment here instead of
+  //    blocking the wizard for the SCM's full 30-second timeout.
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop NetViewAgent', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // 2. Give a healthy service time to shut down and release its own exe.
+  Sleep(5000);
+
+  // 3. Guarantee the handle is gone. A no-op when step 1 already worked -
+  //    taskkill simply reports no matching process, and the non-zero result
+  //    is ignored, exactly as it is on a first-time install where there is no
+  //    service at all. Force is warranted: the alternative is a failed
+  //    upgrade, and the agent holds no unsaved state - its config and log are
+  //    separate files it is not mid-write on.
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // 4. Windows releases the file handle a moment after the process dies.
+  Sleep(2000);
 end;
 
 procedure WriteDefaultConfig;
