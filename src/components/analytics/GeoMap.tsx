@@ -14,7 +14,8 @@ import { TbWorld, TbMapPinFilled, TbMapPinOff, TbMaximize } from "react-icons/tb
 import { useThemeToken } from '../../lib/themeColor';
 import { themePalette } from '../../services/themePalettes';
 import { protocolColor } from '../../services/protocolColors';
-import { greatCirclePath, splitAtAntimeridian } from '../../lib/greatCircle';
+import { greatCircleArc, splitAtAntimeridian } from '../../lib/greatCircle';
+import { ArcLayer, type Arc } from './arcLayer';
 import { aggregateRoutes } from './geoRoutes';
 import { applyThemeToBasemap, skyFor } from './mapTheme';
 import { GeoLocationCounter, type GeoPlace } from './GeoLocationCounter';
@@ -53,12 +54,8 @@ if (maplibregl.getRTLTextPluginStatus() === "unavailable") {
 const LIGHT_STYLE = "https://tiles.openfreemap.org/styles/positron";
 const DARK_STYLE = "https://tiles.openfreemap.org/styles/dark";
 
-const CONNECTIONS_SOURCE_ID = "netview-connections";
-const CONNECTIONS_LAYER_ID = "netview-connections-line";
-// Drawn under the line in the same colour, wider and blurred. Two static
-// layers rather than an animation loop: the glow is what makes a thin line
-// read as lit rather than drawn, and it costs nothing per frame.
-const CONNECTIONS_GLOW_LAYER_ID = "netview-connections-glow";
+// The glow that used to be a second, blurred line layer now lives in the arc
+// layer's own two-pass draw - `line-blur` has no equivalent in raw WebGL.
 const CONNECTIONS_SYNC_THROTTLE_MS = 600;
 
 // How many points to sample along each great circle. Enough that the curve is
@@ -384,7 +381,15 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const isExpandedRef = useRef(false);
   const isFirstStyleRun = useRef(true);
-  const connectionsRef = useRef<GeoJSON.FeatureCollection>({ type: "FeatureCollection", features: [] });
+  const connectionsRef = useRef<Arc[]>([]);
+  /**
+   * The arc layer instance, kept across style reloads.
+   *
+   * `setStyle` discards the layer but not this object, so the geometry it
+   * holds survives a theme change and is re-uploaded by `onAdd` rather than
+   * being rebuilt from routes that may not have changed.
+   */
+  const arcLayerRef = useRef<ArcLayer | null>(null);
   const connectionsSyncTimeoutRef = useRef<number | null>(null);
   const isCameraMovingRef = useRef(false);
   /**
@@ -703,43 +708,13 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       return;
     }
 
-    const existingSource = map.getSource(CONNECTIONS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
-    if (existingSource) {
-      existingSource.setData(connectionsRef.current);
-      return;
-    }
+    if (!arcLayerRef.current) arcLayerRef.current = new ArcLayer();
+    const layer = arcLayerRef.current;
 
-    map.addSource(CONNECTIONS_SOURCE_ID, { type: "geojson", data: connectionsRef.current });
-    // Glow first, so it sits beneath. Same colour, wider and blurred - which is
-    // what makes a 1.5px line read as lit rather than merely drawn, without a
-    // per-frame animation.
-    map.addLayer({
-      id: CONNECTIONS_GLOW_LAYER_ID,
-      type: "line",
-      source: CONNECTIONS_SOURCE_ID,
-      paint: {
-        "line-color": ["get", "color"],
-        "line-width": 5,
-        "line-opacity": 0.18,
-        "line-blur": 4,
-      },
-    });
-    map.addLayer({
-      id: CONNECTIONS_LAYER_ID,
-      type: "line",
-      source: CONNECTIONS_SOURCE_ID,
-      paint: {
-        // Data-driven: each feature carries the colour of the protocol
-        // carrying most of its traffic. The dasharray is gone with the flat
-        // colour it compensated for - a solid line reads as a route, and the
-        // colour is what carries the information now.
-        "line-color": ["get", "color"],
-        // Busy routes draw heavier, so the map shows where the traffic is and
-        // not merely who was contacted.
-        "line-width": ["interpolate", ["linear"], ["get", "weight"], 0, 0.8, 1, 2.6],
-        "line-opacity": 0.75,
-      },
-    });
+    // `setStyle` removes the layer but leaves this object holding its
+    // geometry, so re-adding is enough - onAdd rebuilds the buffer.
+    if (!map.getLayer(layer.id)) map.addLayer(layer);
+    layer.setArcs(connectionsRef.current);
   };
 
   // During active capture `packets` (and therefore `routes`)
@@ -784,30 +759,20 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // on a quiet capture and uniformly fat on a loud one.
     const busiest = Math.max(1, ...routes.map((r) => r.total));
 
-    connectionsRef.current = {
-      type: "FeatureCollection",
-      features: routes.flatMap((route) => {
-        const color = protocolColor(route.dominantProtocol, themeKey);
-        const weight = route.total / busiest;
-        // One feature per segment: a route crossing the antimeridian is two
-        // pieces, because with world copies disabled a single feature would be
-        // drawn back across the whole map instead of over the Pacific.
-        return splitAtAntimeridian(
-          greatCirclePath(route.from, route.to, ARC_STEPS, ARC_CURVATURE),
-        ).map(
-          (coordinates, i) => ({
-            type: "Feature" as const,
-            properties: {
-              id: `${route.key}#${i}`,
-              color,
-              weight,
-              protocol: route.dominantProtocol,
-            },
-            geometry: { type: "LineString" as const, coordinates },
-          }),
-        );
-      }),
-    };
+    connectionsRef.current = routes.flatMap((route) => {
+      const color = protocolColor(route.dominantProtocol, themeKey);
+      const weight = route.total / busiest;
+      // Still split at the antimeridian, in BOTH projections. On the globe the
+      // two halves meet at the same point on the sphere, so the cut is
+      // invisible; under Mercator, with world copies disabled, a single
+      // unsplit route would be drawn back across the whole map instead of over
+      // the Pacific. One geometry for both is also what makes the shader's
+      // mercator-globe crossfade safe, since the same vertices have to be
+      // valid at every point of the transition.
+      return splitAtAntimeridian(
+        greatCircleArc(route.from, route.to, ARC_STEPS, ARC_CURVATURE),
+      ).map((points) => ({ points, color, weight }));
+    });
 
     scheduleConnectionsSync();
   }, [routes, themeKey]);

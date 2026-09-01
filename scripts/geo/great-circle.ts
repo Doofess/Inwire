@@ -14,7 +14,7 @@
  * run 170 → -170 is not drawn as a short hop across the Pacific but as a stripe
  * back across Asia, Europe and the Atlantic.
  */
-import { greatCirclePath, splitAtAntimeridian } from '../../src/lib/greatCircle';
+import { greatCircleArc, greatCirclePath, splitAtAntimeridian } from '../../src/lib/greatCircle';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -154,6 +154,59 @@ check('an unsplit path is returned unchanged',
 }
 
 console.log();
+// --- the altitude profile ----------------------------------------------------
+//
+// The arcs are drawn by a custom WebGL layer, which cannot be asserted here -
+// there is no GL context in a script. What CAN be pinned is the geometry it
+// consumes, and these are the properties the shader assumes rather than checks.
+
+const arc = greatCircleArc(TLV, NYC, 48);
+
+checkTrue('an arc carries an altitude per point', arc.every((p) => p.length === 3));
+checkTrue('an arc has the same points as the path it is built from',
+  arc.length === greatCirclePath(TLV, NYC, 48).length);
+
+// Touching down at both ends is what lets an arc meet its own markers.
+check('the first point is on the surface', arc[0][2], 0);
+check('the last point is on the surface', arc[arc.length - 1][2], 0);
+
+checkTrue('altitude peaks in the middle',
+  arc[Math.floor(arc.length / 2)][2] === Math.max(...arc.map((p) => p[2])));
+
+checkTrue('altitude never goes below the surface', arc.every((p) => p[2] >= 0));
+
+checkTrue('the profile rises then falls, with no second hump', (() => {
+  const heights = arc.map((p) => p[2]);
+  let turns = 0;
+  for (let i = 1; i < heights.length - 1; i++) {
+    const rising = heights[i] > heights[i - 1];
+    const nextRising = heights[i + 1] > heights[i];
+    if (rising !== nextRising) turns += 1;
+  }
+  return turns <= 1;
+})());
+
+// Distance has to be carried by something that survives rotation. Line length
+// foreshortens to nothing when a route points away from the camera; height
+// does not.
+const peakOf = (a: [number, number], b: [number, number]) =>
+  Math.max(...greatCircleArc(a, b, 48).map((p) => p[2]));
+const NEARBY: [number, number] = [34.8, 32.0];   // ~10km from TLV
+checkTrue('a longer route arcs higher than a shorter one', peakOf(TLV, NYC) > peakOf(TLV, NEARBY));
+checkTrue('even a very short route lifts off the surface', peakOf(TLV, NEARBY) > 0);
+
+// The seam is the one place an arc is already two pieces of geometry, so a
+// discontinuity there is the most visible one available.
+const pacificArc = greatCircleArc(TYO, SFO, 48);
+const arcParts = splitAtAntimeridian(pacificArc);
+check('a split arc is still two segments', arcParts.length, 2);
+checkTrue('altitude is carried across the seam, not reset',
+  arcParts[0][arcParts[0].length - 1][2] > 0 && arcParts[1][0][2] > 0);
+check('both sides of the seam meet at the same altitude',
+  Math.abs(arcParts[0][arcParts[0].length - 1][2] - arcParts[1][0][2]) < 1e-9, true);
+check('both sides of the seam meet at the same latitude',
+  Math.abs(arcParts[0][arcParts[0].length - 1][1] - arcParts[1][0][1]) < 1e-9, true);
+
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
   process.exit(1);
