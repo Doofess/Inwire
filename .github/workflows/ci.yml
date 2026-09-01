@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web app (type-check, assertions, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # tsc --noEmit plus every assertion script under scripts/. These cover the
+      # theme contract (token completeness, contrast floors, CSS-vs-palette
+      # drift), the protocol dissectors, the filter grammar and the agent
+      # protocol version triple. This is the gate that matters.
+      - name: Type-check and run assertion scripts
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+  agent:
+    name: Capture agent (protocol tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Not requirements.txt: that pulls pyinstaller (packaging only) and
+      # pywin32 (Windows only). These three are what importing the agent
+      # module needs.
+      - name: Install runtime dependencies
+        run: python -m pip install --quiet scapy websockets psutil
+
+      - name: Run protocol tests
+        working-directory: local-agent
+        run: python test_protocol.py

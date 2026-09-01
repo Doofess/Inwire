@@ -1,7 +1,18 @@
 {
-  "name": "react-example",
+  "name": "netview",
   "private": true,
   "version": "0.0.0",
+  "description": "Real-time network packet analyzer that runs in the browser, fed by a local capture agent.",
+  "license": "MIT",
+  "author": "Rotem Grinhut",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Doofess/NetView.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Doofess/NetView/issues"
+  },
+  "homepage": "https://github.com/Doofess/NetView#readme",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
