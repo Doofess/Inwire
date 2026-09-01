@@ -6,8 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NetView (internally referred to in some strings as "WirePulse") is a browser-based network packet analyzer with a desktop-analyzer-style UI, built with React + Vite. It has no backend of its own for capture: live packets come from a separate local Python agent (`local-agent/agent.py`) that the user downloads and runs with elevated privileges, which streams captured packets over a local WebSocket (`ws://localhost:8999`) to the web app running in the browser. Everything else — protocol dissection, filtering, dissector rules, color rules, anomaly detection, PCAP export/import — happens client-side in TypeScript.
 
-The project originated in Google AI Studio (see README.md); `vite.config.ts` still has AI-Studio-specific accommodations (see Architecture notes below).
-
 ## Commands
 
 - `npm run lint` — type-check only (`tsc --noEmit`); there is no separate lint tool configured
@@ -46,10 +44,9 @@ Theming is **four themes**, not a light/dark pair: `light` (Day), `paper`, `dark
 
 ### Vite config quirks (`vite.config.ts`) — read the inline comments before touching this file
 - `maplibre-gl` is excluded from `optimizeDeps` because Vite's dependency pre-bundler breaks its web worker asset resolution, silently killing map tile rendering.
-- File watching/HMR is fully disabled when the `DISABLE_HMR` env var is set (used by AI Studio to prevent flicker during agent edits).
-- `local-agent/**` and `public/downloads/**` are excluded from the file watcher so that rebuilding the Python agent or dropping a new installer binary doesn't trigger a full page reload (which would tear down the live agent WebSocket and look like a connect/disconnect loop).
+- File watching/HMR is fully disabled when the `DISABLE_HMR` env var is set. Useful when a tool is rewriting many files at once: each save would otherwise trigger a reload, and they accumulate until the tab stalls.
+- `local-agent/**` is excluded from the file watcher so that rebuilding the Python agent doesn't trigger a full page reload (which would tear down the live agent WebSocket and look like a connect/disconnect loop). `public/downloads/**` is deliberately **not** excluded, even though it belongs to the same build chain - read the inline comment before "fixing" that, because an excluded path falls through to the SPA fallback and the browser silently downloads `index.html` renamed to `NetView-Agent-Setup.exe`.
 
 ### Env vars
-Two separate `.env*` setups exist, from different points in the project's history:
-- `.env.example` — `GEMINI_API_KEY`, `APP_URL` (legacy AI-Studio-injected values; `@google/genai` is still a dependency but not obviously wired into the current UI — check before assuming it's live)
+The app itself needs none. `server.ts` reads `PORT`, and `vite.config.ts` reads `DISABLE_HMR`; both have working defaults.
 - `.env.local.example` — `VITE_FIREBASE_*` vars for a "Standalone NetView" Firebase config. `security_spec.md` describes the corresponding Firestore rules/threat model (roles, admin bootstrap email, shared-capture ownership invariants) for that Firebase backend, but no `firebase.ts`/Firestore integration currently exists under `src/` — treat `security_spec.md` as a spec for not-yet-implemented (or removed) backend auth/sharing, not a description of current code.

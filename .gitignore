@@ -5,7 +5,6 @@ coverage/
 .DS_Store
 *.log
 .env*
-!.env.example
 !.env.local.example
 
 # Compiled local-agent build artifacts (~19-21MB Windows binaries). Regenerate
