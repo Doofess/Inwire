@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-NetView (internally referred to in some strings as "WirePulse") is a browser-based network packet analyzer — a Wireshark-like UI built with React + Vite. It has no backend of its own for capture: live packets come from a separate local Python agent (`local-agent/agent.py`) that the user downloads and runs with elevated privileges, which streams captured packets over a local WebSocket (`ws://localhost:8999`) to the web app running in the browser. Everything else — protocol dissection, filtering, dissector rules, color rules, anomaly detection, PCAP export/import — happens client-side in TypeScript.
+NetView (internally referred to in some strings as "WirePulse") is a browser-based network packet analyzer with a desktop-analyzer-style UI, built with React + Vite. It has no backend of its own for capture: live packets come from a separate local Python agent (`local-agent/agent.py`) that the user downloads and runs with elevated privileges, which streams captured packets over a local WebSocket (`ws://localhost:8999`) to the web app running in the browser. Everything else — protocol dissection, filtering, dissector rules, color rules, anomaly detection, PCAP export/import — happens client-side in TypeScript.
 
 The project originated in Google AI Studio (see README.md); `vite.config.ts` still has AI-Studio-specific accommodations (see Architecture notes below).
 
