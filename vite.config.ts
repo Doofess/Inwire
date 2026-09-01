@@ -21,10 +21,11 @@ export default defineConfig(() => {
       exclude: ['maplibre-gl'],
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      // HMR and file watching get expensive when a tool is rewriting many
+      // files at once: every save triggers a reload, and they accumulate
+      // until the tab stalls. Set DISABLE_HMR=true for those sessions and
+      // reload by hand when the edits are done.
       hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {
         // local-agent/ holds the Python source and the PyInstaller build
         // output for the local capture agent - thousands of files churning

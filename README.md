@@ -143,9 +143,6 @@ local-agent/     Python capture agent, its tests, and the Windows installer
 - `security_spec.md` describes Firestore rules and a threat model for a Firebase
   backend that is **not currently implemented**. Read it as a spec for
   not-yet-built auth and sharing, not as a description of this code.
-- `.env.example` carries `GEMINI_API_KEY` and `APP_URL` from an earlier stage of
-  the project. `@google/genai` is still a dependency but is not wired into the
-  current UI.
 - Role-based access control is defined in `src/services/rbacService.ts` for four
   roles, but the app currently hardcodes the admin permission set. Components
   already gate on the permissions object, so restoring real roles is a matter of

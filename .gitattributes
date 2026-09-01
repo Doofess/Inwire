@@ -19,5 +19,8 @@
 *.exe   binary
 *.msi   binary
 
-# Generated; collapse it in diffs and exclude it from language statistics.
-package-lock.json -diff linguist-generated
+# Generated. Collapsed in GitHub's diff view and excluded from language
+# statistics, but NOT marked -diff: that would make git treat it as binary,
+# and inspecting what a dependency change did to the tree is the one time you
+# actually want to read it.
+package-lock.json linguist-generated=true
