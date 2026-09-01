@@ -1,0 +1,23 @@
+# Normalize line endings in the repository to LF regardless of the checkout
+# platform. Development happens on Windows and CI runs on Linux; without this,
+# a Windows commit rewrites whole files as CRLF and every subsequent diff is
+# unreadable noise. Working copies still get native endings on checkout.
+* text=auto eol=lf
+
+# Shell scripts must stay LF even on a Windows checkout - CRLF makes the
+# shebang line unparseable.
+*.sh text eol=lf
+
+# Never touched: recorded byte-for-byte or not text at all.
+*.pcap  binary
+*.pcapng binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.exe   binary
+*.msi   binary
+
+# Generated; collapse it in diffs and exclude it from language statistics.
+package-lock.json -diff linguist-generated
