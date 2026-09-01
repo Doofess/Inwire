@@ -415,5 +415,20 @@ export class ArcLayer implements CustomLayerInterface {
     gl.uniform1f(this.uniforms.u_widthScale, 1);
     gl.uniform1f(this.uniforms.u_opacity, 0.85);
     gl.drawArrays(gl.TRIANGLES, 0, this.vertexCount);
+
+    // Hand the context back as it was found.
+    //
+    // A custom layer shares one GL context with the whole renderer, and
+    // MapLibre draws everything after this with whatever state is left behind.
+    // Vertex attribute arrays are the dangerous part: an array still enabled
+    // for an attribute the NEXT program does not declare is read anyway, from
+    // this layer's buffer, at this layer's stride - which is how a custom layer
+    // makes the basemap flicker and tear rather than merely drawing itself
+    // wrong. Cheap insurance, and invisible when it is working.
+    for (const [name] of ATTRIBUTES) {
+      const location = this.locations[name];
+      if (location >= 0) gl.disableVertexAttribArray(location);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
 }

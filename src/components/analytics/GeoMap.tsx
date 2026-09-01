@@ -93,6 +93,12 @@ const MERCATOR_BOUNDS: [[number, number], [number, number]] = [
  */
 const MARKER_OPACITY_WHEN_COVERED = 0;
 
+/** Globe: close enough that the planet fills the frame rather than floating in it. */
+const GLOBE_MIN_ZOOM = 1.9;
+
+/** Flat: pulled in from the old 0.6, but nothing like as far as the globe. */
+const MERCATOR_MIN_ZOOM = 1.1;
+
 const ARC_STEPS = 48;
 
 /**
@@ -126,6 +132,14 @@ function applyProjectionMode(
   mode: MapProjectionMode,
   styleReady: boolean,
 ): void {
+  // How far back the camera may pull, per projection.
+  //
+  // These are floors on zoom, so a HIGHER number means less zooming out. The
+  // two projections fail differently at the far end and so need different
+  // limits: a globe recedes into a small ball adrift in empty space, which is
+  // both useless and unflattering, while a flat map merely starts repeating
+  // its own margins. The globe is held much closer for that reason.
+  map.setMinZoom(mode === 'globe' ? GLOBE_MIN_ZOOM : MERCATOR_MIN_ZOOM);
   // Bounds are cleared BEFORE projecting and restored AFTER, so the camera is
   // never penned inside an extent that does not apply to the projection it is
   // currently in.
@@ -818,7 +832,9 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // should not come back to the world view.
       center: geoSession().camera?.center ?? [15, 20],
       zoom: geoSession().camera?.zoom ?? 1,
-      minZoom: 0.6,
+      // Replaced per projection by applyProjectionMode; this is only what the
+      // map is built with before it knows which projection it is in.
+      minZoom: MERCATOR_MIN_ZOOM,
       maxZoom: 14,
       // One world, not an endless ribbon of them. MapLibre repeats the map
       // horizontally by default, so panning east just kept handing back
@@ -827,6 +843,10 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // Set for real by applyProjectionMode once the instance exists, since
       // globe and Mercator want different answers. See MERCATOR_BOUNDS.
       attributionControl: false,
+      // MapLibre's own resize observer is off, because this component runs a
+      // better one below. Left on, the two both call resize() and the canvas is
+      // cleared twice per frame instead of once - see the note there.
+      trackResize: false,
       // Rotation and tilt, previously off outright. A globe that cannot be
       // spun is a picture of a globe, and the flat map gains the same depth
       // from being tilted - the great circles stop reading as decoration and
@@ -941,12 +961,47 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   // element covers every one of those, including the ones nobody has thought of
   // yet, and it replaces a single post-expand frame with a correct answer at
   // every intermediate size.
+  //
+  // Resized AND repainted in the same frame, which is the whole trick.
+  //
+  // `map.resize()` reallocates the WebGL drawing buffer, and reallocating
+  // CLEARS it. On its own, resize only *schedules* a repaint for the following
+  // frame, so every resize leaves one frame with an empty canvas. One resize is
+  // one blank frame and nobody notices; the dashboard's drag handle resizes on
+  // every pointer move, so every frame was blank and the map strobed white for
+  // the length of the gesture.
+  //
+  // Debouncing was tried first and is the wrong shape: it stops the strobing by
+  // not resizing during the drag at all, which leaves the canvas stretched and
+  // then snapping - no longer flickering, but not tracking the drag either.
+  // `redraw()` is a synchronous repaint, so the buffer is refilled before the
+  // frame is presented and the map follows the handle smoothly at full
+  // resolution.
+  //
+  // Coalesced to one pass per frame, because a burst of observer callbacks
+  // within one frame would otherwise pay for the reallocation several times
+  // over.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const observer = new ResizeObserver(() => mapRef.current?.resize());
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const map = mapRef.current;
+        if (!map) return;
+        map.resize();
+        // Same frame, not the next one. This is what keeps the canvas from
+        // ever being presented empty.
+        map.redraw();
+      });
+    });
     observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
   }, []);
 
   /**
@@ -1189,15 +1244,21 @@ export const GeoMap: React.FC<GeoMapProps> = ({
 
               Conditional rendering rather than hiding: a control that is
               present but invisible still takes keyboard focus in tab order. */}
-          {roomy && (
-            <ZoomControls
-              onZoomIn={() => mapRef.current?.zoomIn()}
-              onZoomOut={() => mapRef.current?.zoomOut()}
-              leading={
-                <ProjectionSwitcher mode={projectionMode} onChange={setProjectionMode} />
-              }
-            />
-          )}
+          {/* The projection switcher is shown at BOTH sizes; the zoom buttons
+              still only in the expanded view. ZoomControls omits any button
+              whose handler is missing, so this is one positioned stack either
+              way rather than two components that have to agree on a corner.
+              The card is small, but which projection the map is in is a
+              decision worth being able to make without expanding it first -
+              which is not true of zooming, since the card shows the whole
+              world already. */}
+          <ZoomControls
+            onZoomIn={roomy ? () => mapRef.current?.zoomIn() : undefined}
+            onZoomOut={roomy ? () => mapRef.current?.zoomOut() : undefined}
+            leading={
+              <ProjectionSwitcher mode={projectionMode} onChange={setProjectionMode} />
+            }
+          />
           <GeoLocationCounter
             places={geoStats.places}
             unresolved={geoStats.unresolved}
