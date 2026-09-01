@@ -6,7 +6,7 @@
  * the clear precisely so that a server which has never seen the connection can
  * decrypt it. Everything after the handshake - 0-RTT, Handshake, and 1-RTT
  * packets - needs the TLS session secrets, which a passive observer does not
- * have, so those stay opaque here exactly as they do in Wireshark.
+ * have, so those stay opaque here exactly as they do in the reference analyzer.
  *
  * This is what turns "Initial, DCID=9635b6f53a7cb323" into
  * "Initial, DCID=9635b6f53a7cb323, PKN: 1, CRYPTO, CRYPTO, PING".

@@ -10,7 +10,7 @@ import type { Packet } from '../types/packet';
  *
  * The two absolute formats are here because they are what you need the moment
  * you correlate a capture against anything else - a server log, an incident
- * timeline, a colleague in another timezone. Wireshark offers exactly these and
+ * timeline, a colleague in another timezone. The reference analyzer offers exactly these and
  * they are its two most-used alternates for that reason.
  */
 export type TimeFormat = 'relative' | 'clock' | 'date' | 'utc' | 'delta';

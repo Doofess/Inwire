@@ -27,7 +27,7 @@ interface LayerRailProps {
 }
 
 /**
- * Dissectors name layers the way Wireshark's detail pane does - "Internet
+ * Dissectors name layers the way the reference analyzer's detail pane does - "Internet
  * Protocol Version 4", "Transmission Control Protocol" - which is right in a
  * full-width heading and far too long for a rail. These are the same protocols
  * under the names the packet list already uses.

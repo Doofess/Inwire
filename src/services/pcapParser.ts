@@ -394,7 +394,7 @@ export class PcapService {
 }
 
 /**
- * Maps dissected layer names to their Wireshark filter-field abbreviations for
+ * Maps dissected layer names to their conventional filter-field abbreviations for
  * the Frame layer's "[Protocols in frame]" field. Module-level so it isn't
  * rebuilt once per decoded packet.
  */
@@ -451,7 +451,7 @@ export function decodeRawEthernetPacket(
   }
 
   // Frames with no network layer (ARP, STP, other pure-L2 traffic) show their
-  // MAC addresses in the address columns, resolved to names the way Wireshark
+  // MAC addresses in the address columns, resolved to names the way the reference analyzer
   // does - "SagemcomBroa_5d:cc:62", "Broadcast", "Nearest-Customer-Bridge".
   // The IPv4/IPv6 branches below overwrite these when an L3 address exists.
   let srcIp = resolveMacName(srcMac);
@@ -461,9 +461,9 @@ export function decodeRawEthernetPacket(
   // ProtocolType - "TLSv1.2", "ICMPv6", "STP". Left undefined when the two
   // would read the same.
   let protocolLabel: string | undefined;
-  // Wireshark's tcp.analysis.* field names that fired for this frame, if any.
+  // The reference analyzer's tcp.analysis.* field names that fired for this frame, if any.
   let analysisFlags: string[] | undefined;
-  // Dissected values under their Wireshark field names, for display filters
+  // Dissected values under their conventional field names, for display filters
   // and color rules to reference generically.
   const filterFields: Record<string, string | number> = {};
   let srcPort: number | undefined;
@@ -479,7 +479,7 @@ export function decodeRawEthernetPacket(
       name: 'Frame',
       summary: `Frame ${id}: ${origLen || rawBytes.length} bytes on wire (${(origLen || rawBytes.length) * 8} bits), ${rawBytes.length} bytes captured (${rawBytes.length * 8} bits)`,
       rawBytesRange: [0, rawBytes.length - 1],
-      // Ordered as Wireshark orders it: identity, then encapsulation, then the
+      // Ordered as the reference analyzer orders it: identity, then encapsulation, then the
       // three clocks, then the generated deltas, then the frame's own numbers.
       fields: [
         { name: 'Section number', value: 1, generated: true },
@@ -524,7 +524,7 @@ export function decodeRawEthernetPacket(
   // ethertype) can appear between the MACs and the "real" ethertype, and can
   // repeat for double-tagged trunk traffic. Strip every tag we find so the
   // IPv4/IPv6 branches below see the correct offset and correct ethertype,
-  // exactly how Wireshark's packet-vlan.c walks nested tags.
+  // exactly how the reference analyzer's packet-vlan.c walks nested tags.
   let l3Offset = 14;
   let currentEtherType = etherType;
   let vlanDepth = 0;
@@ -682,7 +682,7 @@ export function decodeRawEthernetPacket(
       info = transport.info;
       layers.push(transport.layer);
       // Timing lives here, not in the transport decoder, so the [Timestamps]
-      // subtree Wireshark nests under UDP/TCP is attached from this side.
+      // subtree the reference analyzer nests under UDP/TCP is attached from this side.
       transport.layer.fields.push({
         name: '[Timestamps]',
         value: '',
@@ -719,7 +719,7 @@ export function decodeRawEthernetPacket(
         // The first 4 bytes are one word carrying three fields at three
         // different render widths - 8, 32 and 24 bits. That is why totalBits
         // is dissector-supplied: nothing about the fields themselves implies
-        // these widths, they are Wireshark's presentation convention, matched
+        // these widths, they are the reference analyzer's presentation convention, matched
         // here against `tshark -V`.
         {
           name: 'Version',
@@ -757,7 +757,7 @@ export function decodeRawEthernetPacket(
     // multi-kilobyte TCP payload that advances the sequence tracker past
     // everything that follows, silently suppressing the lost-segment and
     // ACKed-unseen-segment analysis on every later frame in that stream.
-    // Wireshark stops here and labels the frame malformed; so do we.
+    // The reference analyzer stops here and labels the frame malformed; so do we.
     filterFields['ipv6.hlim'] = hopLimit;
     filterFields['ipv6.src'] = srcIp;
     filterFields['ipv6.dst'] = dstIp;
@@ -785,7 +785,7 @@ export function decodeRawEthernetPacket(
       info = transport.info;
       layers.push(transport.layer);
       // Timing lives here, not in the transport decoder, so the [Timestamps]
-      // subtree Wireshark nests under UDP/TCP is attached from this side.
+      // subtree the reference analyzer nests under UDP/TCP is attached from this side.
       transport.layer.fields.push({
         name: '[Timestamps]',
         value: '',
@@ -831,7 +831,7 @@ export function decodeRawEthernetPacket(
       analysisFlags,
       frameProtocols,
       fields: filterFields,
-      // The on-wire frame size, which is what Wireshark's Length column shows.
+      // The on-wire frame size, which is what the reference analyzer's Length column shows.
       // It differs from rawBytes.length whenever the capture used a snaplen.
       // Falls back to the captured size if a source didn't report a wire size.
       length: origLen || rawBytes.length,
@@ -849,7 +849,7 @@ export function decodeRawEthernetPacket(
 
 
 /**
- * The nine flag bits plus Reserved, as Wireshark lists them.
+ * The nine flag bits plus Reserved, as the reference analyzer lists them.
  *
  * Drawn as a 12-bit window starting 4 bits into the data-offset byte: the
  * low nibble of byte 12 plus all of byte 13. Offsets below are relative to
@@ -908,7 +908,7 @@ const ECN_NAMES = [
  * Traffic Class and the DSCP/ECN pair nested beneath it.
  *
  * All three render at 32 bits even though the class is 8 bits and its parts
- * are 6 and 2: Wireshark draws a child at its parent's width so the nested
+ * are 6 and 2: the reference analyzer draws a child at its parent's width so the nested
  * rows line up as one ruler down the column. Verified against `tshark -V`.
  */
 function ipv6TrafficClassFields(rawBytes: Uint8Array, l3Offset: number): ProtocolField[] {
@@ -944,7 +944,7 @@ function ipv6TrafficClassFields(rawBytes: Uint8Array, l3Offset: number): Protoco
 }
 
 /**
- * The children Wireshark nests under each MAC address: the address itself,
+ * The children the reference analyzer nests under each MAC address: the address itself,
  * then the two flag bits carried in the first byte.
  *
  * Both bits render over 24 bits - the OUI, not the whole 6-byte address -
@@ -978,15 +978,15 @@ function macAddressFields(mac: string, offset: number): ProtocolField[] {
 }
 
 /**
- * Wireshark's arrival-time format: `Aug 25, 2026 20:16:40.351587600 Jerusalem
+ * The reference analyzer's arrival-time format: `Aug 25, 2026 20:16:40.351587600 Jerusalem
  * Daylight Time`. The spelled-out zone name comes from Intl rather than an
- * offset, because that is what Wireshark prints and an offset would not match.
+ * offset, because that is what the reference analyzer prints and an offset would not match.
  *
  * Sub-millisecond digits are zero-padded rather than invented: the agent
  * timestamps to microsecond resolution, so the last three digits of the
  * nanosecond field are genuinely unknown, not measured.
  */
-/** Wireshark's [Address Space] classification for an IPv6 address. */
+/** The reference analyzer's [Address Space] classification for an IPv6 address. */
 function ipv6AddressSpace(address: string): string {
   const a = address.toLowerCase();
   if (a === '::1') return 'Loopback';
@@ -1029,13 +1029,13 @@ function describeEtherType(etherType: number): string {
 
 /**
  * Formats a 16-byte IPv6 address (starting at `offset` within `bytes`) in the
- * RFC 5952 canonical form Wireshark displays: leading zeros stripped from each
+ * RFC 5952 canonical form the reference analyzer displays: leading zeros stripped from each
  * group, lowercase hex, and the *longest* run of two or more all-zero groups
  * collapsed to "::" (leftmost run wins a tie, and a single zero group is never
  * collapsed - "2001:db8:0:1:1:1:1:1" stays as-is).
  *
  * Without this an address renders as 39 characters of zero-padded groups,
- * which both diverges from Wireshark and overflows the address column.
+ * which both diverges from the reference analyzer and overflows the address column.
  */
 
 /**
@@ -1189,7 +1189,7 @@ function decodeTransportLayer(
     const cwr = (flags & 0x80) !== 0;
     const rawWindow = (rawBytes[transportOffset + 14] << 8) | rawBytes[transportOffset + 15];
 
-    // Wireshark's fixed flag order, which is *not* the bit order: a typical
+    // The reference analyzer's fixed flag order, which is *not* the bit order: a typical
     // data segment reads "[PSH, ACK]", never "[ACK, PSH]".
     const flagList: string[] = [];
     if (syn) flagList.push('SYN');
@@ -1204,7 +1204,7 @@ function decodeTransportLayer(
     // Port only *hints* at the protocol. Whether the frame actually gets a TLS
     // label depends on it containing a real TLS record, checked further down
     // once the payload boundaries are known - a bare ACK or keep-alive on a
-    // 443 connection is a plain TCP frame to Wireshark, not a TLS one.
+    // 443 connection is a plain TCP frame to the reference analyzer, not a TLS one.
     const isTlsPort = srcPort === 443 || dstPort === 443;
     let proto: Packet['protocol'] = 'TCP';
     let protocolLabel: string | undefined;
@@ -1288,7 +1288,7 @@ function decodeTransportLayer(
     // the tracker's per-direction high-water mark, which would report the
     // stream's furthest-seen sequence for a retransmit/out-of-order segment
     // and a stale value for a keep-alive (which skips checkSequence). SYN and
-    // FIN each consume one sequence number. Wireshark omits the field for
+    // FIN each consume one sequence number. The reference analyzer omits the field for
     // zero-length non-SYN/FIN segments, where it would just repeat Seq.
     const nextSeqDelta = payloadLength + (syn || fin ? 1 : 0);
     const expectedNextRel = nextSeqDelta > 0 ? relSeq + nextSeqDelta : undefined;
@@ -1349,14 +1349,14 @@ function decodeTransportLayer(
     }
 
     // Every expert annotation is a bracketed *prefix* on the Info column, and
-    // several can stack on one segment - Wireshark shows e.g.
+    // several can stack on one segment - the reference analyzer shows e.g.
     // "[TCP Previous segment not captured] [TCP Out-Of-Order] 443 → 51685 ...".
-    // They are ordered here the way Wireshark emits them: the gap that
+    // They are ordered here the way the reference analyzer emits them: the gap that
     // explains the segment first, then the segment's own classification.
     const expertTags: string[] = [];
-    // Wireshark's own tcp.analysis.* field names, kept alongside the display
+    // The reference analyzer's own tcp.analysis.* field names, kept alongside the display
     // tags so color rules and display filters can match on them the way
-    // Wireshark's do ("tcp.analysis.flags && !tcp.analysis.keep_alive").
+    // The reference analyzer's do ("tcp.analysis.flags && !tcp.analysis.keep_alive").
     const analysisFlags: string[] = [];
     if (lostSegment) { expertTags.push('[TCP Previous segment not captured]'); analysisFlags.push('lost_segment'); }
     if (ackedUnseenSegment) { expertTags.push('[TCP ACKed unseen segment]'); analysisFlags.push('ack_lost_segment'); }
@@ -1366,7 +1366,7 @@ function decodeTransportLayer(
     else if (status === 'warning') { expertTags.push('[TCP Out-Of-Order]'); analysisFlags.push('out_of_order'); }
 
     // When a subdissector claimed the payload, its summary *replaces* the TCP
-    // one - Wireshark shows "Application Data", not the ports and sequence
+    // one - the reference analyzer shows "Application Data", not the ports and sequence
     // numbers underneath it. Expert tags still lead, since they describe the
     // segment rather than its contents.
     const infoParts = tlsResult
@@ -1429,7 +1429,7 @@ function decodeTransportLayer(
             ],
           },
           {
-            // The data-offset nibble. Wireshark names it Header Length and
+            // The data-offset nibble. The reference analyzer names it Header Length and
             // shows both the byte count and the raw nibble it decoded from.
             name: 'Header Length',
             value: `${tcpHeaderLen} bytes (${tcpHeaderLen / 4})`,
@@ -1476,11 +1476,11 @@ function decodeTransportLayer(
     const isSsdp = srcPort === 1900 || dstPort === 1900;
 
     // The UDP header's Length field counts the 8-byte header itself, but
-    // Wireshark's "Len=" - like TCP's - reports payload only.
+    // The reference analyzer's "Len=" - like TCP's - reports payload only.
     const udpPayloadLen = Math.max(0, udpLen - 8);
 
     // Each subdissector that claims the payload replaces the generic
-    // "src → dst Len=n" summary entirely, the way Wireshark does.
+    // "src → dst Len=n" summary entirely, the way the reference analyzer does.
     let info: string | null = null;
     const extraLayers: ProtocolLayer[] = [];
 
@@ -1498,14 +1498,14 @@ function decodeTransportLayer(
       const requestLine = readAsciiRequestLine(rawBytes, udpPayloadStart);
       if (requestLine) {
         protocolLabel = 'SSDP';
-        // Wireshark's HTTP-style dissectors emit a trailing space after the
+        // The reference analyzer's HTTP-style dissectors emit a trailing space after the
         // request line; kept so the diff against tshark is exact.
         info = `${requestLine} `;
       }
     } else if (isQuic) {
       // A short header is only identifiable as QUIC in the context of a
       // handshake already seen on this flow, so packets that precede one stay
-      // plain UDP - which is what Wireshark reports for them too.
+      // plain UDP - which is what the reference analyzer reports for them too.
       const isShortHeaderCandidate = udpPayloadStart < rawBytes.length && (rawBytes[udpPayloadStart] & 0x80) === 0;
       const flowIsKnown = quicTracker?.isKnownFlow(srcIp, srcPort, dstIp, dstPort) ?? false;
 
@@ -1561,7 +1561,7 @@ function decodeTransportLayer(
           { name: 'Destination Port', value: dstPort, rawBytesRange: [transportOffset + 2, transportOffset + 3] },
           { name: 'Length', value: udpLen, rawBytesRange: [transportOffset + 4, transportOffset + 5] },
           {
-            // Checksum validation is deliberately off, and Wireshark words an
+            // Checksum validation is deliberately off, and the reference analyzer words an
             // unvalidated checksum exactly this way rather than hiding it.
             name: 'Checksum',
             value: `0x${(((rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7]) >>> 0).toString(16).padStart(4, '0')} [unverified]`,
@@ -1632,7 +1632,7 @@ function decodeTransportLayer(
     }
 
     if (icmpId !== undefined && icmpSeq !== undefined) {
-      // Wireshark shows both the big-endian wire value and the same 16 bits
+      // The reference analyzer shows both the big-endian wire value and the same 16 bits
       // reinterpreted little-endian, since many ping implementations
       // increment the sequence counter in host (LE) byte order.
       const seqLe = ((icmpSeq << 8) | (icmpSeq >> 8)) & 0xffff;

@@ -13,7 +13,7 @@
  * possible for Initial packets: their keys derive from the connection ID via
  * HKDF, and that is on the wire in the clear. See quicCrypto.ts. 0-RTT,
  * Handshake and 1-RTT packets need the TLS session secrets, so they carry no
- * tail here - and none in Wireshark either.
+ * tail here - and none in the reference analyzer either.
  */
 
 /** Long-header packet types for QUIC v1 (RFC 9000). */
@@ -57,7 +57,7 @@ function frameTypeName(type: number): string {
  *
  * Runs of PADDING collapse to a single entry - a packet padded out to the
  * 1200-byte minimum contains hundreds of them, and listing each would bury
- * everything else. Wireshark does the same, which is why its Info reads
+ * everything else. The reference analyzer does the same, which is why its Info reads
  * "PADDING, PING, PADDING" rather than one PADDING per byte.
  */
 function summarizeFrames(payload: Uint8Array): string[] {
@@ -219,7 +219,7 @@ export function dissectQuic(
   if (!isLongHeader) {
     // The key phase bit lives under header protection along with the reserved
     // bits and the packet-number length, so it cannot be read without the
-    // keys. Wireshark reports KP0 for a packet it hasn't decrypted, and so do
+    // keys. The reference analyzer reports KP0 for a packet it hasn't decrypted, and so do
     // we - reading the masked bit directly reports a random phase.
     return {
       info: knownConnectionId
@@ -256,7 +256,7 @@ export function dissectQuic(
   const typeBits = (firstByte >> 4) & 0x03;
   const packetType = (isV2 ? LONG_PACKET_TYPES_V2 : LONG_PACKET_TYPES_V1)[typeBits] ?? 'Unknown';
 
-  // Wireshark names whichever connection ID is non-empty, preferring the
+  // The reference analyzer names whichever connection ID is non-empty, preferring the
   // destination - a server's reply carries only its own source CID.
   const dcidHex = toHex(dcid);
   const scidHex = toHex(scid);
@@ -309,7 +309,7 @@ export function dissectQuic(
  * Dissects every QUIC packet coalesced into one UDP datagram.
  *
  * A datagram may carry several packets back to back - typically a Handshake
- * followed by a 1-RTT packet - and Wireshark summarizes the datagram with the
+ * followed by a 1-RTT packet - and the reference analyzer summarizes the datagram with the
  * *last* one, so that is what `info` reports. Connection IDs are collected
  * across all of them, since any long header in the datagram teaches us an ID
  * that later short headers will use.

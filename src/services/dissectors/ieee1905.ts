@@ -4,7 +4,7 @@
  * Common on any capture taken behind a consumer router with mesh extenders.
  *
  * Only the 8-byte CMDU header is parsed; the TLV payload that follows is not
- * summarized, because the message type alone is what Wireshark puts in the
+ * summarized, because the message type alone is what the reference analyzer puts in the
  * Info column.
  */
 import { ProtocolLayer } from '../../types/packet';
@@ -12,7 +12,7 @@ import { ProtocolLayer } from '../../types/packet';
 /**
  * Message types. 0x0000-0x00ff are IEEE 1905.1a itself; 0x8000 and up are the
  * Wi-Fi Alliance's EasyMesh (Multi-AP) extensions. The inconsistent
- * capitalization between the two blocks mirrors Wireshark's own tables, which
+ * capitalization between the two blocks mirrors the reference analyzer's own tables, which
  * this has to match exactly for the Info column to agree.
  */
 const MESSAGE_TYPE_NAMES: Record<number, string> = {

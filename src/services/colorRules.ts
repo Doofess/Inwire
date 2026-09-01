@@ -5,27 +5,27 @@ import { FilterEngine } from './filterEngine';
 import type { PacketTheme } from './packetThemes';
 
 /**
- * Wireshark's default coloring rules, in its order and under its exact names.
+ * The reference analyzer's default coloring rules, in its order and under its exact names.
  *
  * Order is the whole design: the chain is first-match-wins, so a retransmitted
  * RST is "Bad TCP" rather than "TCP RST", a plain RST on port 80 is "TCP RST"
  * rather than "HTTP", and an ARP broadcast is "ARP" rather than "Broadcast" -
  * results a protocol-to-color map cannot express at all. The rule *names* are
- * kept identical to Wireshark's because that is what makes a frame-by-frame
+ * kept identical to the reference analyzer's because that is what makes a frame-by-frame
  * diff against `tshark -e frame.coloring_rule.name` a meaningful test.
  *
  * Each rule carries two palettes, because NetView's packet list follows the
  * app theme and a single pair cannot serve both grounds:
  *
- *   - `lightBgColor`/`lightTextColor` are Wireshark's own defaults, taken
+ *   - `lightBgColor`/`lightTextColor` are the reference analyzer's own defaults, taken
  *     verbatim from its shipped `colorfilters` file and converted from its
  *     16-bit channels to hex. In light mode the list is pixel-comparable to
- *     Wireshark, including the details that look like bugs but aren't: the
+ *     The reference analyzer, including the details that look like bugs but aren't: the
  *     Broadcast rule really does paint a white row, and the five "something is
  *     wrong" rules really do use a dark slate fill even in the light profile.
- *   - `bgColor`/`textColor` are dark-adapted. Wireshark's pastel fills (TCP
+ *   - `bgColor`/`textColor` are dark-adapted. The reference analyzer's pastel fills (TCP
  *     #e7e5ff, UDP #daeeff, Broadcast pure white) read as glare on a dark UI,
- *     so each rule keeps Wireshark's *hue* and relative emphasis, re-derived
+ *     so each rule keeps the reference analyzer's *hue* and relative emphasis, re-derived
  *     for a dark ground.
  */
 export const DEFAULT_COLOR_RULES: ColorRule[] = [
@@ -151,7 +151,7 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     textColor: '#f78787',
     lightBgColor: '#12272e',
     lightTextColor: '#f78787',
-    // Off by default, matching Wireshark: NIC checksum offload means a frame
+    // Off by default, matching the reference analyzer: NIC checksum offload means a frame
     // captured on the host that sent it has not had its checksum filled in
     // yet, so validating locally-captured traffic paints half the list red.
     enabled: false,
@@ -234,7 +234,7 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
     filter: 'eth[0] & 1',
     bgColor: '#202020',
     textColor: '#7a7d76',
-    // White, exactly as Wireshark has it: a broadcast row is deliberately the
+    // White, exactly as the reference analyzer has it: a broadcast row is deliberately the
     // plainest thing in the list, distinguished only by its grey text.
     lightBgColor: '#ffffff',
     lightTextColor: '#babdb6',
@@ -272,8 +272,8 @@ export function resolveRuleColors(
   };
 }
 
-// Coloring rules are fixed to Wireshark's own chain (above) - there is no UI
-// path left to view or edit them, matching Wireshark parity rather than being
+// Coloring rules are fixed to the reference analyzer's own chain (above) - there is no UI
+// path left to view or edit them, matching the reference analyzer parity rather than being
 // a user-customizable feature.
 export class ColorRulesEngine {
   private compiled: CompiledRule[];
@@ -351,9 +351,9 @@ export class ColorRulesEngine {
 
   /**
    * The name of the first rule in the chain that matches, or undefined when
-   * none does. Wireshark exposes the same thing as `frame.coloring_rule.name`,
+   * none does. The reference analyzer exposes the same thing as `frame.coloring_rule.name`,
    * which makes it the cleanest way to assert that this chain agrees with
-   * Wireshark's frame for frame.
+   * The reference analyzer's frame for frame.
    */
   public getMatchedRuleName(packet: Packet): string | undefined {
     return this.matchRule(packet)?.name;
@@ -363,7 +363,7 @@ export class ColorRulesEngine {
    * How one packet should be painted under a packet theme.
    *
    * Returns `{}` for a packet matching no rule - the chain ends at Broadcast
-   * and has no catch-all, exactly as Wireshark's does. The caller paints those
+   * and has no catch-all, exactly as the reference analyzer's does. The caller paints those
    * rows with the theme's own surface, which is what keeps a list internally
    * consistent when the packet theme and the app theme disagree about ground.
    */

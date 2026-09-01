@@ -9,7 +9,7 @@ export interface L2DissectorResult {
   protocolLabel: string;
   info: string;
   layer: ProtocolLayer;
-  /** Dissected values under their Wireshark field names, for display filters. */
+  /** Dissected values under their conventional field names, for display filters. */
   fields?: Record<string, string | number>;
 }
 
@@ -40,7 +40,7 @@ export function dissectArp(rawBytes: Uint8Array, l3Offset: number): L2DissectorR
     `unknown (${opcode})`;
 
   // A host announcing its own address - sender and target IP equal - is a
-  // gratuitous ARP, and Wireshark says so rather than asking "who has" an
+  // gratuitous ARP, and the reference analyzer says so rather than asking "who has" an
   // address the sender already owns.
   const isGratuitous = senderIp === targetIp && (opcode === 1 || opcode === 2);
 
@@ -142,7 +142,7 @@ export function dissectStp(rawBytes: Uint8Array, llcOffset: number): L2Dissector
   const bridge = formatBridgeId(rawBytes, bpdu + 17);
   const portId = (rawBytes[bpdu + 25] << 8) | rawBytes[bpdu + 26];
 
-  // Wireshark's own abbreviations for the BPDU type, and note the *double*
+  // The reference analyzer's own abbreviations for the BPDU type, and note the *double*
   // spaces separating the three sections of the summary.
   const typeName = bpduType === 0x02 ? 'RST' : 'Conf.';
   const info = `${typeName} Root = ${root.text}  Cost = ${rootCost}  Port = 0x${portId.toString(16).padStart(4, '0')}`;
@@ -194,7 +194,7 @@ export function dissectStp(rawBytes: Uint8Array, llcOffset: number): L2Dissector
 
 /**
  * Ethertypes we can name in the Protocol column but do not (yet) dissect.
- * Wireshark still shows a real protocol name for these; without the mapping
+ * The reference analyzer still shows a real protocol name for these; without the mapping
  * they would inherit the caller's fallback and be labeled something wrong.
  */
 const ETHERTYPE_LABELS: Record<number, string> = {

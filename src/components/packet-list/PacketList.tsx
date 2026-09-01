@@ -179,7 +179,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   // Columns the user has dragged; these opt out of auto-sizing for good.
   const userSizedColumnsRef = useRef<Set<ColumnKey>>(new Set());
 
-  // Address columns auto-size to their widest value, Wireshark-style: an IPv6
+  // Address columns auto-size to their widest value, reference-analyzer style: an IPv6
   // address is far too wide for a fixed default, and truncating it to an
   // ellipsis hides the part that distinguishes one host from another. A column
   // the user has dragged is theirs from then on and stops auto-sizing.
@@ -917,7 +917,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     }`}
                     // The matched rule's foreground applies to the whole row,
                     // including the Protocol and Length cells - that is how
-                    // Wireshark's coloring reads at a glance. Individual cells
+                    // The reference analyzer's coloring reads at a glance. Individual cells
                     // below inherit rather than setting their own color.
                     style={
                       !isSelected
@@ -953,7 +953,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     </td>
                     )}
 
-                    {/* Source - address only; Wireshark keeps ports in the Info column */}
+                    {/* Source - address only; the reference analyzer keeps ports in the Info column */}
                     {columns.source && (
                     <td className={`px-2 ${density.cell} ${alignCell} whitespace-nowrap truncate`} title={packet.source}>
                       {packet.source}
@@ -980,7 +980,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     <td className={`pl-2 pr-3 ${density.cell} whitespace-nowrap text-right tabular-nums`}>{packet.length}</td>
                     )}
 
-                    {/* Info - absorbs the remaining width and clips; Wireshark
+                    {/* Info - absorbs the remaining width and clips; the reference analyzer
                         scrolls the list horizontally rather than ellipsising. */}
                     <td className={`px-4 ${density.cell} ${alignCell} whitespace-nowrap overflow-hidden`} title={packet.info}>
                       {packet.info}

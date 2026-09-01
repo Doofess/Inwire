@@ -1,5 +1,5 @@
 /**
- * DNS message summaries in Wireshark's Info format:
+ * DNS message summaries in the reference analyzer's Info format:
  *
  *   Standard query 0x060a HTTPS ssl.gstatic.com
  *   Standard query response 0x39a2 A ssl.gstatic.com A 142.250.75.195
@@ -84,7 +84,7 @@ function readName(bytes: Uint8Array, messageStart: number, offset: number, jumps
   return { name: labels.join('.'), nextOffset: nextOffset === -1 ? cursor : nextOffset };
 }
 
-/** Renders the record data the way Wireshark summarizes it in the Info column. */
+/** Renders the record data the way the reference analyzer summarizes it in the Info column. */
 function formatRdata(
   bytes: Uint8Array,
   messageStart: number,
@@ -125,7 +125,7 @@ function formatRdata(
 }
 
 /**
- * The DNS flags word, as the sixteen-bit rows Wireshark draws beneath it.
+ * The DNS flags word, as the sixteen-bit rows the reference analyzer draws beneath it.
  *
  * The row set is conditional, not a fixed template: a query shows six rows,
  * while a response additionally carries Authoritative, Recursion available,
@@ -188,7 +188,7 @@ function dnsFlagFields(flags: number, flagsOffset: number): ProtocolField[] {
 
   if (isResponse) {
     // RCODE_NAMES deliberately has no entry for 0: the Info string must not
-    // append "No error" to a successful response, matching Wireshark's
+    // append "No error" to a successful response, matching the reference analyzer's
     // packet-list column. The detail tree does name it, so it is spelled out
     // here rather than by adding a 0 that would leak into the Info string.
     const rcodeName = rcode === 0 ? 'No error' : RCODE_NAMES[rcode] ?? 'Unknown';
@@ -199,11 +199,11 @@ function dnsFlagFields(flags: number, flagsOffset: number): ProtocolField[] {
 }
 
 /**
- * The Queries node: one child per question, worded as Wireshark words it
+ * The Queries node: one child per question, worded as the reference analyzer words it
  * (`www.googleapis.com: type AAAA, class IN`).
  *
  * Returns nothing when there are no questions, rather than an empty parent -
- * Wireshark omits the node entirely in that case.
+ * The reference analyzer omits the node entirely in that case.
  */
 function dnsQuerySection(bytes: Uint8Array, messageStart: number, questionCount: number): ProtocolField[] {
   if (questionCount < 1) return [];
@@ -313,7 +313,7 @@ export function dissectDns(bytes: Uint8Array, messageStart: number): string | nu
   }
 
   // Answers, then authority records - a negative answer carries its SOA in the
-  // authority section, and Wireshark still shows it.
+  // authority section, and the reference analyzer still shows it.
   for (let i = 0; i < answerCount + authorityCount && cursor < bytes.length; i++) {
     const { nextOffset } = readName(bytes, messageStart, cursor);
     cursor = nextOffset;

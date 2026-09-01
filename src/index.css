@@ -407,7 +407,7 @@
 
    Only the vertical bar goes. The horizontal one stays, because the Info
    column deliberately runs off the right edge and is scrolled to, the way
-   Wireshark does it, and nothing else offers that axis.
+   The reference analyzer does it, and nothing else offers that axis.
 
    Firefox has no per-axis equivalent of ::-webkit-scrollbar:vertical -
    scrollbar-width is all-or-nothing - so it is deliberately left alone there

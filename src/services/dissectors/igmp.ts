@@ -255,11 +255,11 @@ function pushChecksum(fields: ProtocolField[], offset: number, checksum: number,
 }
 
 /**
- * The per-record phrase Wireshark puts in the Info column.
+ * The per-record phrase the reference analyzer puts in the Info column.
  *
  * The source-less forms are matched against `tshark -V`. A record that does
  * carry source addresses gets a descriptive phrase built from the record type
- * instead of a guessed copy of Wireshark's wording, which is not reproduced
+ * instead of a guessed copy of the reference analyzer's wording, which is not reproduced
  * here because no capture was available to verify it against.
  */
 function describeGroupRecord(

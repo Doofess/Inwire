@@ -13,7 +13,7 @@ import { L2DissectorResult } from './l2';
  * two-letter subtype prefixes, and which subtypes render as hex rather than
  * text - was read off `tshark -T fields -e _ws.col.info` for frames built to
  * cover all 7x7 chassis/port subtype combinations, so NetView's Info column
- * matches Wireshark's character for character rather than approximating it.
+ * matches the reference analyzer's character for character rather than approximating it.
  */
 
 const TLV_END = 0;
@@ -29,12 +29,12 @@ const TLV_MANAGEMENT_ADDRESS = 8;
 /**
  * Chassis and Port ID subtypes are numbered differently for the same names -
  * "Port component" is chassis 3 but port 2 - so the two tables cannot be
- * merged. `hex` marks the subtypes Wireshark renders as raw hex digits
+ * merged. `hex` marks the subtypes the reference analyzer renders as raw hex digits
  * instead of text.
  */
 interface SubtypeSpec {
   name: string;
-  /** Wireshark's two-letter Info-column prefix. */
+  /** The reference analyzer's two-letter Info-column prefix. */
   prefix: string;
   render?: 'hex' | 'mac' | 'address';
 }
@@ -321,7 +321,7 @@ export function dissectLldp(rawBytes: Uint8Array, offset: number): L2DissectorRe
 
   if (fields.length === 0) return null;
 
-  // Wireshark's Info column, exactly: chassis, port, TTL, then System Name
+  // The reference analyzer's Info column, exactly: chassis, port, TTL, then System Name
   // and System Description when those TLVs are present.
   const parts: string[] = [];
   if (chassisSummary) parts.push(chassisSummary);

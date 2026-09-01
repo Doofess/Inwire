@@ -1,11 +1,11 @@
 /**
- * TLS record-layer dissection, enough to produce Wireshark's Protocol label
+ * TLS record-layer dissection, enough to produce the reference analyzer's Protocol label
  * ("TLSv1.2") and Info summary ("Application Data", "Client Hello (SNI=...)")
  * without decrypting anything.
  *
  * This exists because guessing "port 443 means TLS" is wrong often enough to
  * matter: a bare ACK, a keep-alive, or a retransmission on a TLS connection
- * carries no TLS record at all, and Wireshark labels those frames TCP. Only
+ * carries no TLS record at all, and the reference analyzer labels those frames TCP. Only
  * a frame that actually contains a well-formed record header gets a TLS label.
  */
 
@@ -18,7 +18,7 @@ const CONTENT_TYPE_APPLICATION_DATA = 23;
  * Record-layer version -> display name. TLS 1.3 deliberately pins the record
  * layer at 0x0303 ("TLSv1.2") for middlebox compatibility and negotiates the
  * real version in a ClientHello extension, so a 1.3 connection still shows
- * TLSv1.2 here until the handshake is parsed - which is exactly what Wireshark
+ * TLSv1.2 here until the handshake is parsed - which is exactly what the reference analyzer
  * shows too.
  */
 const VERSION_NAMES: Record<number, string> = {
@@ -126,7 +126,7 @@ export function dissectTls(bytes: Uint8Array, payloadStart: number, payloadEnd: 
       recordLength <= 0x4800;
     if (!isRecord) break;
 
-    // Wireshark labels the frame with the *first* record's version.
+    // The reference analyzer labels the frame with the *first* record's version.
     if (protocolLabel === null) protocolLabel = versionName;
 
     const recordBody = offset + 5;

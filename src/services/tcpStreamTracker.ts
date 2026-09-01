@@ -83,7 +83,7 @@ export class TcpStreamTracker {
   }
 
   /**
-   * Returns the sequence number relative to this direction's base (Wireshark's
+   * Returns the sequence number relative to this direction's base (the reference analyzer's
    * default display), establishing that base the first time a direction is
    * seen. Wraparound-safe: uses unsigned modular subtraction rather than naive
    * arithmetic, since raw TCP sequence numbers legitimately wrap past 2**32 on
@@ -95,7 +95,7 @@ export class TcpStreamTracker {
    *   - SYN seen: base = the SYN's own sequence number, so the SYN reports
    *     Seq=0 and the first byte of data reports Seq=1.
    *   - Mid-stream capture (no SYN): base = first seen sequence *minus one*,
-   *     so the first observed segment also reports Seq=1. Wireshark does this
+   *     so the first observed segment also reports Seq=1. The reference analyzer does this
    *     so that a capture started mid-connection reads the same way as one
    *     that caught the handshake.
    */
@@ -125,7 +125,7 @@ export class TcpStreamTracker {
    * Returns the shift to apply to this direction's advertised window, or 0
    * when scaling isn't in effect. A mid-stream capture never saw either SYN,
    * so nothing scales and the raw window value is displayed as-is - matching
-   * what Wireshark shows when it can't observe the negotiation.
+   * what the reference analyzer shows when it can't observe the negotiation.
    */
   public getWindowScaleShift(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
     const own = this.windowScaleShift.get(this.directionKey(srcIp, srcPort, dstIp, dstPort));
@@ -135,7 +135,7 @@ export class TcpStreamTracker {
 
   /**
    * True when this segment's sequence number is ahead of where the sender left
-   * off, meaning the capture missed whatever filled the gap - Wireshark's
+   * off, meaning the capture missed whatever filled the gap - the reference analyzer's
    * "[TCP Previous segment not captured]". Skipped for the first segment of a
    * direction, which has no predecessor to be missing.
    */
@@ -151,13 +151,13 @@ export class TcpStreamTracker {
 
   /**
    * True when this packet acknowledges data the capture never contained -
-   * Wireshark's "[TCP ACKed unseen segment]". Compares against how far the
+   * The reference analyzer's "[TCP ACKed unseen segment]". Compares against how far the
    * *peer* direction has actually been seen to send.
    *
    * Only an ack that *advances* past the highest one already flagged counts.
    * A gap is reported once, when it is first revealed; a burst of ACKs that
    * all name the same missing byte describes one gap, not several, and
-   * Wireshark flags only the first. Without this, a retransmitted or
+   * The reference analyzer flags only the first. Without this, a retransmitted or
    * duplicate ACK re-flags a gap that was already accounted for.
    */
   public isAckingUnseenSegment(
@@ -206,7 +206,7 @@ export class TcpStreamTracker {
 
   /**
    * A plain-English summary of handshake progress - deliberately not
-   * Wireshark's internal numeric completeness bitmask, since that's an
+   * The reference analyzer's internal numeric completeness bitmask, since that's an
    * implementation detail nobody reading this UI needs to decode.
    */
   public getConversationCompleteness(streamId: number): string {

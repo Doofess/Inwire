@@ -912,7 +912,7 @@ export default function App() {
     );
   }, [agentInterfaces, selectedInterfaces]);
 
-  // Live-capture relative-time clock (Wireshark-style): resets whenever the
+  // Live-capture relative-time clock (reference-analyzer style): resets whenever the
   // packet buffer is emptied and a fresh capture begins.
   const captureStartRef = useRef<number | null>(null);
   const lastPacketTimeRef = useRef<number | null>(null);

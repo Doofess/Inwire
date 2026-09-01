@@ -4,9 +4,9 @@
  *   npx tsx scripts/lldp/dissect.ts
  *
  * Every expected string below is the literal output of
- * `tshark -T fields -e _ws.col.info` (Wireshark 4.6.8) for the frame beside
+ * `tshark -T fields -e _ws.col.info` (the reference analyzer 4.6.8) for the frame beside
  * it, so a failure here means NetView's Info column would disagree with
- * Wireshark's for that frame.
+ * The reference analyzer's for that frame.
  *
  * The first 49 cases sweep every chassis-subtype x port-subtype combination
  * (7 x 7), which is what pins down the two-letter prefixes and the subtypes

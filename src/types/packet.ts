@@ -30,7 +30,7 @@ export interface ProtocolField {
   isExpanded?: boolean;
 
   /**
-   * Renders this field as Wireshark's dotted-binary row - `0110 .... =
+   * Renders this field as the reference analyzer's dotted-binary row - `0110 .... =
    * Version: 6` - instead of the plain `name: value` line.
    *
    * `totalBits` is the width of the binary string to draw and is emitted by
@@ -47,7 +47,7 @@ export interface ProtocolField {
 
   /**
    * A synthetic field the dissector computed rather than read off the wire -
-   * Wireshark shows these in [brackets]. They describe no bytes, so the tree
+   * The reference analyzer shows these in [brackets]. They describe no bytes, so the tree
    * must not offer a byte highlight for them.
    */
   generated?: boolean;
@@ -90,7 +90,7 @@ export interface Packet {
   protocol: ProtocolType;
   /**
    * The free-form protocol name shown in the Protocol column, matching what
-   * Wireshark displays for the top-most dissected layer: "TLSv1.2", "ICMPv6",
+   * The reference analyzer displays for the top-most dissected layer: "TLSv1.2", "ICMPv6",
    * "SSDP", "ieee1905". `protocol` above stays the coarse, closed-union key
    * that filters and color rules match on; this is display only. Absent when
    * the two would be identical.
@@ -99,11 +99,11 @@ export interface Packet {
   /**
    * Decimal places the capture's timestamps are meaningful to - 6 for a
    * microsecond capture, 9 for nanosecond. Drives how many digits the Time
-   * column renders, the way Wireshark follows the file's own resolution.
+   * column renders, the way the reference analyzer follows the file's own resolution.
    */
   tsPrecision?: number;
   /**
-   * Wireshark's tcp.analysis.* field names that fired for this frame
+   * The reference analyzer's tcp.analysis.* field names that fired for this frame
    * ("retransmission", "lost_segment", "keep_alive", ...). Empty or absent
    * when the segment looks normal. Display filters and color rules match on
    * these, which is how the "Bad TCP" rule distinguishes a genuinely broken
@@ -112,7 +112,7 @@ export interface Packet {
   analysisFlags?: string[];
   /**
    * The protocol layers actually dissected in this frame, lowercase, outermost
-   * first - Wireshark's `frame.protocols` (["eth","ethertype","ipv6","tcp"]).
+   * first - the reference analyzer's `frame.protocols` (["eth","ethertype","ipv6","tcp"]).
    *
    * Display filters and color rules test protocol *presence* against this
    * rather than against `protocol`, which names only the top-most layer. A
@@ -122,7 +122,7 @@ export interface Packet {
    */
   frameProtocols?: string[];
   /**
-   * Dissected field values under their Wireshark names ("tcp.flags",
+   * Dissected field values under their conventional names ("tcp.flags",
    * "ipv6.hlim", "icmpv6.type"), so display filters can reference any field a
    * dissector produced without the filter engine needing a case for each one.
    */

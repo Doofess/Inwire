@@ -1,5 +1,5 @@
 /**
- * Diffs NetView's own dissection of a capture file against Wireshark's, column
+ * Diffs NetView's own dissection of a capture file against tshark's, column
  * by column, so packet-list parity work has a hard pass/fail signal instead of
  * a side-by-side screenshot.
  *
@@ -23,7 +23,7 @@ import type { Packet } from '../../src/types/packet';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CAPTURE = 'C:/Users/Rotem/Downloads/tmp.pcapng';
 
-interface WiresharkRow {
+interface GroundTruthRow {
   number: number;
   timeRelative: string;
   source: string;
@@ -33,8 +33,8 @@ interface WiresharkRow {
   info: string;
 }
 
-function loadGroundTruth(): { rows: WiresharkRow[]; colors: Map<number, string> } {
-  const rows = readFileSync(join(HERE, 'wireshark.psv'), 'utf8')
+function loadGroundTruth(): { rows: GroundTruthRow[]; colors: Map<number, string> } {
+  const rows = readFileSync(join(HERE, 'ground-truth.psv'), 'utf8')
     .split(/\r?\n/)
     .filter(Boolean)
     .map(line => {
@@ -54,7 +54,7 @@ function loadGroundTruth(): { rows: WiresharkRow[]; colors: Map<number, string> 
     });
 
   const colors = new Map<number, string>();
-  for (const line of readFileSync(join(HERE, 'wireshark_colors.psv'), 'utf8').split(/\r?\n/)) {
+  for (const line of readFileSync(join(HERE, 'ground-truth-colors.psv'), 'utf8').split(/\r?\n/)) {
     if (!line) continue;
     const [number, rule] = line.split('|');
     colors.set(Number(number), rule ?? '');
@@ -72,9 +72,9 @@ function netviewProtocol(p: Packet): string {
 interface ColumnSpec {
   name: string;
   ours: (p: Packet) => string;
-  theirs: (r: WiresharkRow) => string;
+  theirs: (r: GroundTruthRow) => string;
   /** Frames this column is knowingly not expected to match yet. */
-  knownGap?: (r: WiresharkRow) => boolean;
+  knownGap?: (r: GroundTruthRow) => boolean;
 }
 
 const COLUMNS: ColumnSpec[] = [
@@ -101,7 +101,7 @@ async function main() {
   const packets = await PcapService.parsePcapFile(file);
 
   console.log(`capture:   ${capturePath}`);
-  console.log(`wireshark: ${rows.length} frames`);
+  console.log(`reference: ${rows.length} frames`);
   console.log(`netview:   ${packets.length} frames`);
 
   if (packets.length !== rows.length) {
@@ -118,7 +118,7 @@ async function main() {
       const ours = column.ours(packets[i]);
       const theirs = column.theirs(rows[i]);
       if (ours !== theirs) {
-        diffs.push(`  #${rows[i].number}\n    wireshark: ${theirs}\n    netview:   ${ours}`);
+        diffs.push(`  #${rows[i].number}\n    reference: ${theirs}\n    netview:   ${ours}`);
       }
     }
 
@@ -147,7 +147,7 @@ async function main() {
     const theirs = colors.get(rows[i].number) ?? '';
     const ours = engine.getMatchedRuleName(packets[i]) ?? '';
     if (ours !== theirs) {
-      colorDiffs.push(`  #${rows[i].number}\n    wireshark: ${theirs || '(no rule)'}\n    netview:   ${ours || '(no rule)'}`);
+      colorDiffs.push(`  #${rows[i].number}\n    reference: ${theirs || '(no rule)'}\n    netview:   ${ours || '(no rule)'}`);
     }
   }
   if (colorDiffs.length > 0) {
