@@ -7,6 +7,18 @@ interface ZoomControlsProps {
   onZoomOut?: () => void;
   /** Return to the default view. Only shown when there is something to undo. */
   onReset?: () => void;
+  /**
+   * Rendered above the zoom buttons, in the same column.
+   *
+   * A slot rather than a second absolutely-positioned stack beside this one:
+   * two independent `absolute right-2 bottom-2` containers would have to agree
+   * on each other's height to avoid overlapping, and would drift the moment
+   * either gained a button. One flex column cannot disagree with itself.
+   *
+   * The map passes its projection switcher here. The timeline chart passes
+   * nothing and renders exactly as before.
+   */
+  leading?: React.ReactNode;
 }
 
 /**
@@ -32,7 +44,7 @@ interface ZoomControlsProps {
  *   - **The same shell as the map's location counter**, so every floating
  *     control in the app is recognisably the same kind of object.
  */
-export const ZoomControls: React.FC<ZoomControlsProps> = ({ onZoomIn, onZoomOut, onReset }) => {
+export const ZoomControls: React.FC<ZoomControlsProps> = ({ onZoomIn, onZoomOut, onReset, leading }) => {
   const buttonClass =
     'flex h-9 w-9 items-center justify-center rounded-full border border-border '
     + 'bg-card/80 text-foreground shadow-sm backdrop-blur-sm transition-colors '
@@ -47,6 +59,7 @@ export const ZoomControls: React.FC<ZoomControlsProps> = ({ onZoomIn, onZoomOut,
   // free.
   return (
     <div className="absolute right-2 bottom-2 z-10 flex flex-col gap-2 pointer-events-auto">
+      {leading}
       {onZoomIn && (
         <button type="button" onClick={onZoomIn} aria-label="Zoom in" title="Zoom in" className={buttonClass}>
           <TbPlus className="h-4 w-4" />

@@ -1,4 +1,4 @@
-import type { Map as MapLibreMap } from 'maplibre-gl';
+import type { Map as MapLibreMap, SkySpecification } from 'maplibre-gl';
 import { mixHex, isDarkColor, contrastRatio } from '../../lib/colorMix';
 
 /**
@@ -99,6 +99,47 @@ export function waterColorFor(background: string, neutral: string): string {
     if (contrastRatio(candidate, background) >= MIN_WATER_CONTRAST) return candidate;
   }
   return mixHex(neutral, background, 0.9);
+}
+
+/**
+ * The sky behind the globe, and the haze on its horizon.
+ *
+ * Only visible in globe projection, where the planet no longer fills the
+ * viewport and something has to occupy the space around it. Left to itself
+ * MapLibre draws a fixed blue atmosphere, which is the same mistake the stock
+ * basemap made: one theme's colours imposed on all four.
+ *
+ * The composition, from outside in:
+ *
+ *   `sky-color`      the void. A step DARKER than the app background on light
+ *                    themes and the background itself on dark ones - space
+ *                    reads as space by being darker than the thing in front of
+ *                    it, and on Day a literal white void makes the globe look
+ *                    like a hole rather than a planet.
+ *   `horizon-color`  the accent, at the one place it pays for itself. This is
+ *                    the rim-light around the planet's edge, and it is the same
+ *                    argument as the coastline in `applyThemeToBasemap`: a
+ *                    hairline of the theme's colour is what stops a neutral map
+ *                    reading as a map that failed to load.
+ *   `fog-color`      the haze the surface fades into near the limb, mixed off
+ *                    the background so the terminator is a gradient rather than
+ *                    a cut edge.
+ *
+ * `atmosphere-blend` is deliberately below 1: at full strength the glow washes
+ * over the coastline the basemap just spent its only saturated colour on.
+ */
+export function skyFor(tokens: BasemapTokens): SkySpecification {
+  const dark = isDarkColor(tokens.background);
+  return {
+    // Light themes get a deepened ground so the planet sits IN something.
+    'sky-color': dark ? tokens.background : mixHex(tokens.mutedForeground, tokens.background, 0.55),
+    'sky-horizon-blend': 0.6,
+    'horizon-color': tokens.accent,
+    'horizon-fog-blend': 0.55,
+    'fog-color': mixHex(tokens.mutedForeground, tokens.background, 0.35),
+    'fog-ground-blend': 0.7,
+    'atmosphere-blend': dark ? 0.75 : 0.55,
+  };
 }
 
 /**

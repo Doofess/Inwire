@@ -16,14 +16,16 @@ import { themePalette } from '../../services/themePalettes';
 import { protocolColor } from '../../services/protocolColors';
 import { greatCirclePath, splitAtAntimeridian } from '../../lib/greatCircle';
 import { aggregateRoutes } from './geoRoutes';
-import { applyThemeToBasemap } from './mapTheme';
+import { applyThemeToBasemap, skyFor } from './mapTheme';
 import { GeoLocationCounter, type GeoPlace } from './GeoLocationCounter';
 import { geoSession } from './geoSession';
 import { prefersReducedMotion } from '../../lib/motion';
 import { nameResolutionStore } from '../../services/interfacePrefs';
-import { usePreferenceStore } from '../../services/preferenceStore';
+import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
+import { mapProjectionStore, type MapProjectionMode } from '../../services/mapPrefs';
 import type { WidgetVariant } from './dashboardWidgets';
 import { ZoomControls } from './ZoomControls';
+import { ProjectionSwitcher } from './ProjectionSwitcher';
 
 // MapLibre's glyph renderer doesn't shape or bidi-reorder Arabic/Hebrew
 // script on its own - without this plugin, place labels in RTL languages
@@ -62,6 +64,38 @@ const CONNECTIONS_SYNC_THROTTLE_MS = 600;
 // How many points to sample along each great circle. Enough that the curve is
 // smooth at continental scale without turning sixty routes into thousands of
 // coordinates the source has to re-serialise on every sync.
+/**
+ * The camera pen, and why it only applies to one projection.
+ *
+ * +/-85, not +/-90, because that is where Web Mercator ends - the poles sit at
+ * infinity in this projection.
+ *
+ * +/-179.9, not +/-180, because a longitude range spanning the full 360 degrees
+ * crashes maplibre-gl 6.5.0 outright: "Cannot read properties of null
+ * (reading '0')" out of Transform._calcMatrices during the first resize, which
+ * takes the whole React tree down with it. Verified by bisection - the throw
+ * depends only on the longitude span reaching 360.
+ *
+ * A globe has no such extent to be penned inside and must be free to spin all
+ * the way round, so it runs with no bounds at all; see applyProjectionMode.
+ */
+const MERCATOR_BOUNDS: [[number, number], [number, number]] = [
+  [-179.9, -85],
+  [179.9, 85],
+];
+
+/**
+ * How visible a marker stays when it is on the far side of the globe.
+ *
+ * MapLibre fades rather than hides, and the default (0.2) leaves a scatter of
+ * ghost pins showing through the planet, which reads as a rendering fault
+ * rather than as depth. Zero is the honest answer: a host behind the Earth is
+ * not visible, and the ones in front are the ones being looked at.
+ *
+ * Has no effect under Mercator, where nothing is ever occluded.
+ */
+const MARKER_OPACITY_WHEN_COVERED = 0;
+
 const ARC_STEPS = 48;
 
 /**
@@ -74,6 +108,59 @@ const ARC_STEPS = 48;
  * next to each other.
  */
 const ARC_CURVATURE = 0.5;
+
+/**
+ * Puts the map into one projection or the other.
+ *
+ * Written as a plain function over a map instance rather than an effect body,
+ * because it has two callers that must not drift: the mode effect below, and
+ * map creation, where the same settings have to be applied to a brand new
+ * instance.
+ *
+ * `maxBounds` is the load-bearing part. It exists to stop the flat map being
+ * dragged off into empty space (there are no world copies to pan into), but a
+ * bounded globe cannot be rotated past its own edge - so entering globe clears
+ * it and returning to flat puts it back. Clearing it is also the reason the
+ * crash documented on MERCATOR_BOUNDS has to be re-checked in globe: this is
+ * the code path that removes the workaround.
+ */
+function applyProjectionMode(
+  map: maplibregl.Map,
+  mode: MapProjectionMode,
+  styleReady: boolean,
+): void {
+  // Bounds are cleared BEFORE projecting and restored AFTER, so the camera is
+  // never penned inside an extent that does not apply to the projection it is
+  // currently in.
+  if (mode === 'globe') map.setMaxBounds(null);
+
+  // `setProjection` is style state and throws "Style is not done loading"
+  // outright if the style is not ready - which, on a freshly constructed map,
+  // it is not. React commits the mode effect long before MapLibre has fetched
+  // a style over the network, so calling it unguarded took the whole GeoMap
+  // subtree down with an uncaught error.
+  //
+  // The readiness flag is passed in rather than read from `map.isStyleLoaded()`
+  // because those are two different questions, and using the second to answer
+  // the first is a bug that already cost an afternoon: `isStyleLoaded()` is
+  // TRUE only once every source has loaded too, while `setProjection` needs
+  // nothing more than the style object itself, which exists the moment
+  // `style.load` fires. Guarding on `isStyleLoaded()` therefore rejected the
+  // one call that matters - the reapply inside the `style.load` handler - and
+  // a theme change silently dropped the map back to Mercator while the
+  // preference still said globe.
+  //
+  // Skipping is safe rather than lossy: `style.load` calls this again, and has
+  // to anyway, since setStyle resets the projection on every theme change.
+  if (styleReady) map.setProjection({ type: mode });
+
+  if (mode === 'mercator') {
+    map.setMaxBounds(MERCATOR_BOUNDS);
+    // Pitch is kept on in both modes, but a flat map tilted to 85 degrees at
+    // low zoom is mostly horizon. Ease it back rather than forbidding it.
+    if (map.getPitch() > 60) map.setPitch(60);
+  }
+}
 
 interface GeoMapProps {
   packets: Packet[];
@@ -301,6 +388,15 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   const connectionsSyncTimeoutRef = useRef<number | null>(null);
   const isCameraMovingRef = useRef(false);
   /**
+   * Whether the current style object exists yet.
+   *
+   * Not the same as `map.isStyleLoaded()` - see applyProjectionMode. Set when
+   * `style.load` fires and cleared immediately before every `setStyle`, which
+   * is the window in which the old style is gone and the new one has not
+   * arrived.
+   */
+  const styleReadyRef = useRef(false);
+  /**
    * Bumped every time a NEW MapLibre instance is built.
    *
    * The markers below are attached to a map, not to this component, and the
@@ -361,6 +457,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   // because this component is unmounted whenever the dashboard is minimized or
   // the widget is switched off. See geoSession for what that used to cost.
   const [nameResolution] = usePreferenceStore(nameResolutionStore);
+  const [projectionMode, setProjectionMode] = usePreferenceValue(mapProjectionStore);
 
   const sessionRef = useRef(geoSession());
   const placesRef = { current: sessionRef.current.places };
@@ -715,6 +812,35 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     scheduleConnectionsSync();
   }, [routes, themeKey]);
 
+  /**
+   * Follows the projection preference, including when another surface changes
+   * it.
+   *
+   * Keyed on `mapEpoch` as well as the mode, for the same reason the marker
+   * effects are: a rebuilt map is a new instance that has never been told which
+   * projection it is in.
+   *
+   * The camera move is separate from the projection change and deliberately
+   * modest - flattening the pitch and squaring the bearing, not flying
+   * anywhere. Entering globe from a tilted, rotated flat view is disorienting
+   * enough without also being moved across the world, and the whole point of
+   * `geoSession`'s stored camera is that the map stays where you left it.
+   */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    applyProjectionMode(map, projectionMode, styleReadyRef.current);
+
+    const settled = { pitch: 0, bearing: 0 };
+    // A camera flight is the most vestibular-hostile thing this panel does, and
+    // it is JavaScript rather than CSS, so the blanket reduced-motion rule
+    // cannot reach it - the same reasoning as the location counter's flight.
+    if (prefersReducedMotion()) map.jumpTo(settled);
+    else map.easeTo({ ...settled, duration: 600 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectionMode, mapEpoch]);
+
   // Create the map once on mount.
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -733,27 +859,14 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // horizontally by default, so panning east just kept handing back
       // another copy of the same continents.
       renderWorldCopies: false,
-      // With the copies gone the lone world can be dragged off into empty
-      // space, so pen the camera inside the map's own extent. Two constants
-      // here are load-bearing and neither is a typo:
-      //   +/-85, not +/-90, because that is where Web Mercator ends - the
-      //   poles sit at infinity in this projection.
-      //   +/-179.9, not +/-180, because a longitude range spanning the full
-      //   360 degrees crashes maplibre-gl 6.5.0 outright: it throws
-      //   "Cannot read properties of null (reading '0')" out of
-      //   Transform._calcMatrices during the very first resize, which takes
-      //   the whole React tree down with it. Verified by bisection - the
-      //   throw depends only on the longitude span reaching 360, not on the
-      //   latitude range and not on renderWorldCopies. The 0.1 degree sliver
-      //   this gives up is sub-pixel at every zoom this map allows.
-      maxBounds: [
-        [-179.9, -85],
-        [179.9, 85],
-      ],
+      // Set for real by applyProjectionMode once the instance exists, since
+      // globe and Mercator want different answers. See MERCATOR_BOUNDS.
       attributionControl: false,
-      dragRotate: false,
-      pitchWithRotate: false,
-      touchPitch: false,
+      // Rotation and tilt, previously off outright. A globe that cannot be
+      // spun is a picture of a globe, and the flat map gains the same depth
+      // from being tilted - the great circles stop reading as decoration and
+      // start reading as paths over a surface.
+      maxPitch: 85,
       // No cooperative gestures, in either size. They existed to stop the wheel
       // being swallowed by the compact card while the sidebar around it is
       // being scrolled, and the price was a "use ctrl + scroll to zoom" overlay
@@ -762,12 +875,20 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // sidebar means putting the pointer beside the map rather than on it.
     });
 
-    map.touchZoomRotate.disableRotation();
     // Both have to happen on every style load: setStyle replaces the entire
     // style object, discarding the custom layers AND every paint property this
     // has written.
     map.on("style.load", () => {
+      styleReadyRef.current = true;
       applyThemeToBasemap(map, basemapTokensRef.current);
+      // The sky is part of the style, so setStyle discards it exactly like the
+      // basemap paint and the connection layers. Everything that has to be
+      // reapplied together is reapplied here, together.
+      map.setSky(skyFor(basemapTokensRef.current));
+      // Projection is a property of the style, not of the map, so a theme
+      // change resets it to Mercator. Reapplied here for the same reason the
+      // sky and the connection layers are.
+      applyProjectionMode(map, mapProjectionStore.get(), true);
       syncConnectionsLayer();
     });
     map.on("movestart", () => {
@@ -786,6 +907,8 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     });
 
     mapRef.current = map;
+    // Bounds and pitch for whichever projection the constructor just opened in.
+    applyProjectionMode(map, mapProjectionStore.get(), styleReadyRef.current);
     // A fresh instance. The marker effects key on this rather than on
     // `mapRef`, which cannot wake them.
     setMapEpoch((n) => n + 1);
@@ -829,6 +952,8 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // immediately: the two differ in label placement and halo strategy, not
     // only in colour, so starting from the one built for this ground gives
     // legible labels before a single paint property is touched.
+    // The new style is not there until `style.load` says so.
+    styleReadyRef.current = false;
     mapRef.current.setStyle(isDark ? DARK_STYLE : LIGHT_STYLE);
   }, [isDark, themeKey]);
 
@@ -919,7 +1044,9 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // every theme, including the ones with no second distinguishable colour
       // to spare.
       const el = createMarkerElement(accent, 18, 'host');
-      const marker = new maplibregl.Marker({ element: el }).setLngLat([loc.longitude, loc.latitude]).addTo(map);
+      const marker = new maplibregl.Marker({ element: el, opacityWhenCovered: MARKER_OPACITY_WHEN_COVERED })
+        .setLngLat([loc.longitude, loc.latitude])
+        .addTo(map);
 
       el.addEventListener("mouseenter", () => {
         if (!isExpandedRef.current || !popupRef.current) return;
@@ -946,7 +1073,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     ispMarkerRef.current?.remove();
 
     const el = createMarkerElement(accent, 20, 'home');
-    const marker = new maplibregl.Marker({ element: el })
+    const marker = new maplibregl.Marker({ element: el, opacityWhenCovered: MARKER_OPACITY_WHEN_COVERED })
       .setLngLat([ispLocation.longitude, ispLocation.latitude])
       .addTo(map);
 
@@ -1101,6 +1228,9 @@ export const GeoMap: React.FC<GeoMapProps> = ({
             <ZoomControls
               onZoomIn={() => mapRef.current?.zoomIn()}
               onZoomOut={() => mapRef.current?.zoomOut()}
+              leading={
+                <ProjectionSwitcher mode={projectionMode} onChange={setProjectionMode} />
+              }
             />
           )}
           <GeoLocationCounter
