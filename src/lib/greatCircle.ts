@@ -1,6 +1,17 @@
 /** `[longitude, latitude]`, the order GeoJSON and MapLibre both use. */
 export type LngLat = [number, number];
 
+/**
+ * `[longitude, latitude, altitude]`, altitude as a fraction of the globe's
+ * radius.
+ *
+ * A fraction rather than metres because that is the unit the globe shader
+ * works in - a point at altitude h sits at `normalize(surface) * (1 + h)` -
+ * and because the number then means the same thing regardless of projection.
+ * The Mercator path scales it into world units at draw time.
+ */
+export type LngLatAlt = [number, number, number];
+
 const RAD = Math.PI / 180;
 const DEG = 180 / Math.PI;
 
@@ -131,6 +142,75 @@ function flattenTowardChord(points: LngLat[], from: LngLat, to: LngLat, blend: n
 }
 
 /**
+ * The highest an arc rises, as a fraction of the globe's radius.
+ *
+ * 0.18 is about 1,150 km at Earth scale, which is meaningless as geography and
+ * exactly right as drawing: high enough that a route reads as leaving the
+ * surface and arcing over it, low enough that a dozen of them do not turn into
+ * a tangle floating clear of the planet they belong to.
+ */
+const ARC_MAX_ALTITUDE = 0.18;
+
+/**
+ * The shortest an arc rises, for two points barely apart.
+ *
+ * Without a floor, a route between two hosts in the same city is drawn flat on
+ * the surface while its neighbours arc overhead, and it stops looking like the
+ * same kind of object. A small constant lift keeps every route a route.
+ */
+const ARC_MIN_ALTITUDE = 0.012;
+
+/**
+ * A great circle with an altitude profile: an arc, not a path painted on.
+ *
+ * Altitude is `sin(pi * t)`, which is 0 at both endpoints and peaks at the
+ * midpoint. Endpoints touching down exactly is what lets the arc meet its own
+ * markers; a profile that merely got close would leave every route floating
+ * above the pin it belongs to.
+ *
+ * The peak scales with the angular separation of the endpoints, so a
+ * Tel Aviv - New York route rises visibly higher than a local hop. That is not
+ * decoration: with a fixed peak, distance is carried only by the length of the
+ * line, which foreshortens to nothing when the route points away from the
+ * camera. Height survives rotation.
+ */
+export function greatCircleArc(
+  from: LngLat,
+  to: LngLat,
+  steps = 48,
+  curvature = 1,
+): LngLatAlt[] {
+  const path = greatCirclePath(from, to, steps, curvature);
+
+  // Angular separation, normalised to 0..1 over a half turn - antipodal points
+  // are pi apart, and nothing on a sphere is further.
+  const [lng1, lat1] = [from[0] * RAD, from[1] * RAD];
+  const [lng2, lat2] = [to[0] * RAD, to[1] * RAD];
+  const dot =
+    Math.cos(lat1) * Math.cos(lng1) * Math.cos(lat2) * Math.cos(lng2) +
+    Math.cos(lat1) * Math.sin(lng1) * Math.cos(lat2) * Math.sin(lng2) +
+    Math.sin(lat1) * Math.sin(lat2);
+  const omega = Math.acos(Math.min(1, Math.max(-1, dot)));
+  const peak = ARC_MIN_ALTITUDE + (ARC_MAX_ALTITUDE - ARC_MIN_ALTITUDE) * (omega / Math.PI);
+
+  const last = path.length - 1;
+  const arc = path.map((point, i) => {
+    const t = last === 0 ? 0 : i / last;
+    return [point[0], point[1], peak * Math.sin(Math.PI * t)] as LngLatAlt;
+  });
+
+  // Endpoints pinned to the surface exactly, for the same reason
+  // greatCirclePath pins their longitude and latitude: sin(PI) is 1.2e-16
+  // rather than 0, and "touches down at both ends" should be a guarantee the
+  // caller can rely on rather than a value that is merely very small.
+  if (arc.length > 0) {
+    arc[0][2] = 0;
+    arc[arc.length - 1][2] = 0;
+  }
+  return arc;
+}
+
+/**
  * Cuts a path where it crosses the antimeridian.
  *
  * Necessary because of two deliberate choices in the map's construction: it
@@ -143,15 +223,17 @@ function flattenTowardChord(points: LngLat[], from: LngLat, to: LngLat, blend: n
  * The seam points are interpolated rather than snapped, so both halves still
  * meet the edge at the right latitude.
  */
-export function splitAtAntimeridian(path: LngLat[]): LngLat[][] {
+export function splitAtAntimeridian<T extends LngLat | LngLatAlt>(path: T[]): T[][] {
   if (path.length < 2) return [path];
 
-  const segments: LngLat[][] = [];
-  let current: LngLat[] = [path[0]];
+  const segments: T[][] = [];
+  let current: T[] = [path[0]];
 
   for (let i = 1; i < path.length; i++) {
-    const [prevLng, prevLat] = path[i - 1];
-    const [lng, lat] = path[i];
+    const previous = path[i - 1];
+    const point = path[i];
+    const [prevLng] = previous;
+    const [lng] = point;
     const delta = lng - prevLng;
 
     if (Math.abs(delta) > 180) {
@@ -164,15 +246,27 @@ export function splitAtAntimeridian(path: LngLat[]): LngLat[][] {
       // unwrapped longitude so the latitude lands correctly.
       const unwrapped = goingEast ? lng + 360 : lng - 360;
       const t = (exitLng - prevLng) / (unwrapped - prevLng);
-      const seamLat = prevLat + (lat - prevLat) * t;
 
-      current.push([exitLng, seamLat]);
+      // Every component after longitude is interpolated the same way, which is
+      // what lets an arc keep its altitude across the cut. Interpolating lat
+      // and leaving alt to be re-derived per segment would put a step in the
+      // profile exactly at the seam - the one place a route is already two
+      // separate pieces of geometry and can least afford to look like it.
+      const seam = (lngAt: number): T => {
+        const out = [lngAt] as unknown as number[];
+        for (let c = 1; c < previous.length; c++) {
+          out[c] = previous[c] + (point[c] - previous[c]) * t;
+        }
+        return out as T;
+      };
+
+      current.push(seam(exitLng));
       segments.push(current);
-      current = [[entryLng, seamLat], [lng, lat]];
+      current = [seam(entryLng), point];
       continue;
     }
 
-    current.push([lng, lat]);
+    current.push(point);
   }
 
   segments.push(current);
