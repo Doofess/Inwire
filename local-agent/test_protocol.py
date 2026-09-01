@@ -808,6 +808,121 @@ check_true(
 )
 
 
+
+# --- the interface list is re-read, not frozen at startup --------------------
+# The agent used to enumerate interfaces exactly once, in main(), and replay
+# that snapshot in every hello/state for the life of the process. Windows
+# creates and destroys adapters constantly (WAN Miniports, Wi-Fi Direct
+# virtuals), and Npcap may not have finished binding when an auto-start service
+# launches at boot - so a process started at a bad moment served a short list
+# for its whole life, and one started before Npcap was ready refused to start.
+
+_real_list_interfaces = agent.list_interfaces
+
+
+def _fake_interfaces(pairs):
+    """Swaps enumeration for a fixed answer, the way the OS would change."""
+    agent.list_interfaces = lambda: list(pairs)
+
+
+try:
+    _fake_interfaces([("dev-ethernet", "Ethernet")])
+    agent.refresh_interfaces()
+    check(
+        "refresh picks up the current adapter list",
+        agent.AVAILABLE_INTERFACES,
+        [("dev-ethernet", "Ethernet")],
+    )
+
+    # An adapter that appears after startup is the reported bug.
+    _fake_interfaces([("dev-ethernet", "Ethernet"), ("dev-wifi", "Wi-Fi")])
+    check(
+        "an adapter that appears later is reported",
+        agent.refresh_interfaces(),
+        [("dev-ethernet", "Ethernet"), ("dev-wifi", "Wi-Fi")],
+    )
+
+    # Labels must move with the list, or a newly-appeared adapter would show up
+    # under its raw device name in the log and the UI.
+    check(
+        "labels are rebuilt alongside the list",
+        agent.INTERFACE_LABELS.get("dev-wifi"),
+        "Wi-Fi",
+    )
+
+    # An adapter going away must not linger in the list.
+    _fake_interfaces([("dev-ethernet", "Ethernet")])
+    agent.refresh_interfaces()
+    check_true(
+        "an adapter that disappears is dropped",
+        "dev-wifi" not in dict(agent.AVAILABLE_INTERFACES),
+    )
+
+    # Enumeration can throw (driver mid-reload). Losing the list a client is
+    # already using would be worse than serving a slightly stale one.
+    _known = [("dev-ethernet", "Ethernet")]
+
+    def _raise():
+        raise OSError("wpcap busy")
+
+    agent.list_interfaces = _raise
+    check(
+        "a failed enumeration keeps the previous list rather than emptying it",
+        agent.refresh_interfaces(),
+        _known,
+    )
+finally:
+    agent.list_interfaces = _real_list_interfaces
+
+
+
+# --- restarting is refused unless it can actually come back ------------------
+# restart_agent is implemented by exiting and letting Windows start a new
+# process. That makes the guard the entire feature: in any situation where
+# nothing would restart the agent, exiting is not a restart but a stop that the
+# app has no way to undo - no browser can start a Windows service. Both
+# conditions are proven by reading the SCM back at startup, never assumed.
+
+check(
+    "restart allowed only when running as the service AND a restart policy exists",
+    agent.decide_restart_allowed(True, True),
+    True,
+)
+check(
+    "refused when running from source, where there is no service to restart",
+    agent.decide_restart_allowed(False, True),
+    False,
+)
+check(
+    "refused when no restart-on-failure policy exists - exiting would stay stopped",
+    agent.decide_restart_allowed(True, False),
+    False,
+)
+check(
+    "refused when neither holds",
+    agent.decide_restart_allowed(False, False),
+    False,
+)
+
+# The default has to be the safe one: RESTART_SUPPORTED is consulted by the
+# command handler, and anything that leaves it untouched (an SCM query that
+# throws, a platform with no services) must not enable the exit path.
+check("restart support defaults to off until proven", agent.RESTART_SUPPORTED, False)
+check_true(
+    "a reason is always available to send back when it is off",
+    isinstance(agent.RESTART_UNAVAILABLE_REASON, str) and len(agent.RESTART_UNAVAILABLE_REASON) > 0,
+)
+
+# Exiting cleanly would read to the SCM as an intentional stop, and no restart
+# action would fire.
+check_true("the restart exit code is non-zero", agent.RESTART_EXIT_CODE != 0)
+
+# On a non-Windows box neither probe may claim success.
+if os.name != "nt":
+    check("service identity is false off Windows", agent._running_as_service_process(), False)
+    check("failure policy is false off Windows", agent._ensure_failure_policy(), False)
+
+
 print()
 if failures:
     print(f"{failures} check(s) FAILED")

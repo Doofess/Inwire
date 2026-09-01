@@ -43,7 +43,11 @@ export const LiveIOGraph: React.FC<LiveIOGraphProps> = ({ packets }) => {
 
   return (
     <div className="w-full h-full flex flex-col text-card-foreground">
-      <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider opacity-70 border-b border-inherit border-opacity-10">
+      {/* Same fix as the geo map's header, and the same reason: `border-inherit`
+          painted this rule in the card's TEXT colour, and the
+          `border-opacity-10` meant to soften it is a Tailwind v3 utility v4
+          never emits. See the comment in GeoMap.tsx. */}
+      <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider opacity-70 border-b border-border">
         Live I/O (pkts/sec)
       </div>
       <div className="flex-1 min-h-0">

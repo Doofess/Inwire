@@ -32,11 +32,19 @@ check('start_capture encodes', encodeAgentCommand({ type: 'start_capture' }), '{
 check('stop_capture encodes', encodeAgentCommand({ type: 'stop_capture' }), '{"type":"stop_capture"}');
 check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', interfaces: ['eth0', 'eth1'] }), '{"type":"set_interfaces","interfaces":["eth0","eth1"]}');
 
-check('required agent version is 2.3.0', REQUIRED_AGENT_VERSION, '2.3.0');
-check('a 1.1.0 agent is outdated against 2.3.0', isAgentOutdated('1.1.0', '2.3.0'), true);
-check('a 2.2.0 agent is outdated against 2.3.0', isAgentOutdated('2.2.0', '2.3.0'), true);
-check('a 2.3.0 agent is current', isAgentOutdated('2.3.0', '2.3.0'), false);
-check('a 2.4.0 agent is not outdated', isAgentOutdated('2.4.0', '2.3.0'), false);
+// 2.6.0 is where restart_agent landed. This constant has to move with
+// AGENT_VERSION in agent.py and MyAppVersion in setup.iss;
+// local-agent/test_protocol.py is what enforces that all three agree.
+check('required agent version is 2.6.0', REQUIRED_AGENT_VERSION, '2.6.0');
+
+// The command exists so Driver Info can ask the agent to restart itself. The
+// agent refuses it unless it can prove something would start it again - see
+// decide_restart_allowed in agent.py.
+check('restart_agent encodes', encodeAgentCommand({ type: 'restart_agent' }), '{"type":"restart_agent"}');
+check('a 1.1.0 agent is outdated against 2.4.0', isAgentOutdated('1.1.0', '2.4.0'), true);
+check('a 2.3.0 agent is outdated against 2.4.0', isAgentOutdated('2.3.0', '2.4.0'), true);
+check('a 2.4.0 agent is current', isAgentOutdated('2.4.0', '2.4.0'), false);
+check('a 2.5.0 agent is not outdated', isAgentOutdated('2.5.0', '2.4.0'), false);
 
 check('subscribe_logs encodes', encodeAgentCommand({ type: 'subscribe_logs' }), '{"type":"subscribe_logs"}');
 check('unsubscribe_logs encodes', encodeAgentCommand({ type: 'unsubscribe_logs' }), '{"type":"unsubscribe_logs"}');

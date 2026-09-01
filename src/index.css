@@ -1,68 +1,127 @@
 @import "tailwindcss";
 
+/* Self-hosted rather than pulled from fonts.googleapis.com: NetView is often
+   pointed at an isolated or offline network, and an analyzer that blocks on a
+   third-party font request would both render unstyled and show up in its own
+   capture. The -Variable packages ship one file covering every weight. */
+@import "@fontsource-variable/nunito";
+@import "@fontsource-variable/jetbrains-mono";
+
 /* Tailwind v4 has no JS config file, so class-based dark mode (toggled by
    next-themes adding/removing .dark on <html>) is opted into here instead
    of the default prefers-color-scheme-only behavior.
 
-   .mono is listed alongside .dark because it is a second DARK theme, not a
-   third mode: every `dark:` variant in the app must apply under it too, or
-   components that branch on `dark:` would render their light treatment on a
-   near-black canvas. */
-@custom-variant dark (&:where(.dark, .dark *, .mono, .mono *));
+   Every DARK theme must be listed here, not just .dark: these are peer themes
+   rather than modes, so a `dark:` variant that does not apply under one of
+   them would render its light treatment on a near-black canvas. Adding a dark
+   theme means adding it to this list - scripts/themes/registry.ts fails if a
+   registered dark theme is missing from it. */
+@custom-variant dark (&:where(
+  .dark, .dark *,
+  .midnight, .midnight *
+));
 
 :root {
-  --background: #f4f7f9;
-  --foreground: #1e293b;
+  --background: #f6f7f9;
+  --foreground: #1b1f24;
   --card: #ffffff;
-  --card-foreground: #1e293b;
+  --card-foreground: #1b1f24;
   --popover: #ffffff;
-  --popover-foreground: #1e293b;
-  /* Light keeps its existing look; only the accent moves off cyan. This is a
-     classic interface blue carrying some green - hue 200, which sits between
-     the old cyan (189) and a pure blue (221), so it reads as blue rather
-     than teal while staying clearly distinct from the cyan it replaces. Dark
-     enough against white to be used for text, which cyan was not. */
-  --primary: #0284c7;
+  --popover-foreground: #1b1f24;
+  --primary: #0b6bcb;
   --primary-foreground: #ffffff;
-  --secondary: #f1f5f9;
-  --secondary-foreground: #1e293b;
-  --muted: #f1f5f9;
-  --muted-foreground: #64748b;
-  --accent: #e2e8f0;
-  --accent-foreground: #1e293b;
-  --destructive: #f43f5e;
+  --secondary: #eef1f5;
+  --secondary-foreground: #1b1f24;
+  --muted: #eef1f5;
+  --muted-foreground: #5b6470;
+  --accent: #e1e5ea;
+  --accent-foreground: #1b1f24;
+  --destructive: #d32f3f;
   --destructive-foreground: #ffffff;
-  --border: #e2e8f0;
-  --input: #e2e8f0;
-  --ring: #0ea5e9;
+  --border: #e1e5ea;
+  --input: #e1e5ea;
+  --ring: #0b6bcb;
+  /* The bar and the drawer, in every theme.
+     `--chrome` is the accent AS THIS GROUND CAN CARRY IT. On a light ground
+     that is the accent itself; on a dark one it is deepened, because a 64px
+     bar plus a 320px full-height drawer at full accent strength is more
+     saturated area than the packet list beside it, and the chrome would win a
+     fight it should not be in. White clears AA on all four, so the foreground
+     is one constant rather than a per-theme judgement. */
+  --chrome: #0b6bcb;
+  --chrome-foreground: #ffffff;
+  /* Status colours - "fine", "check this", "wrong".
+     GENERATED from this theme's own palette by src/services/statusColors.ts.
+     Run `npx tsx scripts/themes/status-css.ts` to regenerate;
+     `npx tsx scripts/themes/status.ts` fails if these have drifted. */
+  --success: #008356;
+  --success-foreground: #ffffff;
+  --success-muted: #008356;
+  --warning: #a86600;
+  --warning-foreground: #ffffff;
+  --warning-muted: #a86600;
+  --danger: #cb354e;
+  --danger-foreground: #ffffff;
+  --danger-muted: #cb354e;
+  --danger-strong: #98062d;
+  --danger-strong-foreground: #ffffff;
 }
 
+/* Orange on warm grey. See PALETTE_BY_THEME.dark for why the ground is `stone`
+   and not `slate`.
+
+   `--primary-foreground` is near-black rather than white, and that is measured
+   rather than chosen: white on orange-500 is about 2.9:1, which fails at every
+   size, while the ground colour on the same fill is about 5.9:1. Every filled
+   accent control in the app reads its text colour from this token, so getting
+   it wrong here would be wrong in twenty places at once.
+
+   `--ring` is a lighter orange than `--primary` on purpose - the focus ring has
+   to be visible ON accent-filled controls as well as beside them, and a ring
+   the same colour as the button it surrounds is not a ring. */
 .dark {
-  --background: #020617;
-  --foreground: #cbd5e1;
-  --card: #0f172a;
-  --card-foreground: #cbd5e1;
-  --popover: #0f172a;
-  --popover-foreground: #cbd5e1;
-  --primary: #06b6d4;
-  --primary-foreground: #020617;
-  --secondary: #1e293b;
-  --secondary-foreground: #cbd5e1;
-  --muted: #1e293b;
-  --muted-foreground: #94a3b8;
-  --accent: #1e293b;
-  --accent-foreground: #cbd5e1;
+  --background: #0c0a09;
+  --foreground: #e7e5e4;
+  --card: #1c1917;
+  --card-foreground: #e7e5e4;
+  --popover: #1c1917;
+  --popover-foreground: #e7e5e4;
+  --primary: #f97316;
+  --primary-foreground: #1c1917;
+  --secondary: #292524;
+  --secondary-foreground: #e7e5e4;
+  --muted: #292524;
+  --muted-foreground: #a8a29e;
+  --accent: #292524;
+  --accent-foreground: #e7e5e4;
   --destructive: #f43f5e;
   --destructive-foreground: #ffffff;
-  --border: #1e293b;
-  --input: #1e293b;
-  --ring: #22d3ee;
+  --border: #292524;
+  --input: #292524;
+  --ring: #fb923c;
+  --chrome: #9a4008;
+  --chrome-foreground: #ffffff;
+  /* Status colours - "fine", "check this", "wrong".
+     GENERATED from this theme's own palette by src/services/statusColors.ts.
+     Run `npx tsx scripts/themes/status-css.ts` to regenerate;
+     `npx tsx scripts/themes/status.ts` fails if these have drifted. */
+  --success: #49c273;
+  --success-foreground: #0b0f14;
+  --success-muted: #49c273;
+  --warning: #dcb424;
+  --warning-foreground: #0b0f14;
+  --warning-muted: #dcb424;
+  --danger: #d26161;
+  --danger-foreground: #0b0f14;
+  --danger-muted: #d26161;
+  --danger-strong: #a2373c;
+  --danger-strong-foreground: #ffffff;
 }
 
 /* NOT `@theme inline`. With `inline`, Tailwind substitutes each token's value
    as resolved against :root directly into the utilities, so `bg-primary`
    compiled to the light theme's blue and stayed that colour under .dark and
-   .mono no matter what those blocks declared - the variable updated, the
+   .midnight no matter what those blocks declared - the variable updated, the
    painted pixel did not. Without `inline`, Tailwind emits --color-primary as
    a real runtime variable pointing at var(--primary), which then follows
    whichever theme class is on <html>. */
@@ -86,16 +145,238 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-chrome: var(--chrome);
+  --color-chrome-foreground: var(--chrome-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-muted: var(--success-muted);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-muted: var(--warning-muted);
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-danger-muted: var(--danger-muted);
+  --color-danger-strong: var(--danger-strong);
+  --color-danger-strong-foreground: var(--danger-strong-foreground);
+
+  /* Overriding Tailwind's two default stacks reaches every `font-mono` and
+     `font-sans` in the app - and the body default - from one place, rather
+     than editing the 109 utilities spread across 20 components.
+
+     Nunito for chrome: its terminals and bowls are genuinely rounded, and
+     unlike the geometric rounded faces it keeps a tall x-height, which this
+     UI needs at 10-11px. JetBrains Mono for data: the packet list, hex dump
+     and protocol tree are column-aligned and MUST stay monospaced, so this
+     is the roundest face that still holds a fixed advance width. */
+  --font-sans: "Nunito Variable", "Nunito", ui-sans-serif, system-ui,
+    -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace,
+    "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
 @layer base {
   body {
-    @apply antialiased select-none bg-background text-foreground;
+    @apply antialiased select-none bg-background text-foreground font-sans;
     font-feature-settings: "tnum" 1, "zero" 1;
     margin: 0;
     height: 100%;
     overflow: hidden;
   }
+
+  /* The focus ring.
+
+     Every one of the eight themes defines --ring, and until this rule existed
+     nothing painted it: the only two files referencing --color-ring were
+     ui/button.tsx and ui/dialog.tsx, neither of which has a consumer. So the
+     app shipped eight carefully chosen focus colours and no visible focus.
+
+     One rule rather than a class on each control, because the alternative is
+     remembering it on every button ever added - and the failure mode is
+     silent, since it only shows up for someone navigating without a mouse.
+
+     :focus-visible, not :focus, so a mouse click does not leave a ring behind;
+     the browser decides when the ring is wanted. :where() keeps specificity at
+     zero, so any component that wants a different ring simply sets one. */
+  :where(
+      a,
+      button,
+      summary,
+      input,
+      select,
+      textarea,
+      [role="button"],
+      [role="tab"],
+      [role="separator"],
+      [role="grid"],
+      /* Tab stops only. `tabindex="-1"` marks something that can be focused
+         BY SCRIPT but never by tabbing - a Radix menu panel, a region focus
+         lands on after a dialog closes - and ringing those draws a box around
+         a whole open menu that no keyboard user asked for. */
+      [tabindex]:not([tabindex="-1"])
+    ):focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    /* The packet list's scroll container is clipped, and an outline drawn
+       outside it would be cut off on the leading edge. Pulling it inside costs
+       two pixels of content and keeps the whole ring visible. */
+    outline-offset: -2px;
+  }
+
+  /* Controls that are not clipped get the outer offset back - it reads better
+     against a filled background, which is most of the app's buttons. */
+  :where(a, button, summary, [role="button"], [role="tab"]):focus-visible {
+    outline-offset: 2px;
+  }
+}
+
+/* Radix menu open/close motion.
+
+   The shadcn primitives in components/ui carry `animate-in`, `fade-in-0`,
+   `zoom-in-95` and `slide-in-from-top-2`. Those come from the
+   tailwindcss-animate plugin, which is a Tailwind v3 plugin and is not
+   installed here - under v4 they compile to nothing at all, which is why
+   every menu in the app appeared and vanished with no transition. Defining
+   the motion here drives it off Radix's own data attributes instead, so it
+   applies to every menu without a dependency that predates this Tailwind. */
+@keyframes nv-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(var(--nv-menu-offset, -6px));
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* The dashboard's morph between a column and the icon rail.
+   The width itself is a CSS transition on the aside, which carries across the
+   crossover because both states are now the SAME element. What cannot
+   transition is the contents: a column of five cards and a strip of five icons
+   share no elements, so React mounts one set and unmounts the other, and a
+   width that slides while the contents cut abruptly reads as a glitch rather
+   than as a change of shape.
+
+   Applied to the children rather than the aside, and unconditionally: an
+   animation runs when an element is MOUNTED, so only the swapped-in contents
+   play it. Dragging the column wider does not remount anything, so it does not
+   flicker - which a fade keyed on a class or a React key would have done on
+   every pointer move that crossed the threshold. */
+@keyframes nv-morph-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.nv-morph > * {
+  animation: nv-morph-in 180ms ease-out;
+}
+
+@keyframes nv-menu-out {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.98) translateY(var(--nv-menu-offset, -4px));
+  }
+}
+
+[data-slot='dropdown-menu-content'],
+[data-slot='dropdown-menu-sub-content'],
+[data-slot='select-content'],
+[data-slot='popover-content'] {
+  /* Grow from the edge nearest the trigger rather than from the centre. */
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin, center);
+}
+
+/* The menu slides *away* from its trigger, so a menu opening upward has to
+   travel the opposite way from one opening downward. */
+[data-slot='dropdown-menu-content'][data-side='top'],
+[data-slot='dropdown-menu-sub-content'][data-side='top'] {
+  --nv-menu-offset: 6px;
+}
+
+[data-slot='dropdown-menu-content'][data-state='open'],
+[data-slot='dropdown-menu-sub-content'][data-state='open'] {
+  /* Decelerating curve: quick to appear, settling at the end. */
+  animation: nv-menu-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Radix holds the element mounted while this runs, so the close is visible
+   rather than the menu blinking out. Shorter than the open on purpose - a
+   dismissal that takes as long as the reveal feels sluggish. */
+[data-slot='dropdown-menu-content'][data-state='closed'],
+[data-slot='dropdown-menu-sub-content'][data-state='closed'] {
+  animation: nv-menu-out 110ms ease-in;
+}
+
+[data-slot='dropdown-menu-item'],
+[data-slot='dropdown-menu-radio-item'],
+[data-slot='dropdown-menu-checkbox-item'],
+[data-slot='dropdown-menu-sub-trigger'] {
+  transition:
+    background-color 130ms ease,
+    color 130ms ease,
+    padding-left 130ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* The radio/check indicator mounts at the moment of selection, so a plain
+   entrance animation on it is the confirmation that the click registered.
+   Overshoots slightly before settling. */
+@keyframes nv-indicator-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.nv-indicator {
+  animation: nv-indicator-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Reduced motion, keyed on an attribute rather than on the media query.
+
+   This used to be `@media (prefers-reduced-motion: reduce)`. That reads the OS
+   directly, which sounds right and makes an in-app setting impossible: a media
+   query beats an attribute, so "Animations: Always" could never re-enable these
+   for someone whose OS asks for reduced motion, and "Never" would not stop them
+   for someone whose OS does not. The setting would have been broken on the
+   app's most-used animation from the day it shipped.
+
+   So the OS preference is resolved in JS instead - see lib/motion.ts - and
+   written to <html> as data-motion="reduce" or "full", with the app's own
+   setting able to override it in either direction. CSS then has one branch to
+   read instead of a media query crossed with an attribute.
+
+   The 0.01ms values rather than `none`: some libraries decide when to unmount
+   an element by listening for animationend, and an animation that never runs
+   never fires it. A duration this short is imperceptible and still completes. */
+[data-motion='reduce'],
+[data-motion='reduce'] *,
+[data-motion='reduce'] *::before,
+[data-motion='reduce'] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  /* The packet list's keyboard navigation scrolls by assignment; smooth
+     scrolling a virtualized list of 50,000 rows is exactly what this setting
+     exists to prevent. */
+  scroll-behavior: auto !important;
+}
+
+/* Transforms toggled by :active are not animations or transitions, so the
+   blanket rule above does not reach them - the button still jumps. */
+[data-motion='reduce'] .active\:scale-95:active {
+  transform: none !important;
 }
 
 /* Custom scrollbars for high-density packet tables */
@@ -151,57 +432,121 @@
   border-bottom-color: var(--popover) !important;
 }
 
-.maplibregl-ctrl-group {
-  background: var(--card);
-  border: 1px solid var(--border);
-  box-shadow: none;
-}
+/* Paper - the warm light theme.
 
-.maplibregl-ctrl-group button + button {
-  border-top: 1px solid var(--border);
-}
+   Not a sepia filter over Day. Every hue is individually pulled warm and
+   darkened in themePalettes.ts, because a cool hue tinted into a warm ground
+   reads as dirty rather than as itself, and the ground here is warm enough to
+   be unmistakably a different theme rather than Day with a filter on it.
 
-/* Mono - the second dark theme. Near-black canvas, white as the accent in
-   place of cyan, and structure carried by borders rather than by colour,
-   which is what makes a dense tool read as calm at this density.
-
-   The greys are deliberately not pure: #0a0c10 rather than #000 keeps the
-   card and popover layers above it distinguishable, and #e6edf3 rather than
-   #fff takes the glare off a screen full of monospace text.
-
-   Only --primary and the greys change. destructive stays rose here, and the
-   rose/amber/emerald used directly by components stays too: colour is
-   reserved for meaning - a failed capture, a warning, a healthy agent - and
-   flattening those would make the states indistinguishable. */
-.mono {
-  --background: #0a0c10;
-  --foreground: #e6edf3;
-  --card: #0d1117;
-  --card-foreground: #e6edf3;
-  --popover: #161b22;
-  --popover-foreground: #e6edf3;
-  --primary: #ffffff;
-  --primary-foreground: #0a0c10;
-  --secondary: #161b22;
-  --secondary-foreground: #e6edf3;
-  --muted: #161b22;
-  --muted-foreground: #8b949e;
-  --accent: #21262d;
-  --accent-foreground: #ffffff;
-  --destructive: #f85149;
+   The accent is a rust rather than a brown: it has to work as a 64px bar, as
+   the wordmark, and as text on the card, and a true brown fails the last of
+   those on a ground this light. */
+.paper {
+  --background: #f4efe4;
+  --foreground: #2b2620;
+  --card: #fdfaf3;
+  --card-foreground: #2b2620;
+  --popover: #fdfaf3;
+  --popover-foreground: #2b2620;
+  --primary: #a35a16;
+  --primary-foreground: #ffffff;
+  --secondary: #ece5d6;
+  --secondary-foreground: #2b2620;
+  --muted: #ece5d6;
+  --muted-foreground: #6b6154;
+  --accent: #e4dbc9;
+  --accent-foreground: #2b2620;
+  --destructive: #b3261e;
   --destructive-foreground: #ffffff;
-  --border: #30363d;
-  --input: #30363d;
-  --ring: #f0f6fc;
+  --border: #e4dbc9;
+  --input: #e4dbc9;
+  --ring: #a35a16;
+  --chrome: #a35a16;
+  --chrome-foreground: #ffffff;
+  /* Status colours - "fine", "check this", "wrong".
+     GENERATED from this theme's own palette by src/services/statusColors.ts.
+     Run `npx tsx scripts/themes/status-css.ts` to regenerate;
+     `npx tsx scripts/themes/status.ts` fails if these have drifted. */
+  --success: #2f5415;
+  --success-foreground: #ffffff;
+  --success-muted: #2f5415;
+  --warning: #705805;
+  --warning-foreground: #ffffff;
+  --warning-muted: #705805;
+  --danger: #8e1914;
+  --danger-foreground: #ffffff;
+  --danger-muted: #8e1914;
+  --danger-strong: #600000;
+  --danger-strong-foreground: #ffffff;
 }
 
-.dark .maplibregl-ctrl-group button .maplibregl-ctrl-icon,
-.mono .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
-  filter: invert(1);
+/* Midnight - the cool dark theme.
+
+   Graphite's counterweight, and the reason both survive the cut to four: one
+   warm dark and one cool dark is a real choice, where four darks separated by
+   a few percent of saturation were not.
+
+   The ground carries a deliberate blue cast (#0d1219 rather than a neutral
+   #111318). Against Graphite's stone it is what makes the two readable as
+   different themes at a glance rather than as two greys - the registry's
+   surface check wants 5 deltaE between any pair and this gives 7.8. */
+.midnight {
+  --background: #0d1219;
+  --foreground: #dbe3ec;
+  --card: #161d26;
+  --card-foreground: #dbe3ec;
+  --popover: #161d26;
+  --popover-foreground: #dbe3ec;
+  --primary: #38bdf8;
+  --primary-foreground: #0d1219;
+  --secondary: #1e2733;
+  --secondary-foreground: #dbe3ec;
+  --muted: #1e2733;
+  --muted-foreground: #94a3b8;
+  --accent: #232b36;
+  --accent-foreground: #dbe3ec;
+  --destructive: #fb7185;
+  --destructive-foreground: #0d1219;
+  --border: #232b36;
+  --input: #232b36;
+  --ring: #7dd3fc;
+  --chrome: #0e5f85;
+  --chrome-foreground: #ffffff;
+  /* Status colours - "fine", "check this", "wrong".
+     GENERATED from this theme's own palette by src/services/statusColors.ts.
+     Run `npx tsx scripts/themes/status-css.ts` to regenerate;
+     `npx tsx scripts/themes/status.ts` fails if these have drifted. */
+  --success: #37b786;
+  --success-foreground: #0b0f14;
+  --success-muted: #37b786;
+  --warning: #d77f37;
+  --warning-foreground: #0b0f14;
+  --warning-muted: #d77f37;
+  --danger: #d26161;
+  --danger-foreground: #0b0f14;
+  --danger-muted: #d26161;
+  --danger-strong: #a2373c;
+  --danger-strong-foreground: #ffffff;
+}
+
+
+/* maplibre-gl ships its own stylesheet, and it sets a hard
+   `"Helvetica Neue", Arial, Helvetica` on the map container. That is the one
+   place in the app the --font-sans token cannot reach on its own: the rule
+   lives in a third-party stylesheet and applies to a class, so everything
+   inside the map - popups, the cooperative-gesture overlay, control tooltips -
+   inherited Helvetica while the rest of the app moved to Nunito.
+   Setting it once at the container is enough; every descendant inherits.
+
+   Note this does NOT cover the place names drawn on the map itself. Those are
+   rendered into the WebGL canvas from glyph atlases the tile server supplies
+   with its style, so they are baked upstream and no CSS can restyle them. */
+.maplibregl-map {
+  font-family: var(--font-sans);
 }
 
 .maplibregl-cooperative-gesture-screen {
   background: rgba(0, 0, 0, 0.3);
   color: #fff;
-  font-family: inherit;
 }

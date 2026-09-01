@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Packet } from '../../types/packet';
 import { TbMessage, TbX, TbCopy, TbCheck, TbDownload } from 'react-icons/tb';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
@@ -16,6 +16,30 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
 }) => {
   const [viewFormat, setViewFormat] = useState<'ascii' | 'hex' | 'raw'>('ascii');
   const [copied, setCopied] = useState(false);
+
+  /**
+   * Escape closes this window, matching every other modal.
+   *
+   * It also has to be handled HERE rather than left to whatever is underneath:
+   * this window can open on top of the packet detail window, which listens for
+   * Escape on `window` in the capture phase. That window stands down while it
+   * is covered, so without this the topmost thing on screen would be the one
+   * key that dismisses nothing.
+   *
+   * Declared above the `streamId === null` early return so the hook order is
+   * the same on every render.
+   */
+  useEffect(() => {
+    if (streamId === null) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [streamId, onClose]);
 
   if (streamId === null) return null;
 
@@ -65,14 +89,16 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+    // z-[60] rather than the z-50 every other modal uses, because this is the
+    // only one that opens ON TOP of another: the packet detail window has a
+    // Follow Stream link. Relying on render order instead would work today and
+    // break silently the first time someone reorders the JSX in App.tsx.
+    <div className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
       <div className="w-full max-w-4xl max-h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground">
         {/* Modal Header */}
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-lg bg-sky-500/20">
-              <TbMessage className="w-5 h-5 text-foreground" />
-            </div>
+            <TbMessage className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <div className="flex items-center gap-2 font-bold text-sm">
                 <span>Follow Stream #{streamId}</span>
@@ -158,7 +184,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
               <span className="font-semibold text-sky-400">Server Traffic ({totalServerBytes} bytes)</span>
             </div>
           </div>
-          <span className="text-[11px] font-mono text-muted-foreground">Wireshark Stream Follower Engine</span>
+          <span className="text-[11px] font-mono text-muted-foreground">Stream Follower Engine</span>
         </div>
 
         {/* Stream Dialogue Viewport */}

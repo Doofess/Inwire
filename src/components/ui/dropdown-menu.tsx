@@ -135,7 +135,9 @@ function DropdownMenuRadioItem({
     >
       <span className="pointer-events-none absolute left-2 flex size-3.5 items-center justify-center">
         <DropdownMenuPrimitive.ItemIndicator>
-          <TbCircle className="size-2 fill-current" />
+          {/* The indicator only mounts once checked, so this plays on select
+              rather than on open. Keyframes live in index.css. */}
+          <TbCircle className="size-2 fill-current nv-indicator" />
         </DropdownMenuPrimitive.ItemIndicator>
       </span>
       {children}

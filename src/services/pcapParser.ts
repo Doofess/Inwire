@@ -7,6 +7,8 @@ import { dissectTls } from './dissectors/tls';
 import { dissectDns, buildDnsLayer } from './dissectors/dns';
 import { dissectQuicDatagram } from './dissectors/quic';
 import { dissectIeee1905 } from './dissectors/ieee1905';
+import { dissectIgmp } from './dissectors/igmp';
+import { dissectLldp } from './dissectors/lldp';
 import { QuicFlowTracker } from './quicFlowTracker';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 
@@ -564,6 +566,8 @@ export function decodeRawEthernetPacket(
     l2Result = dissectArp(rawBytes, l3Offset);
   } else if (currentEtherType === 0x893a) {
     l2Result = dissectIeee1905(rawBytes, l3Offset);
+  } else if (currentEtherType === 0x88cc) {
+    l2Result = dissectLldp(rawBytes, l3Offset);
   } else if (isLlcFrame && rawBytes.length > l3Offset && rawBytes[l3Offset] === 0x42) {
     l2Result = dissectStp(rawBytes, l3Offset);
   }
@@ -577,8 +581,22 @@ export function decodeRawEthernetPacket(
   } else if (currentEtherType !== 0x0800 && currentEtherType !== 0x86dd) {
     // Not dissected, but still nameable from the ethertype - better an honest
     // "ieee1905" than an inherited default of "TCP".
-    protocolLabel = labelForEtherType(currentEtherType)
+    //
+    // Info has to be set here too, not just the label. Leaving it alone is
+    // what made LLDP frames show "Frame (57 bytes)" in the Info column while
+    // the Protocol column read LLDP correctly: this branch named the protocol
+    // and then let the frame-length placeholder stand. Any ethertype that
+    // lands here from now on says what it is.
+    const known = labelForEtherType(currentEtherType);
+    protocolLabel = known
       ?? (isLlcFrame ? 'LLC' : `0x${currentEtherType.toString(16).padStart(4, '0')}`);
+    const etherTypeHex = `0x${currentEtherType.toString(16).padStart(4, '0')}`;
+    const l2PayloadLen = Math.max(0, rawBytes.length - l3Offset);
+    info = isLlcFrame
+      ? `LLC frame, ${l2PayloadLen} byte${l2PayloadLen === 1 ? '' : 's'}`
+      : known
+        ? `${known} (${etherTypeHex}), ${l2PayloadLen} byte${l2PayloadLen === 1 ? '' : 's'}`
+        : `Ethernet II, unhandled ethertype ${etherTypeHex}`;
   }
 
   // IPv4 Decode
@@ -682,6 +700,8 @@ export function decodeRawEthernetPacket(
       if (transport.streamId !== undefined) {
         ipLayer.fields.push({ name: '[Stream index]', value: transport.streamId, generated: true });
       }
+    } else {
+      ({ label: protocolLabel, info } = describeUndissectedIpPayload(ipProtocolNum));
     }
   } else if (currentEtherType === 0x86dd && rawBytes.length >= l3Offset + 40) {
     // IPv6 Decode - fixed 40-byte header only; IPv6 extension headers are not supported.
@@ -783,6 +803,10 @@ export function decodeRawEthernetPacket(
       if (transport.streamId !== undefined) {
         ipv6Layer.fields.push({ name: '[Stream index]', value: transport.streamId, generated: true });
       }
+    } else if (!isMalformedJumbo) {
+      // Same fallback as IPv4. Guarded on the jumbo case, which has already
+      // set its own more specific label and [Malformed Packet] info.
+      ({ label: protocolLabel, info } = describeUndissectedIpPayload(nextHeader));
     }
   }
 
@@ -995,7 +1019,11 @@ function describeEtherType(etherType: number): string {
     case 0x0806: return 'ARP';
     case 0x8100: return '802.1Q Virtual LAN';
     case 0x88a8: return '802.1ad Provider Bridge (QinQ)';
-    default: return 'Unknown';
+    // Everything this switch does not name falls through to the ethertype
+    // table the dissectors share, so a frame the app can already label "LLDP"
+    // in the Protocol column does not simultaneously call its own ethertype
+    // "Unknown" one row into the Ethernet layer.
+    default: return labelForEtherType(etherType) ?? 'Unknown';
   }
 }
 
@@ -1544,6 +1572,21 @@ function decodeTransportLayer(
         ],
       },
     };
+  } else if (ipProtocolNum === 2) {
+    // IGMP sits directly on IP with no ports, so it is dispatched here beside
+    // ICMP rather than in the port-based subdissector path.
+    const igmp = dissectIgmp(rawBytes, transportOffset, l4SegmentLen ?? rawBytes.length - transportOffset);
+    if (igmp) {
+      return {
+        // No IGMP member in the coarse ProtocolType union; ICMP is the closest
+        // existing key, and protocolLabel carries the real name to the column.
+        proto: 'ICMP',
+        protocolLabel: igmp.protocolLabel,
+        info: igmp.info,
+        fields: igmp.fields,
+        layer: igmp.layer,
+      };
+    }
   } else if ((ipProtocolNum === 1 || ipProtocolNum === 58) && rawBytes.length >= transportOffset + 4) {
     // ICMP (v4, protocol 1) / ICMPv6 (protocol 58) Decode - ICMPv6 uses
     // different type numbers than ICMPv4 for the same messages (e.g. echo
@@ -1731,6 +1774,51 @@ function parseTcpOptions(
  * used to produce it, so a correct header always recomputes to the value
  * actually stored there.
  */
+/**
+ * IANA protocol numbers, for the Protocol column when nothing dissects the
+ * payload. Only the ones that actually turn up on a LAN or a VPN link - the
+ * point is to name what a capture will really contain, not to mirror the whole
+ * registry, and anything missing still gets an honest "IP Protocol N".
+ */
+const IP_PROTOCOL_NAMES: Record<number, string> = {
+  0: 'IPv6 Hop-by-Hop',
+  2: 'IGMP',
+  4: 'IPv4',
+  41: 'IPv6',
+  43: 'IPv6-Route',
+  44: 'IPv6-Frag',
+  46: 'RSVP',
+  47: 'GRE',
+  50: 'ESP',
+  51: 'AH',
+  59: 'IPv6-NoNxt',
+  60: 'IPv6-Opts',
+  89: 'OSPF',
+  103: 'PIM',
+  112: 'VRRP',
+  115: 'L2TP',
+  132: 'SCTP',
+  137: 'MPLS-in-IP',
+};
+
+/**
+ * Names an IP payload that no dissector claimed.
+ *
+ * Without this, an undissected protocol kept `decodeRawEthernetPacket`'s
+ * initial values and was displayed as a TCP frame whose Info column read
+ * "Frame (N bytes)" - actively wrong on both counts. This is the IP-layer
+ * counterpart of the ethertype fallback used for undissected L2 frames.
+ */
+function describeUndissectedIpPayload(ipProtocolNum: number): { label: string; info: string } {
+  const name = IP_PROTOCOL_NAMES[ipProtocolNum];
+  return name
+    ? { label: name, info: `${name} payload (protocol ${ipProtocolNum}, not dissected)` }
+    : {
+        label: `IP Protocol ${ipProtocolNum}`,
+        info: `IP protocol ${ipProtocolNum} payload (not dissected)`,
+      };
+}
+
 function computeIpHeaderChecksum(rawBytes: Uint8Array, l3Offset: number, ipHeaderLen: number): number {
   let sum = 0;
   for (let i = 0; i < ipHeaderLen; i += 2) {

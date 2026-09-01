@@ -1,4 +1,8 @@
 scapy>=2.5.0
 websockets>=12.0
+# Per-adapter byte/packet counters behind the interface picker's sparklines.
+# Reading the OS counters is what keeps that feature from needing a capture
+# handle on every adapter - see interface_stats.py.
+psutil>=5.9.0
 pyinstaller>=6.3.0
 pywin32>=306; sys_platform == 'win32'

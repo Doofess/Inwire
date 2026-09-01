@@ -73,14 +73,16 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
     >
       <motion.div
         {...modalPanelMotion}
-        className="w-full max-w-2xl rounded-xl shadow-2xl flex flex-col border bg-card border-border text-card-foreground"
+        // 3xl rather than the 2xl this started at, matching SettingsModal.
+        // The two primary cards split whatever this is, so the width is what
+        // decides how many lines an ISP name costs: at 2xl each card had about
+        // 224px of text column, which is half a typical WHOIS org string.
+        className="w-full max-w-3xl rounded-xl shadow-2xl flex flex-col border bg-card border-border text-card-foreground"
       >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-border">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-sky-500/20">
-              <TbGlobe className="w-5 h-5 text-foreground" />
-            </div>
+            <TbGlobe className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <h2 className="font-bold text-foreground">Local ISP Diagnostics</h2>
               <p className="text-xs text-muted-foreground">
@@ -110,26 +112,47 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
             <div className="space-y-6">
 
               {/* Primary Info */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Deliberately not two equal columns. The content is not
+                  symmetric: the ISP name is prose that can run 50 characters,
+                  while the IP beside it is a fixed-width token that breaks
+                  cleanly anywhere. Splitting 3:2 spends the width where the
+                  wrapping actually costs lines. */}
+              <div className="grid grid-cols-1 sm:grid-cols-[3fr_2fr] gap-4">
                 <div className="p-4 rounded-lg border flex items-start gap-4 bg-muted/50 border-border">
                   <TbServer className="w-8 h-8 mt-1 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
-                    <div className="text-[11px] uppercase tracking-wider font-semibold mb-1 truncate text-muted-foreground">
+                    <div className="text-[11px] uppercase tracking-wider font-semibold mb-1 text-muted-foreground">
                       Internet Service Provider (ISP)
                     </div>
-                    <div className="font-bold text-lg truncate text-foreground" title={data.org}>{data.org}</div>
-                    <div className="text-sm font-mono mt-1 truncate text-sky-600 dark:text-sky-400">{data.asn}</div>
+                    {/* Wraps rather than truncating. WHOIS org strings are
+                        verbose - the local one is `"Bezeq"- THE ISRAEL
+                        TELECOMMUNICATION CORP. LTD.`, 48 characters and about
+                        456px at this size, against roughly 224px of column -
+                        so `truncate` was hiding half of every real ISP name
+                        regardless of how much room the window had. The IP
+                        beside it already wraps via `break-all`; this is the
+                        same call for prose. `break-words` rather than
+                        `break-all` so it breaks between words and only splits
+                        a token that cannot fit on a line by itself. */}
+                    <div className="font-bold text-lg break-words text-foreground" title={data.org}>{data.org}</div>
+                    <div className="text-sm font-mono mt-1 break-words text-sky-600 dark:text-sky-400">{data.asn}</div>
                   </div>
                 </div>
 
                 <div className="p-4 rounded-lg border flex items-start gap-4 bg-muted/50 border-border">
                   <TbDatabase className="w-8 h-8 mt-1 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
-                    <div className="text-[11px] uppercase tracking-wider font-semibold mb-1 truncate text-muted-foreground">
+                    <div className="text-[11px] uppercase tracking-wider font-semibold mb-1 text-muted-foreground">
                       Public IP Address
                     </div>
                     <div className="font-bold text-lg break-all text-foreground">{data.ip}</div>
-                    <div className="text-sm font-mono mt-1 truncate text-emerald-600 dark:text-emerald-400">IPv{data.version}</div>
+                    {/* ipapi.co returns this already spelled "IPv4"/"IPv6",
+                        so the old `IPv{version}` template rendered "IPvIPv6".
+                        Tolerates a bare "4"/"6" too, in case the field ever
+                        goes back to what that template assumed. */}
+                    <div className="text-sm font-mono mt-1 text-emerald-600 dark:text-emerald-400">
+                      {/^IPv/i.test(String(data.version)) ? data.version : `IPv${data.version}`}
+                    </div>
                   </div>
                 </div>
               </div>

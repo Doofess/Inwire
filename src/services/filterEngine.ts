@@ -1,64 +1,9 @@
-import { Packet, FilterPreset } from '../types/packet';
+import { Packet } from '../types/packet';
 import { addressInCidr } from './addressFormat';
 
-export const DEFAULT_FILTER_PRESETS: FilterPreset[] = [
-  {
-    id: 'all',
-    name: 'All Traffic',
-    filter: '',
-    category: 'Custom',
-    description: 'Show all captured network packets without filtering',
-  },
-  {
-    id: 'web-traffic',
-    name: 'Web (HTTP/HTTPS/TLS)',
-    filter: 'http || tls || tcp.port == 443 || tcp.port == 80',
-    category: 'Web',
-    description: 'Hypertext and Transport Layer Security web traffic',
-  },
-  {
-    id: 'dns-queries',
-    name: 'DNS Resolution',
-    filter: 'dns || udp.port == 53',
-    category: 'Web',
-    description: 'Domain Name System queries, responses, and records',
-  },
-  {
-    id: 'threats-anomalies',
-    name: 'Security Anomalies & Alerts',
-    filter: 'status == alert || status == warning || anomaly',
-    category: 'Security',
-    description: 'SYN floods, port scans, DNS tunneling, and IDS triggers',
-  },
-  {
-    id: 'syn-handshakes',
-    name: 'TCP Handshakes (SYN/FIN)',
-    filter: 'info contains "SYN" || info contains "FIN"',
-    category: 'Troubleshooting',
-    description: 'Connection initiation and termination frames',
-  },
-  {
-    id: 'high-bandwidth',
-    name: 'Large Payloads (> 1000B)',
-    filter: 'len > 1000',
-    category: 'Troubleshooting',
-    description: 'Jumbo frames and high-throughput data segments',
-  },
-  {
-    id: 'custom-dissector',
-    name: 'Custom Plugins (IoT / Fast)',
-    filter: 'proto_iot || finfast || port == 18833',
-    category: 'Custom',
-    description: 'Frames processed by custom dissector engine',
-  },
-  {
-    id: 'mqtt-telemetry',
-    name: 'IoT MQTT Traffic',
-    filter: 'mqtt || tcp.port == 1883',
-    category: 'Web',
-    description: 'Message Queuing Telemetry Transport broker streams',
-  },
-];
+// DEFAULT_FILTER_PRESETS used to live here. The presets are user-editable and
+// grouped now, so they moved to services/filterPresets.ts alongside the
+// storage and reordering logic that owns them.
 
 export interface FilterValidationResult {
   isValid: boolean;
@@ -210,6 +155,9 @@ const KNOWN_FIELD_NAMES = new Set([
   'arp.src.hw_mac', 'arp.dst.hw_mac',
   'stp.type', 'stp.version', 'stp.root.cost', 'stp.port',
   'ieee1905.message.type', 'ieee1905.message.id',
+  'lldp.chassis.id', 'lldp.chassis.subtype', 'lldp.port.id', 'lldp.port.subtype',
+  'lldp.time_to_live', 'lldp.port.desc', 'lldp.tlv.system.name',
+  'lldp.tlv.system.desc', 'lldp.tlv.system.cap', 'lldp.mgn.addr',
 ]);
 
 function checkFilterSemantics(expr: string): string | null {

@@ -26,13 +26,17 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
 
     for (const p of packets) {
       if (!p.source || !p.destination) continue;
-      const sorted = [p.source, p.destination].sort();
-      const key = `${sorted[0]}<->${sorted[1]}`;
+      // A comparison rather than [a, b].sort(): the sort allocated an array and
+      // ran a comparator for every packet on every pass, and this loop runs
+      // over the whole buffer. Same canonical ordering, no allocation.
+      const first = p.source < p.destination ? p.source : p.destination;
+      const second = p.source < p.destination ? p.destination : p.source;
+      const key = `${first}<->${second}`;
 
       const existing = pairMap.get(key) || {
         id: key,
-        hostA: sorted[0],
-        hostB: sorted[1],
+        hostA: first,
+        hostB: second,
         packetsCount: 0,
         totalBytes: 0,
         protocols: new Set<string>(),
@@ -115,12 +119,12 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
                 key={conv.id}
                 className={`flex items-center justify-between text-xs px-2.5 py-1.5 rounded border transition-colors ${
                   conv.hasAnomaly
-                    ? 'border-rose-300 dark:border-rose-500/30 bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                    ? 'border-danger/40 bg-danger/10 text-danger-muted'
                     : 'border-border bg-secondary/60 hover:bg-accent/80'
                 }`}
               >
                 <div className="flex items-center gap-1.5 font-mono text-[10px] truncate">
-                  {conv.hasAnomaly && <TbShieldExclamation className="w-3.5 h-3.5 text-rose-400 shrink-0 animate-pulse" />}
+                  {conv.hasAnomaly && <TbShieldExclamation className="w-3.5 h-3.5 text-danger shrink-0 animate-pulse" />}
                   <button
                     onClick={() => onFilterHost(conv.hostA)}
                     className="hover:underline hover:text-primary truncate max-w-[85px] cursor-pointer"
@@ -139,7 +143,13 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
                 </div>
 
                 <div className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground shrink-0">
-                  <span className="text-primary font-bold">
+                  {/* The panel's own heading colour rather than the app accent.
+                      These are the values the heading is about, and painting
+                      them the accent made five rows of numbers compete with the
+                      one accent-coloured control in the panel - the FLOWS/HOSTS
+                      toggle - which is the only thing here that is actually
+                      interactive. Weight carries the hierarchy instead. */}
+                  <span className="text-muted-foreground font-bold">
                     {conv.totalBytes >= 1024 ? `${(conv.totalBytes / 1024).toFixed(1)}K` : `${conv.totalBytes}B`}
                   </span>
                 </div>
@@ -154,12 +164,12 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
               key={ep.ip}
               className={`flex items-center justify-between text-xs px-2.5 py-1.5 rounded border transition-colors ${
                 ep.anomalies > 0
-                  ? 'border-rose-300 dark:border-rose-500/30 bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                  ? 'border-danger/40 bg-danger/10 text-danger-muted'
                   : 'border-border bg-secondary/60 hover:bg-accent/80'
               }`}
             >
               <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                {ep.anomalies > 0 && <TbShieldExclamation className="w-3.5 h-3.5 text-rose-400 shrink-0 animate-pulse" />}
+                {ep.anomalies > 0 && <TbShieldExclamation className="w-3.5 h-3.5 text-danger shrink-0 animate-pulse" />}
                 <button
                   onClick={() => onFilterHost(ep.ip)}
                   className="hover:underline hover:text-primary font-medium cursor-pointer"
@@ -170,7 +180,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({ packets, onFilterH
 
               <div className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
                 <span>{ep.txPkts + ep.rxPkts} pkts</span>
-                <span className="text-primary font-bold">
+                <span className="text-muted-foreground font-bold">
                   {ep.bytes >= 1024 ? `${(ep.bytes / 1024).toFixed(1)}K` : `${ep.bytes}B`}
                 </span>
               </div>

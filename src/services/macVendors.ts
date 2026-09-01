@@ -29,8 +29,13 @@ const RESERVED_MAC_NAMES: Record<string, string> = {
   '01:80:c2:00:00:00': 'Nearest-Customer-Bridge',
   '01:80:c2:00:00:01': 'Pause_flow_control',
   '01:80:c2:00:00:02': 'Slow-Protocols',
-  '01:80:c2:00:00:03': 'Nearest-Bridge',
-  '01:80:c2:00:00:0e': 'Nearest-non-TPMR-Bridge',
+  // These two were the wrong way round. 0e is the Nearest Bridge group - the
+  // address essentially every LLDP agent sends to - and 03 is the non-TPMR
+  // group, per IEEE 802.1AB Table 7-1 and `tshark -e eth.dst_resolved`, which
+  // was used to check every entry in this block rather than just these two.
+  '01:80:c2:00:00:03': 'Nearest-non-TPMR-Bridge',
+  '01:80:c2:00:00:0d': 'Provider-Bridge-MVRP',
+  '01:80:c2:00:00:0e': 'Nearest-Bridge',
   '01:00:0c:cc:cc:cc': 'CDP/VTP/DTP/PAgP/UDLD',
   '01:00:0c:cc:cc:cd': 'PVST+',
 };

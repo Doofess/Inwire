@@ -24,3 +24,8 @@ public/downloads/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Session planning artifacts written by coding agents. Kept on disk as a record
+# of how a change was arrived at, but they are scratch, not project docs, and
+# they go stale the moment the code moves past them.
+docs/superpowers/
