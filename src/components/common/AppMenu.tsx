@@ -3,9 +3,6 @@ import { Command } from 'cmdk';
 import { AnimatePresence, motion } from 'motion/react';
 import { HamburgerIcon } from './HamburgerIcon';
 import {
-  TbPlayerPlay,
-  TbPlayerPause,
-  TbTrash,
   TbDownload,
   TbCloudDownload,
   TbChartBar,
@@ -14,31 +11,42 @@ import {
   TbSettings,
   TbX,
 } from 'react-icons/tb';
-import { UserRolePermissions } from '../../types/packet';
 import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
-import type { AgentCommand } from '../../services/agentProtocol';
 
+/**
+ * The menu holds only what has no permanent control elsewhere. Capture
+ * start/stop, Clear Packet Buffer and the interface picker all live in the
+ * header, so this deliberately does not take capture state, capture
+ * callbacks, the agent command channel, or the role permissions that gated
+ * them - a menu entry that duplicates a visible button is a second thing to
+ * keep in sync for no gain.
+ */
 interface AppMenuProps {
-  isCapturing: boolean;
-  onStartCapture: () => void;
-  onPauseCapture: () => void;
-  onSendAgentCommand: (command: AgentCommand) => void;
-  onClearPackets: () => void;
-  selectedInterfaces: string[];
   onOpenDissectorModal: () => void;
   onOpenStatsModal: () => void;
   onOpenExportModal: () => void;
   onOpenIspModal?: () => void;
   onOpenSettingsModal: () => void;
-  permissions: UserRolePermissions;
-  totalPacketsCount: number;
   agentOutdated: boolean;
 }
 
+/**
+ * The drawer is `--chrome`, in every theme - the same surface as the header bar
+ * it hangs from, and now the same single set of classes.
+ *
+ * The selected row is a translucent wash of the FOREGROUND colour rather than
+ * `--accent`. Accent is a near-neutral in these themes - designed to sit on a
+ * card - and on a saturated ground it reads as a smear rather than as a
+ * highlight.
+ */
 const itemClass =
-  'flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm cursor-pointer text-foreground ' +
-  'data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground ' +
+  'flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm cursor-pointer ' +
+  'text-chrome-foreground ' +
+  'data-[selected=true]:bg-chrome-foreground/15 data-[selected=true]:text-chrome-foreground ' +
   'data-[disabled=true]:opacity-40 data-[disabled=true]:pointer-events-none';
+
+/** Icons follow their row. */
+const itemIconClass = 'w-3.5 h-3.5 shrink-0 text-chrome-foreground';
 
 function downloadAgentInstaller() {
   const { url, filename } = getAgentDownloadForCurrentOS();
@@ -51,19 +59,11 @@ function downloadAgentInstaller() {
 }
 
 export const AppMenu: React.FC<AppMenuProps> = ({
-  isCapturing,
-  onStartCapture,
-  onPauseCapture,
-  onSendAgentCommand,
-  onClearPackets,
-  selectedInterfaces,
   onOpenDissectorModal,
   onOpenStatsModal,
   onOpenExportModal,
   onOpenIspModal,
   onOpenSettingsModal,
-  permissions,
-  totalPacketsCount,
   agentOutdated,
 }) => {
   const [open, setOpen] = useState(false);
@@ -108,7 +108,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
         title="Menu (Ctrl/Cmd + K)"
         aria-expanded={open}
         aria-label="Toggle menu"
-        className="relative z-50 flex items-center justify-center w-9 h-9 rounded-md border transition-colors cursor-pointer bg-secondary hover:bg-accent border-border text-foreground"
+        className="relative z-50 flex items-center justify-center w-9 h-9 rounded-md border transition-colors cursor-pointer bg-secondary hover:bg-accent border-border text-foreground dark:text-primary"
       >
         <HamburgerIcon open={open} />
       </button>
@@ -151,133 +151,122 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                 ref={commandRef}
                 label="App Menu"
                 loop
-                shouldFilter={false}
+                // Filtering on, and an input below to drive it.
+                //
+                // This was bound to Ctrl+K and built on cmdk from the start,
+                // but with no input and filtering switched off it was a drawer
+                // of links wearing a palette's keybinding. Six entries fit on
+                // screen, so it did not matter; adding view commands to a flat
+                // list is where it starts to.
+                shouldFilter
                 tabIndex={0}
-                className="flex flex-col h-full rounded-r-xl border shadow-2xl overflow-hidden bg-popover border-border text-popover-foreground outline-none"
+                className="flex flex-col h-full rounded-r-xl border shadow-2xl overflow-hidden bg-chrome border-chrome-foreground/20 text-chrome-foreground outline-none"
               >
-                <div className="flex items-center justify-between border-b border-border px-3.5 py-2.5 shrink-0">
-                  <span className="text-xs font-bold text-foreground">Menu</span>
+                <div className="flex items-center justify-between border-b border-chrome-foreground/20 px-3.5 py-2.5 shrink-0">
+                  <span className="text-xs font-bold text-chrome-foreground">Menu</span>
                   {/* Was an inert "ESC" hint; Escape itself still closes the
                       menu via the keydown handler above, this just gives the
                       hint something to do when clicked instead of typed. */}
                   <button
                     onClick={() => setOpen(false)}
                     aria-label="Close menu"
-                    className="p-1 rounded-md shrink-0 text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer"
+                    className="p-1 rounded-md shrink-0 transition-colors cursor-pointer text-chrome-foreground/70 hover:text-chrome-foreground hover:bg-chrome-foreground/15"
                   >
                     <TbX className="w-4 h-4" />
                   </button>
                 </div>
 
-                <Command.List
-                  className="flex-1 overflow-y-auto custom-scrollbar p-1.5
-                    [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5
-                    [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:font-bold
-                    [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider
-                    [&_[cmdk-group-heading]]:font-mono [&_[cmdk-group-heading]]:text-muted-foreground"
-                >
-                  <Command.Group heading="Actions">
-                    {isCapturing ? (
-                      <Command.Item
-                        value="stop-capture"
-                        onSelect={() => run(() => { onPauseCapture(); onSendAgentCommand({ type: 'stop_capture' }); })}
-                        className={itemClass}
+                <div className="border-b border-chrome-foreground/20 px-3 py-2 shrink-0">
+                  <Command.Input
+                    autoFocus
+                    placeholder="Search commands..."
+                    className="w-full bg-transparent text-xs outline-none text-chrome-foreground placeholder:text-chrome-foreground/60"
+                  />
+                </div>
+
+                <Command.Empty className="px-3 py-6 text-center text-[11px] text-chrome-foreground/70">
+                  No matching command.
+                </Command.Empty>
+
+                {/* One flat list. There is no Command.Group here on purpose:
+                    with a handful of entries, an Actions/Views split cost two
+                    heading rows to sort items that fit on screen at once, and
+                    the headings are not selectable, so arrowing through the
+                    menu skipped past them anyway. The cmdk-group-heading
+                    styling this list used to carry went with them. */}
+                <Command.List className="flex-1 overflow-y-auto custom-scrollbar p-1.5">
+                  {/* The two pane commands that used to head this list now live
+                      only in Settings -> Interface, beside the rest of the
+                      layout controls. Two ways to flip the same switch, worded
+                      differently in each place, is how a menu starts drifting
+                      from the panel it duplicates. */}
+                  <Command.Item
+                    value="export-import"
+                    onSelect={() => run(onOpenExportModal)}
+                    className={itemClass}
+                  >
+                    <TbDownload className={itemIconClass} />
+                    <span>Export / Import PCAP</span>
+                  </Command.Item>
+                  {/* Was its own always-visible header button; folded in here
+                      now that the header has nothing right of the trigger
+                      for it to sit next to. */}
+                  <Command.Item
+                    value="download-driver"
+                    onSelect={() => run(downloadAgentInstaller)}
+                    className={itemClass}
+                  >
+                    <TbCloudDownload className={itemIconClass} />
+                    <span className="flex-1">Download Driver ({agentDownload.label})</span>
+                    {agentOutdated && (
+                      <span
+                        className="shrink-0 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-chrome-foreground/15 border border-chrome-foreground/30 text-chrome-foreground"
+                        title="A newer driver build is available"
                       >
-                        <TbPlayerPause className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                        <span>Stop Capture</span>
-                      </Command.Item>
-                    ) : (
-                      <Command.Item
-                        value="start-capture"
-                        // Mirrors the header's Start button: an adapter has to
-                        // be chosen first, and the only place to choose one is
-                        // the header's Interfaces button.
-                        disabled={!permissions.canCapture || selectedInterfaces.length === 0}
-                        onSelect={() => run(onStartCapture)}
-                        className={itemClass}
-                      >
-                        <TbPlayerPlay className="w-3.5 h-3.5 text-primary shrink-0" />
-                        <span>Start Capture</span>
-                      </Command.Item>
+                        Update
+                      </span>
                     )}
-
+                  </Command.Item>
+                  {/* Named for what it opens rather than for its category:
+                      the window is a protocol hierarchy, and the panel in the
+                      sidebar that leads here is already called Protocol
+                      Breakdown - two names for one thing read as two things. */}
+                  <Command.Item
+                    value="protocol-breakdown"
+                    onSelect={() => run(onOpenStatsModal)}
+                    className={itemClass}
+                  >
+                    <TbChartBar className={itemIconClass} />
+                    <span>Protocol Breakdown</span>
+                  </Command.Item>
+                  <Command.Item
+                    value="custom-dissectors"
+                    onSelect={() => run(onOpenDissectorModal)}
+                    className={itemClass}
+                  >
+                    <TbCode className={itemIconClass} />
+                    <span>Custom Dissectors</span>
+                  </Command.Item>
+                  {onOpenIspModal && (
                     <Command.Item
-                      value="clear-buffer"
-                      disabled={!permissions.canClearBuffer || totalPacketsCount === 0}
-                      onSelect={() => run(onClearPackets)}
+                      // cmdk matches typed search text against this value, so
+                      // it tracks the label rather than staying "isp-stats".
+                      value="isp-information"
+                      onSelect={() => run(onOpenIspModal)}
                       className={itemClass}
                     >
-                      <TbTrash className="w-3.5 h-3.5 text-foreground shrink-0" />
-                      <span>Clear Packet Buffer</span>
+                      <TbHome className={itemIconClass} />
+                      <span>ISP Information</span>
                     </Command.Item>
-                    <Command.Item
-                      value="export-import"
-                      onSelect={() => run(onOpenExportModal)}
-                      className={itemClass}
-                    >
-                      <TbDownload className="w-3.5 h-3.5 text-foreground shrink-0" />
-                      <span>Export / Import PCAP</span>
-                    </Command.Item>
-                    {/* Was its own always-visible header button; folded in here
-                        now that the header has nothing right of the trigger
-                        for it to sit next to. */}
-                    <Command.Item
-                      value="download-driver"
-                      onSelect={() => run(downloadAgentInstaller)}
-                      className={itemClass}
-                    >
-                      <TbCloudDownload className="w-3.5 h-3.5 text-foreground shrink-0" />
-                      <span className="flex-1">Download Driver ({agentDownload.label})</span>
-                      {agentOutdated && (
-                        <span
-                          className="shrink-0 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400"
-                          title="A newer agent build is available"
-                        >
-                          Update
-                        </span>
-                      )}
-                    </Command.Item>
-                  </Command.Group>
-
-                  <Command.Separator className="my-1 h-px bg-border" />
-
-                  <Command.Group heading="Views">
-                    <Command.Item
-                      value="statistics"
-                      onSelect={() => run(onOpenStatsModal)}
-                      className={itemClass}
-                    >
-                      <TbChartBar className="w-3.5 h-3.5 text-foreground shrink-0" />
-                      <span>Statistics</span>
-                    </Command.Item>
-                    <Command.Item
-                      value="custom-dissectors"
-                      onSelect={() => run(onOpenDissectorModal)}
-                      className={itemClass}
-                    >
-                      <TbCode className="w-3.5 h-3.5 text-foreground shrink-0" />
-                      <span>Custom Dissectors</span>
-                    </Command.Item>
-                    {onOpenIspModal && (
-                      <Command.Item
-                        value="isp-stats"
-                        onSelect={() => run(onOpenIspModal)}
-                        className={itemClass}
-                      >
-                        <TbHome className="w-3.5 h-3.5 text-foreground shrink-0" />
-                        <span>ISP Stats</span>
-                      </Command.Item>
-                    )}
-                    <Command.Item
-                      value="settings"
-                      onSelect={() => run(onOpenSettingsModal)}
-                      className={itemClass}
-                    >
-                      <TbSettings className="w-3.5 h-3.5 text-foreground shrink-0" />
-                      <span>Settings</span>
-                    </Command.Item>
-                  </Command.Group>
-
+                  )}
+                  <Command.Item
+                    value="settings"
+                    onSelect={() => run(onOpenSettingsModal)}
+                    className={itemClass}
+                  >
+                    <TbSettings className={itemIconClass} />
+                    <span>Settings</span>
+                  </Command.Item>
                 </Command.List>
               </Command>
             </motion.div>

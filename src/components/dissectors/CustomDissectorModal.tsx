@@ -154,9 +154,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-primary/20">
-              <TbCode className="w-5 h-5 text-foreground" />
-            </div>
+            <TbCode className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <div className="flex items-center gap-2 font-bold text-base">
                 <span>Modular Custom Protocol Dissector Plugin Engine</span>

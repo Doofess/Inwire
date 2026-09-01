@@ -145,7 +145,6 @@ export interface Packet {
   asciiDump?: string;
   anomalies?: AnomalyInfo[];
   interfaceName: string;
-  colorRuleName?: string;
 }
 
 export interface CustomDissectorFieldDef {
@@ -174,26 +173,55 @@ export interface ColorRule {
   id: string;
   name: string;
   filter: string;
-  /** Colors used on a dark packet list. */
-  bgColor: string;
-  textColor: string;
   /**
-   * Colors used on a light packet list. Optional so a user-defined rule can
-   * supply a single pair and have it apply to both themes; the built-in rules
-   * set both, because a palette tuned for a dark ground is unreadable on a
-   * light one (and vice versa).
+   * A rule's own colors, used only as a fallback.
+   *
+   * Appearance belongs to the active packet theme (see services/packetThemes),
+   * which keys its palette by rule id and covers every built-in rule - so for
+   * those these are never read. They remain for a user-defined rule, which no
+   * shipped theme can know about and which would otherwise render unpainted.
+   *
+   * The built-in rules still carry them so the shipped themes can be diffed
+   * against the palette the list historically used.
    */
+  bgColor?: string;
+  textColor?: string;
   lightBgColor?: string;
   lightTextColor?: string;
   enabled: boolean;
 }
 
+/** A named display filter, applied from the Presets dropdown. */
 export interface FilterPreset {
   id: string;
   name: string;
   filter: string;
-  category: 'Security' | 'Web' | 'Troubleshooting' | 'Custom';
   description: string;
+}
+
+/**
+ * A user-created folder of presets.
+ *
+ * Presets are nested inside their group rather than pointing at one by id:
+ * membership and within-group ordering are then the same fact - a preset's
+ * position in this array - so a drag between groups cannot leave the two
+ * disagreeing. Array order is display order, in the Settings panel and in the
+ * Presets dropdown alike.
+ */
+export interface FilterPresetGroup {
+  id: string;
+  name: string;
+  presets: FilterPreset[];
+}
+
+/**
+ * The whole preset library, as persisted to localStorage.
+ *
+ * A wrapper object rather than a bare array so the stored shape has somewhere
+ * to grow without a migration.
+ */
+export interface FilterPresetLibrary {
+  groups: FilterPresetGroup[];
 }
 
 export type UserRole = 'ADMIN' | 'SOC_ANALYST' | 'NETWORK_ENGINEER' | 'AUDITOR_GUEST';

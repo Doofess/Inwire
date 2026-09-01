@@ -23,6 +23,7 @@ a = Analysis(
         'agent',
         'agent_log',
         'config',
+        'interface_stats',
         'logging_setup',
         # Scapy's dynamically loaded layers.
         'scapy.layers.all',

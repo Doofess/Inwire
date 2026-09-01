@@ -205,9 +205,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-sky-500/20">
-              <TbDownload className="w-5 h-5 text-foreground" />
-            </div>
+            <TbDownload className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <div className="font-bold text-base">Capture Import & Export Center</div>
               <p className={`text-xs ${"text-muted-foreground"}`}>Libpcap 2.4 binary format, JSON telemetry & CSV reports</p>
@@ -250,7 +248,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
                   <TbDownload className="w-4 h-4 text-foreground" />
                 </div>
                 <p className={`text-[11px] ${"text-muted-foreground"}`}>
-                  Standard binary libpcap 2.4 file compatible with Wireshark & Tcpdump
+                  Standard binary libpcap 2.4 file, readable by tcpdump and any standard capture tool
                 </p>
               </button>
 

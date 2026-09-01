@@ -54,7 +54,13 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "2.3.0"
+AGENT_VERSION = "2.6.0"
+
+# How often per-interface traffic rates are sampled while a client has the
+# capture-interface picker open. 500ms is fast enough that the sparkline
+# reacts while you are looking at it, slow enough that reading the OS counters
+# stays invisible in the agent's CPU use.
+INTERFACE_STATS_INTERVAL_SECONDS = 0.5
 
 # The most packet sends that may be queued onto the event loop at once. Past
 # this, frames are dropped instead of queued (see AgentServer.broadcast). A
@@ -69,10 +75,18 @@ ORPHAN_CHECK_SECONDS = 2
 
 import logging_setup
 import agent_log
+import interface_stats
 
 # Configured for real in main(); until then this is a plain logger, so an
 # import-time failure still has somewhere to go.
 log = logging.getLogger("netview")
+
+# The adapters currently available to capture on, as (device_name, label), and
+# the same data as a lookup. Deliberately module-level rather than created in
+# main(): these are re-read while the agent runs (see refresh_interfaces), so
+# they are ordinary state with a starting value, not a one-time snapshot.
+AVAILABLE_INTERFACES: list = []
+INTERFACE_LABELS: dict = {}
 
 
 def make_id() -> str:
@@ -92,6 +106,174 @@ def has_admin_privileges() -> bool:
         return os.geteuid() == 0
     except AttributeError:
         return False
+
+
+# --- Restarting this process --------------------------------------------------
+
+SERVICE_NAME = "NetViewAgent"
+# Any non-zero code. The service manager treats a service process that dies
+# with one as a failure, which is what triggers the restart action below - a
+# clean exit(0) reads as an intentional stop and nothing would come back.
+RESTART_EXIT_CODE = 1
+# How long the SCM waits before restarting, and how long a run has to last
+# before its failure count resets. A day is deliberate: three restarts is a
+# genuine crash loop worth leaving stopped, not something to forgive hourly.
+FAILURE_ACTION_DELAY_MS = 5000
+FAILURE_RESET_SECONDS = 86400
+
+# Resolved once at startup by refresh_restart_support(). False unless proven
+# otherwise - see decide_restart_allowed for why that direction matters.
+RESTART_SUPPORTED = False
+RESTART_UNAVAILABLE_REASON = "Restart is unavailable: this agent is not running as the NetView service."
+
+
+def decide_restart_allowed(is_service_process: bool, failure_policy_confirmed: bool) -> bool:
+    """Whether a restart_agent command may be honored.
+
+    Restarting is implemented by exiting and letting Windows start the agent
+    again, so BOTH halves have to hold or the command is not a restart at all -
+    it is a one-way stop that nothing on this machine will undo:
+
+      - `is_service_process`: an agent run from source (python agent.py) has no
+        service behind it. Exiting would just close it, and no browser can
+        start it again.
+      - `failure_policy_confirmed`: without restart-on-failure actions the SCM
+        treats the exit as a dead service and leaves it stopped until someone
+        starts it or reboots.
+
+    Both are proven by reading the SCM back, never assumed, and this is a pure
+    function so that reasoning is testable without a service to talk to.
+    """
+    return bool(is_service_process and failure_policy_confirmed)
+
+
+def _open_own_service(access):
+    """Opens this machine's NetViewAgent service, or None if unreachable."""
+    import win32service
+
+    scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+    try:
+        return scm, win32service.OpenService(scm, SERVICE_NAME, access)
+    except Exception:
+        win32service.CloseServiceHandle(scm)
+        raise
+
+
+def _running_as_service_process() -> bool:
+    """True only when THIS process is the one the SCM runs as NetViewAgent.
+
+    Compares the SCM's reported process id against our own rather than
+    inferring from how the code was launched: `debug` mode runs the real
+    service body in the foreground, and a source run imports the very same
+    module, so nothing about the call path distinguishes them reliably.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import win32service
+
+        scm, svc = _open_own_service(win32service.SERVICE_QUERY_STATUS)
+        try:
+            status = win32service.QueryServiceStatusEx(svc)
+            return status.get("ProcessId") == os.getpid()
+        finally:
+            win32service.CloseServiceHandle(svc)
+            win32service.CloseServiceHandle(scm)
+    except Exception as exc:
+        log.debug("could not determine service identity (%s)", exc)
+        return False
+
+
+def _ensure_failure_policy() -> bool:
+    """Asserts restart-on-failure actions, and returns whether they are in place.
+
+    Writes first and then reads back, because only the read decides. The write
+    can legitimately fail - a non-elevated source run has no right to change
+    service config - and the installer may already have set the policy, so a
+    failed write is not a failed outcome. Never trusting the write is also what
+    keeps a silently-ignored ChangeServiceConfig2 from being read as success.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import win32service
+
+        scm, svc = _open_own_service(
+            win32service.SERVICE_CHANGE_CONFIG | win32service.SERVICE_QUERY_CONFIG
+        )
+        try:
+            try:
+                win32service.ChangeServiceConfig2(
+                    svc,
+                    win32service.SERVICE_CONFIG_FAILURE_ACTIONS,
+                    {
+                        "ResetPeriod": FAILURE_RESET_SECONDS,
+                        "RebootMsg": None,
+                        "Command": None,
+                        "Actions": [
+                            (win32service.SC_ACTION_RESTART, FAILURE_ACTION_DELAY_MS)
+                        ]
+                        * 3,
+                    },
+                )
+            except Exception as exc:
+                # Not fatal: the policy may already be correct from the
+                # installer, which the read below is the judge of.
+                log.debug("could not write failure actions (%s)", exc)
+
+            current = win32service.QueryServiceConfig2(
+                svc, win32service.SERVICE_CONFIG_FAILURE_ACTIONS
+            )
+            actions = current.get("Actions") or ()
+            return any(a[0] == win32service.SC_ACTION_RESTART for a in actions)
+        finally:
+            win32service.CloseServiceHandle(svc)
+            win32service.CloseServiceHandle(scm)
+    except Exception as exc:
+        log.debug("could not read failure actions (%s)", exc)
+        return False
+
+
+def refresh_restart_support() -> bool:
+    """Works out once, at startup, whether restart_agent can be honored."""
+    global RESTART_SUPPORTED, RESTART_UNAVAILABLE_REASON
+
+    is_service = _running_as_service_process()
+    policy_ok = _ensure_failure_policy() if is_service else False
+    RESTART_SUPPORTED = decide_restart_allowed(is_service, policy_ok)
+
+    if RESTART_SUPPORTED:
+        RESTART_UNAVAILABLE_REASON = ""
+        log.info("restart is available (service restart-on-failure policy confirmed)")
+    elif not is_service:
+        RESTART_UNAVAILABLE_REASON = (
+            "Restart is unavailable: this agent is not running as the NetView service."
+        )
+        log.info("restart is unavailable - not running as the %s service", SERVICE_NAME)
+    else:
+        RESTART_UNAVAILABLE_REASON = (
+            "Restart is unavailable: Windows has no restart-on-failure policy for the "
+            "NetView service, so the agent would not come back. Reinstall the agent to fix this."
+        )
+        log.warning(
+            "restart is unavailable - no restart-on-failure policy on %s; refusing to "
+            "exit on request because nothing would start the agent again",
+            SERVICE_NAME,
+        )
+    return RESTART_SUPPORTED
+
+
+def exit_for_restart() -> None:
+    """Ends this process so the service manager starts a fresh one.
+
+    os._exit rather than a graceful shutdown: the point is for the SCM to see
+    the service process terminate unexpectedly, which is what triggers the
+    restart action. Logging is flushed first because after this line there is
+    no further record of why the agent went away.
+    """
+    log.info("restarting now - exiting so the service manager starts a new process")
+    logging.shutdown()
+    os._exit(RESTART_EXIT_CODE)
 
 
 def build_hello_message(version: str, state: str, interfaces) -> dict:
@@ -259,6 +441,11 @@ class AgentServer:
         # never opens Driver Info at all, and log fan-out should cost nothing
         # for those.
         self.log_subscribers = set()
+        # Sockets with the interface picker open. Same reasoning as
+        # log_subscribers: sampling runs only while somebody is looking, so a
+        # client that never opens the picker costs nothing.
+        self.interface_stats_subscribers = set()
+        self._interface_stats_task = None
         self.loop = None
         # How many _send_all coroutines are scheduled but have not yet run.
         # Bounding this is what stops a fast interface growing the agent
@@ -276,7 +463,12 @@ class AgentServer:
             # not self.connections, so any stuck entry means the condition
             # can never be true again. Every exit path must reach finally.
             state = "sniffing" if sniffer.is_sniffing() else "idle"
-            await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, AVAILABLE_INTERFACES)))
+            # Re-read the adapters here rather than trusting the list built at
+            # startup: this message is what the app builds its interface picker
+            # from, so a client connecting is exactly the moment the answer has
+            # to be current. See refresh_interfaces().
+            interfaces = refresh_interfaces()
+            await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, interfaces)))
             async for raw in ws:
                 await self._handle_message(ws, raw)
         finally:
@@ -297,6 +489,10 @@ class AgentServer:
         # A socket left here after its connection died would make the log
         # fan-out write to a dead socket on every line, forever.
         self.log_subscribers.discard(ws)
+        # Same for the stats fan-out - and dropping it here is what lets the
+        # sampling loop wind down when the last picker goes away with its tab.
+        self.interface_stats_subscribers.discard(ws)
+        self._stop_interface_stats_task_if_idle()
         log.info("client disconnected (%d remaining)", len(self.connections))
         if not self.connections and sniffer.is_sniffing():
             log.info("last client disconnected - stopping capture")
@@ -350,8 +546,81 @@ class AgentServer:
         elif msg_type == "unsubscribe_logs":
             self.log_subscribers.discard(ws)
             return
+        elif msg_type == "subscribe_interface_stats":
+            self.interface_stats_subscribers.add(ws)
+            self._ensure_interface_stats_task()
+            return
+        elif msg_type == "unsubscribe_interface_stats":
+            self.interface_stats_subscribers.discard(ws)
+            self._stop_interface_stats_task_if_idle()
+            return
+        elif msg_type == "restart_agent":
+            if not RESTART_SUPPORTED:
+                # Refusing is the whole safety property: this command is
+                # implemented by exiting, and where nothing would start the
+                # agent again that is a stop the user cannot undo from the app.
+                log.warning("restart_agent refused - %s", RESTART_UNAVAILABLE_REASON)
+                await ws.send(json.dumps({
+                    "type": "error",
+                    "code": "restart_unavailable",
+                    "message": RESTART_UNAVAILABLE_REASON,
+                }))
+                return
+            log.info("restart_agent requested by a client")
+            # Deferred by a moment rather than exiting inline so this handler
+            # can return, the log line reaches any subscriber, and the socket
+            # closes as a normal drop instead of mid-message.
+            asyncio.get_running_loop().call_later(0.5, exit_for_restart)
+            return
         else:
             return
+
+    def _ensure_interface_stats_task(self):
+        if self._interface_stats_task is None or self._interface_stats_task.done():
+            self._interface_stats_task = asyncio.create_task(self._interface_stats_loop())
+
+    def _stop_interface_stats_task_if_idle(self):
+        """Sampling exists to feed an open picker; with none open it stops.
+
+        Cancelled rather than left spinning on an empty subscriber set, so a
+        closed menu leaves nothing running - the same lifecycle rule capture
+        itself follows.
+        """
+        if not self.interface_stats_subscribers and self._interface_stats_task is not None:
+            self._interface_stats_task.cancel()
+            self._interface_stats_task = None
+
+    async def _interface_stats_loop(self):
+        # Constructed per subscription rather than kept alive: its first sample
+        # is always zero (it has no previous reading to difference against), so
+        # a stale sampler would report one bogus spike covering however long
+        # the menu was closed.
+        sampler = interface_stats.InterfaceRateSampler(AVAILABLE_INTERFACES)
+        try:
+            while self.interface_stats_subscribers:
+                # A monotonic clock, so a system time change mid-capture cannot
+                # produce a negative interval and a nonsense rate.
+                rates = sampler.sample(time.monotonic())
+                message = json.dumps({
+                    "type": "interface_stats",
+                    "intervalMs": int(INTERFACE_STATS_INTERVAL_SECONDS * 1000),
+                    "interfaces": rates,
+                })
+                for ws in list(self.interface_stats_subscribers):
+                    try:
+                        await ws.send(message)
+                    except Exception:
+                        self.interface_stats_subscribers.discard(ws)
+                await asyncio.sleep(INTERFACE_STATS_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Never take the connection down over a sparkline: the picker still
+            # works without it, and the counters are the least important thing
+            # the agent reports.
+            log.warning("interface stats sampling stopped: %s", exc)
+        finally:
+            self._interface_stats_task = None
 
         self.broadcast(sniffer.state_message(AVAILABLE_INTERFACES))
 
@@ -541,6 +810,17 @@ def list_interfaces():
     """
     from scapy.all import get_if_list
 
+    # scapy builds conf.ifaces once, when it initialises, and it is a plain
+    # dict from then on - iterating it hands back that original snapshot no
+    # matter how much later you ask. Without this reload the agent would keep
+    # re-reading a cache from process start, and re-enumerating on connect
+    # would look correct while changing nothing. reload() clears the table and
+    # re-runs pcap_findalldevs, which is the actual query.
+    try:
+        scapy_conf.ifaces.reload()
+    except Exception as exc:
+        log.warning("could not reload the interface table (%s); using the cached one", exc)
+
     if os.name == "nt":
         if not getattr(scapy_conf, "use_pcap", False):
             # scapy could not load wpcap.dll, so conf.ifaces (and
@@ -569,6 +849,58 @@ def list_interfaces():
             log.warning("could not resolve friendly adapter names (%s); falling back to raw list", exc)
 
     return [(name, name) for name in get_if_list()]
+
+
+def refresh_interfaces():
+    """Re-reads the adapter list into AVAILABLE_INTERFACES, and returns it.
+
+    The list used to be built once in main() and replayed in every hello and
+    state message for the life of the process, which was wrong in two ways that
+    both showed up in the field:
+
+      - Windows creates and destroys adapters constantly - WAN Miniports and
+        Wi-Fi Direct virtual adapters appear and vanish on their own - so an
+        agent that happened to start at a quiet moment reported a short list
+        forever. An adapter plugged in afterwards could never be captured on,
+        with nothing in the UI to suggest why.
+
+      - As an auto-start service the agent can win the race against Npcap's
+        driver binding at boot and enumerate nothing at all.
+
+    Calling this whenever a client connects means opening the app is enough to
+    get an accurate list, without a poll loop or any protocol change.
+
+    A failed enumeration keeps the previous list. The alternative - emptying it
+    because one call threw while a driver was reloading - would take the picker
+    away from a client that is using it, which is worse than being briefly out
+    of date.
+    """
+    global AVAILABLE_INTERFACES, INTERFACE_LABELS
+
+    try:
+        interfaces = list_interfaces()
+    except Exception as exc:
+        log.warning(
+            "could not re-enumerate network interfaces (%s); keeping the previous list", exc
+        )
+        return AVAILABLE_INTERFACES
+
+    if interfaces == AVAILABLE_INTERFACES:
+        return AVAILABLE_INTERFACES
+
+    previous = dict(AVAILABLE_INTERFACES)
+    AVAILABLE_INTERFACES = interfaces
+    INTERFACE_LABELS = dict(interfaces)
+
+    log.info("detected %d network interface(s)", len(interfaces))
+    for name, label in interfaces:
+        if name not in previous:
+            log.info("  interface available: %s -> %s", label, name)
+    for name, label in previous.items():
+        if name not in INTERFACE_LABELS:
+            log.info("  interface gone: %s -> %s", label, name)
+
+    return AVAILABLE_INTERFACES
 
 
 def sniff_on_interface(iface_name, iface_label, stop_event):
@@ -617,7 +949,9 @@ async def watch_for_orphaned_capture():
 
 
 async def main(to_stderr=True):
-    global AVAILABLE_INTERFACES, INTERFACE_LABELS, sniffer, log
+    # The interface globals are owned by refresh_interfaces() now, and only
+    # read here, so they are deliberately not declared global.
+    global sniffer, log
 
     log = logging_setup.setup_logging(config.config_dir(), to_stderr=to_stderr)
     # Must come after setup_logging, which tears down existing handlers when
@@ -634,19 +968,25 @@ async def main(to_stderr=True):
         log.error("packet capture requires elevated privileges. %s", hint)
         return False
 
-    try:
-        AVAILABLE_INTERFACES = list_interfaces()
-    except Exception as exc:
-        log.error("could not enumerate network interfaces: %s", exc)
-        return False
-    if not AVAILABLE_INTERFACES:
-        log.error("no capturable network interfaces found - cannot start")
-        return False
-    INTERFACE_LABELS = dict(AVAILABLE_INTERFACES)
+    # Resolved once, here, rather than per request: it queries the SCM, and the
+    # answer cannot change while this process runs - a process either is the
+    # service or is not. Also writes the restart-on-failure policy, so an agent
+    # installed before that policy existed heals itself on its next start.
+    refresh_restart_support()
 
-    log.info("detected %d network interface(s)", len(AVAILABLE_INTERFACES))
-    for name, label in AVAILABLE_INTERFACES:
-        log.info("  %s -> %s", label, name)
+    refresh_interfaces()
+    if not AVAILABLE_INTERFACES:
+        # Deliberately not fatal any more. As an auto-start service the agent
+        # can beat Npcap's driver binding at boot and enumerate nothing, and
+        # refusing to start turned a few seconds of bad timing into an agent
+        # that stayed down until someone restarted it by hand - which is
+        # exactly what happened here on 2026-08-29 09:26. The list is re-read
+        # whenever a client connects, so an agent that starts empty heals
+        # itself as soon as the app is opened.
+        log.warning(
+            "no capturable network interfaces found at startup - starting anyway. "
+            "If this persists, Npcap may not be installed: https://npcap.com/#download"
+        )
 
     # Starts idle on purpose - sniffing now only begins when a paired client
     # sends start_capture, not automatically at process launch.

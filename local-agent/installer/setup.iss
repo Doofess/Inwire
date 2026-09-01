@@ -13,7 +13,7 @@
 ; licence, and downloading it on the user's machine is not redistribution.
 
 #define MyAppName "NetView Agent"
-#define MyAppVersion "2.3.0"
+#define MyAppVersion "2.6.0"
 #define MyAppExeName "netview-agent-windows.exe"
 #define MyAppPublisher "NetView"
 #define NpcapUrl "https://npcap.com/dist/npcap-1.79.exe"
@@ -224,6 +224,22 @@ begin
       'See ' + LogPath + ' for details.', mbCriticalError, MB_OK, IDOK);
     Exit;
   end;
+
+  // Restart-on-failure actions, set between registering and starting.
+  //
+  // This is what makes Driver Info's "Restart Agent" possible at all: the
+  // agent restarts by exiting, and without these the SCM would treat that exit
+  // as a dead service and leave it stopped until someone started it by hand.
+  // The agent re-asserts the same policy at startup and refuses to exit on
+  // request when it cannot confirm it, so a failure here degrades to the
+  // button being unavailable rather than to an agent that cannot come back -
+  // which is why this is not treated as a fatal install error.
+  //
+  // reset= 86400 means three failures inside a day stop the restarts, so a
+  // genuine crash loop is left stopped instead of being retried forever.
+  Exec(ExpandConstant('{sys}\sc.exe'),
+       'failure NetViewAgent reset= 86400 actions= restart/5000/restart/5000/restart/5000',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   if not Exec(ExePath, 'start', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin

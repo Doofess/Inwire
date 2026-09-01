@@ -1,24 +1,33 @@
 import React from 'react';
 import { Packet } from '../../types/packet';
-import { TbChartPie } from 'react-icons/tb';
+import { TbChartPie, TbMaximize } from 'react-icons/tb';
 
 interface ProtocolDonutProps {
   packets: Packet[];
   onSelectProtocol: (protocol: string) => void;
   selectedProtocolFilter?: string;
+  /** Opens the Statistics modal - the full version of this panel's summary. */
+  onOpenStatistics: () => void;
 }
 
 interface ProtocolDatum {
   protocol: string;
   count: number;
   percentage: number;
-  color: string;
-  textColor: string;
 }
 
-// All protocols share the same cyan accent used broadly across the app
-// (Start Capture button, active-filter states, etc.) rather than each
-// getting its own hue.
+/*
+ * Every bar is the theme's accent, not a hue per protocol.
+ *
+ * A per-protocol palette was tried here and removed. This panel is a ranked
+ * list - the bar lengths and the ordering carry the comparison - so a hue per
+ * row adds a second encoding of something the layout already says, and eight
+ * saturated bars stacked in a small card read as decoration rather than data.
+ *
+ * The geo map is the opposite case and keeps its per-protocol colours: there
+ * the routes are scattered across a map with no ordering and no shared
+ * baseline, so colour is the only thing that can distinguish them.
+ */
 const PROTOCOL_BAR_COLOR = 'bg-primary';
 const PROTOCOL_TEXT_COLOR = 'text-primary';
 
@@ -26,6 +35,7 @@ export const ProtocolDonutChart: React.FC<ProtocolDonutProps> = ({
   packets,
   onSelectProtocol,
   selectedProtocolFilter,
+  onOpenStatistics,
 }) => {
   const data: ProtocolDatum[] = React.useMemo(() => {
     if (packets.length === 0) return [];
@@ -33,20 +43,20 @@ export const ProtocolDonutChart: React.FC<ProtocolDonutProps> = ({
     // Grouped by the displayed protocol name, so the breakdown reads the way
     // the packet list does - "TLSv1.2", "QUIC", "ICMPv6" - rather than
     // collapsing everything onto the handful of coarse ProtocolType values.
-    const counts: Record<string, number> = {};
+    const counts: Record<string, { count: number }> = {};
     for (const p of packets) {
       const label = p.protocolLabel ?? p.protocol;
-      counts[label] = (counts[label] || 0) + 1;
+      const entry = counts[label] ?? { count: 0 };
+      entry.count += 1;
+      counts[label] = entry;
     }
 
     const total = packets.length;
     return Object.entries(counts)
-      .map(([proto, count]) => ({
+      .map(([proto, { count }]) => ({
         protocol: proto,
         count,
         percentage: (count / total) * 100,
-        color: PROTOCOL_BAR_COLOR,
-        textColor: PROTOCOL_TEXT_COLOR,
       }))
       .sort((a, b) => b.count - a.count);
   }, [packets]);
@@ -58,7 +68,18 @@ export const ProtocolDonutChart: React.FC<ProtocolDonutProps> = ({
           <TbChartPie className="w-3.5 h-3.5 text-foreground" />
           <span>Protocol Breakdown</span>
         </h3>
-        <span className="text-[10px] text-muted-foreground font-mono">CLICK TO FILTER</span>
+        {/* A "CLICK TO FILTER" caption used to sit here, describing what the
+            rows below already do - they keep a pointer cursor and a hover
+            state, so the affordance survives its removal. The expand control
+            that replaced it matches the Live Geo-IP Map's exactly: this panel
+            shows the top five protocols, and Statistics is the whole table. */}
+        <button
+          onClick={onOpenStatistics}
+          className="p-1 -m-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+          title="Open full protocol statistics"
+        >
+          <TbMaximize className="w-3.5 h-3.5" />
+        </button>
       </div>
 
       {/* Geometric Progress Bars */}
@@ -75,11 +96,11 @@ export const ProtocolDonutChart: React.FC<ProtocolDonutProps> = ({
             >
               <div className="flex justify-between text-[11px] font-mono">
                 <span className="font-semibold text-foreground/90">{item.protocol}</span>
-                <span className={`font-bold ${item.textColor}`}>{item.percentage.toFixed(1)}%</span>
+                <span className={`font-bold ${PROTOCOL_TEXT_COLOR}`}>{item.percentage.toFixed(1)}%</span>
               </div>
               <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
                 <div
-                  className={`h-full ${item.color} transition-all duration-300`}
+                  className={`h-full ${PROTOCOL_BAR_COLOR} transition-all duration-300`}
                   style={{ width: `${Math.max(4, item.percentage)}%` }}
                 />
               </div>

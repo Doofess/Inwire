@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
+import type { PacketTheme } from '../../services/packetThemes';
 import { PacketListMinimap } from './PacketListMinimap';
 import {
   TbArrowsSort,
@@ -12,17 +13,37 @@ import {
   TbCopy,
 } from 'react-icons/tb';
 import { packetHexDump } from '../../services/pcapParser';
+import { minimapStore, packetListStore } from '../../services/interfacePrefs';
+import { formatTimeColumn } from '../../lib/formatTimeColumn';
+import { ColumnOptionsMenu } from './ColumnOptionsMenu';
+import {
+  COLUMN_ALIGN_CLASS,
+  COLUMN_ALIGN_JUSTIFY,
+  HIDEABLE_COLUMNS,
+  visibleSortField,
+  type SortField as ColumnSortField,
+} from '../../lib/packetColumns';
+import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
+import {
+  loadPreference,
+  useDebouncedPreference,
+  usePreferenceSync,
+} from '../../services/preferences';
 
 interface PacketListProps {
   packets: Packet[];
   selectedPacket: Packet | null;
   onSelectPacket: (packet: Packet) => void;
+  /** Double-clicking a row opens the full-window view of that frame. */
+  onInspectPacket?: (packet: Packet) => void;
   onFollowStream: (streamId: number) => void;
   onQuickFilter: (filter: string) => void;
   searchText: string;
   colorEngine: ColorRulesEngine;
   permissions: UserRolePermissions;
-  isDark: boolean;
+  /** Colors for the list itself. Independent of the app theme by design -
+   *  see services/packetThemes. */
+  packetTheme: PacketTheme;
   themeKey?: string;
 }
 
@@ -35,6 +56,7 @@ type SortOrder = 'asc' | 'desc';
 type ColumnKey = 'id' | 'relativeTime' | 'source' | 'destination' | 'protocol' | 'length';
 
 const COLUMN_WIDTHS_STORAGE_KEY = 'netview.packetListColumnWidths';
+const SORT_STORAGE_KEY = 'netview.packetListSort';
 const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
   id: 64,
   relativeTime: 116,
@@ -43,41 +65,99 @@ const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
   protocol: 76,
   length: 68,
 };
+/**
+ * The three densities, as designed pairs.
+ *
+ * Padding and text size move together rather than being offered as two
+ * controls. Nine combinations of the two would include several that are simply
+ * unreadable - 10px text with comfortable padding reads as a bug, not a choice
+ * - and the presets are the three anybody actually wants.
+ *
+ * Row height is not listed here because it is MEASURED, not declared. Stating
+ * it would be stating it twice, and the two would drift the first time a
+ * padding value changed.
+ */
+const DENSITY_CLASS: Record<'compact' | 'default' | 'comfortable', { body: string; cell: string }> = {
+  compact: { body: 'font-mono text-[10px] leading-[1.1]', cell: 'py-0.5' },
+  default: { body: 'font-mono text-[11px] leading-[1.15]', cell: 'py-1' },
+  comfortable: { body: 'font-mono text-[12px] leading-[1.45]', cell: 'py-1.5' },
+};
+
 const MIN_COLUMN_WIDTH = 36;
 const MAX_COLUMN_WIDTH = 480;
 
+/**
+ * Validates a stored width map field by field: an unknown key is ignored, a
+ * non-numeric or absent one keeps its default, and an out-of-range one is
+ * clamped rather than thrown away. A hand-edited or stale value can therefore
+ * cost at most the fields it actually got wrong.
+ *
+ * Declared at module scope, not inside the component: usePreferenceSync takes
+ * it as a dependency, and a new function identity every render would
+ * resubscribe the storage listener every render.
+ */
+function normalizeColumnWidths(raw: unknown): Record<ColumnKey, number> | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const parsed = raw as Record<string, unknown>;
+  const result = { ...DEFAULT_COLUMN_WIDTHS };
+  (Object.keys(DEFAULT_COLUMN_WIDTHS) as ColumnKey[]).forEach(key => {
+    const value = parsed[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      result[key] = Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, value));
+    }
+  });
+  return result;
+}
+
+/**
+ * Module scope for the same reason as normalizeColumnWidths: a fresh identity
+ * every render would resubscribe the storage listener every render.
+ *
+ * An unknown field name is rejected rather than clamped - unlike a width,
+ * there is no nearest valid sort column, and sorting by a field that does not
+ * exist would render an empty list with no clue why.
+ */
+const SORT_FIELDS: SortField[] = ['id', 'relativeTime', 'source', 'destination', 'protocol', 'length', 'info'];
+
+function normalizeSort(raw: unknown): { field: SortField; order: SortOrder } | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const value = raw as Record<string, unknown>;
+  const field = SORT_FIELDS.find(f => f === value.field);
+  if (!field) return null;
+  return { field, order: value.order === 'desc' ? 'desc' : 'asc' };
+}
+
 function loadStoredColumnWidths(): Record<ColumnKey, number> {
-  try {
-    const raw = localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_COLUMN_WIDTHS };
-    const parsed = JSON.parse(raw);
-    const result = { ...DEFAULT_COLUMN_WIDTHS };
-    (Object.keys(DEFAULT_COLUMN_WIDTHS) as ColumnKey[]).forEach(key => {
-      const value = parsed?.[key];
-      if (typeof value === 'number' && Number.isFinite(value)) {
-        result[key] = Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, value));
-      }
-    });
-    return result;
-  } catch {
-    return { ...DEFAULT_COLUMN_WIDTHS };
-  }
+  return loadPreference(COLUMN_WIDTHS_STORAGE_KEY, normalizeColumnWidths, {
+    ...DEFAULT_COLUMN_WIDTHS,
+  });
 }
 
 export const PacketList: React.FC<PacketListProps> = ({
   packets,
   selectedPacket,
   onSelectPacket,
+  onInspectPacket,
   onFollowStream,
   onQuickFilter,
   searchText,
   colorEngine,
   permissions,
-  isDark,
+  packetTheme,
   themeKey,
 }) => {
-  const [sortField, setSortField] = useState<SortField>('id');
-  const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
+  // Restored from the last session, so a refresh keeps the column the user
+  // was sorting by rather than snapping back to packet number.
+  const storedSort = React.useMemo(
+    () => loadPreference(SORT_STORAGE_KEY, normalizeSort, { field: 'id' as SortField, order: 'asc' as SortOrder }),
+    [],
+  );
+  const [sortField, setSortField] = useState<SortField>(storedSort.field);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(storedSort.order);
+  useDebouncedPreference(
+    SORT_STORAGE_KEY,
+    React.useMemo(() => ({ field: sortField, order: sortOrder }), [sortField, sortOrder]),
+  );
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; packet: Packet } | null>(null);
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -85,13 +165,16 @@ export const PacketList: React.FC<PacketListProps> = ({
   const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(loadStoredColumnWidths);
   const columnResizeRef = useRef<{ column: ColumnKey; startX: number; startWidth: number } | null>(null);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
-    } catch {
-      // ignore write failures (private browsing, storage disabled, etc.)
-    }
-  }, [columnWidths]);
+  // Debounced rather than written straight from an effect: dragging a column
+  // divider changes this on every mousemove, which used to mean one
+  // serialize-and-write per frame of the drag. The write still lands if the
+  // tab closes mid-drag - preferences.ts flushes on pagehide.
+  useDebouncedPreference(COLUMN_WIDTHS_STORAGE_KEY, columnWidths);
+
+  // A resize in another tab lands here without a reload. Without this the two
+  // tabs hold independent copies and whichever writes last silently reverts
+  // the other.
+  usePreferenceSync(COLUMN_WIDTHS_STORAGE_KEY, normalizeColumnWidths, setColumnWidths);
 
   // Columns the user has dragged; these opt out of auto-sizing for good.
   const userSizedColumnsRef = useRef<Set<ColumnKey>>(new Set());
@@ -180,12 +263,35 @@ export const PacketList: React.FC<PacketListProps> = ({
       onPointerMove={handleColumnResizePointerMove}
       onPointerUp={handleColumnResizePointerUp}
       onClick={e => e.stopPropagation()}
+      // Right-click resets THIS column rather than all of them: the handle
+      // belongs to one column, and a gesture on one control that silently
+      // rearranges six others is not a reset, it is a surprise.
+      onContextMenu={e => {
+        e.preventDefault();
+        e.stopPropagation();
+        setColumnWidths(prev => ({ ...prev, [column]: DEFAULT_COLUMN_WIDTHS[column] }));
+      }}
       className="absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-primary/50 z-10"
-      title="Drag to resize column"
+      title="Drag to resize column - right-click to reset"
     />
   );
 
   // Sorting & Filtering
+  const [listPrefs, patchListPrefs] = usePreferenceStore(packetListStore);
+  const [showMinimap] = usePreferenceValue(minimapStore);
+  const density = DENSITY_CLASS[listPrefs.density];
+  const columns = listPrefs.columns;
+
+  /**
+   * The field actually sorted by.
+   *
+   * A user can sort by Protocol and then hide Protocol, leaving the list in an
+   * order with no visible explanation and no header carrying an arrow. Falling
+   * back to `id` also restores the fast path below - sorting by anything else
+   * copies and sorts the whole buffer on every flush.
+   */
+  const effectiveSortField = visibleSortField(sortField as ColumnSortField, columns);
+
   const sortedPackets = React.useMemo(() => {
     let processedPackets = packets;
 
@@ -202,11 +308,19 @@ export const PacketList: React.FC<PacketListProps> = ({
       );
     }
 
-    if (!sortField) return processedPackets;
+    if (!effectiveSortField) return processedPackets;
+
+    // The default sort - packet number ascending - is the order the buffer is
+    // already in, since ids come from packetGenerator monotonically and nothing
+    // reorders it. Copying and re-sorting it every 100ms flush to arrive back
+    // at the identical order is measurable at capture volume and buys nothing,
+    // so recognise it and hand the array straight back. Exact, not an
+    // approximation: any other field or direction still takes the sort below.
+    if (effectiveSortField === 'id' && sortOrder === 'asc') return processedPackets;
 
     return [...processedPackets].sort((a, b) => {
-      let valA: any = a[sortField];
-      let valB: any = b[sortField];
+      let valA: any = a[effectiveSortField as keyof Packet];
+      let valB: any = b[effectiveSortField as keyof Packet];
       if (typeof valA === 'string') {
         valA = valA.toLowerCase();
         valB = (valB || '').toLowerCase();
@@ -214,7 +328,7 @@ export const PacketList: React.FC<PacketListProps> = ({
       }
       return sortOrder === 'asc' ? valA - valB : valB - valA;
     });
-  }, [packets, sortField, sortOrder, searchText]);
+  }, [packets, effectiveSortField, sortOrder, searchText]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -239,7 +353,11 @@ export const PacketList: React.FC<PacketListProps> = ({
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
   const [rowHeight, setRowHeight] = useState(ROW_HEIGHT_FALLBACK);
+
+
   const hasMeasuredRowHeightRef = useRef(false);
+  /** The sticky header, measured for the keyboard scroll arithmetic above. */
+  const headerRef = useRef<HTMLTableSectionElement>(null);
 
   // getBoundingClientRect() forces a synchronous layout, so this must only
   // ever run once: the ref callback re-fires on every render where a
@@ -247,12 +365,85 @@ export const PacketList: React.FC<PacketListProps> = ({
   // incoming packet while auto-scrolled), and doing this measurement on
   // every one of those was itself measured as the single largest forced-
   // reflow cost in the app once the earlier full-DOM freeze was fixed.
+  // One more measurement, once the webfont has actually landed.
+  //
+  // The latch below deliberately measures once, and on a cold load that once is
+  // too early: rows are laid out in the fallback font, which here happens to be
+  // exactly the 21px fallback, so the measurement agrees with the guess and the
+  // real 20.641px height that arrives with JetBrains Mono is never seen. The
+  // list then believes every row is a third of a pixel taller than it is, which
+  // across a full buffer puts the last rows out of reach of the scroll position
+  // that should land on them.
+  //
+  // Bumping state rather than only clearing the latch, because the ref callback
+  // fires on render and an idle list is not rendering.
+  const [measureEpoch, setMeasureEpoch] = useState(0);
+
+  /**
+   * The sticky header's height, so the minimap can start below it.
+   *
+   * Observed rather than assumed: it changes with the density preference, and
+   * again when the webfont finishes loading, which is the same pair of moving
+   * parts that made the row-height measurement wrong for so long.
+   */
+  const [headerHeight, setHeaderHeight] = useState(0);
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const update = () => setHeaderHeight(el.offsetHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    document.fonts?.ready.then(() => {
+      if (cancelled) return;
+      hasMeasuredRowHeightRef.current = false;
+      setMeasureEpoch((n) => n + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Density changes the row height, so everything measured from a row has to be
+   * measured again.
+   *
+   * All three of these latch on first use, and all three would otherwise keep
+   * describing the previous density forever: the virtualizer would place rows
+   * on a stale pitch (which at a full buffer puts the end of the capture out of
+   * reach), and the address auto-sizing would keep measuring text in the old
+   * font size.
+   */
+  useEffect(() => {
+    hasMeasuredRowHeightRef.current = false;
+    textMeasureRef.current = null;
+    autoSizeRef.current.measuredCount = 0;
+    setMeasureEpoch((n) => n + 1);
+  }, [listPrefs.density]);
+
   const measuredRowRef = (node: HTMLTableRowElement | null) => {
     if (!node || hasMeasuredRowHeightRef.current) return;
     const height = node.getBoundingClientRect().height;
     if (height > 0) {
       hasMeasuredRowHeightRef.current = true;
-      if (Math.abs(height - rowHeight) > 0.5) setRowHeight(height);
+      // Any real difference counts, not just a large one.
+      //
+      // This used to require half a pixel of disagreement before accepting the
+      // measurement, which sounds harmless and is not: the row is 20.641px and
+      // the fallback is 21, so the measurement was discarded every time and the
+      // fallback stood forever. Per row that is a third of a pixel; across a
+      // 50,000-packet buffer the spacers over-claim about eighteen thousand
+      // pixels, and the last rows drift out of reach of the scroll position
+      // that should land on them.
+      //
+      // The threshold that remains is only float noise from
+      // getBoundingClientRect - it exists to avoid a pointless state update,
+      // not to filter out real differences.
+      if (Math.abs(height - rowHeight) > 0.01) setRowHeight(height);
     }
   };
 
@@ -275,6 +466,27 @@ export const PacketList: React.FC<PacketListProps> = ({
 
   // Auto scroll to bottom
   const shouldAutoScrollRef = useRef(true);
+
+  /**
+   * The follow setting, in a ref.
+   *
+   * Read from the scroll handler and the flush effect, both of which are
+   * registered once and would otherwise close over whatever the setting was
+   * when the list mounted.
+   */
+  const followRef = useRef(listPrefs.follow);
+  useEffect(() => {
+    followRef.current = listPrefs.follow;
+    // Choosing 'always' should take effect now rather than at the next packet,
+    // and choosing 'never' should not leave a queued stick-to-bottom behind.
+    if (listPrefs.follow === 'always') {
+      shouldAutoScrollRef.current = true;
+      const el = tableContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    } else if (listPrefs.follow === 'never') {
+      shouldAutoScrollRef.current = false;
+    }
+  }, [listPrefs.follow]);
   // A 'scroll' event only updates shouldAutoScrollRef when it was just
   // "armed" by a genuine user input gesture (wheel/touch/scrollbar drag).
   // Our own per-packet scrollTop assignment below also fires 'scroll'
@@ -296,21 +508,155 @@ export const PacketList: React.FC<PacketListProps> = ({
     setScrollTop(currentScrollTop); // keep the virtualization window in sync regardless of cause
     if (!userScrollArmedRef.current) return;
     userScrollArmedRef.current = false;
+    // Only 'reading' lets a gesture change the decision. 'always' and 'never'
+    // have already made it, and a scroll must not overrule the setting.
+    if (followRef.current !== 'reading') return;
     shouldAutoScrollRef.current = scrollHeight - (currentScrollTop + clientHeight) < 50;
   };
+
+  // An empty list re-arms stick-to-bottom.
+  //
+  // "The user scrolled up" is a statement about a particular scroll position,
+  // and it stops meaning anything the moment there is nothing left to scroll.
+  // Without this, clearing the packet buffer while scrolled up left autoscroll
+  // switched off, so the next capture filled the list from the top and simply
+  // sat there - the one moment someone is most obviously expecting to watch
+  // packets arrive.
+  //
+  // Nothing is lost by re-arming. Emptying the list collapses scrollHeight and
+  // puts scrollTop back to 0 on its own, so the position the user had was
+  // already gone either way; the only open question is where the next packets
+  // land, and for a live capture that is the bottom.
+  useEffect(() => {
+    if (packets.length === 0 && followRef.current !== 'never') {
+      shouldAutoScrollRef.current = true;
+    }
+  }, [packets.length]);
 
   useEffect(() => {
     // Depend on the array reference itself, not packets.length: once the
     // live-capture buffer hits its cap (4000, see App.tsx), each new packet
     // also drops the oldest one, so length stops changing even though new
     // data keeps arriving - length alone would silently stop autoscroll.
-    if (shouldAutoScrollRef.current && tableContainerRef.current) {
+    if (followRef.current !== 'never' && shouldAutoScrollRef.current && tableContainerRef.current) {
       tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
       // Update the virtualization window synchronously too, rather than
       // waiting for the resulting scroll event to do it.
       setScrollTop(tableContainerRef.current.scrollTop);
     }
   }, [packets]);
+
+  /**
+   * Moves the selection by whole rows, from the keyboard.
+   *
+   * Selection moves by INDEX INTO `sortedPackets`, never by walking DOM
+   * siblings: the list is virtualized, so the row above the selected one may
+   * not exist in the document at all. The same reason is why the caller cannot
+   * rely on `scrollIntoView` and this scrolls the container arithmetically.
+   *
+   * Moving the selection also decides whether the list keeps following the
+   * live tail, and it decides it directly rather than going through
+   * `armUserScroll`. Routing it through the arming flag would hand the
+   * question to `handleScroll`, which answers it from the final scroll
+   * position - so the behaviour would be right by accident and only for as
+   * long as nobody changed the 50px threshold it uses.
+   *
+   * Disarming matters at all because the autoscroll effect reasserts scrollTop
+   * on every flush, about ten times a second while capturing. Without it,
+   * arrowing upwards fights the capture and loses.
+   */
+  const moveSelection = (delta: number | 'first' | 'last') => {
+    if (sortedPackets.length === 0) return;
+    const current = selectedPacket
+      ? sortedPackets.findIndex(p => p.id === selectedPacket.id)
+      : -1;
+
+    let next: number;
+    if (delta === 'first') next = 0;
+    else if (delta === 'last') next = sortedPackets.length - 1;
+    // With nothing selected, the first key press selects an end rather than
+    // jumping into the middle: down starts at the top, up starts at the bottom.
+    else if (current === -1) next = delta > 0 ? 0 : sortedPackets.length - 1;
+    else next = current + delta;
+
+    next = Math.max(0, Math.min(sortedPackets.length - 1, next));
+    const target = sortedPackets[next];
+    if (!target) return;
+
+    // Jumping to the end means "show me the newest", so following resumes.
+    // Any other move means the user is reading something specific, and the
+    // list must hold still underneath them - unless they have said they always
+    // want the tail, in which case moving the selection is not a request to
+    // stop following.
+    if (followRef.current === 'reading') {
+      shouldAutoScrollRef.current = next === sortedPackets.length - 1;
+    }
+    // Left disarmed deliberately: the scroll assignment below is ours, not the
+    // user's, and handleScroll must not reinterpret it as a gesture.
+    userScrollArmedRef.current = false;
+    onSelectPacket(target);
+
+    // Scroll the row into view only if it is not already, which is what
+    // `block: 'nearest'` would do for a real element. Anything more eager
+    // makes every arrow press recentre the list under the reader.
+    const el = tableContainerRef.current;
+    if (!el) return;
+
+    // The header is INSIDE the scroll container and sticky, so it both offsets
+    // every row in the content and covers the top of the viewport. Omitting it
+    // is invisible when scrolling up - the row lands a header's height too low,
+    // which is still on screen - and puts the row exactly one header height
+    // below the bottom edge when scrolling down.
+    const headerHeight = headerRef.current?.offsetHeight ?? 0;
+    const rowTop = next * rowHeight;
+    const rowBottom = headerHeight + (next + 1) * rowHeight;
+
+    if (rowTop < el.scrollTop) el.scrollTop = rowTop;
+    else if (rowBottom > el.scrollTop + el.clientHeight) {
+      el.scrollTop = rowBottom - el.clientHeight;
+    }
+    setScrollTop(el.scrollTop);
+  };
+
+  /**
+   * The list's keyboard contract.
+   *
+   * Until this existed the packet list could not be reached from a keyboard at
+   * all: the container had an `onKeyDown` but no `tabIndex`, so it could never
+   * receive focus and the handler was dead code, and the rows were plain
+   * `<tr onClick>`. Wheel, touch and a minimap drag were the only ways in.
+   */
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // A page is a viewport of rows, less one for continuity of context - the
+    // same overlap a text editor keeps when paging.
+    const page = Math.max(1, Math.floor(viewportHeight / rowHeight) - 1);
+
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); moveSelection(1); break;
+      case 'ArrowUp': e.preventDefault(); moveSelection(-1); break;
+      case 'PageDown': e.preventDefault(); moveSelection(page); break;
+      case 'PageUp': e.preventDefault(); moveSelection(-page); break;
+      case 'Home': e.preventDefault(); moveSelection('first'); break;
+      case 'End': e.preventDefault(); moveSelection('last'); break;
+      case 'Enter':
+        // Matches double-click: open the frame in its own window.
+        if (selectedPacket) { e.preventDefault(); onInspectPacket?.(selectedPacket); }
+        break;
+      case 'F10':
+        // Shift+F10 is the platform gesture for "open the context menu for the
+        // current item" - the keyboard equivalent of the right-click this list
+        // already supports, and the only one available to someone without a
+        // pointer.
+        if (e.shiftKey && selectedPacket) {
+          e.preventDefault();
+          const rect = (e.target as HTMLElement).getBoundingClientRect();
+          setContextMenu({ x: rect.left + 16, y: rect.top + 16, packet: selectedPacket });
+        }
+        break;
+      default:
+        break;
+    }
+  };
 
   // Context Menu handlers
   const handleContextMenu = (e: React.MouseEvent, packet: Packet) => {
@@ -324,8 +670,53 @@ export const PacketList: React.FC<PacketListProps> = ({
     return () => window.removeEventListener('click', closeMenu);
   }, []);
 
+  /**
+   * The sort state, for assistive tech.
+   *
+   * Visually the sort is carried by an arrow glyph and its colour, which says
+   * nothing to a screen reader. `aria-sort` on the column header is the
+   * standard channel and the only one that survives with no sighted reading of
+   * the icon.
+   */
+  const sortAttr = (field: SortField): 'ascending' | 'descending' | 'none' =>
+    effectiveSortField !== field ? 'none' : sortOrder === 'asc' ? 'ascending' : 'descending';
+
+  // Built once and dropped into the Info header, which is the only column
+  // guaranteed to be there for it to live in.
+  // Info is always shown and is not in the hideable set, hence the +1.
+  const visibleColumnCount = HIDEABLE_COLUMNS.filter((c) => columns[c]).length + 1;
+
+  /**
+   * The header row's surface, in one place.
+   *
+   * The column-options button sits in the strip above the minimap, which is a
+   * SIBLING of the table rather than a cell in it - so it was drawing on
+   * whatever was behind it while the header row beside it drew `--secondary`.
+   * Two surfaces that are meant to read as one bar, defined in two places, is
+   * a mismatch that reappears every time either one is themed. There is one
+   * definition now and both render it.
+   */
+  const HEADER_CHROME =
+    'bg-secondary border-b border-border text-muted-foreground transition-colors';
+
+  // Where the text sits, for the columns whose content is text. The numeric
+  // columns are not included on purpose - see ColumnAlign.
+  const alignCell = COLUMN_ALIGN_CLASS[listPrefs.align];
+  const alignHeader = COLUMN_ALIGN_JUSTIFY[listPrefs.align];
+
+  const columnMenuTrigger = (
+    <ColumnOptionsMenu
+      columns={columns}
+      timeFormat={listPrefs.timeFormat}
+      align={listPrefs.align}
+      onColumnsChange={(next) => patchListPrefs({ columns: next })}
+      onTimeFormatChange={(timeFormat) => patchListPrefs({ timeFormat })}
+      onAlignChange={(align) => patchListPrefs({ align })}
+    />
+  );
+
   const renderSortIcon = (field: SortField) => {
-    if (sortField !== field) return <TbArrowsSort className="w-3 h-3 text-muted-foreground opacity-30 group-hover:opacity-100 transition-opacity" />;
+    if (effectiveSortField !== field) return <TbArrowsSort className="w-3 h-3 text-muted-foreground opacity-30 group-hover:opacity-100 transition-opacity" />;
     return sortOrder === 'asc' ? (
       <TbArrowUp className="w-3 h-3 text-primary" />
     ) : (
@@ -343,103 +734,143 @@ export const PacketList: React.FC<PacketListProps> = ({
         onWheel={armUserScroll}
         onTouchStart={armUserScroll}
         onMouseDown={armUserScroll}
-        onKeyDown={armUserScroll}
+        onKeyDown={handleKeyDown}
+        // The scroll container is the focusable element and the keyboard
+        // target, rather than the rows. That is deliberate: in a virtualized
+        // list the focused row can be unmounted by the virtualizer at any
+        // moment, which drops focus to <body> mid-scroll. `aria-activedescendant`
+        // moves the ASSISTIVE cursor without moving real focus, so the DOM
+        // focus never sits on something the virtualizer is entitled to remove.
+        tabIndex={0}
+        role="grid"
+        aria-label="Captured packets"
+        // Static, deliberately. The row count belongs in aria-rowcount, which
+        // assistive tech reads on demand; putting a live figure in the name
+        // would re-announce the label ten times a second during capture.
+        aria-rowcount={totalRows}
+        aria-activedescendant={selectedPacket ? `packet-row-${selectedPacket.id}` : undefined}
         className="flex-1 overflow-y-auto overflow-x-auto custom-scrollbar minimap-scroll"
+        // The list paints its own ground rather than inheriting the app's.
+        // Without this a packet theme would only reach the rows its rules
+        // matched - the chain has no catch-all, so everything else would show
+        // the app surface, and a light packet theme inside a dark app would
+        // stripe light rows across a dark list.
+        style={{ backgroundColor: packetTheme.surface.background, color: packetTheme.surface.foreground }}
       >
         <table className="w-full table-fixed text-left border-collapse font-mono text-xs">
+          {/* The colgroup has to track visibility exactly: `table-fixed` maps
+              these to cells by POSITION, so one stale <col> shifts every width
+              after it onto the wrong column. */}
           <colgroup>
-            <col style={{ width: columnWidths.id }} />
-            <col style={{ width: columnWidths.relativeTime }} />
-            <col style={{ width: columnWidths.source }} />
-            <col style={{ width: columnWidths.destination }} />
-            <col style={{ width: columnWidths.protocol }} />
-            <col style={{ width: columnWidths.length }} />
+            {columns.id && <col style={{ width: columnWidths.id }} />}
+            {columns.relativeTime && <col style={{ width: columnWidths.relativeTime }} />}
+            {columns.source && <col style={{ width: columnWidths.source }} />}
+            {columns.destination && <col style={{ width: columnWidths.destination }} />}
+            {columns.protocol && <col style={{ width: columnWidths.protocol }} />}
+            {columns.length && <col style={{ width: columnWidths.length }} />}
             <col />
           </colgroup>
           {/* Table Header */}
           <thead
-            className="sticky top-0 z-20 border-b transition-colors select-none bg-secondary border-border text-muted-foreground"
+            ref={headerRef}
+            className={`sticky top-0 z-20 select-none ${HEADER_CHROME}`}
           >
-            <tr className="text-[11px] uppercase tracking-wider divide-x divide-border/60">
+            <tr aria-rowindex={1} className="text-[11px] uppercase tracking-wider divide-x divide-border/60">
+              {columns.id && (
               <th
-                onClick={() => handleSort('id')}
-                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                aria-sort={sortAttr('id')}
+                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <div className="flex items-center gap-1">
-                  <span>No.</span>
-                  {renderSortIcon('id')}
-                </div>
+                <button type="button" onClick={() => handleSort('id')} className="flex items-center gap-1 w-full text-left cursor-pointer">
+                    <span>No.</span>
+                    {renderSortIcon('id')}
+                </button>
                 {renderColumnResizeHandle('id')}
               </th>
+              )}
 
+              {columns.relativeTime && (
               <th
-                onClick={() => handleSort('relativeTime')}
-                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                aria-sort={sortAttr('relativeTime')}
+                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <div className="flex items-center gap-1">
-                  <span>Time</span>
-                  {renderSortIcon('relativeTime')}
-                </div>
+                <button type="button" onClick={() => handleSort('relativeTime')} className="flex items-center gap-1 w-full text-left cursor-pointer">
+                    <span>Time</span>
+                    {renderSortIcon('relativeTime')}
+                </button>
                 {renderColumnResizeHandle('relativeTime')}
               </th>
+              )}
 
+              {columns.source && (
               <th
-                onClick={() => handleSort('source')}
-                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                aria-sort={sortAttr('source')}
+                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <div className="flex items-center gap-1">
-                  <span>Source</span>
-                  {renderSortIcon('source')}
-                </div>
+                <button type="button" onClick={() => handleSort('source')} className={`flex items-center gap-1 w-full cursor-pointer ${alignHeader}`}>
+                    <span>Source</span>
+                    {renderSortIcon('source')}
+                </button>
                 {renderColumnResizeHandle('source')}
               </th>
+              )}
 
+              {columns.destination && (
               <th
-                onClick={() => handleSort('destination')}
-                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                aria-sort={sortAttr('destination')}
+                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <div className="flex items-center gap-1">
-                  <span>Destination</span>
-                  {renderSortIcon('destination')}
-                </div>
+                <button type="button" onClick={() => handleSort('destination')} className={`flex items-center gap-1 w-full cursor-pointer ${alignHeader}`}>
+                    <span>Destination</span>
+                    {renderSortIcon('destination')}
+                </button>
                 {renderColumnResizeHandle('destination')}
               </th>
+              )}
 
+              {columns.protocol && (
               <th
-                onClick={() => handleSort('protocol')}
-                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                aria-sort={sortAttr('protocol')}
+                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <div className="flex items-center gap-1">
-                  <span>Protocol</span>
-                  {renderSortIcon('protocol')}
-                </div>
+                <button type="button" onClick={() => handleSort('protocol')} className={`flex items-center gap-1 w-full cursor-pointer ${alignHeader}`}>
+                    <span>Protocol</span>
+                    {renderSortIcon('protocol')}
+                </button>
                 {renderColumnResizeHandle('protocol')}
               </th>
+              )}
 
+              {columns.length && (
               <th
-                onClick={() => handleSort('length')}
-                className={`relative px-2 py-1 cursor-pointer group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                aria-sort={sortAttr('length')}
+                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 {/* Right-aligned to match the numbers below it. With the
                     header left-aligned and the values right-aligned, resizing
                     this column dragged the two apart in opposite directions
                     and pushed the value up against the Info text. */}
-                <div className="flex items-center justify-end gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleSort('length')}
+                  className="flex items-center justify-end gap-1 w-full cursor-pointer"
+                >
                   <span>Length</span>
                   {renderSortIcon('length')}
-                </div>
+                </button>
                 {renderColumnResizeHandle('length')}
               </th>
+              )}
 
-              <th onClick={() => handleSort('info')} className={`px-4 py-2.5 cursor-pointer group font-bold ${"hover:bg-accent text-muted-foreground"}`}><div className="flex items-center gap-1"><span>Info</span>{renderSortIcon('info')}</div></th>
+              <th aria-sort={sortAttr('info')} className={`px-4 py-2.5 group font-bold ${"hover:bg-accent text-muted-foreground"}`}><div className="flex items-center gap-1"><button type="button" onClick={() => handleSort('info')} className={`flex items-center gap-1 flex-1 min-w-0 cursor-pointer ${alignHeader}`}><span>Info</span>{renderSortIcon('info')}</button>{/* Only when the minimap is off - otherwise it lives in the strip above the map, which is not a column and so does not move when one is resized. It has to live SOMEWHERE, though: this menu is the only way to turn the hidden columns back on. */}{!showMinimap && columnMenuTrigger}</div></th>
             </tr>
           </thead>
 
           {/* Table Body */}
-          <tbody className="font-mono text-[11px] leading-[1.15]">
+          <tbody className={density.body}>
             {sortedPackets.length === 0 ? (
               <tr>
-                <td colSpan={7} className="text-center py-16 text-muted-foreground">
+                <td colSpan={visibleColumnCount} className="text-center py-16 text-muted-foreground">
                   <div className="flex flex-col items-center justify-center gap-1">
                     <TbFilter className="w-6 h-6 text-muted-foreground/70 mb-1" />
                     <span>No packets match current display filter or capture is empty.</span>
@@ -451,18 +882,33 @@ export const PacketList: React.FC<PacketListProps> = ({
               <>
                 {topSpacerHeight > 0 && (
                   <tr aria-hidden="true">
-                    <td colSpan={7} style={{ height: topSpacerHeight, padding: 0, border: 'none' }} />
+                    <td colSpan={visibleColumnCount} style={{ height: topSpacerHeight, padding: 0, border: 'none' }} />
                   </tr>
                 )}
                 {visiblePackets.map((packet, i) => {
                 const isSelected = selectedPacket?.id === packet.id;
-                const style = colorEngine.getPacketStyle(packet, isDark);
+                const style = colorEngine.getPacketStyle(packet, packetTheme);
 
                 return (
                   <tr
                     key={packet.id}
+                    id={`packet-row-${packet.id}`}
                     ref={i === 0 ? measuredRowRef : undefined}
+                    data-measure-epoch={i === 0 ? measureEpoch : undefined}
+                    role="row"
+                    aria-selected={isSelected}
+                    // The row's TRUE position in the buffer, not its position
+                    // among the ~40 rows that happen to be rendered. Without
+                    // this a screen reader reports "row 12 of 32" while the
+                    // user is on packet 8,431 of 21,900, because the two
+                    // spacer rows are all it can see of the rest. 1-based, and
+                    // offset by the header row.
+                    aria-rowindex={startIndex + i + 2}
                     onClick={() => onSelectPacket(packet)}
+                    // Double click also fires the single-click select first,
+                    // which is what we want: the row ends up selected behind
+                    // the window that opens over it.
+                    onDoubleClick={() => onInspectPacket?.(packet)}
                     onContextMenu={e => handleContextMenu(e, packet)}
                     className={`cursor-pointer ${
                       isSelected
@@ -481,7 +927,8 @@ export const PacketList: React.FC<PacketListProps> = ({
                   >
                     {/* No. - right-aligned with tabular figures so the column
                         stays a clean edge as the number of digits grows. */}
-                    <td className="px-2 py-1 font-mono whitespace-nowrap text-right tabular-nums">
+                    {columns.id && (
+                    <td className={`px-2 ${density.cell} font-mono whitespace-nowrap text-right tabular-nums`}>
                       <div className="flex items-center justify-end gap-1">
                         {(packet.anomalies && packet.anomalies.length > 0) || packet.status === 'alert' ? (
                           <TbShieldExclamation className="w-3 h-3 text-rose-500 shrink-0" />
@@ -489,36 +936,53 @@ export const PacketList: React.FC<PacketListProps> = ({
                         <span>{packet.id}</span>
                       </div>
                     </td>
+                    )}
 
                     {/* Time */}
-                    <td className="px-2 py-1 whitespace-nowrap font-mono text-right tabular-nums">
-                      {typeof packet.relativeTime === 'number'
-                        ? packet.relativeTime.toFixed(packet.tsPrecision ?? 6)
-                        : (0).toFixed(packet.tsPrecision ?? 6)}
+                    {columns.relativeTime && (
+                    <td className={`px-2 ${density.cell} whitespace-nowrap font-mono text-right tabular-nums`}>
+                      {formatTimeColumn(
+                        listPrefs.timeFormat,
+                        packet,
+                        // The row ABOVE this one as currently filtered and
+                        // sorted, not the previous packet in the buffer: a
+                        // delta against a frame a filter has hidden is a number
+                        // with nothing on screen to relate it to.
+                        startIndex + i > 0 ? sortedPackets[startIndex + i - 1] : null,
+                      )}
                     </td>
+                    )}
 
                     {/* Source - address only; Wireshark keeps ports in the Info column */}
-                    <td className="px-2 py-1 whitespace-nowrap truncate" title={packet.source}>
+                    {columns.source && (
+                    <td className={`px-2 ${density.cell} ${alignCell} whitespace-nowrap truncate`} title={packet.source}>
                       {packet.source}
                     </td>
+                    )}
 
                     {/* Destination */}
-                    <td className="px-2 py-1 whitespace-nowrap truncate" title={packet.destination}>
+                    {columns.destination && (
+                    <td className={`px-2 ${density.cell} ${alignCell} whitespace-nowrap truncate`} title={packet.destination}>
                       {packet.destination}
                     </td>
+                    )}
 
                     {/* Protocol - plain text in the row's own color. A badge
                         would fight the coloring chain and waste width. */}
-                    <td className="px-2 py-1 whitespace-nowrap truncate">
+                    {columns.protocol && (
+                    <td className={`px-2 ${density.cell} ${alignCell} whitespace-nowrap truncate`}>
                       {packet.protocolLabel ?? packet.protocol}
                     </td>
+                    )}
 
                     {/* Length */}
-                    <td className="pl-2 pr-3 py-1 whitespace-nowrap text-right tabular-nums">{packet.length}</td>
+                    {columns.length && (
+                    <td className={`pl-2 pr-3 ${density.cell} whitespace-nowrap text-right tabular-nums`}>{packet.length}</td>
+                    )}
 
                     {/* Info - absorbs the remaining width and clips; Wireshark
                         scrolls the list horizontally rather than ellipsising. */}
-                    <td className="px-4 py-1 whitespace-nowrap overflow-hidden" title={packet.info}>
+                    <td className={`px-4 ${density.cell} ${alignCell} whitespace-nowrap overflow-hidden`} title={packet.info}>
                       {packet.info}
                     </td>
                   </tr>
@@ -526,7 +990,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                 })}
                 {bottomSpacerHeight > 0 && (
                   <tr aria-hidden="true">
-                    <td colSpan={7} style={{ height: bottomSpacerHeight, padding: 0, border: 'none' }} />
+                    <td colSpan={visibleColumnCount} style={{ height: bottomSpacerHeight, padding: 0, border: 'none' }} />
                   </tr>
                 )}
               </>
@@ -535,15 +999,23 @@ export const PacketList: React.FC<PacketListProps> = ({
         </table>
       </div>
 
+      {showMinimap && (
       <PacketListMinimap
         packets={sortedPackets}
         selectedPacket={selectedPacket}
         colorEngine={colorEngine}
-        isDark={isDark}
+        packetTheme={packetTheme}
         themeKey={themeKey}
         containerRef={tableContainerRef}
+        topOffset={headerHeight}
+        headerSlot={
+          <div className={`w-full h-full flex items-center justify-center ${HEADER_CHROME}`}>
+            {columnMenuTrigger}
+          </div>
+        }
         onUserScrollIntent={armUserScroll}
       />
+      )}
       </div>
 
       {/* Right Click Context Menu */}
