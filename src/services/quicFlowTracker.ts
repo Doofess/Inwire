@@ -7,9 +7,9 @@
  * the first byte has no length prefix - only the two endpoints know how long
  * it is. So a short-header packet can only be recognized as QUIC in the
  * context of a handshake seen earlier on the same flow, which is exactly what
- * Wireshark does. Without this, any UDP datagram on port 443 whose first byte
+ * The reference analyzer does. Without this, any UDP datagram on port 443 whose first byte
  * happens to have the right two bits set gets mislabeled QUIC - including the
- * datagrams that precede the handshake, which Wireshark reports as plain UDP.
+ * datagrams that precede the handshake, which the reference analyzer reports as plain UDP.
  *
  * One instance represents one capture session; call reset() when the packet
  * buffer is cleared or a new file is imported.

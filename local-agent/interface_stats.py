@@ -1,6 +1,6 @@
 """Per-interface traffic rates for the capture-interface picker's sparklines.
 
-Wireshark's welcome screen draws a live sparkline beside every adapter so you
+The reference analyzer's welcome screen draws a live sparkline beside every adapter so you
 can tell which one is actually carrying traffic before you commit to capturing
 on it. This produces the numbers behind that.
 

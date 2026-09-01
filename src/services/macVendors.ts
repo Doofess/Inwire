@@ -1,5 +1,5 @@
 /**
- * MAC address name resolution, matching what Wireshark shows in the Source and
+ * MAC address name resolution, matching what the reference analyzer shows in the Source and
  * Destination columns for frames that have no network-layer address (ARP, STP,
  * and other pure-L2 traffic).
  *
@@ -118,10 +118,10 @@ function octets(mac: string): string[] {
 }
 
 /**
- * Resolves a MAC to the short display name Wireshark shows in the packet-list
+ * Resolves a MAC to the short display name the reference analyzer shows in the packet-list
  * address columns: "SagemcomBroa_aa:bb:cc", "Broadcast",
  * "IPv6mcast_ff:8c:e5:bf". Falls back to the raw MAC when the OUI is unknown,
- * which is also what Wireshark does.
+ * which is also what the reference analyzer does.
  *
  * Deliberately distinct from resolveMacVendor() below: the columns want the
  * bare name, while the detail tree wants the name *and* the literal address.
@@ -146,7 +146,7 @@ export function resolveMacName(mac: string): string {
 
 /**
  * Formats a MAC address with its resolved name for the protocol detail tree,
- * Wireshark-style ("SagemcomBroa_aa:bb:cc (44:15:24:aa:bb:cc)"), falling back
+ * Reference-analyzer style ("SagemcomBroa_aa:bb:cc (44:15:24:aa:bb:cc)"), falling back
  * to the raw MAC unchanged when nothing resolves.
  */
 export function resolveMacVendor(mac: string): string {

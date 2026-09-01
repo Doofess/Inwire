@@ -22,7 +22,7 @@
  *     copies are compared here against index.css itself.
  *
  * The test this replaces asserted that `classic` and `classic-dark` still
- * reproduced Wireshark's historical pastels byte-for-byte. That guarantee is
+ * reproduced the reference analyzer's historical pastels byte-for-byte. That guarantee is
  * deliberately gone: the packet list now matches the app theme, which is a
  * restyle by intent rather than by accident.
  */

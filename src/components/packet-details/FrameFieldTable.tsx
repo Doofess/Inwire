@@ -17,7 +17,7 @@ import { renderBitfield } from '../../lib/bitfield';
  * look different. What must not diverge is meaning, so the conventions the tree
  * established are kept exactly: generated fields are italic and offer no byte
  * highlight, expert info keeps its severity colour, sub-byte fields print
- * Wireshark's dotted binary, and a cross-frame reference is a link.
+ * The reference analyzer's dotted binary, and a cross-frame reference is a link.
  */
 
 const EXPERT_SEVERITY_CLASS: Record<string, string> = {

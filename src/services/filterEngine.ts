@@ -291,7 +291,7 @@ function parseNumericLiteral(text: string): number | null {
 
 /**
  * Expands a display-filter set literal - "{ 3..5, 11 }" or "{1, 64, 255}" -
- * into the numbers it contains. Wireshark's `in` operator accepts both bare
+ * into the numbers it contains. The reference analyzer's `in` operator accepts both bare
  * values and inclusive ranges in the same braces.
  */
 function parseSetLiteral(text: string): number[] | null {
@@ -412,7 +412,7 @@ function evaluateAtomicCondition(cond: string, packet: Packet): boolean {
     return packet.info.toLowerCase().includes(containsMatch[1].toLowerCase());
   }
 
-  // Operator comparisons. Wireshark accepts both symbolic and worded
+  // Operator comparisons. The reference analyzer accepts both symbolic and worded
   // operators ("tcp.flags.reset eq 1"), so the worded ones are normalized to
   // their symbols before matching.
   const normalized = c.replace(/\s+(eq|ne|gt|lt|ge|le)\s+/gi, (_, word: string) => {

@@ -1,8 +1,8 @@
 /**
- * Wireshark's dotted-binary rendering for sub-byte protocol fields.
+ * The reference analyzer's dotted-binary rendering for sub-byte protocol fields.
  *
  * A header field narrower than a byte is unreadable as a decoded value alone:
- * `Version: 6` says nothing about where those bits sit. Wireshark draws the
+ * `Version: 6` says nothing about where those bits sit. The reference analyzer draws the
  * containing word in binary with everything outside the field replaced by
  * dots, so the field's position and width are visible at a glance:
  *
@@ -48,7 +48,7 @@ export function renderBitfield(
   const out: string[] = [];
 
   for (let i = 0; i < totalBits; i++) {
-    // A space every 4 bits, matching Wireshark's nibble grouping.
+    // A space every 4 bits, matching the reference analyzer's nibble grouping.
     if (i > 0 && i % 4 === 0) out.push(' ');
 
     if (i < bitOffset || i >= bitOffset + bitLength) {
@@ -76,7 +76,7 @@ export function renderBitfield(
  * The full row text: `0110 .... = Version: 6`.
  *
  * Kept next to the binary builder so the ` = ` separator - which is part of
- * Wireshark's format and gets compared character-for-character against
+ * The reference analyzer's format and gets compared character-for-character against
  * `tshark -V` during verification - is defined once.
  */
 export function renderBitfieldRow(

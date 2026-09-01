@@ -85,7 +85,7 @@ export function normalizeColumnVisibility(raw: unknown): ColumnVisibility | null
  * Applies to the columns whose content is TEXT - Source, Destination, Protocol,
  * Info. No., Time and Length keep their right edge and their tabular figures
  * whatever this says, because that edge is what makes a column of numbers
- * comparable at a glance: ragged digits have to be read one at a time. Wireshark
+ * comparable at a glance: ragged digits have to be read one at a time. The reference analyzer
  * right-aligns them for the same reason.
  *
  * `left` is what the list has always shown, so nothing moves for anyone who

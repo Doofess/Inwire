@@ -3,7 +3,7 @@
  *
  *   npx tsx scripts/bitfield/render.ts
  *
- * Expected strings are taken from Wireshark's own output for the same fields,
+ * Expected strings are taken from the reference analyzer's own output for the same fields,
  * so a failure here means NetView would disagree with `tshark -V`.
  */
 import { renderBitfield, renderBitfieldRow } from '../../src/lib/bitfield';
@@ -98,7 +98,7 @@ check(
 
 // --- TCP flags: a 12-bit window starting 4 bits into the byte ---
 // Byte 12 is [data offset:4][reserved:3][AE:1], byte 13 is the 8 flag bits, and
-// Wireshark draws the low 12 bits of that pair. Expected strings from
+// The reference analyzer draws the low 12 bits of that pair. Expected strings from
 // `tshark -V` on a plain ACK (0x010).
 const tcpFlagBytes = new Uint8Array([0x50, 0x10]); // data offset 5, ACK set
 const TCP_WINDOW = { totalBits: 12, windowStartBit: 4 };
@@ -138,7 +138,7 @@ check(
 
 // --- the full row, including the " = " separator tshark output is matched on ---
 check(
-  'full row matches Wireshark formatting',
+  'full row matches the reference analyzer formatting',
   renderBitfieldRow(ipv6, 0, { bitOffset: 0, bitLength: 4, totalBits: 8 }, 'Version', 6),
   '0110 .... = Version: 6',
 );

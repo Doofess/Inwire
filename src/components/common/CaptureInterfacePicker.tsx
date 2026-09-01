@@ -151,7 +151,7 @@ export const CaptureInterfacePicker: React.FC<CaptureInterfacePickerProps> = ({
               <span className="flex-1 truncate transition-transform duration-150 ease-out group-hover:translate-x-0.5">
                 {shortInterfaceLabel(iface.label)}
               </span>
-              {/* Live traffic on that adapter, the way Wireshark's welcome
+              {/* Live traffic on that adapter, the way the reference analyzer's welcome
                   screen shows it - so an adapter can be ruled in or out before
                   committing to a capture on it. Muted until the row is
                   selected, so the list reads as names first and charts

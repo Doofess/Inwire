@@ -34,7 +34,7 @@ interface SparklineProps {
 const VIEW_WIDTH = 100;
 
 /**
- * A small inline traffic chart, in the spirit of the sparklines Wireshark
+ * A small inline traffic chart, in the spirit of the sparklines the reference analyzer
  * draws beside each interface on its welcome screen.
  *
  * Deliberately plain SVG rather than the D3 the analytics panels use: this

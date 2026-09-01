@@ -16,7 +16,7 @@ import { contrastRatio, isDarkColor, labToHex, legibleOn, toLabColor } from '../
  * What survives from that design, because the reasoning still holds:
  *
  *   - **A theme owns the list's ground, not just its fills.** The rule chain
- *     has no catch-all - it ends at Broadcast, exactly as Wireshark's does - so
+ *     has no catch-all - it ends at Broadcast, exactly as the reference analyzer's does - so
  *     a packet matching nothing has no rule colour at all. `surface` is what
  *     those rows use, which keeps the list internally consistent instead of
  *     letting unmatched rows fall through to whatever the app is painting.
@@ -68,7 +68,7 @@ export interface PacketTheme {
 /**
  * What a colouring rule *means*, independent of any theme.
  *
- * Ten roles for twenty rules, taken from what Wireshark's chain is actually
+ * Ten roles for twenty rules, taken from what the reference analyzer's chain is actually
  * saying rather than from protocol names - which is why `color-tcp-rst` and
  * `color-checksum-errors` share one role: both mean "this is broken".
  */
@@ -88,7 +88,7 @@ export type RuleRole =
  * Ten roles onto nine hues.
  *
  * **Assigned by how often you actually see a role, not by tradition.** The
- * first attempt followed Wireshark's own hues - TCP blue, UDP cyan - and that
+ * first attempt followed the reference analyzer's own hues - TCP blue, UDP cyan - and that
  * put the two most common protocols in any capture on adjacent hues. Tinted
  * into a near-white ground they collapsed into the same pale wash, so the
  * majority of rows in a light theme were indistinguishable from each other,

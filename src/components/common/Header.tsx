@@ -139,7 +139,7 @@ export const Header: React.FC<HeaderProps> = ({
   /**
    * A stopped capture cannot be resumed, so starting again means discarding.
    *
-   * Wireshark's model, and it is not arbitrary: a buffer that was appended to
+   * The reference analyzer's model, and it is not arbitrary: a buffer that was appended to
    * across two separate capture runs has a gap in the middle that nothing in
    * the file records. Relative timestamps, the sequence trackers and the
    * timeline all measure from one capture's start, and none of them can express

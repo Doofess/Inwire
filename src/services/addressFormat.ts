@@ -114,13 +114,13 @@ export function formatIpv4Address(bytes: Uint8Array, offset: number): string {
 
 /**
  * Formats a 16-byte IPv6 address (starting at `offset` within `bytes`) in the
- * RFC 5952 canonical form Wireshark displays: leading zeros stripped from each
+ * RFC 5952 canonical form the reference analyzer displays: leading zeros stripped from each
  * group, lowercase hex, and the *longest* run of two or more all-zero groups
  * collapsed to "::" (leftmost run wins a tie, and a single zero group is never
  * collapsed - "2001:db8:0:1:1:1:1:1" stays as-is).
  *
  * Without this an address renders as 39 characters of zero-padded groups,
- * which both diverges from Wireshark and overflows the address column.
+ * which both diverges from the reference analyzer and overflows the address column.
  */
 export function formatIpv6Address(bytes: Uint8Array, offset: number): string {
   const groups: number[] = [];

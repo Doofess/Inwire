@@ -1,6 +1,6 @@
 /**
  * Correlates ICMP echo request/reply pairs across packets so each side's
- * Info column can reference the other by frame number, mirroring Wireshark's
+ * Info column can reference the other by frame number, mirroring the reference analyzer's
  * "(reply in #N)" / "(request in #N)" annotations. Keyed by the unordered
  * pair of endpoints plus the echo id/sequence, since a request and its reply
  * swap source/destination but keep the same id and sequence number.

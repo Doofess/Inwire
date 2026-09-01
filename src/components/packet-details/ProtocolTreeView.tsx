@@ -42,11 +42,11 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
     '0': true, '1': true, '2': true, '3': true, '4': true,
   });
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  // Collapsed nested fields, keyed by their path through the tree. Wireshark
+  // Collapsed nested fields, keyed by their path through the tree. The reference analyzer
   // gives every node with children its own disclosure triangle, independent of
   // its layer - Traffic Class can be shut while the rest of IPv6 stays open.
   // Tracking what is CLOSED rather than what is open keeps the default
-  // expanded, which is how Wireshark opens a packet.
+  // expanded, which is how the reference analyzer opens a packet.
   const [collapsedPaths, setCollapsedPaths] = useState<Record<string, boolean>>({});
 
   const togglePath = (path: string) => setCollapsedPaths(prev => ({ ...prev, [path]: !prev[path] }));
@@ -75,7 +75,7 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
       activeByteRange[0] === field.rawBytesRange[0] &&
       activeByteRange[1] === field.rawBytesRange[1];
 
-    // One step per level rather than capping at two: Wireshark nests four deep
+    // One step per level rather than capping at two: the reference analyzer nests four deep
     // in places (Queries > record, Flags > bit rows) and a flat cap makes those
     // levels indistinguishable.
     const indentStyle = { marginLeft: `${depth * 0.9}rem` };
@@ -86,7 +86,7 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
     // imply the field lives there.
     const hoverRange = field.generated ? null : field.rawBytesRange || fallbackRange || null;
 
-    // Wireshark draws a sub-byte field as the containing word in binary with
+    // The reference analyzer draws a sub-byte field as the containing word in binary with
     // everything outside the field dotted, which is the only way its position
     // and width are visible. Needs the frame bytes, so it degrades to the plain
     // row if a packet ever arrives without them.
@@ -127,7 +127,7 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
               <span className="text-muted-foreground/70 whitespace-pre shrink-0">{bitfieldText} =</span>
             )}
             {/* A grouping node such as Queries or [Timestamps] carries no value
-                of its own, and Wireshark prints no trailing colon for those. */}
+                of its own, and the reference analyzer prints no trailing colon for those. */}
             <span className={`text-muted-foreground ${field.generated ? 'italic' : ''}`}>
               {field.name}{field.value === '' ? '' : ':'}
             </span>

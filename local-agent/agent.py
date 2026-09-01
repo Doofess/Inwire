@@ -388,7 +388,7 @@ def packet_to_dict(pkt):
         source, destination = ip_layer.src, ip_layer.dst
     else:
         # A frame with no network layer - ARP, STP, IEEE 1905 - shows its MAC
-        # addresses, which is what Wireshark puts in those columns too. The
+        # addresses, which is what the reference analyzer puts in those columns too. The
         # browser resolves them to vendor names once it re-dissects.
         #
         # Both link layers have to be checked: an 802.3 frame (where bytes
@@ -790,7 +790,7 @@ def list_interfaces():
 
     On Windows this enumerates devices via scapy's `conf.ifaces`, which is
     populated from libpcap/Npcap's pcap_findalldevs() - the same source
-    Wireshark's interface list comes from. `get_windows_if_list()` is
+    The reference analyzer's interface list comes from. `get_windows_if_list()` is
     deliberately NOT used here: it returns every Windows adapter *binding*
     (LightWeight Filter bindings, QoS Packet Scheduler bindings, Npcap
     Packet Driver bindings, WAN Miniports, Teredo/6to4/IP-HTTPS tunneling
@@ -905,7 +905,7 @@ def refresh_interfaces():
 
 def sniff_on_interface(iface_name, iface_label, stop_event):
     try:
-        # No BPF filter: capture every frame on the wire, the way Wireshark
+        # No BPF filter: capture every frame on the wire, the way the reference analyzer
         # does by default. This used to be "ip or ip6", which silently
         # discarded ARP, STP and every other non-IP protocol before they
         # could reach the browser - the frontend dissects all of them.

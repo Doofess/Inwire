@@ -6,7 +6,7 @@
  * Every frame below was captured off a real network with tshark, and every
  * expected string is copied from `tshark -V` / `-T fields -e _ws.col.info` for
  * that same frame - so a failure here means NetView would disagree with
- * Wireshark about traffic that shows up on any LAN.
+ * The reference analyzer about traffic that shows up on any LAN.
  */
 import { decodeRawEthernetPacket } from '../../src/services/pcapParser';
 import type { ProtocolField } from '../../src/types/packet';
@@ -113,7 +113,7 @@ check('report type', findField(rf, 'Type')?.value, 'Membership Report (0x22)');
 check('record count', findField(rf, 'Num Group Records')?.value, 3);
 const records = rf.filter((f) => f.name === 'Group Record');
 check('every record gets its own sub-tree', records.length, 3);
-check('record summary matches Wireshark', records[0].value, '224.0.0.251  Mode Is Exclude');
+check('record summary matches the reference analyzer', records[0].value, '224.0.0.251  Mode Is Exclude');
 check('record type', findField(records[0].children!, 'Record Type')?.value, 'Mode Is Exclude (2)');
 check('record group address', findField(records[0].children!, 'Multicast Address')?.value, '224.0.0.251');
 

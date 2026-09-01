@@ -17,7 +17,7 @@ import type { ProtocolType } from '../types/packet';
  * whichever theme is loaded rather than a fixed hue pasted on top of it.
  *
  * **Boundary with `ColorRulesEngine`.** That stays the authority for colouring
- * an individual packet in the list, where the unit is a *packet* and Wireshark's
+ * an individual packet in the list, where the unit is a *packet* and the reference analyzer's
  * first-match-wins chain means a retransmitted RST is "Bad TCP" rather than
  * "TCP" - an ordering a protocol map cannot express. This is the authority for
  * aggregates, where the unit is a protocol and that nuance does not apply. The
