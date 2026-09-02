@@ -99,6 +99,17 @@ const GLOBE_MIN_ZOOM = 1.9;
 /** Flat: pulled in from the old 0.6, but nothing like as far as the globe. */
 const MERCATOR_MIN_ZOOM = 1.1;
 
+/**
+ * Degrees of bearing per pixel dragged, matching MapLibre's own feel.
+ *
+ * The SIGN is applied at the call site rather than baked in here, so that the
+ * one line performing the inversion is visible next to the one that does not.
+ */
+const BEARING_DEGREES_PER_PIXEL = 0.8;
+
+/** Degrees of tilt per pixel dragged, also MapLibre's value. */
+const PITCH_DEGREES_PER_PIXEL = 0.5;
+
 const ARC_STEPS = 48;
 
 /**
@@ -820,6 +831,95 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectionMode, mapEpoch]);
 
+  /**
+   * Drag to rotate, with the bearing reversed.
+   *
+   * MapLibre's own `DragRotateHandler` is disabled, because it exposes exactly
+   * two controls - `enable()` and `disable()` - and no way to change which way
+   * a drag turns the map. Reversing it therefore means owning the gesture.
+   *
+   * Only the BEARING is reversed. Tilt keeps MapLibre's convention, where
+   * dragging up tilts the camera down toward the horizon: that one has a
+   * physical logic to it (the ground is being pushed away from you) that the
+   * compass does not, and inverting both would have made the gesture feel
+   * broken in a second way while fixing the first.
+   *
+   * The gesture is the same one MapLibre uses - right-drag, or ctrl with the
+   * left button - so nothing has to be relearned except the direction. The
+   * context menu is suppressed for the duration, which is what MapLibre does
+   * too and the reason a right-drag is usable as a gesture at all.
+   */
+  useEffect(() => {
+    const map = mapRef.current;
+    const surface = map?.getCanvasContainer();
+    if (!map || !surface) return;
+
+    let rotating = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    // The same test MapLibre applies, so the gesture is unchanged and only
+    // its direction differs: `(button === 0 && ctrlKey) || (button === 2 &&
+    // !ctrlKey)`. metaKey is added for the Mac equivalent.
+    const isRotateGesture = (e: PointerEvent) =>
+      (e.button === 0 && (e.ctrlKey || e.metaKey)) ||
+      (e.button === 2 && !e.ctrlKey && !e.metaKey);
+
+    const onDown = (e: PointerEvent) => {
+      if (!isRotateGesture(e)) return;
+      rotating = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      // Capture, so a drag that leaves the canvas keeps rotating rather than
+      // stopping dead at the edge.
+      surface.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    };
+
+    const onMove = (e: PointerEvent) => {
+      if (!rotating) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      // MINUS is the inversion. MapLibre's own handler ADDS here - its move
+      // function reduces to `bearingDelta = (current.x - previous.x) * 0.8` -
+      // so dragging right turns the map one way by default and the other way
+      // now. Worth stating as fact rather than intuition: the first attempt at
+      // this reversed the sign the wrong way round, faithfully reproducing the
+      // default, and only reading MapLibre's own source settled it.
+      map.setBearing(map.getBearing() - dx * BEARING_DEGREES_PER_PIXEL);
+      // Tilt keeps the default direction and so keeps the default sign.
+      map.setPitch(map.getPitch() - dy * PITCH_DEGREES_PER_PIXEL);
+    };
+
+    const stop = (e: PointerEvent) => {
+      if (!rotating) return;
+      rotating = false;
+      surface.releasePointerCapture?.(e.pointerId);
+    };
+
+    // Only while the gesture is running - a plain right-click on the map
+    // should still open the browser's menu.
+    const onContextMenu = (e: MouseEvent) => {
+      if (rotating) e.preventDefault();
+    };
+
+    surface.addEventListener('pointerdown', onDown);
+    surface.addEventListener('pointermove', onMove);
+    surface.addEventListener('pointerup', stop);
+    surface.addEventListener('pointercancel', stop);
+    surface.addEventListener('contextmenu', onContextMenu);
+    return () => {
+      surface.removeEventListener('pointerdown', onDown);
+      surface.removeEventListener('pointermove', onMove);
+      surface.removeEventListener('pointerup', stop);
+      surface.removeEventListener('pointercancel', stop);
+      surface.removeEventListener('contextmenu', onContextMenu);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapEpoch]);
+
   // Create the map once on mount.
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -852,6 +952,10 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // from being tilted - the great circles stop reading as decoration and
       // start reading as paths over a surface.
       maxPitch: 85,
+      // Rotation is handled by this component, not by MapLibre - see the
+      // drag-to-rotate effect. MapLibre's own handler has no way to reverse
+      // its bearing direction, and that is the whole reason ours exists.
+      dragRotate: false,
       // No cooperative gestures, in either size. They existed to stop the wheel
       // being swallowed by the compact card while the sidebar around it is
       // being scrolled, and the price was a "use ctrl + scroll to zoom" overlay
