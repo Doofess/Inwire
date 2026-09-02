@@ -143,6 +143,21 @@ function applyProjectionMode(
   mode: MapProjectionMode,
   styleReady: boolean,
 ): void {
+  // Where a zoom is anchored.
+  //
+  // MapLibre zooms toward the POINTER by default, which is right for a flat map
+  // - you point at a city and it comes to you - and wrong for a globe, where it
+  // walks the planet off centre a little on every wheel notch until it is
+  // sitting in a corner of the frame with empty space around it. On a sphere
+  // the thing being zoomed IS the subject, so the zoom is anchored to the
+  // centre and the globe stays put.
+  //
+  // Restored to the default in mercator rather than left set, since the two
+  // projections genuinely want different behaviour here.
+  const zoomAnchor = mode === 'globe' ? { around: 'center' as const } : undefined;
+  map.scrollZoom.enable(zoomAnchor);
+  map.touchZoomRotate.enable(zoomAnchor);
+
   // How far back the camera may pull, per projection.
   //
   // These are floors on zoom, so a HIGHER number means less zooming out. The
