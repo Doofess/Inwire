@@ -108,6 +108,40 @@ budget is a clock rather than a row count, because a row holds one frame at
   chain's answer, "matched nothing" must come back as a decision rather than as
   an absence, and an over-long chain must decline to cache rather than wrap.
 
+## The other two callers of the streaming pass: measured, and not built
+
+The plan asked for one background mechanism with three callers - a rule edit, a
+filter change, and export-with-a-filter - each answering from the resident
+window first, with a running count and a cancel. Only the rule edit is built.
+
+The plan conditioned the other two on `fields` no longer being resident, which
+has not happened, so what remained was to check whether they need it anyway.
+They do not (`scripts/filter/engine.ts` reports it):
+
+| filter | per frame | at 100,000 | at 1,000,000 |
+|---|---|---|---|
+| `tcp.port == 443 && !tcp.analysis.flags` | 0.10 us | 10 ms | 100 ms |
+| six terms, none matching, ending in a regex | **0.17 us** | **17 ms** | 175 ms |
+
+The second is a deliberate worst case: every term is false so none can
+short-circuit, and the last is a regex over the Info column, the most expensive
+operator the language has. A first attempt at a "heavy" filter - five terms
+joined by `||` - measured *faster* than the two-term filter, because it matched
+on the first term and never evaluated the rest, which makes it useless as a
+ceiling.
+
+**17 ms at the current cap is instant, and a streaming filter would be
+machinery for a problem that does not exist.** The plan's own UX principle
+argues against building it early: a step that trades the instant case for more
+frames should be refused, and this one would add a progress affordance, a
+cancel, and a partial-results contract to something that already returns before
+the next frame.
+
+It becomes warranted when the cap rises - 175 ms at a million is past the 100 ms
+line this work drew - so it belongs with the compact record that would raise the
+cap, not ahead of it. The measurement is committed so the next person does not
+have to re-derive it.
+
 ## What this does not do
 
 It does not retire `fields`, `frameProtocols` or `analysisFlags` from the
