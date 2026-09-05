@@ -64,7 +64,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
   // large enough to have dropped them would otherwise render an empty stream
   // (docs/decisions/0013). A pass-through while the buffer still holds them,
   // which is every capture that fits in memory.
-  const streamPackets = useHydratedBytes(framesOnStream(packets, target));
+  const { packets: streamPackets } = useHydratedBytes(framesOnStream(packets, target));
   // Not "whoever sent the first frame": a capture that started mid-connection
   // has no SYN to go on, and a well-known port on one end says far more.
   const client = clientEnd(streamPackets, target);
