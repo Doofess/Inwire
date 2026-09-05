@@ -121,6 +121,7 @@ import {
   TbAlertTriangle,
 } from "react-icons/tb";
 import { evictOldBytes } from './services/packetBytes';
+import { FieldBlockWriter } from './services/dissect/fieldSplit';
 
 // Bounded, oldest dropped first. A session left open for hours must not grow
 // the log pane without limit.
@@ -494,6 +495,17 @@ export default function App() {
    * than a mystery.
    */
   const [droppedBuffer, setDroppedBuffer] = useState(0);
+
+  /**
+   * One column-block writer for the session.
+   *
+   * A writer per flush would mean a block per batch, and a slow capture's
+   * batches are small enough that the per-block overhead would exceed what the
+   * columns save. One writer lets a block fill across many flushes
+   * (`services/dissect/fieldSplit.ts`).
+   */
+  const fieldWriter = useRef(new FieldBlockWriter());
+
   /**
    * How much of this capture is on disk.
    *
@@ -632,6 +644,12 @@ export default function App() {
           appendFrames(incoming);
         }
       }
+
+      // The dense fields move into shared columns here, where a finished frame
+      // joins the buffer. Before `setPackets`, because a state updater has to
+      // be pure and React runs this one twice under StrictMode: `absorb` skips a
+      // frame that already has a block, but claiming a row twice would waste one.
+      fieldWriter.current.absorb(incoming);
 
       setPackets((prev) => {
         // The concat first, then both patch passes written into its result.
@@ -917,6 +935,7 @@ export default function App() {
         // frame after a restore is numbered 1, colliding with everything
         // already in the list, and its Time column restarts at zero halfway
         // down a capture.
+        fieldWriter.current = new FieldBlockWriter();
         pipeline.reset(Math.floor(lastId) + 1, captureStartRef.current, lastPacketTimeRef.current);
       }
 
@@ -1955,6 +1974,7 @@ export default function App() {
     // the pipeline Worker now; one message forgets the lot. Without it the TCP
     // tracker would keep describing streams from a capture that no longer
     // exists, and the next frame would be numbered after frames that are gone.
+    fieldWriter.current = new FieldBlockWriter();
     pipeline.reset(1);
     // Clearing the buffer is the only way a fresh capture begins, so this is
     // where the relative-time clock resets. captureStartRef === null is then
@@ -1995,6 +2015,7 @@ export default function App() {
     // The Worker's trackers describe streams from a capture that no longer
     // exists, and the next frame must not be numbered after frames that are
     // gone - the same reset Clear does.
+    fieldWriter.current = new FieldBlockWriter();
     pipeline.reset(1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
@@ -2076,6 +2097,7 @@ export default function App() {
     // capture's TCP/TLS/QUIC/DNS tracker state, which describes streams that
     // are no longer in the buffer.
     const lastId = imported.length > 0 ? imported[imported.length - 1].id : 0;
+    fieldWriter.current = new FieldBlockWriter();
     pipeline.reset(Math.floor(lastId) + 1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;

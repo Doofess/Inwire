@@ -51,8 +51,17 @@ const FIXTURES = [
  * might turn out to be the large one.
  */
 const COMPONENTS: { name: string; strip: (p: Packet) => void; plan?: string }[] = [
-  { name: 'fields', plan: 'last; expect "keep recent, re-dissect beyond"',
+  { name: 'fields (sparse bag)',
     strip: (p) => { (p as { fields?: unknown }).fields = undefined; } },
+  // The other half of what `fields` used to be. Stripping the bag does not
+  // free these - the block is reached through `cols`, not through the bag - so
+  // without a row of its own the columns would be counted in the total and
+  // attributed to nothing.
+  { name: 'fields (dense columns)',
+    strip: (p) => {
+      (p as { cols?: unknown }).cols = undefined;
+      (p as { row?: unknown }).row = undefined;
+    } },
   { name: 'info', plan: 'arena',
     strip: (p) => { (p as { info: unknown }).info = undefined; } },
   { name: 'frameProtocols', plan: 'bitmask',
@@ -86,7 +95,14 @@ function heap(): number {
   // the noise floor this script prints, and the floor decides which rows below
   // are readable at all.
   if (global.gc) for (let i = 0; i < 6; i++) global.gc();
-  return process.memoryUsage().heapUsed;
+  const usage = process.memoryUsage();
+  // `arrayBuffers` as well as `heapUsed`, because a typed array's bytes live
+  // OUTSIDE the JS heap. Since the dense fields moved into typed columns
+  // (`dissect/fieldBlock.ts`) most of what this measures would otherwise be
+  // invisible - which is exactly how ADR 0017 came to report 33 columns at
+  // 47 B a frame when they were 243: it was counting the one string array on
+  // the heap and none of the typed ones beside it.
+  return usage.heapUsed + usage.arrayBuffers;
 }
 
 /** How many times each configuration is measured; the median is reported. */

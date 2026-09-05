@@ -1,3 +1,5 @@
+import type { FieldBlock } from '../services/dissect/fieldBlock';
+
 export type ProtocolType =
   | 'HTTP'
   | 'HTTPS'
@@ -220,6 +222,24 @@ export interface Packet {
    * from disk simply arrives without it and is matched on first sight.
    */
   colorSlot?: number;
+  /**
+   * The column block holding this frame's dense fields, and its row in it.
+   *
+   * Set when the frame joins the buffer (`services/dissect/fieldSplit.ts`);
+   * absent on a frame that never did - one imported from a CSV, or replayed to
+   * build a detail tree - which keeps its whole bag and reads exactly as it
+   * always has. **The bag is the contract; the columns are an optimisation.**
+   *
+   * The block is referenced, not registered: when the buffer trims the last
+   * frame that shares one, it becomes unreachable and the collector takes it.
+   * Nothing rebases, and nothing is keyed by position in the buffer - which is
+   * what makes this survive trimming, filtering and sorting alike.
+   *
+   * Never persisted and never exported, like `colorSlot`: `toStoredFrame` and
+   * the export writers both build explicit objects.
+   */
+  cols?: FieldBlock;
+  row?: number;
   /**
    * The protocol tree. Empty on a frame that has not been asked about: it is
    * 10.6 kB per frame and the detail pane is the only thing that reads it, so

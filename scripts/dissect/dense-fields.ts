@@ -20,6 +20,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { DENSE_FIELDS, POST_DISSECTION_KEYS } from '../../src/services/dissect/denseFields';
 import { FIELDS } from '../../src/services/dissect/fieldRegistry';
+import { fieldEntries } from '../../src/services/dissect/fieldAccess';
 import { PcapService } from '../../src/services/pcapParser';
 
 let failures = 0;
@@ -80,7 +81,13 @@ const DENSE_THRESHOLD = 0.2;
       );
       for (const packet of parsed.packets) {
         frames++;
-        for (const key of Object.keys(packet.fields ?? {})) {
+        // Through the accessor, not off the bag: these frames came from
+        // `parseCaptureFile`, which has already moved the dense keys into
+        // columns - so counting the bag would find none of them, report every
+        // declared key as sparse, and pass vacuously for ever after. It did
+        // exactly that for one commit, and reported 0.0% coverage while
+        // passing.
+        for (const [key] of fieldEntries(packet)) {
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
       }
