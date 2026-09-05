@@ -22,6 +22,17 @@
  */
 import { huffmanDecode, type HeaderField } from './hpack';
 
+/**
+ * One decoder, not one per call. `new TextDecoder()` is not free, and these
+ * sites are per-field / per-frame - a CPU profile put TextDecoder construction
+ * at 8% of a dissection run. It carries no state across `decode()` calls unless
+ * `{stream: true}` is used, which nothing here does, so a shared instance is
+ * exactly equivalent. `new TextDecoder()` and
+ * `new TextDecoder('utf-8', {fatal: false})` are the same thing: utf-8,
+ * non-fatal, is the default.
+ */
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
 /** RFC 9204 Appendix A. Indexed from zero, unlike HPACK's. */
 const STATIC_TABLE: HeaderField[] = [
   { name: ':authority', value: '' },
@@ -163,7 +174,7 @@ class Reader {
     if (length === null || length > this.remaining) return null;
     const raw = this.bytes.subarray(this.position, this.position + length);
     this.position += length;
-    return huffman ? huffmanDecode(raw) : new TextDecoder('utf-8', { fatal: false }).decode(raw);
+    return huffman ? huffmanDecode(raw) : utf8Decoder.decode(raw);
   }
 }
 

@@ -19,6 +19,17 @@
  */
 import { hpackDecode, HpackTable, type HeaderField } from './hpack';
 
+/**
+ * One decoder, not one per call. `new TextDecoder()` is not free, and these
+ * sites are per-field / per-frame - a CPU profile put TextDecoder construction
+ * at 8% of a dissection run. It carries no state across `decode()` calls unless
+ * `{stream: true}` is used, which nothing here does, so a shared instance is
+ * exactly equivalent. `new TextDecoder()` and
+ * `new TextDecoder('utf-8', {fatal: false})` are the same thing: utf-8,
+ * non-fatal, is the default.
+ */
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
 export const HTTP2_PREFACE = new TextEncoder().encode('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
 
 const FRAME_HEADER_BYTES = 9;
@@ -272,7 +283,7 @@ export function dissectHttp2(
           frame.goawayLastStream = u32(payload, 0) & 0x7fffffff;
           frame.errorCode = u32(payload, 4);
           if (payload.length > 8) {
-            frame.goawayDebug = new TextDecoder('utf-8', { fatal: false }).decode(payload.subarray(8, Math.min(payload.length, 8 + 256)));
+            frame.goawayDebug = utf8Decoder.decode(payload.subarray(8, Math.min(payload.length, 8 + 256)));
           }
         }
         break;

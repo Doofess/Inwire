@@ -10,6 +10,9 @@
 import { hmacSha256, SHA256_DIGEST_LENGTH } from './sha256';
 import { hmacSha384, SHA384_DIGEST_LENGTH } from './sha512';
 
+/** One encoder, not one per call - see scripts/perf/hot-path-allocations.ts. */
+const utf8Encoder = new TextEncoder();
+
 /** A hash, as HKDF needs to see it: its output length and its HMAC. */
 export interface HashSpec {
   name: string;
@@ -69,7 +72,7 @@ export function hkdfExpandLabel(
   hash: HashSpec = SHA256
 ): Uint8Array {
   const fullLabel = `tls13 ${label}`;
-  const labelBytes = new TextEncoder().encode(fullLabel);
+  const labelBytes = utf8Encoder.encode(fullLabel);
 
   const info = new Uint8Array(2 + 1 + labelBytes.length + 1 + context.length);
   info[0] = (length >> 8) & 0xff;
@@ -98,7 +101,7 @@ export function tls12Prf(
   length: number,
   hash: HashSpec = SHA256
 ): Uint8Array {
-  const labelBytes = new TextEncoder().encode(label);
+  const labelBytes = utf8Encoder.encode(label);
   const labelAndSeed = new Uint8Array(labelBytes.length + seed.length);
   labelAndSeed.set(labelBytes);
   labelAndSeed.set(seed, labelBytes.length);

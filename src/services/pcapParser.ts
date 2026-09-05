@@ -30,6 +30,15 @@ import { buildCsvText } from './tabularWriters';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 
 /**
+ * One decoder, not one per call. Constructing a TextDecoder is not free, and
+ * the ASCII-line reader below runs on every frame with a payload - a CPU
+ * profile put TextDecoder construction at 8% of a dissection run, the same
+ * class of cost as the Intl.DateTimeFormat that was being rebuilt twice a
+ * frame. Stateless without `{stream: true}`, which nothing here uses.
+ */
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
+/**
  * Standard Libpcap file header structure (24 bytes)
  * magic_number (4 bytes) = 0xa1b2c3d4
  * version_major (2 bytes) = 2
@@ -370,7 +379,7 @@ export class PcapService {
         const secretsType = view.getUint32(offset + 8, isLittleEndian);
         const secretsLength = view.getUint32(offset + 12, isLittleEndian);
         if (secretsType === DSB_SECRETS_TYPE_TLS_KEY_LOG && offset + 16 + secretsLength <= offset + blockLen) {
-          const text = new TextDecoder('utf-8', { fatal: false })
+          const text = utf8Decoder
             .decode(new Uint8Array(buffer, offset + 16, secretsLength));
           keyLog.add(text);
         }
@@ -1496,18 +1505,64 @@ export function applyInfoPatch(packet: Packet, patch: InfoPatch): void {
   }
 }
 
+/**
+ * Where frame `id` sits in a buffer, or -1.
+ *
+ * Ids are handed out in order and only ever leave from the head, so the
+ * position is arithmetic: `id - packets[0].id`. That is a guess and not a
+ * guarantee - the Worker takes an id before it dissects, so a frame that fails
+ * to dissect burns one and leaves a hole - so the guess is checked, and a miss
+ * falls back to a binary search. Ids ascend either way, holes or not, so the
+ * fallback is log n rather than the linear scan it replaces.
+ *
+ * This exists because the two patch passes were each a `.map` over the whole
+ * buffer, ten times a second, to touch one or two frames: 14.1 ms per pass at a
+ * million frames, against 1.6 ms to copy the array once
+ * (`scripts/perf/buffer-cost.ts`).
+ */
+export function indexOfFrame(packets: Packet[], id: number): number {
+  if (packets.length === 0) return -1;
+  const guess = id - packets[0].id;
+  if (guess >= 0 && guess < packets.length && packets[guess].id === id) return guess;
+  let lo = 0;
+  let hi = packets.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const at = packets[mid].id;
+    if (at === id) return mid;
+    if (at < id) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/**
+ * Applies patches by writing into `packets` directly. **The caller must own the
+ * array** - it is mutated, though the packets in it are replaced rather than
+ * changed, so anything else holding one of them still sees what it saw.
+ *
+ * For a caller that has just built a fresh array (the flush, which has already
+ * paid for one copy in its `concat`) this is the whole cost; `applyInfoPatches`
+ * is the copying wrapper for callers that have not.
+ */
+export function applyInfoPatchesInPlace(packets: Packet[], patches: InfoPatch[]): boolean {
+  let changed = false;
+  for (const patch of patches) {
+    const at = indexOfFrame(packets, patch.frameId);
+    if (at < 0) continue;
+    const copy = { ...packets[at] };
+    applyInfoPatch(copy, patch);
+    packets[at] = copy;
+    changed = true;
+  }
+  return changed;
+}
+
 /** Applies patches to packets already in a list; the packets are replaced, not mutated. */
 export function applyInfoPatches(packets: Packet[], patches: InfoPatch[]): Packet[] {
   if (patches.length === 0) return packets;
-  const byFrame = new Map<number, InfoPatch[]>();
-  for (const p of patches) byFrame.set(p.frameId, [...(byFrame.get(p.frameId) ?? []), p]);
-  return packets.map((p) => {
-    const mine = byFrame.get(p.id);
-    if (!mine) return p;
-    const copy = { ...p };
-    for (const patch of mine) applyInfoPatch(copy, patch);
-    return copy;
-  });
+  const next = packets.slice();
+  return applyInfoPatchesInPlace(next, patches) ? next : packets;
 }
 
 
@@ -1641,19 +1696,59 @@ function ipv6AddressSpace(address: string): string {
   return 'Global Unicast';
 }
 
-function formatArrivalTime(tsUs: number, utc = false): string {
-  const d = new Date(tsUs / 1000);
-  const opts: Intl.DateTimeFormatOptions = {
+/**
+ * The two formatters, built once.
+ *
+ * `new Intl.DateTimeFormat(...)` was being constructed inside
+ * `formatArrivalTime`, which is called twice for every frame - so a 12,858
+ * frame capture built 25,716 of them. Constructing one is among the most
+ * expensive things in the language: it resolves a locale and sets up ICU, and
+ * it measured at ~49 us a call. A CPU profile of a full dissection put this one
+ * function at **38% of the entire profile, and more than half of all dissection
+ * time** - far and away the largest single cost in the pipeline, for two rows
+ * of a tree that 92% of frames never show anyone.
+ *
+ * Lazily, because the locale data load is not work to do at module init in a
+ * Worker that may never dissect anything.
+ */
+let localArrivalFormat: Intl.DateTimeFormat | undefined;
+let utcArrivalFormat: Intl.DateTimeFormat | undefined;
+
+function arrivalFormatter(utc: boolean): Intl.DateTimeFormat {
+  if (utc) {
+    utcArrivalFormat ??= new Intl.DateTimeFormat('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false, timeZone: 'UTC', timeZoneName: 'long',
+    });
+    return utcArrivalFormat;
+  }
+  localArrivalFormat ??= new Intl.DateTimeFormat('en-US', {
     month: 'short', day: 'numeric', year: 'numeric',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: false,
-    timeZone: utc ? 'UTC' : undefined,
-    timeZoneName: 'long',
-  };
-  const parts = new Intl.DateTimeFormat('en-US', opts).formatToParts(d);
-  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+    hour12: false, timeZoneName: 'long',
+  });
+  return localArrivalFormat;
+}
+
+function formatArrivalTime(tsUs: number, utc = false): string {
+  const parts = arrivalFormatter(utc).formatToParts(new Date(tsUs / 1000));
+  // One pass over the parts rather than a `find` per field: there are six
+  // fields and about ten parts, so the old form was sixty scans a frame.
+  let month = '', day = '', year = '', hour = '', minute = '', second = '', zone = '';
+  for (const p of parts) {
+    switch (p.type) {
+      case 'month': month = p.value; break;
+      case 'day': day = p.value; break;
+      case 'year': year = p.value; break;
+      case 'hour': hour = p.value; break;
+      case 'minute': minute = p.value; break;
+      case 'second': second = p.value; break;
+      case 'timeZoneName': zone = p.value; break;
+    }
+  }
   const fractional = String((tsUs % 1_000_000) * 1000).padStart(9, '0');
-  return `${get('month')} ${get('day')}, ${get('year')} ${get('hour')}:${get('minute')}:${get('second')}.${fractional} ${get('timeZoneName')}`;
+  return `${month} ${day}, ${year} ${hour}:${minute}:${second}.${fractional} ${zone}`;
 }
 
 
@@ -1683,7 +1778,7 @@ function readAsciiRequestLine(rawBytes: Uint8Array, payloadStart: number): strin
     end++;
   }
   if (end === payloadStart || end >= limit) return null;
-  return new TextDecoder().decode(rawBytes.subarray(payloadStart, end));
+  return utf8Decoder.decode(rawBytes.subarray(payloadStart, end));
 }
 
 /**

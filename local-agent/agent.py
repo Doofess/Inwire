@@ -25,6 +25,7 @@ from http import HTTPStatus
 
 import config
 import packet_batch
+import capture_profile
 
 
 def _report_missing_dependency(name: str, install_hint: str) -> None:
@@ -60,6 +61,9 @@ try:
     scapy_conf.load_layers = ["l2", "inet", "inet6"]
     from scapy.all import sniff  # noqa: E402  (must follow load_layers)
     from scapy.data import ETH_P_ALL
+    # Only to ask whether a socket has overridden recv_raw - see
+    # sniff_on_interface. Importing it loads no protocol layers.
+    from scapy.supersocket import SuperSocket
 except ImportError:
     _report_missing_dependency("scapy", "pip install scapy")
     sys.exit(1)
@@ -72,7 +76,7 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "3.4.1"
+AGENT_VERSION = "3.5.0"
 
 # How often per-interface traffic rates are sampled while a client has the
 # capture-interface picker open. 500ms is fast enough that the sparkline
@@ -447,25 +451,27 @@ class SnifferController:
         return all(name in self.failed_interfaces for name in self.selected_interfaces)
 
 
-def capture_time_us(pkt) -> int:
+def capture_time_us(stamp) -> int:
     """Epoch microseconds for when the frame was actually captured.
 
-    scapy sets pkt.time from libpcap's per-packet header, which carries
-    microsecond resolution; an integer count of microseconds carries all of it
-    and nothing invented. Falls back to the current wall clock only if a
-    packet somehow arrives without one - a frame with no time at all would
-    otherwise break the browser's relative-time column outright, which is a
+    Takes libpcap's per-packet timestamp directly, as `recv_raw` returns it.
+    It carries microsecond resolution; an integer count of microseconds carries
+    all of it and nothing invented.
+
+    A falsy stamp falls back to the current wall clock, which is the same test
+    scapy's own `SuperSocket.recv` applies (`if ts: pkt.time = ts`) - so a
+    socket that reports no time gets the clock either way. A frame with no time
+    at all would break the browser's relative-time column outright, which is a
     worse outcome than one slightly-late timestamp.
     """
-    stamp = getattr(pkt, "time", None)
-    if stamp is None:
+    if not stamp:
         return int(time.time() * 1_000_000)
     # float() of an EDecimal keeps ~7 fractional digits at epoch magnitude,
     # so the microseconds survive; rounding removes the float's last-bit noise.
     return int(round(float(stamp) * 1_000_000))
 
 
-def packet_to_record(pkt, iface_id=0, seq=0) -> bytes:
+def packet_to_record(raw, ts, iface_id=0, seq=0) -> bytes:
     """Encodes one captured frame for the binary batch (packet_batch.py).
 
     Until 3.2.0 this built a JSON object with source, destination, protocol,
@@ -477,12 +483,17 @@ def packet_to_record(pkt, iface_id=0, seq=0) -> bytes:
     adapter it came from and where it sits in the capture's sequence, and
     nothing else.
 
-    Runs on the sniffer thread. bytes(pkt) is the frame scapy already holds and
-    struct.pack is a memcpy; doing it here is what lets the event loop see a
-    queue of finished records instead of live scapy objects.
+    Runs on the sniffer thread, and takes the frame's bytes exactly as the
+    driver handed them over. Until 3.5.0 it took a dissected scapy packet and
+    called `bytes(pkt)` on it, which re-serialised an object graph scapy had
+    just built from those same bytes and which nothing here ever read - about
+    80 us a frame, measured over both fixture captures, to arrive back at the
+    bytes we started with. (The two were verified byte-identical across all
+    27,640 frames of those captures before the dissection was removed, which is
+    what made this a pure performance change rather than a wire change.)
     """
     return packet_batch.encode_record(
-        seq, iface_id, capture_time_us(pkt), len(pkt), bytes(pkt),
+        seq, iface_id, capture_time_us(ts), len(raw), raw,
     )
 
 
@@ -529,6 +540,11 @@ class CaptureCounters:
 
 
 counters = CaptureCounters()
+
+# Per-frame timing for the sniffer thread, off unless INWIRE_PROFILE_CAPTURE is
+# set. See capture_profile.py for why the number that matters is the one it
+# derives rather than the one it measures directly.
+profile = capture_profile.CaptureProfile()
 
 
 def read_pcap_stats(sock):
@@ -929,6 +945,7 @@ class AgentServer:
     def start_capture(self):
         """Starts the sniffer threads and the capture_stats ticker together."""
         counters.reset()
+        profile.reset()
         self._dropped_at_capture_start = self._dropped_sends
         sniffer.start_threads(spawn_sniffer_thread)
         if self.loop is not None and (self._capture_stats_task is None or self._capture_stats_task.done()):
@@ -1263,8 +1280,12 @@ def make_process_request(on_reject=None):
 _captured_count = 0
 
 
-def sniff_callback(pkt, iface_id=0):
+def sniff_callback(raw, ts, iface_id=0):
     global _captured_count
+    # Wall time for this frame's own callback. The expensive half - the driver
+    # read and scapy's dissection - already happened before we were called, so
+    # capture_profile derives it from the gap between frames instead.
+    profile_start = time.perf_counter() if profile.enabled else 0.0
     _captured_count += 1
     if _captured_count == 1:
         log.info("first packet captured - capture is working")
@@ -1278,11 +1299,15 @@ def sniff_callback(pkt, iface_id=0):
 
     seq = counters.next_seq(iface_id)
     try:
-        record = packet_to_record(pkt, iface_id, seq)
+        record = packet_to_record(raw, ts, iface_id, seq)
     except Exception as exc:
         log.warning("failed to process a captured packet: %s", exc)
         return
     agent.queue_packet(record)
+    if profile.enabled:
+        profile.frame(time.perf_counter() - profile_start)
+        if _captured_count % 10000 == 0:
+            log.info("%s", profile.describe())
 
 
 _RTL_MARKS = ("‎", "‏")
@@ -1441,17 +1466,46 @@ def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
         return
     counters.register_socket(iface_id, sock)
     try:
-        # No BPF filter: capture every frame on the wire, the way the reference analyzer
-        # does by default. This used to be "ip or ip6", which silently
-        # discarded ARP, STP and every other non-IP protocol before they
-        # could reach the browser - the frontend dissects all of them.
-        # store=False keeps memory flat during long-running captures.
-        # sniff() is re-entered every CAPTURE_POLL_SECONDS so a stop is
-        # honoured within that bound even on an adapter carrying no traffic;
-        # stop_filter covers the busy case between polls.
-        while not stop_event.is_set():
-            sniff(opened_socket=sock, prn=lambda pkt: sniff_callback(pkt, iface_id), store=False,
-                  timeout=CAPTURE_POLL_SECONDS, stop_filter=lambda pkt: stop_event.is_set())
+        # No BPF filter: capture every frame on the wire, the way the reference
+        # analyzer does by default. This used to be "ip or ip6", which silently
+        # discarded ARP, STP and every other non-IP protocol before they could
+        # reach the browser - the frontend dissects all of them.
+        #
+        # `recv_raw`, not `sniff(prn=...)`. sniff() calls SuperSocket.recv,
+        # which is `cls, val, ts = self.recv_raw(x)` followed by `cls(val)` -
+        # so every frame was dissected into an Ether/IP/TCP object graph that
+        # this agent then threw away, because packet_to_record reads only the
+        # bytes, the length and the timestamp. recv_raw is the same call
+        # without the half we discard.
+        #
+        # It is the complete primitive on both platforms that matter, not a
+        # shortcut past something: the libpcap socket's recv_raw returns
+        # libpcap's own per-packet timestamp, and Linux's L2Socket.recv_raw
+        # applies the PACKET_OUTGOING rule and fills the timestamp in itself.
+        # A socket that has NOT overridden it inherits SuperSocket's base,
+        # which reports no timestamp at all - so that case keeps sniff(),
+        # rather than silently trading capture times for throughput.
+        if type(sock).recv_raw is SuperSocket.recv_raw:
+            log.info("%s: no raw receive on this socket type - using sniff()", iface_label)
+            while not stop_event.is_set():
+                sniff(opened_socket=sock, prn=lambda pkt: sniff_callback(bytes(pkt), pkt.time, iface_id),
+                      store=False, timeout=CAPTURE_POLL_SECONDS)
+        else:
+            # A libpcap socket is opened with to_ms=100, so recv_raw returns on
+            # its own read timeout and a stop is honoured within 100 ms even on
+            # a silent adapter - tighter than the 0.5 s the sniff() loop gave.
+            # An AF_PACKET socket blocks indefinitely instead, so that one is
+            # polled with select() on the same cadence as before.
+            polled = getattr(sock, "pcap_fd", None) is None
+            while not stop_event.is_set():
+                if polled and not sock.select([sock], CAPTURE_POLL_SECONDS):
+                    continue
+                _cls, raw, ts = sock.recv_raw()
+                # None is the read timeout expiring, not an error: loop round
+                # and re-test stop_event.
+                if raw is None:
+                    continue
+                sniff_callback(raw, ts, iface_id)
     except Exception as exc:
         log.warning("capture failed on interface %r (%s): %s", iface_label, iface_name, exc)
         agent.report_capture_failure(iface_id, iface_name, iface_label, str(exc))

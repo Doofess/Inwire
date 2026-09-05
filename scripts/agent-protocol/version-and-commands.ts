@@ -37,7 +37,7 @@ check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', int
 // different install. Major, not minor. This constant has to move with
 // AGENT_VERSION in agent.py and MyAppVersion in setup.iss;
 // local-agent/test_protocol.py is what enforces that all three agree.
-check('required agent version is 3.4.1', REQUIRED_AGENT_VERSION, '3.4.1');
+check('required agent version is 3.5.0', REQUIRED_AGENT_VERSION, '3.5.0');
 
 // Pairing. The token goes on the wire as an ordinary command rather than in
 // the handshake, because a handshake this agent refuses reaches the browser as

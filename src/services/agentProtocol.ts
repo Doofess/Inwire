@@ -341,7 +341,7 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
  * whatever the connected agent reports in its hello message to flag a
  * stale build in the UI.
  */
-export const REQUIRED_AGENT_VERSION = '3.4.1';
+export const REQUIRED_AGENT_VERSION = '3.5.0';
 
 /**
  * Simple major.minor.patch comparison - good enough for this agent's

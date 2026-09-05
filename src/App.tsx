@@ -39,7 +39,7 @@ import { Packet, UserRole } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
 import { pipeline } from "./services/pipelineClient";
 import { usePacketDetail } from "./lib/usePacketDetail";
-import { applyInfoPatches, type InfoPatch } from './services/pcapParser';
+import { applyInfoPatchesInPlace, type InfoPatch } from './services/pcapParser';
 import { flowAnnotations } from './services/flowAnnotations';
 import {
   readLinkContext, watchLinkChanges, type LinkChange, type LinkContext,
@@ -55,11 +55,12 @@ import {
   clearSession,
   countFrames,
   loadSessionMeta,
+  pendingWriteBacklog,
   readFrames,
   saveSessionMeta,
   trimFramesBelow,
 } from "./services/sessionStore";
-import { applyIcmpReplies, buildFallbackPacket, restoreBatch } from "./services/sessionRestore";
+import { applyIcmpRepliesInPlace, buildFallbackPacket, restoreBatch } from "./services/sessionRestore";
 import {
   answerLivenessPings,
   prepareStoredSession,
@@ -473,6 +474,15 @@ export default function App() {
    */
   const [droppedBuffer, setDroppedBuffer] = useState(0);
   /**
+   * How much of this capture is on disk.
+   *
+   * Shown because the stored capture now outlives the app
+   * (docs/decisions/0012-stored-captures-persist.md): bytes that persist
+   * unasked and unseen would be the wrong trade, so the size is on screen
+   * beside the one button that removes them.
+   */
+  const [storedBytes, setStoredBytes] = useState(0);
+  /**
    * The same number on a ref, plus the head id it was last counted at,
    * because the state can only be advanced from inside a `setPackets` updater
    * - which React runs twice under StrictMode, with the same `prev` both
@@ -552,6 +562,16 @@ export default function App() {
   /** The highest packet id already written to disk, so a flush only appends. */
   const persistedThroughIdRef = useRef(0);
 
+  // The stored size, sampled rather than pushed: the store writes in batches
+  // off the critical path, and a number that updates twice a second is as
+  // current as anyone reading it needs.
+  useEffect(() => {
+    const tick = () => setStoredBytes(pendingWriteBacklog().storedBytes);
+    tick();
+    const timer = window.setInterval(tick, 2000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   // Drains the ingest queue into state on a fixed cadence. Runs for the life
   // of the app rather than only while capturing, so packets queued in the
   // instant before a stop still land instead of being stranded.
@@ -583,20 +603,22 @@ export default function App() {
       }
 
       setPackets((prev) => {
-        let next = prev;
-        if (replies.length > 0) {
-          const replyByFrameId = new Map(replies.map((r) => [r.requestFrameId, r.replyId]));
-          next = next.map((p) => {
-            const replyId = replyByFrameId.get(p.id);
-            return replyId === undefined ? p : { ...p, info: p.info + ` (reply in ${replyId})` };
-          });
-        }
-        next = next === prev ? prev.concat(incoming) : next.concat(incoming);
-        if (patches.length > 0) {
-          // Patches may target frames in this same batch (a record that began
-          // and ended within one flush), so they are applied after the concat.
-          next = applyInfoPatches(next, patches);
-        }
+        // The concat first, then both patch passes written into its result.
+        //
+        // That result is a fresh array nobody else has seen yet, so the patches
+        // can be applied by index instead of by rebuilding the buffer around
+        // them. Each pass used to be a `.map` over every frame to touch one or
+        // two: 14.1 ms each at a million frames, ten times a second, against
+        // 1.6 ms for the one copy the concat was doing anyway
+        // (`scripts/perf/buffer-cost.ts`). The packets themselves are still
+        // replaced rather than mutated, so a selection or a filtered array
+        // holding one of them is unaffected.
+        //
+        // Both passes run after the concat because a patch may target a frame
+        // in this very batch - a record that began and ended within one flush.
+        let next = prev.concat(incoming);
+        if (replies.length > 0) applyIcmpRepliesInPlace(next, replies);
+        if (patches.length > 0) applyInfoPatchesInPlace(next, patches);
         const cap = packetBufferCapRef.current;
         const trimmed = trimToCap(next, cap);
         if (trimmed !== next) {
@@ -810,9 +832,20 @@ export default function App() {
           lastId = frames[frames.length - 1].id;
           done += frames.length;
 
-          setPackets((prev) =>
-            trimToCap(applyInfoPatches(applyIcmpReplies(prev, icmpReplies), infoPatches).concat(batch), packetBufferCapRef.current),
-          );
+          setPackets((prev) => {
+            // Concat first, then patch in place - the same order the live
+            // flush uses, and for the same reason. Applying the patches to
+            // `prev` before appending this chunk dropped every patch that
+            // targeted a frame *inside* the chunk, which is where a TLS record
+            // reassembled across a few hundred frames lands: a restored session
+            // was quietly missing "[TCP PDU reassembled in N]" annotations that
+            // the same capture showed on import. It is also two whole-buffer
+            // copies per 250-frame chunk cheaper.
+            const next = prev.concat(batch);
+            applyIcmpRepliesInPlace(next, icmpReplies);
+            applyInfoPatchesInPlace(next, infoPatches);
+            return trimToCap(next, packetBufferCapRef.current);
+          });
           setRestoreProgress({ done, total });
           // Yield so React can commit and the browser can paint this chunk.
           await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1412,10 +1445,17 @@ export default function App() {
         // batch carries the same two facts.
         if (captureStartRef.current === null) captureStartRef.current = packets[0].tsUs;
         lastPacketTimeRef.current = packets[packets.length - 1].tsUs;
-        pendingPacketsRef.current.push(...packets);
+        // A loop, not `push(...packets)`. Spreading passes one argument per
+        // frame, and an engine throws RangeError somewhere past ~65-125k of
+        // them. Nothing here bounds the batch: the Worker sends what one flush
+        // dissected, so a Worker that stalled for a few seconds at rate - the
+        // exact condition this whole change exists to survive - arrives as one
+        // batch large enough to throw, losing the batch and every frame queued
+        // behind it. See the sibling pushes below.
+        for (const packet of packets) pendingPacketsRef.current.push(packet);
       }
-      if (icmpReplies.length > 0) pendingIcmpRepliesRef.current.push(...icmpReplies);
-      if (infoPatches.length > 0) pendingInfoPatchesRef.current.push(...infoPatches);
+      for (const reply of icmpReplies) pendingIcmpRepliesRef.current.push(reply);
+      for (const patch of infoPatches) pendingInfoPatchesRef.current.push(patch);
     };
 
     pipeline.onFailure = (message) => {
@@ -1846,13 +1886,41 @@ export default function App() {
     // would let a local port reused since the last capture be attributed to
     // whatever held it during a capture that is no longer on screen.
     flowAnnotations.clear();
-    // Clearing the buffer clears what a refresh would restore. Anything else
-    // would resurrect the packets the user just asked to be rid of.
-    void clearSession();
+    // The stored capture is deliberately NOT cleared here. Clearing the view
+    // frees the memory the buffer is holding; it is not a request to destroy
+    // the capture, and it used to be treated as one - so a user who cleared the
+    // screen to get some room back also silently lost the ability to export
+    // what they had captured. Discarding is its own action
+    // (`handleDiscardCapture`), named as what it does
+    // (docs/decisions/0012-stored-captures-persist.md).
     setPackets([]);
     setSelectedPacket(null);
     setActiveByteRange(null);
   };
+
+  /**
+   * Throws the stored capture away, for good.
+   *
+   * The only thing in the app that deletes captured bytes from disk. Nothing
+   * does it automatically any more - not closing the last window, not reopening
+   * the app, not clearing the view - so this is the whole of the exit
+   * (docs/decisions/0012-stored-captures-persist.md).
+   */
+  const handleDiscardCapture = useCallback(async () => {
+    await clearSession();
+    setPackets([]);
+    setSelectedPacket(null);
+    setActiveByteRange(null);
+    // The Worker's trackers describe streams from a capture that no longer
+    // exists, and the next frame must not be numbered after frames that are
+    // gone - the same reset Clear does.
+    pipeline.reset(1);
+    captureStartRef.current = null;
+    lastPacketTimeRef.current = null;
+    persistedThroughIdRef.current = 0;
+    flowAnnotations.clear();
+    setStoredBytes(0);
+  }, []);
 
   // The dashboard's callbacks are memoized, and the three below are the ones
   // that matter: they are handed to the analytics widgets, which is the part of
@@ -2408,6 +2476,8 @@ export default function App() {
             packetBufferCap={packetBufferCap}
             bufferAutoPaused={bufferAutoPaused}
             onClearPackets={handleClearPackets}
+            storedBytes={storedBytes}
+            onDiscardCapture={handleDiscardCapture}
             colorRules={colorRules}
             onColorRulesChange={setColorRules}
             packetTheme={packetTheme}

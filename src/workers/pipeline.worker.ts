@@ -218,7 +218,35 @@ function flush(): void {
   pendingIcmpReplies = [];
   pendingInfoPatches = [];
 
-  post({ type: 'frames', packets, icmpReplies, infoPatches, lateCount: ordering.lateCount });
+  // The frames' bytes are MOVED rather than copied. `retain()` gives every
+  // frame an exactly-sized buffer of its own (agentBinary.ts), and the three
+  // arrays above have already been swapped out, so nothing here reads a packet
+  // again after this line - which is what makes detaching them safe.
+  //
+  // Measured at 2.16 us a frame, 1.27% of one (scripts/perf/throughput.ts).
+  // Small: the boundary is only ~4% of a frame to begin with, and the bytes are
+  // a fifth of that. Worth taking because it is free and correct, not because
+  // it moves the ceiling - the ceiling is dissection (docs/decisions/0007).
+  //
+  // Deduplicated because a transfer list may not name one buffer twice, and
+  // zero-length ones are skipped: a frame with no bytes shares the empty
+  // buffer, which would be a duplicate every time two of them land together.
+  const transfer: ArrayBuffer[] = [];
+  const seen = new Set<ArrayBuffer>();
+  for (const packet of packets) {
+    const bytes = packet.rawBytes;
+    if (!bytes || bytes.byteLength === 0) continue;
+    const buffer = bytes.buffer as ArrayBuffer;
+    // A view over a larger buffer would detach more than this frame - never
+    // true for a retained live frame, but a restored or fallback packet is
+    // built elsewhere and this is not the place to assume.
+    if (bytes.byteOffset !== 0 || bytes.byteLength !== buffer.byteLength) continue;
+    if (seen.has(buffer)) continue;
+    seen.add(buffer);
+    transfer.push(buffer);
+  }
+
+  post({ type: 'frames', packets, icmpReplies, infoPatches, lateCount: ordering.lateCount }, transfer);
 }
 
 setInterval(flush, FLUSH_MS);

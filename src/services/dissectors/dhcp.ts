@@ -11,6 +11,18 @@
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 
+/**
+ * One decoder, not one per call. `new TextDecoder()` is not free, and these
+ * sites are per-DNS-label / per-field / per-frame - a CPU profile put
+ * TextDecoder construction at 8% of a dissection run. It carries no state
+ * across `decode()` calls unless `{stream: true}` is used, which nothing here
+ * does, so a shared instance is exactly equivalent.
+ *
+ * `new TextDecoder()` and `new TextDecoder('utf-8', {fatal: false})` are the
+ * same thing: utf-8, non-fatal, is the default.
+ */
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
 const MESSAGE_TYPE_NAMES: Record<number, string> = {
   1: 'Discover', 2: 'Offer', 3: 'Request', 4: 'Decline', 5: 'ACK', 6: 'NAK', 7: 'Release', 8: 'Inform',
   9: 'Force Renew', 10: 'Lease query', 11: 'Lease Unassigned', 12: 'Lease Unknown', 13: 'Lease Active',
@@ -49,7 +61,7 @@ export interface DhcpResult {
 const ip4 = (b: Uint8Array, p: number) => `${b[p]}.${b[p + 1]}.${b[p + 2]}.${b[p + 3]}`;
 const mac = (b: Uint8Array, p: number, n: number) => Array.from(b.subarray(p, p + n)).map((x) => x.toString(16).padStart(2, '0')).join(':');
 const u32 = (b: Uint8Array, p: number) => ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0;
-const text = (b: Uint8Array, p: number, n: number) => new TextDecoder().decode(b.subarray(p, p + n)).replace(/\0+$/, '');
+const text = (b: Uint8Array, p: number, n: number) => utf8Decoder.decode(b.subarray(p, p + n)).replace(/\0+$/, '');
 
 /** BOOTP/DHCP on UDP 67/68. */
 export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResult | null {

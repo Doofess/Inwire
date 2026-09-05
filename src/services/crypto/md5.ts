@@ -9,6 +9,9 @@
  * (docs/decisions/0003). Same house style as sha256.ts.
  */
 
+/** One encoder, not one per call - see scripts/perf/hot-path-allocations.ts. */
+const utf8Encoder = new TextEncoder();
+
 const S = [
   7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
   5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
@@ -59,6 +62,6 @@ export function md5(message: Uint8Array): Uint8Array {
 }
 
 export function md5Hex(message: Uint8Array | string): string {
-  const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+  const bytes = typeof message === 'string' ? utf8Encoder.encode(message) : message;
   return Array.from(md5(bytes)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }

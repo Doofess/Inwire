@@ -13,7 +13,7 @@
 ; licence, and downloading it on the user's machine is not redistribution.
 
 #define MyAppName "Inwire Agent"
-#define MyAppVersion "3.4.1"
+#define MyAppVersion "3.5.0"
 #define MyAppExeName "inwire-agent-windows.exe"
 #define MyAppPublisher "Inwire"
 #define NpcapUrl "https://npcap.com/dist/npcap-1.79.exe"

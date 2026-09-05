@@ -1,28 +1,27 @@
 /**
- * Deciding whether a stored session is still the user's, or leftovers.
+ * Claiming the stored session for this tab.
  *
- * The session store keeps raw packet bytes on disk so a refresh does not lose a
- * capture. The rule this module enforces is the other half of that bargain:
- * those bytes live exactly as long as the app is open, and no longer.
+ * This module used to decide whether a stored session was leftovers and delete
+ * it if so. It no longer deletes anything, and the reversal is the point of the
+ * file: a stored capture is now discarded **only when the user asks**
+ * (`docs/decisions/0012-stored-captures-persist.md`).
  *
- * Two mechanisms share the job, because neither covers the whole of it:
+ * The old rule was that captured bytes "live exactly as long as the app is
+ * open, and no longer" - enforced here for the browser-quit case and by
+ * `public/inwire-sw.js` for the last-window-closed case. That was a good rule
+ * while the store was only a convenience so a refresh did not lose the last few
+ * thousand frames. It is the wrong rule once the disk is where a long capture
+ * actually lives: an accidental tab close should not destroy three hours of
+ * capture, and every mechanism that deleted "orphans" could not tell an orphan
+ * from a capture someone still wanted.
  *
- *   - `public/inwire-sw.js` deletes the database a few seconds after the last
- *     window goes away. That handles closing the app while the browser keeps
- *     running, which is the common case, and it deletes at close rather than
- *     merely before the next use.
- *
- *   - The startup guard here catches what the worker cannot: quitting the
- *     browser outright kills the worker mid-wait, so the deletion never runs.
- *     On the next launch this notices the session is orphaned and wipes it
- *     before the restore effect can put any of it on screen.
+ * What remains is the tab marker, which is still worth keeping: it is how a
+ * reload is told apart from a fresh tab, which the restore path uses to decide
+ * whether it is continuing a capture or opening a stored one.
  *
  * The discriminator is `sessionStorage`, which is per-tab: it survives a reload
- * and is discarded when the tab closes. A marker that is still there means this
- * page is the same tab reloading and the session is its own. A missing marker
- * means a brand new tab, so anything on disk belongs to a session that is gone.
+ * and is discarded when the tab closes.
  */
-import { clearSession } from './sessionStore';
 
 const TAB_MARKER_KEY = 'inwire.tabAlive';
 const CHANNEL_NAME = 'inwire.session';
@@ -31,6 +30,12 @@ const SW_URL = '/inwire-sw.js';
 /** How long to wait for another window to answer a liveness ping. */
 const LIVENESS_TIMEOUT_MS = 250;
 
+/**
+ * What to do with a stored session at startup.
+ *
+ * `wipe` is retained in the type because the explicit-discard path still needs
+ * a name for the act, but nothing decides it automatically any more.
+ */
 export type StartupAction = 'wipe' | 'restore';
 
 /**
@@ -43,12 +48,15 @@ export function decideStartupAction(
   tabMarker: string | null,
   otherWindowLive: boolean,
 ): StartupAction {
-  // Same tab, reloaded: sessionStorage survived, so this session is ours.
-  if (tabMarker !== null) return 'restore';
-  // A fresh tab, but another window is already using this database. Wiping
-  // would destroy a capture that is live on screen somewhere else.
-  if (otherWindowLive) return 'restore';
-  return 'wipe';
+  // Always. A stored capture belongs to whoever stored it until they say
+  // otherwise, and neither of these signals distinguishes "nobody wants this"
+  // from "the tab was closed". Both arguments are kept because they still
+  // describe the situation truthfully and the callers already compute them -
+  // and because a future policy that does discriminate should be written here,
+  // where it can be tested, rather than inline at the call site.
+  void tabMarker;
+  void otherWindowLive;
+  return 'restore';
 }
 
 // --- Storage access ----------------------------------------------------------
@@ -212,10 +220,11 @@ export function registerSessionWorker(): () => void {
 // --- The guard ---------------------------------------------------------------
 
 /**
- * Wipes an orphaned session, and claims this tab either way.
+ * Claims the stored session for this tab.
  *
- * Must be awaited before anything reads the store, so a session that belongs to
- * a closed run of the app is deleted rather than restored onto the screen.
+ * Nothing is deleted here any more; see the note at the top of this file. It is
+ * still awaited before the store is read, because claiming the tab first is
+ * what makes a reload distinguishable from a fresh open.
  */
 export async function prepareStoredSession(): Promise<StartupAction> {
   const marker = readTabMarker();
@@ -227,6 +236,7 @@ export async function prepareStoredSession(): Promise<StartupAction> {
   // answer, and skipping the ping keeps the common path off a 250ms wait.
   const action = decideStartupAction(marker, marker === null ? await anotherWindowIsLive() : false);
 
-  if (action === 'wipe') await clearSession();
+  // No automatic deletion. `clearSession` is still exported and is still what
+  // an explicit discard calls - it is just not called from here.
   return action;
 }
