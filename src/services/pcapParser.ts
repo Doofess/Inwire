@@ -28,6 +28,7 @@ import { QuicFlowTracker } from './quicFlowTracker';
 import { displayProtocol, toBase64 } from './exportSchema';
 import { buildCsvText } from './tabularWriters';
 import { IcmpEchoTracker } from './icmpEchoTracker';
+import { poolExpert, poolTokens } from './dissect/tokenPool';
 
 /**
  * One decoder, not one per call. Constructing a TextDecoder is not free, and
@@ -580,7 +581,10 @@ function collectExpert(
   for (const anomaly of anomalies ?? []) {
     consider(anomaly.severity === 'medium' ? 'warn' : anomaly.severity === 'low' ? 'note' : 'error');
   }
-  return { expert: found.length > 0 ? found : undefined, worst };
+  // Pooled: a finding is a fixed sentence a dissector emits, so the same set
+  // recurs across a capture - 209 distinct sets over both fixtures, against
+  // one array per frame that carries any (`dissect/tokenPool.ts`).
+  return { expert: found.length > 0 ? poolExpert(found) : undefined, worst };
 }
 
 const PROTOCOL_NAME_MAP: Record<string, string> = {
@@ -1425,8 +1429,14 @@ export function decodeRawEthernetPacket(
       destPort: dstPort,
       protocol: proto,
       protocolLabel,
-      analysisFlags,
-      frameProtocols,
+      // Pooled at the point they stop changing. Both are short lists with very
+      // few distinct values across a capture - 21 chains and 13 flag sets over
+      // both fixtures - so the buffer held one array per frame where a few
+      // dozen do (`services/dissect/tokenPool.ts`). Everything above this line
+      // still built and mutated its own array; from here they are shared and
+      // frozen.
+      analysisFlags: analysisFlags ? poolTokens(analysisFlags) : undefined,
+      frameProtocols: poolTokens(frameProtocols),
       fields: filterFields,
       // The on-wire frame size, which is what the reference analyzer's Length column shows.
       // It differs from rawBytes.length whenever the capture used a snaplen.

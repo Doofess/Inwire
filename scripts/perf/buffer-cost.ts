@@ -37,13 +37,23 @@ const INCOMING = 500;
 const SIZES = [10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
 
 /**
- * Measured with `node --expose-gc`, over the inwire fixture's 12,858 distinct
- * frames: the heap the parse added, divided by the frames it produced. Stated
- * as a constant because measuring it inside this script would need --expose-gc
- * to be reliable, and a number that silently degrades to garbage without a flag
- * is worse than one that says where it came from.
+ * **Quoted, not measured here.** Measuring it needs `--expose-gc` to be
+ * reliable, and a number that silently degrades to garbage without a flag is
+ * worse than one that says where it came from - so this script states it and
+ * names its source.
+ *
+ * It is also the thing to distrust in this file. The previous value, 2,342, sat
+ * here through two changes that moved it (address pooling took it down,
+ * `colorSlot` put some back) and was still being printed as though it had been
+ * measured. That is how the compaction work came to be planned in the reverse
+ * order of the costs - see `docs/decisions/0016`. **If it has been a while,
+ * re-run the source below and update this rather than trusting it.**
+ *
+ * Source: `node --expose-gc --import tsx scripts/perf/record-cost.ts`,
+ * "whole record", over both fixtures' 27,640 dissected frames.
+ * Last taken 2026-09-05, after the per-frame lists were pooled (ADR 0016).
  */
-const SUMMARY_BYTES_PER_FRAME = 2342;
+const SUMMARY_BYTES_PER_FRAME = 1876;
 
 function heapUsed(): number {
   return process.memoryUsage().heapUsed;
@@ -93,7 +103,8 @@ async function main() {
 
   console.log('per frame, resident on the main thread');
   console.log('  raw frame bytes      ' + perFrameBytes.toFixed(0) + ' B  (external, not in heapUsed)');
-  console.log('  summary object       ' + perFrameSummary.toFixed(0) + ' B  (of which fields ~1174 B)');
+  console.log('  summary object       ' + perFrameSummary.toFixed(0)
+    + ' B  (of which fields ~1431 B; quoted, see the note on the constant)');
   console.log('  -> at 1M frames      ' + ((perFrameSummary + perFrameBytes) * 1e6 / 1e9).toFixed(1)
     + ' GB, and the summaries are the larger half');
   console.log();
