@@ -324,7 +324,7 @@ function conversationsIn(t: Required<Trackers>): number {
     const value = (target as Record<string, unknown>)[field];
     return value instanceof Map ? value.size : 0;
   };
-  return size(t.tcp, 'streamIds')
+  return size(t.tcp, 'connections')
     + size(t.quic, 'flowConnectionIds')
     + size(t.icmp, 'pendingRequests');
 }
@@ -343,6 +343,7 @@ async function pass(name: string, frames: readonly Uint8Array[], unit: string): 
   const after = heap();
   const total = after - before;
   const conversations = Math.max(1, conversationsIn(t));
+  const evicted = t.tcp.evictedConnections;
 
   console.log(name);
   console.log('  frames ' + count.toLocaleString()
@@ -381,11 +382,24 @@ async function pass(name: string, frames: readonly Uint8Array[], unit: string): 
   console.log('    ' + 'TOTAL, measured directly'.padEnd(34) + kb(total)
     + '   ' + (total / conversations).toFixed(0).padStart(6) + ' B/' + unit);
   console.log();
-  console.log('  at this cost per ' + unit + ', with nothing ever evicted:');
-  for (const n of [10_000, 50_000, 200_000]) {
-    console.log('    ' + String(n).padStart(9) + ' ' + unit + 's   '
-      + ((total / conversations) * n / 1e6).toFixed(0).padStart(6)
-      + ' MB of tracker state');
+
+  // The caps are the point, so report what they did rather than extrapolating
+  // past them. An extrapolation with no eviction is what this looked like
+  // before there were bounds, and printing one now would describe a version of
+  // the code that no longer exists.
+  if (evicted > 0) {
+    console.log('  ' + evicted.toLocaleString() + ' ' + unit
+      + 's evicted to stay inside the cap; ' + conversations.toLocaleString()
+      + ' retained.');
+    console.log('  That ceiling is the whole retention, however long the capture runs: '
+      + (total / 1e6).toFixed(0) + ' MB.');
+  } else {
+    console.log('  nothing was evicted, so this is the cost as it grows:');
+    for (const n of [10_000, 50_000, 200_000]) {
+      console.log('    ' + String(n).padStart(9) + ' ' + unit + 's   '
+        + ((total / conversations) * n / 1e6).toFixed(0).padStart(6)
+        + ' MB of tracker state');
+    }
   }
   console.log();
 }
