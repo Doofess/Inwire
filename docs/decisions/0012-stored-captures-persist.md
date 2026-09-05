@@ -87,7 +87,13 @@ Two things this does **not** change:
   stronger route that nothing deletes at all.
 - A capture left on disk is bounded only by `STORAGE_BUDGET_BYTES` (512 MB),
   which evicts oldest-first when exceeded. That bound predates this decision and
-  is now the only automatic deletion left in the system. It should be surfaced
-  in the UI alongside the stored size when the OPFS store lands, because "the
-  app kept your capture, except the beginning of it" is the same surprise this
-  ADR exists to remove.
+  is now the only automatic deletion left in the system, so it is **counted and
+  shown**: `pendingWriteBacklog()` reports `evictedForBudget`, and the panel says
+  how many frames stopped being stored and why, next to the size and the limit.
+  "The app kept your capture, except the beginning of it" is the same surprise
+  this ADR exists to remove, and an app that promises to keep a capture until
+  asked has to say when it could not.
+
+  The arithmetic is `planBudgetEviction`, a pure exported function, so the one
+  thing left that deletes a user's frames can be tested directly rather than
+  only through IndexedDB (`scripts/session/storage-budget.ts`).

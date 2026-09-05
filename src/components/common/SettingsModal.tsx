@@ -61,8 +61,16 @@ interface SettingsModalProps {
   packetBufferCap: number;
   bufferAutoPaused: boolean;
   onClearPackets: () => void;
-  /** Bytes of this capture on disk, for the discard control below. */
-  storedBytes: number;
+  /**
+   * What is on disk, and what the disk is allowed to keep.
+   *
+   * `evictedForBudget` is the honest half: since the app stopped deleting
+   * captures on close (docs/decisions/0012), the storage budget is the only
+   * automatic deletion left, and it silently takes the *beginning* of a long
+   * capture. An app that promises to keep a capture until asked has to say
+   * when it could not.
+   */
+  storage: { storedBytes: number; storageBudgetBytes: number; evictedForBudget: number };
   /** Deletes the stored capture. The only thing in the app that does. */
   onDiscardCapture: () => void;
   /** The agent pairing block, rendered at the top of Driver Info. */
@@ -107,7 +115,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   packetBufferCap,
   bufferAutoPaused,
   onClearPackets,
-  storedBytes,
+  storage,
   onDiscardCapture,
   filterPresetLibrary,
   onFilterPresetLibraryChange,
@@ -282,7 +290,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </button>
                       <button
                         onClick={onDiscardCapture}
-                        disabled={storedBytes === 0 && totalPacketsCount === 0}
+                        disabled={storage.storedBytes === 0 && totalPacketsCount === 0}
                         className={DRIVER_ACTION_BUTTON_CLASS}
                       >
                         <TbTrash className="w-3.5 h-3.5" />
@@ -294,11 +302,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         so the amount is stated next to the button that removes
                         it rather than left to be inferred. */}
                     <p className="text-[11px] text-muted-foreground">
-                      {storedBytes > 0 ? (
+                      {storage.storedBytes > 0 ? (
                         <>
                           <span className="font-medium text-foreground">
-                            {(storedBytes / 1_000_000).toFixed(1)} MB
+                            {(storage.storedBytes / 1_000_000).toFixed(1)} MB
                           </span>
+                          {storage.storageBudgetBytes > 0 && (
+                            <> of {(storage.storageBudgetBytes / 1_000_000).toFixed(0)} MB</>
+                          )}
                           {' stored on disk. This capture is kept until you discard it — '}
                           closing Inwire no longer deletes it.
                         </>
@@ -306,6 +317,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         'Nothing is stored on disk yet.'
                       )}
                     </p>
+
+                    {/* The one thing that still deletes without being asked.
+                        It takes the OLDEST frames, so a long capture quietly
+                        loses its beginning - which is the half a user is least
+                        likely to notice missing and most likely to want. */}
+                    {storage.evictedForBudget > 0 && (
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-600 dark:text-amber-400">
+                        The oldest {storage.evictedForBudget.toLocaleString()} frame
+                        {storage.evictedForBudget === 1 ? ' is' : 's are'} no longer stored on
+                        disk: this capture reached the{' '}
+                        {(storage.storageBudgetBytes / 1_000_000).toFixed(0)} MB storage limit.
+                        {' '}They are still in the buffer and still export, but a reload will
+                        start from the oldest frame that is still stored.
+                      </div>
+                    )}
                   </div>
                 }
               />
