@@ -852,7 +852,19 @@ export default function App() {
 
       if (total > 0) {
         setRestoreProgress({ done: 0, total });
-        const trackers = { tcpTracker, icmpTracker, quicTracker, dnsTracker, l3Tracker };
+        // Built here, not at component scope, so they are collected when this
+        // restore finishes. Held as `useMemo(..., [])` they lived for the tab's
+        // lifetime and kept the restored capture's entire TCP/QUIC/DNS/L3 state
+        // for ever - tens of megabytes on a busy session - and survived Clear,
+        // which only resets the Worker's set. Nothing else reads them: a live
+        // frame is dissected in the Worker, which keeps its own.
+        const trackers = {
+          tcpTracker: new TcpStreamTracker(),
+          icmpTracker: new IcmpEchoTracker(),
+          quicTracker: new QuicFlowTracker(),
+          dnsTracker: new DnsTracker(),
+          l3Tracker: new L3Tracker(),
+        };
         // Rebuilt from the session's own interface table, so restored frames
         // name the adapter they were captured on rather than reporting
         // themselves as an imported capture.
@@ -1149,17 +1161,6 @@ export default function App() {
     () => (selectedPacket ? colorEngine.getPacketAccent(selectedPacket, packetTheme) : null),
     [selectedPacket, colorEngine, packetTheme],
   );
-
-  // Restore only. Live frames are dissected in the pipeline Worker, which
-  // keeps its own trackers; these exist because a stored session is decoded
-  // here, on the main thread, once at startup.
-  const tcpTracker = useMemo(() => new TcpStreamTracker(), []);
-  const icmpTracker = useMemo(() => new IcmpEchoTracker(), []);
-  const quicTracker = useMemo(() => new QuicFlowTracker(), []);
-  // Pairs DNS queries with their responses; order-dependent, like the others.
-  const dnsTracker = useMemo(() => new DnsTracker(), []);
-  // IP fragments and ARP bindings (services/l3Tracker.ts), for the same reason.
-  const l3Tracker = useMemo(() => new L3Tracker(), []);
 
   // Track the latest isCapturing value for the always-on agent connection
   // below, whose handlers are set up once and must not go stale.

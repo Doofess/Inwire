@@ -231,7 +231,15 @@ export const WIRESHARK_DEFAULT_RULES: ColorRule[] = [
     name: 'Broadcast',
     // The multicast bit of the destination MAC, not equality with
     // ff:ff:ff:ff:ff:ff - this catches STP and other group addresses too.
-    filter: 'eth[0] & 1',
+    //
+    // Wireshark writes this rule as `eth[0] & 1`, a read straight out of the
+    // frame's bytes. Inwire releases a frame's bytes once the store can supply
+    // them again (docs/decisions/0013), and a byte read cannot answer for a
+    // frame whose bytes are not resident - it would silently return no match
+    // and the row would quietly lose its colour. `eth.ig` is the same bit,
+    // dissected once and kept, so the answer survives eviction. The rule's
+    // NAME is unchanged, which is what the parity harness compares.
+    filter: 'eth.ig == 1',
     bgColor: '#202020',
     textColor: '#7a7d76',
     // White, exactly as the reference analyzer has it: a broadcast row is deliberately the

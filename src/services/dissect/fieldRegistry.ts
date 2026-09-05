@@ -77,6 +77,13 @@ export const FIELDS: readonly FieldDef[] = [
   // --- Ethernet --------------------------------------------------------------
   { abbrev: 'eth.src', label: 'Source', type: 'mac', layer: 'eth' },
   { abbrev: 'eth.dst', label: 'Destination', type: 'mac', layer: 'eth' },
+  // The destination MAC's group bit - Wireshark publishes the same field.
+  // Registered because the Broadcast colour rule needs it: Wireshark writes
+  // that rule as `eth[0] & 1`, a raw byte poke, and a frame whose bytes the
+  // buffer has released can no longer answer one (docs/decisions/0013 evicts
+  // them past a window). A dissected field survives eviction; a byte read does
+  // not.
+  uint('eth.ig', 'IG bit', 'eth'),
   uint('eth.type', 'Type', 'eth'),
   uint('vlan.id', 'VLAN ID', 'vlan', { label: 'VLAN', align: 'right' }),
 

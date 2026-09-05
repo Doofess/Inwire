@@ -92,7 +92,7 @@ export function describeEtherType(etherType: number): string {
  * Lives here rather than in pcapParser because this module owns the Ethernet
  * layer now, and the SLL headers show a source MAC with the same three rows.
  */
-export function macAddressFields(mac: string, offset: number): ProtocolField[] {
+export function macAddressFields(mac: string, offset: number, isDestination = false): ProtocolField[] {
   const firstByte = parseInt(mac.slice(0, 2), 16);
   const locallyAdministered = (firstByte & 0x02) !== 0;
   const groupAddress = (firstByte & 0x01) !== 0;
@@ -112,6 +112,9 @@ export function macAddressFields(mac: string, offset: number): ProtocolField[] {
       value: groupAddress
         ? 'Group address (multicast/broadcast)'
         : 'Individual address (unicast)',
+      // Only the destination's row is `eth.ig`: an abbrev names one field, and
+      // the source's group bit is a different fact about a different address.
+      ...(isDestination ? { abbrev: 'eth.ig' } : {}),
       rawBytesRange: [offset, offset + 2],
       bitfield: { bitOffset: 7, bitLength: 1, totalBits: 24 },
     },
@@ -179,7 +182,7 @@ function dissectEthernet(rawBytes: Uint8Array, encapsulation: string): LinkLayer
     summary: `Ethernet II, Src: ${srcMac}, Dst: ${dstMac}`,
     rawBytesRange: [0, 13],
     fields: [
-      { name: 'Destination', value: resolveMacVendor(dstMac), abbrev: 'eth.dst', rawBytesRange: [0, 5], children: macAddressFields(dstMac, 0) },
+      { name: 'Destination', value: resolveMacVendor(dstMac), abbrev: 'eth.dst', rawBytesRange: [0, 5], children: macAddressFields(dstMac, 0, true) },
       { name: 'Source', value: resolveMacVendor(srcMac), abbrev: 'eth.src', rawBytesRange: [6, 11], children: macAddressFields(srcMac, 6) },
       etherType <= MAX_802_3_LENGTH
         // An 802.3 frame's bytes 12-13 are a length, not a type, and calling
@@ -191,7 +194,13 @@ function dissectEthernet(rawBytes: Uint8Array, encapsulation: string): LinkLayer
     ],
   }];
 
-  const fields: Record<string, string | number> = { 'eth.src': srcMac, 'eth.dst': dstMac };
+  const fields: Record<string, string | number> = {
+    'eth.src': srcMac,
+    'eth.dst': dstMac,
+    // The destination's group bit, as a field rather than something a rule has
+    // to read out of the frame's bytes. See the registry entry.
+    'eth.ig': (parseInt(dstMac.slice(0, 2), 16) & 0x01) !== 0 ? 1 : 0,
+  };
   if (etherType > MAX_802_3_LENGTH) fields['eth.type'] = etherType;
 
   const result: LinkLayerResult = {
