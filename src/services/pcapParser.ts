@@ -29,6 +29,7 @@ import { displayProtocol, toBase64 } from './exportSchema';
 import { buildCsvText } from './tabularWriters';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 import { poolExpert, poolTokens } from './dissect/tokenPool';
+import { FieldBlockWriter } from './dissect/fieldSplit';
 
 /**
  * One decoder, not one per call. Constructing a TextDecoder is not free, and
@@ -475,6 +476,11 @@ export class PcapService {
         }
       }
     }
+
+    // The dense fields move into columns once the frames are built - at the one
+    // moment a finished frame joins a buffer, rather than inside the dissector,
+    // which has no single write to intercept (`dissect/fieldSplit.ts`).
+    new FieldBlockWriter().absorb(parsedPackets);
 
     return parsedPackets;
   }

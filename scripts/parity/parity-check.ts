@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { PcapService } from '../../src/services/pcapParser';
 import { ColorRulesEngine, WIRESHARK_DEFAULT_RULES } from '../../src/services/colorRules';
 import type { Packet } from '../../src/types/packet';
+import { fieldValue } from '../../src/services/dissect/fieldAccess';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '..', '..', 'test', 'fixtures');
@@ -108,7 +109,7 @@ interface ColumnSpec {
   sparse?: boolean;
 }
 
-const field = (p: Packet, name: string) => String(p.fields?.[name] ?? '');
+const field = (p: Packet, name: string) => String(fieldValue(p, name) ?? '');
 
 const COLUMNS: ColumnSpec[] = [
   { name: 'Protocol', ours: inwireProtocol, theirs: r => r.protocol },
@@ -135,11 +136,11 @@ const has = (p: Packet, flag: string) => (p.analysisFlags ?? []).includes(flag);
 const COUNTERS: Record<string, (packets: Packet[]) => number> = {
   frames: ps => ps.length,
   quicRows: ps => ps.filter(p => inwireProtocol(p) === 'QUIC').length,
-  tcpRst: ps => ps.filter(p => p.fields?.['tcp.flags.reset'] === 1).length,
+  tcpRst: ps => ps.filter(p => fieldValue(p, 'tcp.flags.reset') === 1).length,
   tcpClientHelloSni: ps => ps.filter(p => (p.frameProtocols ?? []).includes('tcp') && /Client Hello \(SNI=/.test(p.info)).length,
   // The field, not the Info line: tshark does not put a QUIC connection's
   // server name in the packet-list column, and neither do we.
-  quicClientHelloSni: ps => ps.filter(p => inwireProtocol(p) === 'QUIC' && p.fields?.['tls.handshake.extensions_server_name'] !== undefined).length,
+  quicClientHelloSni: ps => ps.filter(p => inwireProtocol(p) === 'QUIC' && fieldValue(p, 'tls.handshake.extensions_server_name') !== undefined).length,
   // tshark's tcp.analysis.retransmission is set on the fast and spurious kinds too.
   retransmission: ps => ps.filter(p => has(p, 'retransmission') || has(p, 'fast_retransmission') || has(p, 'spurious_retransmission')).length,
   dupAck: ps => ps.filter(p => has(p, 'duplicate_ack')).length,

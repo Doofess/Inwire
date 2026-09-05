@@ -19,7 +19,7 @@
 
 import { Packet } from '../../types/packet';
 import { FIELDS, FIELD_BY_ABBREV, FieldDef, FieldType, LAYERS } from '../dissect/fieldRegistry';
-import { fieldValue } from '../dissect/fieldAccess';
+import { fieldReader, fieldValue } from '../dissect/fieldAccess';
 
 export type Scalar = string | number;
 
@@ -58,18 +58,23 @@ const LAYER_TOKENS: ReadonlySet<string> = new Set(LAYERS);
  * filter and every colour rule arrives here, once per frame per pass.
  */
 function fromBag(abbrev: string): (p: Packet) => Scalar[] {
+  // Resolved once, here, rather than per frame: this closure is built when an
+  // expression is compiled and then run over the whole buffer, so it can know
+  // which half of the frame its field lives in before it sees a frame.
+  const read = fieldReader(abbrev);
   return (p) => {
-    const v = fieldValue(p, abbrev);
+    const v = read(p);
     return v === undefined ? [] : [v];
   };
 }
 
 /** Reads the first of several registered fields that the frame actually has. */
 function fromAny(...abbrevs: string[]): (p: Packet) => Scalar[] {
+  const readers = abbrevs.map(fieldReader);
   return (p) => {
     const out: Scalar[] = [];
-    for (const a of abbrevs) {
-      const v = fieldValue(p, a);
+    for (const read of readers) {
+      const v = read(p);
       if (v !== undefined) out.push(v);
     }
     return out;
