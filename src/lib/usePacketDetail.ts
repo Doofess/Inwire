@@ -17,7 +17,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { pipeline, type ReplayBundle } from '../services/pipelineClient';
 import { streamPackets, targetForPacket } from '../services/followStream';
-import { hasBytes, packetBytes, packetsBytes } from '../services/packetBytes';
+import { bytesAreRecoverable, hasBytes, packetBytes, packetsBytes } from '../services/packetBytes';
 import type { Packet } from '../types/packet';
 
 /**
@@ -85,12 +85,38 @@ export async function replayBundleFor(
 }
 
 /**
- * `packet` with its tree filled in, or with an empty one until it arrives.
+ * What the panes below know about the frame they are being handed.
+ *
+ * `ready` is the ordinary case, and the only one in which every pane can draw
+ * everything. The other two differ in a way a reader cannot see and has to be
+ * told:
+ *
+ *  - `loading` - the tree, the bytes, or both are on their way. The columns and
+ *    the summary are already right, so the panes that have what they need
+ *    should draw immediately; the hex dump should say it is fetching rather
+ *    than draw nothing, because an empty hex pane looks exactly like a frame
+ *    that carried no payload.
+ *  - `unavailable` - the buffer released this frame's bytes and the store
+ *    cannot supply them back, because the capture outgrew its storage budget
+ *    and this frame is older than the oldest one still on disk. Nothing is
+ *    coming, and saying so is the difference between "wait" and "this is all
+ *    there will be".
+ */
+export type PacketDetailState = 'ready' | 'loading' | 'unavailable';
+
+export interface PacketDetail {
+  /** The frame, as complete as it currently is; null when none is selected. */
+  packet: Packet | null;
+  state: PacketDetailState;
+}
+
+/**
+ * `packet` with its tree and bytes filled in, and what is still missing.
  *
  * Returns the same object identity while a fetch is in flight, so the panes
  * below do not remount between the frame being selected and its tree landing.
  */
-export function usePacketDetail(packet: Packet | null, buffer: readonly Packet[]): Packet | null {
+export function usePacketDetail(packet: Packet | null, buffer: readonly Packet[]): PacketDetail {
   const [detail, setDetail] = useState<{ id: number; packet: Packet } | null>(null);
 
   // The buffer is read through a ref rather than closed over as a dependency:
@@ -101,11 +127,9 @@ export function usePacketDetail(packet: Packet | null, buffer: readonly Packet[]
 
   useEffect(() => {
     if (!packet) return;
-    // Already carries a tree: a frame from a build that kept them, or one a
-    // custom dissector produced. Nothing to fetch.
     // Both already present: a frame from a build that kept trees, or one still
-  // carrying its bytes and its tree. Nothing to fetch.
-  if (packet.layers.length > 0 && hasBytes(packet)) return;
+    // carrying its bytes and its tree. Nothing to fetch.
+    if (packet.layers.length > 0 && hasBytes(packet)) return;
 
     let live = true;
     // The tree and the bytes together, because a frame the buffer has stopped
@@ -122,8 +146,23 @@ export function usePacketDetail(packet: Packet | null, buffer: readonly Packet[]
     return () => { live = false; };
   }, [packet]);
 
-  if (!packet) return null;
-  if (packet.layers.length > 0 && hasBytes(packet)) return packet;
-  if (detail && detail.id === packet.id) return detail.packet;
-  return packet;
+  if (!packet) return { packet: null, state: 'ready' };
+  if (packet.layers.length > 0 && hasBytes(packet)) return { packet, state: 'ready' };
+
+  if (detail && detail.id === packet.id) {
+    // The fetch landed. It is still not `ready` if the bytes did not come back
+    // with the tree: `packetBytes` answers a frame the store cannot supply with
+    // an empty array rather than throwing, because a frame whose bytes are gone
+    // is a thing to render and not an error to handle - so this is where that
+    // empty array is turned into something the panes can say out loud.
+    const complete = hasBytes(detail.packet);
+    return { packet: detail.packet, state: complete ? 'ready' : 'unavailable' };
+  }
+
+  // Nothing back yet. `bytesAreRecoverable` is what separates the two waits: a
+  // frame inside the stored range has a read coming, and one outside it never
+  // had anywhere to read from, so there is no point showing a spinner that will
+  // never resolve.
+  const waiting = hasBytes(packet) || bytesAreRecoverable(packet.id);
+  return { packet, state: waiting ? 'loading' : 'unavailable' };
 }

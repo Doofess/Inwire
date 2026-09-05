@@ -1155,7 +1155,8 @@ export default function App() {
   // fetched on selection (docs/decisions/0007). `selectedPacket` stays the
   // buffer's own object everywhere else - the list, the filters, the accent -
   // so nothing downstream has to know a hydrated copy exists.
-  const selectedPacketDetail = usePacketDetail(selectedPacket, packets);
+  const { packet: selectedPacketDetail, state: selectedDetailState } =
+    usePacketDetail(selectedPacket, packets);
 
   const selectedPacketAccent = useMemo(
     () => (selectedPacket ? colorEngine.getPacketAccent(selectedPacket, packetTheme) : null),
@@ -2354,6 +2355,7 @@ export default function App() {
               >
                 <HexViewer
                   packet={selectedPacketDetail}
+                  bytesState={selectedDetailState}
                   accentColor={selectedPacketAccent}
                   activeByteRange={activeByteRange}
                   onHoverByte={(byteIdx) => {

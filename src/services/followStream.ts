@@ -56,37 +56,71 @@ export function streamPackets(packets: readonly Packet[], target: StreamTarget):
 }
 
 /**
- * Which end is the client.
+ * How well the client end is known.
  *
- * Two pieces of evidence, in order of how much they prove. A well-known port
- * on exactly one end is close to conclusive - nothing dials out FROM 443 -
- * and it keeps working on a capture that started in the middle of a
- * connection, where the first frame belongs to whichever side happened to
- * speak next. The first frame is the fallback: on a complete TCP conversation
- * it is the SYN, and its sender is the client by definition.
+ *  - `well-known-port` - one end is a port nothing dials out FROM. Close to
+ *    conclusive, and it holds on a capture that started mid-connection.
+ *  - `syn` - the first frame on the stream is a SYN, so its sender opened the
+ *    connection and is the client by definition.
+ *  - `first-speaker` - neither of the above. This is a **guess**: whoever
+ *    happened to speak first in what was captured, which is the client only if
+ *    the capture caught the start.
  *
- * Getting this backwards mislabels the whole conversation and reverses its
- * colours, which is the kind of wrong that reads as a fact.
+ * The distinction is the point. Getting the ends backwards mislabels the whole
+ * conversation and reverses its colours - the module's own comment calls it
+ * "the kind of wrong that reads as a fact" - and the only defence against that
+ * is for the guess to be labelled as one where it is shown.
+ */
+export type ClientEndBasis = 'well-known-port' | 'syn' | 'first-speaker';
+
+export interface ClientEnd {
+  address: string;
+  port: number;
+  basis: ClientEndBasis;
+}
+
+/**
+ * Which end is the client, and on what evidence.
+ *
+ * Three pieces, in order of how much they prove. A well-known port on exactly
+ * one end is close to conclusive - nothing dials out FROM 443 - and it keeps
+ * working on a capture that started in the middle of a connection, where the
+ * first frame belongs to whichever side happened to speak next. Failing that,
+ * a first frame carrying SYN and not ACK is the connection being opened, and
+ * its sender is the client by definition.
+ *
+ * What is left is the guess, and it is returned as one.
  */
 export function clientEnd(
   frames: readonly Packet[],
   target: StreamTarget,
-): { address: string; port: number } {
+): ClientEnd {
   const a = { address: target.addressA, port: target.portA };
   const b = { address: target.addressB, port: target.portB };
 
   const aWellKnown = isWellKnownPort(target.portA);
   const bWellKnown = isWellKnownPort(target.portB);
-  if (aWellKnown !== bWellKnown) return aWellKnown ? b : a;
+  if (aWellKnown !== bWellKnown) {
+    return { ...(aWellKnown ? b : a), basis: 'well-known-port' };
+  }
 
-  // Neither end or both ends look like a server: fall back to who spoke first.
+  // Neither end or both ends look like a server: fall back to who spoke first,
+  // and say whether that was the handshake or merely the earliest frame left.
   const first = frames[0];
   if (first?.sourcePort !== undefined) {
-    return { address: first.source, port: first.sourcePort };
+    // SYN without ACK is the opening of a connection rather than the answer to
+    // one, which is what makes its sender the client rather than the server.
+    const opensConnection = first.fields?.['tcp.flags.syn'] === 1
+      && first.fields?.['tcp.flags.ack'] !== 1;
+    return {
+      address: first.source,
+      port: first.sourcePort,
+      basis: opensConnection ? 'syn' : 'first-speaker',
+    };
   }
   // A conversation with no frames has no client; A keeps the label so the
   // window still renders rather than throwing.
-  return a;
+  return { ...a, basis: 'first-speaker' };
 }
 
 /** True when this frame travelled from the client to the server. */
