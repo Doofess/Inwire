@@ -898,6 +898,12 @@ export default function App() {
         await readFrames(RESTORE_CHUNK_SIZE, async (frames) => {
           // Same trackers across every chunk, in id order - see restoreBatch.
           const { packets: batch, icmpReplies, infoPatches } = restoreBatch(frames, trackers, interfaceIdByLabel);
+          // A restored session fills the buffer as full as a live capture ever
+          // does - fuller, since it arrives all at once - so its frames get the
+          // same treatment. `restoreBatch` returns them undivided because the
+          // bag is the contract and it has no business knowing about blocks;
+          // the split belongs here, where the frames join the buffer.
+          fieldWriter.current.absorb(batch);
           lastId = frames[frames.length - 1].id;
           done += frames.length;
 
