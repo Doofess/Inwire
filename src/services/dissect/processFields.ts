@@ -15,6 +15,7 @@
  */
 import type { Packet, ProtocolLayer } from '../../types/packet';
 import type { FlowAnnotationStore, ProcessInfo } from '../flowAnnotations';
+import { fieldValue } from './fieldAccess';
 
 /** Written only when there is something to write - see `flowAnnotations`. */
 export function writeProcessFields(packet: Packet, process: ProcessInfo | null): void {
@@ -96,7 +97,7 @@ export function addProcessRow(layers: ProtocolLayer[], process: ProcessInfo | nu
  * the address alone rather than an address with a trailing separator.
  */
 export function sendingProcessName(packet: Packet, store: FlowAnnotationStore): string | null {
-  const name = packet.fields?.['inwire.process.name'];
+  const name = fieldValue(packet, 'inwire.process.name');
   if (typeof name !== 'string' || !name) return null;
   if (!store.isLocalAddress(packet.source)) return null;
   return name;

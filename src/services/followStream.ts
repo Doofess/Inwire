@@ -15,6 +15,7 @@
 
 import { Packet } from '../types/packet';
 import { isWellKnownPort } from './portServices';
+import { fieldValue } from './dissect/fieldAccess';
 
 export interface StreamTarget {
   /** Which transport, so a UDP flow on the same ports as a TCP one stays apart. */
@@ -110,8 +111,8 @@ export function clientEnd(
   if (first?.sourcePort !== undefined) {
     // SYN without ACK is the opening of a connection rather than the answer to
     // one, which is what makes its sender the client rather than the server.
-    const opensConnection = first.fields?.['tcp.flags.syn'] === 1
-      && first.fields?.['tcp.flags.ack'] !== 1;
+    const opensConnection = fieldValue(first, 'tcp.flags.syn') === 1
+      && fieldValue(first, 'tcp.flags.ack') !== 1;
     return {
       address: first.source,
       port: first.sourcePort,

@@ -18,6 +18,7 @@ import { useEffect, useRef, useState } from 'react';
 import { pipeline, type ReplayBundle } from '../services/pipelineClient';
 import { streamPackets, targetForPacket } from '../services/followStream';
 import { bytesAreRecoverable, hasBytes, packetBytes, packetsBytes } from '../services/packetBytes';
+import { fieldValue } from '../services/dissect/fieldAccess';
 import type { Packet } from '../types/packet';
 
 /**
@@ -57,12 +58,12 @@ export async function replayBundleFor(
   const first = stream[0];
   const truncated = target?.kind === 'tcp'
     && first !== undefined
-    && first.fields?.['tcp.flags.syn'] !== 1;
+    && fieldValue(first, 'tcp.flags.syn') !== 1;
 
   // `[Response In: N]` on a DNS query is written by the frame that answers it,
   // which sits after the target and so is not replayed. The frame recorded the
   // fact when it first learned it; the rebuilt tree is handed it back.
-  const responseIn = packet.fields?.['dns.response_in'];
+  const responseIn = fieldValue(packet, 'dns.response_in');
   const retroactive = typeof responseIn === 'number'
     ? { frameId: packet.id, responseInFrame: responseIn }
     : undefined;
@@ -71,13 +72,13 @@ export async function replayBundleFor(
   // this lives in the Worker and the answer is time-dependent, so asking it a
   // second time - minutes later, for a socket long closed - could legitimately
   // give a different answer than the column is already showing.
-  const processName = packet.fields?.['inwire.process.name'];
-  const processPid = packet.fields?.['inwire.process.pid'];
+  const processName = fieldValue(packet, 'inwire.process.name');
+  const processPid = fieldValue(packet, 'inwire.process.pid');
   const process = typeof processName === 'string' && typeof processPid === 'number'
     ? {
       name: processName,
       pid: processPid,
-      exe: String(packet.fields?.['inwire.process.path'] ?? ''),
+      exe: String(fieldValue(packet, 'inwire.process.path') ?? ''),
     }
     : undefined;
 

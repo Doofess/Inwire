@@ -45,6 +45,7 @@ import {
   readLinkContext, watchLinkChanges, type LinkChange, type LinkContext,
 } from './services/linkContext';
 import { processForPacket, sendingProcessName, writeProcessFields } from './services/dissect/processFields';
+import { fieldValue } from './services/dissect/fieldAccess';
 import { TcpStreamTracker } from "./services/tcpStreamTracker";
 import { IcmpEchoTracker } from "./services/icmpEchoTracker";
 import { QuicFlowTracker } from "./services/quicFlowTracker";
@@ -1475,7 +1476,7 @@ export default function App() {
           let changed = false;
           const next = prev.map((packet) => {
             if (packet.tsUs < horizonUs) return packet;
-            if (packet.fields?.['inwire.process.name'] !== undefined) return packet;
+            if (fieldValue(packet, 'inwire.process.name') !== undefined) return packet;
             const process = processForPacket(packet, flowAnnotations);
             if (!process) return packet;
             changed = true;

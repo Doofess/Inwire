@@ -14,6 +14,7 @@ import {
 } from 'react-icons/tb';
 import { packetHexDump } from '../../services/pcapParser';
 import { hasBytes, packetBytes } from '../../services/packetBytes';
+import { fieldValue } from '../../services/dissect/fieldAccess';
 import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { minimapStore, packetListStore } from '../../services/interfacePrefs';
 import { formatTimeColumn } from '../../lib/formatTimeColumn';
@@ -1241,9 +1242,9 @@ export const PacketList: React.FC<PacketListProps> = ({
                         className={`px-2 ${density.cell} whitespace-nowrap truncate ${
                           c.def.column?.align === 'right' ? 'text-right tabular-nums' : 'text-left'
                         }`}
-                        title={String(packet.fields?.[c.abbrev] ?? '')}
+                        title={String(fieldValue(packet, c.abbrev) ?? '')}
                       >
-                        {packet.fields?.[c.abbrev] ?? ''}
+                        {fieldValue(packet, c.abbrev) ?? ''}
                       </td>
                     ))}
 

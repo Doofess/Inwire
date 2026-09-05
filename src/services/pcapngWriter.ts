@@ -25,6 +25,7 @@
  */
 import type { Packet } from '../types/packet';
 import { LINKTYPE } from './dissect/types';
+import { fieldValue } from './dissect/fieldAccess';
 
 const BLOCK_SHB = 0x0a0d0d0a;
 const BLOCK_IDB = 0x00000001;
@@ -245,10 +246,10 @@ function enhancedPacket(packet: Packet, interfaceId: number, unitsPerSecond: big
   //
   // Nothing is written when the frame was not attributed - an absent comment
   // says "not known", and an empty one would say "known to be nothing".
-  const processName = packet.fields?.['inwire.process.name'];
-  const processPid = packet.fields?.['inwire.process.pid'];
+  const processName = fieldValue(packet, 'inwire.process.name');
+  const processPid = fieldValue(packet, 'inwire.process.pid');
   if (typeof processName === 'string' && typeof processPid === 'number') {
-    const path = packet.fields?.['inwire.process.path'];
+    const path = fieldValue(packet, 'inwire.process.path');
     stringOption(w, OPT_COMMENT, `Process: ${processName} (pid ${processPid})`
       + (typeof path === 'string' && path ? ` - ${path}` : ''));
   }
