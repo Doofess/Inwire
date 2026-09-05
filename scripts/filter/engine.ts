@@ -383,6 +383,37 @@ check('the known-name list comes from the registry',
   const elapsed = Date.now() - started;
   console.log(`        50,000 frames filtered in ${elapsed} ms (${hits} matched)`);
   check('a 50k pass stays inside the phase budget', elapsed < 50, true);
+
+  // Reported rather than asserted, because it is a decision input rather than
+  // a contract: whether a filter pass has to STREAM its results depends on
+  // what one costs at the sizes the buffer is headed for. The expensive shape
+  // is the one that decides it - a cheap filter is cheap at any size.
+  //
+  // The UX line drawn for this work is that a filter must return visible
+  // results in under 100 ms whatever the cap, because a million frames where
+  // filtering takes a second is not obviously better than a hundred thousand
+  // where it is instant.
+  // Deliberately a filter that CANNOT short-circuit: every term is false, so
+  // all of them are evaluated for every frame, and the last is a regex over
+  // the Info column - the most expensive operator the language has. A chain of
+  // `||`s that matches early measured *faster* than the two-term filter above,
+  // which makes it useless as a ceiling.
+  const heavy = compile(
+    'ip.src == 203.0.113.1 || udp.port == 9999 || tcp.port == 9998 '
+    + '|| dns.qry.name == "nothing.invalid" || frame contains "zzzz" '
+    + '|| _ws.col.info matches "^zzz[0-9]+"',
+  );
+  const t0 = performance.now();
+  let heavyHits = 0;
+  for (const p of many) if (heavy(p)) heavyHits++;
+  const heavyMs = performance.now() - t0;
+  const perFrame = (heavyMs * 1000) / many.length;
+  console.log(`        ...and ${heavyMs.toFixed(1)} ms for a six-term filter that `
+    + `cannot short-circuit (${heavyHits} matched, ${perFrame.toFixed(2)} us/frame)`);
+  for (const size of [100_000, 1_000_000]) {
+    console.log(`        which is ${((perFrame * size) / 1000).toFixed(0)} ms `
+      + `at ${size.toLocaleString()} frames`);
+  }
 }
 
 console.log();
