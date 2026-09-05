@@ -654,6 +654,73 @@ export async function countFrames(): Promise<number> {
  *
  * `onBatch` may return false to stop early.
  */
+/**
+ * The span of frame ids whose bytes are actually on disk right now.
+ *
+ * Pure, so the rule can be tested without a database. The write ledger holds
+ * one entry per frame the store has confirmed written, oldest first, and both
+ * the buffer's trimming and the storage budget slice from its front - so the
+ * ledger *is* the answer to "what could be read back", and its ends are the
+ * range. Null when nothing is stored.
+ *
+ * This is what makes it safe to stop holding a frame's bytes in memory: they
+ * can be dropped once they are inside this range, and must not be dropped
+ * before, because `toStoredFrame` writes a byte-less frame as a `fallback`
+ * block and the bytes would be gone from both places at once.
+ */
+export function ledgerRange(
+  ledger: readonly { id: number; bytes: number }[],
+): { first: number; last: number } | null {
+  if (ledger.length === 0) return null;
+  return { first: ledger[0].id, last: ledger[ledger.length - 1].id };
+}
+
+/** The span of frame ids currently readable from disk, or null. */
+export function storedIdRange(): { first: number; last: number } | null {
+  return ledgerRange(writtenLedger);
+}
+
+/**
+ * The raw bytes of specific frames, read back from disk.
+ *
+ * The counterpart to not keeping every frame's bytes in memory. Every frame's
+ * bytes are already written (`toStoredFrame`), and the store is keyed by frame
+ * id, so this needs no new persistence - only a way to ask for one frame rather
+ * than walking the whole session with `readFrames`.
+ *
+ * One transaction for the whole request: a stream of a few thousand frames is a
+ * few thousand `get`s, and a transaction each would be a few thousand round
+ * trips. Ids absent from the result are frames the store does not have - budget
+ * evicted, trimmed, or never written - which is a fact for the caller to render
+ * honestly rather than an error.
+ */
+export async function readFrameBytes(
+  ids: readonly number[],
+): Promise<Map<number, Uint8Array>> {
+  const out = new Map<number, Uint8Array>();
+  if (ids.length === 0) return out;
+  const db = await openDb();
+  if (!db) return out;
+
+  const wanted = [...new Set(ids)];
+  await runTx<StoredFrame | undefined>(db, FRAME_STORE, 'readonly', (store) => {
+    let last: IDBRequest<StoredFrame | undefined> | null = null;
+    for (const id of wanted) {
+      const request = store.get(id) as IDBRequest<StoredFrame | undefined>;
+      // Collected per request rather than from the transaction, which reports
+      // only the last one. `oncomplete` still gates the promise, so every
+      // handler below has run by the time this resolves.
+      request.onsuccess = () => {
+        const raw = request.result?.raw;
+        if (raw && raw.byteLength > 0) out.set(id, raw);
+      };
+      last = request;
+    }
+    return last;
+  });
+  return out;
+}
+
 export async function readFrames(
   batchSize: number,
   onBatch: (frames: StoredFrame[]) => boolean | void | Promise<boolean | void>,

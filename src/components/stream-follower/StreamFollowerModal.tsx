@@ -8,6 +8,7 @@ import {
   type StreamTarget,
 } from '../../services/followStream';
 import { portLabel } from '../../services/portServices';
+import { useHydratedBytes } from '../../lib/useHydratedBytes';
 
 /**
  * One conversation's payload, both directions, in order.
@@ -59,7 +60,11 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
 
   if (target === null) return null;
 
-  const streamPackets = framesOnStream(packets, target);
+  // Hydrated, because every view below reads the frames' bytes and a buffer
+  // large enough to have dropped them would otherwise render an empty stream
+  // (docs/decisions/0013). A pass-through while the buffer still holds them,
+  // which is every capture that fits in memory.
+  const streamPackets = useHydratedBytes(framesOnStream(packets, target));
   // Not "whoever sent the first frame": a capture that started mid-connection
   // has no SYN to go on, and a well-known port on one end says far more.
   const client = clientEnd(streamPackets, target);
