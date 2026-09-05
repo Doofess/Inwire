@@ -32,7 +32,7 @@ import { PinLayer, type Pin } from './pinLayer';
 import { themePalette } from '../../services/themePalettes';
 import { GeoLocationCounter, type GeoPlace } from './GeoLocationCounter';
 import { GeoMapHelp } from './GeoMapHelp';
-import { geoSession } from './geoSession';
+import { geoSession, onGeoSessionReset } from './geoSession';
 import { prefersReducedMotion } from '../../lib/motion';
 import { nameResolutionStore } from '../../services/interfacePrefs';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
@@ -644,6 +644,27 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       });
     });
   }, []);
+
+  /**
+   * Empty the map when the capture it was describing is cleared.
+   *
+   * The session is emptied in place by `resetGeoSession`, so everything read
+   * through `sessionRef` is already right by the time this runs; what it cannot
+   * do is re-render a component, because `locations`, `hostnames` and the stats
+   * were copied into React state when they were learned. This copies the now
+   * empty maps back over them.
+   *
+   * Without it, clearing the buffer left the previous capture's pins standing
+   * while its arcs vanished - the arcs are folded from the packet buffer, which
+   * really had emptied.
+   */
+  useEffect(() => onGeoSessionReset(() => {
+    const session = sessionRef.current;
+    setLocations(new Map(session.locations));
+    setHostnames(new Map(session.hostnames));
+    setGeoStats({ places: [], unresolved: 0 });
+    setIspLocation(null);
+  }), []);
 
   // This machine's own public location, from the service rather than a fetch
   // here. The request is memoized there, so this component mounting again -

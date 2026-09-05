@@ -62,10 +62,25 @@ function emptySession(): GeoSession {
   };
 }
 
-let session = emptySession();
+const session = emptySession();
 
 export function geoSession(): GeoSession {
   return session;
+}
+
+/** Mounted maps, so a reset reaches the ones already on screen. */
+const resetListeners = new Set<() => void>();
+
+/**
+ * Runs `listener` whenever the session is reset. Returns the unsubscribe.
+ *
+ * The same shape as `onNameResolutionEnabled`, and for the same reason: the
+ * session is module state and the map is a component, so something has to carry
+ * the news across.
+ */
+export function onGeoSessionReset(listener: () => void): () => void {
+  resetListeners.add(listener);
+  return () => { resetListeners.delete(listener); };
 }
 
 /**
@@ -75,11 +90,28 @@ export function geoSession(): GeoSession {
  * are describing traffic that no longer exists - the one case where the
  * monotonic count SHOULD go back to zero.
  *
+ * **Emptied in place, and never replaced.** This used to assign a fresh object
+ * to `session`, which did nothing at all for a map that was already open:
+ * `GeoMap` takes the session once, in a `useRef` at mount, so every holder went
+ * on reading the object that had just been abandoned. The visible half was that
+ * clearing the buffer left the previous capture's pins standing on the map -
+ * the arcs vanished, because those are folded from the packet buffer itself
+ * rather than from here, and the difference between the two is what showed the
+ * bug. The place counter this function was written for did not reset either.
+ *
  * The camera is deliberately kept: clearing the buffer is a statement about
  * packets, not about where the user was looking.
  */
 export function resetGeoSession(): void {
-  const { camera } = session;
-  session = emptySession();
-  session.camera = camera;
+  session.places.clear();
+  session.unresolved.clear();
+  session.seenIps.clear();
+  session.locations.clear();
+  session.hostnames.clear();
+  session.scan.firstPacketId = -1;
+  session.scan.scannedCount = 0;
+  // Listeners refresh the React state they derived from the maps above. The
+  // data is already correct for anything reading the session directly; this is
+  // only what makes a mounted map re-render.
+  for (const listener of resetListeners) listener();
 }
