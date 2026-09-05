@@ -14,6 +14,7 @@ import { FrameMetaRail } from './FrameMetaRail';
 import { FrameNumberBox } from './FrameNumberBox';
 import { LayerRail } from './LayerRail';
 import { ByteInspector, HexDumpView } from './HexDumpView';
+import { hasBytes } from '../../services/packetBytes';
 import { HexCopyButtons } from './HexViewer';
 import { AnomalyBanners } from './AnomalyBanners';
 import { packetAccentStyle } from '../../lib/packetAccent';
@@ -326,7 +327,9 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
   // Frames in the buffer carry no protocol tree - it is fetched for the one
   // frame being looked at (docs/decisions/0007). Everything above the tree
   // renders from the frame itself and is there immediately.
-  const packet = usePacketDetail(index === -1 ? null : packets[index], packets);
+  const { packet, state: detailState } = usePacketDetail(
+    index === -1 ? null : packets[index], packets,
+  );
 
   const summary = useMemo(() => (packet ? buildFrameSummary(packet) : null), [packet]);
   const related = useMemo(() => (packet ? collectRelatedFrames(packet) : []), [packet]);
@@ -510,15 +513,27 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
         <span className="font-bold text-foreground text-xs">
           Raw bytes
           <span className="ml-2 font-normal text-muted-foreground text-[11px] font-mono">
-            {packet.rawBytes.length.toLocaleString()} captured
+            {hasBytes(packet)
+              ? `${packet.rawBytes.length.toLocaleString()} captured`
+              : detailState === 'unavailable' ? 'not stored' : 'reading…'}
           </span>
         </span>
-        <HexCopyButtons packet={packet} />
+        {hasBytes(packet) && <HexCopyButtons packet={packet} />}
       </div>
 
+      {/* Three reasons there may be no dump, and they are different answers.
+          Policy is a refusal, a read in flight resolves, and a frame the store
+          can no longer supply never will - so none of them may render as the
+          empty pane that means "this frame carried nothing". */}
       {!permissions.canViewPayloads ? (
         <div className="mx-3 my-3 p-2 rounded bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[11px]">
           Auditor / Guest role active: payload inspection is sanitized by policy.
+        </div>
+      ) : !hasBytes(packet) ? (
+        <div className="mx-3 my-3 p-2 rounded bg-muted/40 border border-border text-muted-foreground text-[11px] leading-relaxed">
+          {detailState === 'unavailable'
+            ? 'This capture outgrew its storage limit, so the oldest frames’ bytes were dropped. Everything above is what is kept for this frame.'
+            : 'Fetching this frame’s bytes from the stored capture…'}
         </div>
       ) : (
         <HexDumpView

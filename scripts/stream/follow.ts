@@ -97,7 +97,8 @@ function packet(
   const frames = [serverFirst, clientReply];
 
   check('a well-known port on one end names the server, whoever spoke first',
-    clientEnd(frames, target), { address: '10.0.0.1', port: 51000 });
+    clientEnd(frames, target),
+    { address: '10.0.0.1', port: 51000, basis: 'well-known-port' });
   check('...so the server\'s frame is not from the client',
     isFromClient(serverFirst, clientEnd(frames, target)), false);
   check('...and the client\'s is', isFromClient(clientReply, clientEnd(frames, target)), true);
@@ -109,10 +110,14 @@ function packet(
   const first = packet('10.0.0.1', 51000, '10.0.0.2', 52000, ['udp']);
   const second = packet('10.0.0.2', 52000, '10.0.0.1', 51000, ['udp']);
   const target = targetForPacket(first)!;
+  // ...and it says so. This is the case the window has to disclose: nothing
+  // here proves which end opened the flow, only which end was heard first.
   check('with no well-known port, the first speaker is the client',
-    clientEnd([first, second], target), { address: '10.0.0.1', port: 51000 });
+    clientEnd([first, second], target),
+    { address: '10.0.0.1', port: 51000, basis: 'first-speaker' });
   check('...and the reverse capture order gives the reverse answer',
-    clientEnd([second, first], target), { address: '10.0.0.2', port: 52000 });
+    clientEnd([second, first], target),
+    { address: '10.0.0.2', port: 52000, basis: 'first-speaker' });
 }
 
 {
@@ -122,9 +127,40 @@ function packet(
   const first = packet('10.0.0.1', 179, '10.0.0.2', 179, ['tcp']);
   const target = targetForPacket(first)!;
   check('two well-known ports fall back to arrival order',
-    clientEnd([first], target), { address: '10.0.0.1', port: 179 });
+    clientEnd([first], target), { address: '10.0.0.1', port: 179, basis: 'first-speaker' });
   check('an empty stream still yields an end rather than throwing',
-    clientEnd([], target), { address: '10.0.0.1', port: 179 });
+    clientEnd([], target), { address: '10.0.0.1', port: 179, basis: 'first-speaker' });
+}
+
+// --- a captured handshake is proof, and a trimmed one is not --------------------
+//
+// Both ends ephemeral, so the well-known-port rule cannot help and the first
+// frame decides. The whole question is whether that first frame is the SYN -
+// which makes its sender the client by definition - or merely the earliest
+// frame the buffer still holds, which proves nothing. The two used to be
+// indistinguishable, and the wrong one reads exactly like the right one.
+{
+  nextId = 1;
+  const syn = packet('10.0.0.1', 51000, '10.0.0.2', 52000, ['tcp'],
+    { fields: { 'tcp.flags.syn': 1 } });
+  const synAck = packet('10.0.0.2', 52000, '10.0.0.1', 51000, ['tcp'],
+    { fields: { 'tcp.flags.syn': 1, 'tcp.flags.ack': 1 } });
+  const target = targetForPacket(syn)!;
+
+  check('a captured SYN proves who the client is',
+    clientEnd([syn, synAck], target),
+    { address: '10.0.0.1', port: 51000, basis: 'syn' });
+
+  // The same conversation with its SYN trimmed away. The answer flips to the
+  // server, which is why it must not be presented as a fact.
+  check('with the SYN trimmed, the answer is a guess and is labelled one',
+    clientEnd([synAck], target),
+    { address: '10.0.0.2', port: 52000, basis: 'first-speaker' });
+
+  // A SYN-ACK is an answer to a connection, not the opening of one, so its
+  // sender is the server even when it is the only frame left.
+  check('a SYN-ACK alone does not make its sender the client',
+    clientEnd([synAck], target).basis, 'first-speaker');
 }
 
 console.log();

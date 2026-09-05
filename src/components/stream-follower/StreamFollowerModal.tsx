@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Packet } from '../../types/packet';
-import { TbMessage, TbX, TbCopy, TbCheck, TbDownload } from 'react-icons/tb';
+import { TbMessage, TbX, TbCopy, TbCheck, TbDownload, TbAlertTriangle, TbLoader2 } from 'react-icons/tb';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 import { downloadBlob } from '../../lib/download';
 import {
@@ -19,6 +19,14 @@ import { useHydratedBytes } from '../../lib/useHydratedBytes';
  * a modern capture. `services/followStream.ts` owns the selection and the
  * client/server decision so both are testable; this file renders them.
  */
+
+/**
+ * A stable empty list for the closed window.
+ *
+ * `useHydratedBytes` keys its effect on which frames it was handed, and a
+ * fresh `[]` on every render would be a new set each time.
+ */
+const EMPTY_FRAMES: Packet[] = [];
 
 interface StreamFollowerModalProps {
   target: StreamTarget | null;
@@ -58,15 +66,27 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [target, onClose]);
 
-  if (target === null) return null;
-
   // Hydrated, because every view below reads the frames' bytes and a buffer
   // large enough to have dropped them would otherwise render an empty stream
   // (docs/decisions/0013). A pass-through while the buffer still holds them,
   // which is every capture that fits in memory.
-  const { packets: streamPackets } = useHydratedBytes(framesOnStream(packets, target));
+  //
+  // Above the `target === null` early return, for the same reason the effect
+  // above it is: this window is mounted with a null target and given one when
+  // it opens, so a hook below the return would change the hook COUNT between
+  // two renders of the same component - which React refuses outright. It is
+  // the invariant the comment on that effect already names, and this hook was
+  // added underneath it.
+  const { packets: streamPackets, hydrating } = useHydratedBytes(
+    target === null ? EMPTY_FRAMES : framesOnStream(packets, target),
+  );
+
+  if (target === null) return null;
+
   // Not "whoever sent the first frame": a capture that started mid-connection
-  // has no SYN to go on, and a well-known port on one end says far more.
+  // has no SYN to go on, and a well-known port on one end says far more - and
+  // when neither applies, `basis` says the answer is a guess so the window can
+  // disclose it rather than colour the conversation on one.
   const client = clientEnd(streamPackets, target);
   const clientIp = client.address;
   const serverIp = client.address === target.addressA ? target.addressB : target.addressA;
@@ -224,6 +244,27 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
           </div>
           <span className="text-[11px] font-mono text-muted-foreground">Stream Follower Engine</span>
         </div>
+
+        {/* What this window is NOT sure about, said before the dialogue rather
+            than after it. Both of these change how the conversation below
+            should be read, and neither is visible in it. */}
+        {client.basis === 'first-speaker' && (
+          <div className="px-4 py-2 border-b border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[11px] flex items-start gap-2">
+            <TbAlertTriangle className="w-4 h-4 shrink-0 mt-px" />
+            <span>
+              The start of this conversation is not in the capture, and neither port
+              is a well-known one — so <strong>client and server are assumed</strong> from
+              whichever end was heard first. If the beginning was trimmed or capture
+              began mid-connection, the two colours are the wrong way round.
+            </span>
+          </div>
+        )}
+        {hydrating && (
+          <div className="px-4 py-2 border-b border-border bg-muted/40 text-muted-foreground text-[11px] flex items-center gap-2">
+            <TbLoader2 className="w-4 h-4 shrink-0 animate-spin" />
+            <span>Reading this stream’s bytes back from the stored capture…</span>
+          </div>
+        )}
 
         {/* Stream Dialogue Viewport */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs custom-scrollbar">

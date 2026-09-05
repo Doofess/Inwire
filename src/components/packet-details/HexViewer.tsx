@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
-import { TbBinary, TbCopy, TbCheck, TbShield } from 'react-icons/tb';
+import { TbBinary, TbCopy, TbCheck, TbShield, TbLoader2, TbDatabaseOff } from 'react-icons/tb';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 import { ByteInspector, HexDumpView } from './HexDumpView';
 import { packetAccentStyle } from '../../lib/packetAccent';
+import { hasBytes } from '../../services/packetBytes';
+import type { PacketDetailState } from '../../lib/usePacketDetail';
 
 interface HexViewerProps {
   packet: Packet | null;
@@ -13,6 +15,17 @@ interface HexViewerProps {
   activeByteRange: [number, number] | null;
   onHoverByte: (byteIndex: number | null) => void;
   permissions: UserRolePermissions;
+  /**
+   * Whether this frame's bytes are here, coming, or gone (`usePacketDetail`).
+   *
+   * A big buffer cannot hold every frame's bytes, so it releases the ones the
+   * store can read back and fetches them when a frame is selected
+   * (docs/decisions/0013). That leaves two moments in which there is nothing to
+   * dump, and they are **not** the same thing to a reader: one resolves and the
+   * other does not. Rendering an empty pane for either says neither - it says
+   * "this frame carried no data", which is a third thing entirely and untrue.
+   */
+  bytesState?: PacketDetailState;
 }
 
 type CopyFormat = 'hex' | 'c_array' | 'python' | 'ascii';
@@ -106,6 +119,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
   activeByteRange,
   onHoverByte,
   permissions,
+  bytesState = 'ready',
 }) => {
   const [hoveredByteIdx, setHoveredByteIdx] = useState<number | null>(null);
 
@@ -116,6 +130,33 @@ export const HexViewer: React.FC<HexViewerProps> = ({
           <TbBinary className="w-6 h-6 text-muted-foreground/70 mb-1" />
           <span className="uppercase tracking-wider">Hex Dump Inspector</span>
           <span className="text-[10px] text-muted-foreground/70">Select a frame to inspect raw hexadecimal &amp; ASCII dump</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Gated on the BYTES rather than on the detail state as a whole: a frame can
+  // be `loading` because only its tree is still coming, and in that case the
+  // dump has everything it needs and should draw at once.
+  if (!hasBytes(packet)) {
+    const gone = bytesState === 'unavailable';
+    return (
+      <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
+        <div className="flex flex-col items-center gap-1.5 max-w-xs">
+          {gone
+            ? <TbDatabaseOff className="w-6 h-6 text-muted-foreground/70 mb-1" />
+            : <TbLoader2 className="w-6 h-6 text-muted-foreground/70 mb-1 animate-spin" />}
+          <span className="uppercase tracking-wider">
+            {gone ? `Frame ${packet.id} bytes not stored` : `Reading frame ${packet.id}`}
+          </span>
+          <span className="text-[10px] text-muted-foreground/70 leading-relaxed">
+            {gone
+              // Says which limit, because it is one the user chose and can
+              // raise - and because "not stored" on its own reads like a
+              // failure rather than a setting.
+              ? 'This capture outgrew its storage limit, so the oldest frames’ bytes were dropped. The summary above is all that is kept for this one.'
+              : 'Fetching this frame’s bytes from the stored capture.'}
+          </span>
         </div>
       </div>
     );
