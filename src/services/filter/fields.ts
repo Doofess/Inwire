@@ -19,6 +19,7 @@
 
 import { Packet } from '../../types/packet';
 import { FIELDS, FIELD_BY_ABBREV, FieldDef, FieldType, LAYERS } from '../dissect/fieldRegistry';
+import { fieldValue } from '../dissect/fieldAccess';
 
 export type Scalar = string | number;
 
@@ -48,10 +49,17 @@ const CASE_INSENSITIVE_TYPES: ReadonlySet<FieldType> = new Set<FieldType>([
 
 const LAYER_TOKENS: ReadonlySet<string> = new Set(LAYERS);
 
-/** Reads one registered field out of the generic bag. */
+/**
+ * Reads one registered field, wherever the frame keeps it.
+ *
+ * Through `dissect/fieldAccess.ts` rather than off `p.fields` directly: a
+ * frame's dense fields live in a column block rather than in the bag
+ * (`docs/decisions/0017`), and this is the busiest read in the app - every
+ * filter and every colour rule arrives here, once per frame per pass.
+ */
 function fromBag(abbrev: string): (p: Packet) => Scalar[] {
   return (p) => {
-    const v = p.fields?.[abbrev];
+    const v = fieldValue(p, abbrev);
     return v === undefined ? [] : [v];
   };
 }
@@ -61,7 +69,7 @@ function fromAny(...abbrevs: string[]): (p: Packet) => Scalar[] {
   return (p) => {
     const out: Scalar[] = [];
     for (const a of abbrevs) {
-      const v = p.fields?.[a];
+      const v = fieldValue(p, a);
       if (v !== undefined) out.push(v);
     }
     return out;

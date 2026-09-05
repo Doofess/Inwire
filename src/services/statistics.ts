@@ -28,6 +28,7 @@
  */
 
 import { Packet } from '../types/packet';
+import { fieldValue } from './dissect/fieldAccess';
 
 export type ConversationKind = 'eth' | 'ipv4' | 'ipv6' | 'tcp' | 'udp';
 
@@ -77,27 +78,26 @@ export interface HierarchyNode {
 
 /** The addresses a frame has at the level being counted, or null if it has none. */
 function addressesFor(packet: Packet, kind: ConversationKind): { a: string; b: string; pa?: number; pb?: number } | null {
-  const f = packet.fields;
   switch (kind) {
     case 'eth': {
-      const src = f?.['eth.src'];
-      const dst = f?.['eth.dst'];
+      const src = fieldValue(packet, 'eth.src');
+      const dst = fieldValue(packet, 'eth.dst');
       return typeof src === 'string' && typeof dst === 'string' ? { a: src, b: dst } : null;
     }
     case 'ipv4': {
-      const src = f?.['ip.src'];
-      const dst = f?.['ip.dst'];
+      const src = fieldValue(packet, 'ip.src');
+      const dst = fieldValue(packet, 'ip.dst');
       return typeof src === 'string' && typeof dst === 'string' ? { a: src, b: dst } : null;
     }
     case 'ipv6': {
-      const src = f?.['ipv6.src'];
-      const dst = f?.['ipv6.dst'];
+      const src = fieldValue(packet, 'ipv6.src');
+      const dst = fieldValue(packet, 'ipv6.dst');
       return typeof src === 'string' && typeof dst === 'string' ? { a: src, b: dst } : null;
     }
     case 'tcp':
     case 'udp': {
-      const sp = f?.[`${kind}.srcport`];
-      const dp = f?.[`${kind}.dstport`];
+      const sp = fieldValue(packet, `${kind}.srcport`);
+      const dp = fieldValue(packet, `${kind}.dstport`);
       if (typeof sp !== 'number' || typeof dp !== 'number') return null;
       return { a: packet.source, b: packet.destination, pa: sp, pb: dp };
     }
@@ -280,7 +280,7 @@ export function devices(packets: readonly Packet[]): Device[] {
   const byMac = new Map<string, Device>();
 
   for (const packet of packets) {
-    const mac = packet.fields?.['eth.src'];
+    const mac = fieldValue(packet, 'eth.src');
     if (typeof mac !== 'string' || !isRealSender(mac)) continue;
 
     let device = byMac.get(mac);
@@ -298,7 +298,7 @@ export function devices(packets: readonly Packet[]): Device[] {
     // The sender's network address, from the layer that has one. `source` on
     // the packet is the MAC itself for a frame with no network layer, which
     // would otherwise list every ARP sender's MAC as its own address.
-    const ip = packet.fields?.['ip.src'] ?? packet.fields?.['ipv6.src'] ?? packet.fields?.['arp.src.proto_ipv4'];
+    const ip = fieldValue(packet, 'ip.src') ?? fieldValue(packet, 'ipv6.src') ?? fieldValue(packet, 'arp.src.proto_ipv4');
     if (typeof ip === 'string' && ip !== '0.0.0.0' && !device.addresses.includes(ip)) {
       // A privacy-extension address rotates hourly; a device that has held
       // twenty of them is still one device, but the list is for reading.
@@ -347,15 +347,15 @@ export function processes(packets: readonly Packet[], isLocal?: (address: string
   const byPid = new Map<number, ProcessGroup>();
 
   for (const packet of packets) {
-    const name = packet.fields?.['inwire.process.name'];
-    const pid = packet.fields?.['inwire.process.pid'];
+    const name = fieldValue(packet, 'inwire.process.name');
+    const pid = fieldValue(packet, 'inwire.process.pid');
     if (typeof name !== 'string' || typeof pid !== 'number') continue;
 
     let group = byPid.get(pid);
     if (!group) {
       group = {
         name, pid,
-        exe: String(packet.fields?.['inwire.process.path'] ?? ''),
+        exe: String(fieldValue(packet, 'inwire.process.path') ?? ''),
         peers: [], packets: 0, bytes: 0,
         firstFrame: packet.id, firstSeen: packet.relativeTime, lastSeen: packet.relativeTime,
       };

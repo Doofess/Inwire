@@ -35,6 +35,7 @@
 
 import { Packet } from '../types/packet';
 import { isEchPublicName } from './dissectors/tls';
+import { fieldValue } from './dissect/fieldAccess';
 
 export type NameSource = 'dhcp' | 'lldp' | 'nbns' | 'dns' | 'mdns' | 'sni' | 'quic-sni' | 'arp';
 
@@ -124,7 +125,7 @@ export class NameResolutionMap {
 
     // A server name names the address the frame was SENT TO - the client is
     // the one asking for it, so the destination is the host being named.
-    const sni = f['tls.handshake.extensions_server_name'];
+    const sni = fieldValue(packet, 'tls.handshake.extensions_server_name');
     if (typeof sni === 'string' && packet.destination) {
       // A ServerHello travels the other way and carries no SNI, so a frame
       // with one is always client-to-server.
@@ -134,33 +135,33 @@ export class NameResolutionMap {
     // DHCP: the client names itself. `dhcp.ip.your` is the address the server
     // is handing out, which is the address that name belongs to; on a request
     // there is no address yet, so the MAC carries it instead.
-    const dhcpName = f['dhcp.option.hostname'] ?? f['dhcp.fqdn.name'];
+    const dhcpName = fieldValue(packet, 'dhcp.option.hostname') ?? fieldValue(packet, 'dhcp.fqdn.name');
     if (typeof dhcpName === 'string') {
-      const offered = f['dhcp.ip.your'];
-      const requested = f['dhcp.option.requested_ip_address'];
+      const offered = fieldValue(packet, 'dhcp.ip.your');
+      const requested = fieldValue(packet, 'dhcp.option.requested_ip_address');
       if (typeof offered === 'string' && offered !== '0.0.0.0') this.learn(offered, dhcpName, 'dhcp', frame);
       else if (typeof requested === 'string') this.learn(requested, dhcpName, 'dhcp', frame);
-      const mac = f['dhcp.hw.mac_addr'];
+      const mac = fieldValue(packet, 'dhcp.hw.mac_addr');
       if (typeof mac === 'string') this.learn(mac, dhcpName, 'dhcp', frame, 'mac');
     }
 
-    const dhcpv6Name = f['dhcpv6.client_domain'];
+    const dhcpv6Name = fieldValue(packet, 'dhcpv6.client_domain');
     if (typeof dhcpv6Name === 'string') this.learn(packet.source, dhcpv6Name, 'dhcp', frame);
 
     // LLDP: the device names itself, and the management address it advertises
     // is the one that name belongs to.
-    const lldpName = f['lldp.tlv.system.name'];
+    const lldpName = fieldValue(packet, 'lldp.tlv.system.name');
     if (typeof lldpName === 'string') {
-      const mgmt = f['lldp.mgn.addr'];
+      const mgmt = fieldValue(packet, 'lldp.mgn.addr');
       if (typeof mgmt === 'string') this.learn(mgmt, lldpName, 'lldp', frame);
-      const chassis = f['lldp.chassis.id'];
+      const chassis = fieldValue(packet, 'lldp.chassis.id');
       if (typeof chassis === 'string') this.learn(chassis, lldpName, 'lldp', frame, 'mac');
     }
 
     // ARP: a MAC and an address seen as the same host. No name, but it is what
     // lets the device inventory join the two halves of one machine.
-    const arpMac = f['arp.src.hw_mac'];
-    const arpIp = f['arp.src.proto_ipv4'];
+    const arpMac = fieldValue(packet, 'arp.src.hw_mac');
+    const arpIp = fieldValue(packet, 'arp.src.proto_ipv4');
     if (typeof arpMac === 'string' && typeof arpIp === 'string' && arpIp !== '0.0.0.0') {
       const known = this.byMac.get(arpMac);
       if (known) this.learn(arpIp, known.name, 'arp', frame);

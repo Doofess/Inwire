@@ -16,6 +16,7 @@
  */
 
 import { Packet } from '../../types/packet';
+import { fieldValue } from '../dissect/fieldAccess';
 
 /** How a new term joins whatever is already in the filter bar. */
 export type FilterCombine = 'replace' | 'not' | 'and' | 'or';
@@ -39,7 +40,7 @@ function quote(value: string): string {
  */
 export function fieldTerm(packet: Packet, abbrev: string | undefined): string | null {
   if (!abbrev) return null;
-  const value = packet.fields?.[abbrev];
+  const value = fieldValue(packet, abbrev);
   if (value === undefined) return null;
 
   // A number goes in bare - a `bool` field is 0/1 on the wire and reads as
