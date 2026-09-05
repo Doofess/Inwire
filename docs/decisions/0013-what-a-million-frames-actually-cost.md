@@ -117,7 +117,16 @@ object it copies, so it measures structure alone. The direct test - replace ever
 bag, drop the originals, collect, measure - is the 46 MB above. Recorded because
 the wrong number was convincing enough to act on.
 
-**So there is no cheap large win in `fields`.** It is ~1,030 MB at a million
+**So there is no cheap large win in `fields`.**
+
+> **Superseded 2026-09-05 by `0017-the-dense-sparse-split.md`.** The three
+> measurements above are right; the conclusion drawn from them was too broad.
+> The column experiment gave every one of the 122 keys a column, which is why a
+> key a few frames carry cost a slot in all of them - it tested the extreme
+> rather than the split. Measured again with columns for only the 27 keys
+> present on 20% or more of frames, and the object kept for the rest, the saving
+> is **1,295 B a frame**: within 47 B of deleting the data outright, and with no
+> capability given up at all. It is ~1,030 MB at a million
 frames after interning, and getting it materially lower means a real structural
 change, with a measurement showing the replacement is smaller than what it
 replaces before it is written.
