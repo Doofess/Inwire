@@ -60,8 +60,10 @@ function frameTypeName(type: number): string {
  * everything else. The reference analyzer does the same, which is why its Info reads
  * "PADDING, PING, PADDING" rather than one PADDING per byte.
  */
-function summarizeFrames(payload: Uint8Array): string[] {
+function summarizeFrames(payload: Uint8Array): { names: string[]; crypto: CryptoFragment[]; streams: StreamFragment[] } {
   const names: string[] = [];
+  const crypto: CryptoFragment[] = [];
+  const streams: StreamFragment[] = [];
   const end = payload.length;
   let offset = 0;
 
@@ -110,14 +112,56 @@ function summarizeFrames(payload: Uint8Array): string[] {
       }
       case type === 0x04: ok = skipVarints(3); break; // RESET_STREAM
       case type === 0x05: ok = skipVarints(2); break; // STOP_SENDING
-      case type === 0x06: ok = skipVarints(1) && skipLengthPrefixed(); break; // CRYPTO: offset, then data
+      case type === 0x06: {
+        // CRYPTO: offset, then length-prefixed handshake bytes. The bytes are
+        // kept, not just skipped: reassembled across frames and packets they
+        // are the TLS ClientHello, which is where a QUIC connection's SNI,
+        // ALPN and fingerprint live. A hello with a post-quantum key share
+        // does not fit one Initial packet, so this is the only way to read it.
+        const offsetVarint = readVarint(payload, cursor, end);
+        if (!offsetVarint) { ok = false; break; }
+        const lengthVarint = readVarint(payload, offsetVarint.nextOffset, end);
+        if (!lengthVarint) { ok = false; break; }
+        const dataStart = lengthVarint.nextOffset;
+        const dataEnd = dataStart + lengthVarint.value;
+        if (dataEnd > end) { ok = false; break; }
+        crypto.push({ offset: offsetVarint.value, data: payload.slice(dataStart, dataEnd) });
+        cursor = dataEnd;
+        break;
+      }
       case type === 0x07: ok = skipLengthPrefixed(); break; // NEW_TOKEN
       case type >= 0x08 && type <= 0x0f: {
-        ok = skipVarints(1); // stream id
-        if (ok && (type & 0x04) !== 0) ok = skipVarints(1); // offset
-        if (!ok) break;
-        if ((type & 0x02) !== 0) ok = skipLengthPrefixed();
-        else cursor = end; // no length means the frame runs to the packet's end
+        // STREAM: the low three bits of the type say which optional fields are
+        // present - OFF (0x04), LEN (0x02) and FIN (0x01). The data is kept
+        // rather than skipped: over a 1-RTT packet it is HTTP/3, and the
+        // offset is what lets a stream be put back together across packets
+        // that QUIC is free to deliver in any order.
+        const idVarint = readVarint(payload, cursor, end);
+        if (!idVarint) { ok = false; break; }
+        cursor = idVarint.nextOffset;
+
+        let streamOffset = 0;
+        if ((type & 0x04) !== 0) {
+          const offsetVarint = readVarint(payload, cursor, end);
+          if (!offsetVarint) { ok = false; break; }
+          streamOffset = offsetVarint.value;
+          cursor = offsetVarint.nextOffset;
+        }
+
+        let dataStart = cursor;
+        let dataEnd = end;
+        if ((type & 0x02) !== 0) {
+          const lengthVarint = readVarint(payload, cursor, end);
+          if (!lengthVarint) { ok = false; break; }
+          dataStart = lengthVarint.nextOffset;
+          dataEnd = dataStart + lengthVarint.value;
+          if (dataEnd > end) { ok = false; break; }
+        }
+        streams.push({
+          streamId: idVarint.value, offset: streamOffset,
+          data: payload.slice(dataStart, dataEnd), fin: (type & 0x01) !== 0,
+        });
+        cursor = dataEnd;
         break;
       }
       case type === 0x10 || type === 0x14 || type === 0x19: ok = skipVarints(1); break;
@@ -140,7 +184,7 @@ function summarizeFrames(payload: Uint8Array): string[] {
     offset = cursor;
   }
 
-  return names;
+  return { names, crypto, streams };
 }
 
 /**
@@ -150,16 +194,41 @@ function summarizeFrames(payload: Uint8Array): string[] {
  * Returns null when the packet cannot be decrypted, which is the normal answer
  * for a connection whose first Initial was not captured.
  */
-export type InitialDecryptor = (
+/** Which packet-number space and which keys a packet belongs to. */
+export type QuicPacketKind = 'initial' | '0rtt' | 'handshake' | '1rtt';
+
+export type PacketDecryptor = (
   packetStart: number,
   packetNumberOffset: number,
   packetEnd: number,
   version: number,
-  destinationConnectionId: Uint8Array
+  destinationConnectionId: Uint8Array,
+  kind: QuicPacketKind
 ) => { packetNumber: number; payload: Uint8Array } | null;
+
+/** The name it had when Initial packets were the only ones anything could open. */
+export type InitialDecryptor = PacketDecryptor;
+
+/** One STREAM frame's contribution to a QUIC stream. */
+export interface StreamFragment {
+  streamId: number;
+  offset: number;
+  data: Uint8Array;
+  fin: boolean;
+}
+
+/** One CRYPTO frame's contribution to the handshake stream. */
+export interface CryptoFragment {
+  offset: number;
+  data: Uint8Array;
+}
 
 export interface QuicDissectorResult {
   info: string;
+  /** CRYPTO frames decrypted out of this datagram's Initial packets. */
+  cryptoFragments: CryptoFragment[];
+  /** STREAM frames decrypted out of this datagram's Handshake and 1-RTT packets. */
+  streamFragments: StreamFragment[];
   /** Connection IDs this header advertised, hex-encoded; empty for short headers. */
   connectionIds: string[];
   isLongHeader: boolean;
@@ -205,7 +274,7 @@ export function dissectQuic(
   start: number,
   end: number,
   knownConnectionId?: string,
-  decryptInitial?: InitialDecryptor
+  decryptPacket?: PacketDecryptor
 ): QuicDissectorResult | null {
   if (start >= end) return null;
 
@@ -217,6 +286,31 @@ export function dissectQuic(
   if ((firstByte & 0x40) === 0) return null;
 
   if (!isLongHeader) {
+    // A short header carries no length and no connection-id length: it runs to
+    // the end of the datagram, and where its packet number begins depends
+    // entirely on how long the connection id is - which only the flow's own
+    // history says. A flow whose handshake was not captured is unreadable for
+    // this reason alone, keys or no keys.
+    const dcidLength = knownConnectionId ? knownConnectionId.length / 2 : 0;
+    const decrypted = decryptPacket
+      ? decryptPacket(start, start + 1 + dcidLength, end, 0, new Uint8Array(0), '1rtt')
+      : null;
+
+    if (decrypted) {
+      const frames = summarizeFrames(decrypted.payload);
+      const parts = ['Protected Payload (KP0)'];
+      if (knownConnectionId) parts.push(`DCID=${knownConnectionId}`);
+      parts.push(`PKN: ${decrypted.packetNumber}`, ...frames.names);
+      return {
+        info: parts.join(', '),
+        cryptoFragments: frames.crypto,
+        streamFragments: frames.streams,
+        connectionIds: [],
+        isLongHeader: false,
+        nextPacketOffset: end,
+      };
+    }
+
     // The key phase bit lives under header protection along with the reserved
     // bits and the packet-number length, so it cannot be read without the
     // keys. The reference analyzer reports KP0 for a packet it hasn't decrypted, and so do
@@ -225,6 +319,8 @@ export function dissectQuic(
       info: knownConnectionId
         ? `Protected Payload (KP0), DCID=${knownConnectionId}`
         : 'Protected Payload (KP0)',
+      cryptoFragments: [],
+      streamFragments: [],
       connectionIds: [],
       isLongHeader: false,
       /** A short header runs to the end of the datagram; nothing follows it. */
@@ -239,7 +335,7 @@ export function dissectQuic(
 
   // Version 0 means Version Negotiation, which has no packet-type field.
   if (version === 0) {
-    return { info: 'Version Negotiation', connectionIds: [], isLongHeader: true, nextPacketOffset: end };
+    return { info: 'Version Negotiation', cryptoFragments: [], streamFragments: [], connectionIds: [], isLongHeader: true, nextPacketOffset: end };
   }
 
   const dcidLen = bytes[start + 5];
@@ -286,19 +382,33 @@ export function dissectQuic(
     }
   }
 
-  // Initial packets are the only ones a passive observer can read: their keys
-  // derive from the client's original Destination Connection ID, which is on
-  // the wire in the clear. Everything else needs the TLS session secrets.
-  if (packetType === 'Initial' && decryptInitial && packetNumberOffset > 0) {
-    const decrypted = decryptInitial(start, packetNumberOffset, nextPacketOffset, version, dcid);
+  // Initial packets are the only ones a passive observer can read unaided:
+  // their keys derive from the client's original Destination Connection ID,
+  // which is on the wire in the clear. Handshake and 0-RTT packets need the
+  // TLS session secrets, so they are attempted only when a key log supplied
+  // them - the decryptor answers null otherwise, and the packet stays a name.
+  const cryptoFragments: CryptoFragment[] = [];
+  const streamFragments: StreamFragment[] = [];
+  const kind: QuicPacketKind | null =
+    packetType === 'Initial' ? 'initial'
+      : packetType === 'Handshake' ? 'handshake'
+        : packetType === '0-RTT' ? '0rtt'
+          : null;
+  if (kind !== null && decryptPacket && packetNumberOffset > 0) {
+    const decrypted = decryptPacket(start, packetNumberOffset, nextPacketOffset, version, dcid, kind);
     if (decrypted) {
       parts.push(`PKN: ${decrypted.packetNumber}`);
-      parts.push(...summarizeFrames(decrypted.payload));
+      const frames = summarizeFrames(decrypted.payload);
+      parts.push(...frames.names);
+      cryptoFragments.push(...frames.crypto);
+      streamFragments.push(...frames.streams);
     }
   }
 
   return {
     info: parts.join(', '),
+    cryptoFragments,
+    streamFragments,
     connectionIds: [dcidHex, scidHex].filter(id => id.length > 0),
     isLongHeader: true,
     nextPacketOffset,
@@ -319,26 +429,30 @@ export function dissectQuicDatagram(
   start: number,
   end: number,
   knownConnectionId?: string,
-  decryptInitial?: InitialDecryptor
+  decryptPacket?: PacketDecryptor
 ): QuicDissectorResult | null {
   let offset = start;
   let last: QuicDissectorResult | null = null;
   const connectionIds: string[] = [];
+  const cryptoFragments: CryptoFragment[] = [];
+  const streamFragments: StreamFragment[] = [];
   let sawLongHeader = false;
 
   // Bounded so a packet that fails to advance can't spin; real datagrams
   // coalesce a handful of packets at most.
   for (let packets = 0; packets < 8 && offset < end; packets++) {
-    const result = dissectQuic(bytes, offset, end, knownConnectionId, decryptInitial);
+    const result = dissectQuic(bytes, offset, end, knownConnectionId, decryptPacket);
     if (!result) break;
 
     last = result;
     connectionIds.push(...result.connectionIds);
+    cryptoFragments.push(...result.cryptoFragments);
+    streamFragments.push(...result.streamFragments);
     sawLongHeader = sawLongHeader || result.isLongHeader;
 
     if (result.nextPacketOffset <= offset) break;
     offset = result.nextPacketOffset;
   }
 
-  return last ? { ...last, connectionIds, isLongHeader: sawLongHeader } : null;
+  return last ? { ...last, connectionIds, cryptoFragments, streamFragments, isLongHeader: sawLongHeader } : null;
 }

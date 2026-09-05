@@ -1,137 +1,150 @@
 /**
- * DNS message summaries in the reference analyzer's Info format:
+ * DNS for the packet list and the detail tree.
  *
  *   Standard query 0x060a HTTPS ssl.gstatic.com
  *   Standard query response 0x39a2 A ssl.gstatic.com A 142.250.75.195
- *   Standard query response 0x060a HTTPS ssl.gstatic.com SOA ns1.google.com
+ *   Standard query 0x0000 PTR _spotify-connect._tcp.local, "QM" question
  *
- * A response repeats its question and then appends each record it carries, so
- * the whole exchange is readable from the packet list without opening a frame.
- * mDNS (5353), LLMNR (5355) and NBNS (137) reuse this same wire format.
+ * The message is parsed once by `dnsRecords.ts`; this file renders it. mDNS
+ * (5353), LLMNR (5355) and NBNS (137) reuse the same wire format and the same
+ * dissector, each keeping its own name in the Protocol column.
  */
-import { formatIpv4Address, formatIpv6Address } from '../addressFormat';
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
+import {
+  DNS_OPCODE_NAMES, DNS_RCODE_NAMES, DNS_TYPE_DESCRIPTIONS,
+  dnsInfoLine, dnsTypeName, parseDnsMessage,
+  type DnsMessage, type DnsRecord,
+} from './dnsRecords';
 
-const OPCODE_NAMES: Record<number, string> = {
-  0: 'Standard query',
-  1: 'Inverse query',
-  2: 'Server status request',
-  4: 'Notify',
-  5: 'Dynamic update',
-};
-
-const RCODE_NAMES: Record<number, string> = {
-  1: 'Format error',
-  2: 'Server failure',
-  3: 'No such name',
-  4: 'Not implemented',
-  5: 'Refused',
-};
-
-const TYPE_NAMES: Record<number, string> = {
-  1: 'A', 2: 'NS', 5: 'CNAME', 6: 'SOA', 12: 'PTR', 13: 'HINFO', 15: 'MX',
-  16: 'TXT', 17: 'RP', 24: 'SIG', 25: 'KEY', 28: 'AAAA', 29: 'LOC', 33: 'SRV',
-  35: 'NAPTR', 39: 'DNAME', 41: 'OPT', 43: 'DS', 46: 'RRSIG', 47: 'NSEC',
-  48: 'DNSKEY', 50: 'NSEC3', 51: 'NSEC3PARAM', 52: 'TLSA', 64: 'SVCB',
-  65: 'HTTPS', 99: 'SPF', 251: 'IXFR', 252: 'AXFR', 255: 'ANY', 257: 'CAA',
-};
-
-function typeName(type: number): string {
-  return TYPE_NAMES[type] ?? `TYPE${type}`;
-}
-
-interface NameResult {
-  name: string;
-  /** Offset just past the name *as encoded here* - a pointer is 2 bytes however long the name it names. */
-  nextOffset: number;
-}
+export { parseDnsMessage, dnsInfoLine } from './dnsRecords';
+export type { DnsMessage, DnsRecord } from './dnsRecords';
 
 /**
- * Reads a possibly-compressed DNS name. A length byte with its top two bits
- * set is a 14-bit pointer back into the message rather than a label length,
- * which is how a response avoids repeating the question's domain in every
- * record. `jumps` bounds the pointer chain so a malicious or corrupt message
- * that points at itself can't spin forever.
+ * The Info column. Returns null when the bytes are not DNS, so the caller can
+ * fall back to a plain UDP summary.
  */
-function readName(bytes: Uint8Array, messageStart: number, offset: number, jumps = 0): NameResult {
-  const labels: string[] = [];
-  let cursor = offset;
-  let nextOffset = -1;
-
-  while (cursor < bytes.length) {
-    const length = bytes[cursor];
-
-    if (length === 0) {
-      cursor += 1;
-      break;
-    }
-
-    if ((length & 0xc0) === 0xc0) {
-      if (cursor + 1 >= bytes.length || jumps >= 8) break;
-      const pointer = ((length & 0x3f) << 8) | bytes[cursor + 1];
-      if (nextOffset === -1) nextOffset = cursor + 2;
-      const target = readName(bytes, messageStart, messageStart + pointer, jumps + 1);
-      if (target.name) labels.push(target.name);
-      cursor += 2;
-      break;
-    }
-
-    if (cursor + 1 + length > bytes.length) break;
-    labels.push(new TextDecoder().decode(bytes.subarray(cursor + 1, cursor + 1 + length)));
-    cursor += 1 + length;
-  }
-
-  return { name: labels.join('.'), nextOffset: nextOffset === -1 ? cursor : nextOffset };
+export function dissectDns(bytes: Uint8Array, messageStart: number, multicast = false): string | null {
+  const msg = parseDnsMessage(bytes, messageStart);
+  return msg === null ? null : dnsInfoLine(msg, multicast);
 }
 
-/** Renders the record data the way the reference analyzer summarizes it in the Info column. */
-function formatRdata(
-  bytes: Uint8Array,
-  messageStart: number,
-  type: number,
-  rdataStart: number,
-  rdataLength: number
-): string | null {
-  const end = rdataStart + rdataLength;
-  if (end > bytes.length) return null;
-
-  switch (type) {
-    case 1:
-      return rdataLength >= 4 ? formatIpv4Address(bytes, rdataStart) : null;
-    case 28:
-      return rdataLength >= 16 ? formatIpv6Address(bytes, rdataStart) : null;
-    case 2: case 5: case 12: case 39:
-      return readName(bytes, messageStart, rdataStart).name || null;
-    case 6:
-      // SOA's summary is just its primary name server, the first of its
-      // several fields.
-      return readName(bytes, messageStart, rdataStart).name || null;
-    case 15: {
-      // MX: 2-byte preference, then the exchange host.
-      return rdataLength >= 3 ? readName(bytes, messageStart, rdataStart + 2).name || null : null;
-    }
-    case 16: {
-      // TXT: one or more length-prefixed strings.
-      if (rdataLength < 1) return null;
-      const textLength = Math.min(bytes[rdataStart], rdataLength - 1);
-      return new TextDecoder().decode(bytes.subarray(rdataStart + 1, rdataStart + 1 + textLength));
-    }
-    case 33:
-      // SRV: priority, weight, port, then the target host.
-      return rdataLength >= 7 ? readName(bytes, messageStart, rdataStart + 6).name || null : null;
-    default:
-      return null;
+/** Seconds as Wireshark writes a TTL: `4500 (1 hour, 15 minutes)`. */
+function describeTtl(ttl: number): string {
+  if (ttl === 0) return '0';
+  const units: [number, string][] = [[86400, 'day'], [3600, 'hour'], [60, 'minute'], [1, 'second']];
+  const parts: string[] = [];
+  let left = ttl;
+  for (const [size, name] of units) {
+    const n = Math.floor(left / size);
+    if (n > 0) { parts.push(`${n} ${name}${n === 1 ? '' : 's'}`); left -= n * size; }
   }
+  return `${ttl} (${parts.join(', ')})`;
+}
+
+function classField(rclass: number, cacheFlush: boolean, offset: number): ProtocolField[] {
+  const range: [number, number] = [offset, offset + 1];
+  return [
+    {
+      name: 'Class', value: `${rclass === 1 ? 'IN' : 'Unknown'} (0x${rclass.toString(16).padStart(4, '0')})`,
+      rawBytesRange: range, bitfield: { bitOffset: 1, bitLength: 15, totalBits: 16 },
+    },
+    {
+      name: 'Cache flush', value: cacheFlush ? 'True' : 'False',
+      rawBytesRange: range, bitfield: { bitOffset: 0, bitLength: 1, totalBits: 16 },
+    },
+  ];
+}
+
+/** The record data, as the rows Wireshark nests under a record. */
+function rdataFields(r: DnsRecord): ProtocolField[] {
+  const out: ProtocolField[] = [];
+  const range: [number, number] = [r.rdataStart, r.rdataStart + Math.max(0, r.rdataLength - 1)];
+  switch (r.type) {
+    case 1: if (r.addresses[0]) out.push({ name: 'Address', value: r.addresses[0], rawBytesRange: range, abbrev: 'dns.a' }); break;
+    case 28: if (r.addresses[0]) out.push({ name: 'AAAA Address', value: r.addresses[0], rawBytesRange: range, abbrev: 'dns.aaaa' }); break;
+    case 5: if (r.target) out.push({ name: 'CNAME', value: r.target, rawBytesRange: range, abbrev: 'dns.cname' }); break;
+    case 2: if (r.target) out.push({ name: 'Name Server', value: r.target, rawBytesRange: range, abbrev: 'dns.ns' }); break;
+    case 12: if (r.target) out.push({ name: 'Domain Name', value: r.target, rawBytesRange: range, abbrev: 'dns.ptr.domain_name' }); break;
+    case 15: if (r.target) out.push({ name: 'Mail Exchange', value: r.target, rawBytesRange: range }); break;
+    case 16:
+      for (const s of r.txt ?? []) out.push({ name: 'TXT', value: s, rawBytesRange: range, abbrev: 'dns.txt' });
+      break;
+    case 33:
+      if (r.srv) out.push(
+        { name: 'Priority', value: r.srv.priority, rawBytesRange: [r.rdataStart, r.rdataStart + 1] },
+        { name: 'Weight', value: r.srv.weight, rawBytesRange: [r.rdataStart + 2, r.rdataStart + 3] },
+        { name: 'Port', value: r.srv.port, rawBytesRange: [r.rdataStart + 4, r.rdataStart + 5], abbrev: 'dns.srv.port' },
+        { name: 'Target', value: r.srv.target, rawBytesRange: [r.rdataStart + 6, range[1]], abbrev: 'dns.srv.target' },
+      );
+      break;
+    case 6:
+      if (r.soa) out.push(
+        { name: 'Primary name server', value: r.soa.mname, rawBytesRange: range },
+        { name: 'Responsible authority\'s mailbox', value: r.soa.rname, rawBytesRange: range },
+        { name: 'Serial Number', value: r.soa.serial, rawBytesRange: range },
+        { name: 'Refresh Interval', value: describeTtl(r.soa.refresh), rawBytesRange: range },
+        { name: 'Retry Interval', value: describeTtl(r.soa.retry), rawBytesRange: range },
+        { name: 'Expire limit', value: describeTtl(r.soa.expire), rawBytesRange: range },
+        { name: 'Minimum TTL', value: describeTtl(r.soa.minimum), rawBytesRange: range },
+      );
+      break;
+    case 64: case 65:
+      if (r.svcb) {
+        out.push(
+          { name: 'SvcPriority', value: r.svcb.priority, rawBytesRange: [r.rdataStart, r.rdataStart + 1], abbrev: 'dns.svcb.priority' },
+          { name: 'TargetName', value: r.svcb.target, rawBytesRange: range },
+          ...r.svcb.params.map((param): ProtocolField => ({
+            name: `SvcParam: ${param.name}${param.value ? `=${param.value}` : ''}`,
+            value: '', rawBytesRange: range,
+            ...(param.key === 1 ? { abbrev: 'dns.svcb.alpn' } : {}),
+            ...(param.key === 5 ? { description: 'This name supports Encrypted Client Hello, so its TLS handshakes hide the real server name.' } : {}),
+          })),
+        );
+      }
+      break;
+    case 41:
+      if (r.edns) out.push(
+        { name: 'UDP payload size', value: r.edns.udpPayloadSize, rawBytesRange: range, abbrev: 'dns.rr.udp_payload_size' },
+        { name: 'Higher bits in extended RCODE', value: `0x${r.edns.extendedRcode.toString(16).padStart(2, '0')}`, rawBytesRange: range },
+        { name: 'EDNS0 version', value: r.edns.version, rawBytesRange: range },
+        { name: 'DO bit', value: r.edns.dnssecOk ? 'Accepts DNSSEC security RRs' : 'Cannot handle DNSSEC security RRs', rawBytesRange: range, abbrev: 'dns.resp.z.do' },
+        ...r.edns.options.map((o): ProtocolField => ({ name: `Option: ${o.name}`, value: o.value, rawBytesRange: range })),
+      );
+      break;
+    case 257:
+      if (r.summary) out.push({ name: 'CAA', value: r.summary, rawBytesRange: range });
+      break;
+    default:
+      if (r.rdataLength > 0) out.push({ name: 'Data', value: `${r.rdataLength} bytes`, rawBytesRange: range });
+  }
+  return out;
+}
+
+function recordField(r: DnsRecord): ProtocolField {
+  const typeDesc = DNS_TYPE_DESCRIPTIONS[r.type];
+  const head = r.type === 41
+    ? `<Root>: type OPT`
+    : `${r.name || '<Root>'}: type ${dnsTypeName(r.type)}, class ${r.rclass === 1 ? 'IN' : r.rclass}${r.summary ? `, ${r.summary}` : ''}`;
+  const children: ProtocolField[] = [
+    { name: 'Name', value: r.name || '<Root>', rawBytesRange: [r.start, Math.max(r.start, r.nameEnd - 1)], abbrev: 'dns.resp.name' },
+    { name: 'Type', value: `${dnsTypeName(r.type)} (${r.type})${typeDesc ? ` (${typeDesc})` : ''}`, rawBytesRange: [r.nameEnd, r.nameEnd + 1], abbrev: 'dns.resp.type' },
+  ];
+  if (r.type !== 41) {
+    children.push(...classField(r.rclass, r.cacheFlush, r.nameEnd + 2));
+    children.push({ name: 'Time to live', value: describeTtl(r.ttl), rawBytesRange: [r.nameEnd + 4, r.nameEnd + 7], abbrev: 'dns.resp.ttl' });
+  }
+  children.push({ name: 'Data length', value: r.rdataLength, rawBytesRange: [r.nameEnd + 8, r.nameEnd + 9] });
+  children.push(...rdataFields(r));
+  return { name: head, value: '', rawBytesRange: [r.start, r.end - 1], children };
 }
 
 /**
- * The DNS flags word, as the sixteen-bit rows the reference analyzer draws beneath it.
+ * The flags word, as the sixteen-bit rows Wireshark draws beneath it.
  *
  * The row set is conditional, not a fixed template: a query shows six rows,
  * while a response additionally carries Authoritative, Recursion available,
  * Answer authenticated and Reply code. Emitting the response-only rows on a
- * query would invent flags the message does not have - verified against
- * `tshark -V` for both directions.
+ * query would invent flags the message does not have.
  */
 function dnsFlagFields(flags: number, flagsOffset: number): ProtocolField[] {
   const isResponse = (flags & 0x8000) !== 0;
@@ -140,195 +153,162 @@ function dnsFlagFields(flags: number, flagsOffset: number): ProtocolField[] {
   const bit = (n: number) => (flags >> (15 - n)) & 1;
 
   const range: [number, number] = [flagsOffset, flagsOffset + 1];
-  const row = (
-    name: string,
-    bitOffset: number,
-    bitLength: number,
-    value: string,
-  ): ProtocolField => ({
-    name,
-    value,
-    rawBytesRange: range,
-    bitfield: { bitOffset, bitLength, totalBits: 16 },
+  const row = (name: string, bitOffset: number, bitLength: number, value: string, abbrev?: string): ProtocolField => ({
+    name, value, rawBytesRange: range, bitfield: { bitOffset, bitLength, totalBits: 16 }, ...(abbrev ? { abbrev } : {}),
   });
 
   const rows: ProtocolField[] = [
-    row('Response', 0, 1, isResponse ? 'Message is a response' : 'Message is a query'),
-    row('Opcode', 1, 4, `${OPCODE_NAMES[opcode] ?? 'Unknown'} (${opcode})`),
+    row('Response', 0, 1, isResponse ? 'Message is a response' : 'Message is a query', 'dns.flags.response'),
+    row('Opcode', 1, 4, `${DNS_OPCODE_NAMES[opcode] ?? 'Unknown'} (${opcode})`, 'dns.flags.opcode'),
   ];
-
   if (isResponse) {
-    rows.push(row('Authoritative', 5, 1,
-      bit(5) ? 'Server is an authority for domain' : 'Server is not an authority for domain'));
+    rows.push(row('Authoritative', 5, 1, bit(5) ? 'Server is an authority for domain' : 'Server is not an authority for domain', 'dns.flags.authoritative'));
   }
-
   rows.push(
-    row('Truncated', 6, 1,
-      bit(6) ? 'Message is truncated' : 'Message is not truncated'),
-    row('Recursion desired', 7, 1,
-      bit(7) ? 'Do query recursively' : 'Do not query recursively'),
+    row('Truncated', 6, 1, bit(6) ? 'Message is truncated' : 'Message is not truncated', 'dns.flags.truncated'),
+    row('Recursion desired', 7, 1, bit(7) ? 'Do query recursively' : 'Do not query recursively', 'dns.flags.recdesired'),
   );
-
   if (isResponse) {
-    rows.push(row('Recursion available', 8, 1,
-      bit(8) ? 'Server can do recursive queries' : 'Server cannot do recursive queries'));
+    rows.push(row('Recursion available', 8, 1, bit(8) ? 'Server can do recursive queries' : 'Server cannot do recursive queries'));
   }
-
   rows.push(row('Z', 9, 1, `reserved (${bit(9)})`));
-
   if (isResponse) {
     rows.push(row('Answer authenticated', 10, 1,
-      bit(10)
-        ? 'Answer/authority portion was authenticated by the server'
-        : 'Answer/authority portion was not authenticated by the server'));
+      bit(10) ? 'Answer/authority portion was authenticated by the server' : 'Answer/authority portion was not authenticated by the server'));
   }
-
-  rows.push(row('Non-authenticated data', 11, 1,
-    bit(11) ? 'Acceptable' : 'Unacceptable'));
-
+  rows.push(row('Non-authenticated data', 11, 1, bit(11) ? 'Acceptable' : 'Unacceptable'));
   if (isResponse) {
-    // RCODE_NAMES deliberately has no entry for 0: the Info string must not
-    // append "No error" to a successful response, matching the reference analyzer's
-    // packet-list column. The detail tree does name it, so it is spelled out
-    // here rather than by adding a 0 that would leak into the Info string.
-    const rcodeName = rcode === 0 ? 'No error' : RCODE_NAMES[rcode] ?? 'Unknown';
-    rows.push(row('Reply code', 12, 4, `${rcodeName} (${rcode})`));
+    rows.push(row('Reply code', 12, 4, `${rcode === 0 ? 'No error' : DNS_RCODE_NAMES[rcode] ?? 'Unknown'} (${rcode})`, 'dns.flags.rcode'));
   }
-
   return rows;
 }
 
-/**
- * The Queries node: one child per question, worded as the reference analyzer words it
- * (`www.googleapis.com: type AAAA, class IN`).
- *
- * Returns nothing when there are no questions, rather than an empty parent -
- * The reference analyzer omits the node entirely in that case.
- */
-function dnsQuerySection(bytes: Uint8Array, messageStart: number, questionCount: number): ProtocolField[] {
-  if (questionCount < 1) return [];
-
-  const queries: ProtocolField[] = [];
-  let cursor = messageStart + 12;
-
-  for (let i = 0; i < questionCount && cursor < bytes.length; i++) {
-    const start = cursor;
-    const { name, nextOffset } = readName(bytes, messageStart, cursor);
-    cursor = nextOffset;
-    if (cursor + 4 > bytes.length) break;
-    const qtype = (bytes[cursor] << 8) | bytes[cursor + 1];
-    const qclass = (bytes[cursor + 2] << 8) | bytes[cursor + 3];
-    cursor += 4;
-
-    queries.push({
-      name,
-      value: `type ${typeName(qtype)}, class ${qclass === 1 ? 'IN' : qclass}`,
-      rawBytesRange: [start, cursor - 1],
+function querySection(msg: DnsMessage): ProtocolField[] {
+  if (msg.questions.length === 0) return [];
+  return [{
+    name: 'Queries', value: '',
+    children: msg.questions.map((q): ProtocolField => ({
+      name: q.name, value: `type ${dnsTypeName(q.type)}, class ${q.qclass === 1 ? 'IN' : q.qclass}`,
+      rawBytesRange: [q.start, q.end - 1],
       children: [
-        { name: 'Name', value: name, rawBytesRange: [start, nextOffset - 1] },
-        { name: 'Type', value: `${typeName(qtype)} (${qtype})`, rawBytesRange: [nextOffset, nextOffset + 1] },
-        { name: 'Class', value: `${qclass === 1 ? 'IN' : 'Unknown'} (0x${qclass.toString(16).padStart(4, '0')})`, rawBytesRange: [nextOffset + 2, nextOffset + 3] },
+        { name: 'Name', value: q.name, rawBytesRange: [q.start, Math.max(q.start, q.nameEnd - 1)], abbrev: 'dns.qry.name' },
+        { name: 'Type', value: `${dnsTypeName(q.type)} (${q.type})`, rawBytesRange: [q.nameEnd, q.nameEnd + 1], abbrev: 'dns.qry.type' },
+        ...classField(q.qclass, q.unicastResponse, q.nameEnd + 2),
       ],
+    })),
+  }];
+}
+
+function recordSection(title: string, records: DnsRecord[]): ProtocolField[] {
+  if (records.length === 0) return [];
+  return [{ name: title, value: '', children: records.map(recordField) }];
+}
+
+/** What the caller learned from this message and wants on the packet. */
+export interface DnsDissection {
+  layer: ProtocolLayer;
+  fields: Record<string, string | number>;
+  /** name -> addresses, for passive name resolution. */
+  resolved: { name: string; addresses: string[] }[];
+  /** The first question, for query/response pairing. */
+  questionName?: string;
+  isResponse: boolean;
+  transactionId: number;
+  rcode: number;
+  /** True when this response says the name does not exist. */
+  nxdomain: boolean;
+}
+
+/**
+ * The DNS layer, plus the facts other layers want. `pairing` is filled in by
+ * the caller once the tracker has matched this frame.
+ */
+export function buildDnsLayer(
+  bytes: Uint8Array, messageStart: number, messageEnd = bytes.length,
+  pairing?: { requestFrame?: number; elapsedUs?: number; responseFrame?: number },
+): DnsDissection | null {
+  const msg = parseDnsMessage(bytes, messageStart, messageEnd);
+  if (msg === null) return null;
+
+  const answers = msg.records.filter((r) => r.section === 'answer');
+  const authority = msg.records.filter((r) => r.section === 'authority');
+  const additional = msg.records.filter((r) => r.section === 'additional');
+  const rcodeName = msg.isResponse ? DNS_RCODE_NAMES[msg.rcode] : undefined;
+
+  const fields: Record<string, string | number> = {
+    'dns.id': msg.transactionId,
+    'dns.flags': msg.flags,
+    'dns.flags.response': msg.isResponse ? 1 : 0,
+    'dns.flags.opcode': msg.opcode,
+    'dns.count.queries': msg.counts[0],
+    'dns.count.answers': msg.counts[1],
+  };
+  if (msg.isResponse) fields['dns.flags.rcode'] = msg.rcode;
+  if (msg.questions.length > 0) {
+    fields['dns.qry.name'] = msg.questions[0].name;
+    fields['dns.qry.type'] = msg.questions[0].type;
+  }
+  const firstAddress = msg.records.find((r) => r.type === 1)?.addresses[0];
+  if (firstAddress) fields['dns.a'] = firstAddress;
+  const firstV6 = msg.records.find((r) => r.type === 28)?.addresses[0];
+  if (firstV6) fields['dns.aaaa'] = firstV6;
+  if (pairing?.requestFrame !== undefined) fields['dns.response_to'] = pairing.requestFrame;
+  if (pairing?.responseFrame !== undefined) fields['dns.response_in'] = pairing.responseFrame;
+
+  const generated: ProtocolField[] = [];
+  if (pairing?.requestFrame !== undefined) {
+    generated.push(
+      { name: '[Request In]', value: pairing.requestFrame, generated: true, linkToFrame: pairing.requestFrame, abbrev: 'dns.response_to' },
+      { name: '[Time]', value: `${((pairing.elapsedUs ?? 0) / 1000).toFixed(6)} milliseconds`, generated: true },
+    );
+  }
+  if (pairing?.responseFrame !== undefined) {
+    generated.push({ name: '[Response In]', value: pairing.responseFrame, generated: true, linkToFrame: pairing.responseFrame, abbrev: 'dns.response_in' });
+  }
+  if (msg.isResponse && msg.rcode === 3) {
+    generated.push({
+      name: '[Expert Info]', value: 'No such name', generated: true,
+      expertInfo: { severity: 'note', group: 'Response', message: 'DNS: the name does not exist (NXDOMAIN)' },
     });
   }
 
-  return queries.length ? [{ name: 'Queries', value: '', children: queries }] : [];
-}
-
-/**
- * The DNS protocol layer for the detail tree.
- *
- * Separate from dissectDns, which produces only the packet-list Info string -
- * until now DNS contributed no tree at all, so there was nothing for the flag
- * bits to hang off.
- */
-export function buildDnsLayer(bytes: Uint8Array, messageStart: number): ProtocolLayer | null {
-  if (messageStart + 12 > bytes.length) return null;
-
-  const transactionId = (bytes[messageStart] << 8) | bytes[messageStart + 1];
-  const flags = (bytes[messageStart + 2] << 8) | bytes[messageStart + 3];
-  const opcode = (flags >> 11) & 0x0f;
-  if (OPCODE_NAMES[opcode] === undefined) return null;
-
-  const isResponse = (flags & 0x8000) !== 0;
-  const counts = [4, 6, 8, 10].map(o => (bytes[messageStart + o] << 8) | bytes[messageStart + o + 1]);
-  const rcodeName = isResponse ? RCODE_NAMES[flags & 0x0f] : undefined;
+  // What passive name resolution consumes: every name that mapped to an
+  // address, including the ones a CNAME chain ends at.
+  const resolved = answers
+    .filter((r) => r.addresses.length > 0)
+    .map((r) => ({ name: r.name, addresses: r.addresses }));
 
   return {
-    name: 'Domain Name System',
-    summary: `Domain Name System (${isResponse ? 'response' : 'query'})`,
-    rawBytesRange: [messageStart, bytes.length - 1],
-    fields: [
-      { name: 'Transaction ID', value: `0x${transactionId.toString(16).padStart(4, '0')}`, rawBytesRange: [messageStart, messageStart + 1] },
-      {
-        name: 'Flags',
-        value: `0x${flags.toString(16).padStart(4, '0')} ${OPCODE_NAMES[opcode]}${isResponse ? ' response' : ''}${rcodeName ? `, ${rcodeName}` : ''}`,
-        rawBytesRange: [messageStart + 2, messageStart + 3],
-        children: dnsFlagFields(flags, messageStart + 2),
-      },
-      { name: 'Questions', value: counts[0], rawBytesRange: [messageStart + 4, messageStart + 5] },
-      { name: 'Answer RRs', value: counts[1], rawBytesRange: [messageStart + 6, messageStart + 7] },
-      { name: 'Authority RRs', value: counts[2], rawBytesRange: [messageStart + 8, messageStart + 9] },
-      { name: 'Additional RRs', value: counts[3], rawBytesRange: [messageStart + 10, messageStart + 11] },
-      ...dnsQuerySection(bytes, messageStart, counts[0]),
-    ],
+    layer: {
+      name: 'Domain Name System',
+      summary: `Domain Name System (${msg.isResponse ? 'response' : 'query'})`,
+      rawBytesRange: [messageStart, messageEnd - 1],
+      fields: [
+        { name: 'Transaction ID', value: `0x${msg.transactionId.toString(16).padStart(4, '0')}`, rawBytesRange: [messageStart, messageStart + 1], abbrev: 'dns.id' },
+        {
+          name: 'Flags',
+          value: `0x${msg.flags.toString(16).padStart(4, '0')} ${DNS_OPCODE_NAMES[msg.opcode]}${msg.isResponse ? ' response' : ''}${rcodeName ? `, ${rcodeName}` : ''}`,
+          rawBytesRange: [messageStart + 2, messageStart + 3],
+          abbrev: 'dns.flags',
+          children: dnsFlagFields(msg.flags, messageStart + 2),
+        },
+        { name: 'Questions', value: msg.counts[0], rawBytesRange: [messageStart + 4, messageStart + 5], abbrev: 'dns.count.queries' },
+        { name: 'Answer RRs', value: msg.counts[1], rawBytesRange: [messageStart + 6, messageStart + 7], abbrev: 'dns.count.answers' },
+        { name: 'Authority RRs', value: msg.counts[2], rawBytesRange: [messageStart + 8, messageStart + 9] },
+        { name: 'Additional RRs', value: msg.counts[3], rawBytesRange: [messageStart + 10, messageStart + 11] },
+        ...querySection(msg),
+        ...recordSection('Answers', answers),
+        ...recordSection('Authoritative nameservers', authority),
+        ...recordSection('Additional records', additional),
+        ...generated,
+      ],
+    },
+    fields,
+    resolved,
+    questionName: msg.questions[0]?.name,
+    isResponse: msg.isResponse,
+    transactionId: msg.transactionId,
+    rcode: msg.rcode,
+    nxdomain: msg.isResponse && msg.rcode === 3,
   };
-}
-
-/**
- * Builds the Info string for a DNS message starting at `messageStart`.
- * Returns null when the bytes don't parse as DNS, so the caller can fall back
- * to a plain UDP summary.
- */
-export function dissectDns(bytes: Uint8Array, messageStart: number): string | null {
-  if (messageStart + 12 > bytes.length) return null;
-
-  const transactionId = (bytes[messageStart] << 8) | bytes[messageStart + 1];
-  const flags = (bytes[messageStart + 2] << 8) | bytes[messageStart + 3];
-  const isResponse = (flags & 0x8000) !== 0;
-  const opcode = (flags >> 11) & 0x0f;
-  const rcode = flags & 0x0f;
-  const questionCount = (bytes[messageStart + 4] << 8) | bytes[messageStart + 5];
-  const answerCount = (bytes[messageStart + 6] << 8) | bytes[messageStart + 7];
-  const authorityCount = (bytes[messageStart + 8] << 8) | bytes[messageStart + 9];
-
-  const opcodeName = OPCODE_NAMES[opcode];
-  if (opcodeName === undefined) return null;
-
-  const parts = [opcodeName + (isResponse ? ' response' : ''), `0x${transactionId.toString(16).padStart(4, '0')}`];
-
-  const rcodeName = isResponse ? RCODE_NAMES[rcode] : undefined;
-  if (rcodeName) parts.push(rcodeName);
-
-  let cursor = messageStart + 12;
-
-  // The question section, repeated verbatim by the response.
-  for (let i = 0; i < questionCount && cursor < bytes.length; i++) {
-    const { name, nextOffset } = readName(bytes, messageStart, cursor);
-    cursor = nextOffset;
-    if (cursor + 4 > bytes.length) return null;
-    const qtype = (bytes[cursor] << 8) | bytes[cursor + 1];
-    cursor += 4;
-    parts.push(typeName(qtype), name);
-  }
-
-  // Answers, then authority records - a negative answer carries its SOA in the
-  // authority section, and the reference analyzer still shows it.
-  for (let i = 0; i < answerCount + authorityCount && cursor < bytes.length; i++) {
-    const { nextOffset } = readName(bytes, messageStart, cursor);
-    cursor = nextOffset;
-    if (cursor + 10 > bytes.length) break;
-    const type = (bytes[cursor] << 8) | bytes[cursor + 1];
-    const rdataLength = (bytes[cursor + 8] << 8) | bytes[cursor + 9];
-    const rdataStart = cursor + 10;
-    cursor = rdataStart + rdataLength;
-
-    // OPT is the EDNS pseudo-record carrying transport hints, not an answer.
-    if (type === 41) continue;
-
-    const rdata = formatRdata(bytes, messageStart, type, rdataStart, rdataLength);
-    if (rdata) parts.push(typeName(type), rdata);
-  }
-
-  return parts.join(' ');
 }

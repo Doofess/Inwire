@@ -1,0 +1,89 @@
+/**
+ * Assertion tests for the first-run tour's anchors.
+ *
+ *   npx tsx scripts/accessibility/tour.ts
+ *
+ * A tour step finds its target with `document.querySelector('[data-tour="..."]')`.
+ * That is the right trade - the alternative threads a ref from the step list
+ * down into the header, the packet pane and the details pane, putting a
+ * tour-shaped prop on four component signatures that have nothing to do with
+ * the tour - but it buys the flexibility with a string that the compiler cannot
+ * check.
+ *
+ * So this checks it. Someone edits the header, the attribute goes with the
+ * rewrite, and nothing anywhere raises a word: the step quietly measures null,
+ * the overlay advances past it, and the one part of the app written for people
+ * who have never seen it before is a step shorter for everybody. That is the
+ * bug this file exists for.
+ *
+ * Both directions matter. An anchor with no attribute is a dead step; an
+ * attribute no step claims is a marker left behind by a deleted step, which is
+ * the kind of thing that gets "tidied up" by someone who cannot tell whether it
+ * is load-bearing.
+ */
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { TOUR_STEPS } from '../../src/components/tour/tourSteps';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+let failures = 0;
+function check(name: string, actual: unknown, expected: unknown) {
+  const pass = JSON.stringify(actual) === JSON.stringify(expected);
+  if (!pass) failures++;
+  console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}`);
+  if (!pass) {
+    console.log(`        expected ${JSON.stringify(expected)}`);
+    console.log(`        actual   ${JSON.stringify(actual)}`);
+  }
+}
+
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...walk(full));
+    else if (/\.tsx?$/.test(entry)) out.push(full);
+  }
+  return out;
+}
+
+// The tour's own files are excluded from the scan. `TourOverlay` builds the
+// selector and `tourSteps` documents it, so counting either as a placed anchor
+// would let the tour satisfy itself.
+const TOUR_DIR = join(root, 'src', 'components', 'tour');
+const sources = walk(join(root, 'src')).filter((f) => !f.startsWith(TOUR_DIR));
+
+const placed = new Set<string>();
+for (const file of sources) {
+  for (const m of readFileSync(file, 'utf8').matchAll(/data-tour="([a-z-]+)"/g)) {
+    placed.add(m[1]);
+  }
+}
+
+const wanted = TOUR_STEPS.map((s) => s.anchor);
+
+check('every tour step has a data-tour anchor in the app',
+  wanted.filter((a) => !placed.has(a)), []);
+
+check('...and every data-tour anchor is claimed by a step',
+  [...placed].filter((a) => !wanted.includes(a as (typeof wanted)[number])), []);
+
+// --- The steps themselves ----------------------------------------------------
+
+check('the tour starts on the capture driver - nothing else works without it',
+  TOUR_STEPS[0]?.anchor, 'menu');
+
+check('no step is listed twice', wanted.length, new Set(wanted).size);
+
+check('every step says something',
+  TOUR_STEPS.filter((s) => !s.title.trim() || s.body.trim().length < 20).map((s) => s.anchor), []);
+
+console.log();
+if (failures) {
+  console.log(`${failures} check(s) FAILED`);
+  process.exit(1);
+}
+console.log('All tour checks passed.');
+process.exit(0);

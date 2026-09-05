@@ -1,4 +1,5 @@
 import React from 'react';
+import type { StreamTarget } from '../../services/followStream';
 import {
   TbClock,
   TbRuler2,
@@ -41,13 +42,13 @@ interface FrameMetaRailProps {
   summary: FrameSummary;
   colorRuleName?: string;
   related: RelatedFrame[];
-  streamId?: number;
+  streamTarget: StreamTarget | null;
   hiddenByFilter: boolean;
   /** The go-to-frame control, passed in so the rail owns no lookup logic. */
   frameBox: React.ReactNode;
   collapsed: boolean;
   onToggleCollapse: () => void;
-  onFollowStream: (streamId: number) => void;
+  onFollowStream: (target: StreamTarget) => void;
   onShowFrame: (frameNumber: number) => void;
   /**
    * Width, background, border and positioning, supplied by the caller.
@@ -117,7 +118,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
   summary,
   colorRuleName,
   related,
-  streamId,
+  streamTarget,
   hiddenByFilter,
   frameBox,
   collapsed,
@@ -152,7 +153,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
           {hasAnalysis && (
             <TbAlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
           )}
-          {(streamId !== undefined || related.length > 0) && (
+          {(streamTarget !== null || related.length > 0) && (
             <TbArrowRight className="w-3.5 h-3.5" />
           )}
         </div>
@@ -235,10 +236,16 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
         <MetaGroup label="Go to" icon={TbArrowRight}>
           {frameBox}
 
-          {streamId !== undefined && (
-            <RailLink onClick={() => onFollowStream(streamId)} title="Follow this TCP stream">
+          {streamTarget !== null && (
+            <RailLink
+              onClick={() => onFollowStream(streamTarget)}
+              title={`Follow this ${streamTarget.kind.toUpperCase()} stream`}
+            >
               <TbMessage className="w-3 h-3 shrink-0" />
-              <span className="truncate">Stream {streamId}</span>
+              <span className="truncate">
+                {streamTarget.kind.toUpperCase()} stream
+                {streamTarget.streamId !== undefined ? ` ${streamTarget.streamId}` : ''}
+              </span>
             </RailLink>
           )}
 

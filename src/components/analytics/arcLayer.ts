@@ -43,8 +43,16 @@ export interface Arc {
  *     how MapLibre elevates terrain and exactly what an arc needs.
  *   - `globeComputeClippingZ` - the horizon plane written into clip Z, so
  *     geometry on the far side of the planet is clipped rather than drawn
- *     through it. MapLibre never renders the globe into the depth buffer, so
- *     without this an arc behind the Earth draws in front of it.
+ *     through it.
+ *
+ *     This layer does NOT rely on the depth buffer to hide those arcs, and it
+ *     is worth being precise about why. MapLibre 6.5.0 does run a globe-surface
+ *     depth prepass, but the call is guarded `&& !this.style.map.terrain` -
+ *     turning terrain on substitutes the terrain mesh's own depth writes, which
+ *     cover only the tiles that have loaded. This map has had terrain both on
+ *     and off within a week, so depending on the prepass would have made
+ *     occlusion a function of a basemap decision made three files away.
+ *     Clipping in the shader is independent of all of it.
  *   - the mercator fallback blend - globe falls back to a flat projection as
  *     zoom increases, and `u_projection_transition` drives the crossfade.
  *     Ignoring it is what makes a custom layer visibly detach from the map
@@ -208,7 +216,7 @@ export function toMercator(lng: number, lat: number): [number, number] {
 }
 
 export class ArcLayer implements CustomLayerInterface {
-  readonly id = 'netview-arcs';
+  readonly id = 'inwire-arcs';
   readonly type = 'custom' as const;
   readonly renderingMode = '3d' as const;
 
@@ -268,6 +276,15 @@ export class ArcLayer implements CustomLayerInterface {
    * of a busy capture.
    */
   setArcs(arcs: Arc[]): void {
+    // Same array, already built: nothing to do. This guard is worth more than
+    // its size suggests. `GeoMap` calls this from `moveend` as well as from
+    // its 600 ms throttle, and `moveend` fires on every pan, every wheel-zoom
+    // and every `map.resize()` - each of which used to allocate a fresh
+    // ~800 KB Float32Array, re-sample every segment with a sin and a log, and
+    // re-upload the lot, for geometry that had not changed by a byte. The
+    // caller holds one array per set of routes and hands the same reference
+    // back until the routes change, so identity is exactly the right test.
+    if (arcs === this.arcs && this.vertices.length > 0) return;
     this.arcs = arcs;
     this.build();
     this.dirty = true;

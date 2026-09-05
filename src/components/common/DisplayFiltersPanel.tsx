@@ -469,7 +469,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
           <button
             onClick={() => setConfirmRestore(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent text-xs font-medium transition-colors cursor-pointer"
-            title="Discard your changes and restore the filters NetView ships with"
+            title="Discard your changes and restore the filters Inwire ships with"
           >
             <TbRestore className="w-3.5 h-3.5" />
             Restore defaults

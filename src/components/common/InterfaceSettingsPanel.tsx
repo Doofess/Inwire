@@ -4,7 +4,6 @@ import { Segmented } from '../ui/segmented';
 import {
   layoutStore,
   minimapStore,
-  motionStore,
   packetListStore,
   performanceStore,
   nameResolutionStore,
@@ -12,12 +11,12 @@ import {
   type DashboardRefresh,
   type FollowMode,
   type ListDensity,
-  type MotionSetting,
   type PaneArrangement,
 } from '../../services/interfacePrefs';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
 import { dashboardStore, type DashboardMode } from '../../services/dashboardPrefs';
 import { DashboardWidgetList } from './DashboardWidgetList';
+import { Section, SettingRow } from './settingsLayout';
 
 /**
  * Settings -> Interface: how the app looks and behaves as a UI.
@@ -35,55 +34,6 @@ import { DashboardWidgetList } from './DashboardWidgetList';
  * here: this modal COVERS most of what these settings control, so the only way
  * to see a layout change is for it to have happened already.
  */
-
-const SECTION_CLASS = 'text-[10px] font-bold uppercase tracking-widest text-muted-foreground';
-
-/**
- * One setting: name, explanation, control.
- *
- * Deliberately local rather than in components/common. It has one consumer, and
- * a file in a shared directory announces itself as a shared primitive; this can
- * move the day something else wants it.
- */
-function SettingRow({
-  label,
-  description,
-  htmlFor,
-  children,
-}: {
-  label: string;
-  description?: string;
-  /** Set when the control is a single focusable element that can own the label. */
-  htmlFor?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-6 py-2.5">
-      <div className="min-w-0">
-        {htmlFor ? (
-          <label htmlFor={htmlFor} className="text-xs font-semibold text-foreground cursor-pointer">
-            {label}
-          </label>
-        ) : (
-          <div className="text-xs font-semibold text-foreground">{label}</div>
-        )}
-        {description && (
-          <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">{description}</p>
-        )}
-      </div>
-      <div className="shrink-0 pt-0.5">{children}</div>
-    </div>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="mb-5">
-      <h3 className={SECTION_CLASS}>{title}</h3>
-      <div className="mt-1 divide-y divide-border/60">{children}</div>
-    </section>
-  );
-}
 
 const ARRANGEMENT_OPTIONS = [
   { value: 'side-by-side' as PaneArrangement, label: 'Side by side' },
@@ -115,6 +65,7 @@ const BUFFER_OPTIONS = [
   { value: '10000' as const, label: '10k' },
   { value: '25000' as const, label: '25k' },
   { value: '50000' as const, label: '50k' },
+  { value: '100000' as const, label: '100k' },
 ];
 
 const DASHBOARD_MODE_OPTIONS = [
@@ -123,18 +74,21 @@ const DASHBOARD_MODE_OPTIONS = [
   { value: 'hidden' as DashboardMode, label: 'Hidden' },
 ];
 
-const MOTION_OPTIONS = [
-  { value: 'system' as MotionSetting, label: 'Follow system' },
-  { value: 'always' as MotionSetting, label: 'Always' },
-  { value: 'never' as MotionSetting, label: 'Never' },
-];
+/**
+ * Animations live in the Accessibility tab now, not here.
+ *
+ * `motionStore` is still listed in INTERFACE_STORES and is still reset by this
+ * tab's Reset button - the setting belongs to the interface, the CONTROL
+ * belongs beside the other things somebody changes because the default does not
+ * work for them. Only the row moved; the key and the stored value did not, so
+ * nobody's choice was reset by the move.
+ */
 
 export const InterfaceSettingsPanel: React.FC = () => {
   const [layout, patchLayout] = usePreferenceStore(layoutStore);
   const [list, patchList] = usePreferenceStore(packetListStore);
   const [minimap, setMinimap] = usePreferenceValue(minimapStore);
   const [perf, patchPerf] = usePreferenceStore(performanceStore);
-  const [motion, setMotion] = usePreferenceValue(motionStore);
   const [dashboard, patchDashboard] = usePreferenceStore(dashboardStore);
   const [nameResolution, patchNameResolution] = usePreferenceStore(nameResolutionStore);
 
@@ -234,27 +188,13 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Buffer size"
-          description="How many packets are kept before the oldest are dropped. A smaller buffer makes every calculation in the app proportionally cheaper."
+          description="How many packets are kept before the oldest are dropped. A smaller buffer makes every calculation in the app proportionally cheaper; 100k is about 180 MB of memory."
         >
           <Segmented
             ariaLabel="Buffer size"
-            value={String(perf.packetBufferCap) as '10000' | '25000' | '50000'}
+            value={String(perf.packetBufferCap) as '10000' | '25000' | '50000' | '100000'}
             onValueChange={(v) => patchPerf({ packetBufferCap: Number(v) })}
             options={BUFFER_OPTIONS}
-          />
-        </SettingRow>
-      </Section>
-
-      <Section title="Motion">
-        <SettingRow
-          label="Animations"
-          description="Pulsing map markers, alert indicators, map camera movement and panel transitions."
-        >
-          <Segmented
-            ariaLabel="Animations"
-            value={motion}
-            onValueChange={setMotion}
-            options={MOTION_OPTIONS}
           />
         </SettingRow>
       </Section>
@@ -267,7 +207,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Locate addresses"
-          description="Sends the public IP addresses in your capture to get.geojs.io, in batches, as they first appear - and asks it once per launch where this machine is. Without this the map has nothing to plot."
+          description="Sends the public IP addresses in your capture to get.geojs.io, in batches, as they first appear - and asks it once per launch where this machine is. Also lets the ISP panel ask ipapi.co about this connection. Without this the map has nothing to plot."
           htmlFor="setting-geoip"
         >
           <Switch
@@ -290,7 +230,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
         </SettingRow>
 
         <p className="text-[11px] text-muted-foreground pt-2 leading-snug">
-          MAC vendor names come from a table built into NetView. Nothing is sent for those, and all
+          MAC vendor names come from a table built into Inwire. Nothing is sent for those, and all
           protocol dissection happens on this machine.
         </p>
       </Section>

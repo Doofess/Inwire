@@ -22,17 +22,60 @@ Start the agent first (as Administrator), then:
 """
 import asyncio
 import json
+import os
 import sys
 import time
 
 import websockets
 
+import config
+
 AGENT_URL = "ws://localhost:8999"
 
 
+def read_pairing_token():
+    """The token this agent expects, if this process can read it.
+
+    Tried in the order that fails most usefully: an argument, then the
+    environment, then config.json itself - which is readable by an
+    administrator and, deliberately, by nobody else. Running this script
+    elevated is the normal case, since it is verifying a service.
+    """
+    for index, arg in enumerate(sys.argv[1:]):
+        if arg == "--token" and index + 2 <= len(sys.argv) - 1:
+            return sys.argv[index + 2]
+    from_env = os.environ.get("INWIRE_TOKEN")
+    if from_env:
+        return from_env
+    try:
+        return config.load_config().get("token")
+    except Exception:
+        return None
+
+
 async def recv_json(ws, timeout=3):
-    raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-    return json.loads(raw)
+    """Reads the next *control* message, skipping packet batches.
+
+    Since 3.2.0 captured frames arrive as binary WebSocket messages, not JSON
+    (docs/decisions/0005). This script predated that and called json.loads on
+    whatever turned up, so the first frame captured during the run killed it
+    with a UnicodeDecodeError - which is what a verification tool doing its job
+    should never look like.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        if isinstance(raw, (bytes, bytearray)):
+            BINARY_FRAMES.append(len(raw))
+            continue
+        return json.loads(raw)
+
+
+# Packet batches seen during the run, for the "packets actually flow" check.
+BINARY_FRAMES = []
 
 
 async def recv_type(ws, wanted, timeout=3):
@@ -75,6 +118,19 @@ async def main():
             check("hello lists at least one interface", len(hello.get("interfaces", [])) > 0)
         except asyncio.TimeoutError:
             check("hello received within timeout", False)
+            hello = {}
+
+        # Pairing, when this agent has a token. Everything below is a command,
+        # and an unpaired connection is answered with auth_required and nothing
+        # else - so without this the rest of the script would report the whole
+        # protocol as broken.
+        if hello.get("authRequired"):
+            token = read_pairing_token()
+            check("a pairing token is available to this process", bool(token))
+            if token:
+                await ws.send(json.dumps({"type": "authenticate", "token": token}))
+                paired = await recv_type(ws, "state")
+                check("the token is accepted", paired.get("type") == "state")
 
         await ws.send(json.dumps({"type": "start_capture"}))
         # Real packets may already be queued ahead of the state message once
@@ -83,6 +139,17 @@ async def main():
         state = await recv_type(ws, "state")
         check("state after start_capture", state.get("type") == "state")
         check("state is sniffing after start_capture", state.get("state") == "sniffing")
+
+        # 3.1.0: while sniffing the agent reports what was dropped, once a
+        # second, whether or not any packet arrived.
+        try:
+            stats = await recv_type(ws, "capture_stats", timeout=3)
+            check("capture_stats arrives while sniffing", stats.get("type") == "capture_stats")
+            check("capture_stats carries the agent's drop count", isinstance(stats.get("droppedAgent"), int))
+            check("capture_stats carries a sequence high-water mark", isinstance(stats.get("seqHigh"), int))
+            check("capture_stats lists interfaces", isinstance(stats.get("interfaces"), list))
+        except asyncio.TimeoutError:
+            check("capture_stats arrives while sniffing", False)
 
         await ws.send(json.dumps({"type": "stop_capture"}))
         state2 = await recv_type(ws, "state")
@@ -135,6 +202,11 @@ async def main():
             restored_state2 = await recv_type(ws, "state")
             check("state message received after re-restoring full interface selection", restored_state2.get("type") == "state")
             print(f"      interface selection restored to all {len(all_interfaces)} interface(s)")
+
+        # --- 3.1.0: an unknown command is named, not swallowed ---
+        await ws.send(json.dumps({"type": "teleport"}))
+        unknown = await recv_type(ws, "error")
+        check("an unknown command is answered with unknown_command", unknown.get("code") == "unknown_command")
 
         # --- log streaming ---
         await ws.send(json.dumps({"type": "subscribe_logs"}))

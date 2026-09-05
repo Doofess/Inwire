@@ -2,6 +2,20 @@ import React, { useState } from 'react';
 import { Packet, ProtocolField } from '../../types/packet';
 import { TbChevronRight, TbChevronDown, TbCopy, TbCheck } from 'react-icons/tb';
 import { renderBitfield } from '../../lib/bitfield';
+import { SEVERITY_TEXT } from '../../services/expertInfo';
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuLabel,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubTrigger,
+  ContextMenuSubContent,
+} from '../ui/context-menu';
+import { COMBINE_LABELS, combineFilter, fieldTerm, type FilterCombine } from '../../services/filter/fromField';
+import { fieldDef } from '../../services/dissect/fieldRegistry';
 
 /**
  * The dissected protocol tree itself, with no surrounding chrome.
@@ -13,14 +27,11 @@ import { renderBitfield } from '../../lib/bitfield';
  * cross-frame link behaves identically wherever the tree is shown.
  */
 
-// Expert-info severities reuse the palette the anomaly banners use, so one
-// severity means one colour across the whole app.
-const EXPERT_SEVERITY_CLASS: Record<string, string> = {
-  error: 'text-rose-600 dark:text-rose-400',
-  warn: 'text-amber-600 dark:text-amber-400',
-  note: 'text-sky-600 dark:text-sky-400',
-  chat: 'text-muted-foreground',
-};
+// The severity palette lives in services/expertInfo, so one level means one
+// colour in the tree, in the packet list's severity dot and in the Expert
+// Information tab - which is the point of having unified the two severity
+// vocabularies at all.
+const EXPERT_SEVERITY_CLASS = SEVERITY_TEXT;
 
 interface ProtocolTreeViewProps {
   packet: Packet;
@@ -28,7 +39,28 @@ interface ProtocolTreeViewProps {
   activeByteRange: [number, number] | null;
   /** Follows a cross-packet reference such as `[Response In: 11]`. */
   onSelectFrame?: (frameNumber: number) => void;
+  /**
+   * Puts an expression in the filter bar; `apply` also runs it.
+   *
+   * Omit and the filter half of the row menu is not offered - the tree in a
+   * dialog that has no filter bar behind it would otherwise have a menu item
+   * whose effect nothing on screen shows.
+   */
+  onFieldFilter?: (expression: string, apply: boolean) => void;
+  /** What is in the filter bar now, so "…and Selected" can build on it. */
+  currentFilter?: string;
+  /** Adds a registry field as a column in the packet list. */
+  onAddColumn?: (abbrev: string) => void;
+  /** The row under the pointer, for the pane header to name. */
+  onHoverField?: (abbrev: string | null) => void;
   className?: string;
+}
+
+/** The row a right-click landed on, and what can be done with it. */
+interface MenuTarget {
+  field: ProtocolField;
+  /** The `field == value` term, or null when the row carries no filterable value. */
+  term: string | null;
 }
 
 export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
@@ -36,6 +68,10 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
   onHoverByteRange,
   activeByteRange,
   onSelectFrame,
+  onFieldFilter,
+  currentFilter = '',
+  onAddColumn,
+  onHoverField,
   className,
 }) => {
   const [expandedLayers, setExpandedLayers] = useState<Record<string, boolean>>({
@@ -48,6 +84,12 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
   // Tracking what is CLOSED rather than what is open keeps the default
   // expanded, which is how the reference analyzer opens a packet.
   const [collapsedPaths, setCollapsedPaths] = useState<Record<string, boolean>>({});
+  // One menu for the whole tree, the way the packet list has one for its whole
+  // header row: Radix's trigger already positions at the pointer and owns
+  // Escape and focus return, and a tree can be hundreds of rows deep. Which
+  // row was right-clicked is the only thing left to record, and the event
+  // knows that.
+  const [menuTarget, setMenuTarget] = useState<MenuTarget | null>(null);
 
   const togglePath = (path: string) => setCollapsedPaths(prev => ({ ...prev, [path]: !prev[path] }));
   const toggleLayer = (layerIndex: number) =>
@@ -58,6 +100,21 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
     setCopiedField(name);
     setTimeout(() => setCopiedField(null), 1500);
   };
+
+  const applyTerm = (how: FilterCombine, apply: boolean) => {
+    if (!menuTarget?.term || !onFieldFilter) return;
+    onFieldFilter(combineFilter(currentFilter, menuTarget.term, how), apply);
+  };
+
+  /**
+   * A column is offered only for a field the registry marks as offerable
+   * (`FieldDef.column`). Every field can be filtered on; not every field is
+   * worth a column of its own, and the registry is where that judgement is
+   * recorded rather than being made again here.
+   */
+  const columnAbbrev = menuTarget?.field.abbrev;
+  const columnDef = columnAbbrev ? fieldDef(columnAbbrev) : undefined;
+  const canAddColumn = !!onAddColumn && !!columnDef?.column;
 
   const renderField = (
     field: ProtocolField,
@@ -98,8 +155,22 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
     return (
       <div key={key}>
         <div
-          onMouseEnter={e => { e.stopPropagation(); onHoverByteRange(hoverRange); }}
-          onMouseLeave={e => { e.stopPropagation(); onHoverByteRange(null); }}
+          onMouseEnter={e => {
+            e.stopPropagation();
+            onHoverByteRange(hoverRange);
+            onHoverField?.(field.abbrev ?? null);
+          }}
+          onMouseLeave={e => {
+            e.stopPropagation();
+            onHoverByteRange(null);
+            onHoverField?.(null);
+          }}
+          // Deliberately NOT stopPropagation, unlike the hover handlers above:
+          // the menu is one Radix trigger wrapping the whole tree, so the
+          // event has to reach it. This only records which row it passed
+          // through on the way - the innermost row runs first, so a nested
+          // field wins over its parent.
+          onContextMenu={() => setMenuTarget({ field, term: fieldTerm(packet, field.abbrev) })}
           style={indentStyle}
           className={`flex items-center justify-between px-2 py-0.5 rounded group transition-colors ${
             isFieldActive
@@ -182,7 +253,22 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
     );
   };
 
-  return (
+  const filterMenu = (apply: boolean) => (
+    <ContextMenuSub>
+      <ContextMenuSubTrigger disabled={!menuTarget?.term}>
+        {apply ? 'Apply as Filter' : 'Prepare as Filter'}
+      </ContextMenuSubTrigger>
+      <ContextMenuSubContent>
+        {(Object.keys(COMBINE_LABELS) as FilterCombine[]).map(how => (
+          <ContextMenuItem key={how} onSelect={() => applyTerm(how, apply)}>
+            {COMBINE_LABELS[how]}
+          </ContextMenuItem>
+        ))}
+      </ContextMenuSubContent>
+    </ContextMenuSub>
+  );
+
+  const tree = (
     <div className={`space-y-1.5 font-mono text-xs ${className ?? ''}`}>
       {packet.layers.map((layer, idx) => {
         const isExpanded = expandedLayers[idx] ?? true;
@@ -232,5 +318,49 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
         );
       })}
     </div>
+  );
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{tree}</ContextMenuTrigger>
+      {menuTarget && (
+        <ContextMenuContent className="w-56 font-mono text-xs">
+          {/* The row's filter name, not its display label: that is the thing
+              every item below acts on, and it is the one piece of the row that
+              is not already on screen. */}
+          <ContextMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground truncate">
+            {menuTarget.field.abbrev ?? menuTarget.field.name}
+          </ContextMenuLabel>
+
+          {onFieldFilter && filterMenu(true)}
+          {onFieldFilter && filterMenu(false)}
+
+          <ContextMenuItem
+            disabled={!canAddColumn}
+            onSelect={() => columnAbbrev && onAddColumn?.(columnAbbrev)}
+          >
+            Apply as Column
+          </ContextMenuItem>
+
+          <ContextMenuSeparator />
+
+          <ContextMenuItem onSelect={() => navigator.clipboard.writeText(String(menuTarget.field.value))}>
+            Copy Value
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={!menuTarget.field.abbrev}
+            onSelect={() => menuTarget.field.abbrev && navigator.clipboard.writeText(menuTarget.field.abbrev)}
+          >
+            Copy Field Name
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={!menuTarget.term}
+            onSelect={() => menuTarget.term && navigator.clipboard.writeText(menuTarget.term)}
+          >
+            Copy as Filter
+          </ContextMenuItem>
+        </ContextMenuContent>
+      )}
+    </ContextMenu>
   );
 };

@@ -11,12 +11,11 @@
  * it on demand. Run it whenever a capture shows raw MACs where a vendor name
  * is expected, then commit the regenerated file.
  *
- * Note on short names: IEEE publishes only the full legal organization name
- * ("GIGA-BYTE TECHNOLOGY CO.,LTD."). The <=12-character abbreviations used in
- * the column are derived here by stripping non-alphanumerics and truncating,
- * which is close to - but not always identical to - the curated abbreviation
- * other analyzers show. Entries already present in the checked-in table are
- * preserved, so hand-corrected names are never clobbered by a regeneration.
+ * Note on short names: see shortName() below. They are derived from the
+ * registry's legal names by this project's own rule, not copied from any
+ * analyzer's curated list, so they agree with other tools usually rather than
+ * always. Entries already present in the checked-in table are preserved, so
+ * hand-corrected names are never clobbered by a regeneration.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -25,9 +24,31 @@ import { fileURLToPath } from 'node:url';
 const IEEE_MAL_CSV = 'https://standards-oui.ieee.org/oui/oui.csv';
 const MACVENDORS = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'services', 'macVendors.ts');
 
-/** Strips punctuation and truncates, e.g. "Sagemcom Broadband SAS" -> "SagemcomBroa". */
+/**
+ * IEEE publishes only the full legal name ("Intel Corporate", "GIGA-BYTE
+ * TECHNOLOGY CO.,LTD."). The column wants something a person recognises in
+ * twelve characters, so the legal-form words every registry entry carries are
+ * dropped first and what remains is packed and truncated: "Intel Corporate"
+ * -> "Intel", "Sagemcom Broadband SAS" -> "SagemcomBroa".
+ *
+ * Derived here from the public registry rather than taken from any analyzer's
+ * curated list - those files are separately licensed, and this project ships
+ * under MIT. Names therefore agree with other tools usually, not always.
+ */
+const LEGAL_FORM_WORDS = new Set([
+  'corporate', 'corporation', 'corp', 'inc', 'incorporated', 'ltd', 'limited', 'llc', 'lp', 'plc',
+  'co', 'company', 'gmbh', 'ag', 'kg', 'sas', 'sa', 'srl', 'spa', 'bv', 'nv', 'ab', 'as', 'oy',
+  'pty', 'pte', 'sdn', 'bhd', 'kk', 'aps', 'sl', 'the', 'and', 'of',
+]);
+
 function shortName(organization: string): string {
-  return organization.replace(/[^A-Za-z0-9]/g, '').slice(0, 12);
+  const words = organization
+    .replace(/[.,]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((w) => !LEGAL_FORM_WORDS.has(w.toLowerCase().replace(/[^a-z]/g, '')));
+  const packed = (words.length > 0 ? words : [organization]).join('').replace(/[^A-Za-z0-9]/g, '');
+  return packed.slice(0, 12);
 }
 
 /** Minimal RFC 4180 row splitter - IEEE quotes organization names containing commas. */

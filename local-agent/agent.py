@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NetView Agent
+Inwire Agent
 
 Captures live packet metadata with Scapy and streams it as JSON to any
 connected browser tab over a local WebSocket. This never leaves the
@@ -12,7 +12,7 @@ Run elevated:
 """
 
 import asyncio
-import base64
+import collections
 import ctypes
 import json
 import logging
@@ -24,6 +24,7 @@ import time
 from http import HTTPStatus
 
 import config
+import packet_batch
 
 
 def _report_missing_dependency(name: str, install_hint: str) -> None:
@@ -34,14 +35,31 @@ def _report_missing_dependency(name: str, install_hint: str) -> None:
     if sys.stderr is not None:
         print(message, file=sys.stderr)
     try:
-        logging.getLogger("netview").critical(message)
+        logging.getLogger("inwire").critical(message)
     except Exception:
         pass
 
 
 try:
-    from scapy.all import sniff, ARP, Dot3, Ether, IP, IPv6, TCP, UDP
-    from scapy.all import conf as scapy_conf
+    # Scapy is a capture *driver* here and nothing else. Since 3.2.0 the agent
+    # sends raw frames and the browser dissects them, so the protocol classes
+    # this used to import - ARP, Ether, IP, IPv6, TCP, UDP - had no reader left;
+    # they were still being loaded, along with the other seventeen hundred.
+    #
+    # `load_layers` has to be set before `scapy.all` is touched, because
+    # importing it is what loads them. Three are kept: `l2` for the link layer
+    # (Ethernet, and the Loopback header a DLT_NULL adapter carries), `inet` and
+    # `inet6` for the raw-IP link types a VPN or tunnel adapter reports, since
+    # the capture socket looks up a class for the link type it is handed and a
+    # missing one is an error rather than a graceful degradation.
+    #
+    # Measured on this machine: 65.6 MB and 0.33 s of import time become 39.9 MB
+    # and 0.17 s. That memory is resident for the life of a service that spends
+    # almost all of it idle.
+    from scapy.config import conf as scapy_conf
+    scapy_conf.load_layers = ["l2", "inet", "inet6"]
+    from scapy.all import sniff  # noqa: E402  (must follow load_layers)
+    from scapy.data import ETH_P_ALL
 except ImportError:
     _report_missing_dependency("scapy", "pip install scapy")
     sys.exit(1)
@@ -54,7 +72,7 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "2.6.0"
+AGENT_VERSION = "3.4.1"
 
 # How often per-interface traffic rates are sampled while a client has the
 # capture-interface picker open. 500ms is fast enough that the sparkline
@@ -62,24 +80,62 @@ AGENT_VERSION = "2.6.0"
 # stays invisible in the agent's CPU use.
 INTERFACE_STATS_INTERVAL_SECONDS = 0.5
 
-# The most packet sends that may be queued onto the event loop at once. Past
-# this, frames are dropped instead of queued (see AgentServer.broadcast). A
-# few hundred is roughly a quarter-second of a busy interface: enough to ride
-# out a normal render hitch on the client, far too little to accumulate into
-# the gigabyte-scale backlog that previously wedged the agent.
-MAX_PENDING_SENDS = 400
+# Packet batching (packet_batch.py). Captured frames are queued by the sniffer
+# threads and drained by one pump task, so the event loop sees a batch every
+# PACKET_BATCH_INTERVAL_SECONDS rather than a coroutine per frame - which is
+# what the per-packet path spent its time on, and why it dropped frames long
+# before the socket was actually saturated.
+#
+# 10ms is below the browser's own 100ms flush, so batching adds no perceptible
+# latency to the packet list; at 5,000 packets/second it turns 5,000 sends a
+# second into 100.
+PACKET_BATCH_INTERVAL_SECONDS = 0.01
+# Bounds on one batch, so a burst is split across sends rather than building
+# one enormous frame that blocks the loop while it is written.
+MAX_BATCH_RECORDS = 512
+MAX_BATCH_BYTES = 256 * 1024
+
+# How many encoded frames may wait in the queue. Past this the OLDEST are
+# dropped: this is a live view of traffic, not a recording, and a viewer that
+# cannot keep up wants the newest frames rather than an ever-growing backlog of
+# stale ones it will never catch up on. Every drop is counted and reaches the
+# app in capture_stats. ~8,000 frames is a second or two of a busy adapter -
+# enough to ride out a render hitch on the client, far too little to accumulate
+# into the gigabyte-scale backlog that once wedged the agent.
+MAX_QUEUED_PACKETS = 8192
+MAX_QUEUED_BYTES = 32 * 1024 * 1024
 
 # How often the watchdog checks that capture is not running with nobody
 # watching (see watch_for_orphaned_capture).
 ORPHAN_CHECK_SECONDS = 2
 
+# How often capture_stats is sent while sniffing. One second is what the
+# drop counter in the app is expected to move at; the numbers behind it are
+# two integers per interface and cost nothing to read.
+CAPTURE_STATS_INTERVAL_SECONDS = 1.0
+
+# How often the socket table is re-read for process attribution.
+#
+# One second, because that is the resolution the attribution can honestly
+# claim: a socket opened and closed inside one tick is never seen, and no
+# faster cadence removes that - it only narrows the window. Reading the table
+# costs about 3.5 ms and naming the processes in it about 2.9 ms (measured,
+# ~890 sockets, 60 processes), so a tick is well under 1% of a core.
+SOCKET_TABLE_INTERVAL_SECONDS = 1.0
+
+# How long one sniff() call may block before the thread re-checks its stop
+# event. Bounds how long a stopped capture can linger on a quiet adapter,
+# which before was "until the next packet arrives".
+CAPTURE_POLL_SECONDS = 0.5
+
 import logging_setup
 import agent_log
 import interface_stats
+import sockets
 
 # Configured for real in main(); until then this is a plain logger, so an
 # import-time failure still has somewhere to go.
-log = logging.getLogger("netview")
+log = logging.getLogger("inwire")
 
 # The adapters currently available to capture on, as (device_name, label), and
 # the same data as a lookup. Deliberately module-level rather than created in
@@ -87,6 +143,9 @@ log = logging.getLogger("netview")
 # they are ordinary state with a starting value, not a one-time snapshot.
 AVAILABLE_INTERFACES: list = []
 INTERFACE_LABELS: dict = {}
+# Device name -> position in AVAILABLE_INTERFACES, which is what a packet's
+# `iface` field carries (see interface_entries).
+INTERFACE_IDS: dict = {}
 
 
 def make_id() -> str:
@@ -110,7 +169,7 @@ def has_admin_privileges() -> bool:
 
 # --- Restarting this process --------------------------------------------------
 
-SERVICE_NAME = "NetViewAgent"
+SERVICE_NAME = "InwireAgent"
 # Any non-zero code. The service manager treats a service process that dies
 # with one as a failure, which is what triggers the restart action below - a
 # clean exit(0) reads as an intentional stop and nothing would come back.
@@ -124,7 +183,7 @@ FAILURE_RESET_SECONDS = 86400
 # Resolved once at startup by refresh_restart_support(). False unless proven
 # otherwise - see decide_restart_allowed for why that direction matters.
 RESTART_SUPPORTED = False
-RESTART_UNAVAILABLE_REASON = "Restart is unavailable: this agent is not running as the NetView service."
+RESTART_UNAVAILABLE_REASON = "Restart is unavailable: this agent is not running as the Inwire service."
 
 
 def decide_restart_allowed(is_service_process: bool, failure_policy_confirmed: bool) -> bool:
@@ -148,7 +207,7 @@ def decide_restart_allowed(is_service_process: bool, failure_policy_confirmed: b
 
 
 def _open_own_service(access):
-    """Opens this machine's NetViewAgent service, or None if unreachable."""
+    """Opens this machine's InwireAgent service, or None if unreachable."""
     import win32service
 
     scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
@@ -160,7 +219,7 @@ def _open_own_service(access):
 
 
 def _running_as_service_process() -> bool:
-    """True only when THIS process is the one the SCM runs as NetViewAgent.
+    """True only when THIS process is the one the SCM runs as InwireAgent.
 
     Compares the SCM's reported process id against our own rather than
     inferring from how the code was launched: `debug` mode runs the real
@@ -247,13 +306,13 @@ def refresh_restart_support() -> bool:
         log.info("restart is available (service restart-on-failure policy confirmed)")
     elif not is_service:
         RESTART_UNAVAILABLE_REASON = (
-            "Restart is unavailable: this agent is not running as the NetView service."
+            "Restart is unavailable: this agent is not running as the Inwire service."
         )
         log.info("restart is unavailable - not running as the %s service", SERVICE_NAME)
     else:
         RESTART_UNAVAILABLE_REASON = (
             "Restart is unavailable: Windows has no restart-on-failure policy for the "
-            "NetView service, so the agent would not come back. Reinstall the agent to fix this."
+            "Inwire service, so the agent would not come back. Reinstall the agent to fix this."
         )
         log.warning(
             "restart is unavailable - no restart-on-failure policy on %s; refusing to "
@@ -276,19 +335,43 @@ def exit_for_restart() -> None:
     os._exit(RESTART_EXIT_CODE)
 
 
-def build_hello_message(version: str, state: str, interfaces) -> dict:
+def build_hello_message(version: str, state: str, interfaces, client_id: str = "",
+                        owner=None, auth_required: bool = False) -> dict:
     """The first message sent on every new connection, before anything else.
 
-    No `authRequired` field: by the time this is sent the connection has
-    already passed the origin check during the HTTP handshake, so there is no
-    second authentication step left to advertise.
+    `authRequired` says whether this agent has a pairing token configured. It
+    is announced rather than discovered because the alternative is worse: a
+    connection refused during the HTTP handshake reaches the browser as an
+    opaque WebSocket error, indistinguishable from "the agent is not running".
+    Answering the handshake and then asking is what lets the app say which of
+    the two it is.
+
+    Nothing else is sent until the token arrives - no interfaces beyond the
+    list, no log, no packets - so announcing the requirement gives away only
+    that there is one.
     """
     return {
         "type": "hello",
         "version": version,
         "state": state,
-        "interfaces": [{"name": name, "label": label} for name, label in interfaces],
+        "interfaces": interface_entries(interfaces),
+        # This connection's own id, so it can recognise itself in `state`'s
+        # `owner` field. Opaque and per-connection: it identifies a tab for the
+        # length of one socket, not a user and not a machine.
+        "clientId": client_id,
+        "owner": owner,
+        "authRequired": auth_required,
     }
+
+
+def interface_entries(interfaces) -> list:
+    """The interface list as every message carries it.
+
+    `id` is the position in this list and is what a packet's `iface` field
+    refers to (docs/decisions/0005). It is an index rather than the device
+    name so a packet costs four bytes of identity, not sixty.
+    """
+    return [{"id": i, "name": name, "label": label} for i, (name, label) in enumerate(interfaces)]
 
 
 class SnifferController:
@@ -310,6 +393,7 @@ class SnifferController:
         self.selected_interfaces = list(default_interfaces)
         self._sniffing = False
         self.stop_event = threading.Event()
+        self.failed_interfaces = set()
 
     def is_sniffing(self) -> bool:
         return self._sniffing
@@ -321,6 +405,7 @@ class SnifferController:
         if self._sniffing:
             return
         self.stop_event = threading.Event()
+        self.failed_interfaces = set()
         for name in self.selected_interfaces:
             spawn_fn(name, self.stop_event)
         self._sniffing = True
@@ -337,95 +422,162 @@ class SnifferController:
         if was_sniffing:
             self.start_threads(spawn_fn)
 
-    def state_message(self, available_interfaces) -> dict:
+    def state_message(self, available_interfaces, owner=None) -> dict:
         return {
             "type": "state",
             "state": "sniffing" if self._sniffing else "idle",
-            "interfaces": [{"name": name, "label": label} for name, label in available_interfaces],
+            "interfaces": interface_entries(available_interfaces),
+            # Which connection asked for this capture, by the id that
+            # connection was given in `hello`. A second tab compares it against
+            # its own and knows the difference between "capture is running" and
+            # "capture is running and I am the one who can stop it". Null when
+            # nothing is being captured.
+            "owner": owner,
         }
 
+    def mark_failed(self, iface_name) -> bool:
+        """Records that a selected interface could not be captured on.
 
-def capture_time_ms(pkt):
-    """Epoch milliseconds for when the frame was actually captured.
+        Returns True when every selected interface has now failed - the case
+        where the controller still says "sniffing" but no thread is alive to
+        capture anything, which is exactly what the app must not be left
+        believing.
+        """
+        self.failed_interfaces.add(iface_name)
+        return all(name in self.failed_interfaces for name in self.selected_interfaces)
+
+
+def capture_time_us(pkt) -> int:
+    """Epoch microseconds for when the frame was actually captured.
 
     scapy sets pkt.time from libpcap's per-packet header, which carries
-    microsecond resolution. Falls back to the current wall clock only if a
+    microsecond resolution; an integer count of microseconds carries all of it
+    and nothing invented. Falls back to the current wall clock only if a
     packet somehow arrives without one - a frame with no time at all would
     otherwise break the browser's relative-time column outright, which is a
     worse outcome than one slightly-late timestamp.
     """
     stamp = getattr(pkt, "time", None)
     if stamp is None:
-        return time.time() * 1000
-    return float(stamp) * 1000
+        return int(time.time() * 1_000_000)
+    # float() of an EDecimal keeps ~7 fractional digits at epoch magnitude,
+    # so the microseconds survive; rounding removes the float's last-bit noise.
+    return int(round(float(stamp) * 1_000_000))
 
 
-def packet_to_dict(pkt):
-    """Builds the JSON message for one captured frame.
+def packet_to_record(pkt, iface_id=0, seq=0) -> bytes:
+    """Encodes one captured frame for the binary batch (packet_batch.py).
 
-    These metadata fields are only a *fallback*: whenever "raw" is present the
-    browser re-dissects the frame itself with the same code path an imported
-    pcap goes through, and overwrites all of them. So the job here is to send
-    every frame with its bytes intact, not to classify it - which is why a
-    frame with no IP layer is described from its Ethernet header rather than
-    being dropped.
+    Until 3.2.0 this built a JSON object with source, destination, protocol,
+    ports and an info string alongside the base64 bytes. Every one of those
+    was thrown away: whenever "raw" was present the browser re-dissected the
+    frame itself with the same code path an imported pcap goes through, and
+    overwrote all of them. So the agent no longer classifies anything - it
+    sends the bytes, the wire length, when the frame was captured, which
+    adapter it came from and where it sits in the capture's sequence, and
+    nothing else.
+
+    Runs on the sniffer thread. bytes(pkt) is the frame scapy already holds and
+    struct.pack is a memcpy; doing it here is what lets the event loop see a
+    queue of finished records instead of live scapy objects.
     """
-    if IP in pkt:
-        ip_layer = pkt[IP]
-    elif IPv6 in pkt:
-        ip_layer = pkt[IPv6]
-    else:
-        ip_layer = None
+    return packet_batch.encode_record(
+        seq, iface_id, capture_time_us(pkt), len(pkt), bytes(pkt),
+    )
 
-    if TCP in pkt:
-        proto, sport, dport = "TCP", int(pkt[TCP].sport), int(pkt[TCP].dport)
-    elif UDP in pkt:
-        proto, sport, dport = "UDP", int(pkt[UDP].sport), int(pkt[UDP].dport)
-    else:
-        proto, sport, dport = "Other", None, None
 
-    if ip_layer is not None:
-        source, destination = ip_layer.src, ip_layer.dst
-    else:
-        # A frame with no network layer - ARP, STP, IEEE 1905 - shows its MAC
-        # addresses, which is what the reference analyzer puts in those columns too. The
-        # browser resolves them to vendor names once it re-dissects.
-        #
-        # Both link layers have to be checked: an 802.3 frame (where bytes
-        # 12-13 are a length rather than an ethertype, as in every STP BPDU)
-        # parses as Dot3, not Ether, so testing only for Ether loses exactly
-        # the frames this fallback exists to describe.
-        link_layer = pkt.getlayer(Ether) or pkt.getlayer(Dot3)
-        if link_layer is not None:
-            source, destination = link_layer.src, link_layer.dst
-            proto = "ARP" if ARP in pkt else "Other"
-        else:
-            source, destination = "unknown", "unknown"
+class CaptureCounters:
+    """What the sniffer threads count, for the sequence number and capture_stats.
 
+    One instance per process; reset() on every start_capture so `seq` restarts
+    at 0 and the counters describe this capture rather than the process's
+    lifetime. Threads increment under one lock - the counts are what the app
+    shows as "received", and a lost increment is a lie in the other direction
+    from the one this feature exists to expose.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.seq = 0
+        self.received = {}
+        self.sockets = {}
+
+    def reset(self):
+        with self._lock:
+            self.seq = 0
+            self.received = {}
+
+    def next_seq(self, iface_id) -> int:
+        with self._lock:
+            n = self.seq
+            self.seq += 1
+            self.received[iface_id] = self.received.get(iface_id, 0) + 1
+            return n
+
+    def register_socket(self, iface_id, sock):
+        with self._lock:
+            self.sockets[iface_id] = sock
+
+    def unregister_socket(self, iface_id):
+        with self._lock:
+            self.sockets.pop(iface_id, None)
+
+    def snapshot(self):
+        """(seq_high, {iface_id: received}, {iface_id: socket}) at one instant."""
+        with self._lock:
+            return self.seq, dict(self.received), dict(self.sockets)
+
+
+counters = CaptureCounters()
+
+
+def read_pcap_stats(sock):
+    """(received, dropped) as the capture driver counts them, or None.
+
+    scapy's socket wraps a libpcap handle but exposes no statistics call, so
+    this reaches past it to pcap_stats() on the raw handle. `dropped` is the
+    kernel-buffer drops plus the interface's own, which are the frames the
+    agent never saw and therefore the one number nothing downstream can infer.
+    None - never zero - when the handle or the call is unavailable, so the app
+    shows "unknown" rather than a reassuring 0.
+    """
+    try:
+        from ctypes import byref
+        from scapy.libs.winpcapy import pcap_stat, pcap_stats
+        # scapy keeps the libpcap wrapper on `pcap_fd`; older releases called
+        # it `ins`. Looking only at `ins` is why this silently returned None on
+        # every capture and the app showed the driver's loss as "unknown" for
+        # the life of the feature - the one number nothing downstream can
+        # infer, reported as unavailable because of an attribute name.
+        wrapper = getattr(sock, "pcap_fd", None) or getattr(sock, "ins", None)
+        handle = getattr(wrapper, "pcap", None)
+        if not handle:
+            return None
+        stat = pcap_stat()
+        if pcap_stats(handle, byref(stat)) != 0:
+            return None
+        return int(stat.ps_recv), int(stat.ps_drop) + int(stat.ps_ifdrop)
+    except Exception:
+        return None
+
+
+def build_capture_stats(seq_high, received, kernel_stats, dropped_agent) -> dict:
+    """One capture_stats message. Pure, so the shape is testable."""
+    interfaces = []
+    for iface_id in sorted(received):
+        kernel = kernel_stats.get(iface_id)
+        interfaces.append({
+            "iface": iface_id,
+            "received": received[iface_id],
+            "kernelReceived": None if kernel is None else kernel[0],
+            "droppedKernel": None if kernel is None else kernel[1],
+        })
     return {
-        "type": "packet",
-        "id": make_id(),
-        # The frame's real capture time, from libpcap, in fractional
-        # milliseconds. Was int(time.time() * 1000): the wall clock read when
-        # Python happened to process the frame, truncated to a whole
-        # millisecond. That is wrong twice over - it measures this process's
-        # scheduling rather than the wire, and at even modest rates several
-        # frames land on the same millisecond and become indistinguishable in
-        # time. A 1368-frame sample held only 604 distinct timestamps, with up
-        # to six frames sharing one.
-        #
-        # float() because scapy hands back an EDecimal, which json cannot
-        # serialize. Kept fractional rather than rounded so sub-millisecond
-        # ordering survives into the packet list and the pcap export.
-        "timestamp": capture_time_ms(pkt),
-        "source": source,
-        "destination": destination,
-        "protocol": proto,
-        "sourcePort": sport,
-        "destPort": dport,
-        "length": len(pkt),
-        "info": f"{proto} Traffic",
-        "raw": base64.b64encode(bytes(pkt)).decode('ascii'),
+        "type": "capture_stats",
+        "intervalMs": int(CAPTURE_STATS_INTERVAL_SECONDS * 1000),
+        "seqHigh": seq_high,
+        "droppedAgent": dropped_agent,
+        "interfaces": interfaces,
     }
 
 
@@ -436,6 +588,29 @@ class AgentServer:
         # origin check now rejects disallowed clients during the handshake, so
         # every connection in this set is by construction an allowed one.
         self.connections = set()
+        # Connections that have presented the pairing token, when one is
+        # configured. A connection not in here may send `authenticate` and
+        # nothing else - no capture, no log, no interface stats - and receives
+        # no packets.
+        #
+        # The origin check alone could never do this job: `Origin` is a header
+        # the client writes, so it keeps an ordinary web page out and stops
+        # nothing that can set a header, which is any process on the machine.
+        # The token lives in a file only an administrator can read.
+        self.authenticated = set()
+        # An opaque id per connection, told to that connection in `hello` and
+        # used in `state` to name whoever owns the capture. Opaque because it
+        # is nobody's business but the two ends of that socket: it identifies a
+        # tab, not a user or a machine.
+        self.client_ids = {}
+        # The connection that asked for the capture that is running, or None.
+        #
+        # Before this, capture was a single global with no owner: two tabs open
+        # meant the second one's remembered `set_interfaces` restarted the
+        # sniffer on *its* adapter the moment it connected, and Stop in either
+        # one stopped both. Which of them was "the" capture was decided by
+        # whoever spoke last.
+        self.capture_owner = None
         # Sockets that asked for log lines, always a subset of connections.
         # Separate from connections because the common case is a client that
         # never opens Driver Info at all, and log fan-out should cost nothing
@@ -446,15 +621,36 @@ class AgentServer:
         # client that never opens the picker costs nothing.
         self.interface_stats_subscribers = set()
         self._interface_stats_task = None
+        # Sockets that asked which process owns which local endpoint. Same
+        # lifecycle rule again: a client that never turns process attribution
+        # on never causes the table to be read.
+        self.socket_subscribers = set()
+        self._socket_task = None
+        # One tracker for the fan-out, so the table is read once per tick
+        # however many clients are watching. A client that subscribes later
+        # gets its own full snapshot on the spot (see subscribe_sockets) and
+        # then follows these deltas.
+        self._socket_tracker = sockets.SocketTracker()
         self.loop = None
-        # How many _send_all coroutines are scheduled but have not yet run.
-        # Bounding this is what stops a fast interface growing the agent
-        # without limit - see broadcast().
-        self._pending_sends = 0
+        # Frames the agent itself dropped this process, because the queue was
+        # full (see queue_packet). Reported per capture in capture_stats.
         self._dropped_sends = 0
+        self._capture_stats_task = None
+        # Encoded packet records waiting for the pump (see queue_packet). The
+        # sniffer threads append and the loop drains, so both are under one
+        # lock; `_packet_queue_bytes` tracks the byte bound without walking the
+        # deque on every append.
+        self._packet_queue = collections.deque()
+        self._packet_queue_bytes = 0
+        self._packet_lock = threading.Lock()
+        self._packet_pump_task = None
+        # _dropped_sends at the moment the current capture started, so the
+        # number the app shows is this capture's, not the process's lifetime.
+        self._dropped_at_capture_start = 0
 
     async def register(self, ws):
         self.connections.add(ws)
+        self.client_ids[ws] = make_id()
         log.info("client connected (%d total)", len(self.connections))
         try:
             # The hello send is inside the try because a client dropping
@@ -463,12 +659,23 @@ class AgentServer:
             # not self.connections, so any stuck entry means the condition
             # can never be true again. Every exit path must reach finally.
             state = "sniffing" if sniffer.is_sniffing() else "idle"
+            # Re-read per connection, like the origin list: setting a token
+            # should not need a service restart on a machine with no console.
+            settings = config.load_config(on_warning=lambda msg: log.warning("config: %s", msg))
+            expected_token = settings.get("token")
+            if expected_token is None:
+                self.authenticated.add(ws)
             # Re-read the adapters here rather than trusting the list built at
             # startup: this message is what the app builds its interface picker
             # from, so a client connecting is exactly the moment the answer has
             # to be current. See refresh_interfaces().
             interfaces = refresh_interfaces()
-            await ws.send(json.dumps(build_hello_message(AGENT_VERSION, state, interfaces)))
+            await ws.send(json.dumps(build_hello_message(
+                AGENT_VERSION, state, interfaces,
+                client_id=self.client_ids.get(ws, ""),
+                owner=self.owner_id(),
+                auth_required=expected_token is not None,
+            )))
             async for raw in ws:
                 await self._handle_message(ws, raw)
         finally:
@@ -476,7 +683,7 @@ class AgentServer:
 
     def handle_disconnect(self, ws):
         """Capture is scoped to live connections: with nobody watching,
-        nothing should be captured. Closing the last NetView tab therefore
+        nothing should be captured. Closing the last Inwire tab therefore
         stops the sniffer (see spec: Capture lifecycle).
 
         Sniffing deliberately does not resume when a client reconnects - a
@@ -486,6 +693,8 @@ class AgentServer:
         an always-running background capture agent acceptable.
         """
         self.connections.discard(ws)
+        self.client_ids.pop(ws, None)
+        self.authenticated.discard(ws)
         # A socket left here after its connection died would make the log
         # fan-out write to a dead socket on every line, forever.
         self.log_subscribers.discard(ws)
@@ -493,10 +702,28 @@ class AgentServer:
         # sampling loop wind down when the last picker goes away with its tab.
         self.interface_stats_subscribers.discard(ws)
         self._stop_interface_stats_task_if_idle()
+        self.socket_subscribers.discard(ws)
+        self._stop_socket_task_if_idle()
         log.info("client disconnected (%d remaining)", len(self.connections))
-        if not self.connections and sniffer.is_sniffing():
+
+        # The owner leaving stops the capture even when other tabs are still
+        # connected. Those tabs never asked for it - packets were not going to
+        # them - and inheriting a capture nobody present requested is the
+        # always-on background capture this agent is designed not to do.
+        if ws is self.capture_owner:
+            self.capture_owner = None
+            if sniffer.is_sniffing():
+                log.info("the client that started this capture disconnected - stopping")
+                self.stop_capture()
+            self.broadcast_state()
+        elif not self.connections and sniffer.is_sniffing():
             log.info("last client disconnected - stopping capture")
-            sniffer.stop_threads()
+            # stop_capture(), not sniffer.stop_threads(): the latter leaves the
+            # packet pump, the capture-stats ticker and everything still queued
+            # behind. Reachable whenever capture_owner was already cleared -
+            # _send_to_owner nulls it when the owner's socket dies, without
+            # stopping the sniffer.
+            self.stop_capture()
 
     async def _handle_message(self, ws, raw):
         try:
@@ -507,28 +734,76 @@ class AgentServer:
             return
 
         msg_type = message.get("type")
+
+        if msg_type == "authenticate":
+            settings = config.load_config()
+            expected = settings.get("token")
+            if expected is None or config.tokens_match(message.get("token"), expected):
+                self.authenticated.add(ws)
+                log.info("client authenticated")
+                await ws.send(json.dumps(sniffer.state_message(AVAILABLE_INTERFACES, self.owner_id())))
+            else:
+                # Logged without the offered value: a wrong token in a log file
+                # that clients can subscribe to would be a second place the
+                # right one could leak from.
+                log.warning("a client offered a token that did not match")
+                await ws.send(json.dumps({
+                    "type": "error",
+                    "code": "auth_failed",
+                    "message": "That pairing token does not match this agent's.",
+                }))
+            return
+
+        if ws not in self.authenticated:
+            await ws.send(json.dumps({
+                "type": "error",
+                "code": "auth_required",
+                "message": "This agent needs its pairing token before it will do anything.",
+            }))
+            return
+
+        if msg_type in ("start_capture", "stop_capture", "set_interfaces") and self.owned_by_other(ws):
+            await ws.send(json.dumps({
+                "type": "error",
+                "code": "capture_busy",
+                "message": "Another Inwire window started this capture. Stop it there, or close that window.",
+            }))
+            return
+
         if msg_type == "start_capture":
             log.info("start_capture requested on %d interface(s)", len(sniffer.selected_interfaces))
-            sniffer.start_threads(spawn_sniffer_thread)
+            self.capture_owner = ws
+            self.start_capture()
         elif msg_type == "stop_capture":
             log.info("stop_capture requested")
-            sniffer.stop_threads()
+            self.capture_owner = None
+            self.stop_capture()
         elif msg_type == "set_interfaces":
             interfaces = message.get("interfaces")
-            if isinstance(interfaces, list) and all(isinstance(i, str) for i in interfaces):
-                if not interfaces:
-                    # Sniffing "on zero interfaces" would otherwise succeed
-                    # silently and broadcast state=sniffing while nothing is
-                    # actually captured.
-                    await ws.send(json.dumps({
-                        "type": "error",
-                        "code": "empty_interfaces",
-                        "message": "At least one interface must be selected.",
-                    }))
-                    return
-                log.info("set_interfaces: %d interface(s) selected", len(interfaces))
-                sniffer.set_interfaces(interfaces)
-                sniffer.restart_threads(spawn_sniffer_thread)
+            if not (isinstance(interfaces, list) and all(isinstance(i, str) for i in interfaces)):
+                # Used to be ignored in silence, which read as "the agent is
+                # not listening" from the other end.
+                await ws.send(json.dumps({
+                    "type": "error",
+                    "code": "invalid_interfaces",
+                    "message": "set_interfaces needs a list of interface names.",
+                }))
+                return
+            if not interfaces:
+                # Sniffing "on zero interfaces" would otherwise succeed
+                # silently and broadcast state=sniffing while nothing is
+                # actually captured.
+                await ws.send(json.dumps({
+                    "type": "error",
+                    "code": "empty_interfaces",
+                    "message": "At least one interface must be selected.",
+                }))
+                return
+            log.info("set_interfaces: %d interface(s) selected", len(interfaces))
+            sniffer.set_interfaces(interfaces)
+            if sniffer.is_sniffing():
+                self.stop_capture()
+                self.start_capture()
         elif msg_type == "subscribe_logs":
             backlog = agent_log.read_log_tail(self.log_file_path())
             await ws.send(json.dumps({
@@ -554,6 +829,34 @@ class AgentServer:
             self.interface_stats_subscribers.discard(ws)
             self._stop_interface_stats_task_if_idle()
             return
+        elif msg_type == "subscribe_sockets":
+            self.socket_subscribers.add(ws)
+            # This client's own full snapshot, now, rather than waiting for the
+            # shared ticker - which sends deltas, and a delta against a table
+            # this client never received would leave it permanently short of
+            # every socket that existed before it subscribed. The same reason
+            # subscribe_logs hands over a backlog.
+            #
+            # Re-sending an add the next delta also carries, or a remove for a
+            # socket this snapshot never listed, are both harmless: the app
+            # applies each message idempotently.
+            # Off the event loop: this is psutil.net_connections() plus a
+            # describe_process() per pid - ~6.5 ms measured, and more on a
+            # machine holding many sockets. _socket_loop wraps the identical
+            # call for the same reason; doing it inline here stalled packet
+            # delivery for every subscriber.
+            snapshot = await asyncio.to_thread(lambda: sockets.SocketTracker().poll())
+            await ws.send(json.dumps(snapshot))
+            self._ensure_socket_task()
+            # Subscribing changes nothing about what the agent is DOING, so it
+            # takes the same early return every other subscription takes rather
+            # than falling through to the state broadcast at the foot of this
+            # method.
+            return
+        elif msg_type == "unsubscribe_sockets":
+            self.socket_subscribers.discard(ws)
+            self._stop_socket_task_if_idle()
+            return
         elif msg_type == "restart_agent":
             if not RESTART_SUPPORTED:
                 # Refusing is the whole safety property: this command is
@@ -573,7 +876,149 @@ class AgentServer:
             asyncio.get_running_loop().call_later(0.5, exit_for_restart)
             return
         else:
+            # Named rather than dropped: a newer app talking to an older agent
+            # gets told, instead of waiting for an answer that never comes.
+            await ws.send(json.dumps({
+                "type": "error",
+                "code": "unknown_command",
+                "message": f"This agent ({AGENT_VERSION}) does not understand '{msg_type}'.",
+            }))
             return
+        # Every command that changes what the agent is doing is answered with
+        # the resulting state, to every client. This is how a reconnecting
+        # tab, a second tab, and Driver Info's "Capture:" row stay truthful;
+        # it went missing in a refactor once and nothing noticed for weeks,
+        # which is why test_protocol.py now asserts it per command.
+        self.broadcast_state()
+
+    def owner_id(self):
+        """The owning connection's id, or None when nothing is being captured."""
+        if self.capture_owner is None:
+            return None
+        return self.client_ids.get(self.capture_owner)
+
+    def owned_by_other(self, ws) -> bool:
+        """True when someone else's capture is running.
+
+        Ownership only bites while a capture is actually running: an owner that
+        stopped, or one whose socket died between the check and here, holds
+        nothing. That is deliberate - a stale owner would lock the agent out of
+        capturing at all, which is a worse failure than two tabs racing.
+        """
+        if self.capture_owner is None or self.capture_owner is ws:
+            return False
+        if self.capture_owner not in self.connections:
+            self.capture_owner = None
+            return False
+        return sniffer is not None and sniffer.is_sniffing()
+
+    async def _send_to_owner(self, data):
+        """Packets and their statistics go to the connection that asked for
+        them and to no one else. A tab that never pressed Start should not
+        quietly accumulate somebody else's traffic."""
+        ws = self.capture_owner
+        if ws is None or ws not in self.connections or ws not in self.authenticated:
+            return
+        try:
+            await ws.send(data)
+        except Exception:
+            self.connections.discard(ws)
+            self.log_subscribers.discard(ws)
+            self.capture_owner = None
+
+    def start_capture(self):
+        """Starts the sniffer threads and the capture_stats ticker together."""
+        counters.reset()
+        self._dropped_at_capture_start = self._dropped_sends
+        sniffer.start_threads(spawn_sniffer_thread)
+        if self.loop is not None and (self._capture_stats_task is None or self._capture_stats_task.done()):
+            self._capture_stats_task = asyncio.create_task(self._capture_stats_loop())
+        if self.loop is not None and (self._packet_pump_task is None or self._packet_pump_task.done()):
+            self._packet_pump_task = asyncio.create_task(self._packet_pump())
+
+    def stop_capture(self):
+        sniffer.stop_threads()
+        if self._capture_stats_task is not None:
+            self._capture_stats_task.cancel()
+            self._capture_stats_task = None
+        if self._packet_pump_task is not None:
+            self._packet_pump_task.cancel()
+            self._packet_pump_task = None
+        # The sniffer threads are stopped, so nothing more will be appended;
+        # what is still queued belongs to a capture nobody is watching.
+        self.discard_queued_packets()
+
+    def broadcast_state(self):
+        self.send_control(sniffer.state_message(AVAILABLE_INTERFACES, self.owner_id()))
+
+    def send_control(self, message: dict):
+        """Sends a control message to every client, from any thread.
+
+        Not subject to the packet backpressure bound: control messages are
+        rare and are the thing a client needs most when packets are being
+        dropped.
+        """
+        if not self.connections or self.loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._send_to_all(json.dumps(message)), self.loop)
+
+    async def _send_to_all(self, data: str):
+        for ws in list(self.connections):
+            try:
+                await ws.send(data)
+            except Exception:
+                pass
+
+    def report_capture_failure(self, iface_id, iface_name, iface_label, reason):
+        """A sniffer thread could not open or read its adapter.
+
+        Before this the warning went to the log alone and the app sat on
+        "capturing" with an empty list for as long as anyone cared to watch.
+        """
+        self.send_control({
+            "type": "error",
+            "code": "capture_failed",
+            "iface": iface_id,
+            "message": f"Could not capture on {iface_label}: {reason}",
+        })
+        if sniffer.mark_failed(iface_name):
+            log.warning("every selected interface failed - capture stopped")
+            # Back onto the event loop first. This runs on a sniffer THREAD,
+            # and stop_capture() calls Task.cancel(), which is not thread
+            # safe - the same reason send_control hops via
+            # run_coroutine_threadsafe rather than awaiting here.
+            if self.loop is not None:
+                self.loop.call_soon_threadsafe(self._stop_capture_and_broadcast)
+            else:
+                self._stop_capture_and_broadcast()
+
+    def _stop_capture_and_broadcast(self):
+        """stop_capture + broadcast_state, as one thing to hand to the loop."""
+        self.stop_capture()
+        self.broadcast_state()
+
+    async def _capture_stats_loop(self):
+        try:
+            while sniffer is not None and sniffer.is_sniffing():
+                seq_high, received, sockets = counters.snapshot()
+                kernel = {iface_id: read_pcap_stats(sock) for iface_id, sock in sockets.items()}
+                dropped_agent = self._dropped_sends - self._dropped_at_capture_start
+                await self._send_to_owner(json.dumps(
+                    build_capture_stats(seq_high, received, kernel, dropped_agent)
+                ))
+                await asyncio.sleep(CAPTURE_STATS_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("capture stats stopped: %s", exc)
+        finally:
+            # Only if this reference is still to THIS task. `set_interfaces`
+            # while sniffing cancels and recreates in the same breath, so by
+            # the time a cancelled task unwinds, the attribute may already
+            # hold its replacement - and clearing it there would strand the
+            # replacement, uncancellable, for the life of the process.
+            if self._capture_stats_task is asyncio.current_task():
+                self._capture_stats_task = None
 
     def _ensure_interface_stats_task(self):
         if self._interface_stats_task is None or self._interface_stats_task.done():
@@ -589,6 +1034,50 @@ class AgentServer:
         if not self.interface_stats_subscribers and self._interface_stats_task is not None:
             self._interface_stats_task.cancel()
             self._interface_stats_task = None
+
+    def _ensure_socket_task(self):
+        if self._socket_task is None or self._socket_task.done():
+            self._socket_task = asyncio.create_task(self._socket_loop())
+
+    def _stop_socket_task_if_idle(self):
+        if not self.socket_subscribers and self._socket_task is not None:
+            self._socket_task.cancel()
+            self._socket_task = None
+            # The next subscriber gets a full snapshot of its own anyway, but
+            # the shared tracker must not carry a table read minutes ago into
+            # the first delta after it - every socket that came and went in
+            # between would arrive as one impossible burst.
+            self._socket_tracker.reset()
+
+    async def _socket_loop(self):
+        """Pushes socket-table deltas to whoever asked for them.
+
+        Reading the table is blocking work - a few milliseconds of it - so it
+        runs in a thread rather than on the event loop, where it would stall
+        packet delivery for as long as it took.
+        """
+        try:
+            while self.socket_subscribers:
+                await asyncio.sleep(SOCKET_TABLE_INTERVAL_SECONDS)
+                delta = await asyncio.to_thread(self._socket_tracker.poll)
+                # None means nothing opened or closed this second, which on an
+                # idle machine is most seconds.
+                if delta is None:
+                    continue
+                message = json.dumps(delta)
+                for ws in list(self.socket_subscribers):
+                    try:
+                        await ws.send(message)
+                    except Exception:
+                        self.socket_subscribers.discard(ws)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Never take a capture down over attribution. The packet list is
+            # the product; a missing process name is a missing annotation.
+            log.warning("socket table polling stopped: %s", exc)
+        finally:
+            self._socket_task = None
 
     async def _interface_stats_loop(self):
         # Constructed per subscription rather than kept alive: its first sample
@@ -622,63 +1111,98 @@ class AgentServer:
         finally:
             self._interface_stats_task = None
 
-        self.broadcast(sniffer.state_message(AVAILABLE_INTERFACES))
+    def queue_packet(self, record: bytes):
+        """Queues one encoded packet record (packet_batch.encode_record).
 
-    def broadcast(self, message: dict):
-        """Called from the sniffer thread (packet_to_dict results) as well as
-        from _handle_message above - hop back onto the asyncio loop either way.
+        Called from the sniffer threads. Nothing is sent here and no coroutine
+        is scheduled: the record joins a deque that one pump task drains into
+        batched binary frames. Before 3.2.0 this scheduled a coroutine and a
+        JSON string per captured frame, and the bound that kept that from
+        growing without limit is what the agent's log records as ">=260,000
+        packets dropped: the client is not keeping up". Most of that was the
+        loop failing to keep up with its own scheduling.
 
-        Drops the message rather than queueing it when the loop is already
-        behind. This bound is not an optimization, it is the difference
-        between a bad minute and an unusable machine: without it every
-        captured frame scheduled a coroutine plus its JSON string with
-        nothing limiting how many could pile up, so an interface faster than
-        the client could drain - loopback runs ~1200 packets/sec - grew the
-        agent to 1.2 GB and starved its own event loop until it stopped
-        answering the service manager's stop request and could no longer even
-        be shut down.
-
-        Dropping is the correct trade. This is a live view of traffic, not a
-        recording: a viewer that cannot keep up wants the newest frames, not
-        an ever-growing backlog of stale ones it will never catch up on.
+        When the queue is full the OLDEST records go, not this one. This is a
+        live view of traffic, not a recording: a viewer that has fallen behind
+        wants the newest frames rather than a backlog of stale ones it will
+        never catch up on. Every drop is counted and reaches the app in
+        capture_stats within the second.
         """
-        if not self.connections or self.loop is None:
+        if self.capture_owner is None or self.loop is None:
             return
-        if self._pending_sends >= MAX_PENDING_SENDS:
-            self._dropped_sends += 1
+        dropped = None
+        with self._packet_lock:
+            self._packet_queue.append(record)
+            self._packet_queue_bytes += len(record)
+            while (len(self._packet_queue) > MAX_QUEUED_PACKETS
+                   or self._packet_queue_bytes > MAX_QUEUED_BYTES):
+                self._packet_queue_bytes -= len(self._packet_queue.popleft())
+                self._dropped_sends += 1
+                dropped = self._dropped_sends
+        if dropped is not None and (dropped in (1, 100, 1000) or dropped % 10000 == 0):
             # Logged sparsely and only on crossings of a power-of-ten-ish
             # boundary: the drop path is the hot path when it is running at
             # all, and logging per drop would recreate the flood one level up
-            # (log records also fan out to subscribed clients).
-            if self._dropped_sends in (1, 100, 1000) or self._dropped_sends % 10000 == 0:
-                log.warning(
-                    "dropped %d packet(s): the client is not keeping up with this interface",
-                    self._dropped_sends,
-                )
-            return
-        self._pending_sends += 1
-        asyncio.run_coroutine_threadsafe(self._send_all(message), self.loop)
+            # (log records also fan out to subscribed clients). The full count
+            # reaches the app every second in capture_stats regardless.
+            log.warning(
+                "dropped %d packet(s): the client is not keeping up with this interface",
+                dropped,
+            )
 
-    async def _send_all(self, message: dict):
-        # list(...) snapshots the set before awaiting inside the loop, since a
-        # client connecting or dropping mid-broadcast would otherwise mutate
-        # self.connections while it is being iterated.
+    def _drain_packets(self):
+        """Takes up to one batch off the queue. Runs on the loop, under the
+        same lock the sniffer threads append with, and holds it only for the
+        pops - the send happens outside it."""
+        batch = []
+        size = 0
+        with self._packet_lock:
+            while self._packet_queue and len(batch) < MAX_BATCH_RECORDS and size < MAX_BATCH_BYTES:
+                record = self._packet_queue.popleft()
+                self._packet_queue_bytes -= len(record)
+                batch.append(record)
+                size += len(record)
+        return batch
+
+    async def _packet_pump(self):
+        """Drains the packet queue into batched binary frames.
+
+        One task for the whole process, started with capture and cancelled
+        with it. It keeps draining while there is anything queued rather than
+        sleeping between batches, so a burst is cleared as fast as the socket
+        will take it; the sleep is only for the idle case.
+        """
         try:
-            data = json.dumps(message)
-            dead = []
-            for ws in list(self.connections):
-                try:
-                    await ws.send(data)
-                except websockets.ConnectionClosed:
-                    dead.append(ws)
-            for ws in dead:
-                self.connections.discard(ws)
-                self.log_subscribers.discard(ws)
+            while True:
+                batch = self._drain_packets()
+                if not batch:
+                    await asyncio.sleep(PACKET_BATCH_INTERVAL_SECONDS)
+                    continue
+                payload = packet_batch.encode_batch(batch)
+                await self._send_to_owner(payload)
+                if len(batch) < MAX_BATCH_RECORDS:
+                    await asyncio.sleep(PACKET_BATCH_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A pump that died silently would look exactly like an idle
+            # network, which is the worst way for this to fail.
+            log.error("packet pump stopped: %s", exc)
         finally:
-            # In a finally so any unexpected failure still frees the slot.
-            # Leaking slots would silently ratchet the agent down to sending
-            # nothing at all, which is far harder to diagnose than dropping.
-            self._pending_sends -= 1
+            # See _capture_stats_loop: only clear a reference to this task.
+            # The stats loop self-heals because it re-tests is_sniffing(); the
+            # pump is `while True`, so a stranded one runs for ever, draining
+            # the same queue as its replacement and interleaving batches on
+            # the owner's socket.
+            if self._packet_pump_task is asyncio.current_task():
+                self._packet_pump_task = None
+
+    def discard_queued_packets(self):
+        """Empties the queue without counting the drops - for a stop, where
+        the frames were captured but nobody is waiting for them any more."""
+        with self._packet_lock:
+            self._packet_queue.clear()
+            self._packet_queue_bytes = 0
 
     def log_file_path(self) -> str:
         return os.path.join(config.config_dir(), logging_setup.LOG_FILENAME)
@@ -739,7 +1263,7 @@ def make_process_request(on_reject=None):
 _captured_count = 0
 
 
-def sniff_callback(pkt):
+def sniff_callback(pkt, iface_id=0):
     global _captured_count
     _captured_count += 1
     if _captured_count == 1:
@@ -752,13 +1276,13 @@ def sniff_callback(pkt):
         # capture drowned every genuine diagnostic in the viewer.
         log.info("%d packets captured so far", _captured_count)
 
+    seq = counters.next_seq(iface_id)
     try:
-        info = packet_to_dict(pkt)
+        record = packet_to_record(pkt, iface_id, seq)
     except Exception as exc:
         log.warning("failed to process a captured packet: %s", exc)
         return
-    if info is not None:
-        agent.broadcast(info)
+    agent.queue_packet(record)
 
 
 _RTL_MARKS = ("‎", "‏")
@@ -875,7 +1399,7 @@ def refresh_interfaces():
     away from a client that is using it, which is worse than being briefly out
     of date.
     """
-    global AVAILABLE_INTERFACES, INTERFACE_LABELS
+    global AVAILABLE_INTERFACES, INTERFACE_LABELS, INTERFACE_IDS
 
     try:
         interfaces = list_interfaces()
@@ -891,6 +1415,7 @@ def refresh_interfaces():
     previous = dict(AVAILABLE_INTERFACES)
     AVAILABLE_INTERFACES = interfaces
     INTERFACE_LABELS = dict(interfaces)
+    INTERFACE_IDS = {name: i for i, (name, _) in enumerate(interfaces)}
 
     log.info("detected %d network interface(s)", len(interfaces))
     for name, label in interfaces:
@@ -903,25 +1428,45 @@ def refresh_interfaces():
     return AVAILABLE_INTERFACES
 
 
-def sniff_on_interface(iface_name, iface_label, stop_event):
+def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
+    # The capture socket is opened here rather than left to sniff(iface=...)
+    # for two reasons: an adapter that cannot be opened fails HERE, once, with
+    # a message the app gets to see; and holding the socket is what lets the
+    # stats loop ask the driver how many frames it dropped (read_pcap_stats).
+    try:
+        sock = scapy_conf.L2listen(type=ETH_P_ALL, iface=iface_name)
+    except Exception as exc:  # e.g. an adapter that's disabled/down, or Npcap missing on Windows
+        log.warning("capture failed on interface %r (%s): %s", iface_label, iface_name, exc)
+        agent.report_capture_failure(iface_id, iface_name, iface_label, str(exc))
+        return
+    counters.register_socket(iface_id, sock)
     try:
         # No BPF filter: capture every frame on the wire, the way the reference analyzer
         # does by default. This used to be "ip or ip6", which silently
         # discarded ARP, STP and every other non-IP protocol before they
         # could reach the browser - the frontend dissects all of them.
         # store=False keeps memory flat during long-running captures.
-        # stop_filter is checked after every captured packet (or scapy's own
-        # read timeout on a quiet interface) - that's what makes stop_capture
-        # actually stop the thread instead of blocking forever.
-        sniff(prn=sniff_callback, store=False, iface=iface_name,
-              stop_filter=lambda pkt: stop_event.is_set())
-    except Exception as exc:  # e.g. an adapter that's disabled/down, or Npcap missing on Windows
+        # sniff() is re-entered every CAPTURE_POLL_SECONDS so a stop is
+        # honoured within that bound even on an adapter carrying no traffic;
+        # stop_filter covers the busy case between polls.
+        while not stop_event.is_set():
+            sniff(opened_socket=sock, prn=lambda pkt: sniff_callback(pkt, iface_id), store=False,
+                  timeout=CAPTURE_POLL_SECONDS, stop_filter=lambda pkt: stop_event.is_set())
+    except Exception as exc:
         log.warning("capture failed on interface %r (%s): %s", iface_label, iface_name, exc)
+        agent.report_capture_failure(iface_id, iface_name, iface_label, str(exc))
+    finally:
+        counters.unregister_socket(iface_id)
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
 def spawn_sniffer_thread(iface_name, stop_event):
     label = INTERFACE_LABELS.get(iface_name, iface_name)
-    t = threading.Thread(target=sniff_on_interface, args=(iface_name, label, stop_event), daemon=True)
+    iface_id = INTERFACE_IDS.get(iface_name, 0)
+    t = threading.Thread(target=sniff_on_interface, args=(iface_name, label, stop_event, iface_id), daemon=True)
     t.start()
     return t
 
@@ -957,7 +1502,13 @@ async def main(to_stderr=True):
     # Must come after setup_logging, which tears down existing handlers when
     # reconfigured - installing before it would silently remove this one.
     log.addHandler(agent_log.WebSocketLogHandler(agent.broadcast_log))
-    log.info("NetView agent %s starting", AGENT_VERSION)
+    log.info("Inwire agent %s starting", AGENT_VERSION)
+
+    # After logging is up, so the one interesting failure has somewhere to go.
+    # Only the config moves: agent.log is a rotating log, not user data, and an
+    # old one left behind in the previous directory is harmless history.
+    if config.migrate_legacy_config(on_warning=log.warning):
+        log.info("carried config.json over from the previous install directory")
 
     if not has_admin_privileges():
         hint = (
@@ -1011,6 +1562,9 @@ async def main(to_stderr=True):
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv[1:]:
+        print(AGENT_VERSION)
+        sys.exit(0)
     try:
         _ok = asyncio.run(main())
     except KeyboardInterrupt:

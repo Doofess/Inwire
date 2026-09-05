@@ -1,0 +1,21 @@
+[Unit]
+Description=Inwire capture agent
+Documentation=https://github.com/Doofess/NetView
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@PREFIX@/venv/bin/python @PREFIX@/agent.py
+Restart=on-failure
+RestartSec=5
+# Raw capture needs privilege on every OS. Running as root rather than with
+# CAP_NET_RAW alone because scapy opens its sockets lazily, per interface, and
+# a capability that has to survive a re-exec is a worse failure mode than the
+# thing it saves.
+User=root
+WorkingDirectory=@PREFIX@
+StandardOutput=append:@LOG_DIR@/agent.log
+StandardError=append:@LOG_DIR@/agent.log
+
+[Install]
+WantedBy=multi-user.target

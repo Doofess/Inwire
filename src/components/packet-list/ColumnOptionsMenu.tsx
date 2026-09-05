@@ -11,15 +11,13 @@ import {
   DropdownMenuRadioItem,
 } from '../ui/dropdown-menu';
 import {
-  COLUMN_ALIGNS,
-  COLUMN_ALIGN_LABELS,
   COLUMN_LABELS,
   HIDEABLE_COLUMNS,
-  type ColumnAlign,
   type ColumnVisibility,
   type HideableColumn,
 } from '../../lib/packetColumns';
 import { TIME_FORMAT_LABELS, type TimeFormat } from '../../lib/formatTimeColumn';
+import { fieldDef } from '../../services/dissect/fieldRegistry';
 
 /**
  * Which columns show, and how the Time column reads.
@@ -33,24 +31,38 @@ import { TIME_FORMAT_LABELS, type TimeFormat } from '../../lib/formatTimeColumn'
  * Radix rather than the hand-rolled div menu this app already had: that one has
  * no roles, no arrow keys, no Escape and no focus return, and it is why
  * `DropdownMenuCheckboxItem` had been sitting unused in the codebase.
+ *
+ * **Text position is not in here.** It used to be, as one setting applied to
+ * every text column at once - which meant it could not be offered for No.,
+ * Time or Length without also being able to break the digit alignment those
+ * three exist to have. It lives on a right-click of the column header now, so
+ * a choice reaches exactly the column it was made on, and every column can be
+ * offered. That is an accelerator with no visible affordance, which is normally
+ * the objection above - the difference is that it is not the ONLY way to do
+ * anything, it is a per-column refinement of a default that is already right.
  */
 
 interface ColumnOptionsMenuProps {
   columns: ColumnVisibility;
   timeFormat: TimeFormat;
-  align: ColumnAlign;
+  /**
+   * Registry field names added from the detail tree's "Apply as Column".
+   * Listed here because this is the only place they can be taken off again -
+   * the tree adds them and has no idea what is already on the list.
+   */
+  customColumns: string[];
   onColumnsChange: (columns: ColumnVisibility) => void;
+  onCustomColumnsChange: (columns: string[]) => void;
   onTimeFormatChange: (format: TimeFormat) => void;
-  onAlignChange: (align: ColumnAlign) => void;
 }
 
 export const ColumnOptionsMenu: React.FC<ColumnOptionsMenuProps> = ({
   columns,
   timeFormat,
-  align,
+  customColumns,
   onColumnsChange,
+  onCustomColumnsChange,
   onTimeFormatChange,
-  onAlignChange,
 }) => {
   const visibleCount = HIDEABLE_COLUMNS.filter((c) => columns[c]).length;
 
@@ -89,6 +101,29 @@ export const ColumnOptionsMenu: React.FC<ColumnOptionsMenuProps> = ({
           );
         })}
 
+        {customColumns.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Added fields</DropdownMenuLabel>
+            {/* Unchecking one removes it outright rather than hiding it: an
+                added column has no meaning apart from being shown, so a hidden
+                one would be a setting with nothing to say. */}
+            {customColumns.map((abbrev) => (
+              <DropdownMenuCheckboxItem
+                key={abbrev}
+                checked
+                onCheckedChange={() =>
+                  onCustomColumnsChange(customColumns.filter((c) => c !== abbrev))
+                }
+              >
+                <span className="truncate" title={abbrev}>
+                  {fieldDef(abbrev)?.column?.label ?? fieldDef(abbrev)?.label ?? abbrev}
+                </span>
+              </DropdownMenuCheckboxItem>
+            ))}
+          </>
+        )}
+
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Time format</DropdownMenuLabel>
         {/* Radio, not checkboxes: the formats are exclusive. */}
@@ -103,20 +138,6 @@ export const ColumnOptionsMenu: React.FC<ColumnOptionsMenuProps> = ({
           ))}
         </DropdownMenuRadioGroup>
 
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>Text position</DropdownMenuLabel>
-        {/* Applies to the text columns. No., Time and Length keep their right
-            edge - see ColumnAlign for why that is not an oversight. */}
-        <DropdownMenuRadioGroup
-          value={align}
-          onValueChange={(v) => onAlignChange(v as ColumnAlign)}
-        >
-          {COLUMN_ALIGNS.map((value) => (
-            <DropdownMenuRadioItem key={value} value={value}>
-              {COLUMN_ALIGN_LABELS[value]}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>
   );

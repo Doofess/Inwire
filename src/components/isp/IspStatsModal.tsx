@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { TbX, TbGlobe, TbMapPin, TbServer, TbDatabase, TbShield } from 'react-icons/tb';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
+import { useNameResolutionPreference } from '../../lib/nameResolution';
 
 interface IspStatsModalProps {
   onClose: () => void;
@@ -39,10 +40,24 @@ interface IspData {
 
 export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
   const [data, setData] = useState<IspData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * This panel was the one outbound request in the app that nobody had agreed
+   * to. Opening it fetched `ipapi.co/json/` immediately, and the request's own
+   * source address is the disclosure: ipapi.co learns this machine's public IP
+   * and answers with its ISP, city and coordinates. Every other lookup in the
+   * app - GeoJS, the DoH resolver - is behind a switch that is off until it is
+   * turned on, and this is now behind the same one.
+   */
+  const [nameResolution, patchNameResolution] = useNameResolutionPreference();
+  const allowed = nameResolution.geoIp;
+
   useEffect(() => {
+    if (!allowed) return;
+    let live = true;
+    setLoading(true);
     const fetchIspStats = async () => {
       try {
         const response = await fetch('https://ipapi.co/json/');
@@ -55,21 +70,22 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
           throw new Error(jsonData.reason || 'Failed to fetch ISP statistics');
         }
         
-        setData(jsonData);
+        if (live) setData(jsonData);
       } catch (err: any) {
-        setError(err.message || 'An error occurred while fetching ISP stats.');
+        if (live) setError(err.message || 'An error occurred while fetching ISP stats.');
       } finally {
-        setLoading(false);
+        if (live) setLoading(false);
       }
     };
 
     fetchIspStats();
-  }, []);
+    return () => { live = false; };
+  }, [allowed]);
 
   return (
     <motion.div
       {...modalBackdropMotion}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
     >
       <motion.div
         {...modalPanelMotion}
@@ -97,7 +113,30 @@ export const IspStatsModal: React.FC<IspStatsModalProps> = ({ onClose }) => {
 
         {/* Content */}
         <div className="p-6">
-          {loading ? (
+          {!allowed ? (
+            // Asking rather than showing an empty panel: a switch buried in
+            // Settings that the user has to find is a worse consent moment
+            // than the one they are already looking at.
+            <div className="text-center py-10 px-6 rounded-lg border bg-muted/40 border-border">
+              <TbShield className="w-10 h-10 mx-auto mb-3 text-muted-foreground" />
+              <p className="font-semibold text-foreground">This panel has to ask the internet</p>
+              <p className="text-sm mt-2 text-muted-foreground max-w-md mx-auto leading-relaxed">
+                Nothing from your capture is sent. The request itself is the disclosure:
+                <span className="font-mono text-foreground"> ipapi.co</span> sees this
+                machine&rsquo;s public IP address and answers with the ISP, city and
+                coordinates it is registered to.
+              </p>
+              <button
+                onClick={() => patchNameResolution({ geoIp: true })}
+                className="mt-5 px-4 py-2 rounded-md text-sm font-semibold bg-primary text-primary-foreground hover:opacity-90"
+              >
+                Allow external lookups
+              </button>
+              <p className="text-[11px] mt-3 text-muted-foreground">
+                Turns on Settings &rarr; Interface &rarr; Locate addresses, which the map uses too.
+              </p>
+            </div>
+          ) : loading ? (
             <div className="flex flex-col items-center justify-center py-12 gap-4">
               <div className="w-8 h-8 border-4 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
               <p className="text-sm text-muted-foreground">Probing external network...</p>

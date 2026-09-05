@@ -85,7 +85,7 @@ check('every status token is mapped into @theme so the utilities resolve', unmap
 // failure: a token declared in every theme block and left out of `@theme` gives
 // a `bg-chrome` utility that does not exist, so the header bar renders
 // transparent rather than erroring.
-const chromeUnmapped = ['--chrome', '--chrome-foreground'].filter(
+const chromeUnmapped = ['--chrome', '--chrome-foreground', '--chrome-brand', '--chrome-sunken'].filter(
   (token) => !themeBlock.includes(`--color${token.slice(1)}: var(${token});`),
 );
 check('the chrome tokens are mapped into @theme', chromeUnmapped, []);

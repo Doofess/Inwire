@@ -1,5 +1,6 @@
 /**
- * Synchronous AES-128 (encryption only) and AES-128-GCM decryption.
+ * Synchronous AES (encryption direction only) and AES-GCM decryption, for
+ * 128-, 192- and 256-bit keys.
  *
  * Two things QUIC needs that WebCrypto cannot give a synchronous dissector:
  * a raw single-block AES encryption - which WebCrypto deliberately does not
@@ -8,9 +9,17 @@
  * Promise. Only the encryption direction is implemented, because GCM builds
  * both encryption and decryption out of the forward cipher in counter mode.
  *
+ * The 256-bit path exists for TLS: `TLS_AES_256_GCM_SHA384` is the second
+ * most common TLS 1.3 suite, and every AES-256 suite in TLS 1.2 needs it too.
+ * The key schedule is the only thing that differs between the three sizes -
+ * the round function is identical - so the round count is carried in the
+ * length of the expanded key rather than in a parameter every caller would
+ * have to thread and could get wrong.
+ *
  * See the note in sha256.ts on why hand-rolling is acceptable here: these
- * keys are derived from a connection ID sent in the clear, so nothing in this
- * file protects a secret.
+ * keys come either from a connection ID sent in the clear or from a key log
+ * the user chose to supply, so nothing in this file protects a secret of its
+ * own.
  */
 
 const SBOX = new Uint8Array([
@@ -35,42 +44,68 @@ const SBOX = new Uint8Array([
 const ROUND_CONSTANTS = new Uint8Array([0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36]);
 
 export const AES_BLOCK_SIZE = 16;
-const AES128_ROUNDS = 10;
 
 /** Multiply by x in GF(2^8) with the AES reduction polynomial. */
 function xtime(byte: number): number {
   return ((byte << 1) ^ (byte & 0x80 ? 0x1b : 0)) & 0xff;
 }
 
-/** Expands a 16-byte key into the 11 round keys AES-128 uses. */
-export function expandKey128(key: Uint8Array): Uint8Array {
-  if (key.length !== 16) throw new Error(`AES-128 needs a 16-byte key, got ${key.length}`);
+/**
+ * Expands a 16-, 24- or 32-byte key into the round keys of its variant.
+ *
+ * The returned array's length says which variant it is (16 x (rounds + 1)),
+ * which is how `encryptBlock` knows how many rounds to run without being told
+ * a second time - a round count that could disagree with the key it came from
+ * is a bug waiting to happen.
+ */
+export function expandKey(key: Uint8Array): Uint8Array {
+  if (key.length !== 16 && key.length !== 24 && key.length !== 32) {
+    throw new Error(`AES needs a 16-, 24- or 32-byte key, got ${key.length}`);
+  }
 
-  const roundKeys = new Uint8Array(16 * (AES128_ROUNDS + 1));
+  const nk = key.length / 4;
+  // AES's own table: 10 rounds for a 128-bit key, 12 for 192, 14 for 256.
+  const rounds = nk + 6;
+  const totalWords = 4 * (rounds + 1);
+
+  const roundKeys = new Uint8Array(16 * (rounds + 1));
   roundKeys.set(key);
 
-  for (let word = 4; word < 4 * (AES128_ROUNDS + 1); word++) {
+  for (let word = nk; word < totalWords; word++) {
     let t0 = roundKeys[(word - 1) * 4];
     let t1 = roundKeys[(word - 1) * 4 + 1];
     let t2 = roundKeys[(word - 1) * 4 + 2];
     let t3 = roundKeys[(word - 1) * 4 + 3];
 
-    if (word % 4 === 0) {
+    if (word % nk === 0) {
       // RotWord, SubWord, then XOR the round constant into the first byte.
       const rotated = t0;
-      t0 = SBOX[t1] ^ ROUND_CONSTANTS[word / 4 - 1];
+      t0 = SBOX[t1] ^ ROUND_CONSTANTS[word / nk - 1];
       t1 = SBOX[t2];
       t2 = SBOX[t3];
       t3 = SBOX[rotated];
+    } else if (nk > 6 && word % nk === 4) {
+      // AES-256 only: an extra SubWord a third of the way through each
+      // expansion step. Leaving it out yields a schedule that still agrees
+      // with the real one for the first two round keys and then quietly
+      // diverges - the most common way a from-scratch AES-256 goes wrong,
+      // and why the assertion script checks the 256-bit vector too.
+      t0 = SBOX[t0]; t1 = SBOX[t1]; t2 = SBOX[t2]; t3 = SBOX[t3];
     }
 
-    roundKeys[word * 4] = roundKeys[(word - 4) * 4] ^ t0;
-    roundKeys[word * 4 + 1] = roundKeys[(word - 4) * 4 + 1] ^ t1;
-    roundKeys[word * 4 + 2] = roundKeys[(word - 4) * 4 + 2] ^ t2;
-    roundKeys[word * 4 + 3] = roundKeys[(word - 4) * 4 + 3] ^ t3;
+    roundKeys[word * 4] = roundKeys[(word - nk) * 4] ^ t0;
+    roundKeys[word * 4 + 1] = roundKeys[(word - nk) * 4 + 1] ^ t1;
+    roundKeys[word * 4 + 2] = roundKeys[(word - nk) * 4 + 2] ^ t2;
+    roundKeys[word * 4 + 3] = roundKeys[(word - nk) * 4 + 3] ^ t3;
   }
 
   return roundKeys;
+}
+
+/** Expands a 16-byte key. Kept under its own name because QUIC only ever has one. */
+export function expandKey128(key: Uint8Array): Uint8Array {
+  if (key.length !== 16) throw new Error(`AES-128 needs a 16-byte key, got ${key.length}`);
+  return expandKey(key);
 }
 
 /**
@@ -78,12 +113,13 @@ export function expandKey128(key: Uint8Array): Uint8Array {
  * This is the raw block cipher - QUIC's header protection calls for exactly
  * this, applied to a sample of the ciphertext.
  */
-export function encryptBlock128(roundKeys: Uint8Array, block: Uint8Array): Uint8Array {
+export function encryptBlock(roundKeys: Uint8Array, block: Uint8Array): Uint8Array {
+  const lastRound = roundKeys.length / 16 - 1;
   const state = new Uint8Array(block.subarray(0, AES_BLOCK_SIZE));
 
   for (let i = 0; i < 16; i++) state[i] ^= roundKeys[i];
 
-  for (let round = 1; round <= AES128_ROUNDS; round++) {
+  for (let round = 1; round <= lastRound; round++) {
     for (let i = 0; i < 16; i++) state[i] = SBOX[state[i]];
 
     // ShiftRows: row r rotates left by r. State is column-major, so row r is
@@ -94,7 +130,7 @@ export function encryptBlock128(roundKeys: Uint8Array, block: Uint8Array): Uint8
     tmp = state[15]; state[15] = state[11]; state[11] = state[7]; state[7] = state[3]; state[3] = tmp;
 
     // MixColumns is skipped in the final round.
-    if (round !== AES128_ROUNDS) {
+    if (round !== lastRound) {
       for (let column = 0; column < 4; column++) {
         const i = column * 4;
         const a0 = state[i], a1 = state[i + 1], a2 = state[i + 2], a3 = state[i + 3];
@@ -112,42 +148,69 @@ export function encryptBlock128(roundKeys: Uint8Array, block: Uint8Array): Uint8
   return state;
 }
 
-/**
- * One step of GHASH: multiplies X by H in GF(2^128) using the bit-reflected
- * polynomial GCM is defined over. The shift-and-xor form is used rather than
- * a precomputed table because this runs a few times per QUIC handshake, not
- * per byte of a bulk stream.
- */
-function galoisMultiply(x: Uint8Array, h: Uint8Array): Uint8Array {
-  const z = new Uint8Array(16);
-  const v = new Uint8Array(h);
+/** `encryptBlock` under its original name, for the QUIC code that predates the other sizes. */
+export const encryptBlock128 = encryptBlock;
 
-  for (let bit = 0; bit < 128; bit++) {
-    if ((x[bit >> 3] >> (7 - (bit & 7))) & 1) {
-      for (let i = 0; i < 16; i++) z[i] ^= v[i];
+/**
+ * GHASH over a sequence of 16-byte blocks (the tail is zero-padded).
+ *
+ * The multiply is shift-and-xor over the bit-reflected polynomial GCM is
+ * defined on, held in four 32-bit words rather than sixteen bytes. When this
+ * only ran a handful of times per QUIC handshake the byte form was clearer and
+ * fast enough; decrypting TLS application data runs it over every byte of
+ * every record, where it was the whole cost of GCM - 11 MB/s against the block
+ * cipher's 60. Four words instead of sixteen bytes is the same algorithm and
+ * roughly five times the speed, which is why there is no precomputed table
+ * here: the tables cost memory per key and this is no longer the bottleneck.
+ */
+function ghash(h: Uint8Array, data: Uint8Array): Uint8Array {
+  const view = new DataView(h.buffer, h.byteOffset, 16);
+  const h0 = view.getUint32(0, false), h1 = view.getUint32(4, false);
+  const h2 = view.getUint32(8, false), h3 = view.getUint32(12, false);
+
+  let y0 = 0, y1 = 0, y2 = 0, y3 = 0;
+  const block = new Uint8Array(16);
+  const blockView = new DataView(block.buffer);
+
+  for (let offset = 0; offset < data.length; offset += 16) {
+    block.fill(0);
+    block.set(data.subarray(offset, Math.min(offset + 16, data.length)));
+
+    // x = y XOR block, the running value this iteration multiplies by H.
+    const x0 = (y0 ^ blockView.getUint32(0, false)) >>> 0;
+    const x1 = (y1 ^ blockView.getUint32(4, false)) >>> 0;
+    const x2 = (y2 ^ blockView.getUint32(8, false)) >>> 0;
+    const x3 = (y3 ^ blockView.getUint32(12, false)) >>> 0;
+
+    let z0 = 0, z1 = 0, z2 = 0, z3 = 0;
+    let v0 = h0, v1 = h1, v2 = h2, v3 = h3;
+
+    for (let word = 0; word < 4; word++) {
+      const x = word === 0 ? x0 : word === 1 ? x1 : word === 2 ? x2 : x3;
+      for (let bit = 31; bit >= 0; bit--) {
+        if ((x >>> bit) & 1) { z0 ^= v0; z1 ^= v1; z2 ^= v2; z3 ^= v3; }
+
+        // v >>= 1 across the whole 128-bit value, reducing by the polynomial's
+        // 0xe1 << 120 whenever a one falls off the bottom.
+        const carry = v3 & 1;
+        v3 = ((v3 >>> 1) | (v2 << 31)) >>> 0;
+        v2 = ((v2 >>> 1) | (v1 << 31)) >>> 0;
+        v1 = ((v1 >>> 1) | (v0 << 31)) >>> 0;
+        v0 = v0 >>> 1;
+        if (carry) v0 = (v0 ^ 0xe1000000) >>> 0;
+      }
     }
 
-    // v >>= 1 across the whole 128-bit value, reducing by 0xe1 << 120 when a
-    // one falls off the bottom.
-    const lsbSet = v[15] & 1;
-    for (let i = 15; i > 0; i--) v[i] = ((v[i] >>> 1) | ((v[i - 1] & 1) << 7)) & 0xff;
-    v[0] >>>= 1;
-    if (lsbSet) v[0] ^= 0xe1;
+    y0 = z0 >>> 0; y1 = z1 >>> 0; y2 = z2 >>> 0; y3 = z3 >>> 0;
   }
 
-  return z;
-}
-
-/** GHASH over a sequence of already-padded 16-byte blocks. */
-function ghash(h: Uint8Array, data: Uint8Array): Uint8Array {
-  let y = new Uint8Array(16);
-  for (let offset = 0; offset < data.length; offset += 16) {
-    const block = new Uint8Array(16);
-    block.set(data.subarray(offset, Math.min(offset + 16, data.length)));
-    for (let i = 0; i < 16; i++) block[i] ^= y[i];
-    y = galoisMultiply(block, h);
-  }
-  return y;
+  const out = new Uint8Array(16);
+  const outView = new DataView(out.buffer);
+  outView.setUint32(0, y0, false);
+  outView.setUint32(4, y1, false);
+  outView.setUint32(8, y2, false);
+  outView.setUint32(12, y3, false);
+  return out;
 }
 
 /** Increments the low 32 bits of a counter block, per GCM's inc32. */
@@ -164,7 +227,7 @@ function ctrXor(roundKeys: Uint8Array, initialCounter: Uint8Array, data: Uint8Ar
 
   for (let offset = 0; offset < data.length; offset += AES_BLOCK_SIZE) {
     incrementCounter(counter);
-    const keystream = encryptBlock128(roundKeys, counter);
+    const keystream = encryptBlock(roundKeys, counter);
     const blockLength = Math.min(AES_BLOCK_SIZE, data.length - offset);
     for (let i = 0; i < blockLength; i++) output[offset + i] = data[offset + i] ^ keystream[i];
   }
@@ -173,14 +236,16 @@ function ctrXor(roundKeys: Uint8Array, initialCounter: Uint8Array, data: Uint8Ar
 }
 
 /**
- * AES-128-GCM decryption with authentication.
+ * AES-GCM decryption with authentication, for any of the three key sizes.
  *
- * `nonce` must be 12 bytes, which is what QUIC always uses. Returns null when
- * the authentication tag does not verify - which is the point: it means the
- * keys were wrong or the bytes are not what we assumed, and the "plaintext"
- * would be noise. Callers rely on that to avoid rendering garbage.
+ * `nonce` must be 12 bytes, which is what QUIC and TLS both always use.
+ * Returns null when the authentication tag does not verify - which is the
+ * point: it means the keys were wrong or the bytes are not what we assumed,
+ * and the "plaintext" would be noise. Callers rely on that to avoid rendering
+ * garbage, and an honest failure is the only reason it is safe to *try* a key
+ * log entry against a stream at all.
  */
-export function aes128GcmDecrypt(
+export function aesGcmDecrypt(
   key: Uint8Array,
   nonce: Uint8Array,
   aad: Uint8Array,
@@ -188,9 +253,10 @@ export function aes128GcmDecrypt(
   tag: Uint8Array
 ): Uint8Array | null {
   if (nonce.length !== 12) return null;
+  if (tag.length !== 16) return null;
 
-  const roundKeys = expandKey128(key);
-  const h = encryptBlock128(roundKeys, new Uint8Array(16));
+  const roundKeys = expandKey(key);
+  const h = encryptBlock(roundKeys, new Uint8Array(16));
 
   // With a 96-bit nonce, J0 is simply the nonce followed by the integer 1.
   const j0 = new Uint8Array(16);
@@ -209,7 +275,7 @@ export function aes128GcmDecrypt(
   lengthView.setUint32(12, ciphertext.length * 8, false);
 
   const s = ghash(h, hashInput);
-  const tagMask = encryptBlock128(roundKeys, j0);
+  const tagMask = encryptBlock(roundKeys, j0);
 
   let mismatch = 0;
   for (let i = 0; i < 16; i++) mismatch |= (s[i] ^ tagMask[i]) ^ tag[i];
@@ -217,3 +283,6 @@ export function aes128GcmDecrypt(
 
   return ctrXor(roundKeys, j0, ciphertext);
 }
+
+/** `aesGcmDecrypt` under its original name; QUIC Initials are always AES-128. */
+export const aes128GcmDecrypt = aesGcmDecrypt;

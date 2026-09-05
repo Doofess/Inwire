@@ -1,8 +1,11 @@
-import { Packet, ProtocolType } from '../types/packet';
+import { Packet, PacketStatus, ProtocolType } from '../types/packet';
+import type { DnsTracker } from './dnsTracker';
+import type { InfoPatch } from './pcapParser';
 import { decodeRawEthernetPacket } from './pcapParser';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 import { QuicFlowTracker } from './quicFlowTracker';
+import type { L3Tracker } from './l3Tracker';
 import { StoredFrame } from './sessionStore';
 
 /**
@@ -21,9 +24,14 @@ import { StoredFrame } from './sessionStore';
  * genuinely empty rather than fabricated: a frame with no captured bytes has
  * no hex dump, and inventing one would be worse than showing none.
  */
+/** A stored frame's capture time in microseconds, whichever build stored it. */
+export function storedFrameTsUs(frame: { tsUs?: number; timestamp: number }): number {
+  return frame.tsUs ?? Math.round(frame.timestamp * 1000);
+}
+
 export function buildFallbackPacket(fields: {
   id: number;
-  timestamp: number;
+  tsUs: number;
   relativeTime: number;
   timeDelta: number;
   length: number;
@@ -32,12 +40,28 @@ export function buildFallbackPacket(fields: {
   sourcePort?: number;
   destPort?: number;
   protocol?: string;
+  /** See `StoredFrame.fallback.protocolLabel` - set by tabular import only. */
+  protocolLabel?: string;
   info?: string;
+  status?: PacketStatus;
+  /**
+   * Where this frame came from, for the Frame layer and the interface column.
+   *
+   * Defaults to the live agent because that is who originally had no bytes to
+   * send. A spreadsheet import passes its filename instead: a row read out of
+   * `capture.csv` claiming it was captured on "Live Agent" is a small lie that
+   * survives into the detail pane and the interface filter.
+   */
+  sourceLabel?: string;
+  /** Why there are no bytes, in the Frame summary's parenthetical. */
+  frameNote?: string;
 }): Packet {
   const length = fields.length || 0;
+  const sourceLabel = fields.sourceLabel || 'Live Agent';
+  const frameNote = fields.frameNote || 'no raw capture data was available';
   return {
     id: fields.id,
-    timestamp: fields.timestamp,
+    tsUs: fields.tsUs,
     relativeTime: fields.relativeTime,
     timeDelta: fields.timeDelta,
     source: fields.source || '0.0.0.0',
@@ -45,21 +69,22 @@ export function buildFallbackPacket(fields: {
     sourcePort: fields.sourcePort,
     destPort: fields.destPort,
     protocol: (fields.protocol || 'TCP') as ProtocolType,
+    protocolLabel: fields.protocolLabel,
     length,
     info: fields.info || 'Traffic',
-    status: 'ok',
+    status: fields.status || 'ok',
     layers: [
       {
         name: 'Frame',
-        summary: `Frame ${fields.id}: ${length} bytes (no raw capture data was available)`,
+        summary: `Frame ${fields.id}: ${length} bytes (${frameNote})`,
         fields: [
-          { name: 'Interface', value: 'Live Agent' },
+          { name: 'Interface', value: sourceLabel },
           { name: 'Length', value: `${length} bytes` },
         ],
       },
     ],
     rawBytes: new Uint8Array(0),
-    interfaceName: 'Live Agent',
+    interfaceName: sourceLabel,
   };
 }
 
@@ -67,6 +92,14 @@ export interface RestoreTrackers {
   tcpTracker: TcpStreamTracker;
   icmpTracker: IcmpEchoTracker;
   quicTracker: QuicFlowTracker;
+  /** DNS query/response pairing; order-dependent like the others. */
+  dnsTracker: DnsTracker;
+  /**
+   * IP fragments and ARP bindings. Optional so a caller that predates it - the
+   * tabular importer, whose rows are already whole frames - still type-checks;
+   * without it a restored capture simply does not report duplicate addresses.
+   */
+  l3Tracker?: L3Tracker;
 }
 
 /**
@@ -94,9 +127,26 @@ export function restoreBatch(
    * what the detail window surfaced.
    */
   interfaceIdByLabel?: Map<string, string>,
-): { packets: Packet[]; icmpReplies: { requestFrameId: number; replyId: number }[] } {
+  /**
+   * Overrides for frames that have no bytes, used by the tabular importer.
+   *
+   * A session restore leaves this unset and gets the live-agent wording it has
+   * always had; a spreadsheet import names the file it came from instead.
+   */
+  fallbackOrigin?: { sourceLabel: string; frameNote: string },
+  /**
+   * Whether the restored frames carry their protocol tree.
+   *
+   * The app restores without it, for the same reason it imports without it: a
+   * tree is 10.6 kB against the frame's own 1.2 kB and the detail pane is the
+   * only thing that reads one, so it is rebuilt on demand
+   * (docs/decisions/0007). Scripts that assert on tree content ask for it.
+   */
+  keepTrees = false,
+): { packets: Packet[]; icmpReplies: { requestFrameId: number; replyId: number }[]; infoPatches: InfoPatch[] } {
   const packets: Packet[] = [];
   const icmpReplies: { requestFrameId: number; replyId: number }[] = [];
+  const infoPatches: InfoPatch[] = [];
 
   for (const frame of frames) {
     // Only claim an adapter the session's own table can actually identify.
@@ -116,34 +166,45 @@ export function restoreBatch(
       const decoded = decodeRawEthernetPacket(
         frame.raw,
         frame.id,
-        frame.timestamp,
+        storedFrameTsUs(frame),
         frame.relativeTime,
         frame.timeDelta,
         frame.length,
         trackers.tcpTracker,
         trackers.icmpTracker,
         trackers.quicTracker,
+        trackers.dnsTracker,
         captureInterface,
+        undefined,
+        trackers.l3Tracker,
       );
+      // The tree has done its work by here - it is what the fields, the Info
+      // line and the expert findings were read out of - and keeping one per
+      // frame is 89% of a restored buffer's memory. The detail pane rebuilds
+      // the one tree it needs by replaying that frame's conversation
+      // (docs/decisions/0007).
+      if (!keepTrees) decoded.packet.layers = [];
       packets.push(decoded.packet);
       if (decoded.icmpMatchedRequestFrameId !== undefined) {
         icmpReplies.push({ requestFrameId: decoded.icmpMatchedRequestFrameId, replyId: frame.id });
       }
+      if (decoded.infoPatches) infoPatches.push(...decoded.infoPatches);
     } else {
       packets.push(
         buildFallbackPacket({
           id: frame.id,
-          timestamp: frame.timestamp,
+          tsUs: storedFrameTsUs(frame),
           relativeTime: frame.relativeTime,
           timeDelta: frame.timeDelta,
           length: frame.length,
           ...frame.fallback,
+          ...fallbackOrigin,
         }),
       );
     }
   }
 
-  return { packets, icmpReplies };
+  return { packets, icmpReplies, infoPatches };
 }
 
 /**

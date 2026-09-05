@@ -3,7 +3,7 @@
 Turning the agent's own log into something a browser can display.
 
 The agent runs as a LocalSystem service writing to
-%ProgramData%\\NetView\\agent.log, a path no browser page can read. This
+%ProgramData%\\Inwire\\agent.log, a path no browser page can read. This
 module holds the two halves of getting those lines onto the WebSocket -
 reading the tail of the file for backlog, and a logging.Handler that
 forwards each new record live - with no reference to the socket or to
@@ -99,7 +99,7 @@ _TIME_FORMATTER = logging.Formatter()
 class WebSocketLogHandler(logging.Handler):
     """Forwards every log record to `sink` as a protocol log entry.
 
-    Installed on the `netview` logger, this delivers each line the instant
+    Installed on the `inwire` logger, this delivers each line the instant
     it is logged - no polling, no file-position bookkeeping, and nothing a
     RotatingFileHandler rollover mid-session can desync. It also keeps
     working when the log file itself is unwritable, which is the case where

@@ -12,7 +12,7 @@ import { L2DissectorResult } from './l2';
  * Everything here - the Info column's `MA/<id> IN/<id> <ttl>` shape, the
  * two-letter subtype prefixes, and which subtypes render as hex rather than
  * text - was read off `tshark -T fields -e _ws.col.info` for frames built to
- * cover all 7x7 chassis/port subtype combinations, so NetView's Info column
+ * cover all 7x7 chassis/port subtype combinations, so Inwire's Info column
  * matches the reference analyzer's character for character rather than approximating it.
  */
 

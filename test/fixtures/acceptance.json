@@ -1,0 +1,84 @@
+{
+  "tshark": "4.6.8",
+  "groundTruthFields": [
+    "frame.number",
+    "frame.time_relative",
+    "_ws.col.Source",
+    "_ws.col.Destination",
+    "_ws.col.Protocol",
+    "frame.len",
+    "tcp.reassembled_in",
+    "tls.handshake.ja3",
+    "tls.handshake.ja3s",
+    "tls.handshake.ja4",
+    "_ws.col.Info"
+  ],
+  "fixtures": {
+    "inwire": {
+      "file": "inwire_capture_1788478187989.pcap",
+      "sha256": "01f184b7ff5f1078460f08e64eb1a3944ffda89f961736488da8abfc2c427937",
+      "frames": 12858,
+      "floors": {
+        "Protocol": 99.4,
+        "Source": 100,
+        "Destination": 100,
+        "Time": 100,
+        "Length": 100,
+        "Info": 98.9,
+        "Color rule": 99.9,
+        "JA3": 100,
+        "JA3S": 100,
+        "JA4": 100
+      },
+      "counts": {
+        "frames": 12858,
+        "quicRows": 3088,
+        "tcpRst": 11,
+        "tcpClientHelloSni": 9,
+        "quicClientHelloSni": 34,
+        "retransmission": 70,
+        "dupAck": 17,
+        "outOfOrder": 33,
+        "lostSegment": 111
+      },
+      "enforce": [
+        "frames",
+        "quicRows",
+        "tcpRst",
+        "tcpClientHelloSni",
+        "quicClientHelloSni",
+        "retransmission",
+        "outOfOrder",
+        "lostSegment"
+      ]
+    },
+    "netview": {
+      "file": "netview_capture_1788426090876.pcap",
+      "sha256": "2d20930051c0d1f91e5e40a1413ce5c7c73f432ad0e3f2c609789916a7b432e8",
+      "frames": 14782,
+      "floors": {
+        "Protocol": 96.1,
+        "Source": 100,
+        "Destination": 100,
+        "Time": 100,
+        "Length": 100,
+        "Info": 94.9,
+        "Color rule": 99.9,
+        "JA3": 100,
+        "JA3S": 100,
+        "JA4": 100
+      },
+      "counts": {
+        "frames": 14782,
+        "quicRows": 86,
+        "tcpRst": 1,
+        "tcpClientHelloSni": 3
+      },
+      "enforce": [
+        "frames",
+        "quicRows",
+        "tcpRst"
+      ]
+    }
+  }
+}

@@ -1,4 +1,4 @@
-import { Packet } from '../types/packet';
+import { Packet, PacketStatus } from '../types/packet';
 
 /**
  * Persists the live capture session so a browser refresh does not throw it
@@ -37,7 +37,18 @@ import { Packet } from '../types/packet';
  * to keep free.
  */
 
-const DB_NAME = 'netview';
+const DB_NAME = 'inwire';
+
+/**
+ * The database name this app used before it was renamed.
+ *
+ * Read once, on the first open after an update, and deleted afterwards. See
+ * `migrateLegacyDatabase`.
+ */
+const LEGACY_DB_NAME = 'netview';
+
+/** Frames copied per transaction during that migration. */
+const MIGRATION_BATCH = 2000;
 const DB_VERSION = 1;
 const FRAME_STORE = 'frames';
 const META_STORE = 'meta';
@@ -53,7 +64,10 @@ const SESSION_KEY = 'session';
  */
 export interface StoredFrame {
   id: number;
+  /** Epoch milliseconds. Kept for frames stored before `tsUs` existed. */
   timestamp: number;
+  /** Epoch microseconds; absent on frames stored by an older build. */
+  tsUs?: number;
   relativeTime: number;
   timeDelta: number;
   length: number;
@@ -65,7 +79,18 @@ export interface StoredFrame {
     sourcePort?: number;
     destPort?: number;
     protocol: string;
+    /**
+     * The free-form protocol name, when it differs from the coarse `protocol`.
+     *
+     * A live agent frame never sets this - it has no dissector to name a layer.
+     * A frame reconstructed from a spreadsheet row does: the Protocol column
+     * holds what the packet list displayed ("TLSv1.2"), which is not a member
+     * of `ProtocolType`, so the two halves have to travel separately.
+     */
+    protocolLabel?: string;
     info: string;
+    /** Absent means 'ok', which is what a frame with no bytes to judge gets. */
+    status?: PacketStatus;
   };
 }
 
@@ -106,7 +131,19 @@ let dbPromise: Promise<IDBDatabase | null> | null = null;
  */
 function openDb(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve) => {
+  // The migration is folded into the open rather than run beside it, so that
+  // every caller - restore, trim, append - is holding a database that has
+  // already absorbed the old one. A migration running in parallel with the
+  // first append would be racing it for the same object store.
+  dbPromise = openCurrentDb().then(async (db) => {
+    if (db) await migrateLegacyDatabase(db);
+    return db;
+  });
+  return dbPromise;
+}
+
+function openCurrentDb(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
     let request: IDBOpenDBRequest;
     try {
       request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -134,7 +171,109 @@ function openDb(): Promise<IDBDatabase | null> {
     request.onerror = () => resolve(null);
     request.onblocked = () => resolve(null);
   });
-  return dbPromise;
+}
+
+/**
+ * Carry a stored session across the app's rename, once.
+ *
+ * The captured session is a crash-recovery cache rather than authored data, but
+ * it is the difference between reopening the tab onto the packets you were
+ * looking at and reopening it onto nothing - which after an update reads as
+ * "the update lost my capture".
+ *
+ * Only runs when the current database is empty. A session already stored under
+ * the new name is the newer one by construction, and must not be overwritten
+ * by whatever the old build left behind.
+ *
+ * Opening the old database WITHOUT a version is what makes this safe to call
+ * forever: that form opens an existing database at whatever version it is on,
+ * and only fires `onupgradeneeded` when it had to create one. So an
+ * `onupgradeneeded` here means there was nothing to migrate, and the empty
+ * database this call just brought into being is deleted again on the way out -
+ * otherwise every load would recreate the very thing it is trying to remove.
+ */
+async function migrateLegacyDatabase(db: IDBDatabase): Promise<void> {
+  try {
+    const existing = await runTx<unknown>(db, META_STORE, 'readonly', (store) =>
+      store.get(SESSION_KEY));
+    if (existing) return;
+
+    const legacy = await new Promise<IDBDatabase | null>((resolve) => {
+      let created = false;
+      let request: IDBOpenDBRequest;
+      try {
+        request = indexedDB.open(LEGACY_DB_NAME);
+      } catch {
+        resolve(null);
+        return;
+      }
+      request.onupgradeneeded = () => {
+        created = true;
+      };
+      request.onsuccess = () => {
+        const opened = request.result;
+        if (created) {
+          opened.close();
+          try {
+            indexedDB.deleteDatabase(LEGACY_DB_NAME);
+          } catch {
+            // Nothing to clean up that we can reach. Harmless either way.
+          }
+          resolve(null);
+          return;
+        }
+        resolve(opened);
+      };
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    });
+    if (!legacy) return;
+
+    try {
+      const hasStores = legacy.objectStoreNames.contains(FRAME_STORE)
+        && legacy.objectStoreNames.contains(META_STORE);
+      const meta = hasStores
+        ? await runTx<unknown>(legacy, META_STORE, 'readonly', (store) =>
+            store.get(SESSION_KEY))
+        : null;
+
+      if (meta) {
+        // Batched rather than one `getAll`, for the same reason the restore
+        // path is: a full buffer is 50,000 frames and was measured at 162 MB,
+        // and pulling that into a single array before writing any of it doubles
+        // the peak for no benefit.
+        let after = -Infinity;
+        for (;;) {
+          const range = Number.isFinite(after)
+            ? IDBKeyRange.lowerBound(after, true)
+            : undefined;
+          const batch = await runTx<StoredFrame[]>(legacy, FRAME_STORE, 'readonly', (store) =>
+            store.getAll(range, MIGRATION_BATCH));
+          if (!batch?.length) break;
+          await runTx(db, FRAME_STORE, 'readwrite', (store) => {
+            for (const frame of batch) store.put(frame);
+            return null;
+          });
+          after = batch[batch.length - 1].id;
+          if (batch.length < MIGRATION_BATCH) break;
+        }
+
+        await runTx(db, META_STORE, 'readwrite', (store) => store.put(meta, SESSION_KEY));
+      }
+    } finally {
+      legacy.close();
+    }
+
+    try {
+      indexedDB.deleteDatabase(LEGACY_DB_NAME);
+    } catch {
+      // The copy is what mattered; a database left behind costs nothing but
+      // space, and the emptiness check above stops it being read twice.
+    }
+  } catch {
+    // A blocked, full or unavailable IndexedDB. The session is a cache - the
+    // app starts without it exactly as it would on a fresh machine.
+  }
 }
 
 function runTx<T>(
@@ -169,7 +308,8 @@ function runTx<T>(
 export function toStoredFrame(packet: Packet): StoredFrame {
   const frame: StoredFrame = {
     id: packet.id,
-    timestamp: packet.timestamp,
+    timestamp: packet.tsUs / 1000,
+    tsUs: packet.tsUs,
     relativeTime: packet.relativeTime,
     timeDelta: packet.timeDelta,
     length: packet.length,
@@ -187,7 +327,9 @@ export function toStoredFrame(packet: Packet): StoredFrame {
       sourcePort: packet.sourcePort,
       destPort: packet.destPort,
       protocol: packet.protocol,
+      protocolLabel: packet.protocolLabel,
       info: packet.info,
+      status: packet.status,
     };
   }
   return frame;

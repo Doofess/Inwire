@@ -84,8 +84,18 @@ hello = agent.build_hello_message(
 check("hello type", hello["type"], "hello")
 check("hello version", hello["version"], "2.0.0")
 check("hello state", hello["state"], "idle")
-check("hello interfaces", hello["interfaces"], [{"name": "\\Device\\NPF_{ABC}", "label": "Wi-Fi"}])
-check("hello no longer advertises authRequired", "authRequired" in hello, False)
+check("hello interfaces carry their id", hello["interfaces"], [{"id": 0, "name": "\\Device\\NPF_{ABC}", "label": "Wi-Fi"}])
+# It advertises it again since 3.3.0, and for a reason that did not exist when
+# the origin check was the only control: a handshake refused at the HTTP level
+# reaches a browser as an opaque WebSocket error, indistinguishable from "the
+# agent is not running". Announcing the requirement is what lets the app say
+# which of the two it is.
+check("hello says whether a pairing token is needed", hello["authRequired"], False)
+check(
+    "...and says so when one is",
+    agent.build_hello_message("3.3.0", "idle", [], auth_required=True)["authRequired"],
+    True,
+)
 
 hello_no_ifaces = agent.build_hello_message(version="2.0.0", state="sniffing", interfaces=[])
 check("hello with no interfaces", hello_no_ifaces["interfaces"], [])
@@ -159,7 +169,7 @@ check("restart_threads while idle does not spawn anything", spawn5.calls, [])
 idle_msg = agent.SnifferController(default_interfaces=[]).state_message([("eth0", "Ethernet")])
 check("state_message type", idle_msg["type"], "state")
 check("state_message idle state", idle_msg["state"], "idle")
-check("state_message reports available interfaces regardless of selection", idle_msg["interfaces"], [{"name": "eth0", "label": "Ethernet"}])
+check("state_message reports available interfaces regardless of selection", idle_msg["interfaces"], [{"id": 0, "name": "eth0", "label": "Ethernet"}])
 
 sc_sniffing = agent.SnifferController(default_interfaces=["eth0"])
 sc_sniffing.start_threads(FakeSpawnCalls())
@@ -355,36 +365,36 @@ import logging
 
 import logging_setup
 
-_netview_logger = logging.getLogger("netview")
-_saved_handlers = list(_netview_logger.handlers)
+_inwire_logger = logging.getLogger("inwire")
+_saved_handlers = list(_inwire_logger.handlers)
 _saved_configured_with = logging_setup._configured_with
-_saved_level = _netview_logger.level
-_saved_propagate = _netview_logger.propagate
+_saved_level = _inwire_logger.level
+_saved_propagate = _inwire_logger.propagate
 try:
     # A changed to_stderr on a second call must actually take effect: a
     # stale StreamHandler from an earlier to_stderr=True call must not keep
     # writing to a stderr the caller just asked us not to use.
-    for _h in list(_netview_logger.handlers):
-        _netview_logger.removeHandler(_h)
+    for _h in list(_inwire_logger.handlers):
+        _inwire_logger.removeHandler(_h)
         _h.close()
     logging_setup._configured_with = None
 
     _tmpdir1 = tempfile.mkdtemp()
     logging_setup.setup_logging(_tmpdir1, to_stderr=True)
-    _stderr_handlers_before = [h for h in _netview_logger.handlers if getattr(h, "stream", None) is sys.stderr]
+    _stderr_handlers_before = [h for h in _inwire_logger.handlers if getattr(h, "stream", None) is sys.stderr]
     check_true("to_stderr=True attaches a stderr stream handler", len(_stderr_handlers_before) == 1)
 
     logging_setup.setup_logging(_tmpdir1, to_stderr=False)
     # RotatingFileHandler is also a StreamHandler subclass, so this must
     # filter by the stderr stream specifically, not just the class.
-    _stderr_handlers_after = [h for h in _netview_logger.handlers if getattr(h, "stream", None) is sys.stderr]
+    _stderr_handlers_after = [h for h in _inwire_logger.handlers if getattr(h, "stream", None) is sys.stderr]
     check("to_stderr=False on a second call removes the stale stderr handler", _stderr_handlers_after, [])
 
     # An unwritable log directory plus to_stderr=False must still leave the
     # logger with a handler (a NullHandler), so logging.lastResort never
     # writes WARNING+ records to the real stderr behind the SCM's back.
-    for _h in list(_netview_logger.handlers):
-        _netview_logger.removeHandler(_h)
+    for _h in list(_inwire_logger.handlers):
+        _inwire_logger.removeHandler(_h)
         _h.close()
     logging_setup._configured_with = None
 
@@ -393,22 +403,22 @@ try:
     _unwritable_dir = _blocking_file.name  # a file, not a directory: os.makedirs must fail
     try:
         logging_setup.setup_logging(_unwritable_dir, to_stderr=False)
-        check_true("unwritable dir + to_stderr=False still leaves at least one handler", len(_netview_logger.handlers) >= 1)
+        check_true("unwritable dir + to_stderr=False still leaves at least one handler", len(_inwire_logger.handlers) >= 1)
         check_true(
             "that handler is a NullHandler, so logging.lastResort cannot engage",
-            any(isinstance(h, logging.NullHandler) for h in _netview_logger.handlers),
+            any(isinstance(h, logging.NullHandler) for h in _inwire_logger.handlers),
         )
     finally:
         os.remove(_unwritable_dir)
 finally:
-    for _h in list(_netview_logger.handlers):
-        _netview_logger.removeHandler(_h)
+    for _h in list(_inwire_logger.handlers):
+        _inwire_logger.removeHandler(_h)
         _h.close()
     for _h in _saved_handlers:
-        _netview_logger.addHandler(_h)
+        _inwire_logger.addHandler(_h)
     logging_setup._configured_with = _saved_configured_with
-    _netview_logger.level = _saved_level
-    _netview_logger.propagate = _saved_propagate
+    _inwire_logger.level = _saved_level
+    _inwire_logger.propagate = _saved_propagate
 
 # --- build_interface_label ---
 check(
@@ -534,7 +544,7 @@ check("read_log_tail on an empty file returns []", agent_log.read_log_tail(_empt
 
 # --- agent log: live handler ---
 _captured = []
-_handler_logger = logging.getLogger("netview.test.handler")
+_handler_logger = logging.getLogger("inwire.test.handler")
 _handler_logger.setLevel(logging.INFO)
 _handler_logger.propagate = False
 _handler = agent_log.WebSocketLogHandler(_captured.append)
@@ -612,6 +622,9 @@ try:
     agent.AVAILABLE_INTERFACES = [("eth0", "Ethernet")]
     srv = agent.AgentServer()
     ws = RecordingWS()
+    # `register` admits a connection immediately when no pairing token is
+    # configured; these drive _handle_message directly, so they say so here.
+    srv.authenticated.add(ws)
 
     check("a fresh server has no log subscribers", len(srv.log_subscribers), 0)
 
@@ -665,69 +678,269 @@ finally:
     else:
         agent.AVAILABLE_INTERFACES = _prev_interfaces
 
-# --- broadcast backpressure: the bound that keeps the agent from wedging ---
-class _FakeLoop:
-    """Records scheduled coroutines instead of running them, which is exactly
-    the backed-up-loop condition the bound exists for."""
+# --- the pairing token -------------------------------------------------------------
+# The origin check keeps an ordinary web page out of the agent and stops
+# nothing that can set a header, which is any process on this machine. The
+# token is the control that tells the user's browser from another program
+# running as the user, and it lives in a file only an administrator can read.
+check_true("a token is 256 bits of hex", len(config.make_token()) == 64)
+check_true("...and two are not the same", config.make_token() != config.make_token())
+check_true("a token matches itself", config.tokens_match("abc123", "abc123"))
+check_true("...and nothing else", not config.tokens_match("abc123", "abc124"))
+check_true("surrounding whitespace is forgiven, since it will be pasted",
+           config.tokens_match("  abc123\n", "abc123"))
+check_true("a missing token matches nothing", not config.tokens_match(None, "abc123"))
+check("a config with no token means no token", config.parse_config('{}')["token"], None)
+check('an empty token is no token, not a token of nothing',
+      config.parse_config('{"token": "   "}')["token"], None)
+check("a config with a token reports it",
+      config.parse_config('{"token": "deadbeef"}')["token"], "deadbeef")
 
+# A token we could not read must never be reported as a token that is not
+# there. The origin list falls back to defaults on a broken file because doing
+# so allows only the origins we would have allowed anyway; doing the same to
+# the token would turn a stray comma into "authentication silently off", which
+# is the whole of what stands between the user's browser and any other program
+# running as the user.
+check_true("unparseable JSON leaves the token UNKNOWN, not absent",
+           config.parse_config("{not json")["token"] is config.TOKEN_UNREADABLE)
+check_true("...and so does JSON that is not an object",
+           config.parse_config('["a"]')["token"] is config.TOKEN_UNREADABLE)
+check_true("...and an unknown token is not None, so the agent still gates on it",
+           config.parse_config("{not json")["token"] is not None)
+check_true("...and matches nothing offered, so it fails closed",
+           not config.tokens_match("deadbeef", config.parse_config("{not json")["token"]))
+check_true("...and the origin list still falls back to defaults",
+           config.parse_config("{not json")["allowedOrigins"] == config.DEFAULT_ALLOWED_ORIGINS)
+check_true("a genuinely absent file still means no token, which is open",
+           config.parse_config(None)["token"] is None)
+check_true(
+    "the origin list survives a config whose token is the only valid key",
+    config.parse_config('{"token": "x", "allowedOrigins": 7}')["allowedOrigins"]
+    == config.DEFAULT_ALLOWED_ORIGINS,
+)
+check("...and the token survives an unusable origin list",
+      config.parse_config('{"token": "x", "allowedOrigins": 7}')["token"], "x")
+
+class _AuthWS:
     def __init__(self):
-        self.scheduled = []
+        self.sent = []
 
-
-def _fake_schedule(coro, loop):
-    loop.scheduled.append(coro)
-    coro.close()  # never awaited; closing avoids "coroutine was never awaited"
-    return None
-
-
-_prev_schedule = agent.asyncio.run_coroutine_threadsafe
-try:
-    agent.asyncio.run_coroutine_threadsafe = _fake_schedule
-    srv = agent.AgentServer()
-    srv.loop = _FakeLoop()
-    srv.connections.add(object())
-
-    for _ in range(agent.MAX_PENDING_SENDS):
-        srv.broadcast({"type": "packet"})
-    check(
-        "broadcast schedules up to the cap",
-        len(srv.loop.scheduled),
-        agent.MAX_PENDING_SENDS,
-    )
-    check("nothing dropped while under the cap", srv._dropped_sends, 0)
-
-    # The loop is now "behind" - nothing has run, so pending stays at the cap.
-    for _ in range(5000):
-        srv.broadcast({"type": "packet"})
-    check(
-        "past the cap, broadcast drops instead of queueing",
-        len(srv.loop.scheduled),
-        agent.MAX_PENDING_SENDS,
-    )
-    check("dropped packets are counted", srv._dropped_sends, 5000)
-    check_true(
-        "pending never exceeds the cap - this is what bounds memory",
-        srv._pending_sends <= agent.MAX_PENDING_SENDS,
-    )
-finally:
-    agent.asyncio.run_coroutine_threadsafe = _prev_schedule
-
-
-# A send that blows up must still free its slot, or the agent ratchets down to
-# sending nothing at all - a far worse failure than dropping.
-class _ExplodingWS:
     async def send(self, data):
-        raise RuntimeError("nic on fire")
+        self.sent.append(json.loads(data))
 
 
-_srv2 = agent.AgentServer()
-_srv2._pending_sends = 1
-_srv2.connections.add(_ExplodingWS())
+# ensure_config is what the installer calls. The rules it has to keep: never
+# replace a token somebody has already pasted into a browser, never lose
+# anything else in the file, and *do* fill in a token that is missing - an
+# upgrade that left every existing install unauthenticated for ever would
+# defeat the point of having one.
+import tempfile as _tempfile
+
+_prev_programdata = os.environ.get("ProgramData")
+_prev_restrict = config.restrict_config_permissions
 try:
-    asyncio.run(_srv2._send_all({"type": "packet"}))
-except RuntimeError:
-    pass
-check("a failed send still releases its slot", _srv2._pending_sends, 0)
+    os.environ["ProgramData"] = _tempfile.mkdtemp(prefix="inwire-config-")
+    # The real one locks the file to SYSTEM and administrators, which would
+    # stop this process reading back what it just wrote. It is exercised for
+    # real on an installed agent, not here.
+    config.restrict_config_permissions = lambda path, on_warning=None: True
+
+    _first = config.ensure_config()
+    check("ensure_config mints a 256-bit token", len(_first["token"] or ""), 64)
+    check_true("...and keeps it on a second run", config.ensure_config()["token"] == _first["token"])
+
+    with open(config.config_path(), "w", encoding="utf-8") as _fh:
+        json.dump({"allowedOrigins": ["http://example.test"], "custom": 42}, _fh)
+    _upgraded = config.ensure_config()
+    check_true("a config with no token gets one", bool(_upgraded["token"]))
+    with open(config.config_path(), "r", encoding="utf-8") as _fh:
+        _raw = json.load(_fh)
+    check("...and everything else in the file survives", _raw.get("custom"), 42)
+    check("...including an edited allowlist", _raw.get("allowedOrigins"), ["http://example.test"])
+finally:
+    config.restrict_config_permissions = _prev_restrict
+    if _prev_programdata is None:
+        os.environ.pop("ProgramData", None)
+    else:
+        os.environ["ProgramData"] = _prev_programdata
+
+_auth = agent.AgentServer()
+_auth_ws = _AuthWS()
+_auth.connections.add(_auth_ws)
+asyncio.run(_auth._handle_message(_auth_ws, json.dumps({"type": "start_capture"})))
+check("an unauthenticated connection cannot start a capture",
+      _auth_ws.sent[-1]["code"], "auth_required")
+check_true("...and is told nothing else", len(_auth_ws.sent) == 1)
+
+# --- capture ownership -----------------------------------------------------------
+# One capture, one owner. Two tabs used to share a single global sniffer: the
+# second one's remembered set_interfaces restarted it on that tab's adapter the
+# moment it connected, and Stop in either stopped both. Which tab was "the"
+# capture was decided by whoever spoke last.
+_own = agent.AgentServer()
+_own.loop = object()
+_a, _b = object(), object()
+_own.connections.update({_a, _b})
+_own.client_ids[_a] = "id-a"
+_own.client_ids[_b] = "id-b"
+
+
+class _StoppedSniffer:
+    def is_sniffing(self):
+        return False
+
+
+class _RunningSniffer:
+    def is_sniffing(self):
+        return True
+
+
+# `sniffer` is created in main(), so it may not exist in a test process.
+_prev = getattr(agent, "sniffer", None)
+agent.sniffer = _StoppedSniffer()
+check_true("with nothing running, nobody is locked out", not _own.owned_by_other(_a))
+check("...and no owner is reported", _own.owner_id(), None)
+
+_own.capture_owner = _a
+agent.sniffer = _RunningSniffer()
+check_true("the owner is not locked out of its own capture", not _own.owned_by_other(_a))
+check_true("the other tab is", _own.owned_by_other(_b))
+check("the owner is named by the id its connection was given", _own.owner_id(), "id-a")
+
+# A stale owner must not lock the agent out of capturing at all - that is a
+# worse failure than two tabs racing.
+_own.connections.discard(_a)
+check_true("an owner whose socket is gone holds nothing", not _own.owned_by_other(_b))
+check("...and ownership is released", _own.capture_owner, None)
+
+# Ownership only bites while a capture is running: an owner that stopped is
+# not still holding the agent.
+_own.connections.add(_a)
+_own.capture_owner = _a
+agent.sniffer = _StoppedSniffer()
+check_true("an idle agent is not busy", not _own.owned_by_other(_b))
+if _prev is None:
+    del agent.sniffer
+else:
+    agent.sniffer = _prev
+agent.sniffer = _prev
+
+check_true(
+    "state names the owner so a second tab can tell the two cases apart",
+    "owner" in agent.SnifferController(["eth0"]).state_message([], "id-a"),
+)
+check(
+    "...and reports it",
+    agent.SnifferController(["eth0"]).state_message([], "id-a")["owner"],
+    "id-a",
+)
+check(
+    "an idle agent has no owner",
+    agent.SnifferController(["eth0"]).state_message([], None)["owner"],
+    None,
+)
+check_true(
+    "hello tells a connection its own id",
+    agent.build_hello_message(agent.AGENT_VERSION, "idle", [], client_id="id-a")["clientId"] == "id-a",
+)
+
+# --- packet queue backpressure: the bound that keeps the agent from wedging ---
+# Before 3.2.0 each captured frame scheduled its own coroutine, and the bound
+# on how many could be outstanding is what the agent's log records as
+# ">=260,000 packets dropped". Frames are queued as encoded records now and one
+# pump drains them in batches, so the bound is on the queue.
+import packet_batch
+
+srv = agent.AgentServer()
+srv.loop = object()          # queue_packet only checks that a loop exists
+# Queueing is owner-scoped since 3.3.0: a frame is only worth holding for the
+# connection that asked for the capture.
+srv.capture_owner = object()
+srv.connections.add(srv.capture_owner)
+
+_rec = packet_batch.encode_record(0, 0, 1.0, 60, b"\x00" * 60)
+for _ in range(agent.MAX_QUEUED_PACKETS):
+    srv.queue_packet(_rec)
+check("the queue fills to the cap", len(srv._packet_queue), agent.MAX_QUEUED_PACKETS)
+check("nothing dropped while under the cap", srv._dropped_sends, 0)
+
+for _ in range(5000):
+    srv.queue_packet(_rec)
+check(
+    "past the cap the queue stops growing - this is what bounds memory",
+    len(srv._packet_queue),
+    agent.MAX_QUEUED_PACKETS,
+)
+check("dropped packets are counted", srv._dropped_sends, 5000)
+check_true(
+    "the byte total tracks the deque rather than drifting",
+    srv._packet_queue_bytes == sum(len(r) for r in srv._packet_queue),
+)
+
+# A viewer that has fallen behind wants the NEWEST frames, so it is the oldest
+# records that go. Anything else would show a live capture running minutes late.
+srv2 = agent.AgentServer()
+srv2.loop = object()
+srv2.capture_owner = object()
+srv2.connections.add(srv2.capture_owner)
+for seq in range(agent.MAX_QUEUED_PACKETS + 3):
+    srv2.queue_packet(packet_batch.encode_record(seq, 0, 1.0, 60, b"\x00" * 60))
+_first = packet_batch.decode_batch(packet_batch.encode_batch([srv2._packet_queue[0]]))[0]
+check("the oldest queued frames are the ones dropped", _first["seq"], 3)
+
+# A drain takes at most one batch, and leaves the rest for the next pass.
+srv3 = agent.AgentServer()
+srv3.loop = object()
+srv3.capture_owner = object()
+srv3.connections.add(srv3.capture_owner)
+for seq in range(agent.MAX_BATCH_RECORDS + 10):
+    srv3.queue_packet(packet_batch.encode_record(seq, 0, 1.0, 60, b"\x00" * 60))
+_batch = srv3._drain_packets()
+check("a drain takes at most one batch", len(_batch), agent.MAX_BATCH_RECORDS)
+check("...and leaves the remainder queued", len(srv3._packet_queue), 10)
+check(
+    "the drained records are the oldest, in order",
+    [r["seq"] for r in packet_batch.decode_batch(packet_batch.encode_batch(_batch))[:3]],
+    [0, 1, 2],
+)
+srv3.discard_queued_packets()
+check("a stop empties the queue", (len(srv3._packet_queue), srv3._packet_queue_bytes), (0, 0))
+
+
+# --- the binary packet frame ------------------------------------------------
+# The browser has its own decoder (src/services/agentBinary.ts). These assert
+# the bytes, not a description of them, so the two cannot drift apart silently.
+_records = [
+    packet_batch.encode_record(0, 0, 1788477971653284.0, 1514, bytes(range(64))),
+    packet_batch.encode_record(4294967295, 7, 1788477971653285.5, 60, b""),
+    packet_batch.encode_record(9, 1, 1.0, 9000, b"\xff" * 9000),
+]
+_frame = packet_batch.encode_batch(_records)
+check("the batch is tagged so a decoder can refuse anything else", _frame[:4], b"IWP1")
+check("...and carries its version", _frame[4], packet_batch.VERSION)
+check("...and its record count", int.from_bytes(_frame[6:8], "little"), 3)
+
+_decoded = packet_batch.decode_batch(_frame)
+check("every record comes back", len(_decoded), 3)
+check("the capture time survives to the microsecond", _decoded[0]["tsUs"], 1788477971653284.0)
+check("a sequence number at the u32 ceiling round-trips", _decoded[1]["seq"], 4294967295)
+check("a zero-length capture is a record, not an error", _decoded[1]["data"], b"")
+check("the wire length is carried apart from the captured length", _decoded[2]["origLen"], 9000)
+check("the frame bytes are exact", _decoded[0]["data"], bytes(range(64)))
+check("the interface index is carried", _decoded[1]["iface"], 7)
+
+for _bad, _why in (
+    (b"NOPE" + _frame[4:], "refuses a frame that is not a batch"),
+    (_frame[:-1], "refuses a truncated record"),
+    (_frame + b"\x00", "refuses trailing bytes"),
+    (b"IWP1\x02\x00\x01\x00", "refuses a version it does not know"),
+):
+    try:
+        packet_batch.decode_batch(_bad)
+        check(_why, "accepted", "rejected")
+    except ValueError:
+        check(_why, "rejected", "rejected")
 
 
 # --- watchdog: capture must never outlive the app ---
@@ -782,19 +995,21 @@ class _StampedPkt:
 
 import decimal
 
-_ms = agent.capture_time_ms(_StampedPkt(decimal.Decimal("1787795981.131456")))
-check("capture_time_ms converts seconds to milliseconds", round(_ms, 3), 1787795981131.456)
-check_true("capture_time_ms returns a JSON-serializable float", isinstance(_ms, float))
+# The millisecond form is gone with the JSON packet message; microseconds are
+# what the binary record carries and what the browser reads.
+_us = agent.capture_time_us(_StampedPkt(decimal.Decimal("1787795981.131456")))
+check("capture_time_us converts seconds to microseconds", _us, 1787795981131456)
+check_true("...as an integer, exact as a JS number", isinstance(_us, int))
 check_true(
     "sub-millisecond precision survives - this is the whole point",
-    agent.capture_time_ms(_StampedPkt(decimal.Decimal("1.000100")))
-    != agent.capture_time_ms(_StampedPkt(decimal.Decimal("1.000900"))),
+    agent.capture_time_us(_StampedPkt(decimal.Decimal("1.000100")))
+    != agent.capture_time_us(_StampedPkt(decimal.Decimal("1.000900"))),
 )
 
 # Two frames a quarter-millisecond apart must not collapse onto one stamp,
 # which is exactly what int(time.time() * 1000) did.
-_a = agent.capture_time_ms(_StampedPkt(decimal.Decimal("100.000250")))
-_b = agent.capture_time_ms(_StampedPkt(decimal.Decimal("100.000500")))
+_a = agent.capture_time_us(_StampedPkt(decimal.Decimal("100.000250")))
+_b = agent.capture_time_us(_StampedPkt(decimal.Decimal("100.000500")))
 check_true("frames within the same millisecond stay distinguishable", _a != _b)
 
 
@@ -804,9 +1019,8 @@ class _NoTimePkt:
 
 check_true(
     "a packet with no capture time falls back to the wall clock rather than failing",
-    agent.capture_time_ms(_NoTimePkt()) > 0,
+    agent.capture_time_us(_NoTimePkt()) > 0,
 )
-
 
 
 # --- the interface list is re-read, not frozen at startup --------------------
@@ -922,6 +1136,297 @@ if os.name != "nt":
     check("service identity is false off Windows", agent._running_as_service_process(), False)
     check("failure policy is false off Windows", agent._ensure_failure_policy(), False)
 
+
+
+# --- 3.1.0: every state-changing command answers with a state broadcast -------
+# This went missing in a refactor once (the broadcast ended up after the
+# interface-stats loop, where it never ran) and the app's "Capture:" row sat
+# frozen for weeks. Asserted per command so it cannot quietly leave again.
+class _RecordingWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, data):
+        self.sent.append(json.loads(data))
+
+
+def _drive(server, ws, message):
+    # Same as above: no token configured means every connection is admitted.
+    server.authenticated.add(ws)
+    asyncio.run(server._handle_message(ws, json.dumps(message)))
+
+
+_prev_sniffer = getattr(agent, "sniffer", None)
+_prev_spawn = agent.spawn_sniffer_thread
+try:
+    agent.sniffer = agent.SnifferController(default_interfaces=["eth0"])
+    agent.spawn_sniffer_thread = lambda name, stop_event: None
+    srv = agent.AgentServer()
+    ws = _RecordingWS()
+    srv.connections.add(ws)
+    sent_states = []
+    srv.send_control = lambda message: sent_states.append(message)
+
+    _drive(srv, ws, {"type": "start_capture"})
+    check("start_capture broadcasts a state", [m["type"] for m in sent_states], ["state"])
+    check("...that says sniffing", sent_states[-1]["state"], "sniffing")
+
+    _drive(srv, ws, {"type": "set_interfaces", "interfaces": ["eth1"]})
+    check("set_interfaces broadcasts a state", len(sent_states), 2)
+    check("...and the controller now has the new list", agent.sniffer.selected_interfaces, ["eth1"])
+    check("...still sniffing after a live reconfigure", sent_states[-1]["state"], "sniffing")
+
+    _drive(srv, ws, {"type": "stop_capture"})
+    check("stop_capture broadcasts a state", len(sent_states), 3)
+    check("...that says idle", sent_states[-1]["state"], "idle")
+
+    _drive(srv, ws, {"type": "set_interfaces", "interfaces": "eth1"})
+    check("a malformed set_interfaces is answered, not ignored",
+          [m.get("code") for m in ws.sent], ["invalid_interfaces"])
+    check("...and broadcasts no state", len(sent_states), 3)
+
+    _drive(srv, ws, {"type": "set_interfaces", "interfaces": []})
+    check("an empty set_interfaces is still refused", ws.sent[-1].get("code"), "empty_interfaces")
+
+    _drive(srv, ws, {"type": "teleport"})
+    check("an unknown command is named back to the client", ws.sent[-1].get("code"), "unknown_command")
+    check_true("...with the agent version in the message", agent.AGENT_VERSION in ws.sent[-1]["message"])
+    check("...and broadcasts no state", len(sent_states), 3)
+
+    _drive(srv, ws, {"type": "subscribe_logs"})
+    check("a subscription does not broadcast state", len(sent_states), 3)
+finally:
+    agent.spawn_sniffer_thread = _prev_spawn
+    if _prev_sniffer is None:
+        del agent.sniffer
+    else:
+        agent.sniffer = _prev_sniffer
+
+
+# --- 3.1.0: packets carry seq, iface, tsUs and origLen ---------------------------
+class _FakeFrame:
+    """Just enough of a scapy packet for packet_to_record: a time, a length,
+    and nothing that looks like IP or Ethernet."""
+
+    def __init__(self, stamp, size=60):
+        self.time = stamp
+        self._size = size
+
+    def __len__(self):
+        return self._size
+
+    def __bytes__(self):
+        return b"\x00" * self._size
+
+    def __contains__(self, layer):
+        return False
+
+    def getlayer(self, layer):
+        return None
+
+
+_frame = _FakeFrame(decimal.Decimal("1788477971.653284"), size=1514)
+_rec = agent.packet_to_record(_frame, iface_id=2, seq=41)
+_msg = packet_batch.decode_batch(packet_batch.encode_batch([_rec]))[0]
+check("packet carries its sequence number", _msg["seq"], 41)
+check("packet carries its interface id", _msg["iface"], 2)
+check("packet carries the capture time in microseconds", _msg["tsUs"], 1788477971653284)
+check("packet carries the wire length", _msg["origLen"], 1514)
+check("packet carries the frame itself", len(_msg["data"]), 1514)
+check("capture_time_us rounds float noise away", agent.capture_time_us(_FakeFrame(decimal.Decimal("1.000001"))), 1000001)
+check_true("a frame with no time still gets a microsecond stamp", agent.capture_time_us(_NoTimePkt()) > 1_000_000_000_000_000)
+
+_c = agent.CaptureCounters()
+check("sequence numbers start at zero", _c.next_seq(0), 0)
+check("...and count up across interfaces", [_c.next_seq(1), _c.next_seq(0)], [1, 2])
+check("received is counted per interface", _c.snapshot()[1], {0: 2, 1: 1})
+_c.reset()
+check("reset restarts the sequence for a new capture", _c.next_seq(0), 0)
+
+# --- 3.1.0: capture_stats ---------------------------------------------------------
+_stats = agent.build_capture_stats(seq_high=10, received={0: 10, 1: 0},
+                                   kernel_stats={0: (12, 2), 1: None}, dropped_agent=3)
+check("capture_stats type", _stats["type"], "capture_stats")
+check("capture_stats reports the next sequence number", _stats["seqHigh"], 10)
+check("capture_stats reports the agent's own drops", _stats["droppedAgent"], 3)
+check("capture_stats lists every interface with the driver's numbers",
+      _stats["interfaces"],
+      [{"iface": 0, "received": 10, "kernelReceived": 12, "droppedKernel": 2},
+       {"iface": 1, "received": 0, "kernelReceived": None, "droppedKernel": None}])
+check("an unreadable driver counter is null, never zero", _stats["interfaces"][1]["droppedKernel"], None)
+# The handle lives on `pcap_fd` in current scapy and on `ins` in older ones.
+# Reading only `ins` is why the driver's drop counter came back None on every
+# real capture, which looked exactly like "this driver has no counter".
+class _FakeWrapper:
+    pcap = None
+
+
+class _FakeSocketNewName:
+    pcap_fd = _FakeWrapper()
+
+
+class _FakeSocketOldName:
+    ins = _FakeWrapper()
+
+
+check_true("read_pcap_stats looks at pcap_fd", hasattr(_FakeSocketNewName, "pcap_fd"))
+check("...and finds nothing when the handle is null",
+      agent.read_pcap_stats(_FakeSocketNewName()), None)
+check("...and still understands the older attribute name",
+      agent.read_pcap_stats(_FakeSocketOldName()), None)
+
+check("read_pcap_stats returns None for a socket with no pcap handle", agent.read_pcap_stats(object()), None)
+
+_sc = agent.SnifferController(default_interfaces=["eth0", "eth1"])
+_sc.start_threads(lambda name, ev: None)
+check("one failed interface does not end the capture", _sc.mark_failed("eth0"), False)
+check("the last failed interface does", _sc.mark_failed("eth1"), True)
+_sc.stop_threads()
+_sc.start_threads(lambda name, ev: None)
+check("failures are forgotten on the next start", _sc.mark_failed("eth0"), False)
+
+# --- 3.2.0: the packet queue is guarded by a lock -------------------------------
+# The sniffer threads append and the pump drains, so an unguarded deque would
+# let the byte total drift away from the deque it is supposed to describe -
+# and the bound that keeps the agent from growing without limit is on that
+# total.
+check_true("the packet queue's counters are guarded", hasattr(agent.AgentServer(), "_packet_lock"))
+
+# --- 3.4.0: which process owns which local socket -------------------------------
+#
+# The table is read on a one-second tick and reported as deltas, so the parts
+# that can go wrong are all about what happens BETWEEN two readings: a socket
+# that came and went, a local port handed to a different process, a client that
+# subscribed after the table was already being watched. Each of those is a
+# wrong process name on a packet row rather than a crash, which is exactly the
+# kind of fault that ships.
+import sockets
+
+
+class _FakeAddr:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+
+
+class _FakeConn:
+    """Just enough of psutil's sconn: a type, a local address and a pid."""
+
+    def __init__(self, kind, ip, port, pid, raddr=None):
+        self.type = kind
+        # psutil reports an absent address as an empty tuple rather than as an
+        # object with empty fields, and a fake that got that wrong is what let
+        # an unkeyable socket through the first time this was written.
+        self.laddr = _FakeAddr(ip, port) if ip is not None else ()
+        self.raddr = raddr
+        self.pid = pid
+
+
+class _FakeProcess:
+    def __init__(self, name, exe=None, denied_exe=False):
+        self._name = name
+        self._exe = exe or ""
+        self._denied_exe = denied_exe
+
+    def name(self):
+        return self._name
+
+    def exe(self):
+        if self._denied_exe:
+            raise PermissionError("access is denied")
+        return self._exe
+
+
+_TCP, _UDP = 1, 2
+
+check("an IPv6 zone index is stripped, so it can match a captured address",
+      sockets.normalize_address("fe80::1%eth0"), "fe80::1")
+check("...and an address without one is untouched",
+      sockets.normalize_address("10.0.0.4"), "10.0.0.4")
+
+# The measured fact this module is keyed on: Windows reports no remote address
+# for UDP sockets, so a five-tuple key would attribute no QUIC and no DNS.
+_table = sockets.read_socket_table(lambda: [
+    _FakeConn(_UDP, "0.0.0.0", 5353, 4242),
+    _FakeConn(_TCP, "10.0.0.4", 54321, 4242, raddr=_FakeAddr("1.1.1.1", 443)),
+])
+check("a socket is keyed by its local endpoint alone",
+      sorted(_table), [("tcp", "10.0.0.4", 54321), ("udp", "0.0.0.0", 5353)])
+
+check("a socket the OS will not attribute is kept, with no pid",
+      sockets.read_socket_table(lambda: [_FakeConn(_TCP, "10.0.0.4", 1, None)]),
+      {("tcp", "10.0.0.4", 1): 0})
+
+check("a socket with no local address has nothing to key it by and is dropped",
+      sockets.read_socket_table(lambda: [_FakeConn(_TCP, None, 0, 7)]), {})
+
+check("a process that denies its path still gives up its name",
+      sockets.describe_process(9, lambda pid: _FakeProcess("svchost.exe", denied_exe=True)),
+      {"name": "svchost.exe", "exe": ""})
+check("a process that exited between the two calls is reported as unknown",
+      sockets.describe_process(9, lambda pid: (_ for _ in ()).throw(ProcessLookupError())), None)
+check("pid 0 is not a process", sockets.describe_process(0), None)
+
+
+# One mutable table the fake source reads, so a test can open and close a
+# socket between polls the way the machine does.
+_live = [_FakeConn(_TCP, "10.0.0.4", 54321, 100)]
+_names = {100: _FakeProcess("chrome.exe", "C:/chrome.exe"),
+          200: _FakeProcess("curl.exe", "C:/curl.exe")}
+_tracker = sockets.SocketTracker(source=lambda: list(_live),
+                                 namer=lambda pid: _names[pid])
+
+_first = _tracker.poll()
+check("the first poll of a subscription is a full snapshot", _first["full"], True)
+check("...carrying every socket as an addition", _first["add"],
+      [["tcp", "10.0.0.4", 54321, 100]])
+check("...and naming the process behind it", _first["procs"]["100"]["name"], "chrome.exe")
+
+check("a second with no change sends nothing at all", _tracker.poll(), None)
+
+_live.append(_FakeConn(_UDP, "0.0.0.0", 62664, 100))
+_second = _tracker.poll()
+check("a later poll is a delta, not a snapshot", _second["full"], False)
+check("...listing only what appeared", _second["add"], [["udp", "0.0.0.0", 62664, 100]])
+check("...and nothing that was already known", _second["gone"], [])
+
+_live.pop(0)
+_third = _tracker.poll()
+check("a closed socket is reported gone", _third["gone"], [["tcp", "10.0.0.4", 54321]])
+check("...and nothing is re-added with it", _third["add"], [])
+
+# The failure this design exists to survive. A local port freed by one process
+# and taken by another must arrive as a NEW attribution, or every frame the
+# second process sends is labelled with the first one's name.
+_live.append(_FakeConn(_UDP, "0.0.0.0", 62664, 200))
+_live.remove(_live[0])
+_fourth = _tracker.poll()
+check("a reused local port is re-attributed rather than left stale",
+      _fourth["add"], [["udp", "0.0.0.0", 62664, 200]])
+check("...and the new owner is named in the same message",
+      _fourth["procs"]["200"]["name"], "curl.exe")
+
+_tracker.reset()
+_fifth = _tracker.poll()
+check("reset makes the next poll a full snapshot again", _fifth["full"], True)
+check("...of everything currently open", len(_fifth["add"]), len(_live))
+
+
+# The subscription itself: a client that arrives late gets its own snapshot
+# rather than a delta against a table it never had.
+_srv = agent.AgentServer()
+_sock_ws = _RecordingWS()
+_srv.connections.add(_sock_ws)
+_sock_states = []
+_srv.send_control = lambda message: _sock_states.append(message)
+_drive(_srv, _sock_ws, {"type": "subscribe_sockets"})
+check("subscribing is answered with a socket_table", _sock_ws.sent[-1]["type"], "socket_table")
+check("...and that first one is a full snapshot", _sock_ws.sent[-1]["full"], True)
+check("...and broadcasts no state", _sock_states, [])
+check_true("...and registers the subscriber", _sock_ws in _srv.socket_subscribers)
+
+_drive(_srv, _sock_ws, {"type": "unsubscribe_sockets"})
+check_true("unsubscribing removes it", _sock_ws not in _srv.socket_subscribers)
 
 print()
 if failures:

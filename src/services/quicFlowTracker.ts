@@ -14,14 +14,108 @@
  * One instance represents one capture session; call reset() when the packet
  * buffer is cleared or a new file is imported.
  */
-import { deriveInitialKeys, saltForVersion, decryptInitialPacket, QUIC_VERSION_2, InitialKeys } from './dissectors/quicCrypto';
-import type { InitialDecryptor } from './dissectors/quic';
+import {
+  deriveInitialKeys, deriveTrafficKeys, saltForVersion, decryptQuicPacket,
+  QUIC_VERSION_2, type DirectionKeys, type InitialKeys,
+} from './dissectors/quicCrypto';
+import type { CryptoFragment, PacketDecryptor, StreamFragment } from './dissectors/quic';
+import { parseQuicHandshake, type HelloFacts, type ServerHelloFacts } from './dissectors/tls';
+import { cipherSuiteSpec } from './tls/cipherSuites';
+import { keyLog } from './tls/keyLog';
+import { dissectHttp3Stream, freshHttp3Stream, type Http3Frame, type Http3Stream } from './dissectors/http3';
 
 interface InitialSession {
   keys: InitialKeys;
   /** "ip:port" of whichever endpoint sent the connection's first Initial. */
   clientEndpoint: string;
 }
+
+/**
+ * The TLS handshake being reassembled out of one direction's CRYPTO frames.
+ *
+ * QUIC carries the handshake as a byte stream with explicit offsets, and a
+ * client is free to split and reorder it - the fixtures contain hellos
+ * arriving as ten fragments across two Initial packets, in no useful order.
+ * So fragments are filled into a sparse buffer and parsed once the stream is
+ * contiguous from zero and long enough to hold the message it declares.
+ */
+interface CryptoStream {
+  chunks: { offset: number; data: Uint8Array }[];
+  /** Highest byte offset seen, which bounds the buffer. */
+  extent: number;
+  /** Set once parsed, so a retransmitted fragment does not reparse. */
+  done: boolean;
+}
+
+/** What a completed handshake told us about the connection. */
+export interface QuicHandshakeFacts {
+  hello?: HelloFacts;
+  serverHello?: ServerHelloFacts;
+}
+
+/** A handshake message longer than this is not one we can use. */
+const MAX_CRYPTO_BYTES = 65536;
+
+/** What a flow needs before a key log can open anything past its Initials. */
+interface QuicSession {
+  clientRandom?: Uint8Array;
+  cipherSuite?: number;
+  /** undefined before the attempt, null when the key log had nothing for it. */
+  keys?: QuicSessionKeys | null;
+  keyGeneration?: number;
+  /** The ALPN the handshake settled on, so `h3` is not assumed. */
+  alpn?: string;
+}
+
+interface QuicSessionKeys {
+  handshake?: { client: DirectionKeys; server: DirectionKeys };
+  application?: { client: DirectionKeys; server: DirectionKeys };
+}
+
+/** One QUIC stream being put back together, per direction. */
+interface StreamAssembly {
+  http3: Http3Stream;
+  /** The offset the next byte handed to HTTP/3 must have. */
+  nextOffset: number;
+  /** Fragments that arrived ahead of the gap, by offset. */
+  pending: Map<number, Uint8Array>;
+  pendingBytes: number;
+}
+
+/**
+ * The held fragment that carries the byte at `nextOffset`, trimmed to start
+ * there, with everything the cursor has passed dropped from the budget.
+ *
+ * An exact `pending.get(nextOffset)` was not enough. A fragment held at
+ * offset 100 is stranded for ever the moment a larger fragment arrives at 50
+ * and carries the cursor to 150 - never consumed, never subtracted, and so
+ * charged against MAX_PENDING_STREAM_BYTES until the connection ends. The scan
+ * is O(held fragments), which the budget bounds at a couple of hundred, and it
+ * also lets a partially overlapping fragment contribute its new tail instead
+ * of being discarded.
+ */
+function takePendingAt(assembly: StreamAssembly): Uint8Array | undefined {
+  let take: { offset: number; data: Uint8Array } | undefined;
+  for (const [offset, data] of assembly.pending) {
+    if (offset + data.length <= assembly.nextOffset) {
+      assembly.pending.delete(offset);
+      assembly.pendingBytes -= data.length;
+      continue;
+    }
+    // The earliest fragment that reaches the cursor: it carries the most.
+    if (offset <= assembly.nextOffset && (take === undefined || offset < take.offset)) {
+      take = { offset, data };
+    }
+  }
+  if (take === undefined) return undefined;
+  assembly.pending.delete(take.offset);
+  assembly.pendingBytes -= take.data.length;
+  const skip = assembly.nextOffset - take.offset;
+  return skip > 0 ? take.data.subarray(skip) : take.data;
+}
+
+/** A stream's bytes held while waiting for the gap before them to be filled. */
+const MAX_PENDING_STREAM_BYTES = 256 * 1024;
 
 export class QuicFlowTracker {
   /** Connection IDs (hex) seen in long headers, keyed by normalized flow. */
@@ -30,6 +124,14 @@ export class QuicFlowTracker {
   private initialSessions = new Map<string, InitialSession>();
   /** Highest packet number decrypted per sending direction. */
   private largestPacketNumber = new Map<string, number>();
+  /** CRYPTO reassembly, per sending direction. */
+  private cryptoStreams = new Map<string, CryptoStream>();
+  /** The SNI this flow's ClientHello carried, for labelling later packets. */
+  private flowSni = new Map<string, string>();
+  /** Key material and handshake facts, keyed by normalized flow. */
+  private sessions = new Map<string, QuicSession>();
+  /** HTTP/3 stream state, keyed by flow, sender and stream id. */
+  private streams = new Map<string, StreamAssembly>();
 
   /** Order-independent key, so both directions of a flow share their state. */
   private flowKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
@@ -102,11 +204,28 @@ export class QuicFlowTracker {
   public createInitialDecryptor(
     srcIp: string, srcPort: number, dstIp: string, dstPort: number,
     bytes: Uint8Array
-  ): InitialDecryptor {
+  ): PacketDecryptor {
     const flowKey = this.flowKey(srcIp, srcPort, dstIp, dstPort);
     const senderKey = `${flowKey}>${srcIp}:${srcPort}`;
 
-    return (packetStart, packetNumberOffset, packetEnd, version, destinationConnectionId) => {
+    return (packetStart, packetNumberOffset, packetEnd, version, destinationConnectionId, kind) => {
+      if (kind !== 'initial') {
+        // Handshake, 0-RTT and 1-RTT packets are opened only from key log
+        // secrets. Each packet-number space numbers its packets from zero
+        // independently, which is why the largest-seen number is tracked per
+        // space and not per direction.
+        const keys = this.trafficKeys(flowKey, srcIp, srcPort, kind);
+        if (!keys) return null;
+        const spaceKey = `${senderKey}#${kind}`;
+        const largestInSpace = this.largestPacketNumber.get(spaceKey) ?? -1;
+        const opened = decryptQuicPacket(
+          bytes, packetStart, packetNumberOffset, packetEnd, keys, largestInSpace, kind !== '1rtt',
+        );
+        if (!opened) return null;
+        if (opened.packetNumber > largestInSpace) this.largestPacketNumber.set(spaceKey, opened.packetNumber);
+        return opened;
+      }
+
       const salt = saltForVersion(version);
       if (!salt) return null;
 
@@ -128,7 +247,7 @@ export class QuicFlowTracker {
       const keys = isFromClient ? session.keys.client : session.keys.server;
       const largest = this.largestPacketNumber.get(senderKey) ?? -1;
 
-      const decrypted = decryptInitialPacket(bytes, packetStart, packetNumberOffset, packetEnd, keys, largest);
+      const decrypted = decryptQuicPacket(bytes, packetStart, packetNumberOffset, packetEnd, keys, largest, true);
       if (!decrypted) return null;
 
       if (decrypted.packetNumber > largest) {
@@ -138,9 +257,235 @@ export class QuicFlowTracker {
     };
   }
 
+  /**
+   * Adds this datagram's CRYPTO fragments to the sending direction's stream
+   * and returns the handshake facts if the stream is now complete.
+   *
+   * Contiguity is checked from offset 0: a handshake message is 4 bytes of
+   * header and a declared length, so the stream is only readable once every
+   * byte up to that length has arrived. Anything else would parse a hole as
+   * data and produce a fingerprint that matches nothing.
+   */
+  public addCryptoFragments(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number, fragments: CryptoFragment[],
+  ): QuicHandshakeFacts | undefined {
+    if (fragments.length === 0) return undefined;
+    const key = `${this.flowKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+    let stream = this.cryptoStreams.get(key);
+    if (stream === undefined) {
+      stream = { chunks: [], extent: 0, done: false };
+      this.cryptoStreams.set(key, stream);
+    }
+    if (stream.done) return undefined;
+
+    for (const f of fragments) {
+      if (f.offset + f.data.length > MAX_CRYPTO_BYTES) continue;
+      stream.chunks.push({ offset: f.offset, data: f.data });
+      stream.extent = Math.max(stream.extent, f.offset + f.data.length);
+    }
+
+    const assembled = assemble(stream);
+    if (assembled === null) return undefined;
+
+    stream.done = true;
+    stream.chunks = [];
+    const facts = parseQuicHandshake(assembled);
+    const flowKey = this.flowKey(srcIp, srcPort, dstIp, dstPort);
+    if (facts.hello?.sni) this.flowSni.set(flowKey, facts.hello.sni);
+
+    // The two facts a key log needs come from opposite directions: the client
+    // random from the ClientHello, the cipher suite from the ServerHello. Both
+    // are in Initial packets, which is the only reason a passive observer can
+    // decrypt a QUIC connection from a key log at all.
+    if (facts.hello || facts.serverHello) {
+      const session = this.session(flowKey);
+      if (facts.hello) {
+        session.clientRandom = facts.hello.random;
+        if (facts.hello.alpn.length > 0) session.alpn = facts.hello.alpn[0];
+      }
+      if (facts.serverHello) session.cipherSuite = facts.serverHello.cipher;
+    }
+    return facts.hello || facts.serverHello ? facts : undefined;
+  }
+
+  private session(flowKey: string): QuicSession {
+    let session = this.sessions.get(flowKey);
+    if (session === undefined) { session = {}; this.sessions.set(flowKey, session); }
+    return session;
+  }
+
+  /**
+   * The keys for one packet-number space in one direction, deriving them from
+   * the key log the first time they are asked for.
+   *
+   * Re-derived whenever the key log changes, so loading one part-way through a
+   * capture opens the connections that were opaque rather than leaving the
+   * verdict cached for the life of the session.
+   */
+  private trafficKeys(
+    flowKey: string, srcIp: string, srcPort: number, kind: 'handshake' | '0rtt' | '1rtt'
+  ): DirectionKeys | null {
+    const session = this.sessions.get(flowKey);
+    if (session === undefined) return null;
+
+    if (session.keys === undefined || session.keyGeneration !== keyLog.generation) {
+      session.keyGeneration = keyLog.generation;
+      session.keys = this.deriveSessionKeys(session);
+    }
+    if (session.keys === null) return null;
+
+    const initial = this.initialSessions.get(flowKey);
+    if (initial === undefined) return null;
+    const fromClient = initial.clientEndpoint === `${srcIp}:${srcPort}`;
+
+    // 0-RTT rides on the client's early secret, which this build does not
+    // derive: it is a separate key log label and a rare packet.
+    if (kind === '0rtt') return null;
+    const pair = kind === 'handshake' ? session.keys.handshake : session.keys.application;
+    if (pair === undefined) return null;
+    return fromClient ? pair.client : pair.server;
+  }
+
+  private deriveSessionKeys(session: QuicSession): QuicSessionKeys | null {
+    if (session.clientRandom === undefined || session.cipherSuite === undefined) return null;
+    const suite = cipherSuiteSpec(session.cipherSuite);
+    if (suite === null) return null;
+    const secrets = keyLog.secretsFor(session.clientRandom);
+    if (secrets === undefined) return null;
+
+    const keys: QuicSessionKeys = {};
+    const clientHandshake = secrets.get('CLIENT_HANDSHAKE_TRAFFIC_SECRET');
+    const serverHandshake = secrets.get('SERVER_HANDSHAKE_TRAFFIC_SECRET');
+    if (clientHandshake && serverHandshake) {
+      keys.handshake = {
+        client: deriveTrafficKeys(clientHandshake, suite),
+        server: deriveTrafficKeys(serverHandshake, suite),
+      };
+    }
+    const clientApp = secrets.get('CLIENT_TRAFFIC_SECRET_0');
+    const serverApp = secrets.get('SERVER_TRAFFIC_SECRET_0');
+    if (clientApp && serverApp) {
+      keys.application = {
+        client: deriveTrafficKeys(clientApp, suite),
+        server: deriveTrafficKeys(serverApp, suite),
+      };
+    }
+    return keys.handshake || keys.application ? keys : null;
+  }
+
+  /**
+   * Feeds decrypted STREAM frames into their streams and reads HTTP/3 out of
+   * them.
+   *
+   * Reassembly by offset is not optional here the way it is for TCP, where the
+   * transport hands over an ordered stream: QUIC hands over fragments with
+   * explicit offsets and no promise about order, so a frame ahead of a gap is
+   * held until the gap is filled rather than being parsed where it landed.
+   */
+  public readStreams(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number, fragments: StreamFragment[],
+  ): { streamId: number; frames: Http3Frame[]; streamTypeName?: string }[] {
+    if (fragments.length === 0) return [];
+    const flowKey = this.flowKey(srcIp, srcPort, dstIp, dstPort);
+    const out: { streamId: number; frames: Http3Frame[]; streamTypeName?: string }[] = [];
+
+    for (const fragment of fragments) {
+      // Stream id bit 1 says unidirectional; bit 0 says server-initiated.
+      const bidirectional = (fragment.streamId & 0x02) === 0;
+      const key = `${flowKey}>${srcIp}:${srcPort}#${fragment.streamId}`;
+      let assembly = this.streams.get(key);
+      if (assembly === undefined) {
+        assembly = { http3: freshHttp3Stream(bidirectional), nextOffset: 0, pending: new Map(), pendingBytes: 0 };
+        this.streams.set(key, assembly);
+      }
+
+      if (fragment.offset > assembly.nextOffset) {
+        const held = assembly.pending.get(fragment.offset);
+        if (held !== undefined) {
+          // A retransmission of a fragment already being held. Replacing it
+          // has to settle the difference against the budget - `set` overwrites
+          // silently, so charging the full length again leaked the whole
+          // MAX_PENDING_STREAM_BYTES allowance one retransmission at a time,
+          // after which every further out-of-order fragment on this stream was
+          // dropped for the life of the connection.
+          if (fragment.data.length > held.length) {
+            assembly.pendingBytes += fragment.data.length - held.length;
+            assembly.pending.set(fragment.offset, fragment.data);
+          }
+        } else if (assembly.pendingBytes + fragment.data.length <= MAX_PENDING_STREAM_BYTES) {
+          assembly.pending.set(fragment.offset, fragment.data);
+          assembly.pendingBytes += fragment.data.length;
+        }
+        continue;
+      }
+
+      // A fragment that starts before what has already been read overlaps a
+      // retransmission; only the new tail of it is data we have not seen.
+      let data = fragment.data;
+      if (fragment.offset < assembly.nextOffset) {
+        const skip = assembly.nextOffset - fragment.offset;
+        if (skip >= data.length) continue;
+        data = data.subarray(skip);
+      }
+
+      const frames: Http3Frame[] = [];
+      let streamTypeName: string | undefined;
+      for (;;) {
+        const result = dissectHttp3Stream(data, assembly.http3, bidirectional);
+        frames.push(...result.frames);
+        streamTypeName ??= result.streamTypeName;
+        assembly.nextOffset += data.length;
+
+        const next = takePendingAt(assembly);
+        if (next === undefined) break;
+        data = next;
+      }
+
+      if (frames.length > 0 || streamTypeName !== undefined) {
+        out.push({ streamId: fragment.streamId, frames, streamTypeName });
+      }
+    }
+
+    return out;
+  }
+
+  /** The ALPN this flow's ClientHello offered first, when one was read. */
+  public alpnFor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string | undefined {
+    return this.sessions.get(this.flowKey(srcIp, srcPort, dstIp, dstPort))?.alpn;
+  }
+
+  /** The server name this flow's handshake named, once one has been read. */
+  public sniFor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string | undefined {
+    return this.flowSni.get(this.flowKey(srcIp, srcPort, dstIp, dstPort));
+  }
+
   public reset(): void {
     this.flowConnectionIds.clear();
     this.initialSessions.clear();
     this.largestPacketNumber.clear();
+    this.cryptoStreams.clear();
+    this.flowSni.clear();
+    this.sessions.clear();
+    this.streams.clear();
   }
+}
+
+/**
+ * The handshake bytes, if the stream is contiguous from 0 and holds the whole
+ * message its own header declares. Returns null while anything is missing.
+ */
+function assemble(stream: CryptoStream): Uint8Array | null {
+  if (stream.extent < 4) return null;
+  const buffer = new Uint8Array(stream.extent);
+  const filled = new Uint8Array(stream.extent);
+  for (const chunk of stream.chunks) {
+    buffer.set(chunk.data, chunk.offset);
+    filled.fill(1, chunk.offset, chunk.offset + chunk.data.length);
+  }
+  // The declared length of the first handshake message.
+  for (let i = 0; i < 4; i++) if (filled[i] === 0) return null;
+  const declared = 4 + ((buffer[1] << 16) | (buffer[2] << 8) | buffer[3]);
+  if (declared > stream.extent) return null;
+  for (let i = 4; i < declared; i++) if (filled[i] === 0) return null;
+  return buffer.subarray(0, declared);
 }

@@ -1,0 +1,440 @@
+/**
+ * The packet pipeline: socket -> ordering -> dissection -> trackers, off the
+ * main thread (docs/decisions/0003, docs/decisions/0007).
+ *
+ * Everything that runs per captured frame lives here. The main thread's job is
+ * now the buffer and the views over it; it never parses a message from the
+ * agent, never decodes base64, never advances a tracker and never dissects.
+ * What it receives is a batch of finished `Packet`s once per flush, with the
+ * raw bytes attached and the protocol tree left behind.
+ *
+ * The socket is here rather than on the main thread because the packets arrive
+ * on it: a message handler on the main thread would have to at least look at
+ * every frame before it could hand it anywhere, at wire rate, which is the
+ * cost this whole phase exists to remove. Control messages are forwarded up
+ * untouched - there are a handful a second and every one of them lands in
+ * React state.
+ */
+/// <reference lib="webworker" />
+
+import { OrderingWindow, type Orderable } from '../services/dissect/orderingWindow';
+import { keyLog } from '../services/tls/keyLog';
+import { decodePacketBatch, isPacketBatch, retain } from '../services/agentBinary';
+import { encodeAgentCommand, parseAgentMessage } from '../services/agentProtocol';
+import { decodeRawEthernetPacket, type InfoPatch } from '../services/pcapParser';
+import { flowAnnotations } from '../services/flowAnnotations';
+import { addProcessRow, annotatePacket } from '../services/dissect/processFields';
+import { clientFingerprints, learnOrLabelFingerprint } from '../services/dissect/clientFingerprints';
+import { buildFallbackPacket } from '../services/sessionRestore';
+import { TcpStreamTracker } from '../services/tcpStreamTracker';
+import { IcmpEchoTracker } from '../services/icmpEchoTracker';
+import { QuicFlowTracker } from '../services/quicFlowTracker';
+import { DnsTracker } from '../services/dnsTracker';
+import { L3Tracker } from '../services/l3Tracker';
+import { dissectReplay } from '../services/pipeline/replay';
+import type {
+  FromPipeline, PipelineInterface, ToPipeline,
+} from '../services/pipeline/protocol';
+import type { Packet, ProtocolLayer } from '../types/packet';
+
+/** Matches the main thread's old flush cadence, which the packet list is tuned to. */
+const FLUSH_MS = 100;
+/** See services/dissect/orderingWindow.ts. */
+const ORDERING_HOLD_MS = 100;
+/** Reconnect cadence, unchanged from the main-thread client it replaces. */
+const RECONNECT_MS = 3000;
+
+/**
+ * How many frames' trees are kept for the detail pane.
+ *
+ * A tree is 10.6 kB, so this is about 42 MB - the price of answering a click on
+ * a recent frame without dissecting anything again, which is what nearly every
+ * click during a live capture is. Older frames are rebuilt by replaying their
+ * conversation (services/pipeline/replay.ts).
+ */
+const DETAIL_CACHE_FRAMES = 4000;
+
+interface LiveFrame extends Orderable {
+  bytes: Uint8Array;
+  origLen: number;
+  iface: number;
+}
+
+const ctx = self as unknown as DedicatedWorkerGlobalScope;
+
+function post(message: FromPipeline, transfer?: Transferable[]) {
+  ctx.postMessage(message, transfer ?? []);
+}
+
+// --- capture state -----------------------------------------------------------
+
+let socket: WebSocket | null = null;
+let socketUrl = '';
+let wantConnection = false;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+let capturing = false;
+let interfaces: PipelineInterface[] = [];
+
+let tcpTracker = new TcpStreamTracker();
+let icmpTracker = new IcmpEchoTracker();
+let quicTracker = new QuicFlowTracker();
+let dnsTracker = new DnsTracker();
+let l3Tracker = new L3Tracker();
+
+const ordering = new OrderingWindow<LiveFrame>(ORDERING_HOLD_MS);
+
+/** Ids are assigned here now: the frame is numbered where it is dissected. */
+let nextId = 1;
+/** Stand-in sequence number for an agent that sends none. */
+let arrivalSeq = 0;
+let captureStartUs: number | null = null;
+let lastPacketUs: number | null = null;
+
+let pendingPackets: Packet[] = [];
+let pendingIcmpReplies: { requestFrameId: number; replyId: number }[] = [];
+let pendingInfoPatches: InfoPatch[] = [];
+
+/**
+ * Recently dissected trees, oldest first, so the detail pane can be answered
+ * without re-dissecting anything. A plain Map relies on JS insertion order,
+ * which is what makes the oldest key the first one `keys()` yields.
+ */
+const treeCache = new Map<number, ProtocolLayer[]>();
+
+function cacheTree(id: number, layers: ProtocolLayer[]) {
+  treeCache.set(id, layers);
+  while (treeCache.size > DETAIL_CACHE_FRAMES) {
+    const oldest = treeCache.keys().next();
+    if (oldest.done) break;
+    treeCache.delete(oldest.value);
+  }
+}
+
+function resetPipeline(startId: number, startUs?: number | null, lastUs?: number | null) {
+  ordering.clear();
+  tcpTracker = new TcpStreamTracker();
+  icmpTracker = new IcmpEchoTracker();
+  quicTracker = new QuicFlowTracker();
+  dnsTracker = new DnsTracker();
+  l3Tracker = new L3Tracker();
+  treeCache.clear();
+  pendingPackets = [];
+  pendingIcmpReplies = [];
+  pendingInfoPatches = [];
+  // A restored session hands back the capture it is continuing, so the frames
+  // that arrive next carry on its relative-time column rather than restarting
+  // it at zero underneath frames that are already numbered in the thousands.
+  captureStartUs = startUs ?? null;
+  lastPacketUs = lastUs ?? null;
+  arrivalSeq = 0;
+  nextId = startId;
+}
+
+// --- dissection --------------------------------------------------------------
+
+/**
+ * The adapter a frame came from, by the index the agent gave it.
+ *
+ * Undefined when nothing matches, rather than the first adapter. The list this
+ * searches is the *capturable* one - App.tsx filters it before sending it here
+ * - while the agent indexes into the unfiltered one, so a mismatch is
+ * reachable rather than theoretical, and falling back to `interfaces[0]`
+ * labelled the frame with a confident, wrong adapter name in the Frame layer
+ * and the interface column. Same rule as the drop counters and process
+ * attribution: an unknown is not a zero, and is never rendered as one.
+ */
+function interfaceFor(iface: number): { name: string; label: string } | undefined {
+  const found = interfaces.find((entry, index) => (entry.id ?? index) === iface);
+  return found ? { name: found.name, label: found.label } : undefined;
+}
+
+function ingest(frame: LiveFrame): void {
+  try {
+    if (captureStartUs === null) {
+      captureStartUs = frame.tsUs;
+      lastPacketUs = null;
+    }
+    const relativeTime = (frame.tsUs - captureStartUs) / 1_000_000;
+    const timeDelta = lastPacketUs !== null
+      ? Math.max(0, (frame.tsUs - lastPacketUs) / 1_000_000)
+      : 0;
+    lastPacketUs = frame.tsUs;
+
+    const id = nextId++;
+    const decoded = decodeRawEthernetPacket(
+      frame.bytes, id, frame.tsUs, relativeTime, timeDelta, frame.origLen,
+      tcpTracker, icmpTracker, quicTracker, dnsTracker, interfaceFor(frame.iface),
+      undefined, l3Tracker,
+    );
+    const packet = decoded.packet;
+    packet.tsPrecision = 6;
+
+    // The tree stays here; only its bytes and its summary go up. Carrying it
+    // would be 91% of the cost of crossing the boundary and 89% of the buffer's
+    // memory, for something one frame at a time is ever looked at
+    // (docs/decisions/0007).
+    // Which program opened the socket this frame belongs to, if the agent has
+    // been asked and the answer is knowable. Applied here rather than inside
+    // `decodeRawEthernetPacket` because that function is the wire, shared with
+    // every imported file, and a process name is not something a file can
+    // contain - it is a fact about the machine the capture was taken on.
+    //
+    // Before the tree is cached, because it adds a row to it.
+    annotatePacket(packet, flowAnnotations);
+
+    // After attribution, because it is attribution that makes a hello a
+    // labelled example. A frame the OS named teaches this store; one it could
+    // not is what the teaching is for.
+    learnOrLabelFingerprint(packet.fields, clientFingerprints, packet.layers);
+
+    cacheTree(id, packet.layers);
+    packet.layers = [];
+
+    pendingPackets.push(packet);
+    if (decoded.icmpMatchedRequestFrameId !== undefined) {
+      pendingIcmpReplies.push({ requestFrameId: decoded.icmpMatchedRequestFrameId, replyId: id });
+    }
+    if (decoded.infoPatches) pendingInfoPatches.push(...decoded.infoPatches);
+  } catch (err) {
+    post({ type: 'failure', message: `failed to dissect a captured frame: ${String(err)}` });
+  }
+}
+
+function flush(): void {
+  // Frames leave the ordering window in capture order and are dissected right
+  // here, so the trackers see them in the order the wire did. Stopping
+  // releases whatever is still held rather than stranding it.
+  const ready = capturing ? ordering.drain(performance.now()) : ordering.flush();
+  for (const frame of ready) ingest(frame);
+
+  if (pendingPackets.length === 0 && pendingIcmpReplies.length === 0 && pendingInfoPatches.length === 0) {
+    return;
+  }
+  const packets = pendingPackets;
+  const icmpReplies = pendingIcmpReplies;
+  const infoPatches = pendingInfoPatches;
+  pendingPackets = [];
+  pendingIcmpReplies = [];
+  pendingInfoPatches = [];
+
+  post({ type: 'frames', packets, icmpReplies, infoPatches, lateCount: ordering.lateCount });
+}
+
+setInterval(flush, FLUSH_MS);
+
+// --- the agent socket --------------------------------------------------------
+
+function scheduleReconnect() {
+  if (!wantConnection || reconnectTimer !== null) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    openSocket();
+  }, RECONNECT_MS);
+}
+
+function openSocket() {
+  if (!wantConnection) return;
+  post({ type: 'status', status: 'connecting' });
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(socketUrl);
+  } catch {
+    post({ type: 'status', status: 'error' });
+    scheduleReconnect();
+    return;
+  }
+  // Packets arrive as binary batches; without this they would be delivered as
+  // Blobs, which can only be read asynchronously - and an async hop per batch
+  // would put the frames back out of order relative to the control messages.
+  ws.binaryType = 'arraybuffer';
+  socket = ws;
+
+  ws.onopen = () => post({ type: 'status', status: 'connected' });
+
+  ws.onmessage = (event) => {
+    if (typeof event.data !== 'string') {
+      if (!capturing) return; // agent detected, capture not started
+      let frames;
+      try {
+        frames = isPacketBatch(event.data) ? decodePacketBatch(event.data) : null;
+      } catch (err) {
+        post({ type: 'failure', message: String(err) });
+        return;
+      }
+      if (!frames) return;
+      const arrivedAt = performance.now();
+      for (const frame of frames) {
+        // Not dissected here: frames wait in the ordering window and are
+        // dissected by the flush, in capture order. `retain` copies the bytes
+        // out of the batch, which one held frame would otherwise keep alive
+        // in full.
+        ordering.push({
+          tsUs: frame.tsUs,
+          seq: frame.seq,
+          arrivedAt,
+          bytes: retain(frame),
+          origLen: frame.origLen,
+          iface: frame.iface,
+        });
+      }
+      return;
+    }
+
+    const message = parseAgentMessage(event.data);
+    if (!message) return;
+
+    if (message.type === 'socket_table') {
+      // Applied here because this is where dissection happens, so every frame
+      // from now on is annotated as it is built. It is forwarded as well: the
+      // main thread keeps its own copy of the store to re-annotate frames that
+      // were already dissected before this table arrived - the same split
+      // `keyLog` has, for the same reason.
+      flowAnnotations.apply(message, Date.now() * 1000);
+      post({ type: 'agent', message });
+      return;
+    }
+
+    if (message.type !== 'packet') {
+      post({ type: 'agent', message });
+      return;
+    }
+
+    // A pre-3.2 agent, which still sends one JSON message per frame. Kept
+    // working so an agent that has not been updated yet streams while it nags,
+    // rather than showing an empty list next to an "Update" pill.
+    if (!capturing) return;
+    const raw = message as unknown as Record<string, unknown>;
+    const tsUs = typeof raw.tsUs === 'number'
+      ? raw.tsUs
+      : typeof raw.timestamp === 'number' ? Math.round(raw.timestamp * 1000) : Date.now() * 1000;
+    const bytes = typeof raw.raw === 'string' && raw.raw.length > 0 ? base64Bytes(raw.raw) : null;
+    if (bytes) {
+      ordering.push({
+        tsUs,
+        seq: typeof raw.seq === 'number' ? raw.seq : arrivalSeq++,
+        arrivedAt: performance.now(),
+        bytes,
+        origLen: typeof raw.origLen === 'number' ? raw.origLen : bytes.length,
+        iface: typeof raw.iface === 'number' ? raw.iface : 0,
+      });
+    } else {
+      // Metadata only, from an agent that sent no bytes. Nothing is
+      // fabricated: the frame is what the agent said it was and no more.
+      pendingPackets.push(buildFallbackPacket({
+        id: nextId++,
+        tsUs,
+        relativeTime: captureStartUs === null ? 0 : (tsUs - captureStartUs) / 1_000_000,
+        timeDelta: 0,
+        length: Number(raw.length) || 0,
+        source: String(raw.source ?? ''),
+        destination: String(raw.destination ?? ''),
+        sourcePort: raw.sourcePort as number | undefined,
+        destPort: raw.destPort as number | undefined,
+        protocol: raw.protocol as string | undefined,
+        info: raw.info as string | undefined,
+      }));
+    }
+  };
+
+  ws.onerror = () => post({ type: 'status', status: 'error' });
+
+  ws.onclose = () => {
+    if (socket === ws) socket = null;
+    post({ type: 'status', status: 'disconnected' });
+    scheduleReconnect();
+  };
+}
+
+function base64Bytes(text: string): Uint8Array {
+  const binary = atob(text);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+function closeSocket() {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  const ws = socket;
+  socket = null;
+  if (ws) {
+    // Nulled first, so the teardown does not read as the agent going away and
+    // re-arm the retry that disconnecting exists to stop.
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    try { ws.close(); } catch { /* already closing */ }
+  }
+}
+
+// --- commands from the main thread -------------------------------------------
+
+ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
+  const command = event.data;
+  switch (command.type) {
+    case 'connect':
+      socketUrl = command.url;
+      wantConnection = true;
+      if (socket === null) openSocket();
+      break;
+
+    case 'disconnect':
+      wantConnection = false;
+      closeSocket();
+      post({ type: 'status', status: 'disconnected' });
+      break;
+
+    case 'command':
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(encodeAgentCommand(command.command));
+      }
+      break;
+
+    case 'capturing':
+      capturing = command.capturing;
+      break;
+
+    case 'interfaces':
+      interfaces = command.interfaces;
+      break;
+
+    case 'reset':
+      resetPipeline(command.nextId, command.captureStartUs, command.lastPacketUs);
+      // A cleared buffer is a new capture. Keeping the old socket table would
+      // let a port reused since then be attributed to the process that held
+      // it during a capture that is no longer on screen.
+      flowAnnotations.clear();
+      // Fingerprints are learned from THIS capture's attributions. Carrying
+      // them into the next one would keep applying a label whose evidence has
+      // been discarded.
+      clientFingerprints.clear();
+      break;
+
+    case 'keylog':
+      keyLog.add(command.text);
+      break;
+
+    case 'detail': {
+      const layers = treeCache.get(command.id);
+      if (layers) post({ type: 'detail', id: command.id, layers });
+      else post({ type: 'needReplay', id: command.id });
+      break;
+    }
+
+    case 'replay': {
+      const { layers } = dissectReplay(command.frames, command.truncated, command.streamId, command.retroactive);
+      // The process came down with the request rather than being looked up
+      // here: this store is a moving picture of open sockets, and a frame
+      // scrolled back to may belong to one that closed long ago.
+      addProcessRow(layers, command.process ?? null);
+      // Not cached: a replayed frame is one the user scrolled back to, and
+      // caching it would evict the recent frames that answer without any work
+      // at all.
+      post({ type: 'detail', id: command.id, layers });
+      break;
+    }
+  }
+};

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 
 /**
- * One mechanism for every UI preference NetView persists in localStorage.
+ * One mechanism for every UI preference Inwire persists in localStorage.
  *
  * Each preference keeps its own key and its own shape - there is no combined
  * envelope. Separate keys mean a corrupt value in one cannot take the others
@@ -57,6 +57,70 @@ function defaultStorage(): PreferenceStorage | null {
  * records it.
  */
 const lastSerialized = new Map<string, string>();
+
+/**
+ * Move preferences written under the app's previous name onto the current one.
+ *
+ * Every key this app stores is `<app>.<preference>`, and the app was renamed.
+ * Without this, a rename silently factory-resets everyone: layout, filter
+ * presets, colour rules, map settings, column widths - all still in storage,
+ * none of it read by anything.
+ *
+ * Prefix-scanned rather than driven by a list of known keys, deliberately. The
+ * keys are declared across seven modules and at least one (the minimap's
+ * width) is written straight from a component, so any hand-maintained list
+ * would be missing an entry on the day it was needed. Whatever the old build
+ * wrote, this carries.
+ *
+ * Runs at module scope, and it has to: `createPreferenceStore` reads its value
+ * when its module is first evaluated, so by the time any component renders it
+ * is already too late to move the key underneath it. This module is imported
+ * by all of them, so its body is the last point that is still early enough.
+ *
+ * Idempotent. A value already present under the current name wins - a second
+ * pass must not overwrite live settings with whatever the old build left
+ * behind - and the old key is dropped either way, so the scan finds nothing on
+ * every subsequent load.
+ */
+const LEGACY_KEY_PREFIX = 'netview.';
+const KEY_PREFIX = 'inwire.';
+
+export function migrateLegacyPreferenceKeys(
+  storage: PreferenceStorage | null = defaultStorage(),
+): number {
+  // `key`/`length` are Storage's, not PreferenceStorage's - the in-memory
+  // implementation the assertion scripts use is the read/write pair and
+  // nothing more, so this asks for them rather than assuming.
+  const full = storage as (PreferenceStorage & Partial<Storage>) | null;
+  if (typeof full?.length !== 'number' || typeof full.key !== 'function') return 0;
+
+  let moved = 0;
+  try {
+    // Collected before anything is written: removing keys mid-scan reindexes
+    // the store underneath the loop and would skip every other entry.
+    const legacy: string[] = [];
+    for (let i = 0; i < full.length; i++) {
+      const key = full.key(i);
+      if (key?.startsWith(LEGACY_KEY_PREFIX)) legacy.push(key);
+    }
+
+    for (const key of legacy) {
+      const next = KEY_PREFIX + key.slice(LEGACY_KEY_PREFIX.length);
+      const value = full.getItem(key);
+      if (value !== null && full.getItem(next) === null) {
+        full.setItem(next, value);
+        moved++;
+      }
+      full.removeItem?.(key);
+    }
+  } catch {
+    // Blocked, full, or unavailable storage. The app starts on defaults, which
+    // is what it would have done anyway - not a reason to fail to boot.
+  }
+  return moved;
+}
+
+migrateLegacyPreferenceKeys();
 
 /** Debounced writes that have not landed yet, keyed by preference. */
 const pendingWrites = new Map<
@@ -180,13 +244,13 @@ export function resetPreferenceCache(): void {
  * Retiring a preference is not the same as ignoring it. A key nothing honours
  * still sits in storage looking like live configuration to anyone who opens
  * devtools and reads it - which is the reasoning that was already written out
- * for `netview.packetTheme`, as a one-off `removeItem` at the top of App. This
+ * for `inwire.packetTheme`, as a one-off `removeItem` at the top of App. This
  * is that, with somewhere for the next one to go.
  */
 export const RETIRED_PREFERENCE_KEYS: readonly string[] = [
   // The packet list used to carry its own theme, chosen separately from the
   // app theme. The two are one choice now.
-  'netview.packetTheme',
+  'inwire.packetTheme',
 ];
 
 export function clearRetiredPreferences(

@@ -5,7 +5,7 @@
  *
  * Every expected string below is the literal output of
  * `tshark -T fields -e _ws.col.info` (the reference analyzer 4.6.8) for the frame beside
- * it, so a failure here means NetView's Info column would disagree with
+ * it, so a failure here means Inwire's Info column would disagree with
  * The reference analyzer's for that frame.
  *
  * The first 49 cases sweep every chassis-subtype x port-subtype combination

@@ -145,6 +145,17 @@ const ROLE_BY_RULE_ID: Record<string, RuleRole> = {
   'color-arp': 'arp',
   'color-icmp': 'icmp',
   'color-broadcast': 'neutral',
+
+  // Inwire's three additions (services/colorRules INWIRE_EXTRA_RULES).
+  // `color-expert` takes the warn hue rather than error: it fires on anything a
+  // dissector complained about, which is a wider net than the five rules above
+  // it, and painting all of that the same red as a RST would drain the red of
+  // meaning. TLS Handshake takes the web hue - it is the frame that says which
+  // site this is - and QUIC takes tcp's blue because it IS the transport for
+  // most of a modern capture's web traffic.
+  'color-expert': 'warn',
+  'color-tls-handshake': 'web',
+  'color-quic': 'tcp',
 };
 
 /**
@@ -223,6 +234,143 @@ const LIGHTNESS_BY_HUE: Record<Hue, number> = {
   yellow: 5,
   neutral: 7,
 };
+
+/**
+ * The three colour sets the packet list can be painted in.
+ *
+ * A second axis over the app theme, and deliberately a *narrow* one. It does
+ * not introduce new palettes: `default` and `vibrant` are the same nine theme
+ * hues put through the same Lab derivation with two knobs moved, so a Midnight
+ * list stays recognisably Midnight either way. Only `colorblind` substitutes
+ * hues, and it has to - see OKABE_ITO.
+ *
+ * Scoped to the packet list and the accents derived from it. The map arcs, the
+ * protocol donut and the timeline all read `themePalettes` directly and keep
+ * the theme's plain hues, because those surfaces show a handful of large areas
+ * where nine hues are already easy to tell apart. The list is the surface where
+ * a screenful of small rows has to be distinguished at a glance, and the only
+ * one where the trade between loudness and separation is worth a choice.
+ */
+export type PacketColorSet = 'default' | 'vibrant' | 'colorblind';
+
+export const PACKET_COLOR_SETS: PacketColorSet[] = ['default', 'vibrant', 'colorblind'];
+
+/**
+ * Okabe-Ito, the reference set for colour-vision-safe categorical palettes.
+ *
+ * A retired "Colorblind Safe" *app theme* used to carry these as its nine hues.
+ * It is gone, and the set is authored here instead, which is the better place
+ * for it: colour-vision safety is a property of the data colours, so as a theme
+ * it dragged along a ground and a chrome nobody asked for, and it could not be
+ * combined with the dark theme somebody actually wanted to work in. As a colour
+ * set it composes with all four themes.
+ *
+ * Only the a/b direction of each entry is used - `derive` takes lightness from
+ * the theme's own ground - so one table serves the light themes and the dark
+ * ones. The two near-neutral entries are the exception, and the reason
+ * NEUTRAL_CHROMA exists: `magenta` is Okabe-Ito's black and `neutral` a grey,
+ * neither of which has an a/b to be told apart by, so both fall back to their
+ * own lightness relative to the ground.
+ *
+ * Mapped onto hue NAMES rather than onto roles, so it flows through the same
+ * HUE_BY_ROLE table as every theme and nothing downstream has to know this set
+ * exists. Sky blue takes `cyan`, reddish purple takes `violet`, vermillion
+ * takes `red`.
+ *
+ * What makes it safe is not the hue spacing on its own - a deuteranope loses
+ * most of the red/green axis whatever the hexes are. It is that the eight
+ * chromatic entries also form a luminance ramp, which is the axis
+ * LIGHTNESS_BY_HUE already spreads the fills along and `rampScale` stretches.
+ */
+const OKABE_ITO: Record<Hue, string> = {
+  red: '#d55e00',     // vermillion
+  orange: '#e69f00',  // orange
+  yellow: '#f0e442',  // yellow
+  green: '#009e73',   // bluish green
+  cyan: '#56b4e9',    // sky blue
+  blue: '#0072b2',    // blue
+  violet: '#cc79a7',  // reddish purple
+  magenta: '#000000', // black
+  neutral: '#999999', // grey - not Okabe-Ito's, which has only eight entries
+};
+
+export interface PacketColorSetSpec {
+  label: string;
+  /** How much of each hue's colourfulness a fill keeps. See CHROMA_SCALE. */
+  chromaScale: number;
+  /** Multiplier on LIGHTNESS_BY_HUE, so a set can buy separation on L. */
+  rampScale: number;
+  /**
+   * Multiplier on LIGHTNESS_SHIFT_ON_LIGHT / _ON_DARK - how far the whole band
+   * of fills sits from the theme's ground.
+   *
+   * Exists because of sRGB, not because of design. A fill is built in Lab and
+   * then converted, and Lab describes colours sRGB cannot show: a pale blue at
+   * L 80 with any real b runs the blue channel past 255 and gets clamped, which
+   * silently discards exactly the a/b separation the fill was carrying. That is
+   * how `colorblind` first arrived with sky blue and blue 1.7 deltaE apart on
+   * Day - two distinct hues, both clamped to the same near-white. Moving the
+   * band away from the ground moves it back inside the gamut, where the hues
+   * survive the conversion.
+   */
+  shiftScale: number;
+  /** Substitutes the theme's own nine hues. `colorblind` only. */
+  hues?: Record<Hue, string>;
+  /**
+   * The loudest fill this set may produce, asserted by
+   * `scripts/themes/packet-themes.ts`.
+   *
+   * Per set rather than global, and that is the point of the whole feature. The
+   * single global ceiling existed to stop somebody raising CHROMA_SCALE to buy
+   * separation the deltaE floors should buy instead. That reasoning still holds
+   * for `default`, the list almost everybody reads; it is exactly what
+   * `vibrant` exists to opt out of. The FLOORS - WCAG AA on every fill, and all
+   * three deltaE bars - stay identical for every set.
+   */
+  maxChroma: number;
+}
+
+export const PACKET_COLOR_SET_SPECS: Record<PacketColorSet, PacketColorSetSpec> = {
+  /** Today's list, unchanged. Quiet, and separated mostly on lightness. */
+  default: {
+    label: 'Default',
+    chromaScale: CHROMA_SCALE,
+    rampScale: 1,
+    shiftScale: 1,
+    maxChroma: 22,
+  },
+  /**
+   * Loud on purpose.
+   *
+   * Roughly double the chroma, which is above where the list sat before it was
+   * quietened (0.42) - and the ramp widens with it rather than being left
+   * alone, because a fill pushed past the sRGB gamut boundary gets clamped, and
+   * clamping is what drags two saturated fills back toward each other. Spending
+   * some of the extra separation on L is what keeps the deltaE floors clear at
+   * this chroma rather than only just met.
+   */
+  vibrant: { label: 'Vibrant', chromaScale: 0.5, rampScale: 1.3, shiftScale: 1, maxChroma: 40 },
+  /**
+   * Okabe-Ito, with the lightness ramp stretched.
+   *
+   * Chroma sits between the other two: enough that the eight chromatic entries
+   * read as colours, not so much that anyone is invited to read meaning off a
+   * hue a deuteranope cannot recover. The ramp does that work instead.
+   */
+  colorblind: {
+    label: 'Colourblind',
+    chromaScale: 0.3,
+    rampScale: 1.6,
+    shiftScale: 1.9,
+    hues: OKABE_ITO,
+    maxChroma: 26,
+  },
+};
+
+/** The set for a stored value, falling back to `default` for anything else. */
+export function packetColorSet(raw: unknown): PacketColorSet {
+  return PACKET_COLOR_SETS.includes(raw as PacketColorSet) ? (raw as PacketColorSet) : 'default';
+}
 
 /** WCAG AA for normal text. The list is small monospace, so this is a floor. */
 const AA = 4.5;
@@ -316,11 +464,12 @@ function derive(
   hue: string,
   palette: ThemePalette,
   shift: number,
+  spec: PacketColorSetSpec,
 ): PacketThemeColors {
   const [hueL, ha, hb] = toLabColor(hue);
   const [groundL] = toLabColor(palette.surface.background);
-  const a = ha * CHROMA_SCALE;
-  const b = hb * CHROMA_SCALE;
+  const a = ha * spec.chromaScale;
+  const b = hb * spec.chromaScale;
 
   // A hue with essentially no colour cannot be told apart by a/b, so it leans
   // on its own lightness instead - otherwise every near-neutral entry in a
@@ -328,7 +477,7 @@ function derive(
   const toward = Math.hypot(ha, hb) < NEUTRAL_CHROMA ? (hueL - groundL) * 0.6 : 0;
   // Both offsets point away from the ground, which is what `Math.sign` is for:
   // on a light theme `shift` is negative and the ramp has to darken with it.
-  const ramp = Math.sign(shift) * LIGHTNESS_BY_HUE[name];
+  const ramp = Math.sign(shift) * LIGHTNESS_BY_HUE[name] * spec.rampScale;
   const L = Math.max(2, Math.min(97, groundL + shift + ramp + toward));
   return readablePair(labToHex([L, a, b]), palette);
 }
@@ -339,29 +488,39 @@ function derive(
  * Falls back through `themePalette`, so an unknown or not-yet-resolved theme
  * name yields the dark palette rather than an uncoloured list.
  */
-export function getPacketThemeForApp(resolvedTheme: string | undefined): PacketTheme {
+export function getPacketThemeForApp(
+  resolvedTheme: string | undefined,
+  set: PacketColorSet = 'default',
+): PacketTheme {
   const palette = themePalette(resolvedTheme);
-  const shift = isDarkColor(palette.surface.background)
+  const spec = PACKET_COLOR_SET_SPECS[set] ?? PACKET_COLOR_SET_SPECS.default;
+  // A set may substitute the nine hues outright - `colorblind` does - but never
+  // the SURFACE, which stays the theme's own. That split is what lets a colour
+  // set compose with all four themes instead of being a fifth theme: the
+  // ground, the text and the borders belong to the app, and only the data
+  // colours belong to the set.
+  const hues = spec.hues ?? palette.hues;
+  const shift = (isDarkColor(palette.surface.background)
     ? LIGHTNESS_SHIFT_ON_DARK
-    : LIGHTNESS_SHIFT_ON_LIGHT;
+    : LIGHTNESS_SHIFT_ON_LIGHT) * spec.shiftScale;
 
   const rules: Record<string, PacketThemeColors> = {};
   const accents: Record<string, string> = {};
   for (const rule of DEFAULT_COLOR_RULES) {
     const role = ROLE_BY_RULE_ID[rule.id] ?? 'neutral';
     const name = HUE_BY_ROLE[role];
-    const hue = palette.hues[name];
-    rules[rule.id] = derive(name, hue, palette, shift);
+    const hue = hues[name];
+    rules[rule.id] = derive(name, hue, palette, shift, spec);
     accents[rule.id] = legibleOn(hue, palette.surface.card, AA);
   }
 
   return {
-    id: resolvedTheme ?? 'dark',
-    label: resolvedTheme ?? 'dark',
+    id: `${resolvedTheme ?? 'dark'}:${set}`,
+    label: `${resolvedTheme ?? 'dark'} ${spec.label}`,
     surface: palette.surface,
     rules,
     accents,
-    accentFallback: legibleOn(palette.hues.neutral, palette.surface.card, AA),
+    accentFallback: legibleOn(hues.neutral, palette.surface.card, AA),
   };
 }
 

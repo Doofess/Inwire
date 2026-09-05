@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { usePacketDetail } from '../../lib/usePacketDetail';
 import { motion } from 'motion/react';
+import { targetForPacket, type StreamTarget } from '../../services/followStream';
 import { Packet, UserRolePermissions } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
@@ -27,7 +29,7 @@ import {
   TbBinaryTree,
 } from 'react-icons/tb';
 
-const DETAIL_LAYOUT_KEY = 'netview.packetDetailLayout';
+const DETAIL_LAYOUT_KEY = 'inwire.packetDetailLayout';
 
 /**
  * Fields keep slightly more than half.
@@ -144,7 +146,7 @@ interface PacketDetailModalProps {
   filteredPackets: Packet[];
   onClose: () => void;
   onShowFrame: (frameNumber: number) => void;
-  onFollowStream: (streamId: number) => void;
+  onFollowStream: (target: StreamTarget) => void;
   colorEngine: ColorRulesEngine;
   /**
    * The packet palette in force, so this window can label a frame in the colour
@@ -321,7 +323,10 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
   // Lookup by id on demand. Nothing here scans the buffer, which matters
   // because `packets` changes identity on every 100ms flush during capture.
   const index = useMemo(() => findPacketIndexById(packets, packetId), [packets, packetId]);
-  const packet = index === -1 ? null : packets[index];
+  // Frames in the buffer carry no protocol tree - it is fetched for the one
+  // frame being looked at (docs/decisions/0007). Everything above the tree
+  // renders from the frame itself and is there immediately.
+  const packet = usePacketDetail(index === -1 ? null : packets[index], packets);
 
   const summary = useMemo(() => (packet ? buildFrameSummary(packet) : null), [packet]);
   const related = useMemo(() => (packet ? collectRelatedFrames(packet) : []), [packet]);
@@ -475,7 +480,9 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
     summary,
     colorRuleName,
     related,
-    streamId: packet?.streamId,
+    // The five-tuple, not just the TCP index: a UDP or QUIC frame has no
+    // index and could not be followed at all before this.
+    streamTarget: packet ? targetForPacket(packet) : null,
     hiddenByFilter,
     frameBox,
     onFollowStream,
@@ -535,7 +542,7 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
   return (
     <motion.div
       {...modalBackdropMotion}
-      className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
     >
       <motion.div
         {...modalPanelMotion}

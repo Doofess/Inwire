@@ -1,23 +1,43 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'motion/react';
 import {
   TbAlertCircle,
   TbX,
   TbBookmark,
   TbSearch,
+  TbInfoCircle,
 } from 'react-icons/tb';
 import { FilterEngine, FilterValidationResult } from '../../services/filterEngine';
 import { allPresets } from '../../services/filterPresets';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
 
+/**
+ * Which surface this bar is standing on.
+ *
+ * A named variant rather than a `compact` boolean, matching `WidgetVariant` in
+ * `dashboardWidgets.tsx`: the two differ in more than size, and a boolean
+ * called "compact" would be answering the wrong question by the second thing
+ * it had to control.
+ *
+ * `header` is the app header - the full bar, with the packet-search field and
+ * the PACKETS count beside it. `compact` is inside a dialog: the same filter
+ * field, the same presets, the same validation, and nothing else. The search
+ * field is dropped because it filters what is *displayed* in the packet list,
+ * which an export knows nothing about, and the count is dropped because the
+ * export panel states its own - "412 of 5,231" against a different total.
+ */
+export type FilterBarVariant = 'header' | 'compact';
+
 interface FilterBarProps {
   filterText: string;
   onFilterChange: (filter: string) => void;
   onApplyFilter: (newFilter?: string) => void;
-  totalPackets: number;
-  filteredPackets: number;
-  packetSearchText: string;
-  onPacketSearchChange: (text: string) => void;
+  variant?: FilterBarVariant;
+  totalPackets?: number;
+  filteredPackets?: number;
+  /** Required by the `header` variant; unused and omitted by `compact`. */
+  packetSearchText?: string;
+  onPacketSearchChange?: (text: string) => void;
   /**
    * The preset library, owned by App.tsx and edited in
    * Settings > Display Filters. Read-only here apart from the bookmark button,
@@ -25,22 +45,37 @@ interface FilterBarProps {
    * settings panel can never disagree about what exists.
    */
   filterPresetLibrary: FilterPresetLibrary;
-  onSaveCurrentFilter: (filter: string) => void;
+  /** Omit to hide the bookmark button - saving a preset from a dialog would
+   *  edit library state the dialog does not own. */
+  onSaveCurrentFilter?: (filter: string) => void;
 }
 
 export const FilterBar: React.FC<FilterBarProps> = ({
   filterText,
   onFilterChange,
   onApplyFilter,
-  totalPackets,
-  filteredPackets,
-  packetSearchText,
+  variant = 'header',
+  totalPackets = 0,
+  filteredPackets = 0,
+  packetSearchText = '',
   onPacketSearchChange,
   filterPresetLibrary,
   onSaveCurrentFilter,
 }) => {
+  const isCompact = variant === 'compact';
   const [validation, setValidation] = useState<FilterValidationResult>({ isValid: true });
   const [showPresetsDropdown, setShowPresetsDropdown] = useState(false);
+  /**
+   * Which completion is highlighted, or -1 for none.
+   *
+   * The autocomplete this bar used to have was a hand-typed list of twenty-odd
+   * example expressions that had drifted out of step with what the engine
+   * accepted, so it was removed rather than maintained. It is back because it
+   * no longer needs maintaining: the candidates come from the field registry
+   * (`FilterEngine.getSuggestions`), so a field becomes completable the moment
+   * a dissector registers it and can never be offered after it is retired.
+   */
+  const [highlighted, setHighlighted] = useState(-1);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -48,7 +83,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   const isSearchExpanded = isSearchOpen || packetSearchText.trim().length > 0;
 
   const clearSearch = () => {
-    onPacketSearchChange('');
+    onPacketSearchChange?.('');
     setIsSearchOpen(false);
   };
 
@@ -61,18 +96,66 @@ export const FilterBar: React.FC<FilterBarProps> = ({
     }
   };
 
-  // Validate syntax as user types. The autocomplete that used to be computed
-  // here is gone - see the field below.
+  // Validate syntax as the user types.
   useEffect(() => {
     setValidation(FilterEngine.validateFilter(filterText));
   }, [filterText]);
 
+  /**
+   * The word being typed, and where it starts.
+   *
+   * Completion replaces exactly this span, so `tcp.port == 44 && tls.han`
+   * completes the second name and leaves the first expression alone.
+   */
+  const token = useMemo(() => {
+    const match = filterText.match(/[A-Za-z0-9_.]*$/);
+    const text = match?.[0] ?? '';
+    return { text, start: filterText.length - text.length };
+  }, [filterText]);
+
+  const suggestions = useMemo(
+    () => (token.text.length >= 2 ? FilterEngine.getSuggestions(token.text) : []),
+    [token.text],
+  );
+  // The completions and the presets share the space under the field, so only
+  // one can be up. Completing what is half-typed is the more immediate of the
+  // two, and the presets are one Escape away.
+  const showSuggestions = suggestions.length > 0 && !(suggestions.length === 1 && suggestions[0] === token.text);
+
+  useEffect(() => setHighlighted(-1), [token.text]);
+
+  const acceptSuggestion = (name: string) => {
+    const next = filterText.slice(0, token.start) + name + ' ';
+    onFilterChange(next);
+    setHighlighted(-1);
+    inputRef.current?.focus();
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (showSuggestions && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      setHighlighted(prev => {
+        const next = prev + step;
+        if (next < 0) return suggestions.length - 1;
+        return next >= suggestions.length ? 0 : next;
+      });
+      return;
+    }
     if (e.key === 'Enter') {
+      // Enter takes the highlighted completion if there is one, and applies
+      // the filter otherwise - so the key never does both, and never applies
+      // an expression the user was still in the middle of naming.
+      if (showSuggestions && highlighted >= 0) {
+        e.preventDefault();
+        acceptSuggestion(suggestions[highlighted]);
+        return;
+      }
       setShowPresetsDropdown(false);
       onApplyFilter();
     } else if (e.key === 'Escape') {
       setShowPresetsDropdown(false);
+      setHighlighted(-1);
     }
   };
 
@@ -84,7 +167,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 
   const handleSaveCurrentFilter = () => {
     if (!filterText.trim()) return;
-    onSaveCurrentFilter(filterText);
+    onSaveCurrentFilter?.(filterText);
   };
 
   /**
@@ -138,7 +221,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
     // instead of onto a second line.
     <div
       ref={containerRef}
-      className="relative z-30 flex-1 min-w-0"
+      className={`relative z-30 min-w-0 ${isCompact ? 'w-full' : 'flex-1'}`}
     >
       <div className="flex flex-nowrap items-center gap-2">
         {/* The filter field, which is now also the preset picker.
@@ -218,7 +301,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 </button>
               )}
 
-              {isNotEmpty && validation.isValid && (
+              {isNotEmpty && validation.isValid && onSaveCurrentFilter && (
                 <button
                   onClick={handleSaveCurrentFilter}
                   className={filterActionClass}
@@ -232,7 +315,28 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 
           {/* Presets, anchored under the field they write into and matching
               its width rather than the fixed 320px the old popover used. */}
-          {showPresetsDropdown && (
+          {showSuggestions && (
+            <div className="absolute left-0 right-0 top-full mt-1.5 rounded-lg border p-1 shadow-2xl z-50 bg-popover border-border text-popover-foreground">
+              <div className="max-h-64 overflow-y-auto custom-scrollbar">
+                {suggestions.map((name, i) => (
+                  <button
+                    key={name}
+                    // mousedown, not click: the input loses focus first
+                    // otherwise, which closes this list before the click lands.
+                    onMouseDown={e => { e.preventDefault(); acceptSuggestion(name); }}
+                    onMouseEnter={() => setHighlighted(i)}
+                    className={`w-full text-left px-2.5 py-1 rounded text-[11px] font-mono cursor-pointer ${
+                      i === highlighted ? 'bg-accent text-primary' : 'hover:bg-accent/60'
+                    }`}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {showPresetsDropdown && !showSuggestions && (
             <div className="absolute left-0 right-0 top-full mt-1.5 rounded-lg border p-1.5 shadow-2xl z-50 transition-all bg-popover border-border text-popover-foreground">
               <div className="text-[10px] font-bold text-muted-foreground px-2 py-1 uppercase tracking-wider flex items-center justify-between font-mono">
                 <span>Display Filter Presets</span>
@@ -287,12 +391,24 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               <span>{validation.errorMessage}</span>
             </div>
           )}
+
+          {/* A valid expression naming something this build does not dissect.
+              It runs, and it will match nothing - which is worth saying, and
+              is not an error: the filter is correct, the dissector is missing. */}
+          {validation.isValid && validation.warnings && !showSuggestions && (
+            <div className="absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 text-[11px] border border-amber-300 dark:border-amber-800 shadow-lg">
+              <TbInfoCircle className="w-3.5 h-3.5 shrink-0" />
+              <span>{validation.warnings[0]}</span>
+            </div>
+          )}
         </div>
 
         {/* Find Packet - quick substring search applied on top of the
             display filter above (relocated from PacketList's own toolbar
-            row, which no longer exists). */}
-        <div
+            row, which no longer exists). Absent in `compact`: it narrows what
+            the packet list DISPLAYS, which is a different question from what
+            an export contains. */}
+        {!isCompact && <div
           className={`flex items-center gap-1.5 px-1.5 py-1.5 rounded-md border transition-colors overflow-hidden shrink-0 ${
             isSearchExpanded ? 'bg-background border-border' : 'bg-transparent border-transparent'
           }`}
@@ -320,7 +436,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             type="text"
             placeholder="Find packet (IP, protocol, info)..."
             value={packetSearchText}
-            onChange={e => onPacketSearchChange(e.target.value)}
+            onChange={e => onPacketSearchChange?.(e.target.value)}
             onFocus={() => setIsSearchOpen(true)}
             onBlur={() => {
               if (!packetSearchText.trim()) setIsSearchOpen(false);
@@ -341,18 +457,21 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               <TbX className="w-3 h-3" />
             </button>
           )}
-        </div>
+        </div>}
 
-        {/* Packet Count Status Badge */}
-        <div className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border shrink-0 bg-background border-border text-foreground/80">
-          <span className="text-muted-foreground">PACKETS:</span>
-          <span className="font-semibold text-foreground">
-            {filteredPackets.toLocaleString()} <span className="text-muted-foreground">/</span> {totalPackets.toLocaleString()}
-          </span>
-          <span className="text-[10px] px-1.5 py-0.2 rounded bg-primary/20 text-primary font-bold">
-            {filterPercentage}%
-          </span>
-        </div>
+        {/* Packet Count Status Badge. The compact variant leaves this to its
+            host, which counts against a different total. */}
+        {!isCompact && (
+          <div className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border shrink-0 bg-background border-border text-foreground/80">
+            <span className="text-muted-foreground">PACKETS:</span>
+            <span className="font-semibold text-foreground">
+              {filteredPackets.toLocaleString()} <span className="text-muted-foreground">/</span> {totalPackets.toLocaleString()}
+            </span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded bg-primary/20 text-primary font-bold">
+              {filterPercentage}%
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

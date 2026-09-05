@@ -10,20 +10,39 @@ import {
   GeoLocation,
   isLocatable,
 } from "../../services/geoIpService";
-import { TbWorld, TbMapPinFilled, TbMapPinOff, TbMaximize } from "react-icons/tb";
+import { TbMapPinFilled, TbMapPinOff } from "react-icons/tb";
 import { useThemeToken } from '../../lib/themeColor';
-import { themePalette } from '../../services/themePalettes';
 import { protocolColor } from '../../services/protocolColors';
 import { greatCircleArc, splitAtAntimeridian } from '../../lib/greatCircle';
 import { ArcLayer, type Arc } from './arcLayer';
-import { aggregateRoutes } from './geoRoutes';
-import { applyThemeToBasemap, skyFor } from './mapTheme';
+import { addPacketToPairs, aggregateRoutes, type AddressPair } from './geoRoutes';
+import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
+import {
+  applySkin,
+  applyDeclutter,
+  basemapTokensFor,
+  wallTonesFor,
+  LAND_LIFT,
+  skyFor,
+  spaceColorFor,
+  type BasemapTokens,
+} from './mapTheme';
+import { probeRenderTier, TIER_SETTINGS } from './renderTier';
+import { PinLayer, type Pin } from './pinLayer';
+import { themePalette } from '../../services/themePalettes';
 import { GeoLocationCounter, type GeoPlace } from './GeoLocationCounter';
+import { GeoMapHelp } from './GeoMapHelp';
 import { geoSession } from './geoSession';
 import { prefersReducedMotion } from '../../lib/motion';
 import { nameResolutionStore } from '../../services/interfacePrefs';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
-import { mapProjectionStore, type MapProjectionMode } from '../../services/mapPrefs';
+import {
+  arcProtocolColorStore,
+  mapProjectionStore,
+  mapSkinStore,
+  type MapProjectionMode,
+  type MapSkin,
+} from '../../services/mapPrefs';
 import type { WidgetVariant } from './dashboardWidgets';
 import { ZoomControls } from './ZoomControls';
 import { ProjectionSwitcher } from './ProjectionSwitcher';
@@ -49,14 +68,52 @@ if (maplibregl.getRTLTextPluginStatus() === "unavailable") {
 }
 
 // OpenFreeMap: free, no API key, no request limits (donation-supported).
-// Positron/Dark are minimal, label-forward styles that keep focus on our
-// own markers rather than competing with a busy basemap.
-const LIGHT_STYLE = "https://tiles.openfreemap.org/styles/positron";
-const DARK_STYLE = "https://tiles.openfreemap.org/styles/dark";
+//
+// ONE style for all four themes, not the light/dark pair this used to load.
+// Everything visible is repainted by `applyBasemapPalette`, so a second style
+// bought nothing but a second set of layer names to keep working - and the two
+// name their layers nothing alike (`boundary_3` against `boundary_state`,
+// `label_country_2` against `place_country_minor`), which is two chances for a
+// rule to be written once and silently apply to half the themes.
+//
+// Positron is the leanest of OpenFreeMap's styles at 55 layers, and an audit of
+// every source-layer in it against `applyBasemapPalette` found exactly one it
+// did not already recolour (`park`, now covered) - which is what made
+// collapsing to a single style cheap.
+const BASE_STYLE = "https://tiles.openfreemap.org/styles/positron";
+
+/**
+ * The layers that lift the land out of the sea.
+ *
+ * There is no elevation data behind them, and that is the point. This map used
+ * to stream a real DEM from AWS Terrain Tiles, drive a terrain mesh off it and
+ * shade it with a hillshade layer - accurate, and the wrong answer for a map
+ * whose subject is the arcs drawn over it. Every ridge on Earth rendered
+ * underneath the one line you were trying to follow, plus a second tile
+ * pyramid downloading continuously to produce it.
+ *
+ * These are copies of the style's own water polygon, displaced in screen space
+ * and painted underneath the real one, which leaves the side wall of a slab
+ * standing where the two disagree. See `LAND_LIFT` in `mapTheme.ts` for why
+ * that works; the cost is two extra fills of geometry the map has already
+ * loaded, and no network at all.
+ */
+const LAND_WALL_LAYER = (suffix: string) => `inwire-land-wall-${suffix}`;
+
 
 // The glow that used to be a second, blurred line layer now lives in the arc
 // layer's own two-pass draw - `line-blur` has no equivalent in raw WebGL.
 const CONNECTIONS_SYNC_THROTTLE_MS = 600;
+
+/**
+ * How long to wait before asking again when the style is not built yet.
+ *
+ * Much shorter than the throttle above, because it is answering a different
+ * question. The throttle exists to coalesce a burst of updates that would each
+ * cost real work; this is a map that has been open for a few frames and has
+ * nothing to draw on yet, where the only cost of asking again is asking again.
+ */
+const STYLE_WAIT_RETRY_MS = 50;
 
 // How many points to sample along each great circle. Enough that the curve is
 // smooth at continental scale without turning sixty routes into thousands of
@@ -81,17 +138,14 @@ const MERCATOR_BOUNDS: [[number, number], [number, number]] = [
   [179.9, 85],
 ];
 
-/**
- * How visible a marker stays when it is on the far side of the globe.
- *
- * MapLibre fades rather than hides, and the default (0.2) leaves a scatter of
- * ghost pins showing through the planet, which reads as a rendering fault
- * rather than as depth. Zero is the honest answer: a host behind the Earth is
- * not visible, and the ones in front are the ones being looked at.
- *
- * Has no effect under Mercator, where nothing is ever occluded.
+/*
+ * Far-side occlusion used to be MapLibre's own `opacityWhenCovered`, set to 0
+ * because its default (0.2) left a scatter of ghost markers showing through the
+ * planet - which reads as a rendering fault rather than as depth. The pins are
+ * geometry in a custom layer now and MapLibre does not hide those for us, so
+ * the same decision lives in `HORIZON_COS` in pinLayer.ts: a pin past the limb
+ * is not drawn at all.
  */
-const MARKER_OPACITY_WHEN_COVERED = 0;
 
 /** Globe: close enough that the planet fills the frame rather than floating in it. */
 const GLOBE_MIN_ZOOM = 1.9;
@@ -199,6 +253,105 @@ function applyProjectionMode(
   }
 }
 
+/**
+ * Draws the land's side wall.
+ *
+ * Idempotent - it adds on the first call and sets paint properties on every one
+ * after - which costs three lines and means a second `style.load` cannot
+ * double-add.
+ *
+ * Must run on every `style.load`, not once at construction: `setStyle` replaces
+ * the whole style object, and added layers go with it. That is the same reason
+ * the sky, the projection and the connection layers are all reapplied there,
+ * and this joins them rather than being clever about it.
+ *
+ * Everything is individually guarded. A style whose water is not where this
+ * expects should cost the relief and nothing else.
+ */
+function applyLandLift(
+  map: maplibregl.Map,
+  wallSteps: number,
+  tones: { upper: string; lower: string },
+): void {
+  let style;
+  try {
+    style = map.getStyle();
+  } catch {
+    return; // Style not ready. The `style.load` handler will call again.
+  }
+  const layers = style?.layers;
+  if (!layers) return;
+
+  // The water fill these sit under, found by `source-layer` and never by id -
+  // the rule the rest of this basemap code follows, and for the same reason.
+  //
+  // The FIRST such layer, not the last: the whole effect is that the real water
+  // paints back over the displaced copies, so the copies have to go beneath
+  // every pass of it. Beneath the first is beneath all of them.
+  const waterIndex = layers.findIndex(layer => (
+    ('source-layer' in layer ? layer['source-layer'] : undefined) === 'water'
+    && layer.type === 'fill'
+  ));
+  if (waterIndex === -1) return;
+
+  const waterFill = layers[waterIndex] as { id: string; source?: string; filter?: unknown };
+  if (!waterFill.source) return;
+
+  // Fewer steps on a software rasterizer: each is a full fill of the water
+  // polygon per frame, and the first one alone still reads as a wall.
+  for (const step of LAND_LIFT.slice(0, wallSteps)) {
+    const id = LAND_WALL_LAYER(step.suffix);
+    // The geometry is the skin's business, the colour is not: LAND_LIFT owns
+    // how far each step is displaced and in which order they stack, while the
+    // two tones come from `wallTonesFor` because the muted skin has to derive
+    // them from the theme. See mapTheme.ts for why they cannot simply darken.
+    const color = tones[step.suffix];
+    try {
+      if (map.getLayer(id)) {
+        (map.setPaintProperty as (i: string, p: string, v: unknown) => void)(
+          id, 'fill-color', color,
+        );
+        (map.setPaintProperty as (i: string, p: string, v: unknown) => void)(
+          id, 'fill-translate', step.translate,
+        );
+        continue;
+      }
+      map.addLayer(
+        {
+          id,
+          type: 'fill',
+          source: waterFill.source as string,
+          'source-layer': 'water',
+          // The water fill's own filter, carried across rather than reinvented.
+          // It is not the stock one either: `applyDeclutter` has already ANDed
+          // the small-water clause onto it by the time this runs, so the walls
+          // appear and disappear with the lakes they belong to instead of
+          // outlining ghosts of them at world zoom.
+          ...(waterFill.filter === undefined ? {} : { filter: waterFill.filter as never }),
+          paint: {
+            'fill-color': color,
+            'fill-translate': step.translate as never,
+            // Screen space, not ground space. See LAND_LIFT.
+            'fill-translate-anchor': 'viewport',
+            // Off, deliberately. The wall's outer edge is covered by the real
+            // water fill drawn over it, and an antialiased edge underneath an
+            // opaque one blends the wall tone into the sea a pixel early -
+            // which reads as exactly the soft outline this replaced.
+            'fill-antialias': false,
+          },
+        },
+        // LAND_LIFT is ordered longest displacement first, and each new layer
+        // goes immediately under the water fill - so the later, shorter, darker
+        // step lands on top of the earlier one. That is what puts the darkest
+        // tone at the waterline.
+        waterFill.id,
+      );
+    } catch {
+      // One step short of the full wall still leaves a legible map.
+    }
+  }
+}
+
 interface GeoMapProps {
   packets: Packet[];
   isDark: boolean;
@@ -268,30 +421,6 @@ function buildPopupHtml(
 }
 
 /**
- * The two glyphs a marker can be, as Tabler's own `home` and `server` paths.
- *
- * Inlined rather than rendered from `react-icons` because MapLibre takes a DOM
- * element, not a React node - rendering a component per marker would mean a
- * root per marker, or pulling `react-dom/server` into the bundle to stringify
- * two icons. The markup is copied verbatim from the installed package's output,
- * so these are the same glyphs the rest of the app draws, and `currentColor`
- * means the colour is set once on the element and inherited.
- */
-const MARKER_ICONS = {
-  home:
-    '<path d="M5 12l-2 0l9 -9l9 9l-2 0"></path>'
-    + '<path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7"></path>'
-    + '<path d="M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"></path>',
-  host:
-    '<path d="M3 7a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v2a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3"></path>'
-    + '<path d="M3 15a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v2a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3l0 -2"></path>'
-    + '<path d="M7 8l0 .01"></path>'
-    + '<path d="M7 16l0 .01"></path>',
-} as const;
-
-type MarkerKind = keyof typeof MARKER_ICONS;
-
-/**
  * What counts as one place, to two decimal places - a little over a kilometre.
  *
  * The same rounding the route aggregation and the locations list use, and
@@ -303,99 +432,6 @@ function placeKeyFor(latitude: number, longitude: number): string {
   return `${latitude.toFixed(2)},${longitude.toFixed(2)}`;
 }
 
-/**
- * The light a marker gives off.
- *
- * One soft shadow at partial alpha, and deliberately only one. The first
- * version stacked a wide 4px glow with a tight 1px one, and the tight one is
- * what made the icons unreadable: at 18px a server glyph's bars are about two
- * pixels apart, so a shadow with a one-pixel radius fills the gaps between them
- * and the whole thing collapses into a bright blob. A single wide shadow lights
- * the shape from outside without touching the space inside it.
- *
- * Alpha rather than a smaller radius, because the glow still has to be visible
- * against a pale basemap - the fix is for it to be dimmer, not tighter.
- */
-function markerGlow(color: string): string {
-  return `drop-shadow(0 0 5px ${color}80)`;
-}
-
-/**
- * A marker: a glyph over a pulsing halo.
- *
- * `home` is not a cosmetic variant. It marks this machine's own network, which
- * is the one point on the map that is not a located host: LAN addresses have no
- * geography, so their traffic is anchored where it actually enters the internet.
- * A house says that in one glance; the hollow ring it replaces said only "this
- * dot is not like the others" and left you to open the popup to find out why.
- * Everything else is a server, which is what those points are.
- *
- * The halo behind the glyph is the same `animate-ping` circle the plain dots
- * used, so the markers still pulse and still read as live rather than as pins
- * dropped on a static map. Both markers take the app's accent now - what tells
- * them apart is the shape, which does not depend on the theme having two
- * distinguishable colours to spare.
- */
-function createMarkerElement(color: string, size: number, kind: MarkerKind = 'host') {
-  const el = document.createElement("div");
-  el.style.width = `${size}px`;
-  el.style.height = `${size}px`;
-  // No inline `position` here: this element becomes MapLibre's own
-  // `.maplibregl-marker` node (MapLibre uses the element we pass in
-  // directly rather than wrapping it), which MapLibre's stylesheet already
-  // positions with `position: absolute` + a `transform: translate(...)` for
-  // geographic placement. An inline `position: relative` here used to beat
-  // that stylesheet rule (inline styles always win), which put the marker
-  // back into normal document flow - so every marker also stacked vertically
-  // beneath the previous one in DOM order, on top of its correct transform
-  // offset. That's what produced the "markers scattered in a diagonal/ocean
-  // line" bug: `position: absolute` from MapLibre's own CSS is just as valid
-  // a containing block for the `inset: 0` ping/dot children below, so no
-  // inline override is needed at all.
-  el.style.cursor = "pointer";
-
-  // Both children are tagged so the accent can be re-applied later without
-  // rebuilding the marker - see the recolour effect below.
-  //
-  // The halo sits INSIDE the glyph's box rather than filling it: a ping circle
-  // the full size of a 20px icon reads as a disc with something drawn on it,
-  // where the glyph should be the marker and the halo only its light. Kept
-  // faint and small for the same reason the drop-shadow is - anything brighter
-  // sits behind the glyph and washes out the strokes it is meant to light.
-  const ping = document.createElement("span");
-  ping.style.position = "absolute";
-  ping.style.inset = "30%";
-  ping.style.borderRadius = "9999px";
-  ping.style.background = color;
-  ping.style.opacity = "0.25";
-  ping.className = "animate-ping";
-  ping.dataset.accent = "fill";
-
-  const glyph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  glyph.setAttribute("viewBox", "0 0 24 24");
-  glyph.setAttribute("fill", "none");
-  glyph.setAttribute("stroke", "currentColor");
-  // Heavier than the 2 the icon set ships, because these are drawn at 18-20px
-  // over a photographic basemap rather than on a flat panel.
-  glyph.setAttribute("stroke-width", "2.5");
-  glyph.setAttribute("stroke-linecap", "round");
-  glyph.setAttribute("stroke-linejoin", "round");
-  glyph.innerHTML = MARKER_ICONS[kind];
-  glyph.style.position = "absolute";
-  glyph.style.inset = "0";
-  glyph.style.width = "100%";
-  glyph.style.height = "100%";
-  glyph.style.color = color;
-  // The glow the dots had, moved onto the glyph itself. A box-shadow would
-  // trace the element's square box; drop-shadow follows the drawn strokes, so
-  // the light comes off the shape rather than off a rectangle around it.
-  glyph.style.filter = markerGlow(color);
-  glyph.dataset.accent = "glow";
-
-  el.appendChild(ping);
-  el.appendChild(glyph);
-  return el;
-}
 
 export const GeoMap: React.FC<GeoMapProps> = ({
   packets,
@@ -416,11 +452,21 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    * collapsing by place since they were written; this is the third consumer
    * finally doing the same.
    */
-  const markersRef = useRef<Map<string, maplibregl.Marker>>(new Map());
-  const ispMarkerRef = useRef<maplibregl.Marker | null>(null);
+  /**
+   * The 3D pins, and what each one is a pin FOR.
+   *
+   * The layer knows only where its pins stand; the popup needs the address, the
+   * place and the hostname behind one. Kept beside it in a ref rather than in
+   * the layer because it is React's data, and because a hover has to read the
+   * newest hostname rather than whichever one had resolved when the pin was
+   * built.
+   */
+  const pinLayerRef = useRef<PinLayer | null>(null);
+  const pinMetaRef = useRef<Map<string, { ip: string; loc: GeoLocation; kicker?: string }>>(new Map());
+  /** The pin the pointer is currently over, so the popup is not rebuilt per frame. */
+  const hoveredPinRef = useRef<string | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const isExpandedRef = useRef(false);
-  const isFirstStyleRun = useRef(true);
   const connectionsRef = useRef<Arc[]>([]);
   /**
    * The arc layer instance, kept across style reloads.
@@ -436,9 +482,15 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    * Whether the current style object exists yet.
    *
    * Not the same as `map.isStyleLoaded()` - see applyProjectionMode. Set when
-   * `style.load` fires and cleared immediately before every `setStyle`, which
-   * is the window in which the old style is gone and the new one has not
-   * arrived.
+   * `style.load` fires, and never cleared, because nothing calls `setStyle`
+   * any more: skins and themes repaint the loaded style in place. Its false
+   * value is therefore only ever the initial one.
+   *
+   * That is safe because this is a REF ON THE COMPONENT, not on the map. Every
+   * path that builds a new MapLibre instance - expanding the map into its
+   * window, collapsing it back, toggling location lookup - unmounts and
+   * remounts this component, so a fresh instance always starts against a fresh
+   * `false`. Verified from the effect ordering rather than assumed.
    */
   const styleReadyRef = useRef(false);
   /**
@@ -457,35 +509,53 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    */
   const [mapEpoch, setMapEpoch] = useState(0);
 
-  // See useThemeToken: read inline during marker creation this could resolve to
-  // nothing and bake the fallback accent into a marker that is then never
-  // recreated, since markers are only built once per newly-seen location.
+  /**
+   * Bumped whenever a new PinLayer is added to the style.
+   *
+   * Separate from `mapEpoch`, which counts MAP instances. A style reload keeps
+   * the map and replaces every custom layer on it, so the pins need waking on
+   * an event the map epoch never sees - which is how switching basemap skin
+   * used to leave the globe with no pins on it until a location resolved.
+   */
+  const [pinEpoch, setPinEpoch] = useState(0);
+
+  // See useThemeToken: read inline while a pin is built this could resolve to
+  // nothing and bake the fallback accent into a mesh that is then never
+  // rebuilt, since a pin is created once per newly-seen place.
   const accent = useThemeToken('--primary', '#f97316');
-  // The basemap is repainted from the app's own tokens rather than being one of
-  // two stock styles, so the themes do not all render an identical grey-blue
-  // world. Read through useThemeToken for the same reason the accent
-  // is: MapLibre wants a concrete colour, not a CSS variable.
-  const mapBackground = useThemeToken('--background', '#0c0a09');
-  const mapMutedForeground = useThemeToken('--muted-foreground', '#94a3b8');
 
-  // Sea and land are two steps of the theme's own neutral ramp, and the
-  // coastline is the accent - see mapTheme.ts. Water used to be tinted from
-  // the palette's blue, which gave every theme a blue sea whatever else it was
-  // doing; only `landHue` still comes from the palette, for parks.
-  const basemapTokens = React.useMemo(() => {
-    const palette = themePalette(themeKey);
-    return {
-      background: mapBackground,
-      mutedForeground: mapMutedForeground,
-      accent,
-      landHue: palette.hues.green,
-    };
-  }, [mapBackground, mapMutedForeground, accent, themeKey]);
+  // Under the colourful skin the basemap is NOT themed - see mapTheme.ts - and
+  // the sky is the only thing the theme touches, to the extent of day against
+  // night. Under the muted skin every colour on the map is a function of the
+  // theme, which is the whole point of it.
+  //
+  // Read through refs by the `style.load` handler, which is registered once and
+  // must not be re-registered on every theme change.
+  const isDarkRef = useRef(isDark);
+  isDarkRef.current = isDark;
 
-  // Read by the `style.load` handler, which is registered once and must not be
-  // re-registered on every theme change.
+  const [skin] = usePreferenceValue(mapSkinStore);
+  const [arcProtocolColors] = usePreferenceValue(arcProtocolColorStore);
+
+  // The muted skin's four colours. Three come from the palette, which needs no
+  // document; `--primary` has no palette counterpart and comes from the token
+  // the markers already read. Computed for both skins because it is four table
+  // lookups, and a branch here would only move the cost to the reader.
+  const basemapTokens: BasemapTokens = basemapTokensFor(themeKey, accent);
+  const skinRef = useRef<MapSkin>(skin);
+  skinRef.current = skin;
   const basemapTokensRef = useRef(basemapTokens);
   basemapTokensRef.current = basemapTokens;
+
+  /**
+   * How many wall steps this machine can afford, captured where the tier is
+   * probed.
+   *
+   * A ref rather than a second `probeRenderTier()` call: the probe builds a
+   * throwaway WebGL context to ask what it is running on, and the skin effect
+   * needs the answer without paying for it again.
+   */
+  const wallStepsRef = useRef<number>(LAND_LIFT.length);
 
   /**
    * Which distinct PLACES have been seen, not which hosts.
@@ -526,6 +596,16 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   const [hostnames, setHostnames] = useState<Map<string, string | null>>(
     () => new Map(sessionRef.current.hostnames),
   );
+  /**
+   * The same map, for the hover handler to read.
+   *
+   * The handler is registered once per map instance, so it closes over the
+   * hostnames that had resolved at that moment - and reverse DNS arrives
+   * whenever it arrives. Re-registering on every resolution would rebind two
+   * map listeners per name; a ref is the cheaper half of that trade.
+   */
+  const hostnamesRef = useRef(hostnames);
+  hostnamesRef.current = hostnames;
   const [ispLocation, setIspLocation] = useState<GeoLocation | null>(null);
   useEffect(() => {
     // Tracks "has room for a popup", not "is expanded" - a map filling the
@@ -693,6 +773,37 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     });
   }, [packets]);
 
+  /**
+   * Who is talking to whom, folded one packet at a time.
+   *
+   * Deliberately knows nothing about geography. Counting packets per address
+   * pair is fixed the moment a packet arrives, so it is kept across ticks and
+   * only the newly arrived packets are read; where those addresses ARE is
+   * still being looked up, and answers land seconds later and out of order.
+   * Keeping the two apart is what lets a lookup that arrives late still draw
+   * its line, without the whole buffer being re-read to find out. See
+   * geoRoutes for the split and useIncrementalAggregate for the fold.
+   */
+  const pairs = useIncrementalAggregate(
+    packets,
+    () => new Map<string, AddressPair>(),
+    addPacketToPairs,
+    // A COPY, not the accumulator itself. The fold mutates one Map in place
+    // for the life of the capture, so handing that Map back gives a value
+    // whose identity never changes - and `routes` below is a useMemo keyed on
+    // it. Returning the accumulator froze every arc: once each address had
+    // resolved, `locations` stopped changing too and nothing in the dependency
+    // list ever moved again, so new traffic between two already-located hosts
+    // drew nothing and the weights stood still for the rest of the capture.
+    // The copy is O(distinct pairs) once a tick, which is the budget
+    // `finalize` is explicitly allowed to spend; the fold it protects is
+    // O(packets).
+    (map) => new Map(map),
+  );
+
+  // The lines themselves. Redone whenever a lookup lands, which is what makes
+  // a late answer appear - and affordable, because it is a pass over the pairs
+  // rather than over the buffer.
   const routes = React.useMemo(() => {
     const locate = (ip: string): [number, number] | null => {
       // An address with no geography of its own - a LAN host, this machine -
@@ -708,8 +819,8 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       }
       return null;
     };
-    return aggregateRoutes(packets, locate);
-  }, [packets, locations, ispLocation]);
+    return aggregateRoutes(pairs.values(), locate);
+  }, [pairs, locations, ispLocation]);
 
   // Sync the connections GeoJSON source/layer with the map's currently loaded
   // style. Re-invoked on every style load (including after theme switches,
@@ -721,13 +832,23 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // component. Every other bail below reschedules.
     if (!map) return;
 
-    // The style is what the connection layers are added to, and after a
-    // `setStyle` - which every theme change performs - it is briefly not there.
-    // This used to return and drop the update on the floor: the next attempt
-    // only came when `routes` changed again, so on a capture that had already
-    // stopped the lines simply never came back.
-    if (!map.isStyleLoaded()) {
-      scheduleConnectionsSync();
+    // The style is what the connection layers are added to, and until
+    // `style.load` there is no style object to add them to. This used to return
+    // and drop the update on the floor: the next attempt only came when
+    // `routes` changed again, so on a capture that had already stopped the
+    // lines simply never came back.
+    //
+    // `styleReadyRef`, NOT `map.isStyleLoaded()` - the same distinction the
+    // theme effect documents, and the reason the arcs took seconds to appear on
+    // a freshly built map. `isStyleLoaded()` is true only once every SOURCE has
+    // finished loading too, so on a map that has just opened at overlay size
+    // and is streaming a screenful of tiles it is false for as long as that
+    // takes, and each attempt backed off another CONNECTIONS_SYNC_THROTTLE_MS
+    // before asking again. Adding a custom WebGL layer needs the style object
+    // to exist and nothing more; whether the basemap underneath it has finished
+    // downloading is a different question, and not this one.
+    if (!styleReadyRef.current) {
+      scheduleConnectionsSync(STYLE_WAIT_RETRY_MS);
       return;
     }
 
@@ -800,7 +921,15 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     const busiest = Math.max(1, ...routes.map((r) => r.total));
 
     connectionsRef.current = routes.flatMap((route) => {
-      const color = protocolColor(route.dominantProtocol, themeKey);
+      // Two questions, and only one of them is worth colour at a time. Coloured
+      // by protocol, an arc answers "what is this route carrying" in the same
+      // nine hues the protocol donut uses. Painted the accent, it answers "where
+      // is my traffic going" and spends no attention on the first - which is
+      // often the question being asked, and colour encoding something nobody is
+      // reading is noise. See services/mapPrefs.
+      const color = arcProtocolColors
+        ? protocolColor(route.dominantProtocol, themeKey)
+        : accent;
       const weight = route.total / busiest;
       // Still split at the antimeridian, in BOTH projections. On the globe the
       // two halves meet at the same point on the sphere, so the cut is
@@ -815,7 +944,10 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     });
 
     scheduleConnectionsSync();
-  }, [routes, themeKey]);
+    // `accent` and the switch join the dependencies because the arc colours are
+    // baked into a vertex buffer rather than read at draw time - the sync is
+    // what rebuilds it, so anything that changes a colour has to wake this.
+  }, [routes, themeKey, arcProtocolColors, accent]);
 
   /**
    * Follows the projection preference, including when another surface changes
@@ -838,6 +970,11 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     applyProjectionMode(map, projectionMode, styleReadyRef.current);
 
     const settled = { pitch: 0, bearing: 0 };
+    // Already level: nothing to fly to. Without this check every run of this
+    // effect - including the one on mount - played a 600 ms animation from
+    // 0/0 to 0/0, and every frame of it fired `move`, and every `move`
+    // repositioned every marker.
+    if (Math.abs(map.getPitch()) < 0.01 && Math.abs(map.getBearing()) < 0.01) return;
     // A camera flight is the most vestibular-hostile thing this panel does, and
     // it is JavaScript rather than CSS, so the blanket reduced-motion rule
     // cannot reach it - the same reasoning as the location counter's flight.
@@ -939,9 +1076,25 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
+    // Which kind of renderer this is about to draw on - see renderTier.ts.
+    // Asked before construction because two of the answers are constructor
+    // options. On a GPU every value below is the default.
+    const tier = TIER_SETTINGS[probeRenderTier()];
+    // Handed to the skin effect, which needs the number without paying for a
+    // second WebGL probe to get it.
+    wallStepsRef.current = tier.wallSteps;
+
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: isDark ? DARK_STYLE : LIGHT_STYLE,
+      style: BASE_STYLE,
+      // No `pixelRatio` override, on any renderer. The map always draws at the
+      // display's own resolution - see renderTier.ts for why the software tier
+      // does not buy frames by going soft.
+      //
+      // Tile cross-fade. MapLibre's default of 300 ms means every tile arrival
+      // drives ~18 animated frames; on a renderer that cannot afford frames
+      // that is pure cost for an effect nobody is watching.
+      fadeDuration: tier.fadeDuration,
       // Where the map was last pointing, if it has been open before this
       // session. Someone who flew to a city and then collapsed the dashboard
       // should not come back to the world view.
@@ -955,8 +1108,8 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // horizontally by default, so panning east just kept handing back
       // another copy of the same continents.
       renderWorldCopies: false,
-      // Set for real by applyProjectionMode once the instance exists, since
-      // globe and Mercator want different answers. See MERCATOR_BOUNDS.
+      // Added by hand below rather than here, so it can be positioned away
+      // from the zoom controls and the location counter. See addControl.
       attributionControl: false,
       // MapLibre's own resize observer is off, because this component runs a
       // better one below. Left on, the two both call resize() and the canvas is
@@ -979,21 +1132,63 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // sidebar means putting the pointer beside the map rather than on it.
     });
 
+    // No AttributionControl. The credit is a licence condition, not a widget,
+    // and it now lives in GeoMapHelp, which only renders in the EXPANDED map -
+    // so the 256px card shows tiles with no visible credit on it. That is a
+    // deliberate call rather than an oversight: OpenStreetMap asks that the
+    // credit be visible or reachable, and from the card it is one click away
+    // through the card's own expand control. If that reading is ever judged too
+    // thin, the fix is a single muted line along the card's bottom edge rather
+    // than bringing this control back.
+    //
+    // and MapLibre's compact control could only ever say that one thing - in
+    // the corner where a question mark is far more use. It lives in
+    // GeoMapHelp's panel now, under the two things somebody actually opens that
+    // corner to find out: what the pins mean, and how to move the camera.
+    //
+    // What went with it: three MapLibre states that all had to be undone by
+    // hand (it arrives expanded, re-expands from `_updateCompact()` on every
+    // resize, and its click handler moves `maplibregl-compact-show` and the
+    // `<details>` `open` attribute in opposite directions), a click handler, a
+    // mousedown click-away, a class of our own and three CSS rules keyed on it.
+
     // Both have to happen on every style load: setStyle replaces the entire
     // style object, discarding the custom layers AND every paint property this
     // has written.
     map.on("style.load", () => {
       styleReadyRef.current = true;
-      applyThemeToBasemap(map, basemapTokensRef.current);
+      // Refs, not the values closed over: this handler is registered once, and
+      // by the time it fires the skin or the theme may already have moved.
+      applySkin(map, skinRef.current, basemapTokensRef.current);
+      // Borders and labels, thinned. Style structure rather than theme colour,
+      // so unlike the repaint above this belongs only here - it has nothing to
+      // redo when the skin or the tokens change.
+      applyDeclutter(map);
+      // The land's side wall. Layers are style state and were discarded with
+      // everything else.
+      applyLandLift(
+        map,
+        tier.wallSteps,
+        wallTonesFor(skinRef.current, basemapTokensRef.current),
+      );
       // The sky is part of the style, so setStyle discards it exactly like the
       // basemap paint and the connection layers. Everything that has to be
       // reapplied together is reapplied here, together.
-      map.setSky(skyFor(basemapTokensRef.current));
+      map.setSky(skyFor(isDarkRef.current));
       // Projection is a property of the style, not of the map, so a theme
       // change resets it to Mercator. Reapplied here for the same reason the
       // sky and the connection layers are.
       applyProjectionMode(map, mapProjectionStore.get(), true);
       syncConnectionsLayer();
+      // The pins are a custom layer, so they go the way of every other one on a
+      // style reload. Added LAST, after the arcs, because a pin standing on the
+      // surface should be drawn over the routes leaving it rather than sliced
+      // through by them.
+      const pinLayer = new PinLayer();
+      map.addLayer(pinLayer);
+      pinLayerRef.current = pinLayer;
+      // A fresh layer holds no pins; this wakes the sync effect that fills it.
+      setPinEpoch((n) => n + 1);
     });
     map.on("movestart", () => {
       isCameraMovingRef.current = true;
@@ -1007,10 +1202,16 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       closeButton: false,
       closeOnClick: false,
       offset: 14,
-      className: "netview-geo-popup",
+      className: "inwire-geo-popup",
     });
 
     mapRef.current = map;
+    // A handle for measuring, dev builds only. Every performance change to this
+    // map is judged by the same numbers - render cost, arc buffer rebuilds,
+    // marker counts - and those need the live instance, which nothing else
+    // exposes. Compiled out of production: `import.meta.env.DEV` is a build-time
+    // constant, so the branch and the global vanish together.
+    if (import.meta.env.DEV) (window as unknown as { __inwireMap?: maplibregl.Map }).__inwireMap = map;
     // Bounds and pitch for whichever projection the constructor just opened in.
     applyProjectionMode(map, mapProjectionStore.get(), styleReadyRef.current);
     // A fresh instance. The marker effects key on this rather than on
@@ -1025,15 +1226,19 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       geoSession().camera = { center: [center.lng, center.lat], zoom: map.getZoom() };
       map.remove();
       mapRef.current = null;
+      if (import.meta.env.DEV) delete (window as unknown as { __inwireMap?: maplibregl.Map }).__inwireMap;
 
       // Everything below belongs to the MAP, not to this component, and
       // `map.remove()` has just invalidated all of it. Leaving the refs
-      // populated is what made a rebuilt map come up bare: the marker sync
-      // found its keys already present and added nothing.
-      for (const marker of markersRef.current.values()) marker.remove();
-      markersRef.current.clear();
-      ispMarkerRef.current?.remove();
-      ispMarkerRef.current = null;
+      // populated is what made a rebuilt map come up bare: the pin sync found
+      // its keys already present and added nothing.
+      //
+      // `map.remove()` has already called the layer's own `onRemove`, which
+      // disposes the renderer and the cloned meshes; dropping the reference is
+      // what stops the pin effects writing into a dead GL context afterwards.
+      pinLayerRef.current = null;
+      pinMetaRef.current.clear();
+      hoveredPinRef.current = null;
       // A gesture interrupted by this teardown never delivered its `moveend`.
       isCameraMovingRef.current = false;
     };
@@ -1045,29 +1250,72 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nameResolution.geoIp]);
 
-  // Swap the basemap style on theme change (skip the redundant call on mount).
-  useEffect(() => {
-    if (!mapRef.current) return;
-    if (isFirstStyleRun.current) {
-      isFirstStyleRun.current = false;
-      return;
-    }
-    // Still worth picking the right stock style even though it is repainted
-    // immediately: the two differ in label placement and halo strategy, not
-    // only in colour, so starting from the one built for this ground gives
-    // legible labels before a single paint property is touched.
-    // The new style is not there until `style.load` says so.
-    styleReadyRef.current = false;
-    mapRef.current.setStyle(isDark ? DARK_STYLE : LIGHT_STYLE);
-  }, [isDark, themeKey]);
-
-  // Repaint without a style swap - which is the common case, since four of the
-  // eight themes share a stock style and would otherwise all look identical.
+  /**
+   * Repaints the basemap when the skin changes - or, under the muted skin, when
+   * the theme does.
+   *
+   * **No `setStyle`, and that is the whole design.** Switching skins is a
+   * repaint of the style that is already loaded, exactly like the first paint
+   * in `style.load`. Reloading a style to change its colours is what this
+   * component used to do for theme changes and it is documented below as the
+   * single most destructive thing it did; a skin switch is the same question
+   * and gets the same answer. Nothing is torn down, so the arcs, the markers,
+   * the projection and the camera all survive the switch untouched.
+   *
+   * What makes an in-place repaint sufficient is that the two passes write the
+   * same set of paint properties - see mapTheme.ts, where that symmetry is a
+   * stated requirement rather than a coincidence. The land wall is reapplied
+   * with it because its two tones are part of the skin, and `applyLandLift` is
+   * idempotent, so this sets colours on layers that already exist rather than
+   * adding a second pair.
+   *
+   * `applyDeclutter` deliberately does not run here: what it hides and thins is
+   * style structure, which no skin changes, and re-running it would AND a
+   * filter clause onto a filter that already carries it.
+   */
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-    applyThemeToBasemap(map, basemapTokens);
-  }, [basemapTokens]);
+    // Same `styleReadyRef` distinction as the sky effect below - see the note
+    // there, and on applyProjectionMode. A map streaming tiles reports
+    // `isStyleLoaded()` false, and gating on it would make the toggle work only
+    // sometimes.
+    if (!map || !styleReadyRef.current) return;
+    applySkin(map, skin, basemapTokens);
+    applyLandLift(map, wallStepsRef.current, wallTonesFor(skin, basemapTokens));
+    // Spread rather than passed whole: `basemapTokens` is rebuilt every render,
+    // so depending on the object would repaint the world on every packet.
+  }, [skin, basemapTokens.background, basemapTokens.mutedForeground,
+      basemapTokens.accent, basemapTokens.landHue, mapEpoch]);
+
+  // A theme change touches exactly one thing on this map under the colourful
+  // skin: the sky. (Under the muted skin it also drives the repaint above.)
+  //
+  // It used to call `setStyle` to move between Positron and Dark, and that call
+  // was the single most destructive thing the component did: `setStyle`
+  // replaces the whole style object, so every theme change tore down the sky,
+  // the projection, the connection arcs and the coast relief, then rebuilt them
+  // from the `style.load` handler while the map flashed through a half-styled
+  // state. Every "the markers vanished when I changed theme" bug in this file's
+  // history traces back to it. Then it became a full repaint of every layer in
+  // the style, which was correct and still more work than the question needs.
+  //
+  // The basemap's colours are fixed now, so day-against-night is the entire
+  // difference a theme makes here.
+  useEffect(() => {
+    const map = mapRef.current;
+    // `styleReadyRef`, NOT `map.isStyleLoaded()`. They are different questions
+    // and the difference is load-bearing: `isStyleLoaded()` is true only once
+    // every SOURCE has finished loading too, and a map streaming tiles is false
+    // much of the time. Gating on it made a theme change do nothing at all -
+    // the chrome went dark and the map stayed light - and it did so
+    // intermittently, depending on whether tiles happened to be in flight.
+    //
+    // The same mistake, for the same reason, is documented on
+    // `applyProjectionMode`. What this actually needs is "does a style object
+    // exist", which is what `style.load` sets this flag to say.
+    if (!map || !styleReadyRef.current) return;
+    map.setSky(skyFor(isDark));
+  }, [isDark]);
 
 
   // MapLibre does not notice its container resizing - the canvas stays clipped
@@ -1124,112 +1372,121 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   }, []);
 
   /**
-   * Repaints every marker when the accent changes.
+   * Keeps the pin layer's set of pins in step with the resolved locations.
    *
-   * One effect for both kinds now that both take the accent. It is needed
-   * because markers are built once - per newly-seen location, or keyed on
-   * `ispLocation` - so any marker created before a theme switch would otherwise
-   * keep the colour it was born with forever.
+   * One pin per PLACE, not per host: ten servers in one datacentre are one
+   * point on the map, and the locations list is where the full roster lives.
+   * The place this machine's own network sits on is claimed by the home pin, so
+   * a host there gets none of its own - two pins on one coordinate is not two
+   * pieces of information.
+   *
+   * Keyed on `mapEpoch` like the layers themselves: a rebuilt map has a new
+   * PinLayer with nothing in it.
    */
   useEffect(() => {
-    const repaint = (marker: maplibregl.Marker | null) => {
-      if (!marker) return;
-      const el = marker.getElement();
-      const fill = el.querySelector<HTMLElement>('[data-accent="fill"]');
-      const glow = el.querySelector<SVGElement>('[data-accent="glow"]');
-      if (fill) fill.style.background = accent;
-      if (glow) {
-        glow.style.color = accent;
-        glow.style.filter = markerGlow(accent);
-      }
-    };
-    for (const marker of markersRef.current.values()) repaint(marker);
-    repaint(ispMarkerRef.current);
-  }, [accent]);
+    const layer = pinLayerRef.current;
+    if (!layer) return;
 
-  // Keep ping-source markers in sync with resolved locations.
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    // The place this machine's own marker occupies. A host there gets no
-    // marker of its own: the house is already standing on that coordinate, and
-    // two icons on one pixel is not two pieces of information.
     const homeKey = ispLocation && !isNaN(ispLocation.latitude) && !isNaN(ispLocation.longitude)
       ? placeKeyFor(ispLocation.latitude, ispLocation.longitude)
       : null;
 
-    // One entry per place. The first host to resolve there owns the marker and
-    // its popup; the locations list is where the full roster of hosts lives.
-    const wanted = new Map<string, { ip: string; loc: GeoLocation }>();
+    const pins: Pin[] = [];
+    const seen = new Set<string>();
+    if (ispLocation && homeKey) {
+      pins.push({ id: homeKey, lngLat: [ispLocation.longitude, ispLocation.latitude], kind: 'home' });
+      seen.add(homeKey);
+      pinMetaRef.current.set(homeKey, { ip: ispLocation.ip, loc: ispLocation, kicker: 'Your network' });
+    }
     locations.forEach((loc, ip) => {
       const key = placeKeyFor(loc.latitude, loc.longitude);
-      if (key === homeKey || wanted.has(key)) return;
-      wanted.set(key, { ip, loc });
+      if (seen.has(key)) return;
+      seen.add(key);
+      pins.push({ id: key, lngLat: [loc.longitude, loc.latitude], kind: 'host' });
+      pinMetaRef.current.set(key, { ip, loc });
     });
 
-    for (const [key, marker] of markersRef.current) {
-      if (!wanted.has(key)) {
-        marker.remove();
-        markersRef.current.delete(key);
-      }
+    for (const key of pinMetaRef.current.keys()) {
+      if (!seen.has(key)) pinMetaRef.current.delete(key);
     }
+    layer.setPins(pins);
+  }, [locations, ispLocation, mapEpoch, pinEpoch]);
 
-    wanted.forEach(({ ip, loc }, key) => {
-      if (markersRef.current.has(key)) return;
-
-      // The app's accent, the same as this machine's own marker. The two are
-      // told apart by their glyph - a server against a house - which works on
-      // every theme, including the ones with no second distinguishable colour
-      // to spare.
-      const el = createMarkerElement(accent, 18, 'host');
-      const marker = new maplibregl.Marker({ element: el, opacityWhenCovered: MARKER_OPACITY_WHEN_COVERED })
-        .setLngLat([loc.longitude, loc.latitude])
-        .addTo(map);
-
-      el.addEventListener("mouseenter", () => {
-        if (!isExpandedRef.current || !popupRef.current) return;
-        const hostname = hostnames.get(ip) ?? null;
-        popupRef.current.setLngLat([loc.longitude, loc.latitude]).setHTML(buildPopupHtml(ip, loc, hostname)).addTo(map);
-      });
-      el.addEventListener("mouseleave", () => {
-        popupRef.current?.remove();
-      });
-
-      markersRef.current.set(key, marker);
-    });
-    // `mapEpoch`, because these markers live on the map instance: a rebuilt
-    // map needs them all added again, and nothing else in this list changes
-    // when it is rebuilt.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locations, accent, ispLocation, mapEpoch]);
-
-  // ISP ("home") marker.
+  /**
+   * Hover popups, which the pins can no longer raise for themselves.
+   *
+   * A DOM marker got `mouseenter` for free; a mesh in a WebGL layer gets
+   * nothing, so the pointer is tested against the pin positions the layer
+   * recorded on its last frame - see PinLayer.hitTest. Screen-space distance
+   * rather than a raycast, because the camera here has a projection matrix
+   * handed to it by MapLibre and no view transform of its own, which is exactly
+   * what a raycaster needs and does not have.
+   *
+   * The hovered id is remembered so a pointer moving ACROSS one pin does not
+   * rebuild its popup on every mousemove.
+   */
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !ispLocation || isNaN(ispLocation.latitude) || isNaN(ispLocation.longitude)) return;
+    if (!map) return;
 
-    ispMarkerRef.current?.remove();
+    const onMove = (e: maplibregl.MapMouseEvent) => {
+      const layer = pinLayerRef.current;
+      const popup = popupRef.current;
+      if (!layer || !popup) return;
+      // Popups only in the expanded view, as before: at card size the popup is
+      // wider than the map it is covering.
+      if (!isExpandedRef.current) return;
 
-    const el = createMarkerElement(accent, 20, 'home');
-    const marker = new maplibregl.Marker({ element: el, opacityWhenCovered: MARKER_OPACITY_WHEN_COVERED })
-      .setLngLat([ispLocation.longitude, ispLocation.latitude])
-      .addTo(map);
+      const hit = layer.hitTest(e.point.x, e.point.y);
+      if (!hit) {
+        if (hoveredPinRef.current !== null) {
+          hoveredPinRef.current = null;
+          popup.remove();
+        }
+        map.getCanvas().style.cursor = '';
+        return;
+      }
+      map.getCanvas().style.cursor = 'pointer';
+      if (hoveredPinRef.current === hit.id) return;
+      hoveredPinRef.current = hit.id;
 
-    el.addEventListener("mouseenter", () => {
-      if (!isExpandedRef.current || !popupRef.current) return;
-      popupRef.current
-        .setLngLat([ispLocation.longitude, ispLocation.latitude])
-        .setHTML(buildPopupHtml(ispLocation.ip, ispLocation, null, "Your network"))
+      const meta = pinMetaRef.current.get(hit.id);
+      if (!meta) return;
+      popup
+        .setLngLat(hit.lngLat)
+        .setHTML(buildPopupHtml(meta.ip, meta.loc, hostnamesRef.current.get(meta.ip) ?? null, meta.kicker))
         .addTo(map);
-    });
-    el.addEventListener("mouseleave", () => {
-      popupRef.current?.remove();
-    });
+    };
 
-    ispMarkerRef.current = marker;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ispLocation, accent, mapEpoch]);
+    const onLeave = () => {
+      hoveredPinRef.current = null;
+      popupRef.current?.remove();
+    };
+
+    map.on('mousemove', onMove);
+    map.on('mouseout', onLeave);
+    return () => {
+      map.off('mousemove', onMove);
+      map.off('mouseout', onLeave);
+    };
+  }, [mapEpoch]);
+
+  /**
+   * The two pin colours.
+   *
+   * Host pins take the app accent, the same colour the arcs fall back to. This
+   * machine's own network takes the palette's green instead, and that is the
+   * whole of what tells them apart now that both are the same object - the
+   * house-against-server glyph the DOM markers used has no equivalent in one
+   * shared model. Green because it is the one hue no theme spends its accent
+   * on, so the home pin stays the odd one out on all four.
+   */
+  useEffect(() => {
+    // `isDark` covers both dark themes, and does not need to tell them apart -
+    // the clamp it turns on is derived from each theme's own accent.
+    pinLayerRef.current?.setColors(accent, themePalette(themeKey).hues.green, isDark);
+  }, [accent, themeKey, isDark, mapEpoch, pinEpoch]);
+
 
   /**
    * With location lookup off, this renders an explanation instead of a map.
@@ -1247,14 +1504,12 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   if (!nameResolution.geoIp) {
     return (
       <div className="w-full h-full flex flex-col bg-card text-card-foreground">
-        <div className="px-3.5 py-1.5 border-b border-border flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-muted-foreground shrink-0">
-          <TbWorld className="w-4 h-4" />
-          <span>Live Geo-IP map</span>
-        </div>
+        {/* No heading of its own: WidgetCard draws one for every widget now,
+            and this used to be the second on the same card. */}
         <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
           <TbMapPinOff className="w-8 h-8 text-muted-foreground/50" />
           <p className="text-[11px] text-muted-foreground leading-snug max-w-xs">
-            Location lookup is off. NetView can show where the public addresses in your capture are
+            Location lookup is off. Inwire can show where the public addresses in your capture are
             by sending them to <span className="font-mono">get.geojs.io</span>.
           </p>
           <button
@@ -1274,131 +1529,257 @@ export const GeoMap: React.FC<GeoMapProps> = ({
 
   const roomy = variant === 'full';
 
-  return (
-    <div className="w-full h-full flex flex-col bg-card text-card-foreground">
-        {/* Taller than the other panel headings, but only a little. This one is
-            not just a title: it also reports where this machine sits on the map
-            and carries the expand control, and at 10px inside a 22px bar those
-            read as a caption rather than as the panel's own chrome. The type and
-            icons carry that now; the padding stays tight, because the height
-            comes straight off a map that only has 256px to begin with. */}
-        {/* `border-border`, not `border-inherit border-opacity-10`, which drew a
-            near-white rule across the top of the map on every dark theme. Two
-            faults compounding: `border-inherit` inherits a border colour that
-            resolves up the tree to `currentColor` - the CARD'S TEXT colour, so
-            the divider was painted in `--foreground` (#cbd5e1 on dark) rather
-            than in `--border`; and `border-opacity-10`, which was there to knock
-            that back to a hint, is a Tailwind v3 utility that v4 does not emit
-            at all, so it silently did nothing and the line stayed at full
-            strength. This is the token every other panel header in the app
-            already uses. */}
-        <div
-          className={`flex items-center justify-between gap-3 py-1.5 text-[11px] font-bold uppercase tracking-wider opacity-80 border-b border-border shrink-0 ${
-            // Room for the overlay's close control, which floats over the
-            // top-right corner. Without it the ISP readout runs underneath and
-            // loses its last few characters.
-            roomy ? 'pl-3.5 pr-12' : 'px-3.5'
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            <TbWorld className="w-4 h-4" />
-            Live Geo-IP Map
-          </div>
-          <div className="flex items-center gap-2.5 min-w-0">
-            {/* A dropped map pin rather than the house this used to show, and
-                no "ISP:" label: the pin already says "this is a place", which
-                is the only thing the prefix was adding. Filled rather than
-                outlined because at this size an outlined pin's interior hole
-                closes up and it stops reading as a pin at all. The full
-                wording stays in the tooltip for anyone who wants it. */}
-            {ispLocation && (
-              <div
-                className="flex items-center gap-1.5 text-primary min-w-0"
-                title={`ISP location: ${
-                  ispLocation.city !== "Unknown" ? ispLocation.city + ", " : ""
-                }${ispLocation.country}`}
-              >
-                <TbMapPinFilled className="w-4 h-4 shrink-0" />
-                <span className="truncate">
-                  {ispLocation.city !== "Unknown" ? ispLocation.city + ", " : ""}
-                  {ispLocation.country}
-                </span>
-              </div>
-            )}
-            {/* Expand only, and only in the card. The overlay draws the single
-                close control, in the same place for every widget, so this
-                header is identical in the expanded window however it was
-                opened. */}
-            {onExpand && !roomy && (
-              <button
-                onClick={onExpand}
-                // Where focus returns when the panel this opens is closed. The
-                // card is unmounted while the panel is up, so the element that
-                // opened it no longer exists by the time it closes.
-                data-widget-expand=""
-                className="p-1 -m-1 rounded shrink-0 hover:bg-accent text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-                aria-label="Expand map"
-                title="Expand map"
-              >
-                <TbMaximize className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-        </div>
-        <div className="flex-1 min-h-0 relative overflow-hidden">
-          {/* MapLibre forces position:relative on any element bearing its own
-              .maplibregl-map class (added imperatively once the map mounts),
-              which silently wins over an "absolute inset-0" utility at equal
-              specificity and collapses this div to its (near-zero) content
-              height. w-full/h-full sizing works regardless of which position
-              value ends up applied, since the parent above already has a
-              resolved height. */}
-          <div ref={containerRef} className="w-full h-full" />
-          {/* Zoom buttons, but only in the expanded view. The compact card is
-              256px tall and already carries a title bar, an ISP readout, an
-              expand button and the location counter; a stacked pair on top of
-              that is the fifth piece of chrome competing for a map barely twice
-              as tall as it is - and there is nothing to zoom into at that size,
-              since the card shows the whole world.
+  /**
+   * Picking a place, and the camera move that goes with it.
+   *
+   * Shared by the card's popover and the expanded view's side panel, because
+   * they are the same list - the only difference is that expanded there is
+   * room to leave it open.
+   */
+  const flyToPlace = (place: { latitude: number; longitude: number }) => {
+    // Zoom 5 is city scale - close enough that the place is the subject rather
+    // than a dot in a continent, far enough that its neighbours are in frame.
+    const target = {
+      center: [place.longitude, place.latitude] as [number, number],
+      zoom: Math.max(mapRef.current?.getZoom() ?? 1, 5),
+    };
+    // A camera flight across a full-viewport map is the most vestibular-hostile
+    // thing in this app, and it is JavaScript rather than CSS, so the blanket
+    // reduced-motion rule cannot reach it. Jump instead: same destination, no
+    // journey.
+    if (prefersReducedMotion()) mapRef.current?.jumpTo(target);
+    else mapRef.current?.flyTo({ ...target, speed: 1.2 });
+  };
 
-              Conditional rendering rather than hiding: a control that is
-              present but invisible still takes keyboard focus in tab order. */}
-          {/* The projection switcher is shown at BOTH sizes; the zoom buttons
-              still only in the expanded view. ZoomControls omits any button
-              whose handler is missing, so this is one positioned stack either
-              way rather than two components that have to agree on a corner.
-              The card is small, but which projection the map is in is a
-              decision worth being able to make without expanding it first -
-              which is not true of zooming, since the card shows the whole
-              world already. */}
-          <ZoomControls
-            onZoomIn={roomy ? () => mapRef.current?.zoomIn() : undefined}
-            onZoomOut={roomy ? () => mapRef.current?.zoomOut() : undefined}
-            leading={
-              <ProjectionSwitcher mode={projectionMode} onChange={setProjectionMode} />
-            }
-          />
-          <GeoLocationCounter
-            places={geoStats.places}
-            unresolved={geoStats.unresolved}
-            expandable={roomy}
-            onSelectPlace={(place) => {
-              // Zoom 5 is city scale - close enough that the place is the
-              // subject rather than a dot in a continent, far enough that its
-              // neighbours are still in frame.
-              const target = {
-                center: [place.longitude, place.latitude] as [number, number],
-                zoom: Math.max(mapRef.current?.getZoom() ?? 1, 5),
-              };
-              // A camera flight across a full-viewport map is the most
-              // vestibular-hostile thing in this app, and it is JavaScript
-              // rather than CSS, so the blanket reduced-motion rule cannot
-              // reach it. Jump instead: same destination, no journey.
-              if (prefersReducedMotion()) mapRef.current?.jumpTo(target);
-              else mapRef.current?.flyTo({ ...target, speed: 1.2 });
-            }}
-          />
+  /** Where this machine is, as one line. Null when the lookup gave nothing. */
+  const ispLabel = ispLocation
+    ? `${ispLocation.city !== 'Unknown' ? ispLocation.city + ', ' : ''}${ispLocation.country}`
+    : null;
+
+  /**
+   * The protocols actually on screen, most-carried first.
+   *
+   * There has never been a legend anywhere in this app. That was survivable
+   * while every arc was one colour and stopped being survivable the moment they
+   * were coloured by protocol: the map became the only surface that encodes a
+   * variable without saying what the encoding is.
+   *
+   * Built from the routes rather than from the protocol table, so it lists what
+   * is drawn rather than the twelve protocols that could be.
+   */
+  const legend = React.useMemo(() => {
+    if (!arcProtocolColors) return [];
+    const totals = new Map<string, number>();
+    for (const route of routes) {
+      totals.set(route.dominantProtocol, (totals.get(route.dominantProtocol) ?? 0) + route.total);
+    }
+    return Array.from(totals, ([protocol, total]) => ({ protocol, total })).sort(
+      (a, b) => b.total - a.total,
+    );
+  }, [routes, arcProtocolColors]);
+
+  const topRoutes = React.useMemo(
+    () => [...routes].sort((a, b) => b.total - a.total).slice(0, 8),
+    [routes],
+  );
+
+  const map = (
+    <div className="flex-1 min-h-0 relative overflow-hidden">
+      {/* MapLibre forces position:relative on any element bearing its own
+          .maplibregl-map class (added imperatively once the map mounts), which
+          silently wins over an "absolute inset-0" utility at equal specificity
+          and collapses this div to its (near-zero) content height. w-full/h-full
+          sizing works regardless of which position value ends up applied, since
+          the parent above already has a resolved height. */}
+      {/* The backdrop is on the container, not in the style. MapLibre's sky in
+          globe projection is only the atmosphere on the limb; everything past
+          it is transparent canvas, and in flat projection there is no sky at
+          all. See spaceColorFor. */}
+      <div ref={containerRef} className="w-full h-full" style={{ background: spaceColorFor(isDark) }} />
+
+      {/* One stack, one corner, one visual language.
+          Expanded, the map's furniture used to be scattered across three
+          corners of a 1500px panel - close top-right, locations bottom-left,
+          zoom and projection bottom-right - with a void between them. The place
+          list has moved into the side panel, which leaves this the only thing
+          floating over the map.
+
+          Zoom buttons still only when expanded: the card shows the whole world,
+          so there is nothing there to look closer at, and three stacked buttons
+          would be a third of its height. Which projection the map is in is
+          worth deciding without expanding first, so that stays at both sizes. */}
+      {/* Top-right, where MapLibre's (i) used to be - the corner people
+          already look in to find out what a map is.
+
+          Expanded only, for the same reason the zoom buttons are: the card is
+          256px tall and already carries the location counter, and a second
+          floating control on it would be furniture in most of a panel whose
+          whole content is the map. The gestures it documents are also gestures
+          worth having room to try.
+
+          The licence credit goes with it, which is the one thing worth being
+          deliberate about - see the note where the AttributionControl used to
+          be added. */}
+      {roomy && <GeoMapHelp />}
+
+      <ZoomControls
+        onZoomIn={roomy ? () => mapRef.current?.zoomIn() : undefined}
+        onZoomOut={roomy ? () => mapRef.current?.zoomOut() : undefined}
+        leading={<ProjectionSwitcher mode={projectionMode} onChange={setProjectionMode} />}
+      />
+
+      {/* On the card the counter sits on the map, because there is nowhere else
+          for it to go. Expanded it is the side panel's heading instead. */}
+      {!roomy && (
+        <GeoLocationCounter
+          places={geoStats.places}
+          unresolved={geoStats.unresolved}
+          expandable={false}
+          onSelectPlace={flyToPlace}
+        />
+      )}
+    </div>
+  );
+
+  // The card is the map and nothing else. Its title, icon and expand control
+  // belong to WidgetCard now, like every other widget - this component used to
+  // draw a header bar of its own, which alongside the shared card would have
+  // been a second heading on the same card. What that bar also carried, the ISP
+  // readout, is in the expanded view's side panel, where it has room for a
+  // label instead of being a pin and a truncated city name.
+  if (!roomy) {
+    return <div className="w-full h-full flex flex-col bg-card text-card-foreground">{map}</div>;
+  }
+
+  /**
+   * Expanded: a side panel, and the globe in what is left.
+   *
+   * The globe is bounded by the panel's HEIGHT, because it is a circle - so on a
+   * 1490x860 window it filled a 630px disc and left more than half the panel
+   * empty. Meanwhile the three things worth reading at that size had nowhere to
+   * be: the place list was folded into a pill, the routes were not listed at
+   * all, and the arc colours had no legend. They go in the space the globe was
+   * never going to use.
+   */
+  return (
+    <div className="w-full h-full flex bg-card text-card-foreground">
+      <aside
+        aria-label="Map details"
+        className="hidden md:flex w-[300px] shrink-0 flex-col border-r border-border overflow-y-auto custom-scrollbar"
+      >
+        <div className="px-4 py-3 border-b border-border">
+          <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">
+            This machine
+          </div>
+          <div className="flex items-center gap-1.5 text-primary mt-1 min-w-0">
+            <TbMapPinFilled className="w-4 h-4 shrink-0" />
+            <span className="text-xs truncate">{ispLabel ?? 'Location unknown'}</span>
+          </div>
         </div>
+
+        <section className="px-4 py-3 border-b border-border">
+          <div className="flex items-baseline justify-between gap-2">
+            <h4 className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">
+              Locations
+            </h4>
+            <span className="text-[10px] font-mono text-muted-foreground">
+              {geoStats.places.length}
+              {geoStats.unresolved > 0 ? ` (+${geoStats.unresolved} unresolved)` : ''}
+            </span>
+          </div>
+          {geoStats.places.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground/80 mt-2 leading-snug">
+              Nothing located yet.
+            </p>
+          ) : (
+            <ul className="mt-2 space-y-0.5">
+              {geoStats.places.map((place) => (
+                <li key={place.key}>
+                  <button
+                    type="button"
+                    onClick={() => flyToPlace(place)}
+                    // A country-level row is the provider's centroid for a whole
+                    // country rather than this host's position, so it is listed
+                    // and never flown to as though it were a fix.
+                    disabled={place.precision === 'country'}
+                    title={
+                      place.precision === 'country'
+                        ? `${place.label} - country-level only, not plotted`
+                        : `Centre the map on ${place.label}`
+                    }
+                    className="w-full flex items-center gap-1.5 px-1 py-1 rounded text-[11px] text-left transition-colors hover:bg-accent disabled:hover:bg-transparent disabled:cursor-default cursor-pointer"
+                  >
+                    {place.precision === 'country' ? (
+                      <TbMapPinOff className="w-3.5 h-3.5 shrink-0 text-muted-foreground/60" />
+                    ) : (
+                      <TbMapPinFilled className="w-3.5 h-3.5 shrink-0 text-primary" />
+                    )}
+                    <span className="truncate text-foreground/90">{place.label}</span>
+                    <span className="ml-auto shrink-0 font-mono text-muted-foreground">
+                      {place.hosts}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* Gated on the setting, not merely on having routes. With arc colouring
+            off every line is the accent, and a legend mapping protocols to
+            colours would be describing an encoding that is not there. */}
+        {legend.length > 0 && (
+          <section className="px-4 py-3 border-b border-border">
+            <h4 className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">
+              Protocols
+            </h4>
+            <ul className="mt-2 space-y-0.5">
+              {legend.map(({ protocol, total }) => (
+                <li key={protocol} className="flex items-center gap-1.5 px-1 py-0.5 text-[11px]">
+                  <span
+                    aria-hidden
+                    className="w-2.5 h-1 rounded-full shrink-0"
+                    style={{ background: protocolColor(protocol, themeKey) }}
+                  />
+                  <span className="truncate text-foreground/90">{protocol}</span>
+                  <span className="ml-auto shrink-0 font-mono text-muted-foreground">{total}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {topRoutes.length > 0 && (
+          <section className="px-4 py-3">
+            <h4 className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">
+              Busiest routes
+            </h4>
+            <ul className="mt-2 space-y-0.5">
+              {topRoutes.map((route) => (
+                <li key={route.key} className="flex items-center gap-1.5 px-1 py-0.5 text-[11px]">
+                  <span
+                    aria-hidden
+                    className="w-2.5 h-1 rounded-full shrink-0"
+                    style={{
+                      background: arcProtocolColors
+                        ? protocolColor(route.dominantProtocol, themeKey)
+                        : accent,
+                    }}
+                  />
+                  <span className="truncate font-mono text-foreground/90">
+                    {route.dominantProtocol}
+                  </span>
+                  <span className="ml-auto shrink-0 font-mono text-muted-foreground">
+                    {route.total}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+      </aside>
+
+      <div className="flex-1 min-w-0 flex flex-col">{map}</div>
     </div>
   );
 };

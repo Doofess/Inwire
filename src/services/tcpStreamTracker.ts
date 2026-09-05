@@ -1,26 +1,150 @@
 /**
  * Tracks TCP conversations across packets so a single-pass decode can still
  * detect cross-packet behavior: which stream a segment belongs to (for
- * "Follow Stream"), and whether a segment's sequence number has already been
- * seen on that stream (retransmission) or arrives behind the highest
- * contiguous sequence seen so far (out-of-order). This is a lightweight
- * heuristic, not full TCP reassembly - no SACK, no sequence-wraparound
- * handling, no reordering-window tolerance.
+ * "Follow Stream"), relative sequence numbers, window scaling, the TLS record
+ * cursor, and Wireshark's sequence analysis (retransmission, out-of-order,
+ * duplicate ACK, window and keep-alive flags - see dissect/tcpAnalysis.ts).
  *
  * One instance represents one capture session; call reset() when the packet
  * buffer is cleared or a new file is imported so streams don't bleed across
  * unrelated captures.
  */
+/**
+ * Where one direction of a connection is inside the TLS record layer.
+ *
+ * A TLS record is a 5-byte header and a body of up to 16 KB, and a TCP
+ * segment is ~1,400 bytes, so most records span several segments. Wireshark
+ * labels the frame in which a record COMPLETES with the record's contents and
+ * every earlier segment of it as plain TCP "[TCP PDU reassembled in N]"; doing
+ * the same needs exactly this much memory per direction: how many bytes the
+ * record in progress still owes, and which frames have carried it so far.
+ * Handshake records are additionally buffered so a ClientHello that straddles
+ * segments can still be parsed for its SNI and fingerprint.
+ */
+import { analyzeTcpSegment, freshConnection, type TcpAnalysis, type TcpConnectionState, type TcpSegment } from './dissect/tcpAnalysis';
+
+import type { TlsDecryptionKeys } from './tls/decrypt';
+import type { AppDirection } from './dissectors/appStream';
+
+export interface TlsRecordCursor {
+  /** Bytes still owed to the record in progress; 0 means at a record boundary. */
+  remaining: number;
+  /** A record header that straddled a segment boundary, so far. */
+  headerPartial: number[];
+  contentType: number;
+  version: number;
+  recordLength: number;
+  /**
+   * Absolute TCP sequence number of the byte after the record in progress.
+   * Reassembly follows sequence numbers, not a running byte count, so a lost
+   * segment inside a record does not lose the record: Wireshark keeps the
+   * PDU open across the gap and completes it when the end sequence arrives.
+   */
+  recordEndSeq: number;
+  /** Frames that carried the record in progress and completed nothing of their own. */
+  contributors: number[];
+  /** Byte counts per frame, for the "[Reassembled TCP segments]" note. */
+  contributions: { frame: number; bytes: number }[];
+  /** Handshake body collected so far, or null when the record is not buffered. */
+  buffer: Uint8Array[] | null;
+  bufferedBytes: number;
+  /** True until this direction has shown a valid record header (mid-stream start). */
+  unknown: boolean;
+  /** TLS 1.2: set by Change Cipher Spec; every later handshake record in this direction is ciphertext. */
+  encrypted: boolean;
+  /**
+   * Which end of the conversation this direction is, learned from whichever
+   * hello it sent. Decryption needs it: the two directions have different keys
+   * and a key log names them by role, not by address.
+   */
+  role: 'client' | 'server' | 'unknown';
+  /**
+   * True on the throwaway copy an out-of-order segment is read against. A
+   * retransmission must not be decrypted: doing so would advance the AEAD
+   * sequence number and feed the same bytes to the HTTP decoders a second
+   * time, and both of those are state the real stream shares.
+   */
+  readOnly: boolean;
+  /**
+   * Index into this direction's list of epochs (TLS 1.3 handshake, then
+   * application). A direction only ever moves forwards through it.
+   */
+  epoch: number;
+  /**
+   * The AEAD sequence number of the next record. It counts records, not bytes,
+   * and restarts at zero on each epoch - which is why it lives here rather
+   * than being derived from anything on the wire, where it does not appear.
+   */
+  recordSeq: number;
+}
+
+/** What both ends of a TLS conversation have agreed on so far. */
+export interface TlsConversationState {
+  /** From the ClientHello. The key log's join key, and 32 bytes sent in the clear. */
+  clientRandom?: Uint8Array;
+  /** From the ServerHello, for the TLS 1.2 key block. */
+  serverRandom?: Uint8Array;
+  /** The negotiated cipher suite, which decides the AEAD, the key sizes and the hash. */
+  cipherSuite?: number;
+  /**
+   * Keys derived from the key log: undefined before the attempt, null when it
+   * failed. `keyGeneration` records which version of the key log that verdict
+   * came from, so loading a log part-way through a live capture retries the
+   * connections that were opaque rather than staying opaque for ever.
+   */
+  keys?: TlsDecryptionKeys | null;
+  keyGeneration?: number;
+  /** Why decryption is not happening, when there is a reason worth showing. */
+  keyNote?: string;
+  /** The protocol ALPN settled on, which decides what the plaintext is read as. */
+  alpn?: string;
+  /** Application-layer state per direction, once there is plaintext to read. */
+  appClient?: AppDirection;
+  appServer?: AppDirection;
+  /** From the ServerHello: supported_versions in 1.3, else server_version. */
+  negotiatedVersion?: number;
+  /** The ClientHello's legacy version - what its row is labelled before the server answers. */
+  clientHelloVersion?: number;
+  clientHelloSeen: boolean;
+  serverHelloSeen: boolean;
+  /** Set once the server's ServerHello has been seen in TLS 1.3: every later handshake record is encrypted. */
+  encryptedHandshake: boolean;
+  /** The ClientHello's server name, for the certificate name check. Unset for an ECH outer name. */
+  sni?: string;
+  /** The last record-layer version that was a real one, for labelling a record whose header carries junk. */
+  lastRecordVersion?: number;
+  /**
+   * Frames labelled before the version was negotiated (the ClientHello and
+   * anything else sent ahead of the ServerHello). Wireshark's two-pass view
+   * labels those with the version the conversation ends up with, so when the
+   * ServerHello arrives these get re-labelled.
+   */
+  pendingVersionFrames: number[];
+}
+
+export function freshTlsCursor(): TlsRecordCursor {
+  return {
+    remaining: 0, headerPartial: [], contentType: 0, version: 0, recordLength: 0,
+    contributors: [], contributions: [], buffer: null, bufferedBytes: 0, unknown: true, encrypted: false,
+    recordEndSeq: 0, role: 'unknown', readOnly: false, epoch: 0, recordSeq: 0,
+  };
+}
+
+export function freshTlsConversation(): TlsConversationState {
+  return { clientHelloSeen: false, serverHelloSeen: false, encryptedHandshake: false, pendingVersionFrames: [] };
+}
+
 export class TcpStreamTracker {
   private streamIds = new Map<string, number>();
+  private tlsCursors = new Map<string, TlsRecordCursor>();
+  private tlsConversations = new Map<string, TlsConversationState>();
   private nextStreamId = 0;
-  private highWaterSeq = new Map<string, number>();
   private baseSeq = new Map<string, number>();
   private packetCountByStream = new Map<number, number>();
   private connState = new Map<number, { sawSyn: boolean; sawSynAck: boolean; sawFinOrRst: boolean }>();
-  private lastWasKeepAlive = new Map<string, boolean>();
   private windowScaleShift = new Map<string, number>();
-  private highestAckSent = new Map<string, number>();
+  /** Sequence-analysis state per connection (docs: dissect/tcpAnalysis.ts). */
+  private analysis = new Map<string, TcpConnectionState>();
 
   private connectionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
     const a = `${srcIp}:${srcPort}`;
@@ -38,6 +162,20 @@ export class TcpStreamTracker {
   }
 
   /**
+   * Numbers the next stream this tracker meets.
+   *
+   * A stream index is assigned in order of first appearance across the whole
+   * capture, so a tracker that has only ever seen one conversation calls it 0
+   * - which is wrong for a replay, where the point is to reproduce the tree of
+   * a frame whose stream the real capture numbered something else
+   * (services/pipeline/replay.ts). The frame already knows its own index; this
+   * is how it tells a fresh tracker.
+   */
+  public seedNextStreamId(id: number): void {
+    this.nextStreamId = id;
+  }
+
+  /**
    * Returns a stable, zero-based ID shared by both directions of a TCP
    * conversation, assigning a new one the first time a connection is seen.
    */
@@ -52,34 +190,20 @@ export class TcpStreamTracker {
   }
 
   /**
-   * Classifies a TCP segment against the highest sequence number already
-   * seen going in that same direction on this connection. Pure ACKs (no
-   * payload) never trip retransmit/out-of-order, since they legitimately
-   * reuse the current sequence number.
+   * Runs Wireshark's sequence analysis for one segment and returns its flags.
+   * The two directions of a connection share one state record; which half
+   * this segment travels in is decided by the same ordering the connection
+   * key uses, so both ends see the same `a`/`b`.
    */
-  public checkSequence(
-    srcIp: string,
-    srcPort: number,
-    dstIp: string,
-    dstPort: number,
-    seqNum: number,
-    payloadLength: number
-  ): 'ok' | 'retransmit' | 'out-of-order' {
-    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
-    const seenThrough = this.highWaterSeq.get(directionKey);
-
-    if (seenThrough === undefined) {
-      this.highWaterSeq.set(directionKey, seqNum + payloadLength);
-      return 'ok';
+  public analyze(srcIp: string, srcPort: number, dstIp: string, dstPort: number, segment: TcpSegment): TcpAnalysis {
+    const key = this.connectionKey(srcIp, srcPort, dstIp, dstPort);
+    let conn = this.analysis.get(key);
+    if (conn === undefined) {
+      conn = freshConnection();
+      this.analysis.set(key, conn);
     }
-
-    if (payloadLength > 0 && seqNum < seenThrough) {
-      const result = seqNum + payloadLength <= seenThrough ? 'retransmit' : 'out-of-order';
-      return result;
-    }
-
-    this.highWaterSeq.set(directionKey, Math.max(seenThrough, seqNum + payloadLength));
-    return 'ok';
+    const direction = `${srcIp}:${srcPort}` <= `${dstIp}:${dstPort}` ? 'a' : 'b';
+    return analyzeTcpSegment(conn, direction, segment);
   }
 
   /**
@@ -134,59 +258,50 @@ export class TcpStreamTracker {
   }
 
   /**
-   * True when this segment's sequence number is ahead of where the sender left
-   * off, meaning the capture missed whatever filled the gap - the reference analyzer's
-   * "[TCP Previous segment not captured]". Skipped for the first segment of a
-   * direction, which has no predecessor to be missing.
+   * Whether a segment is at or beyond where this direction left off BEFORE
+   * this segment was analysed - the cases in which the TLS record cursor may
+   * be consulted. A segment behind that point (a retransmission, or data
+   * arriving out of order) must not consume record bytes a second time; one
+   * beyond it (after a gap) is read against the record's end sequence
+   * number, which a gap does not move. Call before analyze().
    */
-  public isPreviousSegmentMissing(
-    srcIp: string, srcPort: number, dstIp: string, dstPort: number, seqNum: number
-  ): boolean {
-    const expectedNext = this.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
-    if (expectedNext === undefined) return false;
-    // 32-bit signed comparison, so a sequence space that has wrapped past
-    // 2**32 doesn't read as an enormous backwards jump.
-    return ((seqNum - expectedNext) | 0) > 0;
+  public isAtOrPastExpected(srcIp: string, srcPort: number, dstIp: string, dstPort: number, seqNum: number): boolean {
+    const conn = this.analysis.get(this.connectionKey(srcIp, srcPort, dstIp, dstPort));
+    if (conn === undefined) return true;
+    const fwd = `${srcIp}:${srcPort}` <= `${dstIp}:${dstPort}` ? conn.a : conn.b;
+    return fwd.nextSeq === 0 || ((seqNum - fwd.nextSeq) | 0) >= 0;
   }
 
-  /**
-   * True when this packet acknowledges data the capture never contained -
-   * The reference analyzer's "[TCP ACKed unseen segment]". Compares against how far the
-   * *peer* direction has actually been seen to send.
-   *
-   * Only an ack that *advances* past the highest one already flagged counts.
-   * A gap is reported once, when it is first revealed; a burst of ACKs that
-   * all name the same missing byte describes one gap, not several, and
-   * The reference analyzer flags only the first. Without this, a retransmitted or
-   * duplicate ACK re-flags a gap that was already accounted for.
-   */
-  public isAckingUnseenSegment(
-    srcIp: string, srcPort: number, dstIp: string, dstPort: number, ackNum: number
-  ): boolean {
-    const peerExpectedNext = this.getExpectedNext(dstIp, dstPort, srcIp, srcPort);
-    if (peerExpectedNext === undefined) return false;
-
-    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
-    const highestAcked = this.highestAckSent.get(directionKey);
-    const threshold =
-      highestAcked !== undefined && ((highestAcked - peerExpectedNext) | 0) > 0
-        ? highestAcked
-        : peerExpectedNext;
-
-    if (highestAcked === undefined || ((ackNum - highestAcked) | 0) > 0) {
-      this.highestAckSent.set(directionKey, ackNum);
+  /** This direction's TLS record cursor, created on first use. */
+  public tlsCursor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): TlsRecordCursor {
+    const key = this.directionKey(srcIp, srcPort, dstIp, dstPort);
+    let cursor = this.tlsCursors.get(key);
+    if (cursor === undefined) {
+      cursor = freshTlsCursor();
+      this.tlsCursors.set(key, cursor);
     }
-    return ((ackNum - threshold) | 0) > 0;
+    return cursor;
   }
 
-  /**
-   * Returns the raw sequence number expected in the next segment from this
-   * direction (i.e. the current high-water mark), or undefined if no segment
-   * from this direction has been through checkSequence() yet.
-   */
-  public getExpectedNext(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number | undefined {
-    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
-    return this.highWaterSeq.get(directionKey);
+  /** The cursor if this direction has one, without creating it. */
+  public peekTlsCursor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): TlsRecordCursor | undefined {
+    return this.tlsCursors.get(this.directionKey(srcIp, srcPort, dstIp, dstPort));
+  }
+
+  /** Forgets where this direction was in the record layer - after a gap, nothing about it is known. */
+  public resetTlsCursor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): void {
+    this.tlsCursors.set(this.directionKey(srcIp, srcPort, dstIp, dstPort), freshTlsCursor());
+  }
+
+  /** The TLS facts both directions share, created on first use. */
+  public tlsConversation(srcIp: string, srcPort: number, dstIp: string, dstPort: number): TlsConversationState {
+    const key = this.connectionKey(srcIp, srcPort, dstIp, dstPort);
+    let state = this.tlsConversations.get(key);
+    if (state === undefined) {
+      state = freshTlsConversation();
+      this.tlsConversations.set(key, state);
+    }
+    return state;
   }
 
   /** Returns this packet's 1-based position within its stream, recording it. */
@@ -218,57 +333,15 @@ export class TcpStreamTracker {
     return 'Incomplete';
   }
 
-  /**
-   * A classic TCP Keep-Alive resends 0-1 bytes at (expected next seq - 1),
-   * purely to provoke an ACK - without this check, checkSequence() would
-   * misread it as a retransmission, since its sequence number is
-   * deliberately behind the high-water mark.
-   */
-  public checkKeepAlive(
-    srcIp: string, srcPort: number, dstIp: string, dstPort: number,
-    seqNum: number, payloadLength: number, syn: boolean, fin: boolean, rst: boolean
-  ): boolean {
-    // The flag must be *cleared* as well as set: if a keep-alive goes
-    // unanswered and the sender then transmits real data, the peer's ordinary
-    // ACK of that data would otherwise still be labeled a Keep-Alive ACK.
-    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
-    if (syn || fin || rst || payloadLength > 1) {
-      this.lastWasKeepAlive.set(directionKey, false);
-      return false;
-    }
-    const expectedNext = this.getExpectedNext(srcIp, srcPort, dstIp, dstPort);
-    if (expectedNext === undefined) {
-      this.lastWasKeepAlive.set(directionKey, false);
-      return false;
-    }
-    const isKeepAlive = seqNum === ((expectedNext - 1 + 2 ** 32) % 2 ** 32);
-    this.lastWasKeepAlive.set(directionKey, isKeepAlive);
-    return isKeepAlive;
-  }
-
-  /**
-   * Checks (and clears) whether the peer direction just sent a keep-alive
-   * that this ACK is replying to - one-shot, so the same ACK isn't
-   * re-labeled on a later unrelated lookup.
-   */
-  public consumeKeepAliveAck(srcIp: string, srcPort: number, dstIp: string, dstPort: number): boolean {
-    // Swapped arguments address the peer's direction; connectionKey is
-    // symmetric, so the resulting key is identical either way round.
-    const peerDirectionKey = this.directionKey(dstIp, dstPort, srcIp, srcPort);
-    const wasKeepAlive = this.lastWasKeepAlive.get(peerDirectionKey) === true;
-    if (wasKeepAlive) this.lastWasKeepAlive.set(peerDirectionKey, false);
-    return wasKeepAlive;
-  }
-
   public reset(): void {
     this.streamIds.clear();
-    this.highWaterSeq.clear();
     this.baseSeq.clear();
     this.packetCountByStream.clear();
     this.connState.clear();
-    this.lastWasKeepAlive.clear();
     this.windowScaleShift.clear();
-    this.highestAckSent.clear();
+    this.analysis.clear();
+    this.tlsCursors.clear();
+    this.tlsConversations.clear();
     this.nextStreamId = 0;
   }
 }

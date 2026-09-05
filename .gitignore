@@ -9,7 +9,7 @@ coverage/
 
 # Compiled local-agent build artifacts (~19-21MB Windows binaries). Regenerate
 # rather than tracking them:
-#   pyinstaller local-agent/netview_agent.spec   -> local-agent/dist/ (ignored by dist/ above)
+#   pyinstaller local-agent/inwire_agent.spec   -> local-agent/dist/ (ignored by dist/ above)
 #   iscc local-agent/installer/setup.iss         -> local-agent/installer/output/
 #   copy the installer into public/downloads/    -> served by the web app
 local-agent/installer/output/
@@ -28,3 +28,10 @@ __pycache__/
 # of how a change was arrived at, but they are scratch, not project docs, and
 # they go stale the moment the code moves past them.
 docs/superpowers/
+scripts/brand/.raster.html
+
+# Parity fixtures: real captures with personal names and addresses inside (docs/decisions/0004).
+# The README and acceptance.json in that directory are the only tracked files.
+test/fixtures/*
+!test/fixtures/README.md
+!test/fixtures/acceptance.json

@@ -1,11 +1,27 @@
 @import "tailwindcss";
 
-/* Self-hosted rather than pulled from fonts.googleapis.com: NetView is often
+/* Self-hosted rather than pulled from fonts.googleapis.com: Inwire is often
    pointed at an isolated or offline network, and an analyzer that blocks on a
    third-party font request would both render unstyled and show up in its own
    capture. The -Variable packages ship one file covering every weight. */
-@import "@fontsource-variable/nunito";
+@import "@fontsource-variable/geist";
 @import "@fontsource-variable/jetbrains-mono";
+
+/* The two alternatives the Accessibility tab offers for the chrome. Imported
+   unconditionally rather than fetched when chosen: they are unicode-range
+   subset, so the browser downloads a face only once something is actually set
+   in it, and a lazy import would mean the person who most needs Hyperlegible
+   waits for a network round trip on a machine that may have no network. See
+   src/lib/fontOptions.ts, which the assertion script checks against this list. */
+@import "@fontsource/atkinson-hyperlegible";
+@import "@fontsource-variable/nunito";
+
+/* The italic face, for the header wordmark and nothing else so far.
+   Its own import because each package's default entry is the roman face only,
+   and without a real italic the browser synthesises one by shearing the roman,
+   which at black weight visibly distorts the letterforms. The unicode-range
+   subsetting means only the latin slice is actually fetched. */
+@import "@fontsource-variable/jetbrains-mono/wght-italic.css";
 
 /* Tailwind v4 has no JS config file, so class-based dark mode (toggled by
    next-themes adding/removing .dark on <html>) is opted into here instead
@@ -50,6 +66,21 @@
      is one constant rather than a per-theme judgement. */
   --chrome: #0b6bcb;
   --chrome-foreground: #ffffff;
+  /* The brand lockup, which is a THIRD chrome colour rather than the
+     foreground. On the light themes it is the foreground; on the dark ones it
+     drops to the surface tone below, so the lockup reads as pressed into the
+     bar instead of sitting on it. It is a token and not a `dark:` utility
+     because the Colourful setting has to be able to move it - see the
+     [data-chrome="plain"] block at the end of this file. */
+  /* The capture buttons' fill: the bar's own colour, deepened.
+     The two dark themes already sank their buttons into the bar with
+     `--secondary`; this is the same idea for the light ones, where a white slab
+     on a saturated bar was the loudest thing in the window. Written as a
+     literal rather than derived, because "deepened" has to clear AA against
+     `--chrome-foreground` and a blanket multiplier does not guarantee that -
+     scripts/themes/registry.ts checks the pair each theme actually uses. */
+  --chrome-sunken: #084f96;
+  --chrome-brand: var(--chrome-foreground);
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
      Run `npx tsx scripts/themes/status-css.ts` to regenerate;
@@ -101,6 +132,9 @@
   --ring: #fb923c;
   --chrome: #9a4008;
   --chrome-foreground: #ffffff;
+  --chrome-brand: var(--secondary);
+  /* Already sunken on the dark themes - see the note in :root. */
+  --chrome-sunken: var(--secondary);
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
      Run `npx tsx scripts/themes/status-css.ts` to regenerate;
@@ -147,6 +181,8 @@
   --color-ring: var(--ring);
   --color-chrome: var(--chrome);
   --color-chrome-foreground: var(--chrome-foreground);
+  --color-chrome-brand: var(--chrome-brand);
+  --color-chrome-sunken: var(--chrome-sunken);
   --color-success: var(--success);
   --color-success-foreground: var(--success-foreground);
   --color-success-muted: var(--success-muted);
@@ -163,12 +199,22 @@
      `font-sans` in the app - and the body default - from one place, rather
      than editing the 109 utilities spread across 20 components.
 
-     Nunito for chrome: its terminals and bowls are genuinely rounded, and
-     unlike the geometric rounded faces it keeps a tall x-height, which this
-     UI needs at 10-11px. JetBrains Mono for data: the packet list, hex dump
-     and protocol tree are column-aligned and MUST stay monospaced, so this
-     is the roundest face that still holds a fixed advance width. */
-  --font-sans: "Nunito Variable", "Nunito", ui-sans-serif, system-ui,
+     Geist for chrome: flat terminals, tight apertures and a tall x-height, so
+     it stays legible at the 10px section headings and status lines this UI is
+     full of. It also answers the mark, which is two folded chevrons - a soft
+     humanist face under an angular mark reads as two products.
+
+     JetBrains Mono for data: the packet list, hex dump and protocol tree are
+     column-aligned and MUST stay monospaced. That is also what keeps the
+     header wordmark out of the typeface setting - the lockup is `font-mono`,
+     so it follows this token rather than the settable one.
+
+     `--font-sans` is a DEFAULT, not the last word. The Accessibility tab
+     overrides it on <html> - see src/lib/font.ts - which works because this is
+     a plain `@theme` block rather than `@theme inline`, so Tailwind emits a
+     real custom property an inline style can beat. Same mechanism as the
+     theme classes, for the same reason. */
+  --font-sans: "Geist Variable", "Geist", ui-sans-serif, system-ui,
     -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace,
     "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -282,23 +328,50 @@
   }
 }
 
+/* Grow from the edge nearest the trigger rather than from the centre.
+   Each Radix component publishes its origin under its OWN variable name, so
+   these cannot share one rule - which they used to, all four reading
+   `--radix-dropdown-menu-content-transform-origin`. A popover never defines
+   that, so it silently fell through to `center` and grew from its own middle,
+   which is the one thing this rule exists to prevent. */
 [data-slot='dropdown-menu-content'],
-[data-slot='dropdown-menu-sub-content'],
-[data-slot='select-content'],
-[data-slot='popover-content'] {
-  /* Grow from the edge nearest the trigger rather than from the centre. */
+[data-slot='dropdown-menu-sub-content'] {
   transform-origin: var(--radix-dropdown-menu-content-transform-origin, center);
+}
+
+[data-slot='popover-content'] {
+  transform-origin: var(--radix-popover-content-transform-origin, center);
+}
+[data-slot='context-menu-content'] {
+  transform-origin: var(--radix-context-menu-content-transform-origin, center);
+}
+
+[data-slot='select-content'] {
+  transform-origin: var(--radix-select-content-transform-origin, center);
+}
+
+/* A panel anchored to the side of its trigger - the dashboard's popout bubbles
+   - travels horizontally or not at all, so the vertical offset the menus use
+   would drag it off the icon it is growing out of. Scaling from the anchored
+   origin above is the whole motion here. */
+[data-slot='popover-content'][data-side='left'],
+[data-slot='popover-content'][data-side='right'] {
+  --nv-menu-offset: 0px;
 }
 
 /* The menu slides *away* from its trigger, so a menu opening upward has to
    travel the opposite way from one opening downward. */
 [data-slot='dropdown-menu-content'][data-side='top'],
-[data-slot='dropdown-menu-sub-content'][data-side='top'] {
+[data-slot='dropdown-menu-sub-content'][data-side='top'],
+[data-slot='context-menu-content'][data-side='top'] {
   --nv-menu-offset: 6px;
 }
 
 [data-slot='dropdown-menu-content'][data-state='open'],
-[data-slot='dropdown-menu-sub-content'][data-state='open'] {
+[data-slot='dropdown-menu-sub-content'][data-state='open'],
+[data-slot='context-menu-content'][data-state='open'],
+[data-slot='popover-content'][data-state='open'],
+[data-slot='select-content'][data-state='open'] {
   /* Decelerating curve: quick to appear, settling at the end. */
   animation: nv-menu-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -307,12 +380,16 @@
    rather than the menu blinking out. Shorter than the open on purpose - a
    dismissal that takes as long as the reveal feels sluggish. */
 [data-slot='dropdown-menu-content'][data-state='closed'],
-[data-slot='dropdown-menu-sub-content'][data-state='closed'] {
+[data-slot='dropdown-menu-sub-content'][data-state='closed'],
+[data-slot='context-menu-content'][data-state='closed'],
+[data-slot='popover-content'][data-state='closed'],
+[data-slot='select-content'][data-state='closed'] {
   animation: nv-menu-out 110ms ease-in;
 }
 
 [data-slot='dropdown-menu-item'],
 [data-slot='dropdown-menu-radio-item'],
+[data-slot='context-menu-radio-item'],
 [data-slot='dropdown-menu-checkbox-item'],
 [data-slot='dropdown-menu-sub-trigger'] {
   transition:
@@ -418,7 +495,7 @@
 
 /* MapLibre GL popup/control theming - keep the library's chrome in sync with
    our light/dark tokens instead of its hardcoded white default. */
-.netview-geo-popup .maplibregl-popup-content {
+.inwire-geo-popup .maplibregl-popup-content {
   background: var(--popover);
   color: var(--popover-foreground);
   border: 1px solid var(--border);
@@ -427,7 +504,7 @@
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
 }
 
-.netview-geo-popup .maplibregl-popup-tip {
+.inwire-geo-popup .maplibregl-popup-tip {
   border-top-color: var(--popover) !important;
   border-bottom-color: var(--popover) !important;
 }
@@ -464,6 +541,9 @@
   --ring: #a35a16;
   --chrome: #a35a16;
   --chrome-foreground: #ffffff;
+  /* The bar deepened. See the note in :root. */
+  --chrome-sunken: #794310;
+  --chrome-brand: var(--chrome-foreground);
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
      Run `npx tsx scripts/themes/status-css.ts` to regenerate;
@@ -513,6 +593,9 @@
   --ring: #7dd3fc;
   --chrome: #0e5f85;
   --chrome-foreground: #ffffff;
+  --chrome-brand: var(--secondary);
+  /* Already sunken on the dark themes - see the note in :root. */
+  --chrome-sunken: var(--secondary);
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
      Run `npx tsx scripts/themes/status-css.ts` to regenerate;
@@ -530,13 +613,41 @@
   --danger-strong-foreground: #ffffff;
 }
 
+/* Colourful off: the header bar and the drawer stop being accent-coloured.
+ *
+ * One rule for all four themes, and no second set of hand-picked colours,
+ * because `--card` and `--card-foreground` are already a designed, contrast-
+ * checked pair in every theme - they are what the panels beside the bar are
+ * painted in. Reusing them is what makes "plain" mean the same thing on Day as
+ * on Midnight without anyone tuning it four times.
+ *
+ * Every consumer goes through `bg-chrome` / `text-chrome-foreground`, so
+ * redefining the tokens repaints the bar, the drawer, the menu rows, the search
+ * field, the filter tabs and the capture readout at once. Nothing that reads
+ * them needs to know the setting exists.
+ *
+ * `--chrome-brand` follows the foreground here rather than staying on the
+ * surface tone. That IS the bug this token was extracted for: the lockup's dark
+ * theme colour is `--secondary`, which sits deliberately close to the accent
+ * bar - and against a plain `--card` bar it would be near-invisible.
+ *
+ * Specificity is the mechanism: `:root[data-chrome="plain"]` is (0,2,0) and the
+ * theme blocks are a single class at (0,1,0), so this wins over all four
+ * without !important. The attribute is written to <html> by lib/chrome.ts. */
+:root[data-chrome="plain"] {
+  --chrome: var(--card);
+  --chrome-foreground: var(--card-foreground);
+  --chrome-brand: var(--chrome-foreground);
+  --chrome-sunken: var(--secondary);
+}
+
 
 /* maplibre-gl ships its own stylesheet, and it sets a hard
    `"Helvetica Neue", Arial, Helvetica` on the map container. That is the one
    place in the app the --font-sans token cannot reach on its own: the rule
    lives in a third-party stylesheet and applies to a class, so everything
    inside the map - popups, the cooperative-gesture overlay, control tooltips -
-   inherited Helvetica while the rest of the app moved to Nunito.
+   inherited Helvetica while the rest of the app moved to its own sans.
    Setting it once at the container is enough; every descendant inherits.
 
    Note this does NOT cover the place names drawn on the map itself. Those are
@@ -550,3 +661,4 @@
   background: rgba(0, 0, 0, 0.3);
   color: #fff;
 }
+

@@ -1,15 +1,32 @@
-import { Packet, ProtocolLayer, ProtocolField, AnomalyInfo } from '../types/packet';
+import { Packet, ProtocolLayer, ProtocolField, AnomalyInfo, ExpertSeverity, ExpertInfo } from '../types/packet';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacVendor, resolveMacName } from './macVendors';
 import { formatMac, formatIpv4Address, formatIpv6Address } from './addressFormat';
 import { dissectArp, dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
-import { dissectTls } from './dissectors/tls';
-import { dissectDns, buildDnsLayer } from './dissectors/dns';
+import { describeEtherType, dissectLinkLayer, macAddressFields } from './dissectors/linkLayer';
+import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './dissectors/ipv4';
+import { dissectNtp, dissectStun, dissectUdpByContent } from './dissectors/udpApps';
+import { L3Tracker } from './l3Tracker';
+import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './dissectors/tls';
+import { dissectAppStream, freshAppDirection, type AppStreamResult } from './dissectors/appStream';
+import { keyLog } from './tls/keyLog';
+import { buildHttp3Layer } from './dissectors/http3';
+import { DSB_SECRETS_TYPE_TLS_KEY_LOG } from './pcapngWriter';
+import { freshTlsConversation, freshTlsCursor } from './tcpStreamTracker';
+import type { TcpAnalysis } from './dissect/tcpAnalysis';
+import { LINKTYPE } from './dissect/types';
+import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dissectors/dns';
+import { DnsTracker } from './dnsTracker';
 import { dissectQuicDatagram } from './dissectors/quic';
+import { buildQuicTlsLayer } from './dissectors/tls';
 import { dissectIeee1905 } from './dissectors/ieee1905';
 import { dissectIgmp } from './dissectors/igmp';
 import { dissectLldp } from './dissectors/lldp';
+import { dissectDhcp, dissectDhcpv6 } from './dissectors/dhcp';
+import { walkIpv6Extensions, IPV6_EXT_HEADERS, NO_NEXT_HEADER } from './dissectors/ipv6Ext';
 import { QuicFlowTracker } from './quicFlowTracker';
+import { displayProtocol, toBase64 } from './exportSchema';
+import { buildCsvText } from './tabularWriters';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 
 /**
@@ -48,6 +65,12 @@ interface ExtractedFrame {
   origLen: number;
   /** Decimal places the capture's timestamps are meaningful to (6 = us, 9 = ns). */
   tsPrecision: number;
+  /**
+   * The file's declared link type (`LINKTYPE`), which decides what sits in
+   * front of the network header. Read and then ignored until Phase 6, so every
+   * capture was decoded as if it were Ethernet.
+   */
+  linktype: number;
 }
 
 /**
@@ -99,10 +122,14 @@ export class PcapService {
     view.setUint32(offset, 1, true); // LinkType: Ethernet (1)
     offset += 4;
 
-    // 2. Write Packet Records
-    for (const packet of packets) {
-      const tsSec = Math.floor(packet.timestamp / 1000);
-      const tsUsec = (packet.timestamp % 1000) * 1000;
+    // 2. Write Packet Records, in capture order. The buffer can hold frames
+    //    from several adapters that arrived out of order (the ordering window
+    //    only covers thread skew); a file is forever, so it is sorted here.
+    //    Stable, so equal stamps keep frame-number order.
+    const ordered = [...packets].sort((a, b) => a.tsUs - b.tsUs);
+    for (const packet of ordered) {
+      const tsSec = Math.floor(packet.tsUs / 1_000_000);
+      const tsUsec = packet.tsUs - tsSec * 1_000_000;
       const capLen = packet.rawBytes.length;
       const origLen = packet.length;
 
@@ -126,9 +153,50 @@ export class PcapService {
   }
 
   /**
-   * Parse a binary .pcap or .pcapng file uploaded by user
+   * Parses a capture file into packets, up to `maxFrames` of them.
+   *
+   * `totalFrames` is how many the file holds, counted by walking every record
+   * header even past the cap - the caller can then say "12,858 frames, first
+   * 10,000 loaded" instead of quietly showing fewer packets than the file has.
+   * The cap is the caller's buffer size, not a constant here: this used to be
+   * a hardcoded 10,000 in both extractors, which meant a capture exported from
+   * a full 50,000-frame buffer could never be imported whole again.
    */
+  /**
+   * `keepTrees` decides whether the returned frames carry their protocol tree.
+   *
+   * The app imports without it: a tree is 10.6 kB against the frame's own
+   * 1.2 kB, so keeping one per frame is what stood between the buffer and a
+   * capture of any size (docs/decisions/0007). The detail pane rebuilds the
+   * tree it needs by replaying that frame's conversation. Scripts that want
+   * the tree - a dissector's own assertions - ask for it.
+   */
+  public static async parseCaptureFile(
+    file: File,
+    maxFrames: number = Number.POSITIVE_INFINITY,
+    keepTrees = false,
+  ): Promise<{ packets: Packet[]; totalFrames: number }> {
+    const extracted = await PcapService.extractFrames(file, maxFrames);
+    return {
+      packets: PcapService.buildPacketsFromFrames(extracted.frames, keepTrees),
+      totalFrames: extracted.totalFrames,
+    };
+  }
+
+  /** Every frame in the file, as a plain array. */
   public static async parsePcapFile(file: File): Promise<Packet[]> {
+    return (await PcapService.parseCaptureFile(file)).packets;
+  }
+
+  /** Every frame, with its protocol tree - for scripts that assert on trees. */
+  public static async parsePcapFileWithTrees(file: File): Promise<Packet[]> {
+    return (await PcapService.parseCaptureFile(file, Number.POSITIVE_INFINITY, true)).packets;
+  }
+
+  private static async extractFrames(
+    file: File,
+    maxFrames: number,
+  ): Promise<{ frames: ExtractedFrame[]; totalFrames: number }> {
     const arrayBuffer = await file.arrayBuffer();
 
     if (arrayBuffer.byteLength < 8) {
@@ -141,7 +209,7 @@ export class PcapService {
     // so it reads identically regardless of the file's actual byte order -
     // no endianness detection needed before recognizing it.
     if (magic === 0x0a0d0d0a) {
-      return PcapService.buildPacketsFromFrames(PcapService.extractPcapNgFrames(arrayBuffer));
+      return PcapService.extractPcapNgFrames(arrayBuffer, maxFrames);
     }
 
     if (arrayBuffer.byteLength < 24) {
@@ -159,21 +227,24 @@ export class PcapService {
       isLittleEndian = magic === 0x4d3cb2a1;
       subSecondIsNanos = true;
     } else {
-      // Might be a JSON export
-      try {
-        const text = new TextDecoder().decode(arrayBuffer);
-        const json = JSON.parse(text);
-        if (Array.isArray(json)) {
-          return json;
-        }
-      } catch {
-        // Continue to attempt fallback libpcap parse
-      }
+      // Not a magic number this parser knows.
+      //
+      // This branch used to try `JSON.parse` and, if the result was an array,
+      // return it verbatim AS `Packet[]` - no validation of any kind. Any JSON
+      // array at all therefore became "packets": objects with no `rawBytes`,
+      // which throw the moment the hex pane renders one. JSON now goes through
+      // `tabularImport.ts` with every other format, where it is checked.
+      //
+      // Falling through to a classic-pcap parse is kept: a headerless or
+      // slightly-off capture is still worth attempting, and it costs a bad
+      // frame count rather than a crash.
     }
 
-    return PcapService.buildPacketsFromFrames(
-      PcapService.extractClassicPcapFrames(arrayBuffer, isLittleEndian, subSecondIsNanos)
-    );
+    // The global header's last field is the link type every frame in the file
+    // shares. It has always been parsed by the comment at the top of this file
+    // and by nothing else.
+    const linktype = new DataView(arrayBuffer).getUint32(20, isLittleEndian);
+    return PcapService.extractClassicPcapFrames(arrayBuffer, isLittleEndian, subSecondIsNanos, maxFrames, linktype);
   }
 
   /**
@@ -187,10 +258,13 @@ export class PcapService {
   private static extractClassicPcapFrames(
     buffer: ArrayBuffer,
     isLittleEndian: boolean,
-    subSecondIsNanos: boolean
-  ): ExtractedFrame[] {
+    subSecondIsNanos: boolean,
+    maxFrames: number,
+    linktype: number,
+  ): { frames: ExtractedFrame[]; totalFrames: number } {
     const view = new DataView(buffer);
     const frames: ExtractedFrame[] = [];
+    let totalFrames = 0;
     const nanosPerSubSecondUnit = subSecondIsNanos ? 1n : 1000n;
     const tsPrecision = subSecondIsNanos ? 9 : 6;
     let offset = 24;
@@ -204,18 +278,22 @@ export class PcapService {
 
       if (offset + capLen > buffer.byteLength) break; // Truncated final packet
 
-      frames.push({
-        rawBytes: new Uint8Array(buffer.slice(offset, offset + capLen)),
-        tsNanos: BigInt(tsSec) * 1_000_000_000n + BigInt(tsSubSecond) * nanosPerSubSecondUnit,
-        origLen,
-        tsPrecision,
-      });
+      totalFrames++;
+      // Past the cap the walk continues over the record headers alone, so the
+      // total is exact without holding the bytes of frames that won't load.
+      if (frames.length < maxFrames) {
+        frames.push({
+          rawBytes: new Uint8Array(buffer.slice(offset, offset + capLen)),
+          tsNanos: BigInt(tsSec) * 1_000_000_000n + BigInt(tsSubSecond) * nanosPerSubSecondUnit,
+          origLen,
+          tsPrecision,
+          linktype,
+        });
+      }
       offset += capLen;
-
-      if (frames.length >= 10000) break; // Safety limit for memory in browser
     }
 
-    return frames;
+    return { frames, totalFrames };
   }
 
   /**
@@ -223,21 +301,29 @@ export class PcapService {
    * block structure: a Section Header Block establishes byte order for
    * everything that follows it, Interface Description Blocks record each
    * interface's timestamp resolution, and Enhanced Packet Blocks carry the
-   * actual frame bytes. Any other block type (interface stats, name
-   * resolution, decryption secrets, vendor-specific blocks, ...) is safely
-   * skipped using its own declared length - a reader doesn't need to
-   * understand every block kind to walk past it, which is the whole point
-   * of the block-based format.
+   * actual frame bytes, and a Decryption Secrets Block hands over the key log
+   * for the connections in the file. Any other block type (interface stats,
+   * name resolution, vendor-specific blocks, ...) is safely skipped using its
+   * own declared length - a reader doesn't need to understand every block kind
+   * to walk past it, which is the whole point of the block-based format.
    */
-  private static extractPcapNgFrames(buffer: ArrayBuffer): ExtractedFrame[] {
+  private static extractPcapNgFrames(
+    buffer: ArrayBuffer,
+    maxFrames: number,
+  ): { frames: ExtractedFrame[]; totalFrames: number } {
     const view = new DataView(buffer);
     const frames: ExtractedFrame[] = [];
+    let totalFrames = 0;
     let offset = 0;
     let isLittleEndian = true;
     // Per-interface timestamp resolution (seconds per tick), indexed by
     // declaration order within the current section - this is exactly what
     // an Enhanced Packet Block's Interface ID field refers to.
     let interfaceResolutions: number[] = [];
+    // Per-interface link type, indexed the same way. A pcapng file may hold
+    // interfaces with different link layers in one section - which is exactly
+    // what `tcpdump -i any` produces - so this cannot be a per-file constant.
+    let interfaceLinkTypes: number[] = [];
 
     while (offset + 8 <= buffer.byteLength) {
       const blockType = view.getUint32(offset, isLittleEndian);
@@ -253,8 +339,10 @@ export class PcapService {
         const boMagicAsLE = view.getUint32(offset + 8, true);
         isLittleEndian = boMagicAsLE === 0x1a2b3c4d;
         interfaceResolutions = [];
+        interfaceLinkTypes = [];
       } else if (blockType === 0x00000001) {
         // Interface Description Block: LinkType(2) Reserved(2) SnapLen(4), then options.
+        const ifLinkType = view.getUint16(offset + 8, isLittleEndian);
         let tsresol = 1e-6; // default per spec: microseconds
         const optionsEnd = offset + blockLen - 4;
         let optOffset = offset + 16;
@@ -271,6 +359,21 @@ export class PcapService {
           optOffset += 4 + optLen + ((4 - (optLen % 4)) % 4); // options are 4-byte padded too
         }
         interfaceResolutions.push(tsresol);
+        interfaceLinkTypes.push(ifLinkType);
+      } else if (blockType === 0x0000000a) {
+        // Decryption Secrets Block: SecretsType(4) SecretsLength(4), then the
+        // secrets. Read here rather than in a pass of its own because a DSB is
+        // written *before* the packets it opens, so walking the file in order
+        // is what makes the secrets available by the time those frames are
+        // dissected. A file that carries its own secrets needs nothing from
+        // the user at all.
+        const secretsType = view.getUint32(offset + 8, isLittleEndian);
+        const secretsLength = view.getUint32(offset + 12, isLittleEndian);
+        if (secretsType === DSB_SECRETS_TYPE_TLS_KEY_LOG && offset + 16 + secretsLength <= offset + blockLen) {
+          const text = new TextDecoder('utf-8', { fatal: false })
+            .decode(new Uint8Array(buffer, offset + 16, secretsLength));
+          keyLog.add(text);
+        }
       } else if (blockType === 0x00000006) {
         // Enhanced Packet Block: InterfaceID(4) TsHigh(4) TsLow(4) CapLen(4) OrigLen(4), then data.
         const interfaceId = view.getUint32(offset + 8, isLittleEndian);
@@ -281,6 +384,11 @@ export class PcapService {
         const dataStart = offset + 28;
 
         if (dataStart + capLen <= buffer.byteLength) {
+          totalFrames++;
+          if (frames.length >= maxFrames) {
+            offset += blockLen;
+            continue;
+          }
           const resolution = interfaceResolutions[interfaceId] ?? 1e-6;
           // Reassemble the 64-bit tick count in bigint: a nanosecond-resolution
           // capture's tick count exceeds float64's exact-integer range, so
@@ -291,16 +399,16 @@ export class PcapService {
             tsNanos: ticksToNanos(ticks, resolution),
             origLen,
             tsPrecision: precisionFor(resolution),
+            linktype: interfaceLinkTypes[interfaceId] ?? LINKTYPE.ETHERNET,
           });
         }
       }
       // Every other block type carries no frame data we need.
 
       offset += blockLen;
-      if (frames.length >= 10000) break; // Safety limit for memory in browser
     }
 
-    return frames;
+    return { frames, totalFrames };
   }
 
   /**
@@ -309,7 +417,7 @@ export class PcapService {
    * live-captured packets, so imported files and live capture produce
    * identical Packet shapes.
    */
-  private static buildPacketsFromFrames(frames: ExtractedFrame[]): Packet[] {
+  private static buildPacketsFromFrames(frames: ExtractedFrame[], keepTrees = false): Packet[] {
     const parsedPackets: Packet[] = [];
     let packetIndex = 1;
     let baseNanos: bigint | null = null;
@@ -317,6 +425,8 @@ export class PcapService {
     const tcpTracker = new TcpStreamTracker();
     const icmpTracker = new IcmpEchoTracker();
     const quicTracker = new QuicFlowTracker();
+    const dnsTracker = new DnsTracker();
+    const l3Tracker = new L3Tracker();
 
     for (const frame of frames) {
       if (baseNanos === null) baseNanos = frame.tsNanos;
@@ -327,12 +437,18 @@ export class PcapService {
       const relativeTime = Number(frame.tsNanos - baseNanos) / 1e9;
       const timeDelta = prevNanos === null ? 0 : Number(frame.tsNanos - prevNanos) / 1e9;
       prevNanos = frame.tsNanos;
-      const epochMs = Number(frame.tsNanos / 1_000_000n);
+      const tsUs = Number(frame.tsNanos / 1000n);
 
-      const { packet, icmpMatchedRequestFrameId } = decodeRawEthernetPacket(
-        frame.rawBytes, packetIndex++, epochMs, relativeTime, timeDelta, frame.origLen, tcpTracker, icmpTracker, quicTracker
+      const { packet, icmpMatchedRequestFrameId, infoPatches } = decodeRawEthernetPacket(
+        frame.rawBytes, packetIndex++, tsUs, relativeTime, timeDelta, frame.origLen,
+        tcpTracker, icmpTracker, quicTracker, dnsTracker, undefined, frame.linktype, l3Tracker,
       );
       packet.tsPrecision = frame.tsPrecision;
+      if (frame.tsPrecision > 6) packet.tsNanos = frame.tsNanos;
+      // Dissected, then dropped: the tree has already done its work by here -
+      // it is what the fields, the Info line and the expert findings were read
+      // out of - and keeping one per frame is 89% of a buffer's memory.
+      if (!keepTrees) packet.layers = [];
       parsedPackets.push(packet);
 
       if (icmpMatchedRequestFrameId !== undefined) {
@@ -341,25 +457,47 @@ export class PcapService {
           requestPacket.info += ` (reply in ${packet.id})`;
         }
       }
+      if (infoPatches) {
+        // Frame ids are 1-based positions in this array, so no search is needed.
+        for (const patch of infoPatches) {
+          const target = parsedPackets[patch.frameId - 1];
+          if (target && target.id === patch.frameId) applyInfoPatch(target, patch);
+        }
+      }
     }
 
     return parsedPackets;
   }
 
   /**
-   * Export to JSON string
+   * Export to JSON string.
+   *
+   * The field names are the ones `exportSchema` recognises, and `epoch` is
+   * present, so a JSON export re-imports through the same evaluator as a CSV.
+   * It did not before: the old shape renamed `id` to `no` and `relativeTime`
+   * to `time`, dropped `rawBytes` entirely, and was then handed straight back
+   * to the app as if it were a `Packet[]`.
+   *
+   * `layers` stays in - it is what makes this export readable by other tools -
+   * but it is decoration on the way back, because the layers are re-derived
+   * from `rawBytes` when those are present and cannot be trusted when they
+   * are not.
    */
-  public static exportToJson(packets: Packet[]): string {
+  public static exportToJson(packets: Packet[], includeRawBytes = false): string {
     const sanitized = packets.map(p => ({
       no: p.id,
       time: p.relativeTime.toFixed(6),
+      epoch: p.tsUs / 1000,
       source: p.source,
       destination: p.destination,
-      protocol: p.protocol,
+      protocol: displayProtocol(p),
       length: p.length,
       info: p.info,
       status: p.status,
-      anomalies: p.anomalies?.map(a => a.title),
+      anomaly: p.anomalies?.map(a => a.title).join('; ') ?? '',
+      ...(includeRawBytes
+        ? { rawBytes: p.rawBytes.length > 0 ? toBase64(p.rawBytes) : '' }
+        : {}),
       layers: p.layers.map(l => ({
         layer: l.name,
         summary: l.summary,
@@ -371,25 +509,15 @@ export class PcapService {
   }
 
   /**
-   * Export to CSV
+   * Export to CSV.
+   *
+   * Delegates to `tabularWriters` so CSV, Excel and the importer cannot drift
+   * apart on columns, quoting or encoding. The hand-rolled version this
+   * replaced quoted three columns of nine, emitted no BOM, and joined with
+   * bare LF.
    */
-  public static exportToCsv(packets: Packet[]): string {
-    const headers = ['No.', 'Time(s)', 'Source', 'Destination', 'Protocol', 'Length', 'Info', 'Status', 'Anomaly'];
-    const rows = packets.map(p => [
-      p.id,
-      p.relativeTime.toFixed(6),
-      `"${p.source}"`,
-      `"${p.destination}"`,
-      p.protocol,
-      p.length,
-      `"${p.info.replace(/"/g, '""')}"`,
-      p.status,
-      p.anomalies && p.anomalies.length > 0
-        ? `"${p.anomalies.map(a => a.title).join('; ').replace(/"/g, '""')}"`
-        : '""',
-    ]);
-
-    return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+  public static exportToCsv(packets: Packet[], includeRawBytes = false): string {
+    return buildCsvText(packets, includeRawBytes);
   }
 }
 
@@ -398,10 +526,70 @@ export class PcapService {
  * the Frame layer's "[Protocols in frame]" field. Module-level so it isn't
  * rebuilt once per decoded packet.
  */
+/**
+ * The most serious thing any dissector said about a frame.
+ *
+ * Walks the tree once at dissection rather than being derived later, so the
+ * value is a field like any other: `inwire.expert.severity == "error"` is a
+ * display filter, and the "Expert Warnings" colour rule is written against it.
+ * `services/expertInfo.ts` still walks the tree for the individual findings -
+ * that list needs each one, this needs only the worst.
+ */
+/**
+ * Every finding in the tree, flattened, and the worst severity among them.
+ *
+ * Two answers from one walk because they are read by different things and
+ * neither can go back for the other. `inwire.expert.severity` is published as
+ * a field so a colour rule and a display filter can ask about a frame's worst
+ * finding - neither can walk a tree. The flat list lands on `Packet.expert`
+ * because the tree is dissected on demand (docs/decisions/0007) and Expert
+ * Information aggregates over the whole buffer, where no tree exists to walk.
+ */
+function collectExpert(
+  layers: ProtocolLayer[],
+  anomalies: AnomalyInfo[] | undefined,
+): { expert?: ExpertInfo[]; worst?: ExpertSeverity } {
+  const RANK: Record<ExpertSeverity, number> = { error: 3, warn: 2, note: 1, chat: 0 };
+  let worst: ExpertSeverity | undefined;
+  const found: ExpertInfo[] = [];
+  const consider = (s: ExpertSeverity) => {
+    if (worst === undefined || RANK[s] > RANK[worst]) worst = s;
+  };
+  const visit = (fields: ProtocolField[]) => {
+    for (const field of fields) {
+      if (field.expertInfo) {
+        found.push(field.expertInfo);
+        consider(field.expertInfo.severity);
+      }
+      if (field.children) visit(field.children);
+    }
+  };
+  for (const layer of layers) visit(layer.fields);
+  // Anomalies raise the worst severity but are not repeated into the list:
+  // they travel on `Packet.anomalies` and expertInfo.ts reads them from there,
+  // so adding them here would count every one of them twice.
+  for (const anomaly of anomalies ?? []) {
+    consider(anomaly.severity === 'medium' ? 'warn' : anomaly.severity === 'low' ? 'note' : 'error');
+  }
+  return { expert: found.length > 0 ? found : undefined, worst };
+}
+
 const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Frame': 'frame',
+  'Transport Layer Security': 'tls',
+  'Hypertext Transfer Protocol': 'http',
+  'HyperText Transfer Protocol 2': 'http2',
+  'HyperText Transfer Protocol Version 3': 'http3',
   'Ethernet II': 'eth',
   '802.1Q Virtual LAN': 'vlan',
+  // The link layers a capture file may declare instead of Ethernet
+  // (services/dissectors/linkLayer.ts). Without these the underscore rule
+  // would name them `linux_cooked_capture_v1` and `null/loopback`, neither of
+  // which is a filter token anybody could type.
+  'Logical-Link Control': 'llc',
+  'Linux cooked capture v1': 'sll',
+  'Linux cooked capture v2': 'sll',
+  'Null/Loopback': 'null',
   'Internet Protocol Version 4': 'ip',
   'Internet Protocol Version 6': 'ipv6',
   'Transmission Control Protocol': 'tcp',
@@ -411,25 +599,70 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Address Resolution Protocol': 'arp',
   'Spanning Tree Protocol': 'stp',
   'IEEE 1905.1a': 'ieee1905',
+  'Domain Name System': 'dns',
+  'Dynamic Host Configuration Protocol': 'dhcp',
+  'DHCPv6': 'dhcpv6',
+  'Link Layer Discovery Protocol': 'lldp',
+  'Internet Group Management Protocol': 'igmp',
+  // The IPv6 extension headers. Without these the layer names fall through to
+  // the underscore rule and the protocol hierarchy reads
+  // `ipv6_hop-by-hop_options` where Wireshark reads `ipv6.hopopts` - and the
+  // walker's own token would be appended a second time at the end of the
+  // chain, out of the position it actually occupies.
+  'IPv6 Hop-by-Hop Options': 'ipv6.hopopts',
+  'IPv6 Destination Options': 'ipv6.dstopts',
+  'IPv6 Routing': 'ipv6.routing',
+  'IPv6 Fragment': 'ipv6.fragment',
+  'IPv6 Authentication Header': 'ah',
+  'IPv6 Encapsulating Security Payload': 'ipv6.ext',
+  'IPv6 Mobility': 'ipv6.ext',
+  'IPv6 Host Identity Protocol': 'ipv6.ext',
+  'IPv6 Shim6': 'ipv6.ext',
 };
+
+/**
+ * Ports a cleartext HTTP dissector is offered. Wireshark's own default list,
+ * minus the ones this build has no reason to claim.
+ */
+const HTTP_PORTS = new Set([80, 591, 3128, 8000, 8008, 8080, 8888]);
 
 export function decodeRawEthernetPacket(
   rawBytes: Uint8Array,
   id: number,
-  epochMs: number,
+  tsUs: number,
   relativeTime: number,
   timeDelta: number,
   origLen: number,
   tcpTracker?: TcpStreamTracker,
   icmpTracker?: IcmpEchoTracker,
   quicTracker?: QuicFlowTracker,
+  dnsTracker?: DnsTracker,
   /**
    * The adapter this frame was captured from, for the Frame layer's interface
    * rows. Absent for imported captures, which carry no live interface - the
    * rows then say so rather than inventing one.
    */
-  captureInterface?: { name: string; label: string }
-): { packet: Packet; icmpMatchedRequestFrameId?: number } {
+  captureInterface?: { name: string; label: string },
+  /**
+   * The capture's link type (`LINKTYPE`). Defaults to Ethernet, which is what
+   * the live agent always captures and what every caller assumed before
+   * Phase 6 - but an imported file says what it holds, and now that is read.
+   */
+  linktype: number = LINKTYPE.ETHERNET,
+  /**
+   * Fragments and ARP bindings - the two facts about the network layer that
+   * are invisible in any single frame. Appended last rather than slotted in
+   * beside the other trackers so no existing positional call site moves.
+   * See services/l3Tracker.ts.
+   */
+  l3Tracker?: L3Tracker,
+): {
+  packet: Packet;
+  icmpMatchedRequestFrameId?: number;
+  infoPatches?: InfoPatch[];
+  /** name -> addresses this frame taught, for the passive resolution map. */
+  resolvedNames?: { name: string; addresses: string[] }[];
+} {
   const interfaceName = captureInterface?.name ?? 'unknown';
   const interfaceDescription = captureInterface?.label ?? 'Imported capture';
   // hexDump/asciiDump are deliberately NOT built here. They are display
@@ -440,22 +673,21 @@ export function decodeRawEthernetPacket(
   // packetHexDump()/packetAsciiDump() below is what makes a 50,000-packet
   // buffer fit in memory at all.
 
-  let srcMac = '00:00:00:00:00:00';
-  let dstMac = '00:00:00:00:00:00';
-  let etherType = 0x0800;
-
-  if (rawBytes.length >= 14) {
-    dstMac = formatMac(rawBytes.slice(0, 6));
-    srcMac = formatMac(rawBytes.slice(6, 12));
-    etherType = (rawBytes[12] << 8) | rawBytes[13];
-  }
+  // The link layer the capture file says it has - Ethernet, Linux cooked,
+  // raw IP or loopback - with its VLAN tags stripped and its LLC/SNAP header
+  // read. Until Phase 6 this was hard-coded to Ethernet II at offset 14 and
+  // the file's own declaration was parsed and ignored
+  // (services/dissectors/linkLayer.ts).
+  const link = dissectLinkLayer(rawBytes, linktype);
+  const srcMac = link.srcMac ?? '00:00:00:00:00:00';
+  const dstMac = link.dstMac ?? '00:00:00:00:00:00';
 
   // Frames with no network layer (ARP, STP, other pure-L2 traffic) show their
   // MAC addresses in the address columns, resolved to names the way the reference analyzer
   // does - "SagemcomBroa_aa:bb:cc", "Broadcast", "Nearest-Customer-Bridge".
   // The IPv4/IPv6 branches below overwrite these when an L3 address exists.
-  let srcIp = resolveMacName(srcMac);
-  let dstIp = resolveMacName(dstMac);
+  let srcIp = link.srcMac ? resolveMacName(srcMac) : '';
+  let dstIp = link.dstMac ? resolveMacName(dstMac) : '';
   let proto: Packet['protocol'] = 'TCP';
   // The Protocol column's free-form label, when it differs from the coarse
   // ProtocolType - "TLSv1.2", "ICMPv6", "STP". Left undefined when the two
@@ -465,7 +697,7 @@ export function decodeRawEthernetPacket(
   let analysisFlags: string[] | undefined;
   // Dissected values under their conventional field names, for display filters
   // and color rules to reference generically.
-  const filterFields: Record<string, string | number> = {};
+  const filterFields: Record<string, string | number> = { ...link.fields };
   let srcPort: number | undefined;
   let dstPort: number | undefined;
   let info = `Frame (${rawBytes.length} bytes)`;
@@ -473,6 +705,21 @@ export function decodeRawEthernetPacket(
   let streamId: number | undefined;
   let anomalies: AnomalyInfo[] | undefined;
   let icmpMatchedRequestFrameId: number | undefined;
+  let infoPatches: InfoPatch[] | undefined;
+  /** frameProtocols tokens for IPv6 extension headers, which have no layer name mapping. */
+  let extensionTokens: string[] = [];
+  /**
+   * Tokens for a dissector that claims the transport payload without adding a
+   * layer of its own (QUIC, SSDP), and where in the chain they go.
+   *
+   * Appending them was wrong in a way the protocol hierarchy made obvious: a
+   * QUIC frame carrying a TLS handshake ends up with `... udp tls`, so an
+   * appended `quic` read as a child of TLS - the exact inverse of what
+   * contains what.
+   */
+  let transportTokens: string[] = [];
+  let transportLayerIndex = -1;
+  let resolvedNames: { name: string; addresses: string[] }[] | undefined;
 
   const layers: ProtocolLayer[] = [
     {
@@ -492,10 +739,10 @@ export function decodeRawEthernetPacket(
             { name: 'Interface description', value: interfaceDescription, generated: true },
           ],
         },
-        { name: 'Encapsulation type', value: 'Ethernet (1)' },
-        { name: 'Arrival Time', value: formatArrivalTime(epochMs) },
-        { name: 'UTC Arrival Time', value: formatArrivalTime(epochMs, true) },
-        { name: 'Epoch Arrival Time', value: (epochMs / 1000).toFixed(9) },
+        { name: 'Encapsulation type', value: link.encapsulation },
+        { name: 'Arrival Time', value: formatArrivalTime(tsUs) },
+        { name: 'UTC Arrival Time', value: formatArrivalTime(tsUs, true) },
+        { name: 'Epoch Arrival Time', value: `${Math.floor(tsUs / 1_000_000)}.${String(tsUs % 1_000_000).padStart(6, '0')}000` },
         { name: '[Time shift for this packet]', value: '0.000000000 seconds', generated: true },
         { name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
         { name: '[Time delta from previous displayed frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
@@ -505,52 +752,27 @@ export function decodeRawEthernetPacket(
         { name: 'Capture Length', value: `${rawBytes.length} bytes (${rawBytes.length * 8} bits)` },
         { name: '[Frame is marked]', value: 'False', generated: true },
         { name: '[Frame is ignored]', value: 'False', generated: true },
+        // A frame longer than the Ethernet MTU was never on the wire in this
+        // shape: the adapter's segmentation offload split it, and the capture
+        // was taken before that happened. It is why the checksum in it is
+        // often zero, and saying so here is what stops that reading as damage.
+        ...((origLen || rawBytes.length) > 1514 ? [{
+          name: '[Frame exceeds MTU]',
+          value: 'Segmentation offloaded to the adapter; this frame was never sent in this form',
+          generated: true,
+          expertInfo: {
+            severity: 'chat' as const,
+            group: 'Protocol' as const,
+            message: `Frame is ${origLen || rawBytes.length} bytes, past the 1514-byte Ethernet MTU - segmentation offload`,
+          },
+        }] : []),
       ],
     },
-    {
-      name: 'Ethernet II',
-      summary: `Ethernet II, Src: ${srcMac}, Dst: ${dstMac}`,
-      rawBytesRange: [0, 13],
-      fields: [
-        { name: 'Destination', value: resolveMacVendor(dstMac), rawBytesRange: [0, 5], children: macAddressFields(dstMac, 0) },
-        { name: 'Source', value: resolveMacVendor(srcMac), rawBytesRange: [6, 11], children: macAddressFields(srcMac, 6) },
-        { name: 'Type', value: `0x${etherType.toString(16).padStart(4, '0')} (${describeEtherType(etherType)})`, rawBytesRange: [12, 13] },
-        { name: '[Stream index]', value: 0, generated: true },
-      ],
-    },
+    ...link.layers,
   ];
 
-  // 802.1Q / 802.1ad (QinQ) VLAN tags: a 4-byte tag (2-byte TCI + 2-byte real
-  // ethertype) can appear between the MACs and the "real" ethertype, and can
-  // repeat for double-tagged trunk traffic. Strip every tag we find so the
-  // IPv4/IPv6 branches below see the correct offset and correct ethertype,
-  // exactly how the reference analyzer's packet-vlan.c walks nested tags.
-  let l3Offset = 14;
-  let currentEtherType = etherType;
-  let vlanDepth = 0;
-  while ((currentEtherType === 0x8100 || currentEtherType === 0x88a8) && rawBytes.length >= l3Offset + 4 && vlanDepth < 8) {
-    const tci = (rawBytes[l3Offset] << 8) | rawBytes[l3Offset + 1];
-    const priority = (tci >> 13) & 0x7;
-    const dei = (tci >> 12) & 0x1;
-    const vlanId = tci & 0x0fff;
-    const innerEtherType = (rawBytes[l3Offset + 2] << 8) | rawBytes[l3Offset + 3];
-
-    layers.push({
-      name: '802.1Q Virtual LAN',
-      summary: `802.1Q Virtual LAN, PRI: ${priority}, DEI: ${dei}, ID: ${vlanId}`,
-      rawBytesRange: [l3Offset, l3Offset + 3],
-      fields: [
-        { name: 'Priority', value: priority, rawBytesRange: [l3Offset, l3Offset] },
-        { name: 'Drop Eligible Indicator (DEI)', value: dei, rawBytesRange: [l3Offset, l3Offset] },
-        { name: 'VLAN ID', value: vlanId, rawBytesRange: [l3Offset, l3Offset + 1] },
-        { name: 'Type', value: `0x${innerEtherType.toString(16).padStart(4, '0')} (${describeEtherType(innerEtherType)})`, rawBytesRange: [l3Offset + 2, l3Offset + 3] },
-      ],
-    });
-
-    currentEtherType = innerEtherType;
-    l3Offset += 4;
-    vlanDepth++;
-  }
+  const l3Offset = link.l3Offset;
+  const currentEtherType = link.etherType;
 
   // Link-layer protocols that carry no IP header. These have to be dispatched
   // before the IPv4/IPv6 branches, and without them a frame keeps this
@@ -560,7 +782,7 @@ export function decodeRawEthernetPacket(
   // An ethertype field <= 1500 is really an 802.3 *length*, and what follows
   // is an LLC header (DSAP/SSAP/Control) rather than a network-layer header.
   // DSAP 0x42 is the Spanning Tree Protocol's service access point.
-  const isLlcFrame = currentEtherType <= 1500;
+  const isLlcFrame = link.llcOffset !== undefined && currentEtherType <= 1500;
   let l2Result: L2DissectorResult | null = null;
   if (currentEtherType === 0x0806) {
     l2Result = dissectArp(rawBytes, l3Offset);
@@ -568,11 +790,39 @@ export function decodeRawEthernetPacket(
     l2Result = dissectIeee1905(rawBytes, l3Offset);
   } else if (currentEtherType === 0x88cc) {
     l2Result = dissectLldp(rawBytes, l3Offset);
-  } else if (isLlcFrame && rawBytes.length > l3Offset && rawBytes[l3Offset] === 0x42) {
-    l2Result = dissectStp(rawBytes, l3Offset);
+  } else if (link.llcDsap === 0x42 && link.llcOffset !== undefined) {
+    // A BPDU's offsets are defined relative to its LLC header, not to the
+    // frame, so the STP dissector is given where that header started rather
+    // than where the link layer finished.
+    l2Result = dissectStp(rawBytes, link.llcOffset);
   }
 
   if (l2Result) {
+    // One address answered by two different MACs is either a misconfiguration
+    // or somebody spoofing, and it is invisible in either frame alone. Only a
+    // claim counts - a request's target fields are a question, and treating
+    // them as a binding would report every ARP scan as a conflict.
+    if (l2Result.protocolLabel === 'ARP' && l3Tracker) {
+      const claimedIp = l2Result.fields['arp.src.proto_ipv4'];
+      const claimedMac = l2Result.fields['arp.src.hw_mac'];
+      if (typeof claimedIp === 'string' && typeof claimedMac === 'string') {
+        const conflict = l3Tracker.arpClaim(claimedIp, claimedMac, id);
+        if (conflict) {
+          l2Result.layer.fields.push({
+            name: '[Duplicate IP address detected]',
+            value: `${conflict.address} was claimed by ${conflict.previousMac} in frame ${conflict.previousFrame}`,
+            generated: true,
+            linkToFrame: conflict.previousFrame,
+            expertInfo: {
+              severity: 'warn',
+              group: 'Sequence',
+              message: `Duplicate IP address configured (${conflict.address})`,
+            },
+          });
+          l2Result.info += ` (duplicate use of ${conflict.address} detected!)`;
+        }
+      }
+    }
     Object.assign(filterFields, l2Result.fields);
     protocolLabel = l2Result.protocolLabel;
     proto = l2Result.protocolLabel === 'ARP' ? 'ARP' : 'TCP';
@@ -617,6 +867,15 @@ export function decodeRawEthernetPacket(
     const headerChecksumActual = (rawBytes[l3Offset + 10] << 8) | rawBytes[l3Offset + 11];
     const headerChecksumComputed = computeIpHeaderChecksum(rawBytes, l3Offset, ipHeaderLen);
     const checksumCorrect = headerChecksumActual === headerChecksumComputed;
+    // Same offload policy as the transport checksums (see `checksumVerdict`):
+    // a header captured on the sending host before the NIC filled the field in
+    // is "Unverified", never "Bad". A zero header checksum is not legal on the
+    // wire, and a frame past the MTU was segmented by the adapter - both mean
+    // the bytes here were never the bytes that were sent.
+    const ipChecksumStatus = headerChecksumActual === 0 || origLen > 1514
+      ? 'Unverified'
+      : checksumCorrect ? 'Good' : 'Bad';
+    const ttlGuess = inferTtl(ttl);
     srcIp = `${rawBytes[l3Offset + 12]}.${rawBytes[l3Offset + 13]}.${rawBytes[l3Offset + 14]}.${rawBytes[l3Offset + 15]}`;
     dstIp = `${rawBytes[l3Offset + 16]}.${rawBytes[l3Offset + 17]}.${rawBytes[l3Offset + 18]}.${rawBytes[l3Offset + 19]}`;
 
@@ -628,12 +887,15 @@ export function decodeRawEthernetPacket(
         { name: 'Version', value: '4', rawBytesRange: [l3Offset, l3Offset] },
         { name: 'Header Length', value: `${ipHeaderLen} bytes`, rawBytesRange: [l3Offset, l3Offset] },
         {
+          // Named, not numbered. IPv6 has shown "EF PHB" and "ECT(0)" since
+          // this phase's first half; IPv4 printed 46 and 2, so the same
+          // traffic read differently depending on which version carried it.
           name: 'Differentiated Services Field',
-          value: `0x${tos.toString(16).padStart(2, '0')} (DSCP: ${dscp}, ECN: ${ecn})`,
+          value: `0x${tos.toString(16).padStart(2, '0')} (DSCP: ${dscpName(dscp)}, ECN: ${ecnName(ecn)})`,
           rawBytesRange: [l3Offset + 1, l3Offset + 1],
           children: [
-            { name: 'Differentiated Services Codepoint', value: dscp, rawBytesRange: [l3Offset + 1, l3Offset + 1] },
-            { name: 'Explicit Congestion Notification', value: ecn, rawBytesRange: [l3Offset + 1, l3Offset + 1] },
+            { name: 'Differentiated Services Codepoint', value: `${dscpName(dscp)} (${dscp})`, abbrev: 'ip.dsfield.dscp', rawBytesRange: [l3Offset + 1, l3Offset + 1] },
+            { name: 'Explicit Congestion Notification', value: `${ecnName(ecn)} (${ecn})`, abbrev: 'ip.dsfield.ecn', rawBytesRange: [l3Offset + 1, l3Offset + 1] },
           ],
         },
         { name: 'Total Length', value: ipTotalLen, rawBytesRange: [l3Offset + 2, l3Offset + 3] },
@@ -649,29 +911,190 @@ export function decodeRawEthernetPacket(
           ],
         },
         { name: 'Fragment Offset', value: fragmentOffset, rawBytesRange: [l3Offset + 6, l3Offset + 7] },
-        { name: 'Time to Live (TTL)', value: ttl, rawBytesRange: [l3Offset + 8, l3Offset + 8] },
-        { name: 'Protocol', value: ipProtocolNum === 6 ? 'TCP (6)' : ipProtocolNum === 17 ? 'UDP (17)' : `${ipProtocolNum}`, rawBytesRange: [l3Offset + 9, l3Offset + 9] },
+        {
+          name: 'Time to Live (TTL)',
+          value: ttl,
+          abbrev: 'ip.ttl',
+          rawBytesRange: [l3Offset + 8, l3Offset + 8],
+          // A TTL of 57 means nothing on its own and means "seven hops away"
+          // once you know what initial values stacks actually use. Generated,
+          // because it is inferred - see inferTtl.
+          children: ttlGuess ? [
+            { name: '[Inferred initial TTL]', value: ttlGuess.initial, generated: true },
+            { name: '[Hops away]', value: ttlGuess.hops, generated: true },
+          ] : undefined,
+        },
+        { name: 'Protocol', value: ipProtocolNum === 6 ? 'TCP (6)' : ipProtocolNum === 17 ? 'UDP (17)' : `${ipProtocolNum}`, abbrev: 'ip.proto', rawBytesRange: [l3Offset + 9, l3Offset + 9] },
         {
           name: 'Header Checksum',
           value: `0x${headerChecksumActual.toString(16).padStart(4, '0')} [${checksumCorrect ? 'correct' : 'incorrect'}]`,
           rawBytesRange: [l3Offset + 10, l3Offset + 11],
+          abbrev: 'ip.checksum',
           children: [
-            { name: '[Header checksum status]', value: checksumCorrect ? 'Correct' : `Incorrect, should be 0x${headerChecksumComputed.toString(16).padStart(4, '0')}`, generated: true },
+            // The row's value is the status the field carries, not prose:
+            // a row with an abbrev is one right-click from becoming a filter,
+            // and `ip.checksum.status == "Correct"` would match nothing.
+            {
+              name: '[Header checksum status]',
+              value: ipChecksumStatus,
+              generated: true,
+              abbrev: 'ip.checksum.status',
+              ...(ipChecksumStatus === 'Bad'
+                ? { expertInfo: { severity: 'error' as const, group: 'Checksum' as const, message: `Bad checksum, should be 0x${headerChecksumComputed.toString(16).padStart(4, '0')}` } }
+                : {}),
+            },
           ],
         },
-        { name: 'Source Address', value: srcIp, rawBytesRange: [l3Offset + 12, l3Offset + 15] },
-        { name: 'Destination Address', value: dstIp, rawBytesRange: [l3Offset + 16, l3Offset + 19] },
+        { name: 'Source Address', value: srcIp, abbrev: 'ip.src', rawBytesRange: [l3Offset + 12, l3Offset + 15] },
+        { name: 'Destination Address', value: dstIp, abbrev: 'ip.dst', rawBytesRange: [l3Offset + 16, l3Offset + 19] },
       ],
     };
+
+    // Anything between the fixed 20-byte header and the transport header is
+    // options. `ipHeaderLen` was used to find the transport header and the
+    // bytes in between were never looked at - which loses the Router Alert
+    // that every IGMP report on a normal network carries.
+    if (ipHeaderLen > 20) {
+      const options = dissectIpv4Options(rawBytes, l3Offset + 20, l3Offset + ipHeaderLen);
+      if (options.length > 0) {
+        ipLayer.fields.push({
+          name: 'Options',
+          value: `(${ipHeaderLen - 20} bytes)`,
+          rawBytesRange: [l3Offset + 20, l3Offset + ipHeaderLen - 1],
+          children: options,
+        });
+        filterFields['ip.opt.type'] = rawBytes[l3Offset + 20];
+      }
+    }
+
     layers.push(ipLayer);
 
     const transportOffset = l3Offset + ipHeaderLen;
     filterFields['ip.ttl'] = ttl;
     filterFields['ip.src'] = srcIp;
     filterFields['ip.dst'] = dstIp;
+    filterFields['ip.checksum'] = headerChecksumActual;
+    filterFields['ip.checksum.status'] = ipChecksumStatus;
     filterFields['ip.proto'] = ipProtocolNum;
+    filterFields['ip.dsfield.dscp'] = dscp;
+    filterFields['ip.dsfield.ecn'] = ecn;
+    filterFields['ip.hdr_len'] = ipHeaderLen;
+    filterFields['ip.id'] = identification;
+    filterFields['ip.flags.df'] = dontFragment;
+    filterFields['ip.flags.mf'] = moreFragments;
+    filterFields['ip.frag_offset'] = fragmentOffset;
 
-    const transport = decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen, quicTracker);
+    // A fragmented datagram's transport header is in its FIRST fragment only.
+    // Every other fragment carries application data at that offset, and
+    // decoding it as a transport header produced two invented port numbers and
+    // a length read out of the payload - specific, plausible, and nothing
+    // about it looked like a failure.
+    const fragmentPayloadLen = Math.max(0, ipTotalLen - ipHeaderLen);
+    const isFragment = moreFragments === 1 || fragmentOffset > 0;
+    const fragmentBytes = fragmentOffset * 8;
+    const fragmentPayload = isFragment
+      ? rawBytes.subarray(transportOffset, Math.min(rawBytes.length, transportOffset + fragmentPayloadLen))
+      : null;
+    const datagram = fragmentPayload && l3Tracker
+      ? l3Tracker.fragment(srcIp, dstIp, identification, ipProtocolNum, fragmentBytes, moreFragments === 1, fragmentPayload, id)
+      : null;
+    // The datagram is whole and this is the frame that finished it, so this is
+    // the frame the transport dissector runs in - which is where Wireshark
+    // shows it too, and why every earlier fragment reads as "Fragmented IP
+    // protocol" rather than each carrying a piece of the answer.
+    const reassembled = datagram?.reassembled ?? null;
+
+    if (isFragment) {
+      ipLayer.fields.push({
+        name: '[Fragment]',
+        value: `offset ${fragmentBytes}, ${fragmentPayloadLen} byte${fragmentPayloadLen === 1 ? '' : 's'}`,
+        generated: true,
+      });
+      if (datagram) {
+        if (reassembled && datagram.contributions) {
+          const parts = datagram.contributions.map((c) => `#${c.frame}(${c.bytes})`).join(', ');
+          ipLayer.fields.push({
+            name: `[${datagram.contributions.length} Reassembled IPv4 fragments (${reassembled.length} bytes)]`,
+            value: parts,
+            generated: true,
+            abbrev: 'ip.reassembled',
+            children: datagram.contributions.map((c) => ({
+              name: `[Frame: ${c.frame}, payload: ${c.offset}-${c.offset + c.bytes - 1} (${c.bytes} bytes)]`,
+              value: '',
+              generated: true,
+              linkToFrame: c.frame,
+            })),
+            ...(datagram.overlapped ? {
+              expertInfo: {
+                severity: 'warn' as const,
+                group: 'Malformed' as const,
+                message: 'Fragments overlap; the first copy of each byte was used',
+              },
+            } : {}),
+          });
+        } else {
+          ipLayer.fields.push({
+            name: '[Fragments so far]',
+            value: `${datagram.frames.length} frame${datagram.frames.length === 1 ? '' : 's'}, ${datagram.bytesSoFar} bytes`,
+            generated: true,
+          });
+          if (datagram.complete && datagram.totalLength !== undefined) {
+            // The last fragment has arrived and there is still a hole. At this
+            // frame there is no way to tell a fragment that is late from one
+            // that will never come - fragments routinely arrive out of order
+            // on any path with more than one route - so this says what is true
+            // rather than declaring a failure. Handing the transport dissector
+            // a buffer with the gap quietly zero-filled is the one thing that
+            // is not an option.
+            ipLayer.fields.push({
+              name: '[Datagram incomplete]',
+              value: `${datagram.totalLength} bytes expected, ${datagram.bytesSoFar} captured - waiting for a missing fragment`,
+              generated: true,
+              expertInfo: {
+                severity: 'note',
+                group: 'Malformed',
+                message: 'IPv4 datagram not reassembled: a fragment has not been captured',
+              },
+            });
+          }
+        }
+      }
+      if (reassembled && datagram) {
+        // Only once the datagram is actually assembled - not merely once the
+        // fragment with More Fragments clear has arrived. A trailing fragment
+        // often arrives first, and forgetting the datagram at that point threw
+        // away the state the fragments still to come needed.
+        //
+        // The earlier fragments only learn which frame completed the datagram
+        // now, the same way a reassembled TLS record's segments do.
+        infoPatches = (infoPatches ?? []).concat(
+          datagram.frames.filter((frameId) => frameId !== id).map((frameId) => ({
+            frameId, suffix: ` [Reassembled in ${id}]`,
+          })),
+        );
+        l3Tracker?.forgetFragments(srcIp, dstIp, identification, ipProtocolNum);
+      }
+    }
+
+    const transport = reassembled
+      // The whole datagram, dissected from offset 0 of its own buffer. The
+      // pseudo-header is built from this frame's addresses and the datagram's
+      // real length, so the transport checksum is verified against what was
+      // actually sent rather than against one fragment of it.
+      ? decodeTransportLayer(reassembled, 0, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, reassembled.length, quicTracker, tsUs, dnsTracker,
+        ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, reassembled.length))
+      : isFragment
+        ? null
+        : decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen, quicTracker, tsUs, dnsTracker,
+          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen));
+
+    if (isFragment && !reassembled) {
+      // Wireshark's own wording for a fragment it cannot yet reassemble.
+      protocolLabel = 'IPv4';
+      const protoName = ipProtocolNum === 6 ? 'TCP' : ipProtocolNum === 17 ? 'UDP' : ipProtocolNum === 1 ? 'ICMP' : 'IP';
+      info = `Fragmented IP protocol (proto=${protoName} ${ipProtocolNum}, off=${fragmentBytes}, ID=${identification.toString(16).padStart(4, '0')})`;
+    }
+
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
@@ -680,6 +1103,16 @@ export function decodeRawEthernetPacket(
       srcPort = transport.srcPort;
       dstPort = transport.dstPort;
       info = transport.info;
+      // A layer dissected out of a reassembled datagram describes bytes that
+      // are not in this frame's hex dump, so it carries no byte ranges - the
+      // same rule a TLS record reassembled across segments follows. The
+      // `[Reassembled IPv4 fragments]` row above is where those bytes are
+      // accounted for.
+      if (reassembled) {
+        stripByteRanges(transport.layer);
+        for (const extra of transport.extraLayers ?? []) stripByteRanges(extra);
+      }
+      transportLayerIndex = layers.length;
       layers.push(transport.layer);
       // Timing lives here, not in the transport decoder, so the [Timestamps]
       // subtree the reference analyzer nests under UDP/TCP is attached from this side.
@@ -693,14 +1126,26 @@ export function decodeRawEthernetPacket(
         ],
       });
       if (transport.extraLayers) layers.push(...transport.extraLayers);
+      if (transport.protocolTokens) transportTokens = transport.protocolTokens;
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
       anomalies = transport.anomalies;
       icmpMatchedRequestFrameId = transport.icmpMatchedRequestFrameId;
+      // Concatenated, not replaced: the fragment block above may already have
+      // written `[Reassembled in N]` onto this datagram's earlier fragments,
+      // and this is the frame that completed it - so both sets of patches
+      // belong to it.
+      const fromTransport = transportPatches(transport, id);
+      if (fromTransport) infoPatches = (infoPatches ?? []).concat(fromTransport);
+      resolvedNames = transport.resolvedNames;
       if (transport.streamId !== undefined) {
         ipLayer.fields.push({ name: '[Stream index]', value: transport.streamId, generated: true });
       }
-    } else {
+    } else if (!isFragment) {
+      // A fragment has no transport header to have failed to dissect - it was
+      // never carrying one, or the datagram is not complete yet. Saying "IP
+      // protocol 17 payload (not dissected)" of it would describe the wrong
+      // absence; the fragment wording above says the right one.
       ({ label: protocolLabel, info } = describeUndissectedIpPayload(ipProtocolNum));
     }
   } else if (currentEtherType === 0x86dd && rawBytes.length >= l3Offset + 40) {
@@ -735,14 +1180,14 @@ export function decodeRawEthernetPacket(
           bitfield: { bitOffset: 4, bitLength: 20, totalBits: 24 },
         },
         { name: 'Payload Length', value: ipv6PayloadLen, rawBytesRange: [l3Offset + 4, l3Offset + 5] },
-        { name: 'Next Header', value: nextHeader === 6 ? 'TCP (6)' : nextHeader === 17 ? 'UDP (17)' : nextHeader === 58 ? 'ICMPv6 (58)' : `${nextHeader}`, rawBytesRange: [l3Offset + 6, l3Offset + 6] },
-        { name: 'Hop Limit', value: hopLimit, rawBytesRange: [l3Offset + 7, l3Offset + 7] },
+        { name: 'Next Header', value: describeIpv6NextHeader(nextHeader), abbrev: 'ipv6.nxt', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
+        { name: 'Hop Limit', value: hopLimit, abbrev: 'ipv6.hlim', rawBytesRange: [l3Offset + 7, l3Offset + 7] },
         {
-          name: 'Source Address', value: srcIp, rawBytesRange: [l3Offset + 8, l3Offset + 23],
+          name: 'Source Address', value: srcIp, abbrev: 'ipv6.src', rawBytesRange: [l3Offset + 8, l3Offset + 23],
           children: [{ name: '[Address Space]', value: ipv6AddressSpace(srcIp), generated: true }],
         },
         {
-          name: 'Destination Address', value: dstIp, rawBytesRange: [l3Offset + 24, l3Offset + 39],
+          name: 'Destination Address', value: dstIp, abbrev: 'ipv6.dst', rawBytesRange: [l3Offset + 24, l3Offset + 39],
           children: [{ name: '[Address Space]', value: ipv6AddressSpace(dstIp), generated: true }],
         },
       ],
@@ -771,10 +1216,115 @@ export function decodeRawEthernetPacket(
       status = 'warning';
     }
 
-    const transportOffset = l3Offset + 40;
+    // The extension-header chain sits between the fixed header and the
+    // transport one. Skipping it reads a Hop-by-Hop option as an ICMPv6
+    // header - which is what every MLDv2 report in the fixtures used to show.
+    const payloadEnd = Math.min(rawBytes.length, l3Offset + 40 + ipv6PayloadLen);
+    const chain = isMalformedJumbo
+      ? null
+      : walkIpv6Extensions(rawBytes, l3Offset + 40, nextHeader, payloadEnd);
+    if (chain) {
+      layers.push(...chain.layers);
+      extensionTokens = chain.protocolTokens;
+    }
+    const transportOffset = chain ? chain.transportOffset : l3Offset + 40;
+    let effectiveNextHeader = chain ? chain.finalNextHeader : nextHeader;
+    const transportPayloadLen = ipv6PayloadLen - (transportOffset - (l3Offset + 40));
+
+    // --- fragments -----------------------------------------------------------
+    // The same mechanism as IPv4's, keyed the way RFC 8200 §4.5 keys it: source,
+    // destination and the Fragment header's 32-bit identification, with the
+    // protocol deliberately left out - the Fragment header sits above whatever
+    // the payload turns out to be, which is exactly why IPv6 moved
+    // fragmentation out of the fixed header in the first place.
+    const isV6Fragment = chain?.fragmentPayloadOffset !== undefined;
+    const v6PayloadStart = chain?.fragmentPayloadOffset ?? transportOffset;
+    const v6FragmentPayload = isV6Fragment
+      ? rawBytes.subarray(v6PayloadStart, Math.min(rawBytes.length, payloadEnd))
+      : null;
+    const v6Datagram = v6FragmentPayload && l3Tracker && chain?.fragmentId !== undefined
+      ? l3Tracker.fragment(
+        srcIp, dstIp, chain.fragmentId, IPV6_FRAGMENT_KEY,
+        chain.fragmentOffset ?? 0, chain.moreFragments ?? false, v6FragmentPayload, id,
+      )
+      : null;
+    const v6Reassembled = v6Datagram?.reassembled ?? null;
+
+    // The fragmentable part may itself begin with extension headers - the
+    // walker stopped at the Fragment header, and everything after it belongs
+    // to the reassembled datagram rather than to this frame.
+    let v6ReassembledOffset = 0;
+    if (v6Reassembled) {
+      const inner = walkIpv6Extensions(v6Reassembled, 0, effectiveNextHeader, v6Reassembled.length);
+      for (const layer of inner.layers) stripByteRanges(layer);
+      layers.push(...inner.layers);
+      extensionTokens = [...extensionTokens, ...inner.protocolTokens];
+      effectiveNextHeader = inner.finalNextHeader;
+      v6ReassembledOffset = inner.transportOffset;
+    }
+
+    if (isV6Fragment) {
+      const fragmentLayer = layers.find((l) => l.name === 'IPv6 Fragment');
+      if (fragmentLayer && v6Datagram) {
+        if (v6Reassembled && v6Datagram.contributions) {
+          const parts = v6Datagram.contributions.map((c) => `#${c.frame}(${c.bytes})`).join(', ');
+          fragmentLayer.fields.push({
+            name: `[${v6Datagram.contributions.length} Reassembled IPv6 fragments (${v6Reassembled.length} bytes)]`,
+            value: parts,
+            generated: true,
+            abbrev: 'ipv6.reassembled',
+            children: v6Datagram.contributions.map((c) => ({
+              name: `[Frame: ${c.frame}, payload: ${c.offset}-${c.offset + c.bytes - 1} (${c.bytes} bytes)]`,
+              value: '',
+              generated: true,
+              linkToFrame: c.frame,
+            })),
+            ...(v6Datagram.overlapped ? {
+              expertInfo: {
+                severity: 'warn' as const,
+                group: 'Malformed' as const,
+                message: 'Fragments overlap; the first copy of each byte was used',
+              },
+            } : {}),
+          });
+          filterFields['ipv6.reassembled'] = v6Reassembled.length;
+        } else {
+          fragmentLayer.fields.push({
+            name: '[Fragments so far]',
+            value: `${v6Datagram.frames.length} frame${v6Datagram.frames.length === 1 ? '' : 's'}, ${v6Datagram.bytesSoFar} bytes`,
+            generated: true,
+          });
+          if (v6Datagram.complete && v6Datagram.totalLength !== undefined) {
+            fragmentLayer.fields.push({
+              name: '[Datagram incomplete]',
+              value: `${v6Datagram.totalLength} bytes expected, ${v6Datagram.bytesSoFar} captured - waiting for a missing fragment`,
+              generated: true,
+              expertInfo: {
+                severity: 'note',
+                group: 'Malformed',
+                message: 'IPv6 datagram not reassembled: a fragment has not been captured',
+              },
+            });
+          }
+        }
+      }
+      if (v6Reassembled && v6Datagram) {
+        infoPatches = (infoPatches ?? []).concat(
+          v6Datagram.frames.filter((frameId) => frameId !== id).map((frameId) => ({
+            frameId, suffix: ` [Reassembled in ${id}]`,
+          })),
+        );
+        l3Tracker?.forgetFragments(srcIp, dstIp, chain!.fragmentId!, IPV6_FRAGMENT_KEY);
+      }
+    }
+
     const transport = isMalformedJumbo
       ? null
-      : decodeTransportLayer(rawBytes, transportOffset, nextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, ipv6PayloadLen, quicTracker);
+      : v6Reassembled
+        ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset))
+        : (chain?.stopsHere ?? false)
+          ? null
+          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen));
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
@@ -783,6 +1333,14 @@ export function decodeRawEthernetPacket(
       srcPort = transport.srcPort;
       dstPort = transport.dstPort;
       info = transport.info;
+      // A layer dissected out of a reassembled datagram describes bytes that
+      // are not in this frame's hex dump, so it carries no byte ranges - the
+      // same rule a TLS record reassembled across segments follows.
+      if (v6Reassembled) {
+        stripByteRanges(transport.layer);
+        for (const extra of transport.extraLayers ?? []) stripByteRanges(extra);
+      }
+      transportLayerIndex = layers.length;
       layers.push(transport.layer);
       // Timing lives here, not in the transport decoder, so the [Timestamps]
       // subtree the reference analyzer nests under UDP/TCP is attached from this side.
@@ -796,21 +1354,51 @@ export function decodeRawEthernetPacket(
         ],
       });
       if (transport.extraLayers) layers.push(...transport.extraLayers);
+      if (transport.protocolTokens) transportTokens = transport.protocolTokens;
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
       anomalies = transport.anomalies;
       icmpMatchedRequestFrameId = transport.icmpMatchedRequestFrameId;
+      // Concatenated, not replaced, for the same reason as the IPv4 branch:
+      // the fragment block above may already have written `[Reassembled in N]`
+      // onto this datagram's earlier fragments, and this is the frame that
+      // completed it.
+      const fromTransport = transportPatches(transport, id);
+      if (fromTransport) infoPatches = (infoPatches ?? []).concat(fromTransport);
+      resolvedNames = transport.resolvedNames;
       if (transport.streamId !== undefined) {
         ipv6Layer.fields.push({ name: '[Stream index]', value: transport.streamId, generated: true });
       }
     } else if (!isMalformedJumbo) {
-      // Same fallback as IPv4. Guarded on the jumbo case, which has already
-      // set its own more specific label and [Malformed Packet] info.
-      ({ label: protocolLabel, info } = describeUndissectedIpPayload(nextHeader));
+      if (chain && chain.fragmentPayloadOffset !== undefined) {
+        // A fragment of a datagram that is not (yet) whole. Its payload is a
+        // slice of something larger, not a transport header.
+        protocolLabel = 'IPv6';
+        info = `IPv6 fragment (off=${chain.fragmentOffset ?? 0} more=${chain.moreFragments ? 1 : 0} ident=0x${(chain.fragmentId ?? 0).toString(16).padStart(8, '0')} nxt=${chain.finalNextHeader})`;
+      } else if (chain && chain.finalNextHeader === NO_NEXT_HEADER) {
+        protocolLabel = 'IPv6';
+        info = 'IPv6 No Next Header';
+      } else {
+        // Same fallback as IPv4. Guarded on the jumbo case, which has already
+        // set its own more specific label and [Malformed Packet] info.
+        ({ label: protocolLabel, info } = describeUndissectedIpPayload(effectiveNextHeader));
+      }
     }
   }
 
+  // The worst finding anywhere in this frame's tree, as one field. A colour
+  // rule and a display filter can both ask about it; neither can walk a tree,
+  // which is why "Expert Warnings" could not be a rule before this existed.
+  const { expert, worst: worstExpert } = collectExpert(layers, anomalies);
+  if (worstExpert) filterFields['inwire.expert.severity'] = worstExpert;
+
   const frameProtocols = layers.map(l => PROTOCOL_NAME_MAP[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_'));
+  if (transportTokens.length > 0 && transportLayerIndex >= 0) {
+    frameProtocols.splice(transportLayerIndex + 1, 0, ...transportTokens.filter(t => !frameProtocols.includes(t)));
+  }
+  // Extension headers are layers with generated names; their filter tokens
+  // come from the walker, which knows which header each one was.
+  for (const token of extensionTokens) if (!frameProtocols.includes(token)) frameProtocols.push(token);
   layers[0].fields.push(
     { name: '[Protocols in frame]', value: frameProtocols.join(':'), generated: true },
     { name: 'Character encoding', value: 'ASCII (0)' },
@@ -819,7 +1407,7 @@ export function decodeRawEthernetPacket(
   return {
     packet: {
       id,
-      timestamp: epochMs,
+      tsUs,
       relativeTime,
       timeDelta,
       source: srcIp,
@@ -841,10 +1429,85 @@ export function decodeRawEthernetPacket(
       layers,
       rawBytes,
       anomalies,
+      ...(expert ? { expert } : {}),
+      ...(resolvedNames && resolvedNames.length > 0 ? { resolved: resolvedNames } : {}),
       interfaceName: captureInterface?.label ?? 'eth0',
     },
     icmpMatchedRequestFrameId,
+    infoPatches,
+    resolvedNames,
   };
+}
+
+/**
+ * A change to an EARLIER frame's Info that only this frame can know about.
+ *
+ * "[TCP PDU reassembled in 12]" on frames 10 and 11 is written by frame 12,
+ * the one that completed the record; "(reply in 42)" on a ping request is
+ * written by the reply. Single-pass dissection cannot see the future, so the
+ * frame that learns the fact hands it back and the caller patches the list -
+ * the import path directly, the live path on its next flush.
+ */
+export interface InfoPatch {
+  frameId: number;
+  /** Appended to the frame's Info. */
+  suffix?: string;
+  /** Replaces the frame's Protocol label - a ClientHello re-labelled with the negotiated version. */
+  protocolLabel?: string;
+  /**
+   * The frame that answered this DNS query. Recorded as a field rather than
+   * appended to Info, because Wireshark shows it in the tree only - the query
+   * row's Info stays as it was.
+   */
+  responseInFrame?: number;
+}
+
+function transportPatches(
+  transport: {
+    reassembledFrom?: number[];
+    labelPatches?: { frameId: number; protocolLabel: string }[];
+    dnsMatchedQueryFrameId?: number;
+  },
+  completedIn: number,
+): InfoPatch[] | undefined {
+  const out: InfoPatch[] = [];
+  for (const frameId of transport.reassembledFrom ?? []) out.push({ frameId, suffix: ` [TCP PDU reassembled in ${completedIn}]` });
+  for (const patch of transport.labelPatches ?? []) out.push(patch);
+  // The query frame learns which frame answered it only now.
+  if (transport.dnsMatchedQueryFrameId !== undefined) {
+    out.push({ frameId: transport.dnsMatchedQueryFrameId, responseInFrame: completedIn });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** Applies one patch to a packet, in place. */
+export function applyInfoPatch(packet: Packet, patch: InfoPatch): void {
+  if (patch.suffix) packet.info += patch.suffix;
+  if (patch.protocolLabel) packet.protocolLabel = patch.protocolLabel;
+  if (patch.responseInFrame !== undefined) {
+    packet.fields = { ...(packet.fields ?? {}), 'dns.response_in': patch.responseInFrame };
+    for (const layer of packet.layers ?? []) {
+      if (layer.name !== 'Domain Name System') continue;
+      layer.fields.push({
+        name: '[Response In]', value: patch.responseInFrame, generated: true,
+        linkToFrame: patch.responseInFrame, abbrev: 'dns.response_in',
+      });
+    }
+  }
+}
+
+/** Applies patches to packets already in a list; the packets are replaced, not mutated. */
+export function applyInfoPatches(packets: Packet[], patches: InfoPatch[]): Packet[] {
+  if (patches.length === 0) return packets;
+  const byFrame = new Map<number, InfoPatch[]>();
+  for (const p of patches) byFrame.set(p.frameId, [...(byFrame.get(p.frameId) ?? []), p]);
+  return packets.map((p) => {
+    const mine = byFrame.get(p.id);
+    if (!mine) return p;
+    const copy = { ...p };
+    for (const patch of mine) applyInfoPatch(copy, patch);
+    return copy;
+  });
 }
 
 
@@ -855,17 +1518,22 @@ export function decodeRawEthernetPacket(
  * low nibble of byte 12 plus all of byte 13. Offsets below are relative to
  * that window, which is what the rendered string shows.
  */
-const TCP_FLAG_ROWS: { name: string; bitOffset: number; bitLength: number; set: string; unset: string }[] = [
+// `abbrev` where the registry has the bit as a field of its own, which is
+// what makes the row one right-click from `tcp.flags.syn == 1`. The five
+// without one are drawn and not published; a row with no abbrev is display
+// only, and the tree's menu greys out its filter items rather than offering
+// an expression nothing would answer.
+const TCP_FLAG_ROWS: { name: string; bitOffset: number; bitLength: number; set: string; unset: string; abbrev?: string }[] = [
   { name: 'Reserved', bitOffset: 0, bitLength: 3, set: 'Set', unset: 'Not set' },
   { name: 'Accurate ECN', bitOffset: 3, bitLength: 1, set: 'Set', unset: 'Not set' },
   { name: 'Congestion Window Reduced', bitOffset: 4, bitLength: 1, set: 'Set', unset: 'Not set' },
   { name: 'ECN-Echo', bitOffset: 5, bitLength: 1, set: 'Set', unset: 'Not set' },
   { name: 'Urgent', bitOffset: 6, bitLength: 1, set: 'Set', unset: 'Not set' },
-  { name: 'Acknowledgment', bitOffset: 7, bitLength: 1, set: 'Set', unset: 'Not set' },
-  { name: 'Push', bitOffset: 8, bitLength: 1, set: 'Set', unset: 'Not set' },
-  { name: 'Reset', bitOffset: 9, bitLength: 1, set: 'Set', unset: 'Not set' },
-  { name: 'Syn', bitOffset: 10, bitLength: 1, set: 'Set', unset: 'Not set' },
-  { name: 'Fin', bitOffset: 11, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Acknowledgment', bitOffset: 7, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ack' },
+  { name: 'Push', bitOffset: 8, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.push' },
+  { name: 'Reset', bitOffset: 9, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.reset' },
+  { name: 'Syn', bitOffset: 10, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.syn' },
+  { name: 'Fin', bitOffset: 11, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.fin' },
 ];
 
 function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolField[] {
@@ -880,6 +1548,7 @@ function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolF
     return {
       name: row.name,
       value: isSet ? row.set : row.unset,
+      ...(row.abbrev ? { abbrev: row.abbrev } : {}),
       rawBytesRange: [transportOffset + 12, transportOffset + 13] as [number, number],
       bitfield: {
         bitOffset: row.bitOffset,
@@ -943,39 +1612,6 @@ function ipv6TrafficClassFields(rawBytes: Uint8Array, l3Offset: number): Protoco
   ];
 }
 
-/**
- * The children the reference analyzer nests under each MAC address: the address itself,
- * then the two flag bits carried in the first byte.
- *
- * Both bits render over 24 bits - the OUI, not the whole 6-byte address -
- * because that is the half of the address the IEEE assigns the flags in, and
- * it is the width `tshark -V` prints them at.
- */
-function macAddressFields(mac: string, offset: number): ProtocolField[] {
-  const firstByte = parseInt(mac.slice(0, 2), 16);
-  const locallyAdministered = (firstByte & 0x02) !== 0;
-  const groupAddress = (firstByte & 0x01) !== 0;
-
-  return [
-    { name: 'Address', value: resolveMacVendor(mac), rawBytesRange: [offset, offset + 5] },
-    {
-      name: 'LG bit',
-      value: locallyAdministered
-        ? 'Locally administered address (this is NOT the factory default)'
-        : 'Globally unique address (factory default)',
-      rawBytesRange: [offset, offset + 2],
-      bitfield: { bitOffset: 6, bitLength: 1, totalBits: 24 },
-    },
-    {
-      name: 'IG bit',
-      value: groupAddress
-        ? 'Group address (multicast/broadcast)'
-        : 'Individual address (unicast)',
-      rawBytesRange: [offset, offset + 2],
-      bitfield: { bitOffset: 7, bitLength: 1, totalBits: 24 },
-    },
-  ];
-}
 
 /**
  * The reference analyzer's arrival-time format: `Aug 25, 2026 20:16:40.351587600 Jerusalem
@@ -987,6 +1623,14 @@ function macAddressFields(mac: string, offset: number): ProtocolField[] {
  * nanosecond field are genuinely unknown, not measured.
  */
 /** The reference analyzer's [Address Space] classification for an IPv6 address. */
+function describeIpv6NextHeader(n: number): string {
+  const ext = IPV6_EXT_HEADERS[n];
+  if (ext) return `IPv6 ${ext} (${n})`;
+  if (n === NO_NEXT_HEADER) return 'No Next Header (59)';
+  const name = IP_PROTOCOL_NAMES[n];
+  return name ? `${name} (${n})` : String(n);
+}
+
 function ipv6AddressSpace(address: string): string {
   const a = address.toLowerCase();
   if (a === '::1') return 'Loopback';
@@ -997,8 +1641,8 @@ function ipv6AddressSpace(address: string): string {
   return 'Global Unicast';
 }
 
-function formatArrivalTime(epochMs: number, utc = false): string {
-  const d = new Date(epochMs);
+function formatArrivalTime(tsUs: number, utc = false): string {
+  const d = new Date(tsUs / 1000);
   const opts: Intl.DateTimeFormatOptions = {
     month: 'short', day: 'numeric', year: 'numeric',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -1008,24 +1652,10 @@ function formatArrivalTime(epochMs: number, utc = false): string {
   };
   const parts = new Intl.DateTimeFormat('en-US', opts).formatToParts(d);
   const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
-  const fractional = String(Math.round((epochMs % 1000) * 1e6)).padStart(9, '0');
+  const fractional = String((tsUs % 1_000_000) * 1000).padStart(9, '0');
   return `${get('month')} ${get('day')}, ${get('year')} ${get('hour')}:${get('minute')}:${get('second')}.${fractional} ${get('timeZoneName')}`;
 }
 
-function describeEtherType(etherType: number): string {
-  switch (etherType) {
-    case 0x0800: return 'IPv4';
-    case 0x86dd: return 'IPv6';
-    case 0x0806: return 'ARP';
-    case 0x8100: return '802.1Q Virtual LAN';
-    case 0x88a8: return '802.1ad Provider Bridge (QinQ)';
-    // Everything this switch does not name falls through to the ethertype
-    // table the dissectors share, so a frame the app can already label "LLDP"
-    // in the Protocol column does not simultaneously call its own ethertype
-    // "Unknown" one row into the Ethernet layer.
-    default: return labelForEtherType(etherType) ?? 'Unknown';
-  }
-}
 
 /**
  * Formats a 16-byte IPv6 address (starting at `offset` within `bytes`) in the
@@ -1141,7 +1771,15 @@ function decodeTransportLayer(
    * rawBytes.length would count that padding as payload.
    */
   l4SegmentLen?: number,
-  quicTracker?: QuicFlowTracker
+  quicTracker?: QuicFlowTracker,
+  /** Capture time, epoch microseconds - the analysis flags compare timings. */
+  tsUs?: number,
+  dnsTracker?: DnsTracker,
+  /**
+   * The IP pseudo-header for the transport checksum (RFC 793 / RFC 8200), or
+   * undefined when the network layer could not supply one.
+   */
+  pseudoHeader?: Uint8Array,
 ): {
   proto: Packet['protocol'];
   protocolLabel?: string;
@@ -1156,12 +1794,28 @@ function decodeTransportLayer(
    * stack rather than replacing it.
    */
   extraLayers?: ProtocolLayer[];
+  /**
+   * Extra `frameProtocols` tokens for a dissector that claims the payload
+   * without contributing a layer of its own - QUIC, whose only tree output is
+   * the TLS handshake it carries, and SSDP, which is one request line. Without
+   * these the bareword `quic` in a filter or a colour rule would have no layer
+   * to find, which is the same gap the extension-header walker fills.
+   */
+  protocolTokens?: string[];
   streamId?: number;
   status?: Packet['status'];
   analysisFlags?: string[];
   fields?: Record<string, string | number>;
   anomalies?: AnomalyInfo[];
   icmpMatchedRequestFrameId?: number;
+  /** Earlier frames that carried parts of a TLS record this segment completed. */
+  reassembledFrom?: number[];
+  /** Earlier frames whose Protocol label this segment's ServerHello settled. */
+  labelPatches?: { frameId: number; protocolLabel: string }[];
+  /** The query frame this DNS response answers, for its "[Response In]" patch. */
+  dnsMatchedQueryFrameId?: number;
+  /** Names this frame mapped to addresses, for passive name resolution. */
+  resolvedNames?: { name: string; addresses: string[] }[];
 } | null {
   // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {
@@ -1216,12 +1870,9 @@ function decodeTransportLayer(
     // Handshake-only options. SACK blocks are handled further down, once the
     // stream tracker is available, because their edges display relative to the
     // peer's sequence space just like Ack= does.
-    const handshakeOptionParts: string[] = [];
-    if (tcpOptions && syn) {
-      if (tcpOptions.mss !== undefined) handshakeOptionParts.push(`MSS=${tcpOptions.mss}`);
-      if (tcpOptions.windowScale !== undefined) handshakeOptionParts.push(`WS=${2 ** tcpOptions.windowScale}`);
-      if (tcpOptions.sackPermitted) handshakeOptionParts.push('SACK_PERM');
-    }
+    // In wire order, as Wireshark prints them: "MSS=1344 SACK_PERM WS=128"
+    // and "MSS=1428 WS=256 SACK_PERM" are different stacks' SYNs.
+    const handshakeOptionParts: string[] = tcpOptions && syn ? tcpOptions.infoParts : [];
 
     const tcpPayloadStart = transportOffset + tcpHeaderLen;
     // Prefer the network layer's declared segment length over the raw frame
@@ -1239,18 +1890,16 @@ function decodeTransportLayer(
     const payloadLength = l4SegmentLen !== undefined && l4SegmentLen >= tcpHeaderLen
       ? Math.max(0, Math.min(capturedPayloadLength, l4SegmentLen - tcpHeaderLen))
       : capturedPayloadLength;
-    // Try the TLS record layer before anything else claims the payload. A hit
-    // gives both the versioned Protocol label and the Info summary; a miss
-    // means the frame is plain TCP however suggestive its port number is.
-    const tlsResult = payloadLength > 0
-      ? dissectTls(rawBytes, tcpPayloadStart, Math.min(rawBytes.length, tcpPayloadStart + payloadLength))
-      : null;
-    if (tlsResult) {
-      proto = 'TLS';
-      protocolLabel = tlsResult.protocolLabel;
-    } else if (proto === 'TLS') {
-      proto = 'TCP';
-    }
+    // TLS is dissected further down, once the tracker has said whether this
+    // segment continues its direction in order: the record cursor that
+    // decides which frame a record belongs to may only advance on in-order
+    // data, and a gap resets it.
+    let tlsResult: TlsSegmentResult | null = null;
+
+    const storedChecksum = (rawBytes[transportOffset + 16] << 8) | rawBytes[transportOffset + 17];
+    const checksum = checksumVerdict(pseudoHeader, rawBytes, transportOffset,
+      l4SegmentLen !== undefined && l4SegmentLen >= tcpHeaderLen ? transportOffset + l4SegmentLen : rawBytes.length,
+      storedChecksum, false);
 
     // TLS payloads are encrypted from essentially the first byte - never
     // scan them, since any "match" there would be a false positive.
@@ -1299,53 +1948,167 @@ function decodeTransportLayer(
     let streamPacketNumber: number | undefined;
     let conversationCompleteness: string | undefined;
     let isKeepAlive = false;
-    let isKeepAliveAck = false;
     let lostSegment = false;
-    let ackedUnseenSegment = false;
+    let tlsInOrder = true;
+    let analysis: TcpAnalysis | undefined;
     if (tcpTracker) {
       streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
       streamPacketNumber = tcpTracker.recordStreamPacket(streamId);
       tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst);
 
-      isKeepAlive = tcpTracker.checkKeepAlive(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength, syn, fin, rst);
-      isKeepAliveAck = !isKeepAlive && payloadLength === 0 && ack && !syn && !fin && !rst
-        && tcpTracker.consumeKeepAliveAck(srcIp, srcPort, dstIp, dstPort);
-
-      // Both gap checks must run *before* checkSequence() advances this
-      // direction's high-water mark, otherwise the segment that reveals the
-      // gap is the same one that closes it and neither ever fires. A
-      // keep-alive deliberately sits one byte behind, so it is never a gap.
-      if (!isKeepAlive) {
-        lostSegment = tcpTracker.isPreviousSegmentMissing(srcIp, srcPort, dstIp, dstPort, seqNum);
-      }
-      if (ack && !isKeepAliveAck) {
-        ackedUnseenSegment = tcpTracker.isAckingUnseenSegment(srcIp, srcPort, dstIp, dstPort, ackNum);
-      }
-
-      if (!isKeepAlive) {
-        const seqResult = tcpTracker.checkSequence(srcIp, srcPort, dstIp, dstPort, seqNum, payloadLength);
-        if (seqResult === 'retransmit') {
-          status = 'retransmit';
-          anomalies = [{
-            type: 'tcp-retransmission',
-            severity: 'low',
-            title: 'TCP Retransmission',
-            description: `Segment with sequence number ${seqNum} was already seen on stream #${streamId} - likely a retransmission after packet loss or a duplicate ACK race.`,
-            recommendation: 'Check for network congestion, packet loss, or an unusually high round-trip time on this path.',
-          }];
-        } else if (seqResult === 'out-of-order') {
-          status = 'warning';
-          anomalies = [{
-            type: 'tcp-out-of-order',
-            severity: 'low',
-            title: 'TCP Out-of-Order Segment',
-            description: `Segment with sequence number ${seqNum} arrived out of order relative to previously seen data on stream #${streamId}.`,
-            recommendation: 'Usually harmless (multi-path routing or reordering in transit) - investigate further only if paired with retransmissions or application-level errors.',
-          }];
-        }
+      // Asked before the analysis advances the direction, so it describes
+      // where the stream stood when this segment arrived.
+      tlsInOrder = tcpTracker.isAtOrPastExpected(srcIp, srcPort, dstIp, dstPort, seqNum);
+      analysis = tcpTracker.analyze(srcIp, srcPort, dstIp, dstPort, {
+        frame: frameId ?? 0, timeUs: tsUs ?? 0, seq: seqNum, ack: ackNum, window: rawWindow,
+        segLen: payloadLength, syn, ack_: ack, fin, rst, windowScaleOption: tcpOptions?.windowScale,
+        sackBlocks: tcpOptions?.sackBlocks.map((b) => ({ left: b.leftEdge, right: b.rightEdge })),
+      });
+      isKeepAlive = analysis.flags.includes('keep_alive');
+      lostSegment = analysis.flags.includes('lost_segment');
+      if (analysis.flags.includes('retransmission') || analysis.flags.includes('fast_retransmission') || analysis.flags.includes('spurious_retransmission')) {
+        status = 'retransmit';
+        anomalies = [{
+          type: 'tcp-retransmission',
+          severity: 'low',
+          title: 'TCP Retransmission',
+          description: `Segment with sequence number ${seqNum} was already seen on stream #${streamId} - likely a retransmission after packet loss or a duplicate ACK race.`,
+          recommendation: 'Check for network congestion, packet loss, or an unusually high round-trip time on this path.',
+        }];
+      } else if (analysis.flags.includes('out_of_order')) {
+        status = 'warning';
+        anomalies = [{
+          type: 'tcp-out-of-order',
+          severity: 'low',
+          title: 'TCP Out-of-Order Segment',
+          description: `Segment with sequence number ${seqNum} arrived out of order relative to previously seen data on stream #${streamId}.`,
+          recommendation: 'Usually harmless (multi-path routing or reordering in transit) - investigate further only if paired with retransmissions or application-level errors.',
+        }];
       }
 
       conversationCompleteness = tcpTracker.getConversationCompleteness(streamId);
+    }
+
+    // The TLS record layer, now that the segment's place in the stream is
+    // known. Only streams that look like TLS pay for cursor state: port 443, a
+    // direction that already has a cursor, or a plausible record header.
+    let reassembledFrom: number[] | undefined;
+    let labelPatches: { frameId: number; protocolLabel: string }[] | undefined;
+    // A segment out of order is still dissected - Wireshark reassembles it and
+    // labels it with what it carries - but a retransmission is not: its bytes
+    // were already read in order, and Wireshark shows the plain TCP line for
+    // the copy. Getting this backwards costs either the Server Hellos that
+    // arrive out of order or 8 % of a download-heavy capture's Protocol column.
+    const isRetransmitted = analysis !== undefined
+      && (analysis.flags.includes('retransmission')
+        || analysis.flags.includes('fast_retransmission')
+        || analysis.flags.includes('spurious_retransmission'));
+    // DNS over TCP, which is what a zone transfer, a response too big for a
+    // datagram, and every DNS-over-TLS connection underneath its encryption
+    // are. It differs from the datagram form by a two-byte length prefix and
+    // nothing else, so the whole of Phase 7's dissector applies to it - it was
+    // simply never reached, because the dispatch only looked at UDP.
+    let tcpDns: {
+      info: string; layer: ProtocolLayer;
+      fields: Record<string, string | number>;
+      resolved: { name: string; addresses: string[] }[];
+    } | null = null;
+    if ((srcPort === 53 || dstPort === 53) && payloadLength > 2) {
+      const declared = (rawBytes[tcpPayloadStart] << 8) | rawBytes[tcpPayloadStart + 1];
+      const messageStart = tcpPayloadStart + 2;
+      const messageEnd = Math.min(rawBytes.length, messageStart + declared);
+      // Only a message that fits inside this one segment. A DNS response split
+      // across segments needs the reassembly the TLS cursor does, and claiming
+      // it here would mean parsing half a message and reporting the half.
+      if (declared > 0 && messageStart + declared <= tcpPayloadStart + payloadLength) {
+        const parsed = parseDnsMessage(rawBytes, messageStart, messageEnd);
+        if (parsed) {
+          const dissection = buildDnsLayer(rawBytes, messageStart, messageEnd, undefined);
+          if (dissection) {
+            tcpDns = {
+              info: dnsInfoLine(parsed, false),
+              layer: dissection.layer,
+              fields: dissection.fields,
+              resolved: dissection.resolved,
+            };
+          }
+        }
+      }
+    }
+
+    if (!tcpDns && payloadLength > 0 && !isKeepAlive && !isRetransmitted) {
+      const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+      const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
+      if (isTlsPort || existing !== undefined || looksLikeTlsRecord(rawBytes, tcpPayloadStart, payloadEnd)) {
+        const cursor = tcpTracker ? tcpTracker.tlsCursor(srcIp, srcPort, dstIp, dstPort) : freshTlsCursor();
+        const conversation = tcpTracker ? tcpTracker.tlsConversation(srcIp, srcPort, dstIp, dstPort) : freshTlsConversation();
+        const outcome = dissectTlsSegment(rawBytes, tcpPayloadStart, payloadEnd, {
+          // An out-of-order or retransmitted segment is read against a copy
+          // of the cursor: its bytes were (or will be) counted in order, so
+          // consuming them twice would put the record layer out of step, but
+          // a Server Hello sitting in one is still a Server Hello and
+          // Wireshark labels it as one.
+          frameId: frameId ?? 0, cursor, conversation, inOrder: tlsInOrder, segmentSeq: seqNum, gap: lostSegment,
+        });
+        if (outcome.kind === 'tls') {
+          tlsResult = outcome.result;
+          reassembledFrom = outcome.result.reassembledFrom;
+          labelPatches = outcome.result.labelPatches;
+        }
+      }
+    }
+    // Cleartext HTTP, which until now was a Protocol column filled in from the
+    // port number over a payload nothing read. Gated on the port list rather
+    // than sniffed from every TCP stream: `looksLikeHttp1` is strict, but a
+    // stream is only recognisable at a message boundary and nothing tells us
+    // where one is, so a mid-stream guess on an arbitrary port would sometimes
+    // find a "request" inside a binary payload. A stream already identified
+    // keeps being read whatever its port.
+    let httpResult: AppStreamResult | null = null;
+    // Never on a connection that has shown TLS. A frame that only *continues* a
+    // TLS record produces no `tlsResult`, and without this guard it would fall
+    // through to here and be handed to the HTTP decoders as cleartext - which
+    // is to say, ciphertext would be fed into the same decoder the decrypted
+    // plaintext goes to, from the same connection's state. The symptom was
+    // HTTP/2 frame boundaries that stopped lining up a few kilobytes into a
+    // download, which looks like a framing bug and is not one.
+    const tlsOnThisConnection = tcpTracker !== undefined && (
+      isTlsPort
+      || tcpTracker.peekTlsCursor(srcIp, srcPort, dstIp, dstPort)?.unknown === false
+      || tcpTracker.peekTlsCursor(dstIp, dstPort, srcIp, srcPort)?.unknown === false
+    );
+    if (!tcpDns && !tlsResult && !tlsOnThisConnection
+      && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder && tcpTracker) {
+      const conversation = tcpTracker.tlsConversation(srcIp, srcPort, dstIp, dstPort);
+      const serverIsDestination = HTTP_PORTS.has(dstPort) || (!HTTP_PORTS.has(srcPort) && dstPort < srcPort);
+      const known = serverIsDestination ? conversation.appClient : conversation.appServer;
+      if (HTTP_PORTS.has(srcPort) || HTTP_PORTS.has(dstPort) || (known !== undefined && known.protocol !== 'unknown')) {
+        if (serverIsDestination) conversation.appClient ??= freshAppDirection();
+        else conversation.appServer ??= freshAppDirection();
+        const own = (serverIsDestination ? conversation.appClient : conversation.appServer)!;
+        const peer = serverIsDestination ? conversation.appServer : conversation.appClient;
+        const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+        const app = dissectAppStream(
+          rawBytes.subarray(tcpPayloadStart, payloadEnd), own, serverIsDestination, conversation.alpn, peer,
+        );
+        if (app.protocolLabel !== null) httpResult = app;
+      }
+    }
+
+    if (tcpDns) {
+      proto = 'DNS';
+      protocolLabel = 'DNS';
+    } else if (tlsResult) {
+      proto = 'TLS';
+      protocolLabel = tlsResult.appProtocolLabel ?? tlsResult.protocolLabel;
+    } else if (httpResult) {
+      proto = 'HTTP';
+      protocolLabel = httpResult.protocolLabel ?? 'HTTP';
+    } else if (proto === 'TLS' || proto === 'HTTP') {
+      // The port was only ever a hint. A bare ACK or a handshake segment on
+      // port 80 carries no HTTP, and calling it HTTP is what made the shipped
+      // `http` colour rule paint a connection's whole three-way handshake.
+      proto = 'TCP';
     }
 
     // Every expert annotation is a bracketed *prefix* on the Info column, and
@@ -1353,24 +2116,22 @@ function decodeTransportLayer(
     // "[TCP Previous segment not captured] [TCP Out-Of-Order] 443 → 51685 ...".
     // They are ordered here the way the reference analyzer emits them: the gap that
     // explains the segment first, then the segment's own classification.
-    const expertTags: string[] = [];
-    // The reference analyzer's own tcp.analysis.* field names, kept alongside the display
-    // tags so color rules and display filters can match on them the way
-    // The reference analyzer's do ("tcp.analysis.flags && !tcp.analysis.keep_alive").
-    const analysisFlags: string[] = [];
-    if (lostSegment) { expertTags.push('[TCP Previous segment not captured]'); analysisFlags.push('lost_segment'); }
-    if (ackedUnseenSegment) { expertTags.push('[TCP ACKed unseen segment]'); analysisFlags.push('ack_lost_segment'); }
-    if (isKeepAlive) { expertTags.push('[TCP Keep-Alive]'); analysisFlags.push('keep_alive'); }
-    if (isKeepAliveAck) { expertTags.push('[TCP Keep-Alive ACK]'); analysisFlags.push('keep_alive_ack'); }
-    if (status === 'retransmit') { expertTags.push('[TCP Retransmission]'); analysisFlags.push('retransmission'); }
-    else if (status === 'warning') { expertTags.push('[TCP Out-Of-Order]'); analysisFlags.push('out_of_order'); }
+    // The tags, in the order Wireshark prints them, and the tcp.analysis.*
+    // names display filters and colour rules match on.
+    const expertTags: string[] = analysis ? analysis.tags : [];
+    const analysisFlags: string[] = analysis ? [...analysis.flags] : [];
+    const isKeepAliveAck = analysisFlags.includes('keep_alive_ack');
 
     // When a subdissector claimed the payload, its summary *replaces* the TCP
     // one - the reference analyzer shows "Application Data", not the ports and sequence
     // numbers underneath it. Expert tags still lead, since they describe the
     // segment rather than its contents.
-    const infoParts = tlsResult
+    const infoParts = tcpDns
+      ? [tcpDns.info]
+      : tlsResult
       ? [tlsResult.info]
+      : httpResult
+      ? [httpResult.info.join(', ')]
       : [
           `${srcPort} → ${dstPort}`,
           `[${flagList.join(', ')}]`,
@@ -1381,7 +2142,13 @@ function decodeTransportLayer(
           ...(optionsSummary ? [optionsSummary] : []),
           ...(tcpHost ? [tcpHost] : []),
         ];
-    const info = `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
+    // "[TCP Previous segment not captured] , Application Data": when a
+    // subdissector provided the Info, Wireshark's column joins the TCP expert
+    // tags to it with " , " - the artefact of two dissectors each appending
+    // to one column. Matched exactly, since the column text is the contract.
+    const info = (tlsResult || tcpDns || httpResult) && expertTags.length > 0
+      ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
+      : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
 
     return {
       proto,
@@ -1390,7 +2157,22 @@ function decodeTransportLayer(
       dstPort,
       info,
       streamId,
+      extraLayers: tcpDns
+        ? [tcpDns.layer]
+        : tlsResult
+        ? [tlsResult.layer, ...(tlsResult.appLayers ?? [])]
+        : httpResult
+        ? httpResult.layers
+        : undefined,
+      // A name learned over TCP is a name learned; the passive resolution map
+      // does not care which transport carried the answer.
+      resolvedNames: tcpDns && tcpDns.resolved.length > 0 ? tcpDns.resolved : undefined,
+      reassembledFrom,
+      labelPatches,
       fields: {
+        ...(tlsResult ? tlsResult.fields : {}),
+        ...(httpResult ? httpResult.fields : {}),
+        ...(tcpDns ? tcpDns.fields : {}),
         'tcp.flags': flags,
         'tcp.flags.syn': syn ? 1 : 0,
         'tcp.flags.fin': fin ? 1 : 0,
@@ -1401,6 +2183,20 @@ function decodeTransportLayer(
         'tcp.dstport': dstPort,
         'tcp.window_size': windowSize,
         'tcp.len': payloadLength,
+        'tcp.seq': relSeq,
+        'tcp.seq_raw': seqNum,
+        'tcp.ack': relAck,
+        'tcp.ack_raw': ackNum,
+        'tcp.checksum': storedChecksum,
+        'tcp.checksum.status': checksum.status,
+        ...(tcpOptions?.mss !== undefined ? { 'tcp.options.mss': tcpOptions.mss } : {}),
+        ...(tcpOptions?.windowScale !== undefined ? { 'tcp.options.wscale.shift': tcpOptions.windowScale } : {}),
+        ...(tcpOptions?.sackPermitted ? { 'tcp.options.sack_perm': 1 } : {}),
+        ...(tcpOptions?.tsval !== undefined ? { 'tcp.options.timestamp.tsval': tcpOptions.tsval } : {}),
+        ...(analysis?.ackRttUs !== undefined ? { 'tcp.analysis.ack_rtt': analysis.ackRttUs / 1e6 } : {}),
+        ...(analysis?.initialRttUs !== undefined ? { 'tcp.analysis.initial_rtt': analysis.initialRttUs / 1e6 } : {}),
+        ...(analysis?.bytesInFlight !== undefined ? { 'tcp.analysis.bytes_in_flight': analysis.bytesInFlight } : {}),
+        ...(analysis?.dupAckNum !== undefined ? { 'tcp.analysis.duplicate_ack_num': analysis.dupAckNum, 'tcp.analysis.duplicate_ack_frame': analysis.dupAckFrame ?? 0 } : {}),
       },
       status: status ?? (analysisFlags.length > 0 && !isKeepAlive && !isKeepAliveAck ? 'warning' : undefined),
       analysisFlags,
@@ -1410,22 +2206,24 @@ function decodeTransportLayer(
         summary: `Transmission Control Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
         rawBytesRange: [transportOffset, transportOffset + tcpHeaderLen - 1],
         fields: [
-          { name: 'Source Port', value: srcPort, rawBytesRange: [transportOffset, transportOffset + 1] },
-          { name: 'Destination Port', value: dstPort, rawBytesRange: [transportOffset + 2, transportOffset + 3] },
+          { name: 'Source Port', value: srcPort, abbrev: 'tcp.srcport', rawBytesRange: [transportOffset, transportOffset + 1] },
+          { name: 'Destination Port', value: dstPort, abbrev: 'tcp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3] },
           {
             name: 'Sequence Number',
             value: `${relSeq} (relative sequence number)`,
+            abbrev: 'tcp.seq',
             rawBytesRange: [transportOffset + 4, transportOffset + 7],
             children: [
-              { name: 'Sequence Number (raw)', value: seqNum, rawBytesRange: [transportOffset + 4, transportOffset + 7] },
+              { name: 'Sequence Number (raw)', value: seqNum, abbrev: 'tcp.seq_raw', rawBytesRange: [transportOffset + 4, transportOffset + 7] },
             ],
           },
           {
             name: 'Acknowledgment Number',
             value: `${relAck} (relative ack number)`,
+            abbrev: 'tcp.ack',
             rawBytesRange: [transportOffset + 8, transportOffset + 11],
             children: [
-              { name: 'Acknowledgment Number (raw)', value: ackNum, rawBytesRange: [transportOffset + 8, transportOffset + 11] },
+              { name: 'Acknowledgment Number (raw)', value: ackNum, abbrev: 'tcp.ack_raw', rawBytesRange: [transportOffset + 8, transportOffset + 11] },
             ],
           },
           {
@@ -1439,13 +2237,29 @@ function decodeTransportLayer(
           {
             name: 'Flags',
             value: `0x${flags.toString(16).padStart(3, '0')} (${flagList.join(', ')})`,
+            abbrev: 'tcp.flags',
             rawBytesRange: [transportOffset + 12, transportOffset + 13],
             children: tcpFlagFields(rawBytes, transportOffset),
           },
           ...(expectedNextRel !== undefined ? [{ name: '[Next Sequence Number]', value: expectedNextRel, generated: true }] : []),
+          // The window as sent, then the window after the scale factor from
+          // this connection's SYN. Wireshark draws both, and `tcp.window_size`
+          // is the scaled one - the number that actually bounds the sender.
+          { name: 'Window', value: rawWindow, rawBytesRange: [transportOffset + 14, transportOffset + 15] },
+          { name: '[Calculated window size]', value: windowSize, generated: true, abbrev: 'tcp.window_size' },
+          { name: '[TCP Segment Len]', value: payloadLength, generated: true, abbrev: 'tcp.len' },
+          {
+            name: 'Checksum',
+            value: `0x${storedChecksum.toString(16).padStart(4, '0')} [${checksum.status === 'Good' ? 'correct' : checksum.status === 'Bad' ? 'incorrect' : 'unverified'}]`,
+            rawBytesRange: [transportOffset + 16, transportOffset + 17],
+            abbrev: 'tcp.checksum',
+            children: [{ name: '[Checksum Status]', value: checksum.status, generated: true, abbrev: 'tcp.checksum.status',
+              ...(checksum.status === 'Bad' ? { expertInfo: { severity: 'error' as const, group: 'Checksum' as const, message: 'Bad checksum' } } : {}) }],
+          },
           ...(streamPacketNumber !== undefined ? [{ name: '[Stream Packet Number]', value: streamPacketNumber, generated: true }] : []),
           ...(conversationCompleteness !== undefined ? [{ name: '[Conversation completeness]', value: conversationCompleteness, generated: true }] : []),
           ...(tcpOptions ? tcpOptions.fields : []),
+          ...(analysis ? tcpAnalysisFields(analysis) : []),
         ],
       },
     };
@@ -1454,6 +2268,8 @@ function decodeTransportLayer(
     const srcPort = (rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1];
     const dstPort = (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3];
     const udpLen = (rawBytes[transportOffset + 4] << 8) | rawBytes[transportOffset + 5];
+    const udpChecksum = (rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7];
+    const udpVerdict = checksumVerdict(pseudoHeader, rawBytes, transportOffset, transportOffset + udpLen, udpChecksum, true);
 
     let proto: Packet['protocol'] = 'UDP';
     let protocolLabel: string | undefined;
@@ -1474,6 +2290,8 @@ function decodeTransportLayer(
     const udpPayloadStart = transportOffset + 8;
     const isQuic = srcPort === 443 || dstPort === 443;
     const isSsdp = srcPort === 1900 || dstPort === 1900;
+    const isDhcp = (srcPort === 67 || srcPort === 68) && (dstPort === 67 || dstPort === 68);
+    const isDhcpv6 = (srcPort === 546 || srcPort === 547) && (dstPort === 546 || dstPort === 547);
 
     // The UDP header's Length field counts the 8-byte header itself, but
     // The reference analyzer's "Len=" - like TCP's - reports payload only.
@@ -1483,21 +2301,62 @@ function decodeTransportLayer(
     // "src → dst Len=n" summary entirely, the way the reference analyzer does.
     let info: string | null = null;
     const extraLayers: ProtocolLayer[] = [];
+    const dhcpFields: Record<string, string | number> = {};
+    const dnsFields: Record<string, string | number> = {};
+    const quicFields: Record<string, string | number> = {};
+    const appFields: Record<string, string | number> = {};
+    let dnsMatchedQueryFrameId: number | undefined;
+    let resolvedNames: { name: string; addresses: string[] }[] | undefined;
+    const protocolTokens: string[] = [];
 
-    if (dnsPortLabel) {
-      const dnsInfo = dissectDns(rawBytes, udpPayloadStart);
-      if (dnsInfo) {
+    if (isDhcp || isDhcpv6) {
+      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+      const dhcp = isDhcp
+        ? dissectDhcp(rawBytes, udpPayloadStart, payloadEnd)
+        : dissectDhcpv6(rawBytes, udpPayloadStart, payloadEnd);
+      if (dhcp) {
+        protocolLabel = dhcp.protocolLabel;
+        info = dhcp.info;
+        extraLayers.push(dhcp.layer);
+        Object.assign(dhcpFields, dhcp.fields);
+      }
+    } else if (dnsPortLabel) {
+      const multicast = dnsPortLabel === 'MDNS';
+      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+      const parsed = parseDnsMessage(rawBytes, udpPayloadStart, payloadEnd);
+      if (parsed) {
         protocolLabel = dnsPortLabel;
-        info = dnsInfo;
-        // DNS previously contributed only this Info string; the layer gives
-        // the flag bits somewhere to live in the detail tree.
-        const dnsLayer = buildDnsLayer(rawBytes, udpPayloadStart);
-        if (dnsLayer) extraLayers.push(dnsLayer);
+        info = dnsInfoLine(parsed, multicast);
+
+        // Pair the query with its response. The response knows which frame
+        // asked; the query only learns its answer afterwards, which is what
+        // the returned frame id is patched back onto.
+        let pairing: { requestFrame?: number; elapsedUs?: number } | undefined;
+        if (dnsTracker && frameId !== undefined && tsUs !== undefined) {
+          const question = parsed.questions[0]?.name ?? '';
+          if (parsed.isResponse) {
+            const hit = dnsTracker.matchResponse(parsed.transactionId, dstIp, dstPort, question, multicast, tsUs);
+            if (hit) {
+              pairing = { requestFrame: hit.frameId, elapsedUs: hit.elapsedUs };
+              dnsMatchedQueryFrameId = hit.frameId;
+            }
+          } else {
+            dnsTracker.recordQuery(parsed.transactionId, srcIp, srcPort, question, multicast, frameId, tsUs);
+          }
+        }
+
+        const dns = buildDnsLayer(rawBytes, udpPayloadStart, payloadEnd, pairing);
+        if (dns) {
+          extraLayers.push(dns.layer);
+          Object.assign(dnsFields, dns.fields);
+          if (dns.resolved.length > 0) resolvedNames = dns.resolved;
+        }
       }
     } else if (isSsdp) {
       const requestLine = readAsciiRequestLine(rawBytes, udpPayloadStart);
       if (requestLine) {
         protocolLabel = 'SSDP';
+        protocolTokens.push('ssdp');
         // The reference analyzer's HTTP-style dissectors emit a trailing space after the
         // request line; kept so the diff against tshark is exact.
         info = `${requestLine} `;
@@ -1526,8 +2385,76 @@ function decodeTransportLayer(
           }
           proto = 'QUIC';
           protocolLabel = 'QUIC';
+          protocolTokens.push('quic');
           info = quic.info;
+
+          // The TLS handshake rides in CRYPTO frames, reassembled across
+          // Initial packets by the flow tracker. This is the only way a
+          // passive observer learns a QUIC connection's server name: the
+          // ClientHello is inside an encrypted packet whose keys derive from
+          // the connection ID, and it does not fit in one packet once a
+          // post-quantum key share is in it.
+          // STREAM frames only exist here when a key log opened the packets
+          // that carried them, so this is where HTTP/3 becomes readable at
+          // all. It is read before the handshake facts below because a
+          // datagram can carry both.
+          const streams = quicTracker?.readStreams(srcIp, srcPort, dstIp, dstPort, quic.streamFragments) ?? [];
+          const http3 = buildHttp3Layer(streams);
+          if (http3) {
+            protocolLabel = 'HTTP3';
+            info = `${quic.info}, ${http3.info.join(', ')}`;
+            Object.assign(appFields, http3.fields);
+          }
+
+          const facts = quicTracker?.addCryptoFragments(srcIp, srcPort, dstIp, dstPort, quic.cryptoFragments);
+          if (facts?.hello) {
+            const h = facts.hello;
+            if (h.sni !== null) quicFields['tls.handshake.extensions_server_name'] = h.sni;
+            if (h.alpn.length > 0) quicFields['tls.handshake.extensions_alpn_str'] = h.alpn.join(',');
+            quicFields['tls.handshake.ja3'] = h.ja3;
+            quicFields['tls.handshake.ja3_full'] = h.ja3Full;
+            quicFields['tls.handshake.ja4'] = h.ja4;
+            quicFields['tls.handshake.ja4_r'] = h.ja4Raw;
+            quicFields['tls.handshake.extensions_ech'] = h.echPresent ? 1 : 0;
+            extraLayers.push(buildQuicTlsLayer(h, undefined));
+          }
+          if (facts?.serverHello) {
+            const sh = facts.serverHello;
+            quicFields['tls.handshake.ciphersuite'] = sh.cipher;
+            quicFields['tls.handshake.ja3s'] = sh.ja3s;
+            quicFields['tls.handshake.ja3s_full'] = sh.ja3sFull;
+            if (sh.selectedVersion !== null) quicFields['tls.handshake.extensions.supported_version'] = sh.selectedVersion;
+            extraLayers.push(buildQuicTlsLayer(undefined, sh));
+          }
+
+          // Last, so `frameProtocols` - which is read off the layer names in
+          // order - puts `http3` after the `tls` of a datagram that carries
+          // both a handshake message and application data. HTTP/3 is carried
+          // *by* the connection the handshake sets up, not beside it.
+          if (http3) extraLayers.push(http3.layer);
         }
+      }
+    }
+
+    if (info === null) {
+      // NTP and STUN, by their port first and then by what the payload
+      // actually is. The content check is what matters for STUN: it is how a
+      // WebRTC call finds itself, it runs on whichever port the ICE candidate
+      // got, and RFC 5389 put a fixed magic cookie in the header precisely so
+      // that it could be recognised anywhere. Without this every one of those
+      // frames reads as anonymous UDP with a length.
+      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+      const app = (srcPort === 123 || dstPort === 123)
+        ? dissectNtp(rawBytes, udpPayloadStart, payloadEnd)
+        : (srcPort === 3478 || dstPort === 3478 || srcPort === 3479 || dstPort === 3479)
+          ? dissectStun(rawBytes, udpPayloadStart, payloadEnd)
+          : dissectUdpByContent(rawBytes, udpPayloadStart, payloadEnd);
+      if (app) {
+        protocolLabel = app.protocolLabel;
+        info = app.info;
+        extraLayers.push(app.layer);
+        protocolTokens.push(app.token);
+        Object.assign(appFields, app.fields);
       }
     }
 
@@ -1547,26 +2474,33 @@ function decodeTransportLayer(
       dstPort,
       info,
       extraLayers,
+      protocolTokens,
+      dnsMatchedQueryFrameId,
+      resolvedNames,
       fields: {
         'udp.srcport': srcPort,
         'udp.dstport': dstPort,
         'udp.length': udpLen,
+        'udp.checksum': udpChecksum,
+        'udp.checksum.status': udpVerdict.status,
+        ...dhcpFields,
+        ...dnsFields,
+        ...quicFields,
+        ...appFields,
       },
       layer: {
         name: 'User Datagram Protocol',
         summary: `User Datagram Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
         rawBytesRange: [transportOffset, transportOffset + 7],
         fields: [
-          { name: 'Source Port', value: srcPort, rawBytesRange: [transportOffset, transportOffset + 1] },
-          { name: 'Destination Port', value: dstPort, rawBytesRange: [transportOffset + 2, transportOffset + 3] },
-          { name: 'Length', value: udpLen, rawBytesRange: [transportOffset + 4, transportOffset + 5] },
+          { name: 'Source Port', value: srcPort, abbrev: 'udp.srcport', rawBytesRange: [transportOffset, transportOffset + 1] },
+          { name: 'Destination Port', value: dstPort, abbrev: 'udp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3] },
+          { name: 'Length', value: udpLen, abbrev: 'udp.length', rawBytesRange: [transportOffset + 4, transportOffset + 5] },
           {
-            // Checksum validation is deliberately off, and the reference analyzer words an
-            // unvalidated checksum exactly this way rather than hiding it.
             name: 'Checksum',
-            value: `0x${(((rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7]) >>> 0).toString(16).padStart(4, '0')} [unverified]`,
-            rawBytesRange: [transportOffset + 6, transportOffset + 7],
-            children: [{ name: '[Checksum Status]', value: 'Unverified', generated: true }],
+            value: `0x${udpChecksum.toString(16).padStart(4, '0')} [${udpVerdict.status === 'Good' ? 'correct' : udpVerdict.status === 'Bad' ? 'incorrect' : 'unverified'}]`,
+            rawBytesRange: [transportOffset + 6, transportOffset + 7], abbrev: 'udp.checksum',
+            children: [{ name: '[Checksum Status]', value: udpVerdict.status, generated: true, abbrev: 'udp.checksum.status' }],
           },
           { name: 'UDP payload', value: `${Math.max(0, udpLen - 8)} bytes`, rawBytesRange: [transportOffset + 8, transportOffset + Math.max(8, udpLen - 1)] },
         ],
@@ -1610,8 +2544,8 @@ function decodeTransportLayer(
     let info: string;
     if (isIcmpv6) {
       switch (icmpType) {
-        case 128: info = 'Echo (ping) request'; break;
-        case 129: info = 'Echo (ping) reply'; break;
+        case 128: info = 'Echo (ping) request '; break;
+        case 129: info = 'Echo (ping) reply   '; break;
         case 133: info = 'Router Solicitation'; break;
         case 134: info = 'Router Advertisement'; break;
         case 135: info = describeNeighborSolicitation(rawBytes, transportOffset); break;
@@ -1621,14 +2555,25 @@ function decodeTransportLayer(
         case 131: info = 'Multicast Listener Report'; break;
         case 132: info = 'Multicast Listener Done'; break;
         case 143: info = 'Multicast Listener Report Message v2'; break;
+        case 1: info = `Destination Unreachable (${ICMPV6_UNREACHABLE_CODES[icmpCode] ?? `Code ${icmpCode}`})`; break;
+        case 2: info = 'Packet Too Big'; break;
+        case 3: info = `Time Exceeded (${icmpCode === 0 ? 'hop limit exceeded in transit' : 'fragment reassembly time exceeded'})`; break;
+        case 4: info = `Parameter Problem (${icmpCode === 0 ? 'erroneous header field encountered' : icmpCode === 1 ? 'unrecognized Next Header type encountered' : 'unrecognized IPv6 option encountered'})`; break;
         default: info = `ICMPv6 Type ${icmpType} Code ${icmpCode}`;
       }
     } else if (icmpType === 8) {
-      info = 'Echo (ping) request';
+      // Two trailing spaces, and five after "reply": Wireshark pads the word so
+      // the id= columns line up down the Info column. Matched exactly, since
+      // the column text is the contract the parity harness compares.
+      info = 'Echo (ping) request ';
     } else if (icmpType === 0) {
-      info = 'Echo (ping) reply';
+      info = 'Echo (ping) reply   ';
     } else {
-      info = `ICMP Type ${icmpType} Code ${icmpCode}`;
+      const named = ICMP_TYPE_NAMES[icmpType];
+      const code = icmpType === 3 ? ICMP_UNREACHABLE_CODES[icmpCode]
+        : icmpType === 11 ? (icmpCode === 0 ? 'Time to live exceeded in transit' : 'Fragment reassembly time exceeded')
+        : icmpType === 5 ? ICMP_REDIRECT_CODES[icmpCode] : undefined;
+      info = named ? (code ? `${named} (${code})` : named) : `ICMP Type ${icmpType} Code ${icmpCode}`;
     }
 
     if (icmpId !== undefined && icmpSeq !== undefined) {
@@ -1715,12 +2660,19 @@ function parseTcpOptions(
   windowScale?: number;
   sackPermitted: boolean;
   sackBlocks: { leftEdge: number; rightEdge: number }[];
+  /** The SYN's option summary, in wire order. */
+  infoParts: string[];
+  tsval?: number;
+  tsecr?: number;
 } {
   const fields: ProtocolField[] = [];
   let mss: number | undefined;
   let windowScale: number | undefined;
   let sackPermitted = false;
   const sackBlocks: { leftEdge: number; rightEdge: number }[] = [];
+  const infoParts: string[] = [];
+  let tsval: number | undefined;
+  let tsecr: number | undefined;
 
   let offset = optionsStart;
   while (offset < optionsEnd && offset < rawBytes.length) {
@@ -1738,13 +2690,16 @@ function parseTcpOptions(
 
     if (kind === 2 && length === 4) {
       mss = (rawBytes[offset + 2] << 8) | rawBytes[offset + 3];
-      fields.push({ name: 'TCP Option - Maximum Segment Size', value: `MSS: ${mss}`, rawBytesRange: [offset, offset + length - 1] });
+      infoParts.push(`MSS=${mss}`);
+      fields.push({ name: 'TCP Option - Maximum Segment Size', value: `MSS: ${mss}`, rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.mss' });
     } else if (kind === 3 && length === 3) {
       windowScale = rawBytes[offset + 2];
-      fields.push({ name: 'TCP Option - Window Scale', value: `${windowScale} (multiply by ${2 ** windowScale})`, rawBytesRange: [offset, offset + length - 1] });
+      infoParts.push(`WS=${2 ** windowScale}`);
+      fields.push({ name: 'TCP Option - Window Scale', value: `${windowScale} (multiply by ${2 ** windowScale})`, rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.wscale.shift' });
     } else if (kind === 4 && length === 2) {
       sackPermitted = true;
-      fields.push({ name: 'TCP Option - SACK Permitted', value: 'True', rawBytesRange: [offset, offset + length - 1] });
+      infoParts.push('SACK_PERM');
+      fields.push({ name: 'TCP Option - SACK Permitted', value: 'True', rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.sack_perm' });
     } else if (kind === 5) {
       const blockCount = Math.floor((length - 2) / 8);
       for (let i = 0; i < blockCount; i++) {
@@ -1755,9 +2710,9 @@ function parseTcpOptions(
         fields.push({ name: `TCP Option - SACK Block ${i + 1}`, value: `${leftEdge}-${rightEdge}`, rawBytesRange: [blockOffset, blockOffset + 7] });
       }
     } else if (kind === 8 && length === 10) {
-      const tsval = ((rawBytes[offset + 2] << 24) | (rawBytes[offset + 3] << 16) | (rawBytes[offset + 4] << 8) | rawBytes[offset + 5]) >>> 0;
-      const tsecr = ((rawBytes[offset + 6] << 24) | (rawBytes[offset + 7] << 16) | (rawBytes[offset + 8] << 8) | rawBytes[offset + 9]) >>> 0;
-      fields.push({ name: 'TCP Option - Timestamps', value: `TSval ${tsval}, TSecr ${tsecr}`, rawBytesRange: [offset, offset + length - 1] });
+      tsval = ((rawBytes[offset + 2] << 24) | (rawBytes[offset + 3] << 16) | (rawBytes[offset + 4] << 8) | rawBytes[offset + 5]) >>> 0;
+      tsecr = ((rawBytes[offset + 6] << 24) | (rawBytes[offset + 7] << 16) | (rawBytes[offset + 8] << 8) | rawBytes[offset + 9]) >>> 0;
+      fields.push({ name: 'TCP Option - Timestamps', value: `TSval ${tsval}, TSecr ${tsecr}`, rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.timestamp.tsval' });
     } else {
       fields.push({ name: `TCP Option - Unknown (Kind ${kind})`, value: `${length} bytes`, rawBytesRange: [offset, offset + length - 1] });
     }
@@ -1765,7 +2720,120 @@ function parseTcpOptions(
     offset += length;
   }
 
-  return { fields, mss, windowScale, sackPermitted, sackBlocks };
+  return { fields, mss, windowScale, sackPermitted, sackBlocks, infoParts, tsval, tsecr };
+}
+
+/** The [SEQ/ACK analysis] subtree, as Wireshark lays it out. */
+function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
+  const children: ProtocolField[] = [];
+  if (a.ackOfFrame !== undefined) {
+    children.push({ name: '[This is an ACK to the segment in frame]', value: a.ackOfFrame, generated: true, linkToFrame: a.ackOfFrame });
+    children.push({ name: '[The RTT to ACK the segment was]', value: `${((a.ackRttUs ?? 0) / 1e6).toFixed(9)} seconds`, generated: true, abbrev: 'tcp.analysis.ack_rtt' });
+  }
+  if (a.initialRttUs !== undefined) {
+    children.push({ name: '[iRTT]', value: `${(a.initialRttUs / 1e6).toFixed(9)} seconds`, generated: true, abbrev: 'tcp.analysis.initial_rtt' });
+  }
+  if (a.bytesInFlight !== undefined) {
+    children.push({ name: '[Bytes in flight]', value: a.bytesInFlight, generated: true, abbrev: 'tcp.analysis.bytes_in_flight' });
+  }
+  if (a.flags.length > 0) {
+    const severity = (flag: string): 'chat' | 'note' | 'warn' | 'error' =>
+      flag === 'lost_segment' || flag === 'ack_lost_segment' || flag === 'out_of_order' || flag === 'zero_window' || flag === 'window_full' || flag === 'reused_ports' ? 'warn'
+        : flag === 'window_update' ? 'chat' : 'note';
+    children.push({
+      name: '[TCP Analysis Flags]', value: '', generated: true,
+      children: a.tags.map((tag, i) => ({
+        name: `[Expert Info (${severity(a.flags[i] ?? '') === 'warn' ? 'Warning' : severity(a.flags[i] ?? '') === 'chat' ? 'Chat' : 'Note'}/Sequence)]`,
+        value: tag.replace(/^\[TCP |\]$/g, ''), generated: true,
+        expertInfo: { severity: severity(a.flags[i] ?? ''), group: 'Sequence', message: tag },
+      })),
+    });
+  }
+  if (children.length === 0) return [];
+  return [{ name: '[SEQ/ACK analysis]', value: '', generated: true, children }];
+}
+
+// --- transport checksums --------------------------------------------------------
+
+/** The IPv4 pseudo-header: src, dst, zero, protocol, transport length. */
+function ipv4PseudoHeader(rawBytes: Uint8Array, l3Offset: number, protocol: number, transportLen: number): Uint8Array | undefined {
+  if (transportLen <= 0 || transportLen > 0xffff) return undefined;
+  const ph = new Uint8Array(12);
+  ph.set(rawBytes.subarray(l3Offset + 12, l3Offset + 20), 0);
+  ph[9] = protocol;
+  ph[10] = transportLen >> 8; ph[11] = transportLen & 0xff;
+  return ph;
+}
+
+/**
+ * The protocol number IPv6 fragments are keyed under.
+ *
+ * RFC 8200 §4.5 keys a datagram on source, destination and identification and
+ * deliberately leaves the payload protocol out - the Fragment header sits
+ * above whatever the payload turns out to be. Passing one constant for every
+ * IPv6 fragment is how that exclusion is expressed to a tracker whose key was
+ * written for IPv4's, and 44 is the Fragment header's own number.
+ */
+const IPV6_FRAGMENT_KEY = 44;
+
+/**
+ * Removes every byte range from a layer and its rows.
+ *
+ * A layer dissected from a reassembled datagram, or from any buffer that is
+ * not the frame the user is looking at, would otherwise point the hex view at
+ * offsets in this frame that hold something else entirely. Wireshark solves
+ * this with a second data source tab; the honest answer with one hex view is
+ * to say nothing rather than to point somewhere wrong.
+ */
+function stripByteRanges(layer: ProtocolLayer): void {
+  delete layer.rawBytesRange;
+  const visit = (fields: ProtocolField[]) => {
+    for (const field of fields) {
+      delete field.rawBytesRange;
+      if (field.children) visit(field.children);
+    }
+  };
+  visit(layer.fields);
+}
+
+/** The IPv6 pseudo-header (RFC 8200 §8.1): src, dst, 32-bit length, zeros, next header. */
+function ipv6PseudoHeader(rawBytes: Uint8Array, l3Offset: number, nextHeader: number, payloadLen: number): Uint8Array | undefined {
+  if (payloadLen <= 0) return undefined;
+  const ph = new Uint8Array(40);
+  ph.set(rawBytes.subarray(l3Offset + 8, l3Offset + 40), 0);
+  ph[32] = (payloadLen >>> 24) & 0xff; ph[33] = (payloadLen >>> 16) & 0xff; ph[34] = (payloadLen >>> 8) & 0xff; ph[35] = payloadLen & 0xff;
+  ph[39] = nextHeader;
+  return ph;
+}
+
+/** One's-complement sum over the pseudo-header and a byte range, RFC 1071. */
+function transportChecksum(pseudoHeader: Uint8Array, rawBytes: Uint8Array, start: number, end: number): number {
+  let sum = 0;
+  for (let i = 0; i + 1 < pseudoHeader.length; i += 2) sum += (pseudoHeader[i] << 8) | pseudoHeader[i + 1];
+  for (let i = start; i + 1 < end; i += 2) sum += (rawBytes[i] << 8) | rawBytes[i + 1];
+  if ((end - start) % 2 === 1) sum += rawBytes[end - 1] << 8;
+  while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+  return (~sum) & 0xffff;
+}
+
+/**
+ * Verdict on a transport checksum, with the offload policy Wireshark ships
+ * (its TCP/UDP validation is off by default for exactly this reason): a
+ * segment captured on the sending host before the NIC filled the checksum
+ * in - one larger than the wire MTU (segmentation offload) or with a zero
+ * checksum - is "Unverified", never "Bad". A frame the capture truncated is
+ * Unverified too, since the bytes to check are not all there.
+ */
+function checksumVerdict(
+  pseudoHeader: Uint8Array | undefined, rawBytes: Uint8Array, start: number, declaredEnd: number, stored: number, udp: boolean,
+): { status: 'Good' | 'Bad' | 'Unverified'; computed?: number } {
+  if (pseudoHeader === undefined || stored === 0 || declaredEnd > rawBytes.length || declaredEnd - start > 1514 - 34) {
+    return { status: 'Unverified' };
+  }
+  const computed = transportChecksum(pseudoHeader, rawBytes, start, declaredEnd);
+  // A UDP checksum computing to 0 is sent as 0xffff.
+  const good = computed === 0 || (udp && computed === 0 && stored === 0xffff);
+  return { status: good ? 'Good' : 'Bad', computed };
 }
 
 /**
@@ -1780,6 +2848,28 @@ function parseTcpOptions(
  * point is to name what a capture will really contain, not to mirror the whole
  * registry, and anything missing still gets an honest "IP Protocol N".
  */
+/** ICMPv4 type names, and the codes worth spelling out (RFC 792). */
+const ICMP_TYPE_NAMES: Record<number, string> = {
+  3: 'Destination unreachable', 4: 'Source quench', 5: 'Redirect', 9: 'Router advertisement',
+  10: 'Router solicitation', 11: 'Time-to-live exceeded', 12: 'Parameter problem',
+  13: 'Timestamp request', 14: 'Timestamp reply', 15: 'Information request', 16: 'Information reply',
+  17: 'Address mask request', 18: 'Address mask reply',
+};
+const ICMP_UNREACHABLE_CODES: Record<number, string> = {
+  0: 'Network unreachable', 1: 'Host unreachable', 2: 'Protocol unreachable', 3: 'Port unreachable',
+  4: 'Fragmentation needed', 5: 'Source route failed', 6: 'Destination network unknown',
+  7: 'Destination host unknown', 9: 'Network administratively prohibited',
+  10: 'Host administratively prohibited', 13: 'Communication administratively filtered',
+};
+const ICMP_REDIRECT_CODES: Record<number, string> = {
+  0: 'Redirect for network', 1: 'Redirect for host', 2: 'Redirect for TOS and network', 3: 'Redirect for TOS and host',
+};
+const ICMPV6_UNREACHABLE_CODES: Record<number, string> = {
+  0: 'no route to destination', 1: 'communication with destination administratively prohibited',
+  2: 'beyond scope of source address', 3: 'address unreachable', 4: 'port unreachable',
+  5: 'source address failed ingress/egress policy', 6: 'reject route to destination',
+};
+
 const IP_PROTOCOL_NAMES: Record<number, string> = {
   0: 'IPv6 Hop-by-Hop',
   2: 'IGMP',

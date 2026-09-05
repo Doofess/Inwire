@@ -2,15 +2,31 @@ import React, { useEffect, useState } from 'react';
 import { Packet } from '../../types/packet';
 import { TbMessage, TbX, TbCopy, TbCheck, TbDownload } from 'react-icons/tb';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
+import { downloadBlob } from '../../lib/download';
+import {
+  clientEnd, isFromClient, streamPackets as framesOnStream,
+  type StreamTarget,
+} from '../../services/followStream';
+import { portLabel } from '../../services/portServices';
+
+/**
+ * One conversation's payload, both directions, in order.
+ *
+ * Takes a five-tuple rather than the TCP stream index it used to: the tracker
+ * numbers TCP conversations only, so a DNS exchange or a QUIC connection had
+ * no id and this window could not be opened on one at all - which is most of
+ * a modern capture. `services/followStream.ts` owns the selection and the
+ * client/server decision so both are testable; this file renders them.
+ */
 
 interface StreamFollowerModalProps {
-  streamId: number | null;
+  target: StreamTarget | null;
   packets: Packet[];
   onClose: () => void;
 }
 
 export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
-  streamId,
+  target,
   packets,
   onClose,
 }) => {
@@ -30,7 +46,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
    * the same on every render.
    */
   useEffect(() => {
-    if (streamId === null) return;
+    if (target === null) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       e.preventDefault();
@@ -39,29 +55,47 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [streamId, onClose]);
+  }, [target, onClose]);
 
-  if (streamId === null) return null;
+  if (target === null) return null;
 
-  // Filter all packets belonging to this stream
-  const streamPackets = packets.filter(p => p.streamId === streamId);
-
-  // Client vs Server IPs
-  const clientIp = streamPackets[0]?.source || 'Client';
-  const serverIp = streamPackets[0]?.destination || 'Server';
+  const streamPackets = framesOnStream(packets, target);
+  // Not "whoever sent the first frame": a capture that started mid-connection
+  // has no SYN to go on, and a well-known port on one end says far more.
+  const client = clientEnd(streamPackets, target);
+  const clientIp = client.address;
+  const serverIp = client.address === target.addressA ? target.addressB : target.addressA;
+  const serverPort = client.port === target.portA ? target.portB : target.portA;
 
   let totalClientBytes = 0;
   let totalServerBytes = 0;
 
   for (const p of streamPackets) {
-    if (p.source === clientIp) totalClientBytes += p.length;
+    if (isFromClient(p, client)) totalClientBytes += p.length;
     else totalServerBytes += p.length;
   }
+
+  /**
+   * The payload as the chosen view shows it.
+   *
+   * `raw` was rendering the ASCII view - the two buttons produced identical
+   * output, which is worse than not offering the choice. Wireshark's Raw is
+   * the payload bytes as one unbroken hex string, which is what gets pasted
+   * into a decoder; the hex dump with its offsets and ASCII column is a
+   * different thing and already has its own button.
+   */
+  const renderPayload = (p: Packet): string => {
+    if (viewFormat === 'hex') return packetHexDump(p);
+    if (viewFormat === 'raw') {
+      return Array.from(p.rawBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    }
+    return p.streamPayload?.payloadText || packetAsciiDump(p);
+  };
 
   const handleCopyStream = () => {
     const fullDialogue = streamPackets
       .map(p => {
-        const prefix = p.source === clientIp ? `[CLIENT -> SERVER (${p.source})]` : `[SERVER -> CLIENT (${p.source})]`;
+        const prefix = isFromClient(p, client) ? `[CLIENT -> SERVER (${p.source})]` : `[SERVER -> CLIENT (${p.source})]`;
         return `${prefix}\n${p.streamPayload?.payloadText || packetAsciiDump(p)}\n`;
       })
       .join('\n');
@@ -74,18 +108,13 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
   const handleSaveStream = () => {
     const fullDialogue = streamPackets
       .map(p => {
-        const prefix = p.source === clientIp ? `>>> [CLIENT -> SERVER] ${p.source}:${p.sourcePort}` : `<<< [SERVER -> CLIENT] ${p.source}:${p.sourcePort}`;
+        const prefix = isFromClient(p, client) ? `>>> [CLIENT -> SERVER] ${p.source}:${p.sourcePort}` : `<<< [SERVER -> CLIENT] ${p.source}:${p.sourcePort}`;
         return `${prefix}\n${p.streamPayload?.payloadText || packetAsciiDump(p)}\n`;
       })
       .join('\n');
 
     const blob = new Blob([fullDialogue], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `tcp_stream_${streamId}_conversation.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `${target.kind}_stream_${target.streamId ?? `${target.portA}-${target.portB}`}_conversation.txt`);
   };
 
   return (
@@ -93,7 +122,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
     // only one that opens ON TOP of another: the packet detail window has a
     // Follow Stream link. Relying on render order instead would work today and
     // break silently the first time someone reorders the JSX in App.tsx.
-    <div className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4">
       <div className="w-full max-w-4xl max-h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground">
         {/* Modal Header */}
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
@@ -101,13 +130,17 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
             <TbMessage className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <div className="flex items-center gap-2 font-bold text-sm">
-                <span>Follow Stream #{streamId}</span>
+                <span>
+                  Follow {target.kind.toUpperCase()} Stream
+                  {target.streamId !== undefined ? ` #${target.streamId}` : ''}
+                </span>
                 <span className="text-xs px-2 py-0.5 rounded bg-secondary text-foreground/80 font-mono">
                   {streamPackets.length} frames
                 </span>
               </div>
               <p className="text-xs text-muted-foreground font-mono">
                 {clientIp} <span className="text-muted-foreground">⇄</span> {serverIp}
+                :{portLabel(serverPort, target.kind, true)}
               </p>
             </div>
           </div>
@@ -190,11 +223,10 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
         {/* Stream Dialogue Viewport */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs custom-scrollbar">
           {streamPackets.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">No stream payload data recorded for stream #{streamId}.</div>
+            <div className="text-center py-12 text-muted-foreground">No frames on this stream are in the buffer.</div>
           ) : (
             streamPackets.map(p => {
-              const isClient = p.source === clientIp;
-              const payload = p.streamPayload?.payloadText || packetAsciiDump(p);
+              const isClient = isFromClient(p, client);
 
               return (
                 <div
@@ -213,7 +245,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
                   </div>
 
                   <pre className="whitespace-pre-wrap font-mono text-xs break-all">
-                    {viewFormat === 'hex' ? packetHexDump(p) : payload}
+                    {renderPayload(p)}
                   </pre>
                 </div>
               );

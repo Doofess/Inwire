@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NetView Agent - Live Capture</title>
+<title>Inwire Agent - Live Capture</title>
 <style>
   :root {
     --bg: #0b0d12;
@@ -123,7 +123,7 @@
   <div class="wrap">
     <header>
       <div>
-        <h1>NetView Agent Live Capture</h1>
+        <h1>Inwire Agent Live Capture</h1>
         <div class="subtitle">Streams packet metadata from the local agent running on your machine.</div>
       </div>
       <div id="status" class="status">
@@ -136,7 +136,7 @@
       <button class="btn primary" id="activateBtn" type="button">
         Activate Agent
       </button>
-      <a class="btn" href="/downloads/NetView-Agent-Setup.exe">
+      <a class="btn" href="/downloads/Inwire-Agent-Setup.exe">
         Manual Download
       </a>
     </div>
@@ -169,8 +169,8 @@
 <script>
 (function () {
   const WS_URL = "ws://localhost:8999";
-  const AGENT_URI = "netview://start";
-  const DOWNLOAD_URL = "/downloads/NetView-Agent-Setup.exe";
+  const AGENT_URI = "inwire://start";
+  const DOWNLOAD_URL = "/downloads/Inwire-Agent-Setup.exe";
   const RECONNECT_DELAY_MS = 2000;
   const LAUNCH_TIMEOUT_MS = 1800;
   const MAX_ROWS = 50;
@@ -206,7 +206,7 @@
     activateHint.classList.toggle("warn", !!isWarning);
   }
 
-  // Tries the OS-registered netview:// handler (installed alongside the
+  // Tries the OS-registered inwire:// handler (installed alongside the
   // driver by the Inno Setup installer). A page can never install a driver
   // or launch an .exe on its own - the handoff to the OS is the only
   // legitimate mechanism, same pattern Zoom/Slack/Teams use for their
@@ -239,7 +239,7 @@
     }, LAUNCH_TIMEOUT_MS);
   }
 
-  // If the OS shows its "Open NetView Agent?" confirmation dialog, the tab
+  // If the OS shows its "Open Inwire Agent?" confirmation dialog, the tab
   // loses focus - that's a signal the handoff is in progress, not a failure,
   // so don't race it into downloading the installer underneath the user.
   document.addEventListener("visibilitychange", () => {

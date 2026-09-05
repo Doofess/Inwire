@@ -14,7 +14,7 @@ import type { PacketTheme } from './packetThemes';
  * kept identical to the reference analyzer's because that is what makes a frame-by-frame
  * diff against `tshark -e frame.coloring_rule.name` a meaningful test.
  *
- * Each rule carries two palettes, because NetView's packet list follows the
+ * Each rule carries two palettes, because Inwire's packet list follows the
  * app theme and a single pair cannot serve both grounds:
  *
  *   - `lightBgColor`/`lightTextColor` are the reference analyzer's own defaults, taken
@@ -28,7 +28,7 @@ import type { PacketTheme } from './packetThemes';
  *     so each rule keeps the reference analyzer's *hue* and relative emphasis, re-derived
  *     for a dark ground.
  */
-export const DEFAULT_COLOR_RULES: ColorRule[] = [
+export const WIRESHARK_DEFAULT_RULES: ColorRule[] = [
   {
     id: 'color-bad-tcp',
     name: 'Bad TCP',
@@ -242,6 +242,140 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = [
   },
 ];
 
+/**
+ * The three bands Inwire adds to Wireshark's chain.
+ *
+ * Wireshark's shipped `colorfilters` predates QUIC being most of a browser's
+ * traffic, and it has no band at all for "a dissector said something is wrong"
+ * beyond the TCP and checksum cases - so on a modern capture the two most
+ * interesting things on screen are painted as plain UDP and plain TCP.
+ *
+ * These are kept SEPARATE from `WIRESHARK_DEFAULT_RULES` rather than merged
+ * into it, because that array is the chain the tshark parity harness compares
+ * against frame for frame: measuring "does our engine reach Wireshark's
+ * colouring decisions" needs Wireshark's rules, not ours. The app ships both
+ * (`DEFAULT_COLOR_RULES`); the harness constructs the engine from Wireshark's
+ * alone.
+ */
+export const INWIRE_EXTRA_RULES: ColorRule[] = [
+  {
+    id: 'color-expert',
+    name: 'Expert Warnings',
+    // `inwire.expert.severity` is the worst finding anywhere in the frame's
+    // tree, published at dissection: a colour rule cannot walk a tree, so
+    // without that field this band could not exist.
+    filter: 'inwire.expert.severity == "error" || inwire.expert.severity == "warn"',
+    bgColor: '#2e1f0d',
+    textColor: '#f0b866',
+    lightBgColor: '#fff3d9',
+    lightTextColor: '#7a4d00',
+    // Off by default, for the same reason Wireshark ships Checksum Errors off:
+    // on a capture taken ON the sending host, NIC checksum offload means the
+    // checksum has not been filled in yet, and those frames dominate. Measured
+    // on the two parity fixtures, this band would paint 14 % and 22 % of the
+    // list - almost all of it "Bad checksum" on locally-originated traffic.
+    // On a capture from a mirror port, where the checksums are real, it is the
+    // most useful band in the chain, which is why it ships ready to switch on
+    // in Settings -> Colouring Rules rather than not existing.
+    enabled: false,
+  },
+  {
+    id: 'color-tls-handshake',
+    name: 'TLS Handshake',
+    // Client Hello and Server Hello. The frames that say who is talking to
+    // whom, in a capture where everything else is opaque.
+    filter: 'tls.handshake.type == 1 || tls.handshake.type == 2',
+    bgColor: '#122b23',
+    textColor: '#6fd6a8',
+    lightBgColor: '#dcf5e9',
+    lightTextColor: '#0d4630',
+    enabled: true,
+  },
+  {
+    id: 'color-quic',
+    name: 'QUIC',
+    filter: 'quic',
+    bgColor: '#1b2334',
+    textColor: '#8fb2f0',
+    lightBgColor: '#e2ecff',
+    lightTextColor: '#1b3a72',
+    enabled: true,
+  },
+];
+
+/**
+ * The chain the app ships with.
+ *
+ * The three extra bands are inserted where first-match-wins puts them to work:
+ * Expert Warnings just after the other "something is broken" rules, so a bad
+ * frame is flagged before its protocol is; TLS Handshake and QUIC before the
+ * generic TCP and UDP bands, which would otherwise swallow them.
+ */
+export const DEFAULT_COLOR_RULES: ColorRule[] = insertExtraRules(
+  WIRESHARK_DEFAULT_RULES,
+  INWIRE_EXTRA_RULES,
+);
+
+function insertExtraRules(base: ColorRule[], extra: ColorRule[]): ColorRule[] {
+  const byId = new Map(extra.map((r) => [r.id, r]));
+  const out: ColorRule[] = [];
+  for (const rule of base) {
+    // Just after Checksum Errors, which ends Wireshark's run of "broken" bands.
+    if (rule.id === 'color-checksum-errors') { out.push(rule); out.push(byId.get('color-expert')!); continue; }
+    // Before TCP SYN/FIN, which is the first band that would swallow them.
+    if (rule.id === 'color-tcp-syn-fin') {
+      out.push(byId.get('color-tls-handshake')!, byId.get('color-quic')!, rule);
+      continue;
+    }
+    out.push(rule);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// The user's chain
+// ---------------------------------------------------------------------------
+
+export const COLOR_RULES_STORAGE_KEY = 'inwire.colorRules';
+
+/**
+ * Validates a stored chain.
+ *
+ * Field by field and rule by rule, the way every other preference in this app
+ * is validated: a rule that has lost its filter is dropped rather than
+ * discarding the whole chain, and a chain that ends up empty falls back to the
+ * shipped one - a packet list with no colouring at all is not a state anybody
+ * chose, and there would be no rule left in the editor to start from.
+ */
+export function normalizeColorRules(raw: unknown): ColorRule[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: ColorRule[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const v = entry as Record<string, unknown>;
+    if (typeof v.id !== 'string' || typeof v.name !== 'string' || typeof v.filter !== 'string') continue;
+    if (seen.has(v.id)) continue;
+    seen.add(v.id);
+    out.push({
+      id: v.id,
+      name: v.name,
+      filter: v.filter,
+      enabled: typeof v.enabled === 'boolean' ? v.enabled : true,
+      ...(typeof v.bgColor === 'string' ? { bgColor: v.bgColor } : {}),
+      ...(typeof v.textColor === 'string' ? { textColor: v.textColor } : {}),
+      ...(typeof v.lightBgColor === 'string' ? { lightBgColor: v.lightBgColor } : {}),
+      ...(typeof v.lightTextColor === 'string' ? { lightTextColor: v.lightTextColor } : {}),
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** A fresh copy of the shipped chain, for the editor's reset. */
+export function defaultColorRules(): ColorRule[] {
+  return DEFAULT_COLOR_RULES.map((r) => ({ ...r }));
+}
+
 interface CompiledRule {
   rule: ColorRule;
   matcher: (p: Packet) => boolean;
@@ -272,9 +406,6 @@ export function resolveRuleColors(
   };
 }
 
-// Coloring rules are fixed to the reference analyzer's own chain (above) - there is no UI
-// path left to view or edit them, matching the reference analyzer parity rather than being
-// a user-customizable feature.
 export class ColorRulesEngine {
   private compiled: CompiledRule[];
 
@@ -299,17 +430,31 @@ export class ColorRulesEngine {
    */
   private matchCache = new WeakMap<Packet, ColorRule | null>();
 
-  constructor() {
-    this.compiled = ColorRulesEngine.compile(DEFAULT_COLOR_RULES);
+  /**
+   * @param rules the chain to match against, first-match-wins. Defaults to the
+   * shipped chain; the app passes the user's edited one, and the parity
+   * harness passes `WIRESHARK_DEFAULT_RULES` so it measures the engine against
+   * Wireshark's own decisions rather than against Inwire's extra bands.
+   */
+  constructor(rules: ColorRule[] = DEFAULT_COLOR_RULES) {
+    this.compiled = ColorRulesEngine.compile(rules);
   }
 
   // Each rule's filter is turned into a matcher once here rather than being
-  // re-derived per call. Note that FilterEngine.compileFilter does NOT
-  // currently compile to a closure tree - it preprocesses the filter string
-  // and returns a closure that re-parses that string for every packet it is
-  // handed. So one uncached chain walk re-parses up to 19 expressions, which
-  // is why a single getPacketStyle call was measured at 26.7us and why the
-  // memo above matters as much as it does.
+  // re-derived per call.
+  //
+  // That used to be far less true than it read: `compileFilter` returned a
+  // closure that RE-PARSED its filter string for every packet handed to it, so
+  // one uncached chain walk re-parsed up to nineteen expressions and a single
+  // getPacketStyle call measured 26.7us. It is a real compile now - tokenize,
+  // parse, resolve every field against the registry, return a closure over the
+  // result - so the per-packet cost is the comparisons and nothing else. The
+  // memo below still earns its place: nineteen matchers is nineteen matchers.
+  //
+  // A rule whose filter does not parse gets a matcher that never fires, rather
+  // than taking the whole chain down. A rule that parses but names a protocol
+  // Inwire does not dissect compiles fine and simply matches nothing, which is
+  // the case for several of Wireshark's defaults that ship here.
   private static compile(rules: ColorRule[]): CompiledRule[] {
     return rules
       .filter(rule => rule.enabled)

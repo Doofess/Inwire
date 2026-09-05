@@ -33,8 +33,8 @@ function matches(name: string, value: string, re: RegExp) {
 }
 
 /** A packet is only ever read for three fields here. */
-function pkt(timestamp: number, relativeTime: number): Packet {
-  return { timestamp, relativeTime } as Packet;
+function pkt(timestampMs: number, relativeTime: number): Packet {
+  return { tsUs: Math.round(timestampMs * 1000), relativeTime } as Packet;
 }
 
 // 2026-08-31T13:37:21.694700Z, chosen so every field is distinguishable.
@@ -66,15 +66,15 @@ check('relative reads the packet\'s own relativeTime, not a recomputation',
 // --- UTC: exact, because it is the same everywhere --------------------------
 
 check('utc is exact and independent of the machine running this',
-  formatTimeColumn('utc', first, null), '2026-08-31 13:37:21.694700');
+  formatTimeColumn('utc', first, null), '2026-08-31 13:37:21');
 
 // --- Local clock: shape only ------------------------------------------------
 
-matches('clock is hh:mm:ss with six decimal places',
-  formatTimeColumn('clock', first, null), /^\d{2}:\d{2}:\d{2}\.\d{6}$/);
+matches('clock is hh:mm:ss, whole seconds',
+  formatTimeColumn('clock', first, null), /^\d{2}:\d{2}:\d{2}$/);
 
 matches('date is a full local date and time',
-  formatTimeColumn('date', first, null), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/);
+  formatTimeColumn('date', first, null), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
 {
   // The local formats must agree with each other, whatever the timezone.
@@ -84,17 +84,32 @@ matches('date is a full local date and time',
 }
 
 {
-  // And the fractional part is the same in all three, since it comes from the
-  // timestamp rather than from any calendar conversion.
-  const frac = (v: string) => v.slice(v.indexOf('.'));
-  check('every absolute format carries the same sub-second part',
-    new Set([
-      frac(formatTimeColumn('clock', first, null)),
-      frac(formatTimeColumn('date', first, null)),
-      frac(formatTimeColumn('utc', first, null)),
-    ]).size, 1);
-}
+  /**
+   * No sub-second part on any wall-clock format.
+   *
+   * These three used to append six digits, which made a reading of the clock
+   * twice as long as the column holding it for precision nobody takes off a
+   * clock face - a capture is correlated against a log or an incident timeline
+   * by the second.
+   *
+   * Checked rather than assumed, because putting it back is a one-token edit
+   * and the formats that DO need the precision are right beside them in the
+   * same switch.
+   */
+  const absolute = (['clock', 'date', 'utc'] as const)
+    .map((format) => formatTimeColumn(format, first, null));
+  check('no wall-clock format carries a fraction of a second',
+    absolute.filter((v) => v.includes('.')), []);
 
+  // ...and the two that are about elapsed time still carry all six places,
+  // which is where the precision went rather than being lost.
+  check('the elapsed formats keep full precision',
+    [
+      /^\d+\.\d{6}$/.test(formatTimeColumn('relative', first, null)),
+      /^\d+\.\d{6}$/.test(formatTimeColumn('delta', second, first)),
+    ],
+    [true, true]);
+}
 // --- Every format is labelled and none throws -------------------------------
 
 {

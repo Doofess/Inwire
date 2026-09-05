@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
 import { TbStack2 } from 'react-icons/tb';
 import { ProtocolTreeView } from './ProtocolTreeView';
@@ -20,6 +20,12 @@ interface PacketDetailsTreeProps {
   permissions: UserRolePermissions;
   /** Follows a cross-packet reference such as `[Response In: 11]`. */
   onSelectFrame?: (frameNumber: number) => void;
+  /** Puts an expression in the filter bar; `apply` also runs it. */
+  onFieldFilter?: (expression: string, apply: boolean) => void;
+  /** What is in the filter bar now, so "…and Selected" can build on it. */
+  currentFilter?: string;
+  /** Adds a registry field as a column in the packet list. */
+  onAddColumn?: (abbrev: string) => void;
 }
 
 /**
@@ -37,7 +43,21 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
   activeByteRange,
   permissions,
   onSelectFrame,
+  onFieldFilter,
+  currentFilter,
+  onAddColumn,
 }) => {
+  /**
+   * The filter name of the row under the pointer.
+   *
+   * Wireshark puts this in its status bar; this pane's header is where it
+   * belongs here, because the pane is what the pointer is inside. It is the
+   * only way to learn what a row is called without right-clicking it, and
+   * knowing that is the difference between reading the tree and being able to
+   * write a filter from it.
+   */
+  const [hoveredField, setHoveredField] = useState<string | null>(null);
+
   if (!packet) {
     return (
       <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
@@ -58,10 +78,15 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
     // cross-reference links.
     <div className="h-full flex flex-col overflow-hidden select-none" style={packetAccentStyle(accentColor)}>
       <div className="px-4 py-2 border-b flex items-center justify-between transition-colors bg-card border-border text-card-foreground shadow-sm">
-        <div className="flex items-center gap-2 text-xs font-mono font-bold">
-          <span className="text-muted-foreground uppercase tracking-tighter">Packet Inspection</span>
-          <span className="text-primary">#Frame {packet.id} ({packet.length} bytes)</span>
+        <div className="flex items-center gap-2 text-xs font-mono font-bold min-w-0">
+          <span className="text-muted-foreground uppercase tracking-tighter shrink-0">Packet Inspection</span>
+          <span className="text-primary shrink-0">#Frame {packet.id} ({packet.length} bytes)</span>
         </div>
+        {hoveredField && (
+          <span className="text-[11px] font-mono text-muted-foreground truncate pl-3" title={hoveredField}>
+            {hoveredField}
+          </span>
+        )}
       </div>
 
       <AnomalyBanners anomalies={packet.anomalies} className="p-3 pb-0" />
@@ -72,6 +97,10 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
           onHoverByteRange={onHoverByteRange}
           activeByteRange={activeByteRange}
           onSelectFrame={onSelectFrame}
+          onFieldFilter={onFieldFilter}
+          currentFilter={currentFilter}
+          onAddColumn={onAddColumn}
+          onHoverField={setHoveredField}
         />
       </div>
     </div>

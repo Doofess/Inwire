@@ -1,0 +1,45 @@
+# Architecture decisions
+
+Phase 0 of `docs/specs/inwire-network-decoding-spec-v3.md`: the decisions every later
+phase depends on, taken before dissector work multiplies the cost of changing them.
+One file per decision, numbered, never edited after acceptance - a reversal is a new
+file that supersedes the old one.
+
+| # | Decision | Status |
+|---|---|---|
+| [0001](0001-packet-data-model.md) | Two-phase packet model: summary on arrival, tree on demand | Accepted 2026-09-04 |
+| [0002](0002-field-registry.md) | One field registry feeds the tree, the filter engine and the columns | Accepted 2026-09-04 |
+| [0003](0003-worker-boundary.md) | Keep dissection synchronous; move the whole pipeline into one Worker | Accepted 2026-09-04 |
+| [0004](0004-fixtures-and-privacy.md) | Fixture captures stay untracked; only aggregate counts are committed | Accepted 2026-09-04 |
+| [0005](0005-agent-wire-format.md) | Agent wire format: `seq`, `iface`, `ts_us`, `capture_stats`, ownership, token | Accepted 2026-09-04 |
+| [0006](0006-pcapng-writer-scope.md) | pcapng writer scope and the pcap fallback | Accepted 2026-09-04 |
+
+## Review outcome: amendments to the spec's execution order
+
+The review agrees with Part C of the spec with two changes, recorded here so the spec
+itself stays as approved.
+
+1. **Phase 2 is split.** 2a (Windows correctness: `state` broadcast, `capture_stats`,
+   `seq`/`iface`, installer fixes, rebuild and republish 3.1.0) ships before any
+   dissector phase. 2b (capture ownership, token auth, macOS/Linux, lazy scapy) can
+   run in parallel with Phases 3-5 because it touches no dissector code. Until 2b lands
+   the app hides the macOS/Linux downloads.
+2. **A short Phase 1b precedes Phase 4.** It introduces the types from 0001 and the
+   registry module from 0002 with *no behaviour change*: `DissectSummary`,
+   `dissectTree`, `ProtocolField.abbrev`, `fieldRegistry.ts`, and the assertion script
+   that fails on an unregistered field. Phase 4 is then the first dissector written on
+   the new shape rather than the first one migrated to it.
+
+Revised order: 1 -> 1b -> 2a -> 3 -> 4 -> 5 -> (2b alongside) -> 6 -> 7 -> 8 -> 9 -> 10
+-> 11 -> 12 -> 13.
+
+## Recurring gate (end of every phase, 30 minutes)
+
+- Parity delta vs the previous phase, both fixtures, per column; no column regressed.
+- At least one new assertion script under `scripts/`, discovered by `npm run check`.
+- `CLAUDE.md` describes the new behaviour; `docs/specs/...v3.md` phase marked done.
+- No new dissector on the old eager-tree shape (0001); no field published without an
+  `abbrev` (0002, enforced by script).
+- No new `async` in the dissection path (0003).
+- No fixture bytes, names or addresses in the diff (0004).
+- Agent protocol change => version bumped in all three places (`test_protocol.py`).

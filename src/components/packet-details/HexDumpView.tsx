@@ -137,14 +137,44 @@ export const HexDumpView: React.FC<HexDumpViewProps> = ({
     if (scroller) scroller.scrollTop = 0;
   }, [packet.id, external, scrollRef]);
 
-  // getBoundingClientRect forces a synchronous layout, so this runs once.
+  /**
+   * Measures one row, once, and NOT during the commit that created it.
+   *
+   * This is a ref callback, so React invokes it while it is still inserting
+   * DOM. Reading `getBoundingClientRect` there forces the browser to style and
+   * lay out everything written so far, mid-mount - and because the rest of the
+   * mount then dirties the tree again, the same work is redone afterwards.
+   *
+   * That is cheap on the workspace pane, whose dump column is a few hundred
+   * pixels tall, and expensive in the detail window, whose column is the height
+   * of the screen: the dump virtualizes by PIXELS, so a full-height column of a
+   * large frame mounts ~79 rows, and a row is one `<span>` per byte twice (hex
+   * and ASCII), so ~2,700 elements arrive at once. Measured on a 63,942-byte
+   * frame, opening the window cost a 298 ms blocking task, 205 ms of it forced
+   * reflow charged to this function, with style recalculation running three
+   * times (140 ms + 56 ms + 14 ms) instead of once. A 54-byte frame mounts four
+   * rows and does not show it.
+   *
+   * Deferring the read by one frame is the whole fix: the layout it forces then
+   * happens after the DOM has settled, so it is the pass the browser was going
+   * to do anyway rather than an extra one. This is the same rule the scroll
+   * measurement below already follows, and for the same reason.
+   *
+   * The flag is set before scheduling so a re-render cannot queue a second
+   * frame, and cleared again if the node turns out not to be laid out yet, so
+   * a dump measured while hidden still gets its real row height later.
+   */
   const measureRow = (node: HTMLDivElement | null) => {
     if (!node || measuredRef.current) return;
-    const h = node.getBoundingClientRect().height;
-    if (h > 0) {
-      measuredRef.current = true;
-      if (Math.abs(h - rowHeight) > 0.5) setRowHeight(h);
-    }
+    measuredRef.current = true;
+    requestAnimationFrame(() => {
+      const h = node.getBoundingClientRect().height;
+      if (h > 0) {
+        if (Math.abs(h - rowHeight) > 0.5) setRowHeight(h);
+      } else {
+        measuredRef.current = false;
+      }
+    });
   };
 
   const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS);

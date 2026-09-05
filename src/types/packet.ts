@@ -21,9 +21,49 @@ export interface FieldHighlight {
   fieldName: string;
 }
 
+/**
+ * How serious a finding is, in Wireshark's four levels.
+ *
+ * The app had two vocabularies for this: dissectors wrote `chat/note/warn/error`
+ * onto tree rows while `AnomalyInfo` used `low/medium/high/critical`, and
+ * nothing related them - so the same frame could be a "warning" in the tree and
+ * a "high" in the alerts panel, and no view could rank the two against each
+ * other. This is the one enum; `services/expertInfo.ts` maps the anomaly
+ * severities onto it.
+ */
+export type ExpertSeverity = 'chat' | 'note' | 'warn' | 'error';
+
+/**
+ * Wireshark's expert groups, which is what its Expert Information dialog
+ * sorts by. Declared by whoever raises the finding rather than guessed from
+ * the message text: a dissector knows whether it is complaining about a
+ * checksum or a sequence number, and a keyword match over prose does not.
+ */
+export type ExpertGroup =
+  | 'Checksum'
+  | 'Sequence'
+  | 'Malformed'
+  | 'Protocol'
+  | 'Security'
+  | 'Response';
+
+export interface ExpertInfo {
+  severity: ExpertSeverity;
+  message: string;
+  /** Defaults to `Protocol` where a dissector does not say. */
+  group?: ExpertGroup;
+}
+
 export interface ProtocolField {
   name: string;
   value: string | number | boolean;
+  /**
+   * The field's filter name (`tcp.flags.syn`), from `services/dissect/fieldRegistry`.
+   * A row that carries one can be turned into a filter or a column; a row
+   * without one is display only. Present on every field a dissector also
+   * publishes into `Packet.fields`.
+   */
+  abbrev?: string;
   rawBytesRange?: [number, number]; // [startByte, endByte]
   description?: string;
   children?: ProtocolField[];
@@ -56,10 +96,7 @@ export interface ProtocolField {
   linkToFrame?: number;
 
   /** Analysis output surfaced inline, e.g. a suspected retransmission. */
-  expertInfo?: {
-    severity: 'chat' | 'note' | 'warn' | 'error';
-    message: string;
-  };
+  expertInfo?: ExpertInfo;
 }
 
 export interface ProtocolLayer {
@@ -80,7 +117,15 @@ export interface AnomalyInfo {
 
 export interface Packet {
   id: number;
-  timestamp: number; // milliseconds epoch
+  /**
+   * Capture time, epoch microseconds - the driver's own resolution, exact as a
+   * JS number. Was milliseconds, which quietly threw away the three digits the
+   * driver stamps and re-exported a capture at coarser precision than it came
+   * in at.
+   */
+  tsUs: number;
+  /** The full nanosecond stamp for a nanosecond-resolution capture file. */
+  tsNanos?: bigint;
   timeDelta: number; // delta from previous packet in seconds
   relativeTime: number; // seconds since capture start
   source: string;
@@ -127,6 +172,16 @@ export interface Packet {
    * dissector produced without the filter engine needing a case for each one.
    */
   fields?: Record<string, string | number>;
+  /**
+   * Names this frame mapped to addresses - a DNS or mDNS answer set.
+   *
+   * Kept on the packet rather than handed to the caller as a side channel so
+   * the passive name map can be derived from the buffer alone, which is what
+   * makes it work identically for a live capture, an imported file and a
+   * restored session (services/nameResolution.ts). One name maps to several
+   * addresses, which is why this cannot live in the flat `fields` bag.
+   */
+  resolved?: { name: string; addresses: string[] }[];
   length: number; // in bytes
   info: string;
   status: PacketStatus;
@@ -136,6 +191,24 @@ export interface Packet {
     payloadText: string;
     payloadType: 'text' | 'binary' | 'json' | 'tls_encrypted';
   };
+  /**
+   * Every finding this frame's dissectors raised, flattened.
+   *
+   * The same findings are attached to the tree rows they belong to, and until
+   * Phase 11 that was the only place they lived - Expert Information built its
+   * list by walking every frame's tree. The tree is dissected on demand now
+   * (docs/decisions/0007), so a view that aggregates over the whole buffer
+   * cannot go and get it; the findings themselves ride on the frame, which is
+   * what `DissectSummary.expert` was for.
+   *
+   * Absent, not empty, on a frame with nothing to say - which is most of them.
+   */
+  expert?: ExpertInfo[];
+  /**
+   * The protocol tree. Empty on a frame that has not been asked about: it is
+   * 10.6 kB per frame and the detail pane is the only thing that reads it, so
+   * it is dissected on demand rather than carried (docs/decisions/0007).
+   */
   layers: ProtocolLayer[];
   rawBytes: Uint8Array;
   /** Optional: derived on demand via packetHexDump() rather than stored, so

@@ -1,4 +1,4 @@
-# NetView
+# Inwire
 
 A real-time network packet analyzer that runs in the browser.
 
@@ -7,7 +7,7 @@ everything else — dissection, filtering, colour rules, anomaly detection, PCAP
 import and export — runs client-side in TypeScript. No packet ever leaves the
 machine, and there is no backend to stand up.
 
-![CI](https://github.com/Doofess/NetView/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Doofess/Inwire/actions/workflows/ci.yml/badge.svg)
 
 ## How it works
 
@@ -82,11 +82,11 @@ does not.
 
 The agent listens on `ws://localhost:8999` and authenticates browsers by
 **origin**, not by a token: a connection whose `Origin` header is not listed in
-`%ProgramData%\NetView\config.json` is rejected during the handshake. Defaults
+`%ProgramData%\Inwire\config.json` is rejected during the handshake. Defaults
 cover `localhost:3000` and `localhost:4173`. The file is re-read per connection,
 so adding an origin needs no restart.
 
-Logs go to `%ProgramData%\NetView\agent.log`. When the agent runs as a Windows
+Logs go to `%ProgramData%\Inwire\agent.log`. When the agent runs as a Windows
 service there is no console, so that file is the only place to look.
 
 ### Windows distribution

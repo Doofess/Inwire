@@ -8,8 +8,11 @@ import {
 } from 'react-icons/tb';
 import { UserRole, UserRolePermissions } from '../../types/packet';
 import { AppMenu } from './AppMenu';
+import { BrandMark } from './BrandMark';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
+import { headerButtonClass } from './headerButton';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
+import type { NameResolutionPrefs } from '../../services/interfacePrefs';
 
 interface HeaderProps {
   isCapturing: boolean;
@@ -25,12 +28,25 @@ interface HeaderProps {
   onSelectInterface: (interfaceName: string) => void;
   /** Recent packets/sec per interface name, for the picker's sparklines. */
   interfaceRates?: Record<string, number[]>;
+  /**
+   * True when the agent is capturing for a different Inwire window.
+   *
+   * The capture belongs to whoever started it, so this window can neither stop
+   * it nor move it to another adapter - and the controls say so rather than
+   * offering buttons whose only outcome would be an error. This window is not
+   * receiving those packets either, which is why the row cannot simply show
+   * "capturing".
+   */
+  captureOwnedElsewhere?: boolean;
   onInterfacePickerOpenChange?: (open: boolean) => void;
   permissions: UserRolePermissions;
   onOpenDissectorModal: () => void;
-  onOpenStatsModal: () => void;
   onOpenExportModal: () => void;
+  onOpenStatisticsModal: () => void;
   onOpenIspModal?: () => void;
+  /** The View -> Name Resolution switches, shown in the menu. */
+  nameResolution: NameResolutionPrefs;
+  onNameResolutionChange: (patch: Partial<NameResolutionPrefs>) => void;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   /** Whether the app is meant to be holding a link at all - see App.tsx. This
    *  is the difference between "the driver is not there" and "you closed the
@@ -57,12 +73,15 @@ export const Header: React.FC<HeaderProps> = ({
   selectedInterfaces,
   onSelectInterface,
   interfaceRates,
+  captureOwnedElsewhere = false,
   onInterfacePickerOpenChange,
   permissions,
   onOpenDissectorModal,
-  onOpenStatsModal,
   onOpenExportModal,
+  onOpenStatisticsModal,
   onOpenIspModal,
+  nameResolution,
+  onNameResolutionChange,
   agentStatus,
   agentLinkEnabled,
   agentOutdated,
@@ -147,9 +166,9 @@ export const Header: React.FC<HeaderProps> = ({
    * discard explicit is what keeps every buffer a single continuous recording.
    */
   const restartDiscards = !isCapturing && totalPacketsCount > 0;
-  const startBlocked = !permissions.canCapture || !selectedInterface;
-  const captureBlocked =
-    !isCapturing && (startBlocked || (restartDiscards && !permissions.canClearBuffer));
+  const startBlocked = !permissions.canCapture || !selectedInterface || captureOwnedElsewhere;
+  const captureBlocked = captureOwnedElsewhere
+    || (!isCapturing && (startBlocked || (restartDiscards && !permissions.canClearBuffer)));
 
   const startFresh = () => {
     setConfirmRestart(false);
@@ -158,35 +177,6 @@ export const Header: React.FC<HeaderProps> = ({
     onClearPackets();
     onStartCapture();
   };
-
-  /**
-   * The three actions in the header bar, in one style.
-   *
-   * They used to be three colours - amber or green or red for the adapter,
-   * green for Start, red for Stop, the accent for Clear Cache - which is four
-   * hues competing for attention in a strip 16px tall, none of them meaning
-   * anything a label does not already say.
-   *
-   * They invert against the bar: the bar is `--chrome`, so these are
-   * `--chrome-foreground` with `--chrome` text - the same pair read the other
-   * way round, which is why one class string works on every theme. There is no
-   * light/dark split any more, because the bar is accent-coloured everywhere.
-   *
-   * The adapter button's STATE is now carried by its label and its tooltip
-   * alone - "Install Drivers", "No interfaces detected" - which is where the
-   * detail always was; the colour was a second, coarser copy of it.
-   */
-  const headerButtonClass =
-    'bg-chrome-foreground text-chrome hover:bg-chrome-foreground/85 ' +
-    // On the two dark themes the bar is a deepened accent, and a white slab on
-    // it is louder than anything else in a dark window. The theme's own dark
-    // `--secondary` reads as a recess in the bar instead, with `--primary` -
-    // the accent at full strength - carrying the label. The same idea
-    // inverted: a light theme pushes the button forward off the bar, a dark
-    // one sinks it in.
-    'dark:bg-secondary dark:text-primary dark:hover:bg-accent ' +
-    'text-xs px-3.5 sm:px-4 py-2 rounded font-bold uppercase tracking-wider ' +
-    'flex items-center gap-1.5 shadow-md transition-all';
 
   const interfaceButton = agentInterfaces.length === 0
     ? adapterStateKnown
@@ -233,19 +223,41 @@ export const Header: React.FC<HeaderProps> = ({
             the logo rather than trailing every other control. */}
         <AppMenu
           onOpenDissectorModal={onOpenDissectorModal}
-          onOpenStatsModal={onOpenStatsModal}
           onOpenExportModal={onOpenExportModal}
+          onOpenStatisticsModal={onOpenStatisticsModal}
           onOpenIspModal={onOpenIspModal}
+          nameResolution={nameResolution}
+          onNameResolutionChange={onNameResolutionChange}
           onOpenSettingsModal={onOpenSettingsModal}
           agentOutdated={agentOutdated}
         />
 
-        {/* Title */}
-        <div className="hidden xl:flex flex-col">
-          <div className="flex items-center gap-1.5">
-            <span className="font-mono font-black text-sm tracking-tight text-chrome-foreground">NET VIEW</span>
-          </div>
-          <span className="text-[10px] text-chrome-foreground/70 font-mono">Packet Analyzer</span>
+        {/* The lockup: mark, then the wordmark, on one line.
+
+            The colour is set once, here, and both children take it through
+            `currentColor` - so the mark and the word cannot drift apart into
+            two values that have to be kept in step by hand.
+
+            `--chrome-brand`, not `--chrome-foreground` and not a `dark:`
+            variant. On the two light themes it resolves to the foreground,
+            white. On the two dark ones it drops to the surface tone below the
+            bar, so the lockup reads as pressed into the chrome rather than
+            sitting on top of it - a deliberately low-contrast treatment, about
+            2:1, legitimate for a logo and not for body text.
+
+            It has to be a token because the Colourful setting moves it: with
+            the accent bar off, that same surface tone would sit on a `--card`
+            ground and the lockup would all but disappear. index.css owns both
+            values; this only has to name the right one.
+
+            The face is the mono, not the rounded sans: flat terminals and
+            square joins, and its true italic rather than a synthesised
+            slant. */}
+        <div className="hidden xl:flex items-center gap-2.5 text-chrome-brand">
+          <BrandMark className="w-9 h-9 shrink-0" />
+          <span className="font-mono font-extrabold italic text-lg leading-none tracking-tight">
+            INWIRE
+          </span>
         </div>
 
         {/* Capture Buttons */}
@@ -256,7 +268,12 @@ export const Header: React.FC<HeaderProps> = ({
             // Both red states are dead ends by design: there is no adapter
             // list to open, and a button that opens an empty menu reads as
             // broken rather than as blocked. The tooltip carries the way out.
-            <button disabled className={`${interfaceButtonClass} cursor-not-allowed`} title={interfaceButton.title}>
+            <button
+              disabled
+              data-tour="interfaces"
+              className={`${interfaceButtonClass} cursor-not-allowed`}
+              title={interfaceButton.title}
+            >
               <TbNetwork className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate">{interfaceButton.label}</span>
             </button>
@@ -269,7 +286,13 @@ export const Header: React.FC<HeaderProps> = ({
               onOpenChange={onInterfacePickerOpenChange}
               align="start"
             >
-              <button className={`${interfaceButtonClass} active:scale-95 cursor-pointer`} title={interfaceButton.title}>
+              {/* Both branches carry the anchor: only one is mounted at a
+                  time, so the tour finds whichever state the app is in. */}
+              <button
+                data-tour="interfaces"
+                className={`${interfaceButtonClass} active:scale-95 cursor-pointer`}
+                title={interfaceButton.title}
+              >
                 <TbNetwork className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">{interfaceButton.label}</span>
               </button>
@@ -300,6 +323,7 @@ export const Header: React.FC<HeaderProps> = ({
               reader or for a hover. */}
           <div className="relative" ref={confirmRef}>
             <button
+              data-tour="start"
               // onPauseCapture already sends stop_capture. Sending it again here
               // is what put every stop in the agent log twice.
               onClick={
@@ -320,7 +344,9 @@ export const Header: React.FC<HeaderProps> = ({
               aria-haspopup={restartDiscards ? 'dialog' : undefined}
               aria-expanded={restartDiscards ? confirmRestart : undefined}
               title={
-                isCapturing
+                captureOwnedElsewhere
+                  ? 'Another Inwire window is capturing. Stop it there, or close that window.'
+                  : isCapturing
                   ? 'Stop capture. A stopped capture cannot be resumed.'
                   : startBlocked
                     ? 'Choose an interface first'
@@ -332,7 +358,13 @@ export const Header: React.FC<HeaderProps> = ({
                 captureBlocked ? 'opacity-50 cursor-not-allowed' : ''
               }`}
             >
-              <span className="relative block w-3.5 h-3.5">
+              {/* 16px, not the 14px of the glyphs it holds. This is a block
+                  box in a flex row, so it sets the button's content height
+                  directly where the other two buttons get theirs from a 16px
+                  text line box - and at 14 this button stood two pixels
+                  shorter than the pair beside it. The glyphs stay 14 and
+                  centre themselves in it. */}
+              <span className="relative block w-4 h-4">
                 {/* Both glyphs occupy the same box, absolutely, so the button's
                     width never depends on which one is showing. `initial={false}`
                     stops the icon animating itself in on first paint. */}

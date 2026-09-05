@@ -143,7 +143,7 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
   return (
     <motion.div
       {...modalBackdropMotion}
-      className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
     >
       <motion.div
         {...modalPanelMotion}

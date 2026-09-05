@@ -1,5 +1,6 @@
 import { Packet } from '../types/packet';
 import { FilterEngine } from './filterEngine';
+import { packetsExtend } from './packetPrefix';
 
 /**
  * Applying a display filter to a growing packet buffer without re-deciding
@@ -26,28 +27,12 @@ export interface FilterCache {
 }
 
 /**
- * True when `packets` provably still begins with the array `cache` was built
- * from, so only the tail past it can contain anything new.
- *
- * Two identity checks establish that, given the buffer is only ever appended
- * to, trimmed from the front, or replaced wholesale:
- *
- *   - element 0 catches a trim or a clear, since both shift the head;
- *   - the element sitting at the cache's final index catches a wholesale
- *     replacement, which is what a pcap import does.
- *
- * Anything either check rejects falls back to a full pass, so being wrong here
- * costs time, never correctness.
+ * True when `cache` was built from a prefix of `packets` under the same
+ * filter, so only the tail past it needs deciding. The prefix test itself is
+ * shared - see `packetsExtend` for why two identity checks are enough.
  */
 function prefixIntact(packets: Packet[], filter: string, cache: FilterCache | null): cache is FilterCache {
-  return (
-    cache !== null &&
-    cache.filter === filter &&
-    cache.source.length > 0 &&
-    packets.length >= cache.source.length &&
-    packets[0] === cache.source[0] &&
-    packets[cache.source.length - 1] === cache.source[cache.source.length - 1]
-  );
+  return cache !== null && cache.filter === filter && packetsExtend(packets, cache.source);
 }
 
 /**

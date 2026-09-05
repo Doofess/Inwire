@@ -8,7 +8,12 @@
  * drawn twice, and **stable tie-breaking**, without which a route carrying
  * equal amounts of two protocols recolours on every recount as packets arrive.
  */
-import { aggregateRoutes, dominantProtocol } from '../../src/components/analytics/geoRoutes';
+import {
+  addPacketToPairs,
+  aggregateRoutes,
+  dominantProtocol,
+  type AddressPair,
+} from '../../src/components/analytics/geoRoutes';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -38,9 +43,24 @@ function pkt(source: string, destination: string, protocol: string): Packet {
   return { id: nextId++, source, destination, protocol } as unknown as Packet;
 }
 
+/**
+ * Packets in, routes out - the two halves the map now runs separately.
+ *
+ * Every assertion below is written against packets, because packets are what
+ * these behaviours are about. Folding through the pair map here rather than
+ * asserting on `aggregateRoutes` alone is deliberate: it is the composition
+ * that has to keep direction independence and tie-breaking, and the pair fold
+ * is where a canonicalisation could quietly be lost.
+ */
+function routesFor(packets: Packet[], place: (ip: string) => [number, number] | null) {
+  const pairs = new Map<string, AddressPair>();
+  for (const packet of packets) addPacketToPairs(pairs, packet);
+  return aggregateRoutes(pairs.values(), place);
+}
+
 // --- Direction independence --------------------------------------------------
 {
-  const routes = aggregateRoutes([
+  const routes = routesFor([
     pkt('a.1', 'b.1', 'TCP'),
     pkt('b.1', 'a.1', 'TCP'),
   ], locate);
@@ -50,7 +70,7 @@ function pkt(source: string, destination: string, protocol: string): Packet {
 
 // --- Hosts in one place collapse onto one line -------------------------------
 {
-  const routes = aggregateRoutes([
+  const routes = routesFor([
     pkt('a.1', 'b.1', 'TCP'),
     pkt('a.2', 'b.1', 'TCP'),
   ], locate);
@@ -60,13 +80,13 @@ function pkt(source: string, destination: string, protocol: string): Packet {
 
 // --- Same-place traffic draws nothing ----------------------------------------
 {
-  const routes = aggregateRoutes([pkt('a.1', 'a.2', 'TCP')], locate);
+  const routes = routesFor([pkt('a.1', 'a.2', 'TCP')], locate);
   check('a route with both ends in one place is dropped', routes.length, 0);
 }
 
 // --- Unlocatable endpoints ---------------------------------------------------
 {
-  const routes = aggregateRoutes([
+  const routes = routesFor([
     pkt('a.1', 'unknown', 'TCP'),
     pkt('unknown', 'other', 'TCP'),
   ], locate);
@@ -75,7 +95,7 @@ function pkt(source: string, destination: string, protocol: string): Packet {
 
 // --- Dominant protocol -------------------------------------------------------
 {
-  const routes = aggregateRoutes([
+  const routes = routesFor([
     pkt('a.1', 'b.1', 'TCP'),
     pkt('a.1', 'b.1', 'QUIC'),
     pkt('a.1', 'b.1', 'QUIC'),
@@ -97,7 +117,7 @@ check('an unknown protocol loses a tie to a known one',
     pkt('a.1', 'b.1', 'TCP'),
     pkt('a.1', 'c.1', 'TCP'), pkt('a.1', 'c.1', 'TCP'), pkt('a.1', 'c.1', 'TCP'),
   ];
-  const routes = aggregateRoutes(packets, locate);
+  const routes = routesFor(packets, locate);
   check('routes come back busiest first', routes.map((r) => r.total), [3, 1]);
 }
 
@@ -110,7 +130,7 @@ check('an unknown protocol loses a tie to a known one',
   for (let i = 0; i < 200; i++) {
     for (let n = 0; n <= i % 5; n++) packets.push(pkt('hub', `p${i}`, 'TCP'));
   }
-  const routes = aggregateRoutes(packets, locateMany);
+  const routes = routesFor(packets, locateMany);
   checkTrue(`the route count is capped (${routes.length})`, routes.length <= 60);
   checkTrue('what survives is the busiest',
     routes[0].total >= routes[routes.length - 1].total);
@@ -136,7 +156,7 @@ check('an unknown protocol loses a tie to a known one',
     ['10.0.0.1', exactA],
     ['10.0.0.2', exactB],
   ]);
-  const routes = aggregateRoutes(
+  const routes = routesFor(
     [pkt('10.0.0.1', '10.0.0.2', 'TCP')],
     (ip) => here.get(ip) ?? null,
   );
@@ -155,7 +175,7 @@ check('an unknown protocol loses a tie to a known one',
     ['10.0.0.2', exactB],
     ['10.0.0.3', [exactB[0] + 0.001, exactB[1] + 0.001]],
   ]);
-  const grouped = aggregateRoutes(
+  const grouped = routesFor(
     [pkt('10.0.0.1', '10.0.0.2', 'TCP'), pkt("10.0.0.1", "10.0.0.3", "TCP")],
     (ip) => nearby.get(ip) ?? null,
   );
