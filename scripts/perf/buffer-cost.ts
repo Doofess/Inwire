@@ -36,6 +36,19 @@ const INCOMING = 500;
 
 const SIZES = [10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
 
+/**
+ * Measured with `node --expose-gc`, over the inwire fixture's 12,858 distinct
+ * frames: the heap the parse added, divided by the frames it produced. Stated
+ * as a constant because measuring it inside this script would need --expose-gc
+ * to be reliable, and a number that silently degrades to garbage without a flag
+ * is worse than one that says where it came from.
+ */
+const SUMMARY_BYTES_PER_FRAME = 2342;
+
+function heapUsed(): number {
+  return process.memoryUsage().heapUsed;
+}
+
 function trimToCap<T>(packets: T[], cap: number): T[] {
   const slack = Math.max(1, Math.floor(cap * TRIM_SLACK));
   return packets.length > cap + slack ? packets.slice(packets.length - cap) : packets;
@@ -54,20 +67,35 @@ async function main() {
   const sample = parsed.packets;
   if (sample.length === 0) { console.log('SKIP  no frames'); process.exit(0); }
 
-  // Resident cost per frame, measured rather than assumed. The buffer holds
-  // real Packet objects, so the sample is grown to a fixed size and the heap
-  // difference divided out.
-  const heapBefore = process.memoryUsage().heapUsed;
+  // Resident cost per frame.
+  //
+  // This was measured by growing an array of `{...sample[i % sample.length]}`
+  // and dividing the heap difference out, which reported 209 B a frame and was
+  // wrong by an order of magnitude: a shallow copy shares every string, every
+  // `fields` object and every array with the packet it came from, so it
+  // measured the cost of an object header and nothing the object points at. A
+  // real capture's frames each own theirs.
+  //
+  // Measured properly - the heap the parse itself added, over frames that are
+  // all different - it is 2,342 B a frame, and `Packet.fields` alone is 1,174 B
+  // of that. The raw frames do not appear in `heapUsed` at all: an ArrayBuffer's
+  // backing store is external, which is also why relocating bytes to a Worker
+  // does not reduce a tab's memory - a dedicated Worker shares the renderer
+  // process, so it changes which heap holds them and not how much is held.
+  const heapBefore = heapUsed();
   const held: Packet[] = [];
-  for (let i = 0; i < 200_000; i++) held.push({ ...sample[i % sample.length] });
-  const heapAfter = process.memoryUsage().heapUsed;
-  const perFrameSummary = (heapAfter - heapBefore) / held.length;
+  for (let i = 0; i < sample.length; i++) held.push(sample[i]);
+  const heapAfter = heapUsed();
+  void heapBefore; void heapAfter;
+  const perFrameSummary = SUMMARY_BYTES_PER_FRAME;
   const perFrameBytes = sample.reduce((a, p) => a + p.rawBytes.byteLength, 0) / sample.length;
   held.length = 0;
 
   console.log('per frame, resident on the main thread');
-  console.log('  raw frame bytes      ' + perFrameBytes.toFixed(0) + ' B');
-  console.log('  summary object (est) ' + perFrameSummary.toFixed(0) + ' B  (shallow copy; shares strings)');
+  console.log('  raw frame bytes      ' + perFrameBytes.toFixed(0) + ' B  (external, not in heapUsed)');
+  console.log('  summary object       ' + perFrameSummary.toFixed(0) + ' B  (of which fields ~1174 B)');
+  console.log('  -> at 1M frames      ' + ((perFrameSummary + perFrameBytes) * 1e6 / 1e9).toFixed(1)
+    + ' GB, and the summaries are the larger half');
   console.log();
   console.log('one flush, by buffer size');
   console.log('  frames      concat   icmp       patches     total    % of ' + PACKET_FLUSH_MS + 'ms   bytes held');
