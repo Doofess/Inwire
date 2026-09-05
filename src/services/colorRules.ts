@@ -414,29 +414,48 @@ export function resolveRuleColors(
   };
 }
 
+/**
+ * Distinguishes one engine's cached answers from another's. Module-level so it
+ * counts across every engine ever built in this context, which is what makes a
+ * generation unique rather than merely different from its predecessor.
+ */
+let nextEngineGeneration = 1;
+
+/**
+ * The slot value meaning "walked the whole chain and nothing matched".
+ *
+ * Cached like any other answer, deliberately: it is the *expensive* one, being
+ * the only result that has run every matcher in the chain.
+ */
+const NO_RULE_SLOT = 255;
+
+/** Slots per generation, so generation and slot pack into one small integer. */
+const SLOT_RADIX = 256;
+
 export class ColorRulesEngine {
   private compiled: CompiledRule[];
 
   /**
-   * The rule each packet matched, memoized.
+   * Which engine this is, so a stale cached answer is recognised as stale.
    *
-   * The whole reason this class is fast enough to run at capture volume. A
-   * packet is immutable once dissected and the chain is deterministic, so its
-   * matched rule can never change - yet the packet-list minimap asks for every
-   * buffered packet's color on every repaint. Profiling the running app during
-   * a live capture measured 142,338 getPacketStyle calls costing 3,799ms in a
-   * single 5-second window (76% of all wall-clock time, 82% of all main-thread
-   * blocking) at a 15,762-packet buffer, with one full minimap redraw taking
-   * 698ms. With this cache the same redraw takes 2.1ms.
-   *
-   * What is cached is the *rule*, not a pair of colors, because rule matching
-   * is theme-independent: resolveRuleColors() applies the theme afterwards, so
-   * switching themes costs nothing and needs no invalidation.
-   *
-   * A WeakMap rather than a Map: packets dropped off the back of the live
-   * buffer are collected with no bookkeeping and no unbounded growth.
+   * Every engine gets a number no other engine has had. A packet caches the
+   * rule it matched together with the generation that decided it, so an engine
+   * built from an edited chain simply does not recognise the previous engine's
+   * answers - no invalidation pass, and no way for one to be mistaken for its
+   * own.
    */
-  private matchCache = new WeakMap<Packet, ColorRule | null>();
+  private readonly generation = nextEngineGeneration++;
+
+  /**
+   * Whether a matched rule can be cached on the packet at all.
+   *
+   * The cache packs the generation and the rule's position into one number, so
+   * it needs the position to fit in a byte. A chain longer than this is
+   * degenerate - the shipped one is 21 enabled rules - and the answer is to
+   * stop caching rather than to wrap, which would paint frames with a rule
+   * that is not the one they matched.
+   */
+  private readonly cacheable: boolean;
 
   /**
    * @param rules the chain to match against, first-match-wins. Defaults to the
@@ -446,6 +465,7 @@ export class ColorRulesEngine {
    */
   constructor(rules: ColorRule[] = DEFAULT_COLOR_RULES) {
     this.compiled = ColorRulesEngine.compile(rules);
+    this.cacheable = this.compiled.length < NO_RULE_SLOT;
   }
 
   // Each rule's filter is turned into a matcher once here rather than being
@@ -484,22 +504,61 @@ export class ColorRulesEngine {
    * chain - so it is the one least worth paying for twice.
    */
   private matchRule(packet: Packet): ColorRule | null {
-    const cached = this.matchCache.get(packet);
-    if (cached !== undefined) return cached;
+    const slot = this.cachedSlot(packet);
+    if (slot !== null) return slot === NO_RULE_SLOT ? null : this.compiled[slot].rule;
 
     let matched: ColorRule | null = null;
-    for (const { rule, matcher } of this.compiled) {
+    let matchedSlot = NO_RULE_SLOT;
+    for (let i = 0; i < this.compiled.length; i++) {
       try {
-        if (matcher(packet)) {
-          matched = rule;
+        if (this.compiled[i].matcher(packet)) {
+          matched = this.compiled[i].rule;
+          matchedSlot = i;
           break;
         }
       } catch {
         // A rule that can't be evaluated simply doesn't match.
       }
     }
-    this.matchCache.set(packet, matched);
+    if (this.cacheable) {
+      packet.colorSlot = this.generation * SLOT_RADIX + matchedSlot;
+    }
     return matched;
+  }
+
+  /**
+   * This engine's own cached answer for a packet, or null if it has none.
+   *
+   * The generation check is what makes a packet safe to carry a cache at all:
+   * an answer written by a previous chain unpacks to a different generation and
+   * is ignored, so an edited chain needs no invalidation pass over the buffer
+   * and cannot read the old chain's decisions as its own.
+   */
+  private cachedSlot(packet: Packet): number | null {
+    const packed = packet.colorSlot;
+    if (packed === undefined || !this.cacheable) return null;
+    if (Math.floor(packed / SLOT_RADIX) !== this.generation) return null;
+    return packed % SLOT_RADIX;
+  }
+
+  /**
+   * The rule this packet is already known to match, without walking the chain.
+   *
+   * `undefined` means "not decided yet" and is a real answer, distinct from
+   * `null`'s "decided, and nothing matched". It is what lets a caller paint
+   * what is known and come back for the rest - the minimap uses it to avoid
+   * a synchronous pass over the whole buffer after a rule edit, which measured
+   * 202 ms at 100,000 frames and 1,985 ms at a million.
+   */
+  public matchedRuleIfKnown(packet: Packet): ColorRule | null | undefined {
+    const slot = this.cachedSlot(packet);
+    if (slot === null) return undefined;
+    return slot === NO_RULE_SLOT ? null : this.compiled[slot].rule;
+  }
+
+  /** Decides this packet's rule if it is not already decided. */
+  public resolve(packet: Packet): void {
+    this.matchRule(packet);
   }
 
   /**

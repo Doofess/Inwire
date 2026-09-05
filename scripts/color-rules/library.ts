@@ -103,18 +103,19 @@ check('the shipped chain survives its own validator',
 check('a reset hands out a copy, not the shared array',
   defaultColorRules()[0] === DEFAULT_COLOR_RULES[0], false);
 
+/** A frame with just enough on it for the chain to have something to read. */
+const packet = (over: Partial<Packet>): Packet => ({
+  id: 1, tsUs: 0, relativeTime: 0, timeDelta: 0,
+  source: '10.0.0.1', destination: '10.0.0.2',
+  protocol: 'TCP' as ProtocolType, length: 100, info: '', status: 'ok',
+  frameProtocols: ['frame', 'eth', 'ip', 'tcp'],
+  layers: [], rawBytes: Uint8Array.from([0x00, 0x11]), interfaceName: 'test',
+  ...over,
+});
+
 // --- order is the feature --------------------------------------------------------
 
 {
-  const packet = (over: Partial<Packet>): Packet => ({
-    id: 1, tsUs: 0, relativeTime: 0, timeDelta: 0,
-    source: '10.0.0.1', destination: '10.0.0.2',
-    protocol: 'TCP' as ProtocolType, length: 100, info: '', status: 'ok',
-    frameProtocols: ['frame', 'eth', 'ip', 'tcp'],
-    layers: [], rawBytes: Uint8Array.from([0x00, 0x11]), interfaceName: 'test',
-    ...over,
-  });
-
   const tlsHello = packet({
     protocolLabel: 'TLSv1.3',
     frameProtocols: ['frame', 'eth', 'ip', 'tcp', 'tls'],
@@ -199,6 +200,86 @@ check('a reset hands out a copy, not the shared array',
   });
   check('a unicast frame with no bytes is not Broadcast',
     new ColorRulesEngine(DEFAULT_COLOR_RULES).getMatchedRuleName(unicast), 'TCP');
+}
+
+// --- The match cache, and the one way it could paint a frame wrongly ---------
+//
+// The matched rule is cached ON the packet - a number packing which engine
+// decided it with which rule it decided (`Packet.colorSlot`). That is 15 B a
+// frame against the 41 B the previous `WeakMap<Packet, ColorRule>` cost, and it
+// takes a warm pass over a million frames from 103.8 ms to 22.7 ms
+// (`scripts/perf/color-index-cost.ts`).
+//
+// It also puts a mutable cache on an object that outlives the thing that wrote
+// it, which is exactly how a stale answer gets rendered as a current one. The
+// generation is the defence, and these are what hold it.
+{
+  const tcp = packet({
+    frameProtocols: ['frame', 'eth', 'ip', 'tcp'],
+    fields: { 'tcp.srcport': 51000, 'tcp.dstport': 443 },
+  });
+
+  const first = new ColorRulesEngine(DEFAULT_COLOR_RULES);
+  check('nothing is known before anything asks', first.matchedRuleIfKnown(tcp), undefined);
+  check('a frame matches under the shipped chain', first.getMatchedRuleName(tcp), 'TCP');
+  check('...and is known afterwards', first.matchedRuleIfKnown(tcp)?.name, 'TCP');
+  check('...from the cache, without a second walk',
+    first.matchedRuleIfKnown(tcp)?.name, 'TCP');
+
+  // The whole point. A second engine over a DIFFERENT chain must not read the
+  // first engine's answer off the packet - the frame is carrying a cached
+  // 'TCP' and the correct answer here is 'UDP-ish', so a generation that did
+  // not distinguish them would paint the old chain's decision for ever.
+  const recoloured = DEFAULT_COLOR_RULES.map(r =>
+    r.id === 'color-tcp' ? { ...r, name: 'TCP (edited)' } : r);
+  const second = new ColorRulesEngine(recoloured);
+  check("a new chain does not read the previous chain's answer",
+    second.matchedRuleIfKnown(tcp), undefined);
+  check('...and decides for itself', second.getMatchedRuleName(tcp), 'TCP (edited)');
+
+  // ...and the first engine is not corrupted by the second having written over
+  // the packet. It is a cache: a miss costs a walk, never a wrong answer.
+  check('the earlier engine still answers correctly after being evicted',
+    first.getMatchedRuleName(tcp), 'TCP');
+}
+
+// A frame matching NO rule caches that too - it is the expensive answer, being
+// the only one that has run every matcher - and must come back as "decided,
+// nothing matched" rather than as "not yet decided".
+{
+  const nothing = packet({ frameProtocols: ['frame', 'eth'], fields: {} });
+  const engine = new ColorRulesEngine([
+    { id: 'only', name: 'Only', filter: 'tcp', enabled: true },
+  ]);
+  check('a frame matching nothing has no rule name',
+    engine.getMatchedRuleName(nothing), undefined);
+  check('...and that is a decision, not an absence',
+    engine.matchedRuleIfKnown(nothing), null);
+}
+
+// A chain longer than the slot can encode must stop caching rather than wrap.
+// Wrapping would hand back a rule the frame did not match, which is the one
+// failure mode worse than being slow.
+{
+  const many = Array.from({ length: 300 }, (_, i) => ({
+    id: 'rule-' + i,
+    name: 'Rule ' + i,
+    // Only the last one can match, so the answer is unambiguous and is also
+    // the deepest possible walk.
+    filter: i === 299 ? 'tcp' : 'ip.src == 203.0.113.' + (i % 200),
+    enabled: true,
+  }));
+  const engine = new ColorRulesEngine(many);
+  const tcp = packet({
+    frameProtocols: ['frame', 'eth', 'ip', 'tcp'],
+    fields: { 'tcp.srcport': 1, 'tcp.dstport': 2 },
+  });
+  check('an over-long chain still matches correctly',
+    engine.getMatchedRuleName(tcp), 'Rule 299');
+  check('...twice, since nothing was cached to go stale',
+    engine.getMatchedRuleName(tcp), 'Rule 299');
+  check('...and it declines to cache rather than wrapping',
+    engine.matchedRuleIfKnown(tcp), undefined);
 }
 
 console.log();

@@ -134,6 +134,38 @@ function resolveColorBytes(color: string): [number, number, number, number] {
  * there are more packets than vertical pixels, the same way a real minimap
  * degrades for files much longer than the viewport.
  */
+/**
+ * How long one slice of the progressive fill may run, and how many rows it
+ * paints between clock checks.
+ *
+ * The budget is well inside a 60 Hz frame so the strip keeps filling while the
+ * list stays interactive; the row batch only exists so `performance.now()` is
+ * not called once per row, which at a million frames would cost more than the
+ * work it is timing.
+ */
+const SLICE_MS = 6;
+const ROWS_PER_CHECK = 16;
+
+/**
+ * This packet's colours if something has already matched it, else `undefined`.
+ *
+ * The distinction the progressive fill is built on. `getPacketStyle` returns
+ * `{}` for a frame that matched no rule, which is an answer; this returns
+ * `undefined` for a frame nothing has asked about yet, which is not one - and
+ * painting the two the same way is how a strip would show a chain's answer for
+ * frames it has not evaluated.
+ */
+function knownStyle(
+  engine: ColorRulesEngine,
+  packet: Packet,
+  theme: PacketTheme,
+): { background?: string } | undefined {
+  const rule = engine.matchedRuleIfKnown(packet);
+  if (rule === undefined) return undefined;
+  if (rule === null) return {};
+  return engine.getPacketStyle(packet, theme);
+}
+
 export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   packets,
   selectedPacket,
@@ -151,6 +183,16 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   const resizingRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [viewport, setViewport] = useState({ top: 0, height: 0 });
+  /**
+   * True while the strip is still deciding colours for part of the buffer.
+   *
+   * Only ever true after a colouring rule is edited, since that is the one
+   * thing that makes every frame's colour unknown at once. It drives a quiet
+   * hint rather than a progress bar: the number that would fill it is rows of a
+   * strip nobody asked to watch, and the list itself is not waiting on any of
+   * it.
+   */
+  const [filling, setFilling] = useState(false);
   const [mapWidth, setMapWidth] = useState(loadStoredMinimapWidth);
   // As state, not read during the paint: see useThemeToken. Read inline this
   // could momentarily resolve to nothing and paint the selected-packet marker
@@ -234,22 +276,44 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
     // A packet matching no rule is painted with the theme's own ground.
     const fallback = packetTheme.surface.background;
 
-    if (total <= size.height) {
-      const bandHeight = size.height / total;
-      paintedPackets.forEach((packet, i) => {
-        const style = colorEngine.getPacketStyle(packet, packetTheme);
-        ctx.fillStyle = style.background || fallback;
-        ctx.fillRect(0, i * bandHeight, size.width, Math.ceil(bandHeight));
-      });
-    } else {
+    // Frames the first pass could not colour because nothing has matched them
+    // against this chain yet. Zero on an ordinary repaint.
+    let undecided = 0;
+
+    /**
+     * Paints rows `from` up to `to`, and reports whether every frame in them
+     * had already been matched.
+     *
+     * Split out of the effect so the pass below can run it in slices. Painting
+     * a row needs every frame in that row's band, so a row is the smallest
+     * unit that can be finished - which is why the budget is checked between
+     * rows rather than between frames.
+     */
+    const paintRows = (from: number, to: number, resolve: boolean): void => {
+      if (total <= size.height) {
+        const bandHeight = size.height / total;
+        for (let i = from; i < to && i < total; i++) {
+          const packet = paintedPackets[i];
+          const style = resolve
+            ? colorEngine.getPacketStyle(packet, packetTheme)
+            : knownStyle(colorEngine, packet, packetTheme);
+          if (style === undefined) undecided++;
+          ctx.fillStyle = style?.background || fallback;
+          ctx.fillRect(0, i * bandHeight, size.width, Math.ceil(bandHeight));
+        }
+        return;
+      }
       const packetsPerRow = total / size.height;
-      for (let row = 0; row < size.height; row++) {
+      for (let row = from; row < to; row++) {
         const startIdx = Math.floor(row * packetsPerRow);
         const endIdx = Math.max(startIdx + 1, Math.floor((row + 1) * packetsPerRow));
         let r = 0, g = 0, b = 0, a = 0, count = 0;
         for (let i = startIdx; i < endIdx && i < total; i++) {
-          const style = colorEngine.getPacketStyle(paintedPackets[i], packetTheme);
-          const [pr, pg, pb, pa] = resolveColorBytes(style.background || fallback);
+          const style = resolve
+            ? colorEngine.getPacketStyle(paintedPackets[i], packetTheme)
+            : knownStyle(colorEngine, paintedPackets[i], packetTheme);
+          if (style === undefined) undecided++;
+          const [pr, pg, pb, pa] = resolveColorBytes(style?.background || fallback);
           r += pr; g += pg; b += pb; a += pa;
           count++;
         }
@@ -257,22 +321,74 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         ctx.fillStyle = `rgba(${Math.round(r / count)}, ${Math.round(g / count)}, ${Math.round(b / count)}, ${(a / count / 255).toFixed(3)})`;
         ctx.fillRect(0, row, size.width, 1);
       }
-    }
+    };
 
-    if (selectedPacket) {
+    /**
+     * The whole strip, without blocking on frames nobody has coloured yet.
+     *
+     * A repaint used to walk the rule chain for every frame in the buffer,
+     * synchronously, here in a layout effect. That is free while the answers
+     * are cached - which they are on an ordinary repaint - and it is not free
+     * at all on the first repaint after a **rule edit**, because an edited
+     * chain is a new engine and a new engine knows nothing: 184 ms at 100,000
+     * frames and 1,762 ms at a million (`scripts/perf/color-index-cost.ts`).
+     *
+     * So the first pass paints only what is already decided, which is instant,
+     * and the rest is decided in slices between animation frames. A row nobody
+     * has coloured yet is painted in the theme's own ground - the same as a row
+     * matching no rule - because the alternative is showing a colour that is
+     * not this chain's answer, and a wrong colour is worse than a late one.
+     */
+    const rowCount = total <= size.height ? total : size.height;
+    undecided = 0;
+    paintRows(0, rowCount, false);
+
+    // Redrawn after every pass rather than once at the end: the slices below
+    // repaint rows, and a row repainted over the marker would erase it.
+    const paintMarker = () => {
+      if (!selectedPacket) return;
       // From the end: the selection is almost always recent, and a forward
       // scan of the whole buffer is the one full pass left in this effect.
       let idx = -1;
       for (let i = paintedPackets.length - 1; i >= 0; i--) {
         if (paintedPackets[i].id === selectedPacket.id) { idx = i; break; }
       }
-      if (idx !== -1) {
-        const y = (idx / total) * size.height;
-        // The selected-packet marker, in the theme's accent.
-        ctx.fillStyle = accent;
-        ctx.fillRect(0, Math.max(0, y - 1), size.width, 2);
+      if (idx === -1) return;
+      const y = (idx / total) * size.height;
+      // The selected-packet marker, in the theme's accent.
+      ctx.fillStyle = accent;
+      ctx.fillRect(0, Math.max(0, y - 1), size.width, 2);
+    };
+    paintMarker();
+
+    // Nothing left to decide - every frame was already matched, which is the
+    // ordinary repaint. No slices, no animation frames, no state update.
+    if (undecided === 0) return;
+    setFilling(true);
+
+    let raf = 0;
+    let cursor = 0;
+    const step = () => {
+      // A time slice, not a row count: a row holds one frame at 10,000 frames
+      // and eighty at a million, so rows are not a budget that means the same
+      // thing twice. The clock is.
+      const deadline = performance.now() + SLICE_MS;
+      while (cursor < rowCount) {
+        const next = Math.min(rowCount, cursor + ROWS_PER_CHECK);
+        paintRows(cursor, next, true);
+        cursor = next;
+        if (performance.now() >= deadline) break;
       }
-    }
+      paintMarker();
+      if (cursor < rowCount) { raf = requestAnimationFrame(step); return; }
+      raf = 0;
+      setFilling(false);
+    };
+    raf = requestAnimationFrame(step);
+    return () => {
+      if (raf !== 0) cancelAnimationFrame(raf);
+      setFilling(false);
+    };
   }, [paintedPackets, colorEngine, packetTheme, themeKey, size, selectedPacket, accent]);
 
   const scrollToClientY = useCallback((clientY: number) => {
@@ -396,6 +512,19 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         </div>
       )}
       <canvas ref={canvasRef} className="absolute inset-0 block" style={{ width: size.width, height: size.height }} />
+      {/* That the strip is still catching up, and nothing more.
+          Indeterminate on purpose: a bar filling would imply something is
+          being waited for, and nothing is - the list is complete and
+          interactive throughout, and this is a strip re-deciding colours for
+          frames nobody is looking at. It takes no pointer and moves no
+          layout. */}
+      {filling && (
+        <div
+          aria-hidden="true"
+          title="Re-colouring earlier frames"
+          className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary/70 animate-pulse pointer-events-none"
+        />
+      )}
       <div
         className="absolute left-0 w-full rounded-sm bg-foreground/15 border border-foreground/40 pointer-events-none"
         style={{ top: viewport.top, height: viewport.height }}

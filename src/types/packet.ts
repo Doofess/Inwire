@@ -205,6 +205,22 @@ export interface Packet {
    */
   expert?: ExpertInfo[];
   /**
+   * Which colouring rule this frame matched, as `ColorRulesEngine` packs it.
+   *
+   * A **cache**, owned entirely by that engine and meaningless outside it -
+   * which is why it is one opaque number rather than a rule id. It is on the
+   * packet because the alternative was a `WeakMap` entry per frame, measured at
+   * 41 B against this field's 8 (`scripts/perf/color-index-cost.ts`), and
+   * because the answer really is a property of the frame: a packet is immutable
+   * once dissected and the chain is deterministic, so the rule it matches can
+   * never change while the chain does not.
+   *
+   * Never persisted and never exported: `toStoredFrame` and the export writers
+   * both build explicit objects, so this is inert in both. A frame restored
+   * from disk simply arrives without it and is matched on first sight.
+   */
+  colorSlot?: number;
+  /**
    * The protocol tree. Empty on a frame that has not been asked about: it is
    * 10.6 kB per frame and the detail pane is the only thing that reads it, so
    * it is dissected on demand rather than carried (docs/decisions/0007).
