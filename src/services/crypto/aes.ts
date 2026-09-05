@@ -245,6 +245,81 @@ function ctrXor(roundKeys: Uint8Array, initialCounter: Uint8Array, data: Uint8Ar
  * garbage, and an honest failure is the only reason it is safe to *try* a key
  * log entry against a stream at all.
  */
+/**
+ * Derived key state, by key.
+ *
+ * `expandKey` and the GHASH subkey H are pure functions of the key, and one key
+ * serves every packet on a connection and every record on a TLS session - so
+ * `aesGcmDecrypt` was re-expanding the schedule and re-deriving H (a whole AES
+ * block encryption) every time it opened anything.
+ *
+ * **This is a small win, and it is not the fix for QUIC's cost.** Measured on
+ * the `inwire` fixture: 898 derivations for 12,858 frames, 85% of them served
+ * from here - perhaps 1% of dissection, which is below the noise on a
+ * throughput run. It was written expecting more, because QUIC frames are 2.7%
+ * of frames carrying 47% of dissection time; they are not slow for this reason.
+ * They are slow because the block cipher itself is JavaScript, ~81 block
+ * encryptions for a 1292-byte packet, which is the standing cost of ADR 0003's
+ * decision to keep dissection synchronous rather than adopt async WebCrypto.
+ *
+ * Kept because it is correct, bounded and removes real work - and because a
+ * TLS-heavy capture reuses one key across far more records than this fixture
+ * does. Not kept as an answer to the tail.
+ *
+ * Bounded and evicting oldest-first: QUIC derives Initial keys from the
+ * connection id, so a capture of many short connections produces many
+ * single-use keys rather than the small stable set the cache is shaped for.
+ *
+ * **The returned arrays are shared and must not be mutated.** Nothing here
+ * does: `encryptBlock` copies its block into a fresh state array and only ever
+ * reads the round keys, and `ghash` reads H through a DataView.
+ *
+ * This is memory, not disk. ADR 0008's rule - key material never persists - is
+ * untouched; a schedule derived from a key already in memory is not a new
+ * exposure, and it is dropped with the module.
+ */
+interface DerivedKey { roundKeys: Uint8Array; h: Uint8Array }
+
+const derivedKeys = new Map<string, DerivedKey>();
+const DERIVED_KEY_CACHE_MAX = 64;
+
+function keyId(key: Uint8Array): string {
+  let id = '';
+  for (let i = 0; i < key.length; i++) id += String.fromCharCode(key[i]);
+  return id;
+}
+
+function derive(key: Uint8Array): DerivedKey {
+  const id = keyId(key);
+  const hit = derivedKeys.get(id);
+  if (hit !== undefined) return hit;
+
+  const roundKeys = expandKey(key);
+  const state: DerivedKey = { roundKeys, h: encryptBlock(roundKeys, new Uint8Array(16)) };
+  // Insertion order is what makes the first key the oldest.
+  while (derivedKeys.size >= DERIVED_KEY_CACHE_MAX) {
+    const oldest = derivedKeys.keys().next();
+    if (oldest.done) break;
+    derivedKeys.delete(oldest.value);
+  }
+  derivedKeys.set(id, state);
+  return state;
+}
+
+/**
+ * `expandKey`, memoised. For a caller that runs the same key over and over -
+ * QUIC header protection is applied to every packet on a connection - and that
+ * will not mutate what it gets back.
+ */
+export function expandKeyCached(key: Uint8Array): Uint8Array {
+  return derive(key).roundKeys;
+}
+
+/** Forgets every derived schedule. For a capture ending, and for tests. */
+export function clearDerivedKeys(): void {
+  derivedKeys.clear();
+}
+
 export function aesGcmDecrypt(
   key: Uint8Array,
   nonce: Uint8Array,
@@ -255,8 +330,7 @@ export function aesGcmDecrypt(
   if (nonce.length !== 12) return null;
   if (tag.length !== 16) return null;
 
-  const roundKeys = expandKey(key);
-  const h = encryptBlock(roundKeys, new Uint8Array(16));
+  const { roundKeys, h } = derive(key);
 
   // With a 96-bit nonce, J0 is simply the nonce followed by the integer 1.
   const j0 = new Uint8Array(16);

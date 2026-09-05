@@ -127,6 +127,8 @@ async function main() {
   let pendingPackets: Packet[] = [];
   const pendingInfoPatches: InfoPatch[] = [];
   let sink = 0;
+  /** The slowest frames, so the tail can be attributed rather than guessed at. */
+  const slow: { us: number; protocol: string; len: number; info: string }[] = [];
 
   // One frame through the Worker's ingest, stage by stage. This is
   // pipeline.worker.ts's `ingest()`, unrolled so each part can be timed.
@@ -142,9 +144,19 @@ async function main() {
       frame.bytes, id, frame.tsUs, relativeTime, timeDelta, frame.origLen,
       tcpTracker, icmpTracker, quicTracker, dnsTracker, undefined, undefined, l3Tracker,
     );
-    dissect.add((performance.now() - d0) * 1000);
+    const dissectUs = (performance.now() - d0) * 1000;
+    dissect.add(dissectUs);
 
     const packet = decoded.packet;
+    // `flush()` is synchronous, so it is the tail that overruns a budget and
+    // starves the socket - a mean says nothing about that. Keeping the worst
+    // frames is what turns "p99 is 30x p50" into a name.
+    if (dissectUs > 200) {
+      slow.push({
+        us: dissectUs, protocol: packet.protocol, len: packet.length,
+        info: (packet.info ?? '').slice(0, 58),
+      });
+    }
     packet.tsPrecision = 6;
 
     const a0 = performance.now();
@@ -242,6 +254,34 @@ async function main() {
     + ' us/frame  (' + (((boundary.mean - boundaryTransfer.mean) / perFrame) * 100).toFixed(2)
     + '% of a frame)');
   console.log();
+  // Where the tail actually is. A p99 far from the median means some frames
+  // cost thirty times what a frame costs, and which ones decides whether that
+  // is fixable or inherent.
+  if (slow.length > 0) {
+    const byProtocol = new Map<string, { n: number; us: number }>();
+    for (const f of slow) {
+      const e = byProtocol.get(f.protocol) ?? { n: 0, us: 0 };
+      e.n++; e.us += f.us;
+      byProtocol.set(f.protocol, e);
+    }
+    console.log('frames over 200us      ' + slow.length + ' of ' + n
+      + '  (' + ((slow.length / n) * 100).toFixed(2) + '%), '
+      + (slow.reduce((a, f) => a + f.us, 0) / 1000).toFixed(0) + ' ms of '
+      + ((dissect.mean * n) / 1000).toFixed(0) + ' ms total dissection');
+    console.log('  by protocol:');
+    for (const [proto, e] of [...byProtocol.entries()].sort((a, b) => b[1].us - a[1].us).slice(0, 6)) {
+      console.log('    ' + proto.padEnd(10) + String(e.n).padStart(6) + ' frames'
+        + (e.us / 1000).toFixed(0).padStart(7) + ' ms'
+        + (e.us / e.n).toFixed(0).padStart(8) + ' us each');
+    }
+    console.log('  slowest frames:');
+    for (const f of [...slow].sort((a, b) => b.us - a.us).slice(0, 6)) {
+      console.log('    ' + f.us.toFixed(0).padStart(7) + ' us  ' + f.protocol.padEnd(8)
+        + String(f.len).padStart(6) + ' B  ' + f.info);
+    }
+    console.log();
+  }
+
   console.log('sustained Worker ceiling   ~' + Math.round(1_000_000 / perFrame).toLocaleString() + ' frames/s');
   console.log('  (dissection alone        ~' + Math.round(1_000_000 / dissect.mean).toLocaleString() + ' frames/s)');
   console.log('\n(sink ' + sink + ')');
