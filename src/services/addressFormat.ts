@@ -101,15 +101,49 @@ export function addressInCidr(address: string, cidr: string): boolean {
 }
 
 /** Formats 6 bytes as a lowercase colon-separated MAC address. */
+/**
+ * One string per distinct address, shared by every frame carrying it.
+ *
+ * These three functions build a fresh string per frame, and a capture talks to
+ * a handful of addresses - so a million frames held a million copies of a few
+ * dozen strings. Measured over the inwire fixture: 434 distinct string values
+ * across every `Packet.fields` bag in the capture, and pooling them frees 82 B a
+ * frame - 82 MB at a million (`scripts/perf/fields-cost.ts`,
+ * `docs/decisions/0013`).
+ *
+ * The formatting still happens; only the result is shared. Memoising on the
+ * *input* would need a key built from the bytes, which costs about what
+ * formatting them costs - so this pools on the way out instead.
+ *
+ * Bounded, because a capture can legitimately see a great many addresses (a
+ * scan, a busy transit link) and an unbounded pool would then be the leak it
+ * exists to prevent. Past the cap it stops admitting new strings rather than
+ * evicting: the entries already in it are the ones being asked for repeatedly.
+ */
+const addressPool = new Map<string, string>();
+const ADDRESS_POOL_MAX = 65536;
+
+function pooled(text: string): string {
+  const existing = addressPool.get(text);
+  if (existing !== undefined) return existing;
+  if (addressPool.size < ADDRESS_POOL_MAX) addressPool.set(text, text);
+  return text;
+}
+
+/** Forgets every pooled address. For a capture ending, and for tests. */
+export function clearAddressPool(): void {
+  addressPool.clear();
+}
+
 export function formatMac(bytes: Uint8Array): string {
-  return Array.from(bytes)
+  return pooled(Array.from(bytes)
     .map(b => b.toString(16).padStart(2, '0'))
-    .join(':');
+    .join(':'));
 }
 
 /** Formats 4 bytes at `offset` as dotted-quad IPv4. */
 export function formatIpv4Address(bytes: Uint8Array, offset: number): string {
-  return `${bytes[offset]}.${bytes[offset + 1]}.${bytes[offset + 2]}.${bytes[offset + 3]}`;
+  return pooled(`${bytes[offset]}.${bytes[offset + 1]}.${bytes[offset + 2]}.${bytes[offset + 3]}`);
 }
 
 /**
@@ -146,9 +180,9 @@ export function formatIpv6Address(bytes: Uint8Array, offset: number): string {
   }
 
   const hex = groups.map(g => g.toString(16));
-  if (bestLen < 2) return hex.join(':');
+  if (bestLen < 2) return pooled(hex.join(':'));
 
   const head = hex.slice(0, bestStart).join(':');
   const tail = hex.slice(bestStart + bestLen).join(':');
-  return `${head}::${tail}`;
+  return pooled(`${head}::${tail}`);
 }
