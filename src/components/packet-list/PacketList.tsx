@@ -14,6 +14,7 @@ import {
 } from 'react-icons/tb';
 import { packetHexDump } from '../../services/pcapParser';
 import { hasBytes, packetBytes } from '../../services/packetBytes';
+import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { minimapStore, packetListStore } from '../../services/interfacePrefs';
 import { formatTimeColumn } from '../../lib/formatTimeColumn';
 import { ColumnOptionsMenu } from './ColumnOptionsMenu';
@@ -91,6 +92,16 @@ interface PacketListProps {
   onFollowStream: (target: StreamTarget) => void;
   onQuickFilter: (filter: string) => void;
   searchText: string;
+  /**
+   * Frames the buffer has dropped since this capture began, or 0.
+   *
+   * A display filter can only match what is still held, and a trimmed frame is
+   * not unmatched - it is invisible. "No packets match" is then a claim about
+   * the capture that the app cannot make, and is the wrong answer in the one
+   * case a reader most needs the right one: a filter that finds nothing is
+   * exactly when they wonder whether it is the filter or the traffic.
+   */
+  droppedBuffer?: number;
   colorEngine: ColorRulesEngine;
   permissions: UserRolePermissions;
   /** Colors for the list itself. Independent of the app theme by design -
@@ -208,6 +219,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   onFollowStream,
   onQuickFilter,
   searchText,
+  droppedBuffer = 0,
   colorEngine,
   permissions,
   packetTheme,
@@ -381,12 +393,27 @@ export const PacketList: React.FC<PacketListProps> = ({
    */
   const effectiveSortField = visibleSortField(sortField as ColumnSortField, columns);
 
+  /**
+   * Quick-find, once typing settles.
+   *
+   * The scan below lowercases four strings for every frame in the buffer, and
+   * it ran on every keystroke - so each intermediate prefix of what someone is
+   * typing cost a full pass, for results replaced before they could be read.
+   *
+   * Clearing the box is exempt and lands at once. It is the one change whose
+   * answer the user already knows - the whole list - and making them wait
+   * 150 ms to get their list back would be the delay showing rather than
+   * hiding.
+   */
+  const settledSearch = useDebouncedValue(searchText, 150);
+  const activeSearch = searchText.trim() === '' ? '' : settledSearch;
+
   const sortedPackets = React.useMemo(() => {
     let processedPackets = packets;
 
     // Apply quick-find search (from the FilterBar's "Find packet" control)
-    if (searchText.trim()) {
-      const lowerSearch = searchText.toLowerCase();
+    if (activeSearch.trim()) {
+      const lowerSearch = activeSearch.toLowerCase();
       processedPackets = processedPackets.filter(
         p =>
           p.protocol.toLowerCase().includes(lowerSearch) ||
@@ -417,7 +444,7 @@ export const PacketList: React.FC<PacketListProps> = ({
       }
       return sortOrder === 'asc' ? valA - valB : valB - valA;
     });
-  }, [packets, effectiveSortField, sortOrder, searchText]);
+  }, [packets, effectiveSortField, sortOrder, activeSearch]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -1031,7 +1058,21 @@ export const PacketList: React.FC<PacketListProps> = ({
                 <td colSpan={visibleColumnCount} className="text-center py-16 text-muted-foreground">
                   <div className="flex flex-col items-center justify-center gap-1">
                     <TbFilter className="w-6 h-6 text-muted-foreground/70 mb-1" />
-                    <span>No packets match current display filter or capture is empty.</span>
+                    <span>
+                      {packets.length === 0
+                        ? 'The capture buffer is empty.'
+                        : 'No packets match the current display filter.'}
+                    </span>
+                    {/* Scoped rather than absolute, and only when it is true.
+                        The filter ran over what is held, and what is held is
+                        not the capture once the buffer has trimmed. */}
+                    {packets.length > 0 && droppedBuffer > 0 && (
+                      <span className="text-[11px] font-mono text-amber-600 dark:text-amber-400 mt-0.5">
+                        Searched frames {packets[0].id.toLocaleString()}–
+                        {packets[packets.length - 1].id.toLocaleString()};{' '}
+                        {droppedBuffer.toLocaleString()} earlier frames have left the buffer.
+                      </span>
+                    )}
                     <span className="text-[10px] text-muted-foreground/70">Start capture or clear filter to resume telemetry</span>
                   </div>
                 </td>

@@ -12,6 +12,7 @@ import {
   buildFrameSummary,
   collectRelatedFrames,
   findPacketIndexById,
+  frameJumpRefusal,
   lookupFrame,
 } from '../../src/components/packet-details/packetDetailModel';
 import type { Packet, ProtocolField, ProtocolLayer } from '../../src/types/packet';
@@ -26,6 +27,8 @@ function check(name: string, actual: unknown, expected: unknown) {
     console.log(`        actual   ${JSON.stringify(actual)}`);
   }
 }
+
+function checkTrue(name: string, condition: boolean) { check(name, condition, true); }
 
 function makePacket(id: number, over: Partial<Packet> = {}): Packet {
   return {
@@ -107,6 +110,39 @@ function makePacket(id: number, over: Partial<Packet> = {}): Packet {
 
   const empty = lookupFrame([], '5');
   check('an empty buffer reports no range rather than crashing', empty.kind === 'outOfRange' ? [empty.first, empty.last] : null, [null, null]);
+}
+
+// --- Refusing a jump, rather than ignoring it -------------------------------
+//
+// Every cross-reference between frames - `[Response In: N]`, `(request in N)`,
+// a Statistics row's first frame - is a number written while its target was in
+// the buffer, and the buffer trims its oldest. Clicking one after that used to
+// do nothing at all, which is indistinguishable from a broken link. These hold
+// the refusal to being specific about WHY, because "no" without a reason is
+// barely better than silence.
+{
+  // 201..300, the same trimmed buffer as above: numbering that no longer
+  // starts at 1 is the whole situation this exists for.
+  const buffer = Array.from({ length: 100 }, (_, i) => makePacket(201 + i));
+
+  check('a frame that is present is not refused', frameJumpRefusal(buffer, 250), null);
+  check('...including the first', frameJumpRefusal(buffer, 201), null);
+  check('...and the last', frameJumpRefusal(buffer, 300), null);
+
+  // The two ends mean different things, and only one of them is permanent.
+  const trimmed = frameJumpRefusal(buffer, 12);
+  checkTrue('a frame below the buffer says it is gone',
+    trimmed !== null && trimmed.includes('no longer'));
+  checkTrue('...and says what is held instead',
+    trimmed !== null && trimmed.includes('201') && trimmed.includes('300'));
+
+  const ahead = frameJumpRefusal(buffer, 9999);
+  checkTrue('a frame above the buffer says it has not arrived',
+    ahead !== null && ahead.includes('not yet'));
+
+  const none = frameJumpRefusal([], 5);
+  checkTrue('an empty buffer refuses without inventing a range',
+    none !== null && none.includes('empty'));
 }
 
 // --- Frame summary ----------------------------------------------------------

@@ -90,6 +90,7 @@ import { PacketDetailsTree } from "./components/packet-details/PacketDetailsTree
 import { HexViewer } from "./components/packet-details/HexViewer";
 import { PacketDetailModal } from "./components/packet-details/PacketDetailModal";
 import { StreamFollowerModal } from "./components/stream-follower/StreamFollowerModal";
+import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
 import { CustomDissectorModal } from "./components/dissectors/CustomDissectorModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsModal } from "./components/statistics/StatisticsModal";
@@ -116,6 +117,7 @@ import {
   TbList,
   TbStack2,
   TbBinary,
+  TbAlertTriangle,
 } from "react-icons/tb";
 import { evictOldBytes } from './services/packetBytes';
 
@@ -1157,6 +1159,46 @@ export default function App() {
   // so nothing downstream has to know a hydrated copy exists.
   const { packet: selectedPacketDetail, state: selectedDetailState } =
     usePacketDetail(selectedPacket, packets);
+
+  /**
+   * A refusal to go somewhere, shown briefly and then gone.
+   *
+   * Every cross-reference between frames is a number written when its target
+   * was in the buffer, and the buffer trims. Clicking a link to a frame that
+   * has since been trimmed used to do nothing whatsoever - which is
+   * indistinguishable from a broken link, and is the reason this exists rather
+   * than the click simply being ignored.
+   */
+  const [navNotice, setNavNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (navNotice === null) return;
+    const timer = window.setTimeout(() => setNavNotice(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [navNotice]);
+
+  /**
+   * Selects frame `id` in the list, or explains why it cannot.
+   *
+   * The one path every in-app jump takes: the detail tree's frame links, the
+   * Statistics tables, and the detail window's own navigation. They each used
+   * to do their own `packets.find` and silently drop the miss.
+   */
+  const goToFrame = useCallback((id: number) => {
+    const refusal = frameJumpRefusal(packets, id);
+    if (refusal !== null) { setNavNotice(refusal); return; }
+    const index = findPacketIndexById(packets, id);
+    if (index === -1) return;
+    setNavNotice(null);
+    setSelectedPacket(packets[index]);
+  }, [packets]);
+
+  /** The same, for the detail window, which navigates by id rather than object. */
+  const showFrameInWindow = useCallback((id: number) => {
+    const refusal = frameJumpRefusal(packets, id);
+    if (refusal !== null) { setNavNotice(refusal); return; }
+    setNavNotice(null);
+    setDetailPacketId(id);
+  }, [packets]);
 
   const selectedPacketAccent = useMemo(
     () => (selectedPacket ? colorEngine.getPacketAccent(selectedPacket, packetTheme) : null),
@@ -2229,6 +2271,9 @@ export default function App() {
                 onFollowStream={handleFollowStream}
                 onQuickFilter={handleQuickFilter}
                 searchText={packetSearchText}
+                // So a filter that finds nothing can say whether it searched
+                // the capture or only what is left of it.
+                droppedBuffer={droppedBuffer}
                 colorEngine={colorEngine}
                 permissions={permissions}
                 packetTheme={packetTheme}
@@ -2302,10 +2347,7 @@ export default function App() {
                   packet={selectedPacketDetail}
                   accentColor={selectedPacketAccent}
                   onHoverByteRange={setActiveByteRange}
-                  onSelectFrame={frameNumber => {
-                    const target = packets.find(p => p.id === frameNumber);
-                    if (target) setSelectedPacket(target);
-                  }}
+                  onSelectFrame={goToFrame}
                   activeByteRange={activeByteRange}
                   permissions={permissions}
                   onFieldFilter={handleFieldFilter}
@@ -2414,7 +2456,7 @@ export default function App() {
             packetId={detailPacketId}
             filteredPackets={filteredPackets}
             onClose={() => setDetailPacketId(null)}
-            onShowFrame={setDetailPacketId}
+            onShowFrame={showFrameInWindow}
             onFollowStream={handleFollowStream}
             colorEngine={colorEngine}
             packetTheme={packetTheme}
@@ -2464,10 +2506,10 @@ export default function App() {
             expert={expertLog}
             onApplyFilter={handleQuickFilter}
             onFollowStream={handleFollowStream}
-            onSelectFrame={(frameNumber) => {
-              const target = packets.find(p => p.id === frameNumber);
-              if (target) setSelectedPacket(target);
-            }}
+            onSelectFrame={goToFrame}
+            // What the tables could not count. The buffer is the capture until
+            // it fills, and silently stops being it after that.
+            droppedBuffer={droppedBuffer}
             onClose={() => setShowStatisticsModal(false)}
           />
         )}
@@ -2526,6 +2568,22 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      {/* A jump that could not happen, said out loud.
+          Bottom-centre and above the modals, because the click that triggers
+          it can come from inside one - the detail window's tree links point at
+          frames the buffer may since have trimmed. It never takes the pointer:
+          the notice explains a refusal, it does not ask for anything. */}
+      {navNotice !== null && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] max-w-md px-3.5 py-2 rounded-md border border-amber-500/40 bg-amber-500/95 dark:bg-amber-950/95 backdrop-blur-sm shadow-lg text-[11px] font-mono leading-snug text-amber-950 dark:text-amber-200 flex items-start gap-2"
+        >
+          <TbAlertTriangle className="w-4 h-4 shrink-0 mt-px" />
+          <span>{navNotice}</span>
+        </div>
+      )}
 
       {/* Outside the AnimatePresence above: the tour is not one of the modals
           that swap in and out of it, and being listed there would make opening

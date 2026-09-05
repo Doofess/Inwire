@@ -64,6 +64,17 @@ interface StatisticsModalProps {
   expert: ExpertLookup;
   /** Selects a frame in the main window. */
   onSelectFrame?: (frameNumber: number) => void;
+  /**
+   * Frames the buffer has dropped since this capture began, or 0.
+   *
+   * These tables count the buffer and are titled "Capture Statistics", and
+   * those are the same thing right up until the buffer fills. Past that they
+   * are not, and the difference is invisible: a conversation table answering
+   * for the most recent 100,000 frames of a two-million-frame capture is the
+   * same table with different numbers. The header says so when this is
+   * non-zero.
+   */
+  droppedBuffer?: number;
   onClose: () => void;
 }
 
@@ -76,6 +87,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
   onApplyFilter,
   onFollowStream,
   onSelectFrame,
+  droppedBuffer = 0,
   onClose,
 }) => {
   const [tab, setTab] = useState<Tab>('hierarchy');
@@ -181,6 +193,19 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
               <p className="text-xs text-muted-foreground">
                 {count(packets.length)} frames · {bytes(hierarchy.bytes)} · every row is a filter
               </p>
+              {/* Named as a range rather than a count, because "counted
+                  1,900,000 of 2,000,000" still invites the reader to treat the
+                  tables as the capture. Frame numbers are what the rest of the
+                  app addresses frames by, so they are what says which part of
+                  it this is. */}
+              {droppedBuffer > 0 && packets.length > 0 && (
+                <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400 font-mono">
+                  Frames {packets[0].id.toLocaleString()}–
+                  {packets[packets.length - 1].id.toLocaleString()} only:{' '}
+                  {count(droppedBuffer)} earlier frames have left the buffer and are
+                  not counted here.
+                </p>
+              )}
             </div>
           </div>
           <button
