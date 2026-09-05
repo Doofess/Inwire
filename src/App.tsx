@@ -56,6 +56,7 @@ import {
   countFrames,
   loadSessionMeta,
   pendingWriteBacklog,
+  storedIdRange,
   readFrames,
   saveSessionMeta,
   trimFramesBelow,
@@ -116,6 +117,7 @@ import {
   TbStack2,
   TbBinary,
 } from "react-icons/tb";
+import { evictOldBytes } from './services/packetBytes';
 
 // Bounded, oldest dropped first. A session left open for hours must not grow
 // the log pane without limit.
@@ -212,6 +214,22 @@ const DASHBOARD_REFRESH_MS = 500;
  * locked-up tab.
  */
 const RESTORE_CHUNK_SIZE = 250;
+
+/**
+ * How many of the newest frames keep their raw bytes in memory.
+ *
+ * Beyond this the buffer stops holding them and reads them back from the
+ * session store instead, where they already are - a frame is 1,176 B, so at the
+ * 100,000 cap this is the difference between 118 MB of raw frames and 29 MB
+ * (docs/decisions/0013-what-a-million-frames-actually-cost.md).
+ *
+ * Sized to cover what anyone is realistically about to click. Everything that
+ * reads a frame's bytes goes through `services/packetBytes.ts` and can wait for
+ * a read; this window is about not making them wait for the frames still on
+ * screen. Below this many frames nothing is evicted at all, so a small capture
+ * behaves exactly as it did.
+ */
+const BYTES_RESIDENT_FRAMES = 25000;
 
 /**
  * The rest of what a refresh used to throw away.
@@ -658,6 +676,14 @@ export default function App() {
           // multi-hour capture while the buffer held only the last 50,000.
           trimFramesBelow(next[0].id);
         }
+        // The oldest frames stop holding their bytes once the store has them.
+        // Called here rather than in an effect because this is where the buffer
+        // is settled, and it is safe to call from a state updater despite the
+        // updater-purity rule: it is idempotent, so StrictMode running it twice
+        // does the work once, and it changes no packet's identity so nothing
+        // re-renders because of it.
+        evictOldBytes(next, BYTES_RESIDENT_FRAMES, storedIdRange());
+
         // Stopping is decided here, where the true post-trim size is known.
         // isCapturingRef rather than isCapturing: this effect is set up once
         // and its closure would otherwise never see a later capture start.

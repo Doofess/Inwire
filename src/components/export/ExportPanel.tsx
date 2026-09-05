@@ -25,6 +25,7 @@ import { downloadBlob, exportStem } from '../../lib/download';
 import { FilterBar } from '../common/FilterBar';
 import { Switch } from '../ui/switch';
 import { buildPdfReport } from './pdfReport';
+import { useHydratedBytes } from '../../lib/useHydratedBytes';
 
 /**
  * The Export half of the Import/Export centre.
@@ -116,11 +117,29 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
    * version of this feature. The summary is shown so the user can see what
    * was taken out rather than take it on trust.
    */
+  //
+  // Hydrated first, because a buffer large enough to have stopped holding raw
+  // frames would otherwise write a capture of empty ones - and anonymisation
+  // rewrites those bytes, so it has to happen after they are back
+  // (docs/decisions/0013). A pass-through while the buffer still holds them,
+  // which is every capture up to the current cap.
+  //
+  // This does mean the whole capture's bytes are resident for the length of an
+  // export. At the present cap that is ~117 MB and unremarkable; if the cap
+  // ever rises to a million frames it is 1.17 GB, and the writers will have to
+  // produce a Blob from parts as they go rather than one contiguous buffer.
+  // Noted here because that is the moment this stops being adequate.
+  const { packets: hydratedPackets, hydrating } = useHydratedBytes(exportPackets);
+
   const { packets: outgoing, summary: anonymised } = useMemo(() => {
-    if (!anonymise) return { packets: exportPackets, summary: null };
-    const result = anonymiseCapture(exportPackets);
+    // Cast, not copy: the hook hands back a readonly view because it must not
+    // invite anyone to write into the buffer's own frames, and the writers below
+    // only ever read. Copying a million-frame array to satisfy a modifier would
+    // be the wrong answer to it.
+    if (!anonymise) return { packets: hydratedPackets as Packet[], summary: null };
+    const result = anonymiseCapture(hydratedPackets as Packet[]);
     return { packets: result.packets, summary: result.summary };
-  }, [anonymise, exportPackets]);
+  }, [anonymise, hydratedPackets]);
 
   /**
    * One IDB per adapter the export actually contains.
@@ -171,7 +190,9 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
     [includeRawBytes, outgoing],
   );
 
-  const canExport = validation.isValid && exportPackets.length > 0;
+  // `hydrating` gates the buttons: writing a file from frames whose bytes have
+  // not arrived yet would produce a valid-looking capture full of nothing.
+  const canExport = validation.isValid && exportPackets.length > 0 && !hydrating;
   const isFiltered = appliedFilter.trim().length > 0;
 
   /**

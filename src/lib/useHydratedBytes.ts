@@ -19,7 +19,15 @@ import { useEffect, useState } from 'react';
 import { hasBytes, packetsBytes } from '../services/packetBytes';
 import type { Packet } from '../types/packet';
 
-export function useHydratedBytes(packets: readonly Packet[]): readonly Packet[] {
+/**
+ * `hydrating` is true while a read is in flight and the packets handed back are
+ * still missing bytes. A caller that only renders can ignore it; one that is
+ * about to WRITE those bytes to a file must not - exporting mid-read would
+ * produce a capture of empty frames, which is worse than making the button wait.
+ */
+export function useHydratedBytes(
+  packets: readonly Packet[],
+): { packets: readonly Packet[]; hydrating: boolean } {
   const [hydrated, setHydrated] = useState<readonly Packet[] | null>(null);
 
   // Cheap and synchronous: a boolean over the set, not a copy of it.
@@ -52,15 +60,15 @@ export function useHydratedBytes(packets: readonly Packet[]): readonly Packet[] 
     // changed. eslint would ask for it and would be wrong here.
   }, [signature, complete]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (complete) return packets;
+  if (complete) return { packets, hydrating: false };
   // A stale hydration - the set changed while a read was in flight - is worse
   // than none: it would show one stream's bytes under another's frames.
   if (hydrated && hydrated.length === packets.length
     && (packets.length === 0 || hydrated[0].id === packets[0].id)) {
-    return hydrated;
+    return { packets: hydrated, hydrating: false };
   }
   // Until the read lands, the packets as they are. Their bytes are empty, so a
   // hex view renders empty for a moment rather than flickering wrong content -
   // and a frame the store cannot supply stays that way, which is honest.
-  return packets;
+  return { packets, hydrating: true };
 }

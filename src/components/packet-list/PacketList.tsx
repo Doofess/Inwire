@@ -13,6 +13,7 @@ import {
   TbCopy,
 } from 'react-icons/tb';
 import { packetHexDump } from '../../services/pcapParser';
+import { hasBytes, packetBytes } from '../../services/packetBytes';
 import { minimapStore, packetListStore } from '../../services/interfacePrefs';
 import { formatTimeColumn } from '../../lib/formatTimeColumn';
 import { ColumnOptionsMenu } from './ColumnOptionsMenu';
@@ -1302,7 +1303,21 @@ export const PacketList: React.FC<PacketListProps> = ({
 
           <button
             onClick={() => {
-              navigator.clipboard.writeText(packetHexDump(contextMenu.packet));
+              // Synchronous while the frame still carries its bytes, which is
+              // the common case and the one that matters here: a clipboard
+              // write is only reliably permitted inside the gesture that
+              // triggered it, and awaiting first can put it outside on some
+              // browsers. A frame whose bytes the buffer has dropped takes the
+              // slow path and accepts that risk, because the alternative is
+              // copying an empty string (docs/decisions/0013).
+              const target = contextMenu.packet;
+              if (hasBytes(target)) {
+                void navigator.clipboard.writeText(packetHexDump(target));
+                return;
+              }
+              void packetBytes(target).then((rawBytes) => {
+                void navigator.clipboard.writeText(packetHexDump({ ...target, rawBytes }));
+              });
             }}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
