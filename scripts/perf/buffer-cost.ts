@@ -51,9 +51,11 @@ const SIZES = [10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
  *
  * Source: `node --expose-gc --import tsx scripts/perf/record-cost.ts`,
  * "whole record", over both fixtures' 27,640 dissected frames.
- * Last taken 2026-09-05, after the per-frame lists were pooled (ADR 0016).
+ * Last taken 2026-09-05, after the dense fields moved into columns (ADR 0018).
+ * That run counts `arrayBuffers` as well as `heapUsed`, because the columns are
+ * typed arrays and their bytes are not on the JS heap.
  */
-const SUMMARY_BYTES_PER_FRAME = 1876;
+const SUMMARY_BYTES_PER_FRAME = 663;
 
 function heapUsed(): number {
   return process.memoryUsage().heapUsed;
@@ -104,7 +106,7 @@ async function main() {
   console.log('per frame, resident on the main thread');
   console.log('  raw frame bytes      ' + perFrameBytes.toFixed(0) + ' B  (external, not in heapUsed)');
   console.log('  summary object       ' + perFrameSummary.toFixed(0)
-    + ' B  (of which fields ~1431 B; quoted, see the note on the constant)');
+    + ' B  (of which fields ~154 B; quoted, see the note on the constant)');
   console.log('  -> at 1M frames      ' + ((perFrameSummary + perFrameBytes) * 1e6 / 1e9).toFixed(1)
     + ' GB, and the summaries are the larger half');
   console.log();
