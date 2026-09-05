@@ -134,31 +134,185 @@ export function freshTlsConversation(): TlsConversationState {
   return { clientHelloSeen: false, serverHelloSeen: false, encryptedHandshake: false, pendingVersionFrames: [] };
 }
 
-export class TcpStreamTracker {
-  private streamIds = new Map<string, number>();
-  private tlsCursors = new Map<string, TlsRecordCursor>();
-  private tlsConversations = new Map<string, TlsConversationState>();
-  private nextStreamId = 0;
-  private baseSeq = new Map<string, number>();
-  private packetCountByStream = new Map<number, number>();
-  private connState = new Map<number, { sawSyn: boolean; sawSynAck: boolean; sawFinOrRst: boolean }>();
-  private windowScaleShift = new Map<string, number>();
-  /** Sequence-analysis state per connection (docs: dissect/tcpAnalysis.ts). */
-  private analysis = new Map<string, TcpConnectionState>();
+/**
+ * One sender's half of a connection.
+ *
+ * These three used to be three separate maps keyed by a string built from the
+ * connection key and the sending endpoint - so every connection stored six
+ * copies of a ~40-character key just to describe its two directions.
+ */
+interface TcpDirection {
+  /** This direction's reference sequence number; see `getRelativeSeq`. */
+  baseSeq?: number;
+  /** The shift this direction's SYN advertised, if it carried the option. */
+  windowScaleShift?: number;
+  /** Where this direction is inside the TLS record layer. */
+  tlsCursor?: TlsRecordCursor;
+}
 
-  private connectionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
-    const a = `${srcIp}:${srcPort}`;
-    const b = `${dstIp}:${dstPort}`;
-    return a <= b ? `${a}|${b}` : `${b}|${a}`;
+/**
+ * Everything one TCP conversation carries, in one record.
+ *
+ * It was nine map entries: three keyed by the connection, three by the
+ * direction and two by the stream index, each holding its own copy of the key
+ * string. Measured at 2,269 B a connection, retained for the length of the
+ * capture (`scripts/perf/tracker-cost.ts`).
+ *
+ * One record per connection stores that key once, and - the reason this matters
+ * more than the bytes - makes forgetting a connection a single delete instead
+ * of nine that could fall out of step.
+ *
+ * Every field is optional and created on first use, so a connection that never
+ * carries TLS never allocates a TLS conversation, and one nothing has analysed
+ * has no analysis state.
+ */
+interface TcpConnection {
+  /** Assigned by `getStreamId` in order of first appearance, not on creation. */
+  streamId?: number;
+  /** Frames seen on this connection, which is `recordStreamPacket`'s answer. */
+  packets: number;
+  sawSyn: boolean;
+  sawSynAck: boolean;
+  sawFinOrRst: boolean;
+  /** Wireshark's sequence analysis state, shared by both directions. */
+  analysis?: TcpConnectionState;
+  /** What both ends of the TLS conversation have agreed on. */
+  tls?: TlsConversationState;
+  /** The endpoint that sorts first, and the other one. */
+  a: TcpDirection;
+  b: TcpDirection;
+}
+
+function freshTcpConnection(): TcpConnection {
+  return { packets: 0, sawSyn: false, sawSynAck: false, sawFinOrRst: false, a: {}, b: {} };
+}
+
+/**
+ * How many connections keep state.
+ *
+ * Nothing bounded this. The packet buffer is capped and trimmed - `trimToCap`
+ * slices the array, trims the session store and evicts raw bytes - but it has
+ * never touched a tracker, and `resetPipeline` only fires on events that mean
+ * the buffer is *gone*. So a capture left running trimmed frames for hours
+ * while this grew, and a browsing workload is precisely the shape that fills
+ * it: thousands of short connections rather than one long one.
+ *
+ * **Least-recently-used, which is what makes a plain cap the right mechanism
+ * here.** A connection that has closed stops receiving frames, so it stops
+ * being touched and drifts to the front of the queue on its own - the entries
+ * evicted first are the ones already finished, without a FIN needing to be
+ * acted on or a sweep needing a clock. A long-lived idle connection is
+ * protected by the same property in reverse, as far as the cap allows, which
+ * is why the cap is generous.
+ *
+ * What eviction costs is real and worth naming: a frame arriving on an evicted
+ * connection is a connection this tracker has not seen before, so it takes a
+ * NEW stream index and a fresh relative-sequence base. That is the same thing
+ * the tracker already does for a capture started mid-connection, and it is
+ * counted (`evictedConnections`) rather than being silent.
+ */
+const MAX_CONNECTIONS = 16384;
+
+export class TcpStreamTracker {
+  /** One record per conversation, in least-recently-used order. */
+  private connections = new Map<string, TcpConnection>();
+  /** The same records by stream index, for the callers that hold only that. */
+  private byStreamId = new Map<number, TcpConnection>();
+  private nextStreamId = 0;
+  /**
+   * The connection the last lookup found. Every call made while dissecting one
+   * frame asks about the same connection, so this is what keeps the
+   * least-recently-used bookkeeping to one delete-and-reinsert per frame
+   * rather than one per call.
+   */
+  private lastKey: string | undefined;
+  private evicted = 0;
+
+  /**
+   * Finds one connection and the calling direction, creating both on first use.
+   *
+   * Builds the two endpoint strings once and derives everything from them: the
+   * connection key, which half of the conversation the sender is, and the
+   * peer's half. The previous shape built the same strings twice over, once for
+   * the connection key and again for the direction key.
+   */
+  private locate(srcIp: string, srcPort: number, dstIp: string, dstPort: number): {
+    conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean;
+  } {
+    const from = `${srcIp}:${srcPort}`;
+    const to = `${dstIp}:${dstPort}`;
+    const senderIsA = from <= to;
+    const key = senderIsA ? `${from}|${to}` : `${to}|${from}`;
+
+    let conn = this.connections.get(key);
+    if (conn === undefined) {
+      conn = freshTcpConnection();
+      this.connections.set(key, conn);
+      this.evictPastCap();
+    } else if (key !== this.lastKey) {
+      // Deleted and re-set rather than left alone: a Map iterates in insertion
+      // order, so this is what moves the connection to the back of the
+      // eviction queue.
+      this.connections.delete(key);
+      this.connections.set(key, conn);
+    }
+    this.lastKey = key;
+
+    return {
+      conn,
+      dir: senderIsA ? conn.a : conn.b,
+      peer: senderIsA ? conn.b : conn.a,
+      senderIsA,
+    };
+  }
+
+  /** The same lookup, without creating anything. */
+  private peek(srcIp: string, srcPort: number, dstIp: string, dstPort: number): {
+    conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean;
+  } | undefined {
+    const from = `${srcIp}:${srcPort}`;
+    const to = `${dstIp}:${dstPort}`;
+    const senderIsA = from <= to;
+    const conn = this.connections.get(senderIsA ? `${from}|${to}` : `${to}|${from}`);
+    if (conn === undefined) return undefined;
+    return {
+      conn,
+      dir: senderIsA ? conn.a : conn.b,
+      peer: senderIsA ? conn.b : conn.a,
+      senderIsA,
+    };
+  }
+
+  /** Forgets the least recently seen connections once the cap is exceeded. */
+  private evictPastCap(): void {
+    while (this.connections.size > MAX_CONNECTIONS) {
+      const oldest = this.connections.keys().next();
+      if (oldest.done) break;
+      const conn = this.connections.get(oldest.value);
+      this.connections.delete(oldest.value);
+      // The stream index goes with it, or `byStreamId` becomes the leak this
+      // eviction exists to stop. Indexes are never reused - `nextStreamId`
+      // only ever counts up - so nothing can collide with the one just freed.
+      if (conn?.streamId !== undefined) this.byStreamId.delete(conn.streamId);
+      if (this.lastKey === oldest.value) this.lastKey = undefined;
+      this.evicted += 1;
+    }
   }
 
   /**
-   * Keys one *direction* of a connection: the (symmetric) connection key plus
-   * the sending endpoint, so the two halves of a conversation track their
-   * sequence state independently.
+   * How many connections have been forgotten to stay inside the cap.
+   *
+   * Zero for every ordinary capture. Non-zero means some frames were given a
+   * fresh stream index and relative-sequence base part-way through a
+   * conversation, which is a thing to be able to say rather than to hide.
    */
-  private directionKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
-    return `${this.connectionKey(srcIp, srcPort, dstIp, dstPort)}>${srcIp}:${srcPort}`;
+  public get evictedConnections(): number {
+    return this.evicted;
+  }
+
+  /** How many connections currently hold state. */
+  public get connectionCount(): number {
+    return this.connections.size;
   }
 
   /**
@@ -180,13 +334,12 @@ export class TcpStreamTracker {
    * conversation, assigning a new one the first time a connection is seen.
    */
   public getStreamId(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
-    const key = this.connectionKey(srcIp, srcPort, dstIp, dstPort);
-    let id = this.streamIds.get(key);
-    if (id === undefined) {
-      id = this.nextStreamId++;
-      this.streamIds.set(key, id);
+    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    if (conn.streamId === undefined) {
+      conn.streamId = this.nextStreamId++;
+      this.byStreamId.set(conn.streamId, conn);
     }
-    return id;
+    return conn.streamId;
   }
 
   /**
@@ -196,14 +349,9 @@ export class TcpStreamTracker {
    * key uses, so both ends see the same `a`/`b`.
    */
   public analyze(srcIp: string, srcPort: number, dstIp: string, dstPort: number, segment: TcpSegment): TcpAnalysis {
-    const key = this.connectionKey(srcIp, srcPort, dstIp, dstPort);
-    let conn = this.analysis.get(key);
-    if (conn === undefined) {
-      conn = freshConnection();
-      this.analysis.set(key, conn);
-    }
-    const direction = `${srcIp}:${srcPort}` <= `${dstIp}:${dstPort}` ? 'a' : 'b';
-    return analyzeTcpSegment(conn, direction, segment);
+    const { conn, senderIsA } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.analysis ??= freshConnection();
+    return analyzeTcpSegment(conn.analysis, senderIsA ? 'a' : 'b', segment);
   }
 
   /**
@@ -227,13 +375,11 @@ export class TcpStreamTracker {
     srcIp: string, srcPort: number, dstIp: string, dstPort: number,
     seqNum: number, isSyn: boolean = false
   ): number {
-    const directionKey = this.directionKey(srcIp, srcPort, dstIp, dstPort);
-    let base = this.baseSeq.get(directionKey);
-    if (base === undefined) {
-      base = isSyn ? seqNum : (seqNum - 1 + 2 ** 32) % 2 ** 32;
-      this.baseSeq.set(directionKey, base);
+    const { dir } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    if (dir.baseSeq === undefined) {
+      dir.baseSeq = isSyn ? seqNum : (seqNum - 1 + 2 ** 32) % 2 ** 32;
     }
-    return ((seqNum - base) + 2 ** 32) % 2 ** 32;
+    return ((seqNum - dir.baseSeq) + 2 ** 32) % 2 ** 32;
   }
 
   /**
@@ -242,7 +388,7 @@ export class TcpStreamTracker {
    * is stored per direction and checked pairwise in getWindowScaleShift().
    */
   public setWindowScaleShift(srcIp: string, srcPort: number, dstIp: string, dstPort: number, shift: number): void {
-    this.windowScaleShift.set(this.directionKey(srcIp, srcPort, dstIp, dstPort), shift);
+    this.locate(srcIp, srcPort, dstIp, dstPort).dir.windowScaleShift = shift;
   }
 
   /**
@@ -252,8 +398,10 @@ export class TcpStreamTracker {
    * what the reference analyzer shows when it can't observe the negotiation.
    */
   public getWindowScaleShift(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
-    const own = this.windowScaleShift.get(this.directionKey(srcIp, srcPort, dstIp, dstPort));
-    const peer = this.windowScaleShift.get(this.directionKey(dstIp, dstPort, srcIp, srcPort));
+    const found = this.peek(srcIp, srcPort, dstIp, dstPort);
+    if (found === undefined) return 0;
+    const own = found.dir.windowScaleShift;
+    const peer = found.peer.windowScaleShift;
     return own !== undefined && peer !== undefined ? own : 0;
   }
 
@@ -266,57 +414,52 @@ export class TcpStreamTracker {
    * number, which a gap does not move. Call before analyze().
    */
   public isAtOrPastExpected(srcIp: string, srcPort: number, dstIp: string, dstPort: number, seqNum: number): boolean {
-    const conn = this.analysis.get(this.connectionKey(srcIp, srcPort, dstIp, dstPort));
-    if (conn === undefined) return true;
-    const fwd = `${srcIp}:${srcPort}` <= `${dstIp}:${dstPort}` ? conn.a : conn.b;
+    const found = this.peek(srcIp, srcPort, dstIp, dstPort);
+    const analysis = found?.conn.analysis;
+    if (found === undefined || analysis === undefined) return true;
+    const fwd = found.senderIsA ? analysis.a : analysis.b;
     return fwd.nextSeq === 0 || ((seqNum - fwd.nextSeq) | 0) >= 0;
   }
 
   /** This direction's TLS record cursor, created on first use. */
   public tlsCursor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): TlsRecordCursor {
-    const key = this.directionKey(srcIp, srcPort, dstIp, dstPort);
-    let cursor = this.tlsCursors.get(key);
-    if (cursor === undefined) {
-      cursor = freshTlsCursor();
-      this.tlsCursors.set(key, cursor);
-    }
-    return cursor;
+    const { dir } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    dir.tlsCursor ??= freshTlsCursor();
+    return dir.tlsCursor;
   }
 
   /** The cursor if this direction has one, without creating it. */
   public peekTlsCursor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): TlsRecordCursor | undefined {
-    return this.tlsCursors.get(this.directionKey(srcIp, srcPort, dstIp, dstPort));
+    return this.peek(srcIp, srcPort, dstIp, dstPort)?.dir.tlsCursor;
   }
 
   /** Forgets where this direction was in the record layer - after a gap, nothing about it is known. */
   public resetTlsCursor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): void {
-    this.tlsCursors.set(this.directionKey(srcIp, srcPort, dstIp, dstPort), freshTlsCursor());
+    this.locate(srcIp, srcPort, dstIp, dstPort).dir.tlsCursor = freshTlsCursor();
   }
 
   /** The TLS facts both directions share, created on first use. */
   public tlsConversation(srcIp: string, srcPort: number, dstIp: string, dstPort: number): TlsConversationState {
-    const key = this.connectionKey(srcIp, srcPort, dstIp, dstPort);
-    let state = this.tlsConversations.get(key);
-    if (state === undefined) {
-      state = freshTlsConversation();
-      this.tlsConversations.set(key, state);
-    }
-    return state;
+    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.tls ??= freshTlsConversation();
+    return conn.tls;
   }
 
   /** Returns this packet's 1-based position within its stream, recording it. */
   public recordStreamPacket(streamId: number): number {
-    const count = (this.packetCountByStream.get(streamId) ?? 0) + 1;
-    this.packetCountByStream.set(streamId, count);
-    return count;
+    const conn = this.byStreamId.get(streamId);
+    // A stream index whose connection has been evicted counts from one again,
+    // which is what a connection this tracker has not seen before looks like.
+    if (conn === undefined) return 1;
+    return ++conn.packets;
   }
 
   public updateConnectionState(streamId: number, syn: boolean, ack: boolean, fin: boolean, rst: boolean): void {
-    const state = this.connState.get(streamId) ?? { sawSyn: false, sawSynAck: false, sawFinOrRst: false };
-    if (syn && !ack) state.sawSyn = true;
-    if (syn && ack) state.sawSynAck = true;
-    if (fin || rst) state.sawFinOrRst = true;
-    this.connState.set(streamId, state);
+    const conn = this.byStreamId.get(streamId);
+    if (conn === undefined) return;
+    if (syn && !ack) conn.sawSyn = true;
+    if (syn && ack) conn.sawSynAck = true;
+    if (fin || rst) conn.sawFinOrRst = true;
   }
 
   /**
@@ -325,23 +468,19 @@ export class TcpStreamTracker {
    * implementation detail nobody reading this UI needs to decode.
    */
   public getConversationCompleteness(streamId: number): string {
-    const state = this.connState.get(streamId);
-    if (!state) return 'Incomplete';
-    if (state.sawSyn && state.sawSynAck && state.sawFinOrRst) return 'Complete, WITH_DATA';
-    if (state.sawSyn && state.sawSynAck) return 'Established, no close seen';
-    if (state.sawSyn) return 'SYN sent, no reply seen';
+    const conn = this.byStreamId.get(streamId);
+    if (!conn) return 'Incomplete';
+    if (conn.sawSyn && conn.sawSynAck && conn.sawFinOrRst) return 'Complete, WITH_DATA';
+    if (conn.sawSyn && conn.sawSynAck) return 'Established, no close seen';
+    if (conn.sawSyn) return 'SYN sent, no reply seen';
     return 'Incomplete';
   }
 
   public reset(): void {
-    this.streamIds.clear();
-    this.baseSeq.clear();
-    this.packetCountByStream.clear();
-    this.connState.clear();
-    this.windowScaleShift.clear();
-    this.analysis.clear();
-    this.tlsCursors.clear();
-    this.tlsConversations.clear();
+    this.connections.clear();
+    this.byStreamId.clear();
     this.nextStreamId = 0;
+    this.lastKey = undefined;
+    this.evicted = 0;
   }
 }

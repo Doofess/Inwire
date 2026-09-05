@@ -86,6 +86,11 @@ interface StreamAssembly {
  * The held fragment that carries the byte at `nextOffset`, trimmed to start
  * there, with everything the cursor has passed dropped from the budget.
  *
+ * Returns what it released as well as what it took, because the same bytes are
+ * charged against two budgets: this stream's, and the whole tracker's
+ * (`MAX_TOTAL_PENDING_BYTES`). A release that settled only the first would
+ * leak the second, which is the bug the per-stream budget already had once.
+ *
  * An exact `pending.get(nextOffset)` was not enough. A fragment held at
  * offset 100 is stranded for ever the moment a larger fragment arrives at 50
  * and carries the cursor to 150 - never consumed, never subtracted, and so
@@ -94,12 +99,14 @@ interface StreamAssembly {
  * also lets a partially overlapping fragment contribute its new tail instead
  * of being discarded.
  */
-function takePendingAt(assembly: StreamAssembly): Uint8Array | undefined {
+function takePendingAt(assembly: StreamAssembly): { data?: Uint8Array; released: number } {
+  let released = 0;
   let take: { offset: number; data: Uint8Array } | undefined;
   for (const [offset, data] of assembly.pending) {
     if (offset + data.length <= assembly.nextOffset) {
       assembly.pending.delete(offset);
       assembly.pendingBytes -= data.length;
+      released += data.length;
       continue;
     }
     // The earliest fragment that reaches the cursor: it carries the most.
@@ -107,15 +114,55 @@ function takePendingAt(assembly: StreamAssembly): Uint8Array | undefined {
       take = { offset, data };
     }
   }
-  if (take === undefined) return undefined;
+  if (take === undefined) return { released };
   assembly.pending.delete(take.offset);
   assembly.pendingBytes -= take.data.length;
+  released += take.data.length;
   const skip = assembly.nextOffset - take.offset;
-  return skip > 0 ? take.data.subarray(skip) : take.data;
+  return { data: skip > 0 ? take.data.subarray(skip) : take.data, released };
 }
 
 /** A stream's bytes held while waiting for the gap before them to be filled. */
 const MAX_PENDING_STREAM_BYTES = 256 * 1024;
+
+/**
+ * Held stream bytes across every stream of every flow.
+ *
+ * `MAX_PENDING_STREAM_BYTES` bounds one stream. Nothing bounded their sum, and
+ * a QUIC connection opens a stream per request - so a browser talking HTTP/3 to
+ * a site that loses packets could hold a quarter of a megabyte per stream with
+ * no ceiling at all. This is the ceiling.
+ */
+const MAX_TOTAL_PENDING_BYTES = 8 * 1024 * 1024;
+
+/**
+ * How many flows keep state, and how many streams across all of them.
+ *
+ * Both are per *connection*, not per frame, so no packet-buffer cap touches
+ * them: `trimToCap` drops frames and leaves every one of these behind
+ * (`scripts/perf/tracker-cost.ts`). A browsing session is thousands of short
+ * connections, which is the shape that fills them.
+ *
+ * Eviction is least-recently-used rather than oldest-first, which matters here:
+ * a QUIC connection can be idle for minutes and then resume, and the flow that
+ * has gone longest without a packet is the one whose loss costs least. What is
+ * lost is a flow's decryption keys and reassembly cursor - so a later packet on
+ * an evicted flow reads as an unrecognised one, which is what it looks like
+ * from the wire without the handshake anyway.
+ */
+const MAX_FLOWS = 4096;
+const MAX_STREAMS = 8192;
+
+/**
+ * Connection IDs remembered per flow.
+ *
+ * A peer may issue new connection IDs for the life of a connection - that is
+ * how QUIC migrates between addresses without being linkable - and every one
+ * was kept for ever. Capped, and oldest-first, because `matchConnectionId`
+ * scans this set for every short-header packet: an unbounded set is a growing
+ * per-packet cost as well as a growing one in memory.
+ */
+const MAX_CONNECTION_IDS_PER_FLOW = 32;
 
 export class QuicFlowTracker {
   /** Connection IDs (hex) seen in long headers, keyed by normalized flow. */
@@ -132,6 +179,8 @@ export class QuicFlowTracker {
   private sessions = new Map<string, QuicSession>();
   /** HTTP/3 stream state, keyed by flow, sender and stream id. */
   private streams = new Map<string, StreamAssembly>();
+  /** Held bytes across every assembly above, against MAX_TOTAL_PENDING_BYTES. */
+  private totalPendingBytes = 0;
 
   /** Order-independent key, so both directions of a flow share their state. */
   private flowKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
@@ -151,12 +200,71 @@ export class QuicFlowTracker {
   ): void {
     const key = this.flowKey(srcIp, srcPort, dstIp, dstPort);
     let ids = this.flowConnectionIds.get(key);
-    if (!ids) {
-      ids = new Set<string>();
-      this.flowConnectionIds.set(key, ids);
-    }
+    if (!ids) ids = new Set<string>();
     for (const id of connectionIds) {
-      if (id.length > 0) ids.add(id);
+      if (id.length === 0) continue;
+      ids.add(id);
+      // Insertion-ordered, so the first key out is the id issued longest ago -
+      // and a peer that has issued 32 since is not still using it.
+      while (ids.size > MAX_CONNECTION_IDS_PER_FLOW) {
+        const oldest = ids.values().next();
+        if (oldest.done) break;
+        ids.delete(oldest.value);
+      }
+    }
+    // Re-inserted rather than updated in place: a Map iterates in insertion
+    // order, so deleting and setting is what moves this flow to the back of
+    // the eviction queue. `flowConnectionIds` is the flow registry - a flow
+    // exists exactly when it has an entry here (`isKnownFlow`) - so it is the
+    // one map whose order can stand for all of them.
+    this.flowConnectionIds.delete(key);
+    this.flowConnectionIds.set(key, ids);
+    this.evictFlowsPastCap();
+  }
+
+  /**
+   * Forgets every flow past the cap, least-recently-seen first.
+   *
+   * The seven maps are keyed three different ways - by flow, by flow and
+   * sender, and by flow, sender and stream id - so forgetting one flow means
+   * scanning the direction-keyed ones for its prefix. That is O(entries) per
+   * eviction, which is why this only runs when the cap is actually exceeded
+   * rather than on every packet.
+   */
+  private evictFlowsPastCap(): void {
+    while (this.flowConnectionIds.size > MAX_FLOWS) {
+      const oldest = this.flowConnectionIds.keys().next();
+      if (oldest.done) break;
+      this.forgetFlow(oldest.value);
+    }
+    // A flow can open many streams, so their total is bounded separately: one
+    // busy HTTP/3 connection can exceed this while the flow count is fine.
+    while (this.streams.size > MAX_STREAMS) {
+      const oldest = this.streams.keys().next();
+      if (oldest.done) break;
+      const assembly = this.streams.get(oldest.value);
+      if (assembly) this.totalPendingBytes -= assembly.pendingBytes;
+      this.streams.delete(oldest.value);
+    }
+  }
+
+  /** Drops everything held for one flow, across every map that keys by it. */
+  private forgetFlow(flowKey: string): void {
+    this.flowConnectionIds.delete(flowKey);
+    this.initialSessions.delete(flowKey);
+    this.flowSni.delete(flowKey);
+    this.sessions.delete(flowKey);
+    const prefix = flowKey + '>';
+    for (const key of this.largestPacketNumber.keys()) {
+      if (key.startsWith(prefix)) this.largestPacketNumber.delete(key);
+    }
+    for (const key of this.cryptoStreams.keys()) {
+      if (key.startsWith(prefix)) this.cryptoStreams.delete(key);
+    }
+    for (const [key, assembly] of this.streams) {
+      if (!key.startsWith(prefix)) continue;
+      this.totalPendingBytes -= assembly.pendingBytes;
+      this.streams.delete(key);
     }
   }
 
@@ -397,6 +505,13 @@ export class QuicFlowTracker {
       if (assembly === undefined) {
         assembly = { http3: freshHttp3Stream(bidirectional), nextOffset: 0, pending: new Map(), pendingBytes: 0 };
         this.streams.set(key, assembly);
+        this.evictFlowsPastCap();
+      } else {
+        // Touched, so the eviction queue orders by last use rather than by
+        // when the stream was opened: a long-lived control stream is the one
+        // that would otherwise be dropped first.
+        this.streams.delete(key);
+        this.streams.set(key, assembly);
       }
 
       if (fragment.offset > assembly.nextOffset) {
@@ -410,11 +525,14 @@ export class QuicFlowTracker {
           // dropped for the life of the connection.
           if (fragment.data.length > held.length) {
             assembly.pendingBytes += fragment.data.length - held.length;
+            this.totalPendingBytes += fragment.data.length - held.length;
             assembly.pending.set(fragment.offset, fragment.data);
           }
-        } else if (assembly.pendingBytes + fragment.data.length <= MAX_PENDING_STREAM_BYTES) {
+        } else if (assembly.pendingBytes + fragment.data.length <= MAX_PENDING_STREAM_BYTES
+          && this.totalPendingBytes + fragment.data.length <= MAX_TOTAL_PENDING_BYTES) {
           assembly.pending.set(fragment.offset, fragment.data);
           assembly.pendingBytes += fragment.data.length;
+          this.totalPendingBytes += fragment.data.length;
         }
         continue;
       }
@@ -437,8 +555,9 @@ export class QuicFlowTracker {
         assembly.nextOffset += data.length;
 
         const next = takePendingAt(assembly);
-        if (next === undefined) break;
-        data = next;
+        this.totalPendingBytes -= next.released;
+        if (next.data === undefined) break;
+        data = next.data;
       }
 
       if (frames.length > 0 || streamTypeName !== undefined) {
@@ -460,6 +579,7 @@ export class QuicFlowTracker {
   }
 
   public reset(): void {
+    this.totalPendingBytes = 0;
     this.flowConnectionIds.clear();
     this.initialSessions.clear();
     this.largestPacketNumber.clear();

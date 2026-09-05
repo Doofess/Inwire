@@ -69,6 +69,37 @@ const POLL_UNCERTAINTY_US = 1_000_000;
 /** The addresses a socket binds to when it means "any of mine". */
 const WILDCARD_ADDRESSES = ['0.0.0.0', '::'];
 
+/**
+ * How long a **closed** socket's life is kept after it closed.
+ *
+ * Every life ever observed used to be kept for the length of the capture, one
+ * array per local endpoint, appended to on every reuse of the port - so an hour
+ * of browsing, which is thousands of short-lived ports, grew this without any
+ * bound (`scripts/perf/tracker-cost.ts`).
+ *
+ * A closed life can be dropped once no frame that could still be dissected
+ * falls inside it. Dissection runs forwards, so that is a question about the
+ * past: a life that closed two minutes ago cannot match a frame arriving now.
+ * The window has to clear three things, and does so by two orders of magnitude
+ * - the poll uncertainty either edge is widened by (1 s), the ordering window's
+ * hold (100 ms), and `App.tsx`'s retro-annotation window for a delta (3 s).
+ *
+ * An **open** life is never swept however old it is: "still open" is not a
+ * timestamp, and a connection can outlive any window - which is exactly the
+ * long-lived socket whose attribution is most worth keeping.
+ */
+const CLOSED_LIFE_RETENTION_US = 120_000_000;
+
+/**
+ * How many lives one local endpoint keeps, newest last.
+ *
+ * A backstop for the sweep above rather than the main bound: a port cycled hard
+ * enough to exceed this inside the retention window has produced more history
+ * than any lookup can use, since two lives covering one instant already answer
+ * with nothing.
+ */
+const MAX_LIVES_PER_ENDPOINT = 8;
+
 function keyOf(proto: FlowProto, address: string, port: number): string {
   return `${proto}|${address}|${port}`;
 }
@@ -157,6 +188,12 @@ export class FlowAnnotationStore {
         fromUs: message.full ? -Infinity : nowUs,
         toUs: Infinity,
       });
+      // Newest last, so the oldest are the ones dropped. Splicing from the
+      // front rather than truncating keeps the still-open life, which is
+      // always the last one pushed.
+      if (history.length > MAX_LIVES_PER_ENDPOINT) {
+        history.splice(0, history.length - MAX_LIVES_PER_ENDPOINT);
+      }
       this.lives.set(key, history);
       if (!isWildcardAddress(address)) this.localAddresses.add(address);
     }
@@ -168,7 +205,29 @@ export class FlowAnnotationStore {
       for (const life of history) if (life.toUs === Infinity) life.toUs = nowUs;
     }
 
+    this.sweepClosed(nowUs);
     this.generation += 1;
+  }
+
+  /**
+   * Forgets lives that closed long enough ago that no frame can still land in
+   * them, and endpoints left with no lives at all.
+   *
+   * Driven from `apply` rather than from a timer: the store only changes when
+   * a table arrives, so that is the only moment there is anything new to
+   * forget, and a timer would be a second thing to tear down when a capture
+   * ends.
+   */
+  private sweepClosed(nowUs: number): void {
+    const horizon = nowUs - CLOSED_LIFE_RETENTION_US;
+    for (const [key, history] of this.lives) {
+      // An open life has `toUs === Infinity`, which fails this test for every
+      // horizon - so "still open" survives however long it has been open.
+      if (!history.some((life) => life.toUs < horizon)) continue;
+      const kept = history.filter((life) => life.toUs >= horizon);
+      if (kept.length === 0) this.lives.delete(key);
+      else this.lives.set(key, kept);
+    }
   }
 
   /** True once anything is known, so a caller can skip the work entirely. */
