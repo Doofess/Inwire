@@ -399,6 +399,35 @@ const MAX_PENDING_FRAMES = 20000;
 const STORAGE_BUDGET_BYTES = 512 * 1024 * 1024;
 
 /**
+ * How much of the oldest history to drop to get back under the budget.
+ *
+ * Pure, and exported, because it is the only thing left in the app that deletes
+ * a user's frames without being asked (`docs/decisions/0012`) - which makes it
+ * worth being able to test directly rather than only through IndexedDB.
+ *
+ * It evicts from the front, so what a long capture loses is its **beginning**.
+ * That is the right end to lose (the recent frames are the ones on screen) and
+ * the wrong end to lose silently, which is why the count comes back out.
+ */
+export function planBudgetEviction(
+  ledger: readonly { id: number; bytes: number }[],
+  writtenBytes: number,
+  budgetBytes: number,
+): { evictCount: number; remainingBytes: number; dropUpTo: number } {
+  let remainingBytes = writtenBytes;
+  let evictCount = 0;
+  let dropUpTo = 0;
+  while (evictCount < ledger.length && remainingBytes > budgetBytes) {
+    remainingBytes -= ledger[evictCount].bytes;
+    // Exclusive: the floor is "the first id still kept", so it is one past the
+    // frame just dropped.
+    dropUpTo = ledger[evictCount].id + 1;
+    evictCount++;
+  }
+  return { evictCount, remainingBytes, dropUpTo };
+}
+
+/**
  * Sizes of what has been written, oldest first, so the budget above can be
  * enforced without asking IndexedDB how big it is (which it cannot answer per
  * record). Two numbers per frame - at the 50,000 cap this ledger is a few
@@ -415,8 +444,34 @@ function frameBytes(frame: StoredFrame): number {
 /** True when frames had to be dropped, so the caller can say so honestly. */
 let droppedFromQueue = 0;
 
-export function pendingWriteBacklog(): { queued: number; dropped: number; storedBytes: number } {
-  return { queued: pendingFrames.length, dropped: droppedFromQueue, storedBytes: writtenBytes };
+/**
+ * Frames the storage budget evicted from disk.
+ *
+ * Counted apart from ordinary trimming, which is not a loss - a frame the live
+ * buffer has already forgotten was never going to be restored. This one is:
+ * these frames were captured, shown, and are still in the buffer, and the
+ * beginning of the capture simply stops being restorable.
+ *
+ * It is counted because since `docs/decisions/0012` this is the **only**
+ * automatic deletion left in the app, and an app that promises to keep a
+ * capture until asked must say when it could not.
+ */
+let evictedForBudget = 0;
+
+export function pendingWriteBacklog(): {
+  queued: number;
+  dropped: number;
+  storedBytes: number;
+  storageBudgetBytes: number;
+  evictedForBudget: number;
+} {
+  return {
+    queued: pendingFrames.length,
+    dropped: droppedFromQueue,
+    storedBytes: writtenBytes,
+    storageBudgetBytes: STORAGE_BUDGET_BYTES,
+    evictedForBudget,
+  };
 }
 
 /**
@@ -485,15 +540,13 @@ async function drain(): Promise<void> {
   // back under it. This only ever moves the floor forward, so it composes with
   // the buffer's own trimming rather than fighting it.
   if (writtenBytes > STORAGE_BUDGET_BYTES) {
-    let dropUpTo = pendingTrimFloor;
-    let index = 0;
-    while (index < writtenLedger.length && writtenBytes > STORAGE_BUDGET_BYTES) {
-      writtenBytes -= writtenLedger[index].bytes;
-      dropUpTo = writtenLedger[index].id + 1;
-      index++;
-    }
-    writtenLedger = writtenLedger.slice(index);
-    if (dropUpTo > pendingTrimFloor) pendingTrimFloor = dropUpTo;
+    const plan = planBudgetEviction(writtenLedger, writtenBytes, STORAGE_BUDGET_BYTES);
+    writtenBytes = plan.remainingBytes;
+    writtenLedger = writtenLedger.slice(plan.evictCount);
+    // Only here, not in the appliedTrimFloor pass below: that one drops frames
+    // the live buffer has already forgotten, which costs the user nothing.
+    evictedForBudget += plan.evictCount;
+    if (plan.dropUpTo > pendingTrimFloor) pendingTrimFloor = plan.dropUpTo;
   }
 
   // Frames already dropped by the buffer's own trim are no longer ours to
@@ -525,6 +578,7 @@ export function resetWriteQueue(): void {
   droppedFromQueue = 0;
   writtenLedger = [];
   writtenBytes = 0;
+  evictedForBudget = 0;
 }
 
 export async function saveSessionMeta(meta: SessionMeta): Promise<void> {

@@ -481,7 +481,9 @@ export default function App() {
    * unasked and unseen would be the wrong trade, so the size is on screen
    * beside the one button that removes them.
    */
-  const [storedBytes, setStoredBytes] = useState(0);
+  const [storage, setStorage] = useState({
+    storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0,
+  });
   /**
    * The same number on a ref, plus the head id it was last counted at,
    * because the state can only be advanced from inside a `setPackets` updater
@@ -566,7 +568,15 @@ export default function App() {
   // off the critical path, and a number that updates twice a second is as
   // current as anyone reading it needs.
   useEffect(() => {
-    const tick = () => setStoredBytes(pendingWriteBacklog().storedBytes);
+    const tick = () => {
+      const { storedBytes, storageBudgetBytes, evictedForBudget } = pendingWriteBacklog();
+      setStorage((prev) =>
+        prev.storedBytes === storedBytes
+          && prev.storageBudgetBytes === storageBudgetBytes
+          && prev.evictedForBudget === evictedForBudget
+          ? prev
+          : { storedBytes, storageBudgetBytes, evictedForBudget });
+    };
     tick();
     const timer = window.setInterval(tick, 2000);
     return () => window.clearInterval(timer);
@@ -1919,7 +1929,7 @@ export default function App() {
     lastPacketTimeRef.current = null;
     persistedThroughIdRef.current = 0;
     flowAnnotations.clear();
-    setStoredBytes(0);
+    setStorage({ storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0 });
   }, []);
 
   // The dashboard's callbacks are memoized, and the three below are the ones
@@ -2476,7 +2486,7 @@ export default function App() {
             packetBufferCap={packetBufferCap}
             bufferAutoPaused={bufferAutoPaused}
             onClearPackets={handleClearPackets}
-            storedBytes={storedBytes}
+            storage={storage}
             onDiscardCapture={handleDiscardCapture}
             colorRules={colorRules}
             onColorRulesChange={setColorRules}
