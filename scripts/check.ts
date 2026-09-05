@@ -35,6 +35,7 @@ const NOT_TESTS: Record<string, string> = {
   'perf/throughput.ts': 'measurement; needs the untracked fixture captures (test/fixtures/README.md)',
   'perf/tree-cost.ts': 'measurement; needs the untracked fixture captures (test/fixtures/README.md)',
   'perf/buffer-cost.ts': 'measurement; needs the untracked fixture captures (test/fixtures/README.md)',
+  'perf/fields-cost.ts': 'measurement; needs the fixtures and --expose-gc (test/fixtures/README.md)',
   'perf/wire-size.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0005)',
 };
 

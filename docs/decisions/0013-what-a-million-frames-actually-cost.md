@@ -78,8 +78,49 @@ problem sideways.
    | step | frees at 1M | shape |
    |---|---|---|
    | bytes not resident, read back by id | 1,176 MB | store gains a by-id read; consumers fetch |
-   | `fields` interned or columnar | up to ~1,100 MB | filters already read it through one seam |
+   | `fields` interned or columnar | **~145 MB, not ~1,100** | see below |
    | the rest of the summary | ~400 MB | only if the first two are not enough |
+
+## What `Packet.fields` turned out to be
+
+The table above first said "up to ~1,100 MB", on the assumption that a bag
+costing 1,174 B a frame had most of that available to a better representation.
+Measured (`scripts/perf/fields-cost.ts`), it does not:
+
+| | |
+|---|---|
+| entries per frame | mean 22.5, p95 34 |
+| distinct keys in the capture | 122 |
+| values | 216,191 number, 73,187 string, 0 bool |
+| distinct string values | **434**, i.e. 98.8% of string content repeats |
+
+Three candidate fixes, measured rather than argued:
+
+- **Interning the strings: 82 MB at 1M** - taken, and it turned out to be 145 MB
+  once `Packet.source` and `Packet.destination` came with it. The address
+  formatters now pool their results (`services/addressFormat.ts`), which is the
+  same shape as the `resolveMacName` memo in 0011: a value computed per frame
+  over a domain of a few dozen. Verified by counting duplicate string objects
+  afterwards: zero.
+- **Rebuilding the bag in one go: 46 MB at 1M** - not taken. Real but small, and
+  it would put an allocation in the hot path for 4%.
+- **A column per key: WORSE.** One array per key over 122 keys measured at
+  976 B a frame against 294 B for one object per frame, because a key only a few
+  frames carry still costs a slot in every frame. ADR 0003's typed-column store
+  would need presence bitmaps and per-key encoding to beat the object it
+  replaces - it is not the free win it looks like, and the naive version is
+  three times the size.
+
+An earlier reading of that last comparison suggested rebuilding would free
+~880 MB. It would not: `{...fields}` shares its strings and numbers with the
+object it copies, so it measures structure alone. The direct test - replace every
+bag, drop the originals, collect, measure - is the 46 MB above. Recorded because
+the wrong number was convincing enough to act on.
+
+**So there is no cheap large win in `fields`.** It is ~1,030 MB at a million
+frames after interning, and getting it materially lower means a real structural
+change, with a measurement showing the replacement is smaller than what it
+replaces before it is written.
 
 ## Consequences
 
