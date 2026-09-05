@@ -196,6 +196,15 @@ export class Anonymiser {
       // kind of thing being removed, so none of it is carried over.
       layers: [],
       fields: undefined,
+      // Both halves of the bag. The dense fields - every address, port and
+      // sequence number among them - live in a shared column block reached
+      // through `cols` (`dissect/fieldSplit.ts`), so clearing `fields` alone
+      // leaves all of them readable on a frame this has just called anonymous.
+      // The block itself is not touched: it is shared with frames that are not
+      // being anonymised, and dropping this frame's pointer is what removes it
+      // from this one.
+      cols: undefined,
+      row: undefined,
       resolved: undefined,
       streamPayload: undefined,
       hexDump: undefined,

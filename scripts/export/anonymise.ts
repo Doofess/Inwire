@@ -16,9 +16,11 @@
  * leading bits as the real pair did.
  */
 import { Anonymiser, anonymiseCapture, parseIpv4, parseIpv6 } from '../../src/services/anonymise';
+import { FieldBlockWriter } from '../../src/services/dissect/fieldSplit';
+import { fieldValue } from '../../src/services/dissect/fieldAccess';
 import { decodeRawEthernetPacket } from '../../src/services/pcapParser';
 import { LINKTYPE } from '../../src/services/dissect/types';
-import type { Packet } from '../../src/types/packet';
+import type { Packet, ProtocolType } from '../../src/types/packet';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -297,6 +299,31 @@ function decode(bytes: Uint8Array, id = 1): Packet {
     !JSON.stringify(out).includes('AppData'));
 }
 
+
+// --- A frame whose dense fields live in a column must lose those too ----------
+//
+// `fields: undefined` alone is not enough once the split lands: addresses,
+// ports and sequence numbers all moved into a shared column block reached
+// through `cols`, and leaving that pointer in place would keep every one of
+// them readable on a frame this function has just declared anonymous.
+{
+  const frame = {
+    id: 1, tsUs: 0, relativeTime: 0, timeDelta: 0,
+    source: '10.0.0.1', destination: '10.0.0.2',
+    protocol: 'TCP' as ProtocolType, length: 100, info: '', status: 'ok' as const,
+    layers: [], rawBytes: new Uint8Array(0), interfaceName: 'test',
+    fields: { 'ip.src': '10.0.0.1', 'tcp.srcport': 51000, 'dns.qry.name': 'secret.invalid' },
+  } as unknown as Packet;
+  new FieldBlockWriter().absorb([frame]);
+  // Proves the split actually happened, so the check below is not vacuous.
+  checkTrue('the frame reads its address through a column',
+    fieldValue(frame, 'ip.src') === '10.0.0.1' && frame.fields?.['ip.src'] === undefined);
+
+  const { packets: scrubbed } = anonymiseCapture([frame]);
+  check('anonymising clears the column values as well as the bag',
+    ['ip.src', 'tcp.srcport', 'dns.qry.name'].map((k) => fieldValue(scrubbed[0], k)),
+    [undefined, undefined, undefined]);
+}
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);

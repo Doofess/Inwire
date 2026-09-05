@@ -1501,6 +1501,14 @@ export default function App() {
             changed = true;
             // A copy, because a packet already handed to React is not ours to
             // mutate - a row that changed in place would not re-render.
+            //
+            // The spread carries `cols` and `row` across, which is what we
+            // want: the copy shares the original's block and its row, and a row
+            // is written once when the frame joins the buffer and never again,
+            // so two packets reading it see the same values. What is written
+            // HERE goes to the bag, because the process fields are declared
+            // post-dissection and so are never dense (`dissect/denseFields.ts`,
+            // asserted in `scripts/dissect/dense-fields.ts`).
             const copy: typeof packet = { ...packet, fields: { ...packet.fields } };
             writeProcessFields(copy, process);
             return copy;
