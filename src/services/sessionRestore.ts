@@ -1,7 +1,7 @@
 import { Packet, PacketStatus, ProtocolType } from '../types/packet';
 import type { DnsTracker } from './dnsTracker';
 import type { InfoPatch } from './pcapParser';
-import { decodeRawEthernetPacket } from './pcapParser';
+import { decodeRawEthernetPacket, indexOfFrame } from './pcapParser';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 import { QuicFlowTracker } from './quicFlowTracker';
@@ -219,13 +219,29 @@ export function applyIcmpReplies(
   replies: { requestFrameId: number; replyId: number }[],
 ): Packet[] {
   if (replies.length === 0) return packets;
-  const replyByFrameId = new Map(replies.map((r) => [r.requestFrameId, r.replyId]));
+  const next = packets.slice();
+  return applyIcmpRepliesInPlace(next, replies) ? next : packets;
+}
+
+/**
+ * The same, written into `packets` directly. **The caller must own the array.**
+ *
+ * A reply names the frame it answers by id, so this reaches for that frame
+ * rather than walking every frame to ask whether it is the one. The `.map` this
+ * replaces cost 14.1 ms a pass at a million frames and ran on every flush that
+ * carried a single reply (`scripts/perf/buffer-cost.ts`).
+ */
+export function applyIcmpRepliesInPlace(
+  packets: Packet[],
+  replies: { requestFrameId: number; replyId: number }[],
+): boolean {
   let changed = false;
-  const next = packets.map((p) => {
-    const replyId = replyByFrameId.get(p.id);
-    if (replyId === undefined) return p;
+  for (const reply of replies) {
+    const at = indexOfFrame(packets, reply.requestFrameId);
+    if (at < 0) continue;
+    const p = packets[at];
+    packets[at] = { ...p, info: `${p.info} (reply in ${reply.replyId})` };
     changed = true;
-    return { ...p, info: `${p.info} (reply in ${replyId})` };
-  });
-  return changed ? next : packets;
+  }
+  return changed;
 }

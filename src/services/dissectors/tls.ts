@@ -47,6 +47,16 @@ import { decryptRecord, deriveFromKeyLog } from '../tls/decrypt';
 import { keyLog } from '../tls/keyLog';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './appStream';
 
+/** One encoder, not one per call - see scripts/perf/hot-path-allocations.ts. */
+const utf8Encoder = new TextEncoder();
+
+/**
+ * One decoder, not one per call - `new TextDecoder()` is not free and a CPU
+ * profile put constructing them at 8% of a dissection run. Stateless without
+ * `{stream: true}`, which nothing here uses.
+ */
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
 const CT_CHANGE_CIPHER_SPEC = 20;
 const CT_ALERT = 21;
 const CT_HANDSHAKE = 22;
@@ -243,7 +253,7 @@ function parseAlpn(body: Uint8Array): string[] {
   const out: string[] = [];
   if (body.length < 2) return out;
   const len = u16(body, 0);
-  const dec = new TextDecoder();
+  const dec = utf8Decoder;
   for (let p = 2; p < Math.min(body.length, 2 + len);) {
     const n = body[p];
     if (p + 1 + n > body.length) break;
@@ -261,7 +271,7 @@ function parseSni(body: Uint8Array): string | null {
     const type = body[p];
     const n = u16(body, p + 1);
     if (p + 3 + n > body.length) break;
-    if (type === 0) return new TextDecoder().decode(body.subarray(p + 3, p + 3 + n));
+    if (type === 0) return utf8Decoder.decode(body.subarray(p + 3, p + 3 + n));
     p += 3 + n;
   }
   return null;
@@ -269,7 +279,7 @@ function parseSni(body: Uint8Array): string | null {
 
 const hex4 = (n: number) => n.toString(16).padStart(4, '0');
 const hexOf = (bytes: Uint8Array) => Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
-const sha256Prefix12 = (s: string) => hexOf(sha256(new TextEncoder().encode(s))).slice(0, 12);
+const sha256Prefix12 = (s: string) => hexOf(sha256(utf8Encoder.encode(s))).slice(0, 12);
 
 function ja4Version(v: number): string {
   switch (v) {
@@ -290,7 +300,7 @@ function ja4Alpn(alpn: string[]): string {
   const a = first[0];
   const z = first[first.length - 1];
   if (isAlnum(a) && isAlnum(z)) return `${a}${z}`;
-  const bytes = new TextEncoder().encode(first);
+  const bytes = utf8Encoder.encode(first);
   const h = hexOf(bytes);
   return `${h[0]}${h[h.length - 1]}`;
 }

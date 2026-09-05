@@ -40154,7 +40154,31 @@ function octets(mac: string): string[] {
  * Deliberately distinct from resolveMacVendor() below: the columns want the
  * bare name, while the detail tree wants the name *and* the literal address.
  */
+/**
+ * Resolved names, by MAC.
+ *
+ * This is a pure function of its argument called twice for every frame - once
+ * for each end - over a domain that is, on any real segment, a couple of dozen
+ * addresses. A CPU profile put it and its `octets` helper at ~4.8% of a
+ * dissection run, all of it recomputing the same few answers.
+ *
+ * Capped rather than unbounded: a capture that sees an unusual number of
+ * distinct MACs (a scan, a busy trunk port) should not grow this without
+ * limit. At the cap it stops admitting new entries rather than evicting, since
+ * the entries already there are the ones being asked for repeatedly.
+ */
+const macNameCache = new Map<string, string>();
+const MAC_NAME_CACHE_MAX = 4096;
+
 export function resolveMacName(mac: string): string {
+  const cached = macNameCache.get(mac);
+  if (cached !== undefined) return cached;
+  const name = computeMacName(mac);
+  if (macNameCache.size < MAC_NAME_CACHE_MAX) macNameCache.set(mac, name);
+  return name;
+}
+
+function computeMacName(mac: string): string {
   const lower = mac.toLowerCase();
 
   const reserved = RESERVED_MAC_NAMES[lower];

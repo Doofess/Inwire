@@ -112,10 +112,11 @@ const building = process.argv.includes('--build');
     console.log('SKIP  the published tarball is about to be rebuilt (--build)');
   } else if (existsSync(archive)) {
     let shipped: string | null = null;
+    let listing = '';
     try {
       // A bare filename from the directory itself, for the same reason the
       // build below does it: GNU tar reads a leading `C:` as a remote host.
-      const listing = execFileSync('tar', ['-tzf', 'inwire-agent-unix.tar.gz'],
+      listing = execFileSync('tar', ['-tzf', 'inwire-agent-unix.tar.gz'],
         { encoding: 'utf8', cwd: downloads });
       shipped = /inwire-agent-([\d.]+)\//.exec(listing)?.[1] ?? null;
     } catch {
@@ -125,6 +126,16 @@ const building = process.argv.includes('--build');
     }
     if (shipped !== null) {
       check(`the published tarball is built from this version (${shipped})`, shipped, version);
+      // The version alone is not enough. Adding a module without bumping the
+      // version leaves an archive that matches on version and is missing a file
+      // the agent imports on startup - which is the same "a copy that stops
+      // being rebuilt goes on being downloaded" failure, wearing the right
+      // version number. Caught in practice when capture_profile.py was added.
+      const inArchive = new Set(
+        [...listing.matchAll(/inwire-agent-[\d.]+\/(\S+\.py)$/gm)].map((m) => m[1]),
+      );
+      check('...and ships every module that is packaged',
+        LOCAL_MODULES.filter((f) => !inArchive.has(f)), []);
     } else {
       console.log('SKIP  could not read the published tarball to compare its version');
     }

@@ -17,6 +17,17 @@
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 
+/**
+ * One decoder, not one per call. `new TextDecoder()` is not free, and these
+ * sites are per-field / per-frame - a CPU profile put TextDecoder construction
+ * at 8% of a dissection run. It carries no state across `decode()` calls unless
+ * `{stream: true}` is used, which nothing here does, so a shared instance is
+ * exactly equivalent. `new TextDecoder()` and
+ * `new TextDecoder('utf-8', {fatal: false})` are the same thing: utf-8,
+ * non-fatal, is the default.
+ */
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
 export interface UdpAppResult {
   protocolLabel: string;
   info: string;
@@ -265,7 +276,7 @@ export function dissectStun(bytes: Uint8Array, start: number, end: number): UdpA
         { name: 'IP', value: address, rawBytesRange: [at + 8, valueEnd - 1] },
       ];
     } else if (type === 0x8022 || type === 0x0006 || type === 0x0014) {
-      attribute.value = new TextDecoder().decode(bytes.slice(at + 4, valueEnd)).replace(/\0+$/, '');
+      attribute.value = utf8Decoder.decode(bytes.slice(at + 4, valueEnd)).replace(/\0+$/, '');
     }
 
     attributes.push(attribute);

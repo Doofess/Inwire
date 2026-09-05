@@ -13,6 +13,12 @@ file that supersedes the old one.
 | [0004](0004-fixtures-and-privacy.md) | Fixture captures stay untracked; only aggregate counts are committed | Accepted 2026-09-04 |
 | [0005](0005-agent-wire-format.md) | Agent wire format: `seq`, `iface`, `ts_us`, `capture_stats`, ownership, token | Accepted 2026-09-04 |
 | [0006](0006-pcapng-writer-scope.md) | pcapng writer scope and the pcap fallback | Accepted 2026-09-04 |
+| [0007](0007-what-crosses-the-worker-boundary.md) | What crosses the worker boundary: bytes yes, tree no — **corrects 0003** | Accepted 2026-09-04 |
+| [0008](0008-key-material.md) | Where TLS key material lives, and where it does not | Accepted 2026-09-04 |
+| [0009](0009-off-wire-enrichment.md) | Facts that did not come off the wire | Accepted 2026-09-04 |
+| [0010](0010-raw-frame-capture.md) | The agent receives raw frames and dissects nothing | Accepted 2026-09-05 |
+| [0011](0011-dissection-cost-is-not-the-tree.md) | Dissection's cost was not the tree — **re-scopes 0001** | Accepted 2026-09-05 |
+| [0012](0012-stored-captures-persist.md) | A stored capture is discarded only when the user asks | Accepted 2026-09-05 |
 
 ## Review outcome: amendments to the spec's execution order
 

@@ -3,7 +3,7 @@ import type { CaptureDropStats } from '../../services/agentProtocol';
 import type { LinkChange, LinkContext } from '../../services/linkContext';
 import { motion } from 'motion/react';
 import {
-  TbSettings, TbX, TbPalette, TbActivity, TbFilter, TbTrash, TbLayoutBoard, TbAccessible, TbKey,
+  TbSettings, TbX, TbPalette, TbActivity, TbFilter, TbTrash, TbEraser, TbLayoutBoard, TbAccessible, TbKey,
 } from 'react-icons/tb';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
@@ -61,6 +61,10 @@ interface SettingsModalProps {
   packetBufferCap: number;
   bufferAutoPaused: boolean;
   onClearPackets: () => void;
+  /** Bytes of this capture on disk, for the discard control below. */
+  storedBytes: number;
+  /** Deletes the stored capture. The only thing in the app that does. */
+  onDiscardCapture: () => void;
   /** The agent pairing block, rendered at the top of Driver Info. */
   pairingSection?: React.ReactNode;
   /** The display-filter presets, shared with the header's Presets dropdown. */
@@ -103,6 +107,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   packetBufferCap,
   bufferAutoPaused,
   onClearPackets,
+  storedBytes,
+  onDiscardCapture,
   filterPresetLibrary,
   onFilterPresetLibraryChange,
   colorRules,
@@ -254,17 +260,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
                     )}
 
-                    {/* The same pill as the three driver actions above it -
-                        it sits in the same tab and does the same kind of thing,
-                        and two shapes for one job read as two kinds of job. */}
-                    <button
-                      onClick={onClearPackets}
-                      disabled={totalPacketsCount === 0}
-                      className={`self-start ${DRIVER_ACTION_BUTTON_CLASS}`}
-                    >
-                      <TbTrash className="w-3.5 h-3.5" />
-                      <span>Clear Buffer</span>
-                    </button>
+                    {/* Two actions, because they are two different things and
+                        one button used to do both. "Clear View" frees the
+                        memory the list is holding; the capture stays on disk and
+                        can still be exported or reopened. "Discard Capture" is
+                        the one that destroys it - nothing else in the app does,
+                        not closing the last window and not reopening it
+                        (docs/decisions/0012-stored-captures-persist.md).
+
+                        The same pill as the three driver actions above: they sit
+                        in the same tab and do the same kind of thing, and two
+                        shapes for one job read as two kinds of job. */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={onClearPackets}
+                        disabled={totalPacketsCount === 0}
+                        className={DRIVER_ACTION_BUTTON_CLASS}
+                      >
+                        <TbEraser className="w-3.5 h-3.5" />
+                        <span>Clear View</span>
+                      </button>
+                      <button
+                        onClick={onDiscardCapture}
+                        disabled={storedBytes === 0 && totalPacketsCount === 0}
+                        className={DRIVER_ACTION_BUTTON_CLASS}
+                      >
+                        <TbTrash className="w-3.5 h-3.5" />
+                        <span>Discard Capture</span>
+                      </button>
+                    </div>
+
+                    {/* Bytes that outlive the app should never be a surprise,
+                        so the amount is stated next to the button that removes
+                        it rather than left to be inferred. */}
+                    <p className="text-[11px] text-muted-foreground">
+                      {storedBytes > 0 ? (
+                        <>
+                          <span className="font-medium text-foreground">
+                            {(storedBytes / 1_000_000).toFixed(1)} MB
+                          </span>
+                          {' stored on disk. This capture is kept until you discard it — '}
+                          closing Inwire no longer deletes it.
+                        </>
+                      ) : (
+                        'Nothing is stored on disk yet.'
+                      )}
+                    </p>
                   </div>
                 }
               />

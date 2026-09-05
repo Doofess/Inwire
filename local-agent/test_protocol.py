@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent
@@ -984,43 +985,41 @@ finally:
 
 
 # --- capture timestamps come from the wire, not the wall clock ---
-class _StampedPkt:
-    """Stands in for a scapy packet carrying libpcap's capture time. scapy
-    returns an EDecimal, which json cannot serialize - Decimal reproduces
-    that hazard faithfully."""
-
-    def __init__(self, stamp):
-        self.time = stamp
-
-
 import decimal
 
+# Since 3.5.0 capture_time_us takes libpcap's timestamp directly rather than a
+# dissected packet to read `.time` off - the agent no longer builds one. scapy
+# hands over an EDecimal, which json cannot serialize; Decimal reproduces that
+# hazard faithfully.
+#
 # The millisecond form is gone with the JSON packet message; microseconds are
 # what the binary record carries and what the browser reads.
-_us = agent.capture_time_us(_StampedPkt(decimal.Decimal("1787795981.131456")))
+_us = agent.capture_time_us(decimal.Decimal("1787795981.131456"))
 check("capture_time_us converts seconds to microseconds", _us, 1787795981131456)
 check_true("...as an integer, exact as a JS number", isinstance(_us, int))
+check("a plain float works too, which is what libpcap reports",
+      agent.capture_time_us(1787795981.131456), 1787795981131456)
 check_true(
     "sub-millisecond precision survives - this is the whole point",
-    agent.capture_time_us(_StampedPkt(decimal.Decimal("1.000100")))
-    != agent.capture_time_us(_StampedPkt(decimal.Decimal("1.000900"))),
+    agent.capture_time_us(decimal.Decimal("1.000100"))
+    != agent.capture_time_us(decimal.Decimal("1.000900")),
 )
 
 # Two frames a quarter-millisecond apart must not collapse onto one stamp,
 # which is exactly what int(time.time() * 1000) did.
-_a = agent.capture_time_us(_StampedPkt(decimal.Decimal("100.000250")))
-_b = agent.capture_time_us(_StampedPkt(decimal.Decimal("100.000500")))
+_a = agent.capture_time_us(decimal.Decimal("100.000250"))
+_b = agent.capture_time_us(decimal.Decimal("100.000500"))
 check_true("frames within the same millisecond stay distinguishable", _a != _b)
 
-
-class _NoTimePkt:
-    pass
-
-
+# A socket reporting no time gets the wall clock. The test is `not stamp` and
+# not `stamp is None`, because that is the test scapy's own recv applies before
+# it will set pkt.time - so 0 and None mean the same thing at both ends.
 check_true(
-    "a packet with no capture time falls back to the wall clock rather than failing",
-    agent.capture_time_us(_NoTimePkt()) > 0,
+    "no capture time falls back to the wall clock rather than failing",
+    agent.capture_time_us(None) > 0,
 )
+check_true("...and so does a zero, which scapy also treats as absent",
+           agent.capture_time_us(0) > 0)
 
 
 # --- the interface list is re-read, not frozen at startup --------------------
@@ -1204,37 +1203,25 @@ finally:
 
 
 # --- 3.1.0: packets carry seq, iface, tsUs and origLen ---------------------------
-class _FakeFrame:
-    """Just enough of a scapy packet for packet_to_record: a time, a length,
-    and nothing that looks like IP or Ethernet."""
-
-    def __init__(self, stamp, size=60):
-        self.time = stamp
-        self._size = size
-
-    def __len__(self):
-        return self._size
-
-    def __bytes__(self):
-        return b"\x00" * self._size
-
-    def __contains__(self, layer):
-        return False
-
-    def getlayer(self, layer):
-        return None
-
-
-_frame = _FakeFrame(decimal.Decimal("1788477971.653284"), size=1514)
-_rec = agent.packet_to_record(_frame, iface_id=2, seq=41)
+#
+# Since 3.5.0 there is no fake scapy packet to build here: packet_to_record
+# takes the frame's bytes and its timestamp, which is all it ever read of one.
+_frame = (bytes(range(256)) * 5 + bytes(234))     # 1514 bytes, and not all zero
+_rec = agent.packet_to_record(_frame, decimal.Decimal("1788477971.653284"), iface_id=2, seq=41)
 _msg = packet_batch.decode_batch(packet_batch.encode_batch([_rec]))[0]
 check("packet carries its sequence number", _msg["seq"], 41)
 check("packet carries its interface id", _msg["iface"], 2)
 check("packet carries the capture time in microseconds", _msg["tsUs"], 1788477971653284)
 check("packet carries the wire length", _msg["origLen"], 1514)
 check("packet carries the frame itself", len(_msg["data"]), 1514)
-check("capture_time_us rounds float noise away", agent.capture_time_us(_FakeFrame(decimal.Decimal("1.000001"))), 1000001)
-check_true("a frame with no time still gets a microsecond stamp", agent.capture_time_us(_NoTimePkt()) > 1_000_000_000_000_000)
+# The bytes go through untouched. Until 3.5.0 they made a round trip through a
+# scapy object graph on the way; that they came back unchanged across all
+# 27,640 frames of both fixtures is what made removing it a safe change.
+check("...unaltered, byte for byte", _msg["data"], _frame)
+check("capture_time_us rounds float noise away",
+      agent.capture_time_us(decimal.Decimal("1.000001")), 1000001)
+check_true("a frame with no time still gets a microsecond stamp",
+           agent.capture_time_us(None) > 1_000_000_000_000_000)
 
 _c = agent.CaptureCounters()
 check("sequence numbers start at zero", _c.next_seq(0), 0)
@@ -1427,6 +1414,183 @@ check_true("...and registers the subscriber", _sock_ws in _srv.socket_subscriber
 
 _drive(_srv, _sock_ws, {"type": "unsubscribe_sockets"})
 check_true("unsubscribing removes it", _sock_ws not in _srv.socket_subscribers)
+
+# --- capture profiling -----------------------------------------------------------
+#
+# The instrument sits on the hot path it measures, so the property that matters
+# most is that it costs nothing when nobody asked for it.
+import capture_profile
+
+_off = capture_profile.CaptureProfile(enabled=False)
+_off.frame(0.5)
+check("a disabled profile records nothing", _off.snapshot(), None)
+check("...and says so rather than reporting zeroes", _off.describe(), "capture profiling is off")
+
+_on = capture_profile.CaptureProfile(enabled=True)
+check("an enabled profile with no frames reports none", _on.snapshot()["frames"], 0)
+check("...and describes that without dividing by it", _on.describe(), "capture profile: no frames yet")
+
+# Real elapsed time, not a fabricated number: the invariant below is that the
+# callback's share fits inside the wall clock, and feeding it timings that never
+# actually elapsed would assert nothing while appearing to.
+for _ in range(4):
+    _t0 = time.perf_counter()
+    time.sleep(0.001)
+    _on.frame(time.perf_counter() - _t0)
+_snap = _on.snapshot()
+check("frames are counted", _snap["frames"], 4)
+check_true("the callback share is the mean of what was measured",
+           900.0 <= _snap["callbackUs"] <= 3000.0)
+# The whole point: wall time per frame is larger than the callback, and the
+# difference is the driver read plus scapy's dissection - the half that happens
+# before our code is ever called, and the half a change to this path targets.
+check_true("per-frame wall time is at least the callback time",
+           _snap["perFrameUs"] >= _snap["callbackUs"])
+check_true("...and the remainder is attributed to driver+dissect",
+           abs((_snap["callbackUs"] + _snap["driverAndDissectUs"]) - _snap["perFrameUs"]) < 0.05)
+check_true("an implied ceiling is derived", _snap["impliedFramesPerSecond"] > 0)
+
+_on.reset()
+check("reset starts a fresh measurement", _on.snapshot()["frames"], 0)
+
+# The env var is the only switch, and an unset or falsy one leaves it off - an
+# installed service must not carry timing overhead because a variable was left
+# lying around with "0" in it.
+_saved = os.environ.get("INWIRE_PROFILE_CAPTURE")
+try:
+    for _value, _expected in (("", False), ("0", False), ("false", False), ("off", False),
+                              ("1", True), ("yes", True)):
+        os.environ["INWIRE_PROFILE_CAPTURE"] = _value
+        check(f"INWIRE_PROFILE_CAPTURE={_value!r} enables profiling: {_expected}",
+              capture_profile.profiling_enabled(), _expected)
+    os.environ.pop("INWIRE_PROFILE_CAPTURE", None)
+    check("an unset variable leaves profiling off", capture_profile.profiling_enabled(), False)
+finally:
+    if _saved is None:
+        os.environ.pop("INWIRE_PROFILE_CAPTURE", None)
+    else:
+        os.environ["INWIRE_PROFILE_CAPTURE"] = _saved
+
+check("the agent starts with profiling off unless asked",
+      agent.profile.enabled, capture_profile.profiling_enabled())
+
+# --- 3.5.0: the capture loop reads raw frames -------------------------------------
+#
+# The change with the most ways to go quietly wrong in this release. sniff()
+# handed the callback a dissected packet; recv_raw hands over bytes and a
+# timestamp, and the loop around it now owns three things sniff() used to do:
+# honouring stop_event, tolerating a read timeout, and choosing a strategy per
+# socket type. Each is checked here against a fake socket, because the real one
+# needs an adapter and elevation.
+import threading as _threading
+from scapy.supersocket import SuperSocket as _SuperSocket
+
+
+class _FakePcapSocket:
+    """A libpcap-style socket: recv_raw returns (cls, bytes, ts), and None on a
+    read timeout the way L2pcapListenSocket does when to_ms elapses."""
+
+    # Present so sniff_on_interface treats this as the non-polled path, which
+    # is what a libpcap socket is - it returns on its own 100 ms read timeout.
+    pcap_fd = object()
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.closed = False
+        self.selects = 0
+
+    def recv_raw(self, x=None):
+        if not self.script:
+            return None, None, None
+        return self.script.pop(0)
+
+    def select(self, socks, remain=None):
+        self.selects += 1
+        return socks
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeAfPacketSocket(_FakePcapSocket):
+    """AF_PACKET blocks in recv_raw forever, so its loop must poll select()."""
+    pcap_fd = None
+
+
+class _BaseRecvRawSocket(_FakePcapSocket):
+    """A socket that never overrode recv_raw. SuperSocket's base returns no
+    timestamp at all, so this one must NOT take the fast path."""
+    recv_raw = _SuperSocket.recv_raw
+
+
+def _run_capture(sock, frames_before_stop):
+    """Drives sniff_on_interface against `sock`, stopping after N frames."""
+    queued = []
+    stop = _threading.Event()
+    prev_l2listen = agent.scapy_conf.L2listen
+    prev_queue = agent.agent.queue_packet
+    prev_sniff = agent.sniff
+    agent.counters.reset()
+    sniff_calls = []
+
+    def _queue(record):
+        queued.append(record)
+        if len(queued) >= frames_before_stop:
+            stop.set()
+
+    agent.scapy_conf.L2listen = lambda **kw: sock
+    agent.agent.queue_packet = _queue
+    agent.sniff = lambda **kw: (sniff_calls.append(kw), stop.set())[0]
+    try:
+        agent.sniff_on_interface("eth0", "Ethernet 0", stop, iface_id=3)
+    finally:
+        agent.scapy_conf.L2listen = prev_l2listen
+        agent.agent.queue_packet = prev_queue
+        agent.sniff = prev_sniff
+    return queued, sniff_calls
+
+
+_A = b"\xaa" * 64
+_B = b"\xbb" * 128
+
+_sock = _FakePcapSocket([
+    (None, _A, decimal.Decimal("100.000001")),
+    (None, None, None),                       # a read timeout, not an error
+    (None, _B, decimal.Decimal("100.000002")),
+])
+_queued, _sniffs = _run_capture(_sock, frames_before_stop=2)
+check("the raw loop queues a record per frame", len(_queued), 2)
+check("...and does not fall back to sniff()", _sniffs, [])
+_decoded = packet_batch.decode_batch(packet_batch.encode_batch(_queued))
+check("...carrying the frame's own bytes", [m["data"] for m in _decoded], [_A, _B])
+check("...its wire length", [m["origLen"] for m in _decoded], [64, 128])
+check("...and libpcap's timestamp, to the microsecond",
+      [m["tsUs"] for m in _decoded], [100000001, 100000002])
+check("...numbered in capture order", [m["seq"] for m in _decoded], [0, 1])
+check("...and tagged with the adapter", [m["iface"] for m in _decoded], [3, 3])
+# A None from recv_raw is the read timeout expiring. Treating it as a frame
+# would queue a null record; treating it as an error would end the capture on
+# the first quiet moment on the wire.
+check_true("a read timeout is skipped rather than queued or fatal", len(_queued) == 2)
+check_true("the socket is closed on the way out", _sock.closed)
+check("a libpcap socket is not polled with select()", _sock.selects, 0)
+
+# AF_PACKET has no read timeout: recv_raw blocks until a frame arrives, so
+# stop_event would never be re-tested without select() in front of it.
+_af = _FakeAfPacketSocket([(None, _A, 100.0), (None, _B, 100.1)])
+_queued_af, _ = _run_capture(_af, frames_before_stop=2)
+check("an AF_PACKET socket still captures", len(_queued_af), 2)
+check_true("...and is polled with select() so a stop is honoured", _af.selects >= 2)
+
+# The safety valve. SuperSocket's own recv_raw reports no timestamp, so a
+# socket type that never overrode it would silently trade every frame's capture
+# time for throughput - the one trade this change must not make.
+_base = _BaseRecvRawSocket([])
+_queued_base, _sniffs_base = _run_capture(_base, frames_before_stop=1)
+check("a socket with no real recv_raw falls back to sniff()", len(_sniffs_base), 1)
+check("...passing it the opened socket", _sniffs_base[0].get("opened_socket") is _base, True)
+check("...and storing nothing, as before", _sniffs_base[0].get("store"), False)
+
 
 print()
 if failures:

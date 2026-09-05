@@ -21,6 +21,14 @@
  * decodes to the wrong text.
  */
 
+/**
+ * One decoder, not one per call. `new TextDecoder()` is not free and these
+ * sites are per-header - a CPU profile put TextDecoder construction at 8% of a
+ * dissection run. It carries no state across `decode()` calls unless
+ * `{stream: true}` is used, which nothing here does.
+ */
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
 /** Code length per symbol, 0-255 plus EOS at 256 (RFC 7541 Appendix B). */
 const HUFFMAN_LENGTHS = [
   13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28,
@@ -101,7 +109,7 @@ export function huffmanDecode(bytes: Uint8Array): string | null {
   if (length >= 8) return null;
   if (length > 0 && code !== 2 ** length - 1) return null;
 
-  return new TextDecoder('utf-8', { fatal: false }).decode(Uint8Array.from(out));
+  return utf8Decoder.decode(Uint8Array.from(out));
 }
 
 // --- the tables --------------------------------------------------------------
@@ -270,7 +278,7 @@ class Reader {
     if (length === null || length > this.remaining) return null;
     const raw = this.bytes.subarray(this.position, this.position + length);
     this.position += length;
-    return huffman ? huffmanDecode(raw) : new TextDecoder('utf-8', { fatal: false }).decode(raw);
+    return huffman ? huffmanDecode(raw) : utf8Decoder.decode(raw);
   }
 }
 

@@ -39,7 +39,13 @@ async function main() {
   const file = new File([new Uint8Array(buf)], 'fixture.pcap');
 
   const t0 = performance.now();
-  const result = await PcapService.parseCaptureFile(file, N);
+  // keepTrees: TRUE. Without it every packet comes back with `layers: []` and
+  // this script silently measures the tree-less case three times over -
+  // `bytesOf` walks an empty array, so "raw + tree" reports the raw bytes, and
+  // "clone, whole Packet" is indistinguishable from "clone, no tree". It was
+  // doing exactly that when this comment was written, which is how a
+  // measurement that ADR 0007 rests on came to disagree with ADR 0007.
+  const result = await PcapService.parseCaptureFile(file, N, true);
   const dissectMs = performance.now() - t0;
   const packets = result.packets.slice(0, N);
 
