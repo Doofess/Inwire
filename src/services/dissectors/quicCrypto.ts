@@ -11,7 +11,7 @@
  * This is what turns "Initial, DCID=9635b6f53a7cb323" into
  * "Initial, DCID=9635b6f53a7cb323, PKN: 1, CRYPTO, CRYPTO, PING".
  */
-import { encryptBlock, expandKey, aesGcmDecrypt, AES_BLOCK_SIZE } from '../crypto/aes';
+import { encryptBlock, expandKeyCached, aesGcmDecrypt, AES_BLOCK_SIZE } from '../crypto/aes';
 import { chacha20, chacha20Poly1305Decrypt } from '../crypto/chacha20poly1305';
 import { hkdfExtract, hkdfExpandLabel } from '../crypto/hkdf';
 import type { CipherSuiteSpec } from '../tls/cipherSuites';
@@ -104,7 +104,10 @@ export function deriveTrafficKeys(
  */
 function headerProtectionMask(keys: DirectionKeys, sample: Uint8Array): Uint8Array {
   if (keys.aead === 'aes-gcm') {
-    return encryptBlock(expandKey(keys.headerProtection), sample);
+    // Cached: header protection is applied to every packet on the connection,
+    // and the key does not change - so this was expanding the same schedule
+    // once per packet.
+    return encryptBlock(expandKeyCached(keys.headerProtection), sample);
   }
   const counter = sample[0] | (sample[1] << 8) | (sample[2] << 16) | (sample[3] << 24);
   return chacha20(keys.headerProtection, sample.subarray(4, 16), counter >>> 0, new Uint8Array(5));

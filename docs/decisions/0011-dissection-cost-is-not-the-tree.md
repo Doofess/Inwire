@@ -96,7 +96,29 @@ recomputing the same answers. Memoised (capped at 4,096 entries).
   `formatToParts`. It produces two tree rows that 92% of frames never show
   anyone, so it is the strongest remaining argument for ADR 0001's migration -
   worth perhaps 5 us a frame, not the 90 that was hoped for.
-- The tail is now the thing to watch: dissect p99 is ~665 us against a p50 of
-  ~22 us. `flush()` is synchronous, so the tail is what overruns a budget. No
-  flush exceeds 100 ms on the fixtures today, but a p99 that far from the median
-  is where the next drop will come from.
+- The tail is now the thing to watch, and it has since been attributed rather
+  than left as a warning. `scripts/perf/throughput.ts` reports the frames over
+  200 us by protocol:
+
+  ```
+  frames over 200us   349 of 12858 (2.71%), 272 ms of 579 ms total dissection
+    QUIC   338 frames   235 ms   696 us each
+  ```
+
+  **2.7% of frames carry 47% of all dissection time, and almost all of them are
+  QUIC.** The cost is the block cipher: opening a 1292-byte QUIC packet is ~81
+  AES block encryptions plus GHASH, in JavaScript. That is the standing price of
+  ADR 0003's decision to keep dissection synchronous rather than adopt
+  Promise-based WebCrypto, and it is a real decision rather than an oversight.
+
+  Two things were tried and reported honestly. Caching the derived key schedule
+  and GHASH subkey (`crypto/aes.ts`) does remove real work - 898 derivations for
+  12,858 frames, 85% served from cache - but that is ~1% of dissection, below
+  the noise, because QUIC derives Initial keys per connection and a capture of
+  many short connections gets little reuse. It was kept because it is correct
+  and helps TLS more than this fixture shows, **not** because it fixed the tail.
+
+  If the tail ever needs fixing, the options are a table-driven AES (typically
+  3-4x, and a real crypto rewrite to be done against test vectors) or a
+  WebCrypto path for the cases that can tolerate being async. Neither is
+  justified today: no flush exceeds the 100 ms budget on either fixture.
