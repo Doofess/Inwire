@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Windows service host for the NetView agent, and the PyInstaller entry point.
+Windows service host for the Inwire agent, and the PyInstaller entry point.
 
 The same exe serves three roles:
 
@@ -28,7 +28,7 @@ import win32serviceutil
 
 # Harmless in both cases, not load-bearing in either: when frozen, agent.py/
 # config.py/logging_setup.py are embedded in the PYZ archive (declared as
-# hiddenimports in netview_agent.spec) and load via PyInstaller's own
+# hiddenimports in inwire_agent.spec) and load via PyInstaller's own
 # meta-path importer, never as loose files from sys._MEIPASS - there is
 # nothing at this path for them to shadow. Running from source, the
 # interpreter already puts the script's own directory on sys.path. Kept for
@@ -42,12 +42,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 DEBUG_MODE = False
 
 
-class NetViewAgentService(win32serviceutil.ServiceFramework):
-    _svc_name_ = "NetViewAgent"
-    _svc_display_name_ = "NetView Capture Agent"
+class InwireAgentService(win32serviceutil.ServiceFramework):
+    _svc_name_ = "InwireAgent"
+    _svc_display_name_ = "Inwire Capture Agent"
     _svc_description_ = (
-        "Captures network packets for the NetView web app. Idle until a "
-        "NetView page connects, and stops capturing when the last one closes."
+        "Captures network packets for the Inwire web app. Idle until a "
+        "Inwire page connects, and stops capturing when the last one closes."
     )
 
     def __init__(self, args):
@@ -59,7 +59,7 @@ class NetViewAgentService(win32serviceutil.ServiceFramework):
     def SvcStop(self):
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
         self._stop_requested = True
-        logging.getLogger("netview").info("service stop requested - shutting down")
+        logging.getLogger("inwire").info("service stop requested - shutting down")
         # A stop can arrive before SvcDoRun has created the loop (the window around
         # `import agent`). The flag above is what makes that case honored; touching
         # the loop is best-effort and must never raise out of SvcStop.
@@ -97,7 +97,7 @@ class NetViewAgentService(win32serviceutil.ServiceFramework):
         if self._stop_requested:
             # Stop arrived while startup was still running - honor it instead
             # of entering a server that never returns.
-            logging.getLogger("netview").info(
+            logging.getLogger("inwire").info(
                 "stop requested before startup completed - not starting"
             )
             return
@@ -117,30 +117,30 @@ class NetViewAgentService(win32serviceutil.ServiceFramework):
                 # agent.main() logs its own reason and returns False rather than
                 # raising, so without this the SCM cannot tell a service that never
                 # started from one that stopped cleanly.
-                logging.getLogger("netview").error(
+                logging.getLogger("inwire").error(
                     "agent failed to start - see earlier log entries"
                 )
                 servicemanager.LogErrorMsg(
-                    "NetView Capture Agent failed to start. See %ProgramData%\\NetView\\agent.log."
+                    "Inwire Capture Agent failed to start. See %ProgramData%\\Inwire\\agent.log."
                 )
         except RuntimeError as exc:
             if not self._stop_requested:
                 # Only a stop we asked for produces asyncio's "Event loop stopped
                 # before Future completed". Any other RuntimeError is a real
                 # startup failure and must not vanish.
-                logging.getLogger("netview").exception(
+                logging.getLogger("inwire").exception(
                     "service terminated with an unhandled RuntimeError"
                 )
-                servicemanager.LogErrorMsg(f"NetView Capture Agent crashed: {exc}")
+                servicemanager.LogErrorMsg(f"Inwire Capture Agent crashed: {exc}")
                 raise
         except Exception as exc:
             # Nothing is attached to stderr under the SCM. If this is not
             # written to the log file before the process dies, a crash at boot
             # is completely invisible.
-            logging.getLogger("netview").exception(
+            logging.getLogger("inwire").exception(
                 "service terminated with an unhandled exception"
             )
-            servicemanager.LogErrorMsg(f"NetView Capture Agent crashed: {exc}")
+            servicemanager.LogErrorMsg(f"Inwire Capture Agent crashed: {exc}")
             raise
         finally:
             loop, self.loop = self.loop, None
@@ -153,9 +153,23 @@ if __name__ == "__main__":
         # No arguments means the Service Control Manager started us, rather
         # than a person or the installer running a subcommand.
         servicemanager.Initialize()
-        servicemanager.PrepareToHostSingle(NetViewAgentService)
+        servicemanager.PrepareToHostSingle(InwireAgentService)
         servicemanager.StartServiceCtrlDispatcher()
+    elif sys.argv[1] == "--init-config":
+        # Run by the installer, elevated, before the service starts. Creates
+        # config.json with a pairing token if there is not one already; prints
+        # the token so the installer can show it to whoever is installing,
+        # since the file it lives in is deliberately not readable by them
+        # afterwards.
+        import config
+        print(config.ensure_config().get("token") or "")
+    elif sys.argv[1] == "--version":
+        # The installed build's version, for a person at a prompt; the app
+        # learns it from hello. The frozen exe has no console, so this is
+        # only useful when run from a terminal that captures stdout.
+        import agent
+        print(agent.AGENT_VERSION)
     else:
         if len(sys.argv) > 1 and sys.argv[1].lower() == "debug":
             DEBUG_MODE = True
-        win32serviceutil.HandleCommandLine(NetViewAgentService)
+        win32serviceutil.HandleCommandLine(InwireAgentService)

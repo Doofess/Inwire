@@ -1,12 +1,15 @@
 import { createPreferenceStore } from './preferenceStore';
 import type { TimeFormat } from '../lib/formatTimeColumn';
 import {
-  COLUMN_ALIGNS,
+  DEFAULT_COLUMN_ALIGN,
   defaultColumnVisibility,
+  normalizeColumnAlign,
   normalizeColumnVisibility,
-  type ColumnAlign,
+  normalizeCustomColumns,
+  type ColumnAlignMap,
   type ColumnVisibility,
 } from '../lib/packetColumns';
+import { FIELD_BY_ABBREV } from './dissect/fieldRegistry';
 
 const TIME_FORMATS: readonly TimeFormat[] = ['relative', 'clock', 'date', 'utc', 'delta'];
 
@@ -81,7 +84,7 @@ export function normalizeLayout(raw: unknown): LayoutPrefs | null {
 }
 
 export const layoutStore = createPreferenceStore(
-  'netview.layout',
+  'inwire.layout',
   normalizeLayout,
   LAYOUT_DEFAULTS,
 );
@@ -108,8 +111,13 @@ export interface PacketListPrefs {
   density: ListDensity;
   timeFormat: TimeFormat;
   columns: ColumnVisibility;
-  /** Where the text sits in the text columns. See ColumnAlign. */
-  align: ColumnAlign;
+  /**
+   * Registry field names added from the detail tree's "Apply as Column",
+   * drawn between Length and Info in the order they were added.
+   */
+  customColumns: string[];
+  /** Where the text sits, per column. See ColumnAlignMap. */
+  align: ColumnAlignMap;
 }
 
 export const PACKET_LIST_DEFAULTS: PacketListPrefs = {
@@ -119,7 +127,8 @@ export const PACKET_LIST_DEFAULTS: PacketListPrefs = {
   // not go looking for the setting.
   timeFormat: 'relative',
   columns: defaultColumnVisibility(),
-  align: 'left',
+  customColumns: [],
+  align: { ...DEFAULT_COLUMN_ALIGN },
 };
 
 export function normalizePacketList(raw: unknown): PacketListPrefs | null {
@@ -138,14 +147,17 @@ export function normalizePacketList(raw: unknown): PacketListPrefs | null {
       ? (v.timeFormat as TimeFormat)
       : PACKET_LIST_DEFAULTS.timeFormat,
     columns: normalizeColumnVisibility(v.columns) ?? defaultColumnVisibility(),
-    align: COLUMN_ALIGNS.includes(v.align as ColumnAlign)
-      ? (v.align as ColumnAlign)
-      : PACKET_LIST_DEFAULTS.align,
+    // A column naming a field this build no longer registers is dropped, not
+    // drawn empty under a header for something that does not exist.
+    customColumns: normalizeCustomColumns(v.customColumns, (abbrev) => FIELD_BY_ABBREV.has(abbrev)),
+    // Accepts the old single string as well as the map, and spreads it over
+    // the columns it used to govern - see normalizeColumnAlign.
+    align: normalizeColumnAlign(v.align),
   };
 }
 
 export const packetListStore = createPreferenceStore(
-  'netview.packetListView',
+  'inwire.packetListView',
   normalizePacketList,
   PACKET_LIST_DEFAULTS,
 );
@@ -153,7 +165,7 @@ export const packetListStore = createPreferenceStore(
 /**
  * The minimap's own key, separate from the width it already stores.
  *
- * One writer per key. The minimap owns `netview.packetListMinimapWidth`, so it
+ * One writer per key. The minimap owns `inwire.packetListMinimapWidth`, so it
  * owns this too - putting the on/off flag in a key belonging to the packet list
  * while the width lives elsewhere is the split that confuses whoever reads it
  * next.
@@ -165,7 +177,7 @@ export function normalizeMinimap(raw: unknown): boolean | null {
 }
 
 export const minimapStore = createPreferenceStore(
-  'netview.packetListMinimap',
+  'inwire.packetListMinimap',
   normalizeMinimap,
   MINIMAP_DEFAULT,
 );
@@ -188,7 +200,15 @@ export const PERFORMANCE_DEFAULTS: PerformancePrefs = {
   packetBufferCap: 50000,
 };
 
-export const BUFFER_CAPS = [10000, 25000, 50000] as const;
+/**
+ * 100,000 became a real option in Phase 11.
+ *
+ * It was not one before: every frame carried its protocol tree, at 10.6 kB
+ * against the frame's own 1.2 kB, so a 100,000-frame buffer was a gigabyte and
+ * the tab died before it filled. The tree is dissected on demand now
+ * (docs/decisions/0007) and the same buffer is about 180 MB.
+ */
+export const BUFFER_CAPS = [10000, 25000, 50000, 100000] as const;
 
 export function normalizePerformance(raw: unknown): PerformancePrefs | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -210,7 +230,7 @@ export function normalizePerformance(raw: unknown): PerformancePrefs | null {
 }
 
 export const performanceStore = createPreferenceStore(
-  'netview.performance',
+  'inwire.performance',
   normalizePerformance,
   PERFORMANCE_DEFAULTS,
 );
@@ -237,7 +257,7 @@ export function normalizeMotion(raw: unknown): MotionSetting | null {
 }
 
 export const motionStore = createPreferenceStore(
-  'netview.motion',
+  'inwire.motion',
   normalizeMotion,
   MOTION_DEFAULT,
 );
@@ -246,15 +266,45 @@ export const motionStore = createPreferenceStore(
 // Name resolution
 // ---------------------------------------------------------------------------
 
+/**
+ * Wireshark's View -> Name Resolution, with the outbound half kept apart from
+ * the passive half.
+ *
+ * `network` and `transport` cost nothing and leak nothing: every name they can
+ * show came out of the capture itself (`services/nameResolution.ts`,
+ * `services/portServices.ts`). That is why they default ON here where
+ * Wireshark defaults network resolution off - Wireshark's default is a guard
+ * against reverse-DNS traffic that this pair cannot generate.
+ *
+ * `geoIp` and `reverseDns` send captured addresses to a third party, so they
+ * are opt-in and stay out of the Interface tab's reset.
+ */
 export interface NameResolutionPrefs {
-  /** Sends captured addresses to get.geojs.io to place them on the map. */
+  /** Host names from the capture, in the address columns and the tables. */
+  network: boolean;
+  /** Service names beside port numbers, in the statistics tables. */
+  transport: boolean;
+  /**
+   * Permits the app's outbound location lookups: captured addresses to
+   * get.geojs.io for the map, and this machine's own public address to
+   * ipapi.co for the ISP panel. One switch rather than two because both are
+   * the same disclosure - a third party learns an address and says where it
+   * is - and a switch per vendor invites agreeing to each without noticing
+   * they add up to the same thing.
+   */
   geoIp: boolean;
   /** Sends captured addresses to cloudflare-dns.com as PTR queries. */
   reverseDns: boolean;
 }
 
 /**
- * Both off. See geoIpService's gate for why this is opt-in rather than opt-out.
+ * The two passive switches on, the two outbound ones off. See geoIpService's
+ * gate for why the latter are opt-in rather than opt-out.
+ *
+ * Passive resolution is a RENDERING choice and nothing else: `Packet.source`
+ * stays the address on every path, so filters, exports and the tshark parity
+ * harness are untouched by it. A name in a column that a filter could not
+ * match would be worse than no name at all.
  *
  * MAC vendor names are deliberately absent from this shape. They come from a
  * table compiled into the app - services/macVendors is three literals and two
@@ -263,6 +313,8 @@ export interface NameResolutionPrefs {
  * all three.
  */
 export const NAME_RESOLUTION_DEFAULTS: NameResolutionPrefs = {
+  network: true,
+  transport: true,
   geoIp: false,
   reverseDns: false,
 };
@@ -271,6 +323,8 @@ export function normalizeNameResolution(raw: unknown): NameResolutionPrefs | nul
   if (typeof raw !== 'object' || raw === null) return null;
   const v = raw as Record<string, unknown>;
   return {
+    network: typeof v.network === 'boolean' ? v.network : NAME_RESOLUTION_DEFAULTS.network,
+    transport: typeof v.transport === 'boolean' ? v.transport : NAME_RESOLUTION_DEFAULTS.transport,
     geoIp: typeof v.geoIp === 'boolean' ? v.geoIp : NAME_RESOLUTION_DEFAULTS.geoIp,
     reverseDns:
       typeof v.reverseDns === 'boolean' ? v.reverseDns : NAME_RESOLUTION_DEFAULTS.reverseDns,
@@ -278,7 +332,7 @@ export function normalizeNameResolution(raw: unknown): NameResolutionPrefs | nul
 }
 
 export const nameResolutionStore = createPreferenceStore(
-  'netview.nameResolution',
+  'inwire.nameResolution',
   normalizeNameResolution,
   NAME_RESOLUTION_DEFAULTS,
 );
@@ -315,4 +369,37 @@ export function resetInterfacePreferences(): void {
   }
   const { bottomPaneHeight, detailsPaneRatio } = layoutStore.get();
   layoutStore.set({ ...LAYOUT_DEFAULTS, bottomPaneHeight, detailsPaneRatio });
+}
+
+// --- the agent's pairing token ---------------------------------------------------
+
+const AGENT_TOKEN_KEY = 'inwire.agentToken';
+
+/**
+ * The pairing token for the agent on this machine.
+ *
+ * Kept in localStorage, which is the same trust boundary the token is already
+ * inside: a process running as this user can read the browser's profile
+ * anyway. What the token buys is the distinction between this user's browser
+ * and *another user's* processes, or a sandboxed one - the case the origin
+ * check cannot see at all, because `Origin` is a header the client writes.
+ */
+export function loadAgentToken(): string {
+  try {
+    return window.localStorage.getItem(AGENT_TOKEN_KEY) ?? '';
+  } catch {
+    // Private mode, or storage disabled. An agent that needs a token will say
+    // so and the field is one paste away; failing to read is not worth an error.
+    return '';
+  }
+}
+
+export function saveAgentToken(token: string): void {
+  try {
+    const trimmed = token.trim();
+    if (trimmed) window.localStorage.setItem(AGENT_TOKEN_KEY, trimmed);
+    else window.localStorage.removeItem(AGENT_TOKEN_KEY);
+  } catch {
+    /* nothing to do; the user can paste it again */
+  }
 }

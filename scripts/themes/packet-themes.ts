@@ -14,8 +14,8 @@
  *   - **Legibility.** This is now the load-bearing test. Colours are computed
  *     rather than hand-picked, so nobody eyeballs each pair before it ships;
  *     the only thing standing between a derivation bug and an unreadable
- *     packet list is this check. It runs over every theme with **no
- *     exemptions**.
+ *     packet list is this check. It runs over every theme crossed with every
+ *     colour set - twelve derivations - with **no exemptions**.
  *   - **No drift between the palette and the CSS.** Each palette hardcodes its
  *     theme's surface so canvas, MapLibre and these scripts can read it without
  *     a document. Two copies of the same three colours is a drift risk, so the
@@ -30,10 +30,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   getPacketThemeForApp,
+  packetColorSet,
+  PACKET_COLOR_SETS,
+  PACKET_COLOR_SET_SPECS,
   REQUIRED_RULE_IDS,
   ROLE_BY_RULE_ID,
   HUE_BY_ROLE,
   contrastRatio,
+  type PacketColorSet,
   type RuleRole,
 } from '../../src/services/packetThemes';
 import { PALETTE_BY_THEME, HUES, themePalette } from '../../src/services/themePalettes';
@@ -57,9 +61,31 @@ function checkTrue(name: string, condition: boolean) {
 const isHex = (s: string) => /^#[0-9a-f]{6}$/i.test(s.trim());
 const THEMES = THEME_OPTIONS.map((t) => t.value);
 
+/**
+ * Every theme crossed with every colour set.
+ *
+ * The packet list gained a second axis - Default, Vibrant and Colourblind -
+ * and the whole point of running the floors over the product rather than over
+ * the themes alone is that a set is not a skin on top of a checked palette. It
+ * moves chroma, the lightness ramp and how far the band of fills sits from the
+ * ground, and Colourblind substitutes the nine hues outright. Twelve
+ * derivations, twelve chances for two rows to collapse into each other.
+ *
+ * Which is not hypothetical: Colourblind's sky blue and blue first arrived 1.7
+ * deltaE apart on Day - two unmistakably different hues clamped to the same
+ * near-white by the sRGB gamut, at a lightness the Default set never reaches.
+ * Only the crossed run could have caught it.
+ */
+const COMBOS: { theme: string; set: PacketColorSet; label: string }[] = THEMES.flatMap(
+  (theme) => PACKET_COLOR_SETS.map((set) => ({ theme, set, label: `${theme}/${set}` })),
+);
+
 // --- Roles cover the chain, hues cover the roles -----------------------------
 
-check('the rule chain has 20 rules to cover', REQUIRED_RULE_IDS.length, 20);
+// Wireshark's twenty, plus Inwire's three (Expert Warnings, TLS Handshake,
+// QUIC - see INWIRE_EXTRA_RULES for why they exist and why they are kept out
+// of the array the parity harness compares against).
+check('the rule chain has 23 rules to cover', REQUIRED_RULE_IDS.length, 23);
 
 const rulesWithoutRole = REQUIRED_RULE_IDS.filter((id) => !ROLE_BY_RULE_ID[id]);
 check('every rule in the chain has a role', rulesWithoutRole, []);
@@ -97,13 +123,13 @@ for (const theme of THEMES) {
 
 // --- The derived palettes cover the chain ------------------------------------
 
-for (const theme of THEMES) {
-  const packet = getPacketThemeForApp(theme);
-  check(`${theme}: covers every rule in the chain`,
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
+  check(`${label}: covers every rule in the chain`,
     REQUIRED_RULE_IDS.filter((id) => !packet.rules[id]), []);
-  check(`${theme}: has no entries for rules that do not exist`,
+  check(`${label}: has no entries for rules that do not exist`,
     Object.keys(packet.rules).filter((id) => !REQUIRED_RULE_IDS.includes(id)), []);
-  check(`${theme}: every derived colour is a hex triple`,
+  check(`${label}: every derived colour is a hex triple`,
     Object.entries(packet.rules)
       .flatMap(([id, c]) => [
         isHex(c.background) ? null : `${id}.background=${c.background}`,
@@ -111,6 +137,39 @@ for (const theme of THEMES) {
       ])
       .filter(Boolean),
     []);
+}
+
+// --- The colour sets themselves ----------------------------------------------
+
+// Same shape of drift as an orphaned role: a set listed but not specified would
+// fall back to Default at runtime and look like the picker was broken.
+check('every colour set has a spec',
+  PACKET_COLOR_SETS.filter((s) => !PACKET_COLOR_SET_SPECS[s]), []);
+check('no spec exists for a set that is not offered',
+  Object.keys(PACKET_COLOR_SET_SPECS).filter((s) => !PACKET_COLOR_SETS.includes(s as PacketColorSet)),
+  []);
+
+// The stored preference is a string off localStorage, so anything can arrive.
+check('an unknown stored set falls back to Default', packetColorSet('nope'), 'default');
+check('a missing stored set falls back to Default', packetColorSet(undefined), 'default');
+check('a real set is kept', packetColorSet('colorblind'), 'colorblind');
+
+// Two sets that produce the same list are a picker entry that does nothing.
+// Compared on Graphite, the default theme, and on the fills rather than the
+// accents - the accents are derived from the hue directly and so are identical
+// between Default and Vibrant by design.
+{
+  const fillsOf = (set: PacketColorSet) =>
+    REQUIRED_RULE_IDS.map((id) => getPacketThemeForApp('dark', set).rules[id].background).join(',');
+  const seen = new Map<string, PacketColorSet>();
+  const duplicates: string[] = [];
+  for (const set of PACKET_COLOR_SETS) {
+    const key = fillsOf(set);
+    const twin = seen.get(key);
+    if (twin) duplicates.push(`${set} is identical to ${twin}`);
+    seen.set(key, set);
+  }
+  check('the three colour sets are actually three different lists', duplicates, []);
 }
 
 // --- Legibility: the check that replaces human judgement ----------------------
@@ -121,20 +180,22 @@ for (const theme of THEMES) {
 // requirement pulling the other way.
 const AA = 4.5;
 
-for (const theme of THEMES) {
-  const packet = getPacketThemeForApp(theme);
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
 
   const weak = Object.entries(packet.rules)
     .map(([id, c]) => ({ id, ratio: contrastRatio(c.color, c.background) }))
     .filter((r) => r.ratio < AA)
     .map((r) => `${r.id} (${r.ratio.toFixed(2)}:1)`);
-  check(`${theme}: every row clears WCAG AA against its own fill`, weak, []);
+  check(`${label}: every row clears WCAG AA against its own fill`, weak, []);
 
   // An unmatched row is text on the theme's own ground, and there are plenty
-  // of those - the chain deliberately has no catch-all.
+  // of those - the chain deliberately has no catch-all. The ground belongs to
+  // the theme, not to the set, which is exactly what makes a colour set safe to
+  // combine with all four themes.
   const surfaceRatio = contrastRatio(packet.surface.foreground, packet.surface.background);
   checkTrue(
-    `${theme}: unmatched rows are legible on the ground (${surfaceRatio.toFixed(2)}:1)`,
+    `${label}: unmatched rows are legible on the ground (${surfaceRatio.toFixed(2)}:1)`,
     surfaceRatio >= AA,
   );
 }
@@ -188,8 +249,12 @@ const FREQUENT_RULES = [
   'color-bad-tcp', 'color-broadcast',
 ];
 
-for (const theme of THEMES) {
-  const packet = getPacketThemeForApp(theme);
+// Every floor below runs over all twelve combinations, not over the four
+// themes. A colour set is allowed to be louder or quieter than Default; it is
+// not allowed to be less legible or less separable, and this is where that line
+// is drawn.
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
   const fills = [...new Set(Object.values(packet.rules).map((c) => c.background))];
 
   const tooAlike: string[] = [];
@@ -199,7 +264,7 @@ for (const theme of THEMES) {
       if (d < MIN_ANY_DELTA_E) tooAlike.push(`${fills[i]} vs ${fills[j]} (${d.toFixed(1)})`);
     }
   }
-  check(`${theme}: no two role fills are within ${MIN_ANY_DELTA_E} deltaE`, tooAlike, []);
+  check(`${label}: no two role fills are within ${MIN_ANY_DELTA_E} deltaE`, tooAlike, []);
 
   const frequentTooAlike: string[] = [];
   for (let i = 0; i < FREQUENT_RULES.length; i++) {
@@ -209,24 +274,24 @@ for (const theme of THEMES) {
       if (d < MIN_FREQUENT_DELTA_E) frequentTooAlike.push(`${x} vs ${y} (${d.toFixed(1)})`);
     }
   }
-  check(`${theme}: common traffic is obviously distinguishable`, frequentTooAlike, []);
+  check(`${label}: common traffic is obviously distinguishable`, frequentTooAlike, []);
 }
 
 // The exact pair the user reported. TCP and UDP dominate every capture, so if
 // any two rows must be told apart it is these - and QUIC and DNS ride UDP, so
 // this covers the whole "UDP, TCP and QUIC look the same" complaint.
-for (const theme of THEMES) {
-  const packet = getPacketThemeForApp(theme);
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
   const d = deltaE76(packet.rules['color-tcp'].background, packet.rules['color-udp'].background);
-  checkTrue(`${theme}: TCP and UDP rows are clearly different (${d.toFixed(1)} deltaE)`,
+  checkTrue(`${label}: TCP and UDP rows are clearly different (${d.toFixed(1)} deltaE)`,
     d >= MIN_TCP_UDP_DELTA_E);
 }
 
 // Nine hues, ten roles - warn and notice share yellow - so nine distinct fills.
-for (const theme of THEMES) {
-  const packet = getPacketThemeForApp(theme);
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
   const distinct = new Set(Object.values(packet.rules).map((c) => c.background));
-  checkTrue(`${theme}: roles produce 9 distinct fills (${distinct.size})`, distinct.size === 9);
+  checkTrue(`${label}: roles produce 9 distinct fills (${distinct.size})`, distinct.size === 9);
 }
 
 /**
@@ -238,20 +303,44 @@ for (const theme of THEMES) {
  * 0.24 and the separation it gave up moved onto the lightness axis
  * (LIGHTNESS_BY_HUE in packetThemes.ts).
  *
- * So the restraint is asserted globally instead. 22 sits just above where the
- * loudest current theme lands and well below the 27.6 the old scale produced,
- * which makes this a tripwire for someone raising CHROMA_SCALE back up to buy
- * separation - the deltaE floors above are the right place to buy it, and they
- * cost nothing in loudness.
+ * So the restraint is asserted per SET rather than globally. Default keeps the
+ * 22 this was written as - just above where the loudest theme lands, well below
+ * the 27.6 the old scale produced - and stays the tripwire for someone raising
+ * CHROMA_SCALE to buy separation the deltaE floors should buy instead.
+ *
+ * Vibrant and Colourblind carry their own ceilings, because "quiet" is a
+ * property of one set rather than of the list: Vibrant exists precisely to be
+ * loud, and holding it to Default's number would be asserting that the feature
+ * should not work. Each ceiling still sits just above where its set actually
+ * lands, so all three remain tripwires rather than decoration - and every
+ * FLOOR above (AA, and the three deltaE bars) is identical for all three.
  */
-const MAX_FILL_CHROMA = 22;
-
-for (const theme of THEMES) {
-  const packet = getPacketThemeForApp(theme);
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
+  const ceiling = PACKET_COLOR_SET_SPECS[set].maxChroma;
   const loudest = Math.max(...Object.values(packet.rules).map((c) => chroma(c.background)));
   checkTrue(
-    `${theme}: no row fill is louder than ${MAX_FILL_CHROMA} chroma (${loudest.toFixed(1)})`,
-    loudest <= MAX_FILL_CHROMA,
+    `${label}: no row fill is louder than ${ceiling} chroma (${loudest.toFixed(1)})`,
+    loudest <= ceiling,
+  );
+}
+
+// The ceilings have to stay ordered, or the picker is offering a distinction it
+// does not deliver: Vibrant must be allowed to be louder than Default, and
+// Colourblind must sit between them rather than above the loud one.
+checkTrue('Vibrant is allowed to be louder than Default',
+  PACKET_COLOR_SET_SPECS.vibrant.maxChroma > PACKET_COLOR_SET_SPECS.default.maxChroma);
+checkTrue('Colourblind sits between the two',
+  PACKET_COLOR_SET_SPECS.colorblind.maxChroma > PACKET_COLOR_SET_SPECS.default.maxChroma
+  && PACKET_COLOR_SET_SPECS.colorblind.maxChroma < PACKET_COLOR_SET_SPECS.vibrant.maxChroma);
+
+// And Vibrant has to actually BE louder somewhere, not merely permitted to be.
+for (const theme of THEMES) {
+  const loudest = (set: PacketColorSet) =>
+    Math.max(...Object.values(getPacketThemeForApp(theme, set).rules).map((c) => chroma(c.background)));
+  checkTrue(
+    `${theme}: Vibrant is visibly louder than Default (${loudest('vibrant').toFixed(1)} vs ${loudest('default').toFixed(1)})`,
+    loudest('vibrant') > loudest('default') * 1.25,
   );
 }
 
@@ -267,26 +356,30 @@ for (const theme of THEMES) {
  * it has to still LOOK LIKE the row's colour (which a contrast-first
  * derivation would not). Both are checked here.
  */
-for (const theme of THEMES) {
-  const packet = getPacketThemeForApp(theme);
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
   const palette = PALETTE_BY_THEME[theme];
   if (!palette) continue;
   const card = palette.surface.card;
+  // The set's own hues where it supplies them, the theme's otherwise - the same
+  // resolution `getPacketThemeForApp` does, and the accents have to be measured
+  // against whichever nine they were actually derived from.
+  const hues = PACKET_COLOR_SET_SPECS[set].hues ?? palette.hues;
 
-  check(`${theme}: every rule has an accent`,
+  check(`${label}: every rule has an accent`,
     REQUIRED_RULE_IDS.filter((id) => !packet.accents[id]), []);
-  check(`${theme}: every accent is a hex triple`,
+  check(`${label}: every accent is a hex triple`,
     Object.entries(packet.accents)
       .map(([id, c]) => (isHex(c) ? null : `${id}=${c}`))
       .filter(Boolean),
     []);
-  checkTrue(`${theme}: the unmatched-frame accent is a hex triple`, isHex(packet.accentFallback));
+  checkTrue(`${label}: the unmatched-frame accent is a hex triple`, isHex(packet.accentFallback));
 
   const unreadable = [...Object.entries(packet.accents), ['fallback', packet.accentFallback] as const]
     .map(([id, c]) => ({ id, ratio: contrastRatio(c, card) }))
     .filter((r) => r.ratio < AA)
     .map((r) => `${r.id} (${r.ratio.toFixed(2)}:1)`);
-  check(`${theme}: every accent clears WCAG AA on the card it sits on`, unreadable, []);
+  check(`${label}: every accent clears WCAG AA on the card it sits on`, unreadable, []);
 
   // The half that keeps the feature honest. Only the L axis may move, so an
   // accent must stay on its hue's own axis in Lab - otherwise "the colour of
@@ -303,7 +396,7 @@ for (const theme of THEMES) {
   };
   const drifted: string[] = [];
   for (const id of REQUIRED_RULE_IDS) {
-    const hue = palette.hues[HUE_BY_ROLE[ROLE_BY_RULE_ID[id]]];
+    const hue = hues[HUE_BY_ROLE[ROLE_BY_RULE_ID[id]]];
     const accent = packet.accents[id];
     if (chroma(hue) < 8 || chroma(accent) < 8) continue;
     let delta = Math.abs(angleOf(accent) - angleOf(hue));
@@ -312,7 +405,7 @@ for (const theme of THEMES) {
       drifted.push(`${id}: ${delta.toFixed(1)} deg from ${hue}`);
     }
   }
-  check(`${theme}: every accent stays on its own hue's axis`, drifted, []);
+  check(`${label}: every accent stays on its own hue's axis`, drifted, []);
 }
 
 /**
@@ -325,8 +418,8 @@ for (const theme of THEMES) {
  * glance, and two roles (`warn` and `notice`) deliberately share a hue.
  */
 const MIN_ACCENT_DELTA_E = 6;
-for (const theme of THEMES) {
-  const packet = getPacketThemeForApp(theme);
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
   const distinct = [...new Set(Object.values(packet.accents))];
   let worst = { pair: '', delta: Infinity };
   for (let i = 0; i < distinct.length; i++) {
@@ -336,7 +429,7 @@ for (const theme of THEMES) {
     }
   }
   checkTrue(
-    `${theme}: accents stay distinguishable (worst ${worst.delta.toFixed(1)} deltaE, ${worst.pair})`,
+    `${label}: accents stay distinguishable (worst ${worst.delta.toFixed(1)} deltaE, ${worst.pair})`,
     worst.delta >= MIN_ACCENT_DELTA_E,
   );
 }

@@ -5,7 +5,7 @@
  *
  * Every frame below was captured off a real network with tshark, and every
  * expected string is copied from `tshark -V` / `-T fields -e _ws.col.info` for
- * that same frame - so a failure here means NetView would disagree with
+ * that same frame - so a failure here means Inwire would disagree with
  * The reference analyzer about traffic that shows up on any LAN.
  */
 import { decodeRawEthernetPacket } from '../../src/services/pcapParser';

@@ -37,8 +37,16 @@ jobs:
         run: npm run build
 
   agent:
-    name: Capture agent (protocol tests)
-    runs-on: ubuntu-latest
+    # On macOS as well as Linux since 3.3.0, because the Unix installer is no
+    # longer a shell script with a stale copy of the agent inside it - it
+    # installs the real modules, and "the real modules import cleanly on that
+    # OS" is now something worth knowing before somebody downloads them.
+    name: Capture agent (protocol tests, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -55,3 +63,19 @@ jobs:
       - name: Run protocol tests
         working-directory: local-agent
         run: python test_protocol.py
+
+      # Was in nobody's run list; a test that only runs when someone
+      # remembers it exists is not coverage.
+      - name: Run interface-stats tests
+        working-directory: local-agent
+        run: python test_interface_stats.py
+
+      # The installer is the thing a macOS or Linux user actually runs, and it
+      # is a shell script, so it gets the one check a shell script can be given
+      # without root: that it parses.
+      - name: Check the Unix installer parses
+        run: sh -n local-agent/unix/install.sh
+
+      - name: Check the agent imports on this OS
+        working-directory: local-agent
+        run: python -c "import agent; print(agent.AGENT_VERSION)"

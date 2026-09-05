@@ -24,5 +24,5 @@ app.get('*', (_req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`WirePulse server running on http://0.0.0.0:${PORT}`);
+  console.log(`Inwire server running on http://0.0.0.0:${PORT}`);
 });

@@ -69,8 +69,11 @@ function rank(protocol: string): number {
   return i === -1 ? TIE_BREAK.length : i;
 }
 
+// Arithmetic, not `Number(n.toFixed(...))`: that allocates and parses a
+// string, and this runs four times per located packet on every aggregation.
+const KEY_SCALE = 10 ** KEY_PRECISION;
 function round(n: number): number {
-  return Number(n.toFixed(KEY_PRECISION));
+  return Math.round(n * KEY_SCALE) / KEY_SCALE;
 }
 
 /** The protocol carrying the most packets, ties broken deterministically. */
@@ -87,7 +90,63 @@ export function dominantProtocol(counts: Record<string, number>): string {
 }
 
 /**
- * Groups a packet buffer into routes between places.
+ * Traffic between two addresses, before anything is known about where they are.
+ *
+ * The split between this and `aggregateRoutes` is what lets the map keep up
+ * with a live capture. Counting packets per address pair does not depend on
+ * geography at all, so it can be folded one packet at a time and kept across
+ * ticks; turning pairs into lines does depend on geography, and geography
+ * arrives late and out of order, as lookups come back for addresses whose
+ * packets went by seconds ago.
+ *
+ * Folding both together meant either re-reading the whole buffer every tick or
+ * silently missing every route whose location resolved after its packets had
+ * been counted. Separated, the expensive half is incremental and the half that
+ * has to be redone when a lookup lands is bounded by how many pairs are
+ * talking rather than by how long the capture has been running.
+ */
+export interface AddressPair {
+  source: string;
+  destination: string;
+  /** Packets seen per protocol, which is what `dominantProtocol` argmaxes. */
+  counts: Record<string, number>;
+  total: number;
+}
+
+/**
+ * The key `addPacketToPairs` files a packet under. Direction is kept here.
+ *
+ * `>` is the separator because it cannot occur in either half: these are
+ * addresses as the dissector renders them - dotted quads, colon-separated IPv6
+ * and MAC addresses, and resolved OUI names - and none of those can contain it.
+ */
+function pairKey(source: string, destination: string): string {
+  return `${source}>${destination}`;
+}
+
+/**
+ * Folds one packet into a pair map, in place.
+ *
+ * Direction is NOT canonicalised here, unlike in the route key below. Two
+ * addresses in one city collapse onto a single line whichever way round they
+ * are, and that merge happens in `aggregateRoutes` where the coordinates are
+ * known - so doing it here as well would only hide which address was which
+ * from a caller that might want it.
+ */
+export function addPacketToPairs(pairs: Map<string, AddressPair>, packet: Packet): void {
+  if (!packet.source || !packet.destination) return;
+  const key = pairKey(packet.source, packet.destination);
+  let pair = pairs.get(key);
+  if (!pair) {
+    pair = { source: packet.source, destination: packet.destination, counts: {}, total: 0 };
+    pairs.set(key, pair);
+  }
+  pair.counts[packet.protocol] = (pair.counts[packet.protocol] ?? 0) + 1;
+  pair.total += 1;
+}
+
+/**
+ * Groups address pairs into routes between places.
  *
  * `locate` is passed in rather than the location map itself, so this stays a
  * pure function of its inputs and the caller keeps ownership of what counts as
@@ -95,19 +154,19 @@ export function dominantProtocol(counts: Record<string, number>): string {
  * its public location.
  */
 export function aggregateRoutes(
-  packets: Packet[],
+  pairs: Iterable<AddressPair>,
   locate: (ip: string) => LngLat | null,
 ): Route[] {
   const routes = new Map<string, Route>();
 
-  for (const packet of packets) {
-    const from = locate(packet.source);
-    const to = locate(packet.destination);
+  for (const pair of pairs) {
+    const from = locate(pair.source);
+    const to = locate(pair.destination);
     if (!from || !to) continue;
 
     const a = [round(from[0]), round(from[1])] as LngLat;
     const b = [round(to[0]), round(to[1])] as LngLat;
-    // A packet between two hosts in the same place has no line to draw.
+    // Traffic between two hosts in the same place has no line to draw.
     if (a[0] === b[0] && a[1] === b[1]) continue;
 
     // Direction-independent: a request and its reply are one relationship, and
@@ -118,17 +177,18 @@ export function aggregateRoutes(
 
     let route = routes.get(key);
     if (!route) {
-      // The EXACT coordinates, ordered to match the key. Whichever packet
-      // creates the route fixes the endpoints; every later packet in the same
+      // The EXACT coordinates, ordered to match the key. Whichever pair
+      // creates the route fixes the endpoints; every later pair in the same
       // rounded cell joins that line rather than nudging it, so a route does
       // not shiver as hosts a few hundred metres apart come and go.
       const [fromExact, toExact] = forward ? [from, to] : [to, from];
       route = { key, from: fromExact, to: toExact, counts: {}, total: 0, dominantProtocol: '' };
       routes.set(key, route);
     }
-    const protocol = packet.protocol;
-    route.counts[protocol] = (route.counts[protocol] ?? 0) + 1;
-    route.total += 1;
+    for (const protocol in pair.counts) {
+      route.counts[protocol] = (route.counts[protocol] ?? 0) + pair.counts[protocol];
+    }
+    route.total += pair.total;
   }
 
   const all = [...routes.values()];

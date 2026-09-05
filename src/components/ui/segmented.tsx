@@ -35,6 +35,18 @@ interface SegmentedProps<T extends string> {
   options: readonly SegmentedOption<T>[];
   /** Names the group for assistive tech. Required - it has no visible label. */
   ariaLabel: string;
+  /**
+   * `sm` for a control that sits in a widget's header rather than in a
+   * settings row.
+   *
+   * A size rather than a second component, because the alternative is what the
+   * dashboard had: two hand-rolled pill pairs, one bare and one in a bordered
+   * box, drawn at different sizes in two widgets that sit one above the other
+   * in the same column. The chip padding shrinks; the fill-and-border marking
+   * of the selected segment does not, because that is the part that has to
+   * stay legible.
+   */
+  size?: 'sm' | 'md';
   className?: string;
   disabled?: boolean;
 }
@@ -44,10 +56,24 @@ function Segmented<T extends string>({
   onValueChange,
   options,
   ariaLabel,
+  size = 'md',
   className,
   disabled,
 }: SegmentedProps<T>) {
-  return (
+  // The hint for whichever segment is selected, shown under the group.
+  //
+  // It was a `title` and nothing else, which is a tooltip: not reachable by
+  // touch, not reliably reachable by keyboard, and gone again the moment the
+  // pointer moves. That is an acceptable home for a nicety and the wrong one
+  // for the line that explains what a choice is FOR - which is exactly what
+  // the typeface picker needs it to be. The `title` stays as well, since a
+  // hover on an unselected segment is how you compare the options.
+  //
+  // Nothing renders when no option carries a hint, so the three groups that
+  // predate this are untouched.
+  const activeHint = options.find((o) => o.value === value)?.hint;
+
+  const group = (
     <RadioGroupPrimitive.Root
       data-slot="segmented"
       value={value}
@@ -68,7 +94,8 @@ function Segmented<T extends string>({
           value={option.value}
           title={option.hint}
           className={cn(
-            "rounded px-2.5 py-1 text-[11px] font-medium whitespace-nowrap outline-none",
+            "rounded font-medium whitespace-nowrap outline-none",
+            size === 'sm' ? "px-1.5 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
             "transition-colors cursor-pointer",
             "text-muted-foreground hover:text-foreground",
             // Fill + border + foreground, all three. See the note above.
@@ -81,7 +108,20 @@ function Segmented<T extends string>({
         </RadioGroupPrimitive.Item>
       ))}
     </RadioGroupPrimitive.Root>
-  )
+  );
+
+  if (!activeHint) return group;
+
+  // Right-aligned under the control, because that is where the control is in a
+  // SettingRow - a left-aligned line would hang off the end of nothing.
+  return (
+    <div className="flex flex-col items-end gap-1">
+      {group}
+      <p className="text-[10px] leading-snug text-muted-foreground text-right max-w-56">
+        {activeHint}
+      </p>
+    </div>
+  );
 }
 
 export { Segmented }

@@ -1,0 +1,7 @@
+# What the agent needs to RUN, as opposed to requirements.txt, which also
+# carries pyinstaller (packaging only) and pywin32 (Windows only). Installing
+# those into a Linux or macOS venv fails, which is what the old bootstrap
+# scripts did.
+scapy>=2.5.0
+websockets>=12.0
+psutil>=5.9.0

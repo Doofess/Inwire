@@ -17,12 +17,30 @@ import { minimapStore, packetListStore } from '../../services/interfacePrefs';
 import { formatTimeColumn } from '../../lib/formatTimeColumn';
 import { ColumnOptionsMenu } from './ColumnOptionsMenu';
 import {
+  COLUMN_ALIGNS,
   COLUMN_ALIGN_CLASS,
   COLUMN_ALIGN_JUSTIFY,
+  COLUMN_ALIGN_LABELS,
+  COLUMN_LABELS,
   HIDEABLE_COLUMNS,
   visibleSortField,
+  type AlignableColumn,
+  type ColumnAlign,
   type SortField as ColumnSortField,
 } from '../../lib/packetColumns';
+import { fieldDef } from '../../services/dissect/fieldRegistry';
+import type { NameLookup } from '../../services/nameResolution';
+import type { ExpertLookup } from '../../services/expertInfo';
+import { targetForPacket, type StreamTarget } from '../../services/followStream';
+import { SEVERITY_DOT, SEVERITY_LABELS } from '../../services/expertInfo';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuLabel,
+  ContextMenuRadioGroup,
+  ContextMenuRadioItem,
+  ContextMenuTrigger,
+} from '../ui/context-menu';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
 import {
   loadPreference,
@@ -31,12 +49,45 @@ import {
 } from '../../services/preferences';
 
 interface PacketListProps {
+  /**
+   * What the capture says its addresses are called, from the passive name map.
+   *
+   * Display only: `packet.source` stays the address everywhere else, so a
+   * filter, an export and the row the user is looking at all still agree about
+   * what this frame is. Omit, or leave `resolveNames` false, and the columns
+   * show addresses.
+   */
+  names?: NameLookup;
+  resolveNames?: boolean;
+  /**
+   * The program that sent a frame, for the Source column, or null.
+   *
+   * Passed in rather than looked up here for the same reason `names` is: this
+   * component renders a list and does not own what anything is called. The
+   * caller answers only for frames that actually left this machine - see
+   * `sendingProcessName`.
+   *
+   * Display only, exactly like a resolved name. `packet.source` is still the
+   * address in every filter, every export and every statistics table, so the
+   * row and the filter that selects it cannot disagree.
+   */
+  sourceProcess?: (packet: Packet) => string | null;
+  /**
+   * The expert log, for the severity dot in the No. column.
+   *
+   * A dot rather than the shield icon this column used to carry for anomalies
+   * alone: the icon answered one question ("did the detector flag this") while
+   * a frame can also be a bad checksum, a lost segment or an expired
+   * certificate, and those had no mark in the list at all. One mark, four
+   * levels, the same colours the tree and the Expert Information tab use.
+   */
+  expert?: ExpertLookup;
   packets: Packet[];
   selectedPacket: Packet | null;
   onSelectPacket: (packet: Packet) => void;
   /** Double-clicking a row opens the full-window view of that frame. */
   onInspectPacket?: (packet: Packet) => void;
-  onFollowStream: (streamId: number) => void;
+  onFollowStream: (target: StreamTarget) => void;
   onQuickFilter: (filter: string) => void;
   searchText: string;
   colorEngine: ColorRulesEngine;
@@ -55,8 +106,8 @@ type SortOrder = 'asc' | 'desc';
 // rightmost panel does - it never needs its own draggable handle.
 type ColumnKey = 'id' | 'relativeTime' | 'source' | 'destination' | 'protocol' | 'length';
 
-const COLUMN_WIDTHS_STORAGE_KEY = 'netview.packetListColumnWidths';
-const SORT_STORAGE_KEY = 'netview.packetListSort';
+const COLUMN_WIDTHS_STORAGE_KEY = 'inwire.packetListColumnWidths';
+const SORT_STORAGE_KEY = 'inwire.packetListSort';
 const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
   id: 64,
   relativeTime: 116,
@@ -65,6 +116,17 @@ const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
   protocol: 76,
   length: 68,
 };
+
+/**
+ * Width of a column added from the detail tree.
+ *
+ * One number for all of them rather than an entry per field: the stored widths
+ * above are keyed by the six built-in columns and are resized by dragging a
+ * handle between them, and a column that can be added and removed at will has
+ * no stable slot in that map. Wide enough for a server name or a JA4, which
+ * are what these columns are usually added for.
+ */
+const CUSTOM_COLUMN_WIDTH = 200;
 /**
  * The three densities, as designed pairs.
  *
@@ -134,6 +196,10 @@ function loadStoredColumnWidths(): Record<ColumnKey, number> {
 }
 
 export const PacketList: React.FC<PacketListProps> = ({
+  names,
+  resolveNames = false,
+  sourceProcess,
+  expert,
   packets,
   selectedPacket,
   onSelectPacket,
@@ -159,6 +225,8 @@ export const PacketList: React.FC<PacketListProps> = ({
     React.useMemo(() => ({ field: sortField, order: sortOrder }), [sortField, sortOrder]),
   );
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; packet: Packet } | null>(null);
+  /** Which header cell the last right-click landed in. See the header's ContextMenu. */
+  const [alignColumn, setAlignColumn] = useState<AlignableColumn | null>(null);
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Resizable columns
@@ -281,6 +349,26 @@ export const PacketList: React.FC<PacketListProps> = ({
   const [showMinimap] = usePreferenceValue(minimapStore);
   const density = DENSITY_CLASS[listPrefs.density];
   const columns = listPrefs.columns;
+  /**
+   * Columns added from the detail tree's "Apply as Column", drawn between
+   * Length and Info. Resolved through the registry here rather than stored
+   * with a label, so a renamed field renames its column and a field that has
+   * been retired takes its column with it.
+   */
+  /**
+   * The address as the column should read it.
+   *
+   * A function rather than a precomputed map: the map is keyed by address and
+   * the list draws forty rows at a time, so this is forty lookups per frame
+   * against a Map - cheaper than building anything, and it stays correct as
+   * the capture teaches the map new names mid-scroll.
+   */
+  const resolved = (address: string) =>
+    (resolveNames ? names?.hostName(address) : undefined) ?? address;
+
+  const customColumns = listPrefs.customColumns
+    .map((abbrev) => ({ abbrev, def: fieldDef(abbrev) }))
+    .filter((c): c is { abbrev: string; def: NonNullable<ReturnType<typeof fieldDef>> } => c.def !== undefined);
 
   /**
    * The field actually sorted by.
@@ -684,7 +772,8 @@ export const PacketList: React.FC<PacketListProps> = ({
   // Built once and dropped into the Info header, which is the only column
   // guaranteed to be there for it to live in.
   // Info is always shown and is not in the hideable set, hence the +1.
-  const visibleColumnCount = HIDEABLE_COLUMNS.filter((c) => columns[c]).length + 1;
+  const visibleColumnCount =
+    HIDEABLE_COLUMNS.filter((c) => columns[c]).length + 1 + listPrefs.customColumns.length;
 
   /**
    * The header row's surface, in one place.
@@ -699,19 +788,27 @@ export const PacketList: React.FC<PacketListProps> = ({
   const HEADER_CHROME =
     'bg-secondary border-b border-border text-muted-foreground transition-colors';
 
-  // Where the text sits, for the columns whose content is text. The numeric
-  // columns are not included on purpose - see ColumnAlign.
-  const alignCell = COLUMN_ALIGN_CLASS[listPrefs.align];
-  const alignHeader = COLUMN_ALIGN_JUSTIFY[listPrefs.align];
+  // Where the text sits, per column. Every column is settable now - see
+  // ColumnAlignMap for why the numeric three no longer have to be excluded.
+  //
+  // The VALUES only. Column titles are always centred, whatever a column is
+  // set to: the header is a fixed row of labels read across, and letting each
+  // one wander to whichever edge its values happen to use turned that row
+  // ragged - a centred title also sits over both a left-aligned and a
+  // right-aligned column without looking attached to the wrong one.
+  const cellAlign = (column: AlignableColumn) => COLUMN_ALIGN_CLASS[listPrefs.align[column]];
+  /** For cells whose content is a flex row rather than plain text. */
+  const cellJustify = (column: AlignableColumn) => COLUMN_ALIGN_JUSTIFY[listPrefs.align[column]];
+  const HEADER_TITLE = 'justify-center';
 
   const columnMenuTrigger = (
     <ColumnOptionsMenu
       columns={columns}
       timeFormat={listPrefs.timeFormat}
-      align={listPrefs.align}
       onColumnsChange={(next) => patchListPrefs({ columns: next })}
+      customColumns={listPrefs.customColumns}
+      onCustomColumnsChange={(next) => patchListPrefs({ customColumns: next })}
       onTimeFormatChange={(timeFormat) => patchListPrefs({ timeFormat })}
-      onAlignChange={(align) => patchListPrefs({ align })}
     />
   );
 
@@ -768,6 +865,10 @@ export const PacketList: React.FC<PacketListProps> = ({
             {columns.destination && <col style={{ width: columnWidths.destination }} />}
             {columns.protocol && <col style={{ width: columnWidths.protocol }} />}
             {columns.length && <col style={{ width: columnWidths.length }} />}
+            {/* A fixed width, and no resize handle: the stored widths are keyed
+                by the six built-in columns, and a column the user can add and
+                remove at will has no stable slot in that map. */}
+            {customColumns.map((c) => <col key={c.abbrev} style={{ width: CUSTOM_COLUMN_WIDTH }} />)}
             <col />
           </colgroup>
           {/* Table Header */}
@@ -775,13 +876,28 @@ export const PacketList: React.FC<PacketListProps> = ({
             ref={headerRef}
             className={`sticky top-0 z-20 select-none ${HEADER_CHROME}`}
           >
-            <tr aria-rowindex={1} className="text-[11px] uppercase tracking-wider divide-x divide-border/60">
+            {/* One ContextMenu for the whole header row rather than one per
+                cell. Radix's trigger already positions at the pointer and owns
+                Escape and focus return; which COLUMN was right-clicked is the
+                only thing left to work out, and the event knows that. Seven
+                wrappers would have been seven copies of the same menu. */}
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+            <tr
+              aria-rowindex={1}
+              onContextMenu={(e) => {
+                const cell = (e.target as HTMLElement).closest('th[data-column]');
+                setAlignColumn((cell?.getAttribute('data-column') as AlignableColumn) ?? null);
+              }}
+              className="text-[11px] uppercase tracking-wider divide-x divide-border"
+            >
               {columns.id && (
               <th
+                data-column="id"
                 aria-sort={sortAttr('id')}
                 className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <button type="button" onClick={() => handleSort('id')} className="flex items-center gap-1 w-full text-left cursor-pointer">
+                <button type="button" onClick={() => handleSort('id')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>No.</span>
                     {renderSortIcon('id')}
                 </button>
@@ -791,10 +907,11 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               {columns.relativeTime && (
               <th
+                data-column="relativeTime"
                 aria-sort={sortAttr('relativeTime')}
                 className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <button type="button" onClick={() => handleSort('relativeTime')} className="flex items-center gap-1 w-full text-left cursor-pointer">
+                <button type="button" onClick={() => handleSort('relativeTime')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>Time</span>
                     {renderSortIcon('relativeTime')}
                 </button>
@@ -804,10 +921,11 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               {columns.source && (
               <th
+                data-column="source"
                 aria-sort={sortAttr('source')}
                 className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <button type="button" onClick={() => handleSort('source')} className={`flex items-center gap-1 w-full cursor-pointer ${alignHeader}`}>
+                <button type="button" onClick={() => handleSort('source')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>Source</span>
                     {renderSortIcon('source')}
                 </button>
@@ -817,10 +935,11 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               {columns.destination && (
               <th
+                data-column="destination"
                 aria-sort={sortAttr('destination')}
                 className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <button type="button" onClick={() => handleSort('destination')} className={`flex items-center gap-1 w-full cursor-pointer ${alignHeader}`}>
+                <button type="button" onClick={() => handleSort('destination')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>Destination</span>
                     {renderSortIcon('destination')}
                 </button>
@@ -830,10 +949,11 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               {columns.protocol && (
               <th
+                data-column="protocol"
                 aria-sort={sortAttr('protocol')}
                 className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                <button type="button" onClick={() => handleSort('protocol')} className={`flex items-center gap-1 w-full cursor-pointer ${alignHeader}`}>
+                <button type="button" onClick={() => handleSort('protocol')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>Protocol</span>
                     {renderSortIcon('protocol')}
                 </button>
@@ -843,17 +963,18 @@ export const PacketList: React.FC<PacketListProps> = ({
 
               {columns.length && (
               <th
+                data-column="length"
                 aria-sort={sortAttr('length')}
                 className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
-                {/* Right-aligned to match the numbers below it. With the
-                    header left-aligned and the values right-aligned, resizing
-                    this column dragged the two apart in opposite directions
-                    and pushed the value up against the Info text. */}
+                {/* Centred like every other title. It used to be pinned right
+                    to match the numbers below it, because the other headers
+                    were left-aligned and this one's values were not - with all
+                    the titles centred there is nothing left to disagree. */}
                 <button
                   type="button"
                   onClick={() => handleSort('length')}
-                  className="flex items-center justify-end gap-1 w-full cursor-pointer"
+                  className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}
                 >
                   <span>Length</span>
                   {renderSortIcon('length')}
@@ -862,8 +983,44 @@ export const PacketList: React.FC<PacketListProps> = ({
               </th>
               )}
 
-              <th aria-sort={sortAttr('info')} className={`px-4 py-2.5 group font-bold ${"hover:bg-accent text-muted-foreground"}`}><div className="flex items-center gap-1"><button type="button" onClick={() => handleSort('info')} className={`flex items-center gap-1 flex-1 min-w-0 cursor-pointer ${alignHeader}`}><span>Info</span>{renderSortIcon('info')}</button>{/* Only when the minimap is off - otherwise it lives in the strip above the map, which is not a column and so does not move when one is resized. It has to live SOMEWHERE, though: this menu is the only way to turn the hidden columns back on. */}{!showMinimap && columnMenuTrigger}</div></th>
+              {customColumns.map((c) => (
+                <th
+                  key={c.abbrev}
+                  data-column={c.abbrev}
+                  title={c.abbrev}
+                  className={`relative px-2 py-1 group font-bold overflow-hidden hover:bg-accent text-muted-foreground`}
+                >
+                  <div className={`flex items-center gap-1 w-full ${HEADER_TITLE}`}>
+                    <span className="truncate">{c.def.column?.label ?? c.def.label}</span>
+                  </div>
+                </th>
+              ))}
+
+              <th data-column="info" aria-sort={sortAttr('info')} className={`px-4 py-2.5 group font-bold ${"hover:bg-accent text-muted-foreground"}`}><div className="flex items-center gap-1"><button type="button" onClick={() => handleSort('info')} className={`flex items-center gap-1 flex-1 min-w-0 cursor-pointer ${HEADER_TITLE}`}><span>Info</span>{renderSortIcon('info')}</button>{/* Only when the minimap is off - otherwise it lives in the strip above the map, which is not a column and so does not move when one is resized. It has to live SOMEWHERE, though: this menu is the only way to turn the hidden columns back on. */}{!showMinimap && columnMenuTrigger}</div></th>
             </tr>
+              </ContextMenuTrigger>
+              {alignColumn && (
+                <ContextMenuContent className="w-44">
+                  <ContextMenuLabel>
+                    {alignColumn === 'info' ? 'Info' : COLUMN_LABELS[alignColumn]}
+                  </ContextMenuLabel>
+                  <ContextMenuRadioGroup
+                    value={listPrefs.align[alignColumn]}
+                    onValueChange={(value) =>
+                      patchListPrefs({
+                        align: { ...listPrefs.align, [alignColumn]: value as ColumnAlign },
+                      })
+                    }
+                  >
+                    {COLUMN_ALIGNS.map((value) => (
+                      <ContextMenuRadioItem key={value} value={value}>
+                        {COLUMN_ALIGN_LABELS[value]}
+                      </ContextMenuRadioItem>
+                    ))}
+                  </ContextMenuRadioGroup>
+                </ContextMenuContent>
+              )}
+            </ContextMenu>
           </thead>
 
           {/* Table Body */}
@@ -910,7 +1067,16 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // the window that opens over it.
                     onDoubleClick={() => onInspectPacket?.(packet)}
                     onContextMenu={e => handleContextMenu(e, packet)}
-                    className={`cursor-pointer ${
+                    // `divide-x` on every row, not just the header. The
+                    // columns had no vertical rule at all below the header, so
+                    // where one value ended and the next began was carried
+                    // entirely by the gap between them - which disappears the
+                    // moment a column is narrow enough for its text to fill it.
+                    // Held at /40 rather than the header's full strength: this
+                    // runs behind the row colours and down every row on screen,
+                    // and at full strength it reads as a grid drawn over the
+                    // data rather than as a separation between columns.
+                    className={`cursor-pointer divide-x divide-border/40 ${
                       isSelected
                         ? '!bg-accent !text-primary dark:!text-primary ring-1 ring-inset ring-primary font-bold'
                         : 'hover:brightness-95 dark:hover:brightness-125'
@@ -928,19 +1094,35 @@ export const PacketList: React.FC<PacketListProps> = ({
                     {/* No. - right-aligned with tabular figures so the column
                         stays a clean edge as the number of digits grows. */}
                     {columns.id && (
-                    <td className={`px-2 ${density.cell} font-mono whitespace-nowrap text-right tabular-nums`}>
-                      <div className="flex items-center justify-end gap-1">
-                        {(packet.anomalies && packet.anomalies.length > 0) || packet.status === 'alert' ? (
-                          <TbShieldExclamation className="w-3 h-3 text-rose-500 shrink-0" />
-                        ) : null}
+                    <td className={`px-2 ${density.cell} font-mono whitespace-nowrap truncate tabular-nums ${cellAlign('id')}`}>
+                      <div className={`flex items-center gap-1 ${cellJustify('id')}`}>
+                        {(() => {
+                          const severity = expert?.severityOf(packet.id);
+                          if ((packet.anomalies?.length ?? 0) > 0 || packet.status === 'alert') {
+                            return <TbShieldExclamation className="w-3 h-3 text-rose-500 shrink-0" title="Flagged by the anomaly detector" />;
+                          }
+                          return severity ? (
+                            <span
+                              className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${SEVERITY_DOT[severity]}`}
+                              title={`${SEVERITY_LABELS[severity]} - see Expert Information`}
+                            />
+                          ) : null;
+                        })()}
                         <span>{packet.id}</span>
                       </div>
                     </td>
                     )}
 
-                    {/* Time */}
+                    {/* Time.
+
+                        `truncate`, not just `whitespace-nowrap`. Without an
+                        overflow rule this cell had nothing to clip it: drag the
+                        Time column narrow and its text ran straight out under
+                        Source, so two columns' values sat on top of each other
+                        with no visible boundary. Same fix on No. and Length,
+                        which had the same gap. */}
                     {columns.relativeTime && (
-                    <td className={`px-2 ${density.cell} whitespace-nowrap font-mono text-right tabular-nums`}>
+                    <td className={`px-2 ${density.cell} whitespace-nowrap truncate font-mono tabular-nums ${cellAlign('relativeTime')}`}>
                       {formatTimeColumn(
                         listPrefs.timeFormat,
                         packet,
@@ -953,36 +1135,79 @@ export const PacketList: React.FC<PacketListProps> = ({
                     </td>
                     )}
 
-                    {/* Source - address only; the reference analyzer keeps ports in the Info column */}
-                    {columns.source && (
-                    <td className={`px-2 ${density.cell} ${alignCell} whitespace-nowrap truncate`} title={packet.source}>
-                      {packet.source}
-                    </td>
-                    )}
+                    {/* Source - address only; the reference analyzer keeps ports in the Info column.
+                        With name resolution on, the column shows what the CAPTURE
+                        called this address and the tooltip keeps the address itself,
+                        because the address is what a filter is written against. */}
+                    {columns.source && (() => {
+                      // Only frames this machine SENT carry a program here;
+                      // the reply to one is attributed to the same local
+                      // socket, and rendering it would put the browser's name
+                      // on the web server that answered.
+                      const sender = sourceProcess?.(packet) ?? null;
+                      return (
+                        <td
+                          className={`px-2 ${density.cell} ${cellAlign('source')} whitespace-nowrap overflow-hidden`}
+                          title={sender ? `${packet.source}  (sent by ${sender})` : packet.source}
+                        >
+                          {/* The ADDRESS gives way, not the program. An IPv6
+                              address is already wider than this column and was
+                              ellipsising before anything was appended to it, so
+                              a plain `truncate` on the pair cut off the very
+                              thing that had just been added. The address
+                              shrinks; the program never does - it is the short
+                              half, and the half that is new. */}
+                          <span className="flex items-baseline min-w-0">
+                            <span className="truncate">{resolved(packet.source)}</span>
+                            {sender && (
+                              // Dimmed, because the address is the identity and
+                              // the program is the annotation. At full strength
+                              // the two read as one long token and the column
+                              // stops scanning as a list of addresses.
+                              <span className="shrink-0 text-muted-foreground">
+                                {'\\'}{sender}
+                              </span>
+                            )}
+                          </span>
+                        </td>
+                      );
+                    })()}
 
                     {/* Destination */}
                     {columns.destination && (
-                    <td className={`px-2 ${density.cell} ${alignCell} whitespace-nowrap truncate`} title={packet.destination}>
-                      {packet.destination}
+                    <td className={`px-2 ${density.cell} ${cellAlign('destination')} whitespace-nowrap truncate`} title={packet.destination}>
+                      {resolved(packet.destination)}
                     </td>
                     )}
 
                     {/* Protocol - plain text in the row's own color. A badge
                         would fight the coloring chain and waste width. */}
                     {columns.protocol && (
-                    <td className={`px-2 ${density.cell} ${alignCell} whitespace-nowrap truncate`}>
+                    <td className={`px-2 ${density.cell} ${cellAlign('protocol')} whitespace-nowrap truncate`}>
                       {packet.protocolLabel ?? packet.protocol}
                     </td>
                     )}
 
                     {/* Length */}
                     {columns.length && (
-                    <td className={`pl-2 pr-3 ${density.cell} whitespace-nowrap text-right tabular-nums`}>{packet.length}</td>
+                    <td className={`pl-2 pr-3 ${density.cell} whitespace-nowrap truncate tabular-nums ${cellAlign('length')}`}>{packet.length}</td>
                     )}
+
+                    {customColumns.map((c) => (
+                      <td
+                        key={c.abbrev}
+                        className={`px-2 ${density.cell} whitespace-nowrap truncate ${
+                          c.def.column?.align === 'right' ? 'text-right tabular-nums' : 'text-left'
+                        }`}
+                        title={String(packet.fields?.[c.abbrev] ?? '')}
+                      >
+                        {packet.fields?.[c.abbrev] ?? ''}
+                      </td>
+                    ))}
 
                     {/* Info - absorbs the remaining width and clips; the reference analyzer
                         scrolls the list horizontally rather than ellipsising. */}
-                    <td className={`px-4 ${density.cell} ${alignCell} whitespace-nowrap overflow-hidden`} title={packet.info}>
+                    <td className={`px-4 ${density.cell} ${cellAlign('info')} whitespace-nowrap overflow-hidden`} title={packet.info}>
                       {packet.info}
                     </td>
                   </tr>
@@ -1028,15 +1253,26 @@ export const PacketList: React.FC<PacketListProps> = ({
             Packet #{contextMenu.packet.id} Options
           </div>
 
-          {contextMenu.packet.streamId !== undefined && (
-            <button
-              onClick={() => onFollowStream(contextMenu.packet.streamId!)}
-              className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-            >
-              <TbMessage className="w-3.5 h-3.5 text-foreground" />
-              <span>Follow Stream (#{contextMenu.packet.streamId})</span>
-            </button>
-          )}
+          {/* Offered for UDP as well as TCP now: a stream is selected by its
+              five-tuple rather than by the TCP tracker's index, so a DNS
+              exchange or a QUIC connection - which have no index - can be
+              followed too. */}
+          {(() => {
+            const target = targetForPacket(contextMenu.packet);
+            if (!target) return null;
+            return (
+              <button
+                onClick={() => onFollowStream(target)}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
+              >
+                <TbMessage className="w-3.5 h-3.5 text-foreground" />
+                <span>
+                  Follow {target.kind.toUpperCase()} Stream
+                  {target.streamId !== undefined ? ` (#${target.streamId})` : ''}
+                </span>
+              </button>
+            );
+          })()}
 
           <button
             onClick={() => onQuickFilter(`ip.src == "${contextMenu.packet.source}"`)}

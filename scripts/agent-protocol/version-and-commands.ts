@@ -32,10 +32,18 @@ check('start_capture encodes', encodeAgentCommand({ type: 'start_capture' }), '{
 check('stop_capture encodes', encodeAgentCommand({ type: 'stop_capture' }), '{"type":"stop_capture"}');
 check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', interfaces: ['eth0', 'eth1'] }), '{"type":"set_interfaces","interfaces":["eth0","eth1"]}');
 
-// 2.6.0 is where restart_agent landed. This constant has to move with
+// 3.0.0 is the rename: the service, its data directory and its URI scheme all
+// changed name, so an older agent is not merely missing a command - it is a
+// different install. Major, not minor. This constant has to move with
 // AGENT_VERSION in agent.py and MyAppVersion in setup.iss;
 // local-agent/test_protocol.py is what enforces that all three agree.
-check('required agent version is 2.6.0', REQUIRED_AGENT_VERSION, '2.6.0');
+check('required agent version is 3.4.1', REQUIRED_AGENT_VERSION, '3.4.1');
+
+// Pairing. The token goes on the wire as an ordinary command rather than in
+// the handshake, because a handshake this agent refuses reaches the browser as
+// an opaque error indistinguishable from "the agent is not running".
+check('authenticate encodes', encodeAgentCommand({ type: 'authenticate', token: 'abc' }),
+  '{"type":"authenticate","token":"abc"}');
 
 // The command exists so Driver Info can ask the agent to restart itself. The
 // agent refuses it unless it can prove something would start it again - see
@@ -48,6 +56,11 @@ check('a 2.5.0 agent is not outdated', isAgentOutdated('2.5.0', '2.4.0'), false)
 
 check('subscribe_logs encodes', encodeAgentCommand({ type: 'subscribe_logs' }), '{"type":"subscribe_logs"}');
 check('unsubscribe_logs encodes', encodeAgentCommand({ type: 'unsubscribe_logs' }), '{"type":"unsubscribe_logs"}');
+
+// 3.4.0: which process owns which socket. Subscribed rather than always-on, so
+// a client that never asks never causes the table to be read at all.
+check('subscribe_sockets encodes', encodeAgentCommand({ type: 'subscribe_sockets' }), '{"type":"subscribe_sockets"}');
+check('unsubscribe_sockets encodes', encodeAgentCommand({ type: 'unsubscribe_sockets' }), '{"type":"unsubscribe_sockets"}');
 
 console.log();
 if (failures) {

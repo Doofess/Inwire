@@ -39,7 +39,7 @@ export default defineConfig(() => {
         // startup and refreshes it from this watcher; a path the watcher never
         // reports is treated as absent, so requests for it fall through to the
         // SPA fallback and the browser silently downloads index.html renamed
-        // to NetView-Agent-Setup.exe - a ~1 KB "corrupted installer" with no
+        // to Inwire-Agent-Setup.exe - a ~1 KB "corrupted installer" with no
         // error anywhere to explain it. One page reload when a new installer
         // is copied in is the cheaper failure.
         ignored: ['**/local-agent/**'],

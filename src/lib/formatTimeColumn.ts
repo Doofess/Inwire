@@ -4,7 +4,7 @@ import type { Packet } from '../types/packet';
  * How the packet list's Time column reads.
  *
  * Five formats rather than the one that used to be hardcoded, and none of them
- * costs anything to compute: `Packet` already carries `timestamp` (milliseconds
+ * costs anything to compute: `Packet` already carries `tsUs` (microseconds
  * since the epoch) and `relativeTime` (seconds since capture start), so all
  * five are derivable with no change to dissection.
  *
@@ -23,29 +23,19 @@ export const TIME_FORMAT_LABELS: Record<TimeFormat, string> = {
   delta: 'Since previous packet',
 };
 
-/** Decimal places, matching the six the capture's own timestamps carry. */
-const PRECISION = 6;
+/**
+ * Decimal places for the elapsed formats: the capture's own resolution, so a
+ * nanosecond pcap shows nine and a microsecond one six. Live capture never sets
+ * `tsPrecision` (the agent stamps in microseconds) and gets six. This was a
+ * constant 6 for a while, which silently rounded nanosecond captures in the
+ * list while the details pane showed all nine.
+ */
+function precisionOf(packet: Packet): number {
+  return packet.tsPrecision ?? 6;
+}
 
 function pad(n: number, width = 2): string {
   return String(n).padStart(width, '0');
-}
-
-/**
- * The part of the timestamp below one second, as six digits.
- *
- * Taken modulo 1000 rather than as `ms - Math.floor(ms)`. That subtraction
- * yields only the SUB-millisecond remainder, so it silently dropped the
- * milliseconds - .694700 came out as .700000 - and doing the arithmetic on a
- * number in the trillions added float noise on top, which turned it into
- * .699951. Modulo keeps the value small before it is divided.
- *
- * Built from the number rather than from `toISOString`, because the displayed
- * precision is six places and an ISO string carries only three.
- */
-function fraction(ms: number): string {
-  // The double modulo keeps pre-epoch timestamps positive.
-  const withinSecond = ((ms % 1000) + 1000) % 1000;
-  return (withinSecond / 1000).toFixed(PRECISION).slice(2);
 }
 
 function clockParts(d: Date, utc: boolean) {
@@ -71,32 +61,39 @@ export function formatTimeColumn(
 ): string {
   switch (format) {
     case 'relative':
-      return packet.relativeTime.toFixed(PRECISION);
+      return packet.relativeTime.toFixed(precisionOf(packet));
 
     case 'delta': {
       // The first row of a capture has nothing to be relative to. Zero says
       // "no time has passed since the previous packet", which is a different
       // and false claim, so this reports the absence instead.
       if (!previous) return '-';
-      const delta = (packet.timestamp - previous.timestamp) / 1000;
+      const delta = (packet.tsUs - previous.tsUs) / 1_000_000;
       // Clamped at zero rather than shown negative: out-of-order timestamps
       // happen on multi-interface captures, and a negative gap in this column
       // reads as a bug in the clock rather than as what it is.
-      return Math.max(0, delta).toFixed(PRECISION);
+      return Math.max(0, delta).toFixed(precisionOf(packet));
     }
 
     case 'clock':
     case 'date':
     case 'utc': {
       const utc = format === 'utc';
-      const d = new Date(packet.timestamp);
+      const d = new Date(packet.tsUs / 1000);
       const p = clockParts(d, utc);
-      const time = `${pad(p.h)}:${pad(p.m)}:${pad(p.s)}.${fraction(packet.timestamp)}`;
+      // Whole seconds. The six-digit fraction that used to be appended here
+      // made a wall-clock reading twice as long as the column it sits in, for
+      // precision nobody reads off a clock face - you correlate a capture
+      // against a log or an incident timeline by the SECOND. The sub-second
+      // detail is not lost: `relative` and `delta` both still carry all six
+      // places, and those are the formats you switch to when the question is
+      // about timing rather than about when.
+      const time = `${pad(p.h)}:${pad(p.m)}:${pad(p.s)}`;
       if (format === 'clock') return time;
       return `${p.Y}-${pad(p.M)}-${pad(p.D)} ${time}`;
     }
 
     default:
-      return packet.relativeTime.toFixed(PRECISION);
+      return packet.relativeTime.toFixed(precisionOf(packet));
   }
 }

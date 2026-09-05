@@ -7,7 +7,7 @@
  *
  * Two mechanisms share the job, because neither covers the whole of it:
  *
- *   - `public/netview-sw.js` deletes the database a few seconds after the last
+ *   - `public/inwire-sw.js` deletes the database a few seconds after the last
  *     window goes away. That handles closing the app while the browser keeps
  *     running, which is the common case, and it deletes at close rather than
  *     merely before the next use.
@@ -24,9 +24,9 @@
  */
 import { clearSession } from './sessionStore';
 
-const TAB_MARKER_KEY = 'netview.tabAlive';
-const CHANNEL_NAME = 'netview.session';
-const SW_URL = '/netview-sw.js';
+const TAB_MARKER_KEY = 'inwire.tabAlive';
+const CHANNEL_NAME = 'inwire.session';
+const SW_URL = '/inwire-sw.js';
 
 /** How long to wait for another window to answer a liveness ping. */
 const LIVENESS_TIMEOUT_MS = 250;
@@ -37,7 +37,7 @@ export type StartupAction = 'wipe' | 'restore';
  * The whole startup decision, as a pure function so it can be tested.
  *
  * `tabMarker` is the sessionStorage value (null when absent) and
- * `otherWindowLive` is whether a second NetView window answered a ping.
+ * `otherWindowLive` is whether a second Inwire window answered a ping.
  */
 export function decideStartupAction(
   tabMarker: string | null,
@@ -87,7 +87,7 @@ function openChannel(): BroadcastChannel | null {
 }
 
 /**
- * Asks whether another NetView window is open, resolving false if none answers.
+ * Asks whether another Inwire window is open, resolving false if none answers.
  *
  * BroadcastChannel does not deliver a message back to the sender, so a lone
  * window cannot mistake its own ping for company.
@@ -110,9 +110,9 @@ export function anotherWindowIsLive(timeoutMs = LIVENESS_TIMEOUT_MS): Promise<bo
     };
 
     channel.onmessage = (event) => {
-      if (event.data?.type === 'netview:here') finish(true);
+      if (event.data?.type === 'inwire:here') finish(true);
     };
-    channel.postMessage({ type: 'netview:who-is-there' });
+    channel.postMessage({ type: 'inwire:who-is-there' });
     setTimeout(() => finish(false), timeoutMs);
   });
 }
@@ -128,9 +128,9 @@ export function answerLivenessPings(): () => void {
   if (!channel) return () => {};
 
   channel.onmessage = (event) => {
-    if (event.data?.type !== 'netview:who-is-there') return;
+    if (event.data?.type !== 'inwire:who-is-there') return;
     try {
-      channel.postMessage({ type: 'netview:here' });
+      channel.postMessage({ type: 'inwire:here' });
     } catch {
       // The asker has gone away; it will time out and decide on its own.
     }
@@ -177,6 +177,11 @@ export function registerSessionWorker(): () => void {
 
   let disposed = false;
 
+  // The script this points at was renamed when the app was. That needs no
+  // cleanup of its own: a registration is keyed by SCOPE, not by script URL, so
+  // registering a different script at the same '/' scope replaces the previous
+  // registration rather than adding a second one beside it. The old worker is
+  // discarded once this one activates.
   void container
     .register(SW_URL, { scope: '/' })
     .then((registration) => {
@@ -185,7 +190,7 @@ export function registerSessionWorker(): () => void {
         registration.active ?? registration.waiting ?? registration.installing;
       // Checking in cancels any deletion the previous page scheduled on its way
       // out, which is what makes a reload keep its session.
-      postToWorker('netview:hello');
+      postToWorker('inwire:hello');
     })
     .catch(() => {
       // Service workers need a secure context. Served over plain http on a LAN
@@ -193,7 +198,7 @@ export function registerSessionWorker(): () => void {
       // its own - so this is a degradation, not a failure.
     });
 
-  const sayGoodbye = () => postToWorker('netview:goodbye');
+  const sayGoodbye = () => postToWorker('inwire:goodbye');
   // `pagehide` rather than `beforeunload`: it fires in cases beforeunload does
   // not, including a mobile tab being discarded.
   window.addEventListener('pagehide', sayGoodbye);

@@ -30,7 +30,7 @@ let nextId = 1;
 function makePacket(i: number): Packet {
   return {
     id: nextId++,
-    timestamp: 1_700_000_000_000 + i,
+    tsUs: 1_700_000_000_000_000 + i * 1000,
     relativeTime: i / 100,
     timeDelta: 0.01,
     source: `10.0.0.${i % 7}`,

@@ -79,6 +79,46 @@ export function normalizeColumnVisibility(raw: unknown): ColumnVisibility | null
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Custom columns
+// ---------------------------------------------------------------------------
+
+/**
+ * Columns added from the packet detail tree's "Apply as Column".
+ *
+ * Stored as registry abbreviations (`tls.handshake.extensions_server_name`)
+ * rather than as label/accessor pairs, because the registry already holds the
+ * label, the alignment and the fact that the field is offerable at all
+ * (`FieldDef.column`). One name is enough to draw the column, and it is the
+ * same name the filter language uses - so a column and a filter on the same
+ * field can never disagree about what that field is.
+ *
+ * These sit between Length and Info in the list. The cap is not arbitrary: the
+ * fixed columns already fill a narrow window, and past about half a dozen
+ * additions the Info column - the one that always has something worth reading -
+ * has no width left.
+ */
+export const MAX_CUSTOM_COLUMNS = 6;
+
+export function normalizeCustomColumns(
+  raw: unknown,
+  /** Passed in rather than imported, so this module stays free of `services`. */
+  isKnownField: (abbrev: string) => boolean,
+): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    // A column for a field the build no longer registers would draw an empty
+    // cell under a header naming something that does not exist.
+    if (!isKnownField(entry)) continue;
+    if (out.includes(entry)) continue;
+    out.push(entry);
+    if (out.length === MAX_CUSTOM_COLUMNS) break;
+  }
+  return out;
+}
+
 /**
  * Where the text sits inside a column.
  *
@@ -114,6 +154,76 @@ export const COLUMN_ALIGN_JUSTIFY: Record<ColumnAlign, string> = {
   center: 'justify-center',
   right: 'justify-end',
 };
+
+/**
+ * Where the text sits, per column.
+ *
+ * It used to be one setting for the whole list, and the restriction that came
+ * with it: No., Time and Length were pinned right and excluded, because a
+ * global "centre" would have centred the numbers too and broken the digit
+ * alignment that is the entire reason those columns are right-aligned.
+ *
+ * Per-column removes the reason for the restriction rather than working around
+ * it. Nobody sets Time to centred by accident now - they have to open that
+ * column's own menu and choose it - so every column is offered, and the three
+ * numeric ones simply DEFAULT to right.
+ */
+export type AlignableColumn = SortField;
+
+export const ALIGNABLE_COLUMNS: readonly AlignableColumn[] = [...HIDEABLE_COLUMNS, 'info'];
+
+export type ColumnAlignMap = Record<AlignableColumn, ColumnAlign>;
+
+/**
+ * Right for the three that are read as numbers, left for the rest.
+ *
+ * `id`, `relativeTime` and `length` are compared down the column - is this
+ * frame bigger than that one, how far apart are these two timestamps - and a
+ * ragged right edge makes that comparison impossible to do at a glance. The
+ * address and text columns are read across instead, so they start at the left.
+ */
+export const DEFAULT_COLUMN_ALIGN: ColumnAlignMap = {
+  id: 'right',
+  relativeTime: 'right',
+  length: 'right',
+  source: 'left',
+  destination: 'left',
+  protocol: 'left',
+  info: 'left',
+};
+
+export function isColumnAlign(raw: unknown): raw is ColumnAlign {
+  return COLUMN_ALIGNS.includes(raw as ColumnAlign);
+}
+
+/**
+ * Validates a stored alignment map, and carries the old single value across.
+ *
+ * The migration is the point. Before this, `align` was one string applied to
+ * the text columns; discarding it would silently reset anyone who had chosen
+ * centred or right, and they would have no idea why. A stored string is
+ * therefore spread over exactly the columns it used to govern, with the
+ * numeric three left on their own default - which reproduces what that setting
+ * actually did.
+ */
+export function normalizeColumnAlign(raw: unknown): ColumnAlignMap {
+  if (isColumnAlign(raw)) {
+    return {
+      ...DEFAULT_COLUMN_ALIGN,
+      source: raw,
+      destination: raw,
+      protocol: raw,
+      info: raw,
+    };
+  }
+  if (typeof raw !== 'object' || raw === null) return { ...DEFAULT_COLUMN_ALIGN };
+  const v = raw as Record<string, unknown>;
+  const out = { ...DEFAULT_COLUMN_ALIGN };
+  for (const column of ALIGNABLE_COLUMNS) {
+    if (isColumnAlign(v[column])) out[column] = v[column] as ColumnAlign;
+  }
+  return out;
+}
 
 /**
  * The field the list should actually sort by.

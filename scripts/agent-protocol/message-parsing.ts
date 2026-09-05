@@ -81,6 +81,40 @@ check('log with an entry missing message returns null', parseAgentMessage('{"typ
 check('log with a non-string message returns null', parseAgentMessage('{"type":"log","lines":[{"time":null,"level":null,"message":42}]}'), null);
 check('log with a non-string level returns null', parseAgentMessage('{"type":"log","lines":[{"time":null,"level":7,"message":"x"}]}'), null);
 
+// --- 3.1.0: interface ids, capture_stats, error codes -------------------------
+
+check('interface entries may carry an id',
+  parseAgentMessage('{"type":"state","state":"idle","interfaces":[{"id":0,"name":"eth0","label":"Ethernet"}]}'),
+  { type: 'state', state: 'idle', interfaces: [{ id: 0, name: 'eth0', label: 'Ethernet' }] });
+check('...but a non-integer id is rejected',
+  parseAgentMessage('{"type":"state","state":"idle","interfaces":[{"id":"zero","name":"eth0","label":"Ethernet"}]}'), null);
+
+const stats = parseAgentMessage(JSON.stringify({
+  type: 'capture_stats', intervalMs: 1000, seqHigh: 42, droppedAgent: 3,
+  interfaces: [{ iface: 0, received: 42, kernelReceived: 45, droppedKernel: 3 }],
+}));
+check('valid capture_stats parses', stats?.type, 'capture_stats');
+check('capture_stats: null kernel counters mean unknown and are allowed',
+  parseAgentMessage(JSON.stringify({
+    type: 'capture_stats', intervalMs: 1000, seqHigh: 0, droppedAgent: 0,
+    interfaces: [{ iface: 0, received: 0, kernelReceived: null, droppedKernel: null }],
+  }))?.type,
+  'capture_stats');
+check('capture_stats missing droppedAgent returns null',
+  parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"interfaces":[]}'), null);
+check('capture_stats with a negative count returns null',
+  parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":-1,"interfaces":[]}'), null);
+check('capture_stats with a malformed interface entry returns null',
+  parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"interfaces":[{"iface":0}]}'), null);
+
+check('error carries its code and interface through',
+  parseAgentMessage('{"type":"error","code":"capture_failed","iface":1,"message":"no"}'),
+  { type: 'error', code: 'capture_failed', iface: 1, message: 'no' });
+
+check('a 3.1 packet keeps seq, iface and tsUs',
+  parseAgentMessage('{"type":"packet","seq":7,"iface":1,"tsUs":1788477971653284,"raw":""}'),
+  { type: 'packet', seq: 7, iface: 1, tsUs: 1788477971653284, raw: '' });
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);

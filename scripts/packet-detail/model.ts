@@ -30,7 +30,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 function makePacket(id: number, over: Partial<Packet> = {}): Packet {
   return {
     id,
-    timestamp: 1_700_000_000_000 + id,
+    tsUs: 1_700_000_000_000_000 + id * 1000,
     relativeTime: id / 100,
     timeDelta: 0.01,
     source: '10.0.0.1',
@@ -151,7 +151,7 @@ function makePacket(id: number, over: Partial<Packet> = {}): Packet {
   check('...and no analysis flags likewise', bare.analysisFlags, []);
 
   // A nonsense timestamp must not render "Invalid Date" into the header.
-  const broken = buildFrameSummary(makePacket(9, { timestamp: Number.NaN }));
+  const broken = buildFrameSummary(makePacket(9, { tsUs: Number.NaN }));
   check('an unusable timestamp degrades to a word, not Invalid Date', [broken.localTime, broken.utcTime], ['unknown', 'unknown']);
 }
 

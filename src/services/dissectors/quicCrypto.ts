@@ -11,8 +11,10 @@
  * This is what turns "Initial, DCID=9635b6f53a7cb323" into
  * "Initial, DCID=9635b6f53a7cb323, PKN: 1, CRYPTO, CRYPTO, PING".
  */
-import { encryptBlock128, expandKey128, aes128GcmDecrypt, AES_BLOCK_SIZE } from '../crypto/aes';
+import { encryptBlock, expandKey, aesGcmDecrypt, AES_BLOCK_SIZE } from '../crypto/aes';
+import { chacha20, chacha20Poly1305Decrypt } from '../crypto/chacha20poly1305';
 import { hkdfExtract, hkdfExpandLabel } from '../crypto/hkdf';
+import type { CipherSuiteSpec } from '../tls/cipherSuites';
 
 /** RFC 9001 §5.2. Changed by QUIC v2 so v1 and v2 keys never collide. */
 export const QUIC_V1_INITIAL_SALT = new Uint8Array([
@@ -37,6 +39,14 @@ export interface DirectionKeys {
   key: Uint8Array;
   iv: Uint8Array;
   headerProtection: Uint8Array;
+  /**
+   * Which AEAD opens the payload and which primitive builds the header
+   * protection mask. Initial packets are always AES-128-GCM; a connection that
+   * negotiated ChaCha20-Poly1305 uses it for everything after them, including
+   * the header mask, which is a *different* construction rather than the same
+   * one with another cipher.
+   */
+  aead: 'aes-gcm' | 'chacha20-poly1305';
 }
 
 export interface InitialKeys {
@@ -53,7 +63,51 @@ function deriveDirection(initialSecret: Uint8Array, label: string, isV2: boolean
     key: hkdfExpandLabel(secret, `${prefix}key`, new Uint8Array(0), 16),
     iv: hkdfExpandLabel(secret, `${prefix}iv`, new Uint8Array(0), 12),
     headerProtection: hkdfExpandLabel(secret, `${prefix}hp`, new Uint8Array(0), 16),
+    aead: 'aes-gcm',
   };
+}
+
+/**
+ * Derives one direction's packet protection keys from a key log traffic
+ * secret (RFC 9001 section 5.1).
+ *
+ * The same secret TLS would expand into a record key expands here into a QUIC
+ * packet key - with QUIC's own labels, and one extra output TLS has no need
+ * for: the header protection key, because QUIC encrypts its packet number and
+ * some of its first byte where TLS leaves its record header in the clear. The
+ * hash is the cipher suite's, so a SHA-384 suite must expand with SHA-384 or
+ * the keys are wrong in a way only the AEAD tag reveals.
+ */
+export function deriveTrafficKeys(
+  secret: Uint8Array,
+  suite: CipherSuiteSpec,
+  isV2 = false
+): DirectionKeys {
+  const prefix = isV2 ? 'quicv2 ' : 'quic ';
+  return {
+    key: hkdfExpandLabel(secret, `${prefix}key`, new Uint8Array(0), suite.keyLength, suite.hash),
+    iv: hkdfExpandLabel(secret, `${prefix}iv`, new Uint8Array(0), 12, suite.hash),
+    headerProtection: hkdfExpandLabel(secret, `${prefix}hp`, new Uint8Array(0), suite.keyLength, suite.hash),
+    aead: suite.aead,
+  };
+}
+
+/**
+ * The five-byte header protection mask (RFC 9001 section 5.4).
+ *
+ * Two constructions, one per AEAD family. AES applies the raw block cipher to
+ * the sample - which is the reason a single-block AES primitive exists in this
+ * codebase at all. ChaCha20 instead reads the sample as a counter and a nonce
+ * and encrypts five zero bytes with them, so the "mask" is the head of a
+ * keystream block. Using one where the other belongs yields a plausible-
+ * looking packet number and a payload that fails to authenticate.
+ */
+function headerProtectionMask(keys: DirectionKeys, sample: Uint8Array): Uint8Array {
+  if (keys.aead === 'aes-gcm') {
+    return encryptBlock(expandKey(keys.headerProtection), sample);
+  }
+  const counter = sample[0] | (sample[1] << 8) | (sample[2] << 16) | (sample[3] << 24);
+  return chacha20(keys.headerProtection, sample.subarray(4, 16), counter >>> 0, new Uint8Array(5));
 }
 
 /**
@@ -116,18 +170,34 @@ export function decryptInitialPacket(
   keys: DirectionKeys,
   largestPacketNumber: number
 ): DecryptedPacket | null {
+  return decryptQuicPacket(bytes, packetStart, pnOffset, packetEnd, keys, largestPacketNumber, true);
+}
+
+/**
+ * Removes header protection and decrypts one packet's payload, long header or
+ * short.
+ *
+ * `isLongHeader` decides how much of the first byte is protected: four bits on
+ * a long header, five on a short one, the extra bit being the key phase. That
+ * one-bit difference is the whole of what separates a Handshake packet from a
+ * 1-RTT packet here; everything else - the sample position, the nonce, the AAD
+ * - is identical, which is why they share this function.
+ */
+export function decryptQuicPacket(
+  bytes: Uint8Array,
+  packetStart: number,
+  pnOffset: number,
+  packetEnd: number,
+  keys: DirectionKeys,
+  largestPacketNumber: number,
+  isLongHeader: boolean
+): DecryptedPacket | null {
   const sampleStart = pnOffset + HEADER_PROTECTION_SAMPLE_OFFSET;
   if (sampleStart + AES_BLOCK_SIZE > packetEnd) return null;
 
-  // The protection mask is the raw block cipher applied to a sample of the
-  // ciphertext - this is why a single-block AES primitive is needed at all.
-  const mask = encryptBlock128(
-    expandKey128(keys.headerProtection),
-    bytes.subarray(sampleStart, sampleStart + AES_BLOCK_SIZE)
-  );
+  const mask = headerProtectionMask(keys, bytes.subarray(sampleStart, sampleStart + AES_BLOCK_SIZE));
 
-  // Long headers expose only the low 4 bits of the first byte to protection.
-  const firstByte = bytes[packetStart] ^ (mask[0] & 0x0f);
+  const firstByte = bytes[packetStart] ^ (mask[0] & (isLongHeader ? 0x0f : 0x1f));
   const pnLength = (firstByte & 0x03) + 1;
   if (pnOffset + pnLength > packetEnd) return null;
 
@@ -158,13 +228,11 @@ export function decryptInitialPacket(
   aad[0] = firstByte;
   aad.set(packetNumberBytes, pnOffset - packetStart);
 
-  const payload = aes128GcmDecrypt(
-    keys.key,
-    nonce,
-    aad,
-    bytes.subarray(ciphertextStart, ciphertextEnd),
-    bytes.subarray(ciphertextEnd, packetEnd)
-  );
+  const ciphertext = bytes.subarray(ciphertextStart, ciphertextEnd);
+  const tag = bytes.subarray(ciphertextEnd, packetEnd);
+  const payload = keys.aead === 'aes-gcm'
+    ? aesGcmDecrypt(keys.key, nonce, aad, ciphertext, tag)
+    : chacha20Poly1305Decrypt(keys.key, nonce, aad, ciphertext, tag);
   if (!payload) return null;
 
   return { packetNumber, payload };

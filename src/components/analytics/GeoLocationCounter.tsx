@@ -201,7 +201,7 @@ export const GeoLocationCounter: React.FC<GeoLocationCounterProps> = ({
                   {/* Only shown when it says something the row does not: one
                       host per place is the common case. */}
                   {place.hosts > 1 && (
-                    <span className="shrink-0 tabular-nums text-[10px] text-primary">
+                    <span className="shrink-0 tabular-nums text-[10px] font-bold text-muted-foreground">
                       {place.hosts}
                     </span>
                   )}

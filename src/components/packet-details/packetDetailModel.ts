@@ -109,13 +109,16 @@ function formatSeconds(seconds: number, precision: number): string {
 
 export function buildFrameSummary(packet: Packet): FrameSummary {
   const precision = packet.tsPrecision ?? 6;
-  const date = new Date(packet.timestamp);
-  // Sub-millisecond digits are not in the Date - `timestamp` is milliseconds -
-  // so the fractional part is taken from the timestamp itself and appended.
-  const fractional = (packet.timestamp % 1000) / 1000;
+  const date = new Date(packet.tsUs / 1000);
+  // A Date holds milliseconds, so the fraction of a second is taken from the
+  // stamp itself: nanoseconds when the capture file carried them, else the
+  // microseconds every live frame has.
+  const fractional = packet.tsNanos !== undefined
+    ? Number(packet.tsNanos % 1_000_000_000n) / 1e9
+    : (packet.tsUs % 1_000_000) / 1e6;
   const fractionalDigits = formatSeconds(fractional, precision).slice(2);
 
-  const valid = Number.isFinite(packet.timestamp) && !Number.isNaN(date.getTime());
+  const valid = Number.isFinite(packet.tsUs) && !Number.isNaN(date.getTime());
   const localTime = valid
     ? `${date.toLocaleString(undefined, { hour12: false })}.${fractionalDigits}`
     : 'unknown';

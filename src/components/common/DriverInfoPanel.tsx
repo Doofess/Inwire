@@ -1,13 +1,30 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { TbTrash, TbPlugConnected, TbPlugConnectedX, TbRefresh } from 'react-icons/tb';
-import type { AgentLogEntry } from '../../services/agentProtocol';
+import type { AgentLogEntry, CaptureDropStats } from '../../services/agentProtocol';
 import { detectOS } from '../../services/platformDetect';
+import { describeLink, type LinkChange, type LinkContext } from '../../services/linkContext';
 
 interface DriverInfoPanelProps {
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   agentVersion: string | null;
   agentOutdated: boolean;
   agentCaptureState: 'idle' | 'sniffing';
+  /** This capture's frame counts from the agent, or null before its first report. */
+  captureStats?: CaptureDropStats | null;
+  /**
+   * Frames pushed out of the browser's own buffer because it filled.
+   *
+   * The third of the three places a frame goes missing, and the only one the
+   * app itself is responsible for. Counted and worded apart from the other two
+   * because it is a different loss: these frames were captured, dissected and
+   * shown, and are still in the stored session - they are just no longer in
+   * the list.
+   */
+  droppedBuffer?: number;
+  /** What the browser says about the link, or null where it says nothing. */
+  linkContext?: LinkContext | null;
+  /** Network transitions observed this session, oldest first. */
+  linkChanges?: LinkChange[];
   agentInterfaces: { name: string; label: string }[];
   selectedInterfaces: string[];
   agentLog: AgentLogEntry[];
@@ -34,6 +51,14 @@ interface DriverInfoPanelProps {
    * keeps knowing only about the driver.
    */
   captureSection?: React.ReactNode;
+  /**
+   * The pairing block, when the agent has a token configured.
+   *
+   * Rendered above everything else in this panel: an agent waiting to be
+   * paired reports no interfaces, no log and no capture, so every row below is
+   * empty until this is dealt with.
+   */
+  pairingSection?: React.ReactNode;
 }
 
 /**
@@ -64,8 +89,8 @@ const AGENT_STATUS_COLOR: Record<DriverInfoPanelProps['agentStatus'], string> = 
 // real one, which would mean another protocol field for a rare case.
 function logFilePath(): string {
   return detectOS() === 'windows'
-    ? '%ProgramData%\\NetView\\agent.log'
-    : '~/.netview/agent.log';
+    ? '%ProgramData%\\Inwire\\agent.log'
+    : '~/.inwire/agent.log';
 }
 
 function levelColor(level: string | null): string {
@@ -106,6 +131,10 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   agentVersion,
   agentOutdated,
   agentCaptureState,
+  captureStats,
+  droppedBuffer = 0,
+  linkContext,
+  linkChanges = [],
   agentInterfaces,
   selectedInterfaces,
   agentLog,
@@ -118,6 +147,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   onUnsubscribe,
   onClearLog,
   captureSection,
+  pairingSection,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -169,6 +199,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
 
   return (
     <div className="flex flex-col gap-4 min-h-0">
+      {pairingSection}
       <div>
         <div className="text-xs font-semibold text-foreground mb-2">Driver</div>
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
@@ -195,6 +226,69 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
               What this row actually reports is whether it is sniffing right
               now, so both of its values now say that. */}
           <dd className="font-mono">{agentCaptureState === 'sniffing' ? 'Sniffing' : 'Not capturing'}</dd>
+
+          {/* Loss is reported here, in full and in one place. "Unknown" for
+              the driver's count means the agent could not read pcap's
+              statistics on this adapter - it is not a zero, and is never shown
+              as one. */}
+          {captureStats && (
+            <>
+              <dt className="text-muted-foreground">Received</dt>
+              <dd className="font-mono">{captureStats.received.toLocaleString()}</dd>
+              <dt className="text-muted-foreground">Dropped by driver</dt>
+              <dd className={`font-mono ${captureStats.droppedKernel ? 'text-amber-600 dark:text-amber-400' : ''}`}>
+                {captureStats.droppedKernel === null ? 'Unknown' : captureStats.droppedKernel.toLocaleString()}
+              </dd>
+              <dt className="text-muted-foreground">Dropped by agent</dt>
+              <dd className={`font-mono ${captureStats.droppedAgent ? 'text-amber-600 dark:text-amber-400' : ''}`}>
+                {captureStats.droppedAgent.toLocaleString()}
+              </dd>
+            </>
+          )}
+
+          {/* Gated on its own count rather than on captureStats: the buffer
+              fills during an import too, when there is no agent to have
+              reported anything. */}
+          {droppedBuffer > 0 && (
+            <>
+              <dt className="text-muted-foreground">Dropped from buffer</dt>
+              <dd className="font-mono text-amber-600 dark:text-amber-400">
+                {droppedBuffer.toLocaleString()}
+              </dd>
+            </>
+          )}
+
+          {/* What the BROWSER believes about the link, kept visibly apart from
+              the counts above, which the capture measured. The estimates are
+              the browser's own and are rounded by it to resist fingerprinting;
+              they are context for reading a capture, never a measurement of
+              one. Absent entirely on Firefox and Safari, which have no
+              Network Information API - saying nothing beats deriving a number
+              from timings and presenting it as though the browser had said
+              it. */}
+          {linkContext && describeLink(linkContext) && (
+            <>
+              <dt className="text-muted-foreground">Link (browser estimate)</dt>
+              <dd className="font-mono">{describeLink(linkContext)}</dd>
+            </>
+          )}
+
+          {/* The half that actually explains a capture. A machine changing
+              network is what a gap with no frames, a burst of ARP and DHCP, or
+              a stream that stops dead all look like from the inside. */}
+          {linkChanges.length > 0 && (
+            <>
+              <dt className="text-muted-foreground">Network changed</dt>
+              <dd className="font-mono text-amber-600 dark:text-amber-400">
+                {linkChanges.length}&times;
+                <span className="text-muted-foreground">
+                  {' '}(last: {describeLink(linkChanges[linkChanges.length - 1].before) || 'unknown'}
+                  {' → '}
+                  {describeLink(linkChanges[linkChanges.length - 1].after) || 'unknown'})
+                </span>
+              </dd>
+            </>
+          )}
 
           <dt className="text-muted-foreground">Listening on</dt>
           <dd className="font-mono">

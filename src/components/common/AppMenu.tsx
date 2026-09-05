@@ -1,17 +1,22 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Command } from 'cmdk';
 import { AnimatePresence, motion } from 'motion/react';
+import { BrandMark } from './BrandMark';
 import { HamburgerIcon } from './HamburgerIcon';
+import { headerIconButtonClass } from './headerButton';
 import {
   TbDownload,
   TbCloudDownload,
-  TbChartBar,
   TbCode,
   TbHome,
   TbSettings,
+  TbChartBar,
+  TbCheck,
+  TbTag,
   TbX,
 } from 'react-icons/tb';
 import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
+import type { NameResolutionPrefs } from '../../services/interfacePrefs';
 
 /**
  * The menu holds only what has no permanent control elsewhere. Capture
@@ -23,9 +28,17 @@ import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
  */
 interface AppMenuProps {
   onOpenDissectorModal: () => void;
-  onOpenStatsModal: () => void;
   onOpenExportModal: () => void;
+  onOpenStatisticsModal: () => void;
   onOpenIspModal?: () => void;
+  /**
+   * Wireshark puts name resolution under a View menu; this app's only menu is
+   * this one, so the two passive switches live here beside the views they
+   * change. The two outbound lookups stay in Settings, where the sentence
+   * explaining what they send has room to be read.
+   */
+  nameResolution: NameResolutionPrefs;
+  onNameResolutionChange: (patch: Partial<NameResolutionPrefs>) => void;
   onOpenSettingsModal: () => void;
   agentOutdated: boolean;
 }
@@ -49,7 +62,12 @@ const itemClass =
 const itemIconClass = 'w-3.5 h-3.5 shrink-0 text-chrome-foreground';
 
 function downloadAgentInstaller() {
-  const { url, filename } = getAgentDownloadForCurrentOS();
+  const download = getAgentDownloadForCurrentOS();
+  // Null on a phone and on a platform this build does not recognise. The menu
+  // entry is hidden in that case, so this is belt and braces rather than a
+  // path anyone reaches.
+  if (!download) return;
+  const { url, filename } = download;
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
@@ -60,9 +78,11 @@ function downloadAgentInstaller() {
 
 export const AppMenu: React.FC<AppMenuProps> = ({
   onOpenDissectorModal,
-  onOpenStatsModal,
   onOpenExportModal,
+  onOpenStatisticsModal,
   onOpenIspModal,
+  nameResolution,
+  onNameResolutionChange,
   onOpenSettingsModal,
   agentOutdated,
 }) => {
@@ -108,7 +128,13 @@ export const AppMenu: React.FC<AppMenuProps> = ({
         title="Menu (Ctrl/Cmd + K)"
         aria-expanded={open}
         aria-label="Toggle menu"
-        className="relative z-50 flex items-center justify-center w-9 h-9 rounded-md border transition-colors cursor-pointer bg-secondary hover:bg-accent border-border text-foreground dark:text-primary"
+        // Anchors the tour's driver step. See components/tour/tourSteps.
+        data-tour="menu"
+        // The same style as the adapter picker and the capture button beside
+        // it - see headerButton.ts. `relative z-50` is this button's own: it
+        // has to sit above the drawer's backdrop so that clicking it closes
+        // the menu rather than the scrim swallowing the click.
+        className={`${headerIconButtonClass} relative z-50 active:scale-95 cursor-pointer`}
       >
         <HamburgerIcon open={open} />
       </button>
@@ -151,19 +177,32 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                 ref={commandRef}
                 label="App Menu"
                 loop
-                // Filtering on, and an input below to drive it.
-                //
-                // This was bound to Ctrl+K and built on cmdk from the start,
-                // but with no input and filtering switched off it was a drawer
-                // of links wearing a palette's keybinding. Six entries fit on
-                // screen, so it did not matter; adding view commands to a flat
-                // list is where it starts to.
-                shouldFilter
+                // Filtering OFF, because there is no input to drive it. cmdk
+                // is still what this is built on - it gives the drawer its
+                // arrow-key navigation, its Enter-to-select and its
+                // roving-focus handling, and those are the parts a list of
+                // links actually needs. Left on, `shouldFilter` would score
+                // every item against a search string nothing can ever set.
+                shouldFilter={false}
                 tabIndex={0}
                 className="flex flex-col h-full rounded-r-xl border shadow-2xl overflow-hidden bg-chrome border-chrome-foreground/20 text-chrome-foreground outline-none"
               >
                 <div className="flex items-center justify-between border-b border-chrome-foreground/20 px-3.5 py-2.5 shrink-0">
-                  <span className="text-xs font-bold text-chrome-foreground">Menu</span>
+                  {/* The mark, not the word. A drawer that has slid out from
+                      under the hamburger does not need a label reading "Menu"
+                      - the thing it is was settled by the gesture that opened
+                      it - so the row carries the app's own icon instead.
+
+                      `currentColor` from the drawer, which is
+                      `--chrome-foreground`: this is standing in for a heading,
+                      so it takes the heading's colour rather than the
+                      deliberately low-contrast `--chrome-brand` the header
+                      lockup uses.
+
+                      Titled, because it is now the only thing naming this row.
+                      That switches BrandMark from aria-hidden to a labelled
+                      img - see the component. */}
+                  <BrandMark className="w-6 h-6 shrink-0" title="Inwire" />
                   {/* Was an inert "ESC" hint; Escape itself still closes the
                       menu via the keydown handler above, this just gives the
                       hint something to do when clicked instead of typed. */}
@@ -175,18 +214,6 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                     <TbX className="w-4 h-4" />
                   </button>
                 </div>
-
-                <div className="border-b border-chrome-foreground/20 px-3 py-2 shrink-0">
-                  <Command.Input
-                    autoFocus
-                    placeholder="Search commands..."
-                    className="w-full bg-transparent text-xs outline-none text-chrome-foreground placeholder:text-chrome-foreground/60"
-                  />
-                </div>
-
-                <Command.Empty className="px-3 py-6 text-center text-[11px] text-chrome-foreground/70">
-                  No matching command.
-                </Command.Empty>
 
                 {/* One flat list. There is no Command.Group here on purpose:
                     with a handful of entries, an Actions/Views split cost two
@@ -211,13 +238,17 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                   {/* Was its own always-visible header button; folded in here
                       now that the header has nothing right of the trigger
                       for it to sit next to. */}
+                  {/* Hidden where the agent cannot run at all. Offering an
+                      iPad a shell script it has no way to execute is worse
+                      than offering it nothing. */}
                   <Command.Item
                     value="download-driver"
                     onSelect={() => run(downloadAgentInstaller)}
                     className={itemClass}
+                    style={agentDownload ? undefined : { display: 'none' }}
                   >
                     <TbCloudDownload className={itemIconClass} />
-                    <span className="flex-1">Download Driver ({agentDownload.label})</span>
+                    <span className="flex-1">Download Driver ({agentDownload?.label ?? 'unavailable'})</span>
                     {agentOutdated && (
                       <span
                         className="shrink-0 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-chrome-foreground/15 border border-chrome-foreground/30 text-chrome-foreground"
@@ -227,17 +258,36 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       </span>
                     )}
                   </Command.Item>
-                  {/* Named for what it opens rather than for its category:
-                      the window is a protocol hierarchy, and the panel in the
-                      sidebar that leads here is already called Protocol
-                      Breakdown - two names for one thing read as two things. */}
                   <Command.Item
-                    value="protocol-breakdown"
-                    onSelect={() => run(onOpenStatsModal)}
+                    value="capture-statistics"
+                    onSelect={() => run(onOpenStatisticsModal)}
                     className={itemClass}
                   >
                     <TbChartBar className={itemIconClass} />
-                    <span>Protocol Breakdown</span>
+                    <span>Capture Statistics</span>
+                  </Command.Item>
+                  {/* Wireshark's View -> Name Resolution. Both switches are
+                      passive - every name they show came out of the capture -
+                      so they toggle in place rather than opening a dialog to
+                      explain themselves. The two lookups that DO send an
+                      address somewhere stay in Settings. */}
+                  <Command.Item
+                    value="resolve-network-addresses"
+                    onSelect={() => onNameResolutionChange({ network: !nameResolution.network })}
+                    className={itemClass}
+                  >
+                    <TbTag className={itemIconClass} />
+                    <span className="flex-1">Resolve Network Addresses</span>
+                    {nameResolution.network && <TbCheck className="w-3.5 h-3.5 shrink-0" />}
+                  </Command.Item>
+                  <Command.Item
+                    value="resolve-transport-ports"
+                    onSelect={() => onNameResolutionChange({ transport: !nameResolution.transport })}
+                    className={itemClass}
+                  >
+                    <TbTag className={itemIconClass} />
+                    <span className="flex-1">Resolve Transport Ports</span>
+                    {nameResolution.transport && <TbCheck className="w-3.5 h-3.5 shrink-0" />}
                   </Command.Item>
                   <Command.Item
                     value="custom-dissectors"

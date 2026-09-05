@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Logging for the NetView agent.
+Logging for the Inwire agent.
 
 Once the agent runs as a service there is no console, so a file is the only
 diagnostic channel that exists for either the user or a maintainer. This is
@@ -21,7 +21,7 @@ _configured_with = None
 
 
 def setup_logging(directory, to_stderr=True, level=logging.INFO):
-    """Configures and returns the shared `netview` logger.
+    """Configures and returns the shared `inwire` logger.
 
     Idempotent: calling it twice with the same (directory, to_stderr) returns
     the same logger without stacking duplicate handlers (which would print
@@ -30,7 +30,7 @@ def setup_logging(directory, to_stderr=True, level=logging.INFO):
     would otherwise keep writing to a stderr the service has no console for.
     """
     global _configured_with
-    logger = logging.getLogger("netview")
+    logger = logging.getLogger("inwire")
     if _configured_with == (directory, to_stderr):
         return logger
 

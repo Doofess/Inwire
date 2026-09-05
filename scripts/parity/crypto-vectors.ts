@@ -12,6 +12,7 @@
  * exercises the whole stack end to end).
  */
 import { sha256, hmacSha256 } from '../../src/services/crypto/sha256';
+import { md5Hex } from '../../src/services/crypto/md5';
 import { expandKey128, encryptBlock128, aes128GcmDecrypt } from '../../src/services/crypto/aes';
 import { hkdfExtract, hkdfExpand, hkdfExpandLabel } from '../../src/services/crypto/hkdf';
 import { deriveInitialKeys, QUIC_V1_INITIAL_SALT } from '../../src/services/dissectors/quicCrypto';
@@ -30,6 +31,13 @@ function check(name: string, actual: string, expected: string) {
     console.log(`        actual   ${actual}`);
   }
 }
+
+// --- MD5 (RFC 1321 A.5) - only because JA3 is defined as one ---
+check('md5("")', md5Hex(''), 'd41d8cd98f00b204e9800998ecf8427e');
+check('md5("abc")', md5Hex('abc'), '900150983cd24fb0d6963f7d28e17f72');
+check('md5("message digest")', md5Hex('message digest'), 'f96b697d7cb7938d525a2f31aaf161d0');
+check('md5(2-block)', md5Hex('12345678901234567890123456789012345678901234567890123456789012345678901234567890'),
+  '57edf4a22be3c955ac49da2e2107b67a');
 
 // --- SHA-256 (FIPS 180-4) ---
 check('sha256("")', hex(sha256(ascii(''))),

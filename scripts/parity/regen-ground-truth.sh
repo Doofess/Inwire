@@ -1,46 +1,89 @@
 #!/usr/bin/env bash
-# Regenerates the tshark ground truth the parity harness diffs against.
+# Regenerates the tshark ground truth the parity harness diffs against, for
+# every fixture listed in test/fixtures/acceptance.json.
 #
-#   ./scripts/parity/regen-ground-truth.sh [capture]
+#   ./scripts/parity/regen-ground-truth.sh            # all fixtures
+#   ./scripts/parity/regen-ground-truth.sh inwire     # one, by name
 #
-# Two passes, because tshark's Protocol/Info columns disagree with the
-# reference analyzer's own GUI on one specific case: when a port-443 conversation carries a
-# segment that is *not* a valid TLS record (a keep-alive's single byte, say),
-# tshark labels the row with the stale conversation name "SSL" and emits an
-# empty Info, even though `frame.protocols` proves TLS never dissected it. The
-# GUI shows the underlying TCP line instead. Since the GUI is what NetView is
-# being matched against, rows with an empty Info are taken from a second pass
-# with the TLS dissector disabled, which yields exactly what the GUI displays.
+# Output: test/fixtures/<name>.psv and <name>-colors.psv - untracked, like the
+# captures themselves (docs/decisions/0004-fixtures-and-privacy.md).
 #
-# Frames TLS genuinely did dissect ("TLSv1.2 / Application Data") have a
-# non-empty Info in the first pass and are left untouched.
+# Two things about the tshark invocation matter:
+#
+# 1. `-2` (two-pass). Single-pass tshark cannot know the future, so a ping
+#    request never gets its "(reply in N)", a DNS query never gets its
+#    "[Response In]", and the segments of a TLS record that completes later
+#    show an EMPTY Info. The Wireshark GUI is two-pass, and it is the GUI
+#    Inwire is matched against. On the inwire fixture 477 rows differ between
+#    the two modes, all in the GUI's favour.
+#
+# 2. `tcp.reassembled_in` is exported as its own column, before Info. It is set
+#    on every segment that is part of a PDU reassembled in a later frame -
+#    exactly the rows whose Protocol/Info the GUI renders as plain TCP with a
+#    "[TCP PDU reassembled in N]" suffix. Having the field separately lets the
+#    harness bucket those rows on their own, because the fix for them (a
+#    record cursor across segments, spec Phase 4) is unrelated to every other
+#    TCP mismatch.
+#
+# The second pass with TLS disabled is kept for any row whose Info is still
+# empty under -2: tshark labels a port-443 segment that is not a valid record
+# with the stale conversation name "SSL" and no Info, while the GUI shows the
+# TCP line underneath.
 set -euo pipefail
 
-# Resolved from PATH by default. On Windows the installer does not add it, so
-# point TSHARK at the binary yourself:
-#   TSHARK="/c/Program Files/.../tshark.exe" ./scripts/parity/regen-ground-truth.sh
 TSHARK="${TSHARK:-tshark}"
 if ! command -v "$TSHARK" >/dev/null 2>&1 && [ ! -x "$TSHARK" ]; then
-  echo "tshark not found. Set TSHARK to its full path." >&2
-  exit 1
+  # The Windows installer does not add it to PATH; try the default location
+  # before giving up, so the common case needs no environment variable.
+  if [ -x "/c/Program Files/Wireshark/tshark.exe" ]; then
+    TSHARK="/c/Program Files/Wireshark/tshark.exe"
+  else
+    echo "tshark not found. Set TSHARK to its full path." >&2
+    exit 1
+  fi
 fi
-CAPTURE="${1:-C:/Users/Rotem/Downloads/tmp.pcapng}"
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FIXTURES="$HERE/../../test/fixtures"
+ACCEPT="$FIXTURES/acceptance.json"
 
-FIELDS=(-e frame.number -e frame.time_relative -e _ws.col.Source
-        -e _ws.col.Destination -e _ws.col.Protocol -e frame.len -e _ws.col.Info)
+# name<TAB>file for every fixture, or just the ones asked for.
+list_fixtures() {
+  node -e '
+    const a = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    const want = process.argv.slice(2);
+    for (const [name, f] of Object.entries(a.fixtures)) {
+      if (want.length === 0 || want.includes(name)) console.log(name + "\t" + f.file);
+    }' "$ACCEPT" "$@"
+}
 
-"$TSHARK" -r "$CAPTURE" -T fields "${FIELDS[@]}" -E separator='|' > "$HERE/.pass1.psv"
-"$TSHARK" -r "$CAPTURE" --disable-protocol tls -T fields "${FIELDS[@]}" -E separator='|' > "$HERE/.pass2.psv"
+# JA3/JA3S/JA4 ride along as their own columns: tshark computes them from
+# the same hello bytes the app parses, so a fingerprint mismatch pins down a
+# parsing error in one extension or one GREASE rule without any guesswork.
+FIELDS=(-e frame.number -e frame.time_relative -e _ws.col.Source -e _ws.col.Destination
+        -e _ws.col.Protocol -e frame.len -e tcp.reassembled_in
+        -e tls.handshake.ja3 -e tls.handshake.ja3s -e tls.handshake.ja4 -e _ws.col.Info)
 
-# Field 7 (Info) empty in pass 1 -> take that row's Protocol and Info from pass 2.
-awk -F'|' -v OFS='|' '
-  NR==FNR { proto[$1]=$5; info[$1]=$7; next }
-  { if ($7 == "") { $5 = proto[$1]; $7 = info[$1] } ; print }
-' "$HERE/.pass2.psv" "$HERE/.pass1.psv" > "$HERE/ground-truth.psv"
+list_fixtures "$@" | while IFS=$'\t' read -r name file; do
+  capture="$FIXTURES/$file"
+  if [ ! -f "$capture" ]; then
+    echo "missing fixture $capture - see test/fixtures/README.md" >&2
+    exit 1
+  fi
+  echo "$name: $file"
 
-"$TSHARK" -r "$CAPTURE" --color -T fields -e frame.number -e frame.coloring_rule.name \
-  -E separator='|' > "$HERE/ground-truth-colors.psv"
+  "$TSHARK" -2 -r "$capture" -T fields "${FIELDS[@]}" -E separator='|' > "$FIXTURES/.pass1.psv"
+  "$TSHARK" -2 -r "$capture" --disable-protocol tls -T fields "${FIELDS[@]}" -E separator='|' > "$FIXTURES/.pass2.psv"
 
-rm -f "$HERE/.pass1.psv" "$HERE/.pass2.psv"
-echo "wrote $(wc -l < "$HERE/ground-truth.psv") frames to $HERE/ground-truth.psv"
+  # Field 11 (Info) empty in pass 1 -> take that row's Protocol and Info from pass 2.
+  awk -F'|' -v OFS='|' '
+    NR==FNR { proto[$1]=$5; info[$1]=$11; next }
+    { if ($11 == "") { $5 = proto[$1]; $11 = info[$1] } ; print }
+  ' "$FIXTURES/.pass2.psv" "$FIXTURES/.pass1.psv" > "$FIXTURES/$name.psv"
+
+  "$TSHARK" -2 -r "$capture" --color -T fields -e frame.number -e frame.coloring_rule.name \
+    -E separator='|' > "$FIXTURES/$name-colors.psv"
+
+  rm -f "$FIXTURES/.pass1.psv" "$FIXTURES/.pass2.psv"
+  echo "  wrote $(wc -l < "$FIXTURES/$name.psv") frames"
+done

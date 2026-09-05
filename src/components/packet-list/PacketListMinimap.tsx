@@ -7,6 +7,7 @@ import {
   usePreferenceSync,
 } from '../../services/preferences';
 import { useThemeToken } from '../../lib/themeColor';
+import { useThrottledValue } from '../../lib/useThrottledValue';
 import type { PacketTheme } from '../../services/packetThemes';
 
 interface PacketListMinimapProps {
@@ -52,7 +53,14 @@ interface PacketListMinimapProps {
   onUserScrollIntent?: () => void;
 }
 
-const MINIMAP_WIDTH_STORAGE_KEY = 'netview.packetListMinimapWidth';
+/**
+ * How often the colour strip is repainted from the buffer. Matches the
+ * dashboard's own refresh, for the same reason: the strip is an overview, and
+ * an overview that redraws every flush is paying for detail it cannot show.
+ */
+const MINIMAP_REPAINT_MS = 500;
+
+const MINIMAP_WIDTH_STORAGE_KEY = 'inwire.packetListMinimapWidth';
 const DEFAULT_MINIMAP_WIDTH = 16;
 const MIN_MINIMAP_WIDTH = 8;
 const MAX_MINIMAP_WIDTH = 120;
@@ -151,6 +159,15 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   // Follows the APP theme, not the packet theme: the marker is a UI
   // affordance pointing at the selected row, not packet data. Mixing the two
   // sources in one canvas is deliberate.
+  // The strip is repainted from a 2 Hz snapshot of the buffer, not the live
+  // 10 Hz one. Every repaint touches every packet - the downsampling branch
+  // below visits all of them to average a colour per pixel row - and at the
+  // 50,000 cap that is ~6-7 ms, ten times a second, for a strip whose bands
+  // are a fraction of a pixel tall and cannot show a single packet's arrival
+  // anyway. The viewport indicator and the selection marker stay live: they
+  // are the two things on this strip a person actually watches move.
+  const paintedPackets = useThrottledValue(packets, MINIMAP_REPAINT_MS);
+
   const accent = useThemeToken('--primary', '#f97316');
 
   // Same reasoning as the packet list's column widths: dragging this divider
@@ -211,7 +228,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.width, size.height);
 
-    const total = packets.length;
+    const total = paintedPackets.length;
     if (total === 0) return;
 
     // A packet matching no rule is painted with the theme's own ground.
@@ -219,7 +236,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
 
     if (total <= size.height) {
       const bandHeight = size.height / total;
-      packets.forEach((packet, i) => {
+      paintedPackets.forEach((packet, i) => {
         const style = colorEngine.getPacketStyle(packet, packetTheme);
         ctx.fillStyle = style.background || fallback;
         ctx.fillRect(0, i * bandHeight, size.width, Math.ceil(bandHeight));
@@ -231,7 +248,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         const endIdx = Math.max(startIdx + 1, Math.floor((row + 1) * packetsPerRow));
         let r = 0, g = 0, b = 0, a = 0, count = 0;
         for (let i = startIdx; i < endIdx && i < total; i++) {
-          const style = colorEngine.getPacketStyle(packets[i], packetTheme);
+          const style = colorEngine.getPacketStyle(paintedPackets[i], packetTheme);
           const [pr, pg, pb, pa] = resolveColorBytes(style.background || fallback);
           r += pr; g += pg; b += pb; a += pa;
           count++;
@@ -243,7 +260,12 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
     }
 
     if (selectedPacket) {
-      const idx = packets.findIndex(p => p.id === selectedPacket.id);
+      // From the end: the selection is almost always recent, and a forward
+      // scan of the whole buffer is the one full pass left in this effect.
+      let idx = -1;
+      for (let i = paintedPackets.length - 1; i >= 0; i--) {
+        if (paintedPackets[i].id === selectedPacket.id) { idx = i; break; }
+      }
       if (idx !== -1) {
         const y = (idx / total) * size.height;
         // The selected-packet marker, in the theme's accent.
@@ -251,7 +273,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         ctx.fillRect(0, Math.max(0, y - 1), size.width, 2);
       }
     }
-  }, [packets, colorEngine, packetTheme, themeKey, size, selectedPacket, accent]);
+  }, [paintedPackets, colorEngine, packetTheme, themeKey, size, selectedPacket, accent]);
 
   const scrollToClientY = useCallback((clientY: number) => {
     const wrapper = wrapperRef.current;

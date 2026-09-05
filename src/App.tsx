@@ -4,21 +4,47 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { DnsTracker } from './services/dnsTracker';
+import { L3Tracker } from './services/l3Tracker';
 import { AnimatePresence } from "motion/react";
 import { useTheme } from "next-themes";
 import { useMediaQuery } from "./lib/useMediaQuery";
 import { useSystemThemePreference } from "./lib/useSystemTheme";
 import { useMotionPreference } from "./lib/motion";
+import { useFontPreference } from "./lib/font";
+import { useChromePreference } from "./lib/chrome";
+import { TourOverlay } from "./components/tour/TourOverlay";
+import { tourStore } from "./services/tourPrefs";
 import { useNameResolutionPreference } from "./lib/nameResolution";
-import { LAYOUT_DEFAULTS, layoutStore, performanceStore } from "./services/interfacePrefs";
-import { usePreferenceStore } from "./services/preferenceStore";
+import {
+  LAYOUT_DEFAULTS,
+  layoutStore,
+  packetListStore,
+  performanceStore,
+  loadAgentToken,
+  saveAgentToken,
+} from "./services/interfacePrefs";
+import { NameResolutionMap, snapshot as nameSnapshot } from "./services/nameResolution";
+import type { StreamTarget } from "./services/followStream";
+import { ExpertLog, expertSnapshot } from "./services/expertInfo";
+import { useIncrementalAggregate } from "./lib/useIncrementalAggregate";
+import { MAX_CUSTOM_COLUMNS } from "./lib/packetColumns";
+import { usePreferenceStore, usePreferenceValue } from "./services/preferenceStore";
+import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { DashboardAside } from "./components/analytics/DashboardAside";
 import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Packet, UserRole } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
-import { decodeRawEthernetPacket } from "./services/pcapParser";
+import { pipeline } from "./services/pipelineClient";
+import { usePacketDetail } from "./lib/usePacketDetail";
+import { applyInfoPatches, type InfoPatch } from './services/pcapParser';
+import { flowAnnotations } from './services/flowAnnotations';
+import {
+  readLinkContext, watchLinkChanges, type LinkChange, type LinkContext,
+} from './services/linkContext';
+import { processForPacket, sendingProcessName, writeProcessFields } from './services/dissect/processFields';
 import { TcpStreamTracker } from "./services/tcpStreamTracker";
 import { IcmpEchoTracker } from "./services/icmpEchoTracker";
 import { QuicFlowTracker } from "./services/quicFlowTracker";
@@ -40,9 +66,14 @@ import {
   registerSessionWorker,
 } from "./services/sessionLifecycle";
 import { CustomDissectorEngine } from "./services/customDissectorEngine";
-import { ColorRulesEngine } from "./services/colorRules";
+import {
+  ColorRulesEngine,
+  COLOR_RULES_STORAGE_KEY,
+  defaultColorRules,
+  normalizeColorRules,
+} from "./services/colorRules";
 import { ROLE_PERMISSIONS } from "./services/rbacService";
-import { parseAgentMessage, encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION, type AgentCommand } from "./services/agentProtocol";
+import { isAgentOutdated, summarizeCaptureStats, REQUIRED_AGENT_VERSION, type AgentCommand, type AgentInterface, type CaptureDropStats } from "./services/agentProtocol";
 import type { AgentLogEntry } from "./services/agentProtocol";
 // Loopback is dropped here, at the single point where the agent's list
 // enters app state, so every consumer below sees the same adapters.
@@ -50,19 +81,16 @@ import { filterCapturableInterfaces } from "./services/captureInterfaces";
 
 // UI Components
 import { Header } from "./components/common/Header";
+import { AgentPairingPanel } from "./components/common/AgentPairingPanel";
 import { FilterBar } from "./components/common/FilterBar";
 import { PacketList } from "./components/packet-list/PacketList";
 import { PacketDetailsTree } from "./components/packet-details/PacketDetailsTree";
 import { HexViewer } from "./components/packet-details/HexViewer";
 import { PacketDetailModal } from "./components/packet-details/PacketDetailModal";
-import { TrafficTimelineChart } from "./components/analytics/TrafficTimelineChart";
-import { ProtocolDonutChart } from "./components/analytics/ProtocolDonutChart";
-import { NetworkMatrix } from "./components/analytics/NetworkMatrix";
-import { AnomalyAlertsPanel } from "./components/analytics/AnomalyAlertsPanel";
 import { StreamFollowerModal } from "./components/stream-follower/StreamFollowerModal";
 import { CustomDissectorModal } from "./components/dissectors/CustomDissectorModal";
-import { StatisticsModal } from "./components/statistics/StatisticsModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
+import { StatisticsModal } from "./components/statistics/StatisticsModal";
 import { IspStatsModal } from "./components/isp/IspStatsModal";
 import { SettingsModal } from "./components/common/SettingsModal";
 import {
@@ -79,9 +107,7 @@ import {
   usePreferenceSync,
 } from "./services/preferences";
 import { useThrottledValue } from "./lib/useThrottledValue";
-import type { FilterPresetLibrary } from "./types/packet";
-
-import { GeoMap } from "./components/analytics/GeoMap";
+import type { ColorRule, FilterPresetLibrary } from "./types/packet";
 
 import {
   TbActivity,
@@ -93,6 +119,18 @@ import {
 // Bounded, oldest dropped first. A session left open for hours must not grow
 // the log pane without limit.
 const AGENT_LOG_BUFFER_LIMIT = 1000;
+
+/**
+ * How far back a socket-table DELTA is allowed to re-annotate.
+ *
+ * The agent reads the table once a second, so a socket first seen at T may
+ * have opened at any point in the second before - and frames from that second
+ * were dissected before anything knew who owned them. Beyond that window a
+ * delta cannot tell us anything new about a frame, and sweeping the whole
+ * buffer every second to prove it would cost more than the attribution is
+ * worth. A full snapshot ignores this and sweeps everything, once.
+ */
+const SOCKET_RETRO_WINDOW_US = 3_000_000;
 
 // Samples kept per interface for the picker's sparklines. At the agent's
 // 500ms sampling period this is a 15-second window - long enough to show a
@@ -113,6 +151,30 @@ const INTERFACE_RATE_SAMPLES = 30;
 // The default only. The live value is a preference - see interfacePrefs -
 // because the cap scales every O(buffer) pass in the app at once.
 const PACKET_BUFFER_CAP = 50000;
+
+/**
+ * How far past the cap the buffer may run before it is trimmed back to it.
+ *
+ * Trimming on every flush looked right and was the single most expensive
+ * thing the app did once the buffer was full. Three separate caches detect a
+ * trim by watching `packets[0]` - the incremental display filter, the packet
+ * list's column auto-sizer and the geo map's address scan - and each answers
+ * "the head moved" with a full pass over the whole buffer. Trim every flush
+ * and the head moves ten times a second, so all three ran their O(n) fallback
+ * ten times a second, forever, on a 50,000-packet array.
+ *
+ * With slack the head moves once per few thousand packets instead. The caches
+ * take their fallback once and then stay hot. The price is that the buffer
+ * briefly holds up to 5% more than the cap, which is why this is a proportion
+ * and not a count: it has to stay small next to the cap, not next to a flush.
+ */
+const TRIM_SLACK = 0.05;
+
+/** The last `cap` packets of `packets`, or `packets` itself while it is within the slack. */
+function trimToCap<T>(packets: T[], cap: number): T[] {
+  const slack = Math.max(1, Math.floor(cap * TRIM_SLACK));
+  return packets.length > cap + slack ? packets.slice(packets.length - cap) : packets;
+}
 
 /**
  * Capture stops on its own at this fraction of the buffer, so a full buffer
@@ -158,9 +220,9 @@ const RESTORE_CHUNK_SIZE = 250;
  * packet buffer is the only part of a session big enough to need IndexedDB.
  * Each validator is module scope so it keeps one identity across renders.
  */
-const DISPLAY_FILTER_KEY = "netview.displayFilter";
-const PACKET_SEARCH_KEY = "netview.packetSearch";
-const SELECTED_PACKET_KEY = "netview.selectedPacketId";
+const DISPLAY_FILTER_KEY = "inwire.displayFilter";
+const PACKET_SEARCH_KEY = "inwire.packetSearch";
+const SELECTED_PACKET_KEY = "inwire.selectedPacketId";
 // Preferences this build no longer reads are cleared here rather than left to
 // sit in storage looking like live configuration. The list, and the reasoning,
 // live in services/preferences.
@@ -199,9 +261,15 @@ export default function App() {
   // Writes data-motion onto <html>, and keeps it in step with the OS while the
   // setting defers to it. See lib/motion.
   useMotionPreference();
+  useFontPreference();
+  useChromePreference();
+  // The first-run walkthrough. `completed` is set by finishing it AND by
+  // skipping it - see services/tourPrefs for why skipping counts.
+  const [tour] = usePreferenceValue(tourStore);
+  usePreferenceSync(tourStore.key, tourStore.normalize, tourStore.accept);
   // Pushes the two outbound-lookup switches into the service that performs
   // them, so the gate lives in one place rather than at every call site.
-  useNameResolutionPreference();
+  const [nameResolution, patchNameResolution] = useNameResolutionPreference();
 
   const { resolvedTheme } = useTheme();
   // Resolves the "System" picker entry into a concrete theme, and keeps
@@ -214,7 +282,17 @@ export default function App() {
   // own stored preference, which meant the default light theme shipped a dark
   // packet list. One theme decision now colours the list, the geo map and the
   // protocol chart alike - see services/themePalettes.
-  const packetTheme = useMemo(() => getPacketThemeForApp(resolvedTheme), [resolvedTheme]);
+  //
+  // The colour SET is the second axis, and it is a preference rather than
+  // something derived: the theme decides which nine hues, the set decides how
+  // loudly - or, for Colourblind, which nine instead. Memoized on both, because
+  // this walks the whole rule chain through a Lab derivation and the result
+  // feeds a component that re-renders on every packet.
+  const [packetColorSet] = usePreferenceValue(packetColorSetStore);
+  const packetTheme = useMemo(
+    () => getPacketThemeForApp(resolvedTheme, packetColorSet),
+    [resolvedTheme, packetColorSet],
+  );
   const [mobileTab, setMobileTab] = useState<
     "packets" | "tree" | "hex" | "graphs" | "alerts"
   >("packets");
@@ -317,20 +395,40 @@ export default function App() {
   );
 
   // Modals
-  const [streamToFollow, setStreamToFollow] = useState<number | null>(null);
+  const [streamToFollow, setStreamToFollow] = useState<StreamTarget | null>(null);
   // The frame the detail window is showing, or null when it is closed. Held as
   // a number rather than a Packet so the window keeps following the same frame
   // as the buffer around it changes.
   const [detailPacketId, setDetailPacketId] = useState<number | null>(null);
   const [showDissectorModal, setShowDissectorModal] = useState(false);
-  const [showStatsModal, setShowStatsModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [showStatisticsModal, setShowStatisticsModal] = useState(false);
   const [showIspModal, setShowIspModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [agentStatus, setAgentStatus] = useState<
     "disconnected" | "connecting" | "connected" | "error"
   >("disconnected");
   const [agentCaptureState, setAgentCaptureState] = useState<'idle' | 'sniffing'>('idle');
+  /**
+   * This connection's id, and whose capture the agent is running.
+   *
+   * Two Inwire windows on one machine used to fight over a single global
+   * sniffer: the second one's remembered adapter selection restarted the
+   * capture on *its* adapter the moment it connected, and Stop in either
+   * stopped both. The agent owns a capture now, and these two are how this
+   * window tells its own capture from somebody else's.
+   */
+  const [agentClientId, setAgentClientId] = useState<string | null>(null);
+  const [captureOwner, setCaptureOwner] = useState<string | null>(null);
+  /**
+   * Whether this agent wants a pairing token, and whether the one we hold was
+   * accepted. `needsToken` is the state Driver Info asks about: the agent is
+   * there and answering, and will do nothing until it is paired.
+   */
+  const [agentNeedsToken, setAgentNeedsToken] = useState(false);
+  const [agentToken, setAgentTokenState] = useState<string>(() => loadAgentToken());
+  const agentTokenRef = useRef(agentToken);
+  useEffect(() => { agentTokenRef.current = agentToken; }, [agentToken]);
   /**
    * Whether the app should be holding a link to the agent at all.
    *
@@ -349,8 +447,65 @@ export default function App() {
   // grace period below - the only signal available for a pre-Task-4 agent,
   // which never sends `hello` at all (see final review finding #5).
   const [agentIncompatible, setAgentIncompatible] = useState(false);
-  const [agentInterfaces, setAgentInterfaces] = useState<{ name: string; label: string }[]>([]);
+  const [agentInterfaces, setAgentInterfaces] = useState<AgentInterface[]>([]);
+  // The full list as the agent last sent it, for attributing a live frame to
+  // the adapter its `iface` index names. A ref because the decode runs inside
+  // the socket handler (see captureInterfaceRef below).
+  const agentInterfacesRef = useRef<AgentInterface[]>([]);
+  useEffect(() => { agentInterfacesRef.current = agentInterfaces; }, [agentInterfaces]);
+  /**
+   * What the driver and the agent dropped during this capture, from the
+   * agent's once-a-second capture_stats. Null until the first tick, and reset
+   * when a capture starts so the number is this capture's. `droppedKernel` is
+   * null when the driver's counters could not be read - shown as unknown, not
+   * as zero.
+   */
+  const [captureStats, setCaptureStats] = useState<CaptureDropStats | null>(null);
+  /**
+   * Frames pushed out of the buffer because it filled.
+   *
+   * The third of the three places a frame can go missing between the wire and
+   * the list - the driver's ring, the agent's send queue, and here - and the
+   * only one that was never counted. Capture auto-pauses at 99% of the buffer,
+   * so this moves during an import or a restore rather than during a capture,
+   * and it is what makes "the list starts at frame 40,001" a statement rather
+   * than a mystery.
+   */
+  const [droppedBuffer, setDroppedBuffer] = useState(0);
+  /**
+   * The same number on a ref, plus the head id it was last counted at,
+   * because the state can only be advanced from inside a `setPackets` updater
+   * - which React runs twice under StrictMode, with the same `prev` both
+   * times. `headId` is what makes the second run a no-op: trimming removes the
+   * head by definition, so a changed head is exactly one trim, counted once.
+   * See the trim in the packet-flush effect.
+   */
+  const droppedBufferRef = useRef({ total: 0, headId: -1 });
+  /**
+   * What the browser says about the link, and every time it changed.
+   *
+   * Null on Firefox and Safari, which have no Network Information API - and
+   * null is what is shown there, rather than numbers derived from timings and
+   * presented as though the browser had reported them.
+   */
+  const [linkContext, setLinkContext] = useState<LinkContext | null>(() => readLinkContext());
+  const [linkChanges, setLinkChanges] = useState<LinkChange[]>([]);
   const [selectedInterfaces, setSelectedInterfaces] = useState<string[]>([]);
+
+  /**
+   * Records network transitions for the life of the page.
+   *
+   * The event is the valuable half of this API. A machine moving between
+   * networks is what explains a gap with no frames in it, a burst of ARP and
+   * DHCP, or a stream that stops dead - all of which read as faults and are
+   * not. The estimates it carries alongside are context and are never shown
+   * beside the capture's own measurements as if they were the same kind of
+   * number.
+   */
+  useEffect(() => watchLinkChanges((change) => {
+    setLinkContext(change.after);
+    setLinkChanges((prev) => prev.concat(change).slice(-32));
+  }), []);
   const [agentLog, setAgentLog] = useState<AgentLogEntry[]>([]);
   /**
    * The agent's most recent rejection, surfaced in Driver Info.
@@ -378,7 +533,6 @@ export default function App() {
   // WebSocket handlers, so it must be a ref: those close over their first
   // render's values and would otherwise never see this change.
   const logSubscribedRef = useRef(false);
-  const wsRef = useRef<WebSocket | null>(null);
   // Packets arrive one WebSocket message at a time but are committed to state
   // in batches - see the ingest comment in the socket handler below.
   const pendingPacketsRef = useRef<Packet[]>([]);
@@ -386,6 +540,8 @@ export default function App() {
   // new packets so the patch is applied once per flush over one array pass,
   // rather than mapping the whole buffer per reply.
   const pendingIcmpRepliesRef = useRef<{ requestFrameId: number; replyId: number }[]>([]);
+  /** Info suffixes for earlier frames, learned by later ones (reassembly); applied on the next flush. */
+  const pendingInfoPatchesRef = useRef<InfoPatch[]>([]);
   /**
    * True while a stored session is being decoded back into the buffer. Read by
    * the effects that must not write a half-restored session back to disk.
@@ -401,11 +557,17 @@ export default function App() {
   // instant before a stop still land instead of being stranded.
   useEffect(() => {
     const flush = () => {
+      // Already dissected, in capture order, by the pipeline Worker - which
+      // owns the ordering window and the trackers, so the wire's order is
+      // preserved where it matters (docs/decisions/0003). All that happens
+      // here is committing a batch to React state.
       const incoming = pendingPacketsRef.current;
       const replies = pendingIcmpRepliesRef.current;
-      if (incoming.length === 0 && replies.length === 0) return;
+      const patches = pendingInfoPatchesRef.current;
+      if (incoming.length === 0 && replies.length === 0 && patches.length === 0) return;
       pendingPacketsRef.current = [];
       pendingIcmpRepliesRef.current = [];
+      pendingInfoPatchesRef.current = [];
 
       // Persisted here rather than inside the updater below, because a state
       // updater has to be pure - React may run it more than once, and in
@@ -430,9 +592,35 @@ export default function App() {
           });
         }
         next = next === prev ? prev.concat(incoming) : next.concat(incoming);
+        if (patches.length > 0) {
+          // Patches may target frames in this same batch (a record that began
+          // and ended within one flush), so they are applied after the concat.
+          next = applyInfoPatches(next, patches);
+        }
         const cap = packetBufferCapRef.current;
-        if (next.length > cap) {
-          next = next.slice(next.length - cap);
+        const trimmed = trimToCap(next, cap);
+        if (trimmed !== next) {
+          const forgotten = next.length - trimmed.length;
+          // Outside the updater's return value on purpose: a state updater has
+          // to be pure, and React runs this one twice under StrictMode.
+          //
+          // Which is exactly why neither this nor the counter it feeds may be
+          // an increment. Scheduling the microtask IS the impure part and ran
+          // on both invocations, so `n + forgotten` was applied twice and the
+          // count came out roughly double - a miscount in the one number this
+          // whole feature exists to report accurately. Guarding on the head id
+          // makes the repeat a no-op: both runs see the same `prev`, so both
+          // compute the same head, and only the first one gets past this.
+          const headId = trimmed[0].id;
+          if (headId !== droppedBufferRef.current.headId) {
+            droppedBufferRef.current = {
+              total: droppedBufferRef.current.total + forgotten,
+              headId,
+            };
+            const total = droppedBufferRef.current.total;
+            queueMicrotask(() => setDroppedBuffer(total));
+          }
+          next = trimmed;
           // The stored session mirrors the live buffer, including its
           // forgetting: without this the database would keep every frame of a
           // multi-hour capture while the buffer held only the last 50,000.
@@ -529,8 +717,21 @@ export default function App() {
    * more - so the only choice available here is whether to ask at all.
    */
   const hasCapturedPackets = packets.length > 0;
+
+  /**
+   * TEMPORARILY OFF, at the user's request, to make reloading during
+   * development bearable - every refresh with a non-empty buffer was a modal.
+   *
+   * Flip back to `true` to restore the warning. Everything below is intact and
+   * unreferenced by anything else; this flag is the whole of the change.
+   */
+  // Off in development only, where every refresh with a non-empty buffer was
+  // a modal. It used to be a hardcoded `false`, which shipped: a user with a
+  // 50,000-frame capture lost it to a stray Ctrl-W with nothing asked.
+  const WARN_BEFORE_LEAVING = !import.meta.env.DEV;
+
   useEffect(() => {
-    if (!hasCapturedPackets) return;
+    if (!WARN_BEFORE_LEAVING || !hasCapturedPackets) return;
     const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
       // A refresh the user just asked for. The session survives it, so asking
       // them to confirm is a prompt about nothing.
@@ -593,7 +794,7 @@ export default function App() {
 
       if (total > 0) {
         setRestoreProgress({ done: 0, total });
-        const trackers = { tcpTracker, icmpTracker, quicTracker };
+        const trackers = { tcpTracker, icmpTracker, quicTracker, dnsTracker, l3Tracker };
         // Rebuilt from the session's own interface table, so restored frames
         // name the adapter they were captured on rather than reporting
         // themselves as an imported capture.
@@ -605,15 +806,13 @@ export default function App() {
 
         await readFrames(RESTORE_CHUNK_SIZE, async (frames) => {
           // Same trackers across every chunk, in id order - see restoreBatch.
-          const { packets: batch, icmpReplies } = restoreBatch(frames, trackers, interfaceIdByLabel);
+          const { packets: batch, icmpReplies, infoPatches } = restoreBatch(frames, trackers, interfaceIdByLabel);
           lastId = frames[frames.length - 1].id;
           done += frames.length;
 
-          setPackets((prev) => {
-            const merged = applyIcmpReplies(prev, icmpReplies).concat(batch);
-            const cap = packetBufferCapRef.current;
-            return merged.length > cap ? merged.slice(merged.length - cap) : merged;
-          });
+          setPackets((prev) =>
+            trimToCap(applyInfoPatches(applyIcmpReplies(prev, icmpReplies), infoPatches).concat(batch), packetBufferCapRef.current),
+          );
           setRestoreProgress({ done, total });
           // Yield so React can commit and the browser can paint this chunk.
           await new Promise((resolve) => setTimeout(resolve, 0));
@@ -625,8 +824,16 @@ export default function App() {
         persistedThroughIdRef.current = lastId;
         // The relative-time clock is restored too, so a resumed capture's
         // timestamps continue the original timeline instead of jumping to 0.
-        captureStartRef.current = meta?.captureStartMs ?? null;
-        lastPacketTimeRef.current = meta?.lastPacketMs ?? null;
+        // The clock refs are microseconds; the stored meta stays in
+        // milliseconds so an older session file still reads.
+        captureStartRef.current = meta?.captureStartMs != null ? meta.captureStartMs * 1000 : null;
+        lastPacketTimeRef.current = meta?.lastPacketMs != null ? meta.lastPacketMs * 1000 : null;
+        // The Worker numbers live frames and keeps the relative-time clock, so
+        // a restored session has to tell it both: otherwise the first live
+        // frame after a restore is numbered 1, colliding with everything
+        // already in the list, and its Time column restarts at zero halfway
+        // down a capture.
+        pipeline.reset(Math.floor(lastId) + 1, captureStartRef.current, lastPacketTimeRef.current);
       }
 
       setRestoreProgress(null);
@@ -671,8 +878,8 @@ export default function App() {
     void saveSessionMeta({
       selectedInterfaces,
       interfaces: agentInterfaces,
-      captureStartMs: captureStartRef.current,
-      lastPacketMs: lastPacketTimeRef.current,
+      captureStartMs: captureStartRef.current === null ? null : captureStartRef.current / 1000,
+      lastPacketMs: lastPacketTimeRef.current === null ? null : lastPacketTimeRef.current / 1000,
       updatedAt: Date.now(),
     });
   }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick]);
@@ -836,7 +1043,20 @@ export default function App() {
 
   // Engines
   const dissectorEngine = useMemo(() => new CustomDissectorEngine(), []);
-  const colorEngine = useMemo(() => new ColorRulesEngine(), []);
+  /**
+   * The colouring chain, and the engine built from it.
+   *
+   * Rebuilt when the chain changes and at no other time: the engine holds a
+   * per-packet match cache whose whole premise is that a packet's rule cannot
+   * change, so editing the chain has to produce a NEW engine rather than
+   * mutating this one.
+   */
+  const [colorRules, setColorRules] = useState<ColorRule[]>(
+    () => loadPreference(COLOR_RULES_STORAGE_KEY, normalizeColorRules, defaultColorRules()),
+  );
+  useDebouncedPreference(COLOR_RULES_STORAGE_KEY, colorRules);
+  usePreferenceSync(COLOR_RULES_STORAGE_KEY, normalizeColorRules, setColorRules);
+  const colorEngine = useMemo(() => new ColorRulesEngine(colorRules), [colorRules]);
   const packetGenerator = useMemo(
     () => new PacketGenerator(dissectorEngine),
     [dissectorEngine],
@@ -849,14 +1069,28 @@ export default function App() {
    * for every frame; labelling it in the frame's own colour ties the header to
    * the row the eye just left.
    */
+  // The docked tree pane and the hex view below it read the selected frame; the
+  // tree is the only part of it that is not already in the buffer, so it is
+  // fetched on selection (docs/decisions/0007). `selectedPacket` stays the
+  // buffer's own object everywhere else - the list, the filters, the accent -
+  // so nothing downstream has to know a hydrated copy exists.
+  const selectedPacketDetail = usePacketDetail(selectedPacket, packets);
+
   const selectedPacketAccent = useMemo(
     () => (selectedPacket ? colorEngine.getPacketAccent(selectedPacket, packetTheme) : null),
     [selectedPacket, colorEngine, packetTheme],
   );
 
+  // Restore only. Live frames are dissected in the pipeline Worker, which
+  // keeps its own trackers; these exist because a stored session is decoded
+  // here, on the main thread, once at startup.
   const tcpTracker = useMemo(() => new TcpStreamTracker(), []);
   const icmpTracker = useMemo(() => new IcmpEchoTracker(), []);
   const quicTracker = useMemo(() => new QuicFlowTracker(), []);
+  // Pairs DNS queries with their responses; order-dependent, like the others.
+  const dnsTracker = useMemo(() => new DnsTracker(), []);
+  // IP fragments and ARP bindings (services/l3Tracker.ts), for the same reason.
+  const l3Tracker = useMemo(() => new L3Tracker(), []);
 
   // Track the latest isCapturing value for the always-on agent connection
   // below, whose handlers are set up once and must not go stale.
@@ -921,23 +1155,27 @@ export default function App() {
   // the "Download Driver" button can auto-detect the agent running and
   // flip to "Agent Connected", independent of whether capture is active.
   // Packets are only recorded into the buffer while isCapturing is true.
+  //
+  // The socket itself lives in the pipeline Worker now, along with the
+  // ordering window, the trackers and dissection (docs/decisions/0003). What
+  // reaches this effect is what always reached it: control messages, and
+  // batches of finished frames. Nothing here parses a packet.
   useEffect(() => {
     if (!permissions.canCapture) return;
     // Driver Info's Disconnect. Bailing out here rather than tearing the
-    // socket down somewhere else is the point: React runs this effect's
+    // connection down somewhere else is the point: React runs this effect's
     // existing cleanup on the way in, and that cleanup already does exactly
-    // what disconnecting means - it nulls `onclose` so the 3s retry cannot
-    // re-arm, closes the socket, and reports "disconnected". A second
-    // teardown path would be a second thing to keep correct.
+    // what disconnecting means - it stops the Worker retrying, closes the
+    // socket, and reports "disconnected". A second teardown path would be a
+    // second thing to keep correct.
     if (!agentLinkEnabled) return;
 
-    let reconnectTimeout: NodeJS.Timeout;
     let connectedDelay: NodeJS.Timeout | null = null;
     // A pre-Task-4 agent never sends `hello` at all, so its absence within
     // this window (started on every fresh socket open, cleared the moment
     // `hello` arrives) is the only way to flag it as incompatible instead of
     // silently showing a normal "Agent Connected" with zero packets ever
-    // arriving (final review finding #5).
+    // arriving.
     let helloTimeout: NodeJS.Timeout | null = null;
     // Only the very first connection attempt shows "Connecting..." - once we
     // know the agent isn't there, silent background retries every 3s keep
@@ -946,234 +1184,277 @@ export default function App() {
     // never running to begin with).
     let isFirstAttempt = true;
 
-    const connect = () => {
-      if (isFirstAttempt) {
-        setAgentStatus("connecting");
+    pipeline.onStatus = (status) => {
+      if (status === 'connecting') {
+        if (isFirstAttempt) setAgentStatus("connecting");
+        return;
       }
-      // Captured in a local const and closed over by every handler below,
-      // rather than re-reading wsRef.current from inside each handler -
-      // closes a rapid-reconnect race where a handler could otherwise end up
-      // reading a newer socket than the one it was actually attached to.
-      const socket = new WebSocket("ws://localhost:8999");
-      wsRef.current = socket;
-
-      socket.onopen = () => {
-        console.log("[WirePulse] Connected to Local Agent");
+      if (status === 'connected') {
+        console.log("[Inwire] Connected to Local Agent");
         // Hold "Connecting..." for a beat after the handshake succeeds so
         // the button doesn't flash instantly - and so a socket that drops
         // right back off (e.g. a page reload racing the connection) reads
         // as still-connecting rather than a confusing connect/disconnect flicker.
+        if (connectedDelay) clearTimeout(connectedDelay);
         connectedDelay = setTimeout(() => setAgentStatus("connected"), 2000);
-
         setAgentIncompatible(false);
+        if (helloTimeout) clearTimeout(helloTimeout);
         helloTimeout = setTimeout(() => {
-          console.warn("[WirePulse] No hello received from agent within 5s - treating it as incompatible.");
+          console.warn("[Inwire] No hello received from agent within 5s - treating it as incompatible.");
           setAgentIncompatible(true);
         }, 5000);
-      };
+        return;
+      }
 
-      socket.onmessage = (event) => {
-        const message = parseAgentMessage(event.data);
-        if (!message) return;
-
-        if (message.type === 'hello') {
-          if (helloTimeout) {
-            clearTimeout(helloTimeout);
-            helloTimeout = null;
-          }
-          setAgentIncompatible(false);
-          setAgentError(null);
-          setAgentVersion(message.version);
-          setAgentCaptureState(message.state);
-          setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
-          // Deliberately does NOT default to every interface. Capture is
-          // single-interface and the user has to name the adapter before a
-          // capture can start; pre-selecting all nine would hand Start a
-          // ready-made selection and quietly defeat that. An existing
-          // selection survives a reconnect untouched.
-          setSelectedInterfaces((prev) => (prev.length > 1 ? [prev[0]] : prev));
-
-          // Reconnect resync. A fresh connection always finds the agent idle
-          // with every interface selected - it stops capturing when the last
-          // client drops - so push our desired state back to it. Phase 1 hung
-          // this off the post-auth `state` message; with pairing gone, `hello`
-          // is the only per-connection signal there is.
-          //
-          // On a first-ever connection selectedInterfacesRef is still empty
-          // (it gets populated from this very message), so nothing is sent and
-          // the agent keeps its own default of every interface. That is correct.
-          if (selectedInterfacesRef.current.length > 0) {
-            socket.send(encodeAgentCommand({ type: 'set_interfaces', interfaces: selectedInterfacesRef.current }));
-          }
-          if (isCapturingRef.current) {
-            socket.send(encodeAgentCommand({ type: 'start_capture' }));
-          }
-          // A log subscription lives on the agent's socket, so a reconnect
-          // drops it. Resubscribing here, and clearing first, avoids showing
-          // a fresh backlog stitched onto the tail of the dead connection's
-          // timeline as though it were continuous.
-          if (logSubscribedRef.current) {
-            setAgentLog([]);
-            socket.send(encodeAgentCommand({ type: 'subscribe_logs' }));
-          }
-          return;
-        }
-
-        if (message.type === 'state') {
-          setAgentCaptureState(message.state);
-          setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
-          return;
-        }
-
-        if (message.type === 'error') {
-          console.warn('[WirePulse] Agent error:', message.message);
-          setAgentError(message.message);
-          return;
-        }
-
-        if (message.type === 'log') {
-          setAgentLog((prev) => {
-            const next = prev.concat(message.lines);
-            return next.length > AGENT_LOG_BUFFER_LIMIT
-              ? next.slice(next.length - AGENT_LOG_BUFFER_LIMIT)
-              : next;
-          });
-          return;
-        }
-
-        if (message.type === 'interface_stats') {
-          setInterfaceRates((prev) => {
-            const next: Record<string, number[]> = {};
-            for (const rate of message.interfaces) {
-              const series = prev[rate.name] ?? [];
-              // A fixed-length window, so the sparkline scrolls rather than
-              // compressing an ever-longer history into the same 68px.
-              next[rate.name] = series.concat(rate.packetsPerSec).slice(-INTERFACE_RATE_SAMPLES);
-            }
-            return next;
-          });
-          return;
-        }
-
-        // message.type === 'packet' from here on - the existing decode path.
-        if (!isCapturingRef.current) return; // agent detected, but capture not started yet
-
-        try {
-          // AgentPacketMessage's extra fields are typed `unknown` (it only
-          // guarantees `type: 'packet'`) - the decode logic below is
-          // unchanged from before this task and still expects the same
-          // loosely-typed shape JSON.parse used to hand it directly.
-          const rawPkt = message as any;
-          const epochMs = typeof rawPkt.timestamp === 'number' ? rawPkt.timestamp : Date.now();
-
-          // Decoding (which mutates tcpTracker/icmpTracker with one-shot,
-          // consume-on-match semantics) and id/ref bookkeeping must happen
-          // exactly once per real packet - doing this inside the setPackets
-          // updater breaks under React StrictMode's double-invocation in
-          // development, since a second invocation would find the ICMP
-          // tracker's match already consumed and keep that unpatched result.
-          const isFirstOfCapture = captureStartRef.current === null;
-          if (isFirstOfCapture) {
-            captureStartRef.current = epochMs;
-            lastPacketTimeRef.current = null;
-          }
-
-          const relativeTime = captureStartRef.current !== null
-            ? (epochMs - captureStartRef.current) / 1000
-            : 0;
-          const timeDelta = lastPacketTimeRef.current !== null
-            ? Math.max(0, (epochMs - lastPacketTimeRef.current) / 1000)
-            : 0;
-          lastPacketTimeRef.current = epochMs;
-
-          const id = packetGenerator.getNextId();
-
-          let safePkt: Packet;
-          let icmpMatchedRequestFrameId: number | undefined;
-          if (typeof rawPkt.raw === 'string' && rawPkt.raw.length > 0) {
-            // Authoritative path: dissect the real captured bytes exactly
-            // like an imported pcap file would be dissected.
-            const binaryString = atob(rawPkt.raw);
-            const bytes = Uint8Array.from(binaryString, (c) => c.charCodeAt(0));
-            const decoded = decodeRawEthernetPacket(bytes, id, epochMs, relativeTime, timeDelta, rawPkt.length ?? bytes.length, tcpTracker, icmpTracker, quicTracker, captureInterfaceRef.current);
-            safePkt = decoded.packet;
-            icmpMatchedRequestFrameId = decoded.icmpMatchedRequestFrameId;
-          } else {
-            // Fallback only: the agent did not send raw bytes. Shared with the
-            // session restore path so a metadata-only packet looks the same
-            // whether it just arrived or came back off disk - byte data left
-            // genuinely empty rather than fabricated.
-            safePkt = buildFallbackPacket({
-              id,
-              timestamp: epochMs,
-              relativeTime,
-              timeDelta,
-              length: rawPkt.length || 0,
-              source: rawPkt.source,
-              destination: rawPkt.destination,
-              sourcePort: rawPkt.sourcePort,
-              destPort: rawPkt.destPort,
-              protocol: rawPkt.protocol,
-              info: rawPkt.info,
-            });
-          }
-
-          // Queued, not committed. Setting state per packet copied the whole
-          // buffer on every arrival and re-ran every consumer that reads it -
-          // two useMemos here plus eight analytics components - so the cost
-          // per packet scaled with the buffer size. At loopback rates that
-          // saturated the render loop and froze the tab. The queue is drained
-          // on an interval instead, which decouples ingest rate from render
-          // cost and is what lets the buffer be large.
-          pendingPacketsRef.current.push(safePkt);
-          if (icmpMatchedRequestFrameId !== undefined) {
-            pendingIcmpRepliesRef.current.push({ requestFrameId: icmpMatchedRequestFrameId, replyId: id });
-          }
-        } catch (err) {
-          console.warn("[WirePulse] Failed to parse agent packet", err);
-        }
-      };
-
-      socket.onerror = (error) => {
-        console.warn("[WirePulse] WebSocket connection failed. Agent might not be running.");
-        if (connectedDelay) clearTimeout(connectedDelay);
+      if (connectedDelay) { clearTimeout(connectedDelay); connectedDelay = null; }
+      if (helloTimeout) { clearTimeout(helloTimeout); helloTimeout = null; }
+      if (status === 'error') {
+        console.warn("[Inwire] WebSocket connection failed. Agent might not be running.");
         if (isFirstAttempt) setAgentStatus("error");
-      };
+      } else {
+        console.log("[Inwire] Disconnected from Local Agent. Reconnecting in 3s...");
+        setAgentStatus("disconnected");
+        setAgentIncompatible(false);
+        // Facts about a connection that no longer exists. Driver Info kept
+        // showing the version and the last rejection of an agent that was
+        // gone, which read as "still there, still refusing".
+        setAgentVersion(null);
+        setAgentError(null);
+      }
+      isFirstAttempt = false;
+    };
 
-      socket.onclose = () => {
-        console.log(
-          "[WirePulse] Disconnected from Local Agent. Reconnecting in 3s...",
-        );
-        if (connectedDelay) clearTimeout(connectedDelay);
+    pipeline.onAgentMessage = (message) => {
+      if (message.type === 'hello') {
         if (helloTimeout) {
           clearTimeout(helloTimeout);
           helloTimeout = null;
         }
-        setAgentStatus("disconnected");
         setAgentIncompatible(false);
-        isFirstAttempt = false;
-        reconnectTimeout = setTimeout(connect, 3000);
-      };
+        setAgentError(null);
+        setAgentVersion(message.version);
+        setAgentCaptureState(message.state);
+        setAgentClientId(message.clientId ?? null);
+        setCaptureOwner(message.owner ?? null);
+
+        // Pairing comes before anything else: an agent with a token
+        // configured answers every other command with `auth_required`.
+        const needsToken = message.authRequired === true;
+        setAgentNeedsToken(needsToken);
+        if (needsToken) {
+          if (agentTokenRef.current) {
+            pipeline.command({ type: 'authenticate', token: agentTokenRef.current });
+          } else {
+            // Nothing else is sent. The resync below would only collect
+            // refusals, and Driver Info is where the token goes in.
+            return;
+          }
+        }
+        setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
+
+        // Deliberately does NOT default to every interface. Capture is
+        // single-interface and the user has to name the adapter before a
+        // capture can start; pre-selecting all nine would hand Start a
+        // ready-made selection and quietly defeat that. An existing
+        // selection survives a reconnect untouched.
+        setSelectedInterfaces((prev) => (prev.length > 1 ? [prev[0]] : prev));
+
+        // Reconnect resync. A fresh connection always finds the agent idle
+        // with every interface selected - it stops capturing when the last
+        // client drops - so push our desired state back to it. `hello` is the
+        // only per-connection signal there is.
+        //
+        // On a first-ever connection selectedInterfacesRef is still empty
+        // (it gets populated from this very message), so nothing is sent and
+        // the agent keeps its own default of every interface. That is correct.
+        //
+        // Not when another window owns the capture: this resync is what used
+        // to hijack it. Both commands would be refused now, but asking at all
+        // would put a `capture_busy` error in front of a user who has done
+        // nothing.
+        const ownedElsewhere = (message.owner ?? null) !== null
+          && message.owner !== (message.clientId ?? null);
+        if (!ownedElsewhere) {
+          if (selectedInterfacesRef.current.length > 0) {
+            pipeline.command({ type: 'set_interfaces', interfaces: selectedInterfacesRef.current });
+          }
+          if (isCapturingRef.current) {
+            pipeline.command({ type: 'start_capture' });
+          }
+        }
+        // A log subscription lives on the agent's socket, so a reconnect
+        // drops it. Resubscribing here, and clearing first, avoids showing
+        // a fresh backlog stitched onto the tail of the dead connection's
+        // timeline as though it were continuous.
+        if (logSubscribedRef.current) {
+          setAgentLog([]);
+          pipeline.command({ type: 'subscribe_logs' });
+        }
+
+        // Who owns which socket, for process attribution.
+        //
+        // Here rather than when the WebSocket opens, and the difference is not
+        // cosmetic: an agent with a pairing token answers every command with
+        // `auth_required` until `authenticate` has been accepted, and the
+        // socket is open well before that. Sent from this handler it queues
+        // behind the `authenticate` above on the same connection, which
+        // delivers in order.
+        //
+        // Unconditional, like the log resync: a subscription lives on the
+        // agent's socket and dies with it, so a reconnect has to ask again.
+        // The opening snapshot is the valuable half - it describes connections
+        // that were already open, which are exactly the long-lived ones a
+        // capture catches mid-stream.
+        pipeline.command({ type: 'subscribe_sockets' });
+        return;
+      }
+
+      if (message.type === 'state') {
+        setAgentCaptureState(message.state);
+        setCaptureOwner(message.owner ?? null);
+        // A `state` arriving on a connection that was waiting to be paired is
+        // the agent saying the token was accepted.
+        setAgentNeedsToken(false);
+        setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
+        // The agent is the authority on whether capture is running. It says
+        // idle while this tab believes otherwise when every selected adapter
+        // failed to open, or when another tab stopped it - either way the
+        // Start button showing "stop" would be a promise about traffic
+        // nobody is capturing.
+        if (message.state === 'idle' && isCapturingRef.current) {
+          setIsCapturing(false);
+        }
+        return;
+      }
+
+      if (message.type === 'error') {
+        console.warn('[Inwire] Agent error:', message.code ?? '', message.message);
+        setAgentError(message.message);
+        // A rejected token is worth more than an error line: the field has to
+        // come back so it can be corrected, and the stored one is wrong.
+        if (message.code === 'auth_failed') setAgentNeedsToken(true);
+        return;
+      }
+
+      if (message.type === 'capture_stats') {
+        setCaptureStats(summarizeCaptureStats(message));
+        return;
+      }
+
+      if (message.type === 'socket_table') {
+        // The Worker has its own copy and annotates every frame it dissects
+        // from here on. This copy exists for the frames that were dissected
+        // BEFORE the table arrived - the opening snapshot describes sockets
+        // that have been open for minutes, and the connection they belong to
+        // may already fill the buffer.
+        flowAnnotations.apply(message, Date.now() * 1000);
+
+        // A full snapshot is worth a pass over the whole buffer; it happens
+        // once per subscription. A delta is one or two sockets a second, and
+        // sweeping 100,000 frames every second to find the handful they might
+        // touch is not - so a delta re-annotates only the frames captured
+        // inside the polling window it is uncertain about, which is the only
+        // stretch where a frame can predate the socket's discovery.
+        const horizonUs = message.full
+          ? -Infinity
+          : Date.now() * 1000 - SOCKET_RETRO_WINDOW_US;
+        setPackets((prev) => {
+          let changed = false;
+          const next = prev.map((packet) => {
+            if (packet.tsUs < horizonUs) return packet;
+            if (packet.fields?.['inwire.process.name'] !== undefined) return packet;
+            const process = processForPacket(packet, flowAnnotations);
+            if (!process) return packet;
+            changed = true;
+            // A copy, because a packet already handed to React is not ours to
+            // mutate - a row that changed in place would not re-render.
+            const copy: typeof packet = { ...packet, fields: { ...packet.fields } };
+            writeProcessFields(copy, process);
+            return copy;
+          });
+          return changed ? next : prev;
+        });
+        return;
+      }
+
+      if (message.type === 'log') {
+        setAgentLog((prev) => {
+          const next = prev.concat(message.lines);
+          return next.length > AGENT_LOG_BUFFER_LIMIT
+            ? next.slice(next.length - AGENT_LOG_BUFFER_LIMIT)
+            : next;
+        });
+        return;
+      }
+
+      if (message.type === 'interface_stats') {
+        setInterfaceRates((prev) => {
+          const next: Record<string, number[]> = {};
+          for (const rate of message.interfaces) {
+            const series = prev[rate.name] ?? [];
+            // A fixed-length window, so the sparkline scrolls rather than
+            // compressing an ever-longer history into the same 68px.
+            next[rate.name] = series.concat(rate.packetsPerSec).slice(-INTERFACE_RATE_SAMPLES);
+          }
+          return next;
+        });
+      }
     };
 
-    connect();
+    // Dissected frames, in capture order, once per flush. Queued rather than
+    // committed: the flush below commits the batch in one state update, which
+    // is what keeps ingest cost independent of buffer size.
+    pipeline.onFrames = ({ packets, icmpReplies, infoPatches }) => {
+      if (packets.length > 0) {
+        // The relative-time origin and the last frame's stamp are written into
+        // the stored session so a restore can carry on from them. They used to
+        // be set per packet by the ingest that now lives in the Worker; the
+        // batch carries the same two facts.
+        if (captureStartRef.current === null) captureStartRef.current = packets[0].tsUs;
+        lastPacketTimeRef.current = packets[packets.length - 1].tsUs;
+        pendingPacketsRef.current.push(...packets);
+      }
+      if (icmpReplies.length > 0) pendingIcmpRepliesRef.current.push(...icmpReplies);
+      if (infoPatches.length > 0) pendingInfoPatchesRef.current.push(...infoPatches);
+    };
+
+    pipeline.onFailure = (message) => {
+      console.warn('[Inwire] packet pipeline:', message);
+    };
+
+    pipeline.connect("ws://localhost:8999");
 
     return () => {
-      clearTimeout(reconnectTimeout);
       if (connectedDelay) clearTimeout(connectedDelay);
       if (helloTimeout) clearTimeout(helloTimeout);
-      if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect loop on intentional unmount/stop
-        wsRef.current.close();
-      }
+      pipeline.onStatus = () => {};
+      pipeline.onAgentMessage = () => {};
+      pipeline.onFrames = () => {};
+      pipeline.onFailure = () => {};
+      pipeline.disconnect();
       setAgentStatus("disconnected");
     };
-  }, [permissions.canCapture, packetGenerator, agentLinkEnabled]);
+  }, [permissions.canCapture, agentLinkEnabled]);
+
+  // The Worker gates dissection on this: the socket stays open whether or not
+  // capture is running, because the agent is detected before anyone presses
+  // Start.
+  useEffect(() => {
+    pipeline.setCapturing(isCapturing);
+  }, [isCapturing]);
+
+  // Which adapter each frame's `iface` index names. The Worker builds the
+  // Frame layer's interface rows from it.
+  useEffect(() => {
+    pipeline.setInterfaces(agentInterfaces.map((iface, index) => ({
+      id: iface.id ?? index,
+      name: iface.name,
+      label: iface.label ?? iface.name,
+    })));
+  }, [agentInterfaces]);
 
   const sendAgentCommand = (command: AgentCommand) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(encodeAgentCommand(command));
-    }
+    pipeline.command(command);
   };
 
   // Memoized with an empty dep array on purpose: DriverInfoPanel subscribes
@@ -1268,6 +1549,37 @@ export default function App() {
   }, [packets, appliedFilter]);
 
   /**
+   * What the capture says its addresses are called.
+   *
+   * Built from the WHOLE buffer, not the filtered view: a name a DNS answer
+   * taught in frame 12 has to keep naming its address after a filter has
+   * hidden frame 12. Folded one packet at a time, because a full pass over
+   * 50,000 frames ten times a second is the thing this hook exists to avoid.
+   */
+  const nameMap = useIncrementalAggregate(
+    packets,
+    () => new NameResolutionMap(),
+    (map, packet) => map.learnFromPacket(packet),
+    (map) => nameSnapshot(map),
+  );
+
+  /**
+   * Every finding the dissectors and the anomaly detector raised.
+   *
+   * Also folded over the whole buffer rather than the filtered view: the
+   * Expert Information list is what a filter gets narrowed FROM, and one that
+   * shrank as the filter tightened could never be used to find the thing worth
+   * filtering on.
+   */
+  const expertLog = useIncrementalAggregate(
+    packets,
+    () => new ExpertLog(),
+    (log, packet) => log.add(packet),
+    (log) => expertSnapshot(log),
+  );
+
+
+  /**
    * The packet buffer as the summary panels see it: the same array, but
    * changing at most twice a second instead of ten times.
    *
@@ -1318,17 +1630,44 @@ export default function App() {
     if (hit) setSelectedPacket(hit);
   }, [restoreProgress, packets, restoreSelectionId]);
 
-  // If selected packet is filtered out, fall back gracefully
+  // If selected packet is filtered out, fall back gracefully.
+  //
+  // This runs on every flush, so it must not scan the buffer. Two cheap
+  // answers cover it: with no display filter `filteredPackets` IS `packets`,
+  // and ids only ever leave from the head, so "still present" is an id-range
+  // check; with a filter the selection is almost always near the tail, so the
+  // scan runs from the end and usually stops within a few steps.
   useEffect(() => {
-    if (
-      selectedPacket &&
-      !filteredPackets.some((p) => p.id === selectedPacket.id)
-    ) {
-      if (filteredPackets.length > 0) {
-        setSelectedPacket(filteredPackets[filteredPackets.length - 1]);
+    if (!selectedPacket) return;
+    let visible: boolean;
+    if (filteredPackets === packets) {
+      // Both ends. The head test alone assumes ids only ever leave from the
+      // front, which holds for live trimming and not for a buffer replaced
+      // wholesale - an import, a restore - where a stale selection numbered
+      // above the new head would be reported present.
+      visible = packets.length > 0
+        && selectedPacket.id >= packets[0].id
+        && selectedPacket.id <= packets[packets.length - 1].id;
+    } else {
+      visible = false;
+      for (let i = filteredPackets.length - 1; i >= 0; i--) {
+        if (filteredPackets[i].id === selectedPacket.id) { visible = true; break; }
       }
     }
-  }, [filteredPackets, selectedPacket]);
+    if (!visible && filteredPackets.length > 0) {
+      setSelectedPacket(filteredPackets[filteredPackets.length - 1]);
+    }
+  }, [filteredPackets, packets, selectedPacket]);
+
+  // The keyboard handler below reads the live list and selection through refs
+  // so that it is registered once per open/close of the detail window rather
+  // than re-registered on every flush - which, with `filteredPackets` in its
+  // dependency list, it was: ten window listener swaps a second for the whole
+  // life of a capture.
+  const filteredPacketsRef = useRef(filteredPackets);
+  filteredPacketsRef.current = filteredPackets;
+  const selectedPacketRef = useRef(selectedPacket);
+  selectedPacketRef.current = selectedPacket;
 
   // Global Keyboard Navigation
   useEffect(() => {
@@ -1338,6 +1677,8 @@ export default function App() {
     if (detailPacketId !== null) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      const filteredPackets = filteredPacketsRef.current;
+      const selectedPacket = selectedPacketRef.current;
       // Don't trigger if user is typing in an input
       if (
         e.target instanceof HTMLInputElement ||
@@ -1419,7 +1760,8 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedPacket, filteredPackets, permissions.canCapture, detailPacketId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permissions.canCapture, detailPacketId]);
 
   // Actions
   //
@@ -1442,6 +1784,10 @@ export default function App() {
   // that would be empty and leave Start unable to start anything.
   const handleStartCapture = () => {
     setBufferAutoPaused(false);
+    // The drop counters describe one capture; the agent resets its own on
+    // start_capture and the first capture_stats tick replaces this within a
+    // second, but a stale "dropped" chip for that second would be a lie.
+    setCaptureStats(null);
     sendAgentCommand({ type: 'start_capture' });
     setIsCapturing(true);
   };
@@ -1451,6 +1797,32 @@ export default function App() {
     setIsCapturing(false);
   };
 
+  /**
+   * A token pasted into Driver Info. Stored and offered immediately, so the
+   * pairing takes effect on the connection that is already open rather than
+   * waiting for a reconnect.
+   */
+  const handleAgentTokenChange = (token: string) => {
+    const trimmed = token.trim();
+    saveAgentToken(trimmed);
+    setAgentTokenState(trimmed);
+    setAgentError(null);
+    if (trimmed) sendAgentCommand({ type: 'authenticate', token: trimmed });
+  };
+
+  /**
+   * The program behind a frame's Source column, or null.
+   *
+   * Stable across renders, so the list is not handed a new function every time
+   * anything else in this component changes. It reads the store rather than
+   * closing over a value, which is what lets a row pick up an attribution that
+   * arrived after the frame itself did.
+   */
+  const sourceProcessFor = useCallback(
+    (packet: Packet) => sendingProcessName(packet, flowAnnotations),
+    [],
+  );
+
   const handleClearPackets = () => {
     setBufferAutoPaused(false);
     packetGenerator.reset();
@@ -1458,9 +1830,11 @@ export default function App() {
     // This is the one case where its deliberately monotonic place count should
     // go back to zero.
     resetGeoSession();
-    tcpTracker.reset();
-    icmpTracker.reset();
-    quicTracker.reset();
+    // The trackers, the ordering window and the frame numbering all live in
+    // the pipeline Worker now; one message forgets the lot. Without it the TCP
+    // tracker would keep describing streams from a capture that no longer
+    // exists, and the next frame would be numbered after frames that are gone.
+    pipeline.reset(1);
     // Clearing the buffer is the only way a fresh capture begins, so this is
     // where the relative-time clock resets. captureStartRef === null is then
     // a reliable, side-effect-free "this is the first packet of a capture"
@@ -1468,6 +1842,10 @@ export default function App() {
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
     persistedThroughIdRef.current = 0;
+    // The Worker forgets its copy on the same reset message. Keeping this one
+    // would let a local port reused since the last capture be attributed to
+    // whatever held it during a capture that is no longer on screen.
+    flowAnnotations.clear();
     // Clearing the buffer clears what a refresh would restore. Anything else
     // would resurrect the packets the user just asked to be rid of.
     void clearSession();
@@ -1502,6 +1880,29 @@ export default function App() {
     setAppliedFilter(expr);
   }, []);
 
+  /**
+   * "Apply as Filter" / "Prepare as Filter" from a row of the detail tree.
+   *
+   * Prepare puts the expression in the bar and leaves it there, which is the
+   * whole point of having both: a filter built from three or four rows is
+   * assembled one "…and Selected" at a time, and re-running the list after
+   * each of them would throw away the rows the next one is picked from.
+   */
+  const handleFieldFilter = useCallback((expression: string, apply: boolean) => {
+    setFilterText(expression);
+    if (apply) setAppliedFilter(expression);
+  }, []);
+
+  /** "Apply as Column" - appends to the packet list's added-field columns. */
+  const handleAddColumn = useCallback((abbrev: string) => {
+    const prefs = packetListStore.get();
+    if (prefs.customColumns.includes(abbrev)) return;
+    packetListStore.set({
+      ...prefs,
+      customColumns: [...prefs.customColumns, abbrev].slice(0, MAX_CUSTOM_COLUMNS),
+    });
+  }, []);
+
   // Hoisted out of the aside's JSX for the same reason. The width check is the
   // one the mobile layout uses to follow a selection into the detail tab.
   const handleInspectFromDashboard = useCallback((pkt: Packet) => {
@@ -1509,22 +1910,30 @@ export default function App() {
     if (window.innerWidth < 768) setMobileTab("tree");
   }, []);
 
-  const handleFilterAnomaly = useCallback(() => {
-    handleQuickFilter("anomaly");
-  }, [handleQuickFilter]);
 
-  const handleOpenStatistics = useCallback(() => setShowStatsModal(true), []);
-
-  const handleFollowStream = (streamId: number) => {
-    setStreamToFollow(streamId);
+  const handleFollowStream = (target: StreamTarget) => {
+    setStreamToFollow(target);
   };
 
   const handleImportPackets = (imported: Packet[]) => {
     setIsCapturing(false);
     setPackets(imported);
-    if (imported.length > 0) {
-      setSelectedPacket(imported[0]);
-    }
+    // The same reset Clear does, and for the same reasons. Imported frames are
+    // numbered 1..N by buildPacketsFromFrames; without this the Worker's
+    // counter is untouched, so pressing Start after an import issues live
+    // frames with ids the imported ones already hold - and every id lookup in
+    // the app (Response In, the reassembly patches, the list's React keys)
+    // then has two frames to choose from. It also drops the previous
+    // capture's TCP/TLS/QUIC/DNS tracker state, which describes streams that
+    // are no longer in the buffer.
+    const lastId = imported.length > 0 ? imported[imported.length - 1].id : 0;
+    pipeline.reset(Math.floor(lastId) + 1);
+    captureStartRef.current = null;
+    lastPacketTimeRef.current = null;
+    // Always assigned, never left alone: a selection held over from the
+    // previous buffer would keep the tree and hex views showing a frame that
+    // is not in the list any more.
+    setSelectedPacket(imported.length > 0 ? imported[0] : null);
   };
 
   const handleUpdateDissectors = () => {
@@ -1551,10 +1960,8 @@ export default function App() {
       isCapturing,
       appliedFilter,
       onSelectProtocol: handleSelectProtocol,
-      onOpenStatistics: handleOpenStatistics,
       onFilterHost: handleFilterHost,
       onInspectPacket: handleInspectFromDashboard,
-      onFilterAnomaly: handleFilterAnomaly,
     }),
     [
       dashboardPackets,
@@ -1563,10 +1970,8 @@ export default function App() {
       isCapturing,
       appliedFilter,
       handleSelectProtocol,
-      handleOpenStatistics,
       handleFilterHost,
       handleInspectFromDashboard,
-      handleFilterAnomaly,
     ],
   );
 
@@ -1602,11 +2007,14 @@ export default function App() {
           selectedInterfaces={selectedInterfaces}
           onSelectInterface={handleSelectInterface}
           interfaceRates={interfaceRates}
+          captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
           onInterfacePickerOpenChange={handleInterfacePickerOpenChange}
           permissions={permissions}
           onOpenDissectorModal={() => setShowDissectorModal(true)}
-          onOpenStatsModal={() => setShowStatsModal(true)}
           onOpenExportModal={() => setShowExportModal(true)}
+          onOpenStatisticsModal={() => setShowStatisticsModal(true)}
+          nameResolution={nameResolution}
+          onNameResolutionChange={patchNameResolution}
           onOpenIspModal={() => setShowIspModal(true)}
           filterSlot={
           <FilterBar
@@ -1690,11 +2098,18 @@ export default function App() {
           <section className="flex-1 flex flex-col border-r border-border overflow-hidden min-w-0">
             {/* Upper Pane: High-Density Packet Table */}
             <div
+              // The tour highlights the pane rather than a row: it runs before
+              // there are any rows. See components/tour/tourSteps.
+              data-tour="list"
               className={`flex-1 flex flex-col min-h-0 overflow-hidden ${
                 mobileTab === "packets" ? "block" : "hidden md:flex"
               }`}
             >
               <PacketList
+                expert={expertLog}
+                names={nameMap}
+                resolveNames={nameResolution.network}
+                sourceProcess={sourceProcessFor}
                 packets={filteredPackets}
                 themeKey={resolvedTheme}
                 selectedPacket={selectedPacket}
@@ -1767,6 +2182,10 @@ export default function App() {
             >
               {/* Protocol Layers Inspection Tree */}
               <div
+                // On the container, not inside PacketDetailsTree - that renders
+                // two different trees for "a packet" and "no packet", and the
+                // tour needs one anchor that exists in both states.
+                data-tour="detail"
                 className={`w-full min-w-0 overflow-hidden md:shrink-0 ${
                   stacked
                     ? "md:w-full md:h-[var(--details-pane-size)]"
@@ -1774,7 +2193,7 @@ export default function App() {
                 } ${mobileTab === "tree" ? "block" : "hidden md:block"}`}
               >
                 <PacketDetailsTree
-                  packet={selectedPacket}
+                  packet={selectedPacketDetail}
                   accentColor={selectedPacketAccent}
                   onHoverByteRange={setActiveByteRange}
                   onSelectFrame={frameNumber => {
@@ -1783,6 +2202,9 @@ export default function App() {
                   }}
                   activeByteRange={activeByteRange}
                   permissions={permissions}
+                  onFieldFilter={handleFieldFilter}
+                  currentFilter={filterText}
+                  onAddColumn={handleAddColumn}
                 />
               </div>
 
@@ -1826,7 +2248,7 @@ export default function App() {
                 }`}
               >
                 <HexViewer
-                  packet={selectedPacket}
+                  packet={selectedPacketDetail}
                   accentColor={selectedPacketAccent}
                   activeByteRange={activeByteRange}
                   onHoverByte={(byteIdx) => {
@@ -1859,7 +2281,7 @@ export default function App() {
       {/* 4. Modals */}
       {streamToFollow !== null && (
         <StreamFollowerModal
-          streamId={streamToFollow}
+          target={streamToFollow}
           packets={packets}
           onClose={() => setStreamToFollow(null)}
         />
@@ -1895,15 +2317,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <AnimatePresence>
-        {showStatsModal && (
-          <StatisticsModal
-            key="stats-modal"
-            packets={dashboardPackets}
-            onClose={() => setShowStatsModal(false)}
-          />
-        )}
-      </AnimatePresence>
 
       <AnimatePresence>
         {showExportModal && (
@@ -1914,6 +2327,41 @@ export default function App() {
             onClose={() => setShowExportModal(false)}
             permissions={permissions}
             isDark={isDark}
+            // The modal derives its own filtered set from the full buffer above
+            // rather than being handed `filteredPackets`: its filter is
+            // editable independently of the main window's, and the deliberate
+            // "export sees the live buffer, never dashboardPackets" rule stays
+            // intact either way.
+            appliedFilter={appliedFilter}
+            filterPresetLibrary={filterPresetLibrary}
+            // For the pcapng file's Interface Statistics Block: what the
+            // driver and the agent dropped. A file that does not say it is
+            // incomplete reads as complete.
+            captureStats={captureStats}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showStatisticsModal && (
+          <StatisticsModal
+            key="statistics-modal"
+            // The whole buffer, not `filteredPackets`: these tables count the
+            // capture. A filter narrows what is being LOOKED at, and a
+            // conversation table that silently answered for a subset would be
+            // the same table with different numbers and no way to tell.
+            packets={packets}
+            names={nameMap}
+            resolveNames={nameResolution.network}
+            resolvePorts={nameResolution.transport}
+            expert={expertLog}
+            onApplyFilter={handleQuickFilter}
+            onFollowStream={handleFollowStream}
+            onSelectFrame={(frameNumber) => {
+              const target = packets.find(p => p.id === frameNumber);
+              if (target) setSelectedPacket(target);
+            }}
+            onClose={() => setShowStatisticsModal(false)}
           />
         )}
       </AnimatePresence>
@@ -1934,11 +2382,22 @@ export default function App() {
             onConnectAgent={handleConnectAgent}
             onDisconnectAgent={handleDisconnectAgent}
             onRestartAgent={handleRestartAgent}
+            pairingSection={
+              <AgentPairingPanel
+                needsToken={agentNeedsToken}
+                token={agentToken}
+                onTokenChange={handleAgentTokenChange}
+              />
+            }
             agentStatus={agentStatus}
             agentVersion={agentVersion}
             agentOutdated={agentOutdated}
             agentCaptureState={agentCaptureState}
             agentInterfaces={agentInterfaces}
+            captureStats={captureStats}
+            droppedBuffer={droppedBuffer}
+            linkContext={linkContext}
+            linkChanges={linkChanges}
             selectedInterfaces={selectedInterfaces}
             agentLog={agentLog}
             onSubscribeAgentLog={handleSubscribeAgentLog}
@@ -1949,11 +2408,22 @@ export default function App() {
             packetBufferCap={packetBufferCap}
             bufferAutoPaused={bufferAutoPaused}
             onClearPackets={handleClearPackets}
+            colorRules={colorRules}
+            onColorRulesChange={setColorRules}
+            packetTheme={packetTheme}
+            permissions={permissions}
             filterPresetLibrary={filterPresetLibrary}
             onFilterPresetLibraryChange={handleFilterPresetLibraryChange}
           />
         )}
       </AnimatePresence>
+
+      {/* Outside the AnimatePresence above: the tour is not one of the modals
+          that swap in and out of it, and being listed there would make opening
+          any modal unmount it part-way through a step. */}
+      {!tour.completed && (
+        <TourOverlay onDone={() => tourStore.set({ completed: true })} />
+      )}
     </div>
   );
 }

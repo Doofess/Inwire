@@ -23,6 +23,7 @@ import {
   normalizePacketList,
   normalizePerformance,
 } from '../../src/services/interfacePrefs';
+import { DEFAULT_COLUMN_ALIGN } from '../../src/lib/packetColumns';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -91,21 +92,43 @@ for (const [name, fn] of [
 }
 
 {
-  // Alignment is a three-value enum stored in the same object as the columns,
-  // so the sibling-survival property applies to it as well.
+  // Alignment is a map now - one position per column - stored in the same
+  // object as the columns, so the sibling-survival property applies to it too.
   check('a bad alignment defaults while a good column set survives', {
     align: normalizePacketList({ align: 'justified', columns: { length: false } })?.align,
     length: normalizePacketList({ align: 'justified', columns: { length: false } })?.columns.length,
-  }, { align: 'left', length: false });
-  check('the three positions are accepted', [
-    normalizePacketList({ align: 'left' })?.align,
+  }, { align: DEFAULT_COLUMN_ALIGN, length: false });
+
+  check('a column set to a position that does not exist falls back to its default', {
+    ...normalizePacketList({ align: { source: 'justified', protocol: 'center' } })?.align,
+  }, { ...DEFAULT_COLUMN_ALIGN, protocol: 'center' });
+
+  /**
+   * The migration, which is the part worth checking.
+   *
+   * `align` used to be ONE string covering every text column, with No., Time
+   * and Length pinned right and excluded. Anyone who had chosen centred or
+   * right has that single string in storage, and dropping it would silently
+   * reset them with nothing on screen to explain why - so a stored string is
+   * spread over exactly the columns it used to govern, and the numeric three
+   * keep their own defaults. That reproduces what the old setting did.
+   */
+  check('an old single-value alignment is spread over the columns it used to govern',
     normalizePacketList({ align: 'center' })?.align,
-    normalizePacketList({ align: 'right' })?.align,
-  ], ['left', 'center', 'right']);
-  // The default has to be `left`, because that is what the list drew before the
-  // setting existed - a default of anything else silently rearranges every
-  // existing user's packet list on upgrade.
-  check('the default is what the list already showed', PACKET_LIST_DEFAULTS.align, 'left');
+    { ...DEFAULT_COLUMN_ALIGN, source: 'center', destination: 'center', protocol: 'center', info: 'center' });
+
+  // The numeric columns default right and the rest left - which is what the
+  // list drew before any of this existed. A default of anything else silently
+  // rearranges every existing user's packet list on upgrade.
+  check('the defaults are what the list already showed', PACKET_LIST_DEFAULTS.align, {
+    id: 'right',
+    relativeTime: 'right',
+    length: 'right',
+    source: 'left',
+    destination: 'left',
+    protocol: 'left',
+    info: 'left',
+  });
 }
 
 {

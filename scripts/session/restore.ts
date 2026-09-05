@@ -13,6 +13,7 @@
  * dropped, and ICMP reply pairings that point at a packet in an earlier chunk.
  */
 import { decodeRawEthernetPacket } from '../../src/services/pcapParser';
+import { DnsTracker } from '../../src/services/dnsTracker';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
 import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
@@ -36,6 +37,7 @@ const freshTrackers = () => ({
   tcpTracker: new TcpStreamTracker(),
   icmpTracker: new IcmpEchoTracker(),
   quicTracker: new QuicFlowTracker(),
+  dnsTracker: new DnsTracker(),
 });
 
 // --- Frame builders ---------------------------------------------------------
@@ -100,7 +102,7 @@ function decodeLive(raws: Uint8Array[]): { packets: Packet[]; replies: { request
   raws.forEach((raw, i) => {
     const d = decodeRawEthernetPacket(
       raw, i + 1, 1_700_000_000_000 + i * 10, i * 0.01, 0.01, raw.length,
-      trackers.tcpTracker, trackers.icmpTracker, trackers.quicTracker, undefined,
+      trackers.tcpTracker, trackers.icmpTracker, trackers.quicTracker, trackers.dnsTracker, undefined,
     );
     packets.push(d.packet);
     if (d.icmpMatchedRequestFrameId !== undefined) {
@@ -119,7 +121,7 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
   const f = stored[0];
   check('a stored frame keeps the raw bytes', f.raw instanceof Uint8Array && f.raw.length === raws[0].length, true);
   check('...and the packet number', f.id, live.packets[0].id);
-  check('...and the timing', [f.timestamp, f.relativeTime, f.timeDelta], [live.packets[0].timestamp, live.packets[0].relativeTime, live.packets[0].timeDelta]);
+  check('...and the timing', [f.tsUs, f.relativeTime, f.timeDelta], [live.packets[0].tsUs, live.packets[0].relativeTime, live.packets[0].timeDelta]);
   check('...and drops the derived layers', 'layers' in f, false);
   check('...and drops the derived info column', 'info' in f, false);
   const bytes = JSON.stringify(Array.from(f.raw!));
@@ -130,7 +132,7 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
 {
   // Restored in one batch, then compared against the live decode field by
   // field. This is the check the whole feature rests on.
-  const restored = restoreBatch(stored, freshTrackers());
+  const restored = restoreBatch(stored, freshTrackers(), undefined, undefined, true);
   check('every packet comes back', restored.packets.length, live.packets.length);
 
   const compare = (key: keyof Packet) =>
@@ -143,6 +145,10 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
                      'status', 'streamId'] as (keyof Packet)[]) {
     compare(key);
   }
+  // Trees are rebuilt on demand now (docs/decisions/0007), so this asks for
+  // them explicitly. What is being asserted is unchanged and is the point of
+  // storing the bytes at all: a frame off disk dissects to the same tree the
+  // live one did.
   check('round trip preserves the dissected layers',
     JSON.stringify(restored.packets.map(p => p.layers)),
     JSON.stringify(live.packets.map(p => p.layers)));
@@ -162,7 +168,7 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
     const packets: Packet[] = [];
     const replies: { requestFrameId: number; replyId: number }[] = [];
     for (let i = 0; i < stored.length; i += size) {
-      const out = restoreBatch(stored.slice(i, i + size), trackers);
+      const out = restoreBatch(stored.slice(i, i + size), trackers, undefined, undefined, true);
       packets.push(...out.packets);
       replies.push(...out.icmpReplies);
     }
@@ -192,7 +198,7 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
   // The agent can send a packet with no bytes. It must come back exactly as
   // unhelpful as it was, not dropped and not given invented payload.
   const bare = buildFallbackPacket({
-    id: 7, timestamp: 1_700_000_000_000, relativeTime: 1.5, timeDelta: 0.02,
+    id: 7, tsUs: 1_700_000_000_000_000, relativeTime: 1.5, timeDelta: 0.02,
     length: 120, source: '192.0.2.1', destination: '192.0.2.9',
     sourcePort: 1234, destPort: 80, protocol: 'UDP', info: 'Something happened',
   });
@@ -200,7 +206,7 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
   check('a byteless packet stores no raw bytes', frame.raw, undefined);
   check('...and stores its display fields instead', frame.fallback?.info, 'Something happened');
 
-  const back = restoreBatch([frame], freshTrackers()).packets[0];
+  const back = restoreBatch([frame], freshTrackers(), undefined, undefined, true).packets[0];
   check('it comes back with the same id', back.id, 7);
   check('...the same addresses', [back.source, back.destination], ['192.0.2.1', '192.0.2.9']);
   check('...the same ports', [back.sourcePort, back.destPort], [1234, 80]);
@@ -211,10 +217,10 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
 // --- A mixed buffer restores in order -------------------------------------
 {
   const bare = toStoredFrame(buildFallbackPacket({
-    id: 500, timestamp: 1_700_000_000_500, relativeTime: 9, timeDelta: 0.1, length: 64,
+    id: 500, tsUs: 1_700_000_000_500_000, relativeTime: 9, timeDelta: 0.1, length: 64,
   }));
   const mixed = [stored[0], bare, stored[1]];
-  const back = restoreBatch(mixed, freshTrackers()).packets;
+  const back = restoreBatch(mixed, freshTrackers(), undefined, undefined, true).packets;
   check('a byteless frame between real ones keeps position and order',
     back.map(p => p.id), [stored[0].id, 500, stored[1].id]);
   check('...and the real frames either side still dissect',
@@ -232,7 +238,7 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
 
   const captured = decodeRawEthernetPacket(
     raws[0], 1, 1_700_000_000_000, 0, 0, raws[0].length,
-    new TcpStreamTracker(), new IcmpEchoTracker(), new QuicFlowTracker(),
+    new TcpStreamTracker(), new IcmpEchoTracker(), new QuicFlowTracker(), new DnsTracker(),
     { name: ID, label: LABEL },
   ).packet;
 
@@ -253,7 +259,7 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
   const stored = toStoredFrame(captured);
   check('the stored frame keeps the label', stored.interfaceName, LABEL);
 
-  const withTable = restoreBatch([stored], freshTrackers(), new Map([[LABEL, ID]])).packets[0];
+  const withTable = restoreBatch([stored], freshTrackers(), new Map([[LABEL, ID]]), undefined, true).packets[0];
   const restoredFields = frameFields(withTable);
   check('restored with the table, the adapter id comes back', restoredFields['Interface name'], ID);
   check('...and so does the description', restoredFields['Interface description'], LABEL);
@@ -263,14 +269,14 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
   // one anyway is what broke the round-trip check above: Packet.interfaceName
   // falls back to the literal "eth0" for a frame that had no interface, which
   // reads exactly like a real label. So: identify it or say nothing.
-  const noTable = frameFields(restoreBatch([stored], freshTrackers()).packets[0]);
+  const noTable = frameFields(restoreBatch([stored], freshTrackers(), undefined, undefined, true).packets[0]);
   check('with no table it does not invent an adapter', noTable['Interface description'], 'Imported capture');
-  const wrongTable = frameFields(restoreBatch([stored], freshTrackers(), new Map([['Some other adapter', 'x']])).packets[0]);
+  const wrongTable = frameFields(restoreBatch([stored], freshTrackers(), new Map([['Some other adapter', 'x']]), undefined, true).packets[0]);
   check('a table that does not list this adapter is not forced to fit', wrongTable['Interface description'], 'Imported capture');
 
   // A frame that genuinely has no adapter keeps the imported-capture wording.
   const anonymous = { ...stored, interfaceName: undefined };
-  const anon = frameFields(restoreBatch([anonymous], freshTrackers()).packets[0]);
+  const anon = frameFields(restoreBatch([anonymous], freshTrackers(), undefined, undefined, true).packets[0]);
   check('a frame with no adapter still reads as an imported capture', anon['Interface description'], 'Imported capture');
 }
 

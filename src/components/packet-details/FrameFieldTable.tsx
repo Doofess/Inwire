@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 import { TbCopy, TbCheck } from 'react-icons/tb';
 import { renderBitfield } from '../../lib/bitfield';
+import { SEVERITY_TEXT } from '../../services/expertInfo';
 
 /**
  * The dissected fields as an aligned two-column table.
@@ -20,12 +21,10 @@ import { renderBitfield } from '../../lib/bitfield';
  * The reference analyzer's dotted binary, and a cross-frame reference is a link.
  */
 
-const EXPERT_SEVERITY_CLASS: Record<string, string> = {
-  error: 'text-rose-600 dark:text-rose-400',
-  warn: 'text-amber-600 dark:text-amber-400',
-  note: 'text-sky-600 dark:text-sky-400',
-  chat: 'text-muted-foreground',
-};
+// The severity palette lives in services/expertInfo, so one level means one
+// colour here, in the workspace tree, in the packet list's severity dot and in
+// the Expert Information tab.
+const EXPERT_SEVERITY_CLASS = SEVERITY_TEXT;
 
 interface FrameFieldTableProps {
   packet: Packet;

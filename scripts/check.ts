@@ -30,7 +30,9 @@ const repoRoot = join(here, '..');
  */
 const NOT_TESTS: Record<string, string> = {
   'gen-oui.ts': 'generator; downloads ~5MB from IEEE',
-  'parity/parity-check.ts': 'needs a local capture file and tshark ground truth',
+  'parity/parity-check.ts': 'needs the untracked fixture captures and tshark ground truth (test/fixtures/README.md)',
+  'perf/clone-cost.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0007)',
+  'perf/wire-size.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0005)',
 };
 
 function walk(dir: string): string[] {

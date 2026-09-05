@@ -14,7 +14,7 @@ import { loadPreference, savePreference } from './preferences';
  * delete every one of them.
  */
 
-export const FILTER_PRESETS_STORAGE_KEY = 'netview.filterPresets';
+export const FILTER_PRESETS_STORAGE_KEY = 'inwire.filterPresets';
 
 /** Seeds a first run, and what "Restore defaults" restores. */
 export const DEFAULT_FILTER_PRESET_LIBRARY: FilterPresetLibrary = {

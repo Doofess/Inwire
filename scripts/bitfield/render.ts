@@ -4,7 +4,7 @@
  *   npx tsx scripts/bitfield/render.ts
  *
  * Expected strings are taken from the reference analyzer's own output for the same fields,
- * so a failure here means NetView would disagree with `tshark -V`.
+ * so a failure here means Inwire would disagree with `tshark -V`.
  */
 import { renderBitfield, renderBitfieldRow } from '../../src/lib/bitfield';
 

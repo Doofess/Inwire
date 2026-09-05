@@ -5,6 +5,8 @@ import {MotionConfig} from 'motion/react';
 import {TooltipProvider} from './components/ui/tooltip';
 import {RETIRED_THEMES, THEME_NAMES, normalizeThemeName} from './lib/themeOptions';
 import {motionStore} from './services/interfacePrefs';
+import {applyStoredFont} from './lib/font';
+import {applyStoredChrome} from './lib/chrome';
 import {usePreferenceValue} from './services/preferenceStore';
 import App from './App.tsx';
 import './index.css';
@@ -39,6 +41,17 @@ function migrateStoredTheme(): void {
 }
 
 migrateStoredTheme();
+
+/**
+ * The chosen typeface, before the first paint.
+ *
+ * Same placement and the same reason as the theme fixup above: a React effect
+ * runs after the browser has already drawn, so leaving this to
+ * `useFontPreference` alone would paint the app in the default face and reflow
+ * into the chosen one a frame later.
+ */
+applyStoredFont();
+applyStoredChrome();
 
 /**
  * The app's motion setting, in the form motion/react wants.

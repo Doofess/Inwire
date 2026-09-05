@@ -1,16 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { Packet } from '../../types/packet';
-import {
-  TbActivity,
-  TbAlertTriangle,
-  TbMaximize,
-} from 'react-icons/tb';
+import { TbAlertTriangle } from 'react-icons/tb';
 import { ZoomControls } from './ZoomControls';
-import type { WidgetVariant } from './dashboardWidgets';
 import { useElementSize } from '../../lib/useElementSize';
 import { prefersReducedMotion } from '../../lib/motion';
 import { useThemeToken } from '../../lib/themeColor';
+import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
+import { FilterEngine } from '../../services/filterEngine';
+
+export type TimelineMetric = 'packets' | 'bytes';
+export type TimelineChart = 'area' | 'bars';
 
 interface TrafficTimelineProps {
   packets: Packet[];
@@ -22,15 +22,34 @@ interface TrafficTimelineProps {
    *  between them and the chart would keep the previous accent. */
   themeKey?: string;
   /**
-   * How much room this has been given. See GeoMap for the full reasoning.
+   * What the Y axis counts, and how the series is drawn.
    *
-   * `full` means the parent has already framed it, so this renders its body
-   * with no scrim and no card of its own - but at the taller layout, because
-   * the space is there.
+   * Both were local state - a PKT/S / KBPS pair of pills, and no chart choice
+   * at all. They are stored settings now, which is what lets the same widget
+   * appear twice in one dashboard as a packet-rate area and a byte-rate
+   * histogram.
    */
-  variant?: WidgetVariant;
-  /** Open this widget in the dashboard's shared overlay. See GeoMap. */
-  onExpand?: () => void;
+  metric: TimelineMetric;
+  chart: TimelineChart;
+  /**
+   * Bucket width in seconds.
+   *
+   * Was hardcoded to one, which is the wrong answer at both ends of the range:
+   * a microburst is invisible at one-second resolution, and an hour-long
+   * capture is 3,600 buckets of noise.
+   */
+  intervalSeconds?: number;
+  /**
+   * A display filter for a SECOND series, drawn over the first.
+   *
+   * This is what makes the widget an I/O graph rather than a throughput chart:
+   * "how much of this traffic is X, over time" is the question it exists to
+   * answer, and it cannot be answered by filtering the whole app - that would
+   * remove the total the answer is measured against.
+   *
+   * Empty means one series, which is what the chart has always drawn.
+   */
+  overlayFilter?: string;
 }
 
 interface TimelineBucket {
@@ -38,6 +57,9 @@ interface TimelineBucket {
   timeLabel: string;
   packetCount: number;
   byteCount: number;
+  /** The part of this bucket matching the overlay filter, if there is one. */
+  matchCount: number;
+  matchBytes: number;
   kbps: number;
   hasAnomaly: boolean;
   anomalyTitle?: string;
@@ -49,8 +71,10 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
   isCapturing,
   isDark,
   themeKey,
-  variant = 'card',
-  onExpand,
+  metric,
+  chart,
+  intervalSeconds = 1,
+  overlayFilter = '',
 }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -65,11 +89,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
   const plotRef = useRef<HTMLDivElement | null>(null);
   const zoomBehaviorRef = useRef<d3.ZoomBehavior<SVGRectElement, unknown> | null>(null);
   const zoomRectNodeRef = useRef<SVGRectElement | null>(null);
-  const [metric, setMetric] = useState<'packets' | 'bandwidth'>('packets');
   const [hoveredBucket, setHoveredBucket] = useState<TimelineBucket | null>(null);
-  // "Has room for the tall layout" - which now means one thing: the dashboard
-  // overlay is what framed us.
-  const roomy = variant === 'full';
   const [zoomTransform, setZoomTransform] = useState<d3.ZoomTransform>(d3.zoomIdentity);
   const [visibleDomain, setVisibleDomain] = useState<[number, number]>([0, 10]);
   const plot = useElementSize(plotRef);
@@ -92,6 +112,12 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
   // The theme's own alert colour rather than a hardcoded rose, so an alert on
   // the timeline is the same red as an alert everywhere else in the app.
   const alert = useThemeToken('--destructive', '#f43f5e');
+  // Bandwidth was drawn in a hardcoded `#10b981` - the one colour in this
+  // chart that followed nothing, which is exactly the fault the axis comment
+  // above records and fixes for the axis. Same token every success state in
+  // the app uses, so switching metric changes hue with the theme rather than
+  // against it.
+  const bandwidth = useThemeToken('--success', '#10b981');
 
   // D3 transitions are JavaScript writing values every frame, so the CSS
   // reduced-motion rule does not apply to them. Zero duration keeps the same
@@ -113,54 +139,135 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
     d3.select(zoomRectNodeRef.current).transition().duration(zoomDuration()).call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
   };
 
-  // Compute time bounds & buckets
-  const { buckets, maxTime } = React.useMemo(() => {
-    if (packets.length === 0) return { buckets: [], minTime: 0, maxTime: 10 };
+  /**
+   * How far back the axis reaches when the capture is shorter than this. Only
+   * a floor for the empty chart - a longer capture keeps every second it has.
+   */
+  const MIN_AXIS_SECONDS = 10;
+  /**
+   * The bucket width, clamped. A stored config is untrusted input and a zero
+   * or negative interval divides the whole capture into one bucket at index
+   * Infinity.
+   */
+  const bucketSeconds = Number.isFinite(intervalSeconds) && intervalSeconds > 0
+    ? Math.min(intervalSeconds, 3600)
+    : 1;
+  /** How much empty axis is drawn ahead of the newest packet. */
+  const SEEDED_WINDOW_SECONDS = 60;
 
-    const bucketMap = new Map<number, { count: number; bytes: number; hasAnomaly: boolean; anomalyTitle?: string; firstPacket?: Packet }>();
-
-    let minT = Math.floor(packets[0].relativeTime);
-    let maxT = Math.ceil(packets[packets.length - 1].relativeTime);
-    if (maxT - minT < 10) maxT = minT + 10;
-
-    // Sliding 60-second window or full range
-    const startSec = Math.max(0, maxT - 60);
-    for (let t = startSec; t <= maxT; t++) {
-      bucketMap.set(t, { count: 0, bytes: 0, hasAnomaly: false });
+  /**
+   * Per-second buckets, folded one packet at a time.
+   *
+   * This used to walk the whole buffer on every dashboard tick to rebuild
+   * counts that had not changed - a packet's second, length and anomaly are
+   * fixed the moment it arrives. The fold keeps the bucket map across ticks and
+   * reads only the packets that arrived during the tick; what still runs every
+   * tick is the finalize below, which is O(seconds captured) rather than
+   * O(packets). See useIncrementalAggregate.
+   *
+   * `first`/`last` are carried in the accumulator rather than read off
+   * `packets`, so finalize needs nothing but the fold - and so that a trim,
+   * which restarts the fold, moves the axis with it.
+   */
+  /**
+   * The overlay's predicate, compiled once per filter string.
+   *
+   * An expression that does not compile yields null rather than throwing, and
+   * the chart then draws one series - the same as an empty filter. A widget
+   * setting is typed a character at a time, so most of what this sees is an
+   * incomplete expression, and a chart that vanished while a filter was being
+   * written would be unusable.
+   */
+  const overlayMatcher = React.useMemo(() => {
+    const trimmed = overlayFilter.trim();
+    if (!trimmed) return null;
+    try {
+      return FilterEngine.compileFilter(trimmed);
+    } catch {
+      return null;
     }
+  }, [overlayFilter]);
 
-    for (const p of packets) {
-      const sec = Math.floor(p.relativeTime);
-      const existing = bucketMap.get(sec) || { count: 0, bytes: 0, hasAnomaly: false };
-      existing.count += 1;
-      existing.bytes += p.length;
-      if (!existing.firstPacket) existing.firstPacket = p;
+  const { buckets, maxTime } = useIncrementalAggregate(
+    packets,
+    () => ({
+      seconds: new Map<number, { count: number; bytes: number; match: number; matchBytes: number; hasAnomaly: boolean; anomalyTitle?: string; firstPacket?: Packet }>(),
+      first: Number.NaN,
+      last: Number.NaN,
+    }),
+    (acc, p) => {
+      if (Number.isNaN(acc.first)) acc.first = p.relativeTime;
+      acc.last = p.relativeTime;
+
+      // Bucket INDEX, not seconds: the axis multiplies back by the interval.
+      // Keying on the index is what keeps the map small at a 1-minute
+      // interval and exact at 100 ms, where a float second would collide.
+      const sec = Math.floor(p.relativeTime / bucketSeconds);
+      let bucket = acc.seconds.get(sec);
+      if (!bucket) {
+        bucket = { count: 0, bytes: 0, match: 0, matchBytes: 0, hasAnomaly: false };
+        acc.seconds.set(sec, bucket);
+      }
+      bucket.count += 1;
+      bucket.bytes += p.length;
+      if (!bucket.firstPacket) bucket.firstPacket = p;
+
+      if (overlayMatcher) {
+        // A rule that throws on one frame must not stop the fold; it simply
+        // did not match that frame.
+        try {
+          if (overlayMatcher(p)) { bucket.match += 1; bucket.matchBytes += p.length; }
+        } catch { /* not a match */ }
+      }
 
       if (p.status === 'alert' || (p.anomalies && p.anomalies.length > 0)) {
-        existing.hasAnomaly = true;
-        existing.anomalyTitle = p.anomalies?.[0]?.title || 'Security Alert';
+        bucket.hasAnomaly = true;
+        bucket.anomalyTitle = p.anomalies?.[0]?.title || 'Security Alert';
       }
-      bucketMap.set(sec, existing);
-    }
+    },
+    (acc) => {
+      if (acc.seconds.size === 0) return { buckets: [] as TimelineBucket[], maxTime: MIN_AXIS_SECONDS };
 
-    const result: TimelineBucket[] = [];
-    const sortedKeys = Array.from(bucketMap.keys()).sort((a, b) => a - b);
-    for (const k of sortedKeys) {
-      const b = bucketMap.get(k)!;
-      result.push({
-        timeSec: k,
-        timeLabel: `${k}s`,
-        packetCount: b.count,
-        byteCount: b.bytes,
-        kbps: (b.bytes * 8) / 1024,
-        hasAnomaly: b.hasAnomaly,
-        anomalyTitle: b.anomalyTitle,
-        firstPacket: b.firstPacket,
-      });
-    }
+      // Everything below counts in bucket INDEXES and converts to seconds on
+      // the way out, so the axis is in seconds whatever the interval is.
+      const minIndex = Math.floor(acc.first / bucketSeconds);
+      let maxIndex = Math.ceil(acc.last / bucketSeconds);
+      const minSpan = Math.ceil(MIN_AXIS_SECONDS / bucketSeconds);
+      if (maxIndex - minIndex < minSpan) maxIndex = minIndex + minSpan;
 
-    return { buckets: result, minTime: minT, maxTime: maxT };
-  }, [packets]);
+      // A quiet stretch has to be drawn as a quiet stretch rather than as a gap
+      // the area chart closes over, so the trailing window is filled in whether
+      // or not any packet landed in it.
+      const seconds = new Set(acc.seconds.keys());
+      const seeded = Math.ceil(SEEDED_WINDOW_SECONDS / bucketSeconds);
+      for (let t = Math.max(0, maxIndex - seeded); t <= maxIndex; t++) seconds.add(t);
+
+      const result: TimelineBucket[] = [];
+      for (const k of Array.from(seconds).sort((a, b) => a - b)) {
+        const b = acc.seconds.get(k) ?? { count: 0, bytes: 0, match: 0, matchBytes: 0, hasAnomaly: false };
+        const at = k * bucketSeconds;
+        result.push({
+          timeSec: at,
+          // Sub-second buckets need a decimal or every label in a burst reads
+          // the same; whole-second ones must not grow one.
+          timeLabel: bucketSeconds < 1 ? `${at.toFixed(1)}s` : `${at}s`,
+          packetCount: b.count,
+          byteCount: b.bytes,
+          matchCount: b.match,
+          matchBytes: b.matchBytes,
+          kbps: (b.bytes * 8) / 1024,
+          hasAnomaly: b.hasAnomaly,
+          anomalyTitle: b.anomalyTitle,
+          firstPacket: b.firstPacket,
+        });
+      }
+
+      return { buckets: result, maxTime: maxIndex * bucketSeconds };
+    },
+    // Both change what is already folded in, so a change to either has to be
+    // answered by folding again from zero - which is what listing them does.
+    [bucketSeconds, overlayMatcher],
+  );
 
   // During active capture `buckets` recomputes on literally every incoming
   // packet, and the draw effect below fully tears down and rebuilds the SVG
@@ -201,7 +308,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
     // before the observer has reported - not as the answer forever, which is
     // what they were.
     const containerWidth = plot.width || containerRef.current.clientWidth || 320;
-    const height = plot.height || (roomy ? 360 : 120);
+    const height = plot.height || 120;
     const margin = { top: 10, right: 12, bottom: 20, left: 30 };
     const width = containerWidth - margin.left - margin.right;
     const innerHeight = height - margin.top - margin.bottom;
@@ -250,13 +357,9 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       .attr('x2', '0%')
       .attr('y2', '100%');
 
-    if (metric === 'packets') {
-      gradient.append('stop').attr('offset', '0%').attr('stop-color', accent).attr('stop-opacity', 0.6);
-      gradient.append('stop').attr('offset', '100%').attr('stop-color', accent).attr('stop-opacity', 0.01);
-    } else {
-      gradient.append('stop').attr('offset', '0%').attr('stop-color', '#10b981').attr('stop-opacity', 0.6);
-      gradient.append('stop').attr('offset', '100%').attr('stop-color', '#10b981').attr('stop-opacity', 0.01);
-    }
+    const seriesColor = metric === 'packets' ? accent : bandwidth;
+    gradient.append('stop').attr('offset', '0%').attr('stop-color', seriesColor).attr('stop-opacity', 0.6);
+    gradient.append('stop').attr('offset', '100%').attr('stop-color', seriesColor).attr('stop-opacity', 0.01);
 
     // Area & Line
     const area = d3
@@ -272,13 +375,76 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       .y(d => yScale(yVal(d)))
       .curve(d3.curveMonotoneX);
 
-    g.append('path').datum(throttledBuckets).attr('fill', `url(#${gradId})`).attr('d', area);
-    g.append('path')
-      .datum(throttledBuckets)
-      .attr('fill', 'none')
-      .attr('stroke', metric === 'packets' ? accent : '#10b981')
-      .attr('stroke-width', 2)
-      .attr('d', line);
+    // The overlay: the part of each bucket matching the widget's filter,
+    // drawn against the SAME y scale as the total so the two are comparable by
+    // height. That is the whole point of a second series - a chart of the
+    // filtered traffic on its own axis would answer "how much X" without
+    // answering "how much of this".
+    const overlayVal = (d: TimelineBucket) => (metric === 'packets' ? d.matchCount : (d.matchBytes * 8) / 1024);
+    const hasOverlay = overlayMatcher !== null && throttledBuckets.some((d) => overlayVal(d) > 0);
+
+    if (chart === 'bars') {
+      // One column per second, sized from the same scales the area uses, so
+      // switching chart type moves nothing but the marks. The width is derived
+      // from the zoomed spacing between adjacent seconds rather than from a
+      // constant: zoomed in, the columns have to grow with the gaps or the
+      // chart turns into a row of hairlines with daylight between them.
+      const step = Math.abs(xScale(1) - xScale(0));
+      const barWidth = Math.max(1, Math.min(step * 0.7, 24));
+      g.selectAll('rect.nv-bar')
+        .data(throttledBuckets.filter((d) => yVal(d) > 0))
+        .join('rect')
+        .attr('class', 'nv-bar')
+        .attr('x', (d) => xScale(d.timeSec) - barWidth / 2)
+        .attr('y', (d) => yScale(yVal(d)))
+        .attr('width', barWidth)
+        .attr('height', (d) => Math.max(1, innerHeight - yScale(yVal(d))))
+        .attr('rx', Math.min(2, barWidth / 2))
+        // An anomalous second is coloured rather than marked, for the same
+        // reason the area chart repaints its span below: the bar IS the
+        // second, so there is nothing to point at that the bar is not.
+        .attr('fill', (d) => (d.hasAnomaly ? alert : seriesColor))
+        .attr('opacity', hasOverlay ? 0.35 : 0.85);
+
+      if (hasOverlay) {
+        // Drawn over the total's column, from the same baseline, so the
+        // matching share reads as a proportion of the bar it sits inside.
+        g.selectAll('rect.nv-bar-overlay')
+          .data(throttledBuckets.filter((d) => overlayVal(d) > 0))
+          .join('rect')
+          .attr('class', 'nv-bar-overlay')
+          .attr('x', (d) => xScale(d.timeSec) - barWidth / 2)
+          .attr('y', (d) => yScale(overlayVal(d)))
+          .attr('width', barWidth)
+          .attr('height', (d) => Math.max(1, innerHeight - yScale(overlayVal(d))))
+          .attr('rx', Math.min(2, barWidth / 2))
+          .attr('fill', alert)
+          .attr('opacity', 0.9);
+      }
+    } else {
+      g.append('path').datum(throttledBuckets).attr('fill', `url(#${gradId})`).attr('d', area);
+      g.append('path')
+        .datum(throttledBuckets)
+        .attr('fill', 'none')
+        .attr('stroke', seriesColor)
+        .attr('stroke-width', 2)
+        .attr('opacity', hasOverlay ? 0.45 : 1)
+        .attr('d', line);
+
+      if (hasOverlay) {
+        const overlayLine = d3
+          .line<TimelineBucket>()
+          .x((d) => xScale(d.timeSec))
+          .y((d) => yScale(overlayVal(d)))
+          .curve(d3.curveMonotoneX);
+        g.append('path')
+          .datum(throttledBuckets)
+          .attr('fill', 'none')
+          .attr('stroke', alert)
+          .attr('stroke-width', 2)
+          .attr('d', overlayLine);
+      }
+    }
 
     // Alerts, painted INTO the graph rather than dotted on top of it.
     //
@@ -297,7 +463,10 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       else alertRuns.push([i, i]);
     });
 
-    if (alertRuns.length > 0) {
+    // Only the area chart needs this pass. A bar chart has already said which
+    // seconds were anomalous by colouring those bars, and painting a band over
+    // them as well would be the same fact drawn twice.
+    if (alertRuns.length > 0 && chart !== 'bars') {
       const alertGradId = `${gradId}-alert`;
       const alertGradient = defs
         .append('linearGradient')
@@ -374,7 +543,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
     // Y Axis
     const yAxis = d3.axisLeft(yScale).ticks(3).tickFormat(d => {
       const n = Number(d);
-      if (metric === 'bandwidth') return `${n >= 1000 ? (n / 1000).toFixed(1) + 'M' : n.toFixed(0)}k`;
+      if (metric === 'bytes') return `${n >= 1000 ? (n / 1000).toFixed(1) + 'M' : n.toFixed(0)}k`;
       return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
     });
     g.append('g')
@@ -412,90 +581,48 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
     zoomRectNodeRef.current = zoomRect.node();
     // `accent` is a dependency, not just a value read inside: that is what
     // makes a theme resolving after the first paint redraw the chart.
-  }, [throttledBuckets, metric, isDark, themeKey, roomy, zoomTransform, accent, axis, alert, plot.width, plot.height]);
+  }, [throttledBuckets, metric, chart, overlayMatcher, isDark, themeKey, zoomTransform, accent, axis, alert, bandwidth, plot.width, plot.height]);
 
-  const body = (
-    <>
-      {/* Title & Metric Toggles */}
-      <div className={`flex items-center justify-between ${roomy ? 'pr-9' : ''}`}>
-        <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1.5 font-mono">
-          <TbActivity className="w-3.5 h-3.5 text-foreground" />
-          <span>Traffic Timeline</span>
-        </h3>
-
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setMetric('packets')}
-            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-              metric === 'packets' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            PKT/S
-          </button>
-          <button
-            onClick={() => setMetric('bandwidth')}
-            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-              metric === 'bandwidth' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            KBPS
-          </button>
-          {/* Expand only - the overlay owns closing, in the same place for
-              every widget, however the widget was opened. */}
-          {onExpand && !roomy && (
-            <button
-              onClick={onExpand}
-              data-widget-expand=""
-              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors ml-1 cursor-pointer"
-              aria-label="Expand chart"
-              title="Expand chart"
-            >
-              <TbMaximize className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* SVG Canvas */}
-      {/* An aspect ratio in the card, a fixed height in the overlay. The card
-          is what gets dragged, and 44/15 is the shape the old 120px height gave
-          at the column's default width - so a dashboard nobody has resized
-          looks exactly as it did. The overlay is a fixed-size window, so there
-          is nothing there for a ratio to track. */}
-      <div
-        ref={plotRef}
-        className={`relative w-full overflow-hidden ${roomy ? 'h-[360px]' : 'aspect-[44/15]'}`}
-      >
+  return (
+    <div ref={containerRef} className="h-full flex flex-col gap-1.5">
+      {/* The plot fills whatever the card gives it, rather than asserting a
+          shape of its own. It used to carry an aspect ratio in the card and a
+          hardcoded 360px in the overlay - two numbers this component chose,
+          neither of which survives a dashboard where the card's height comes
+          from the registry and the popout bubble's from its content. */}
+      <div ref={plotRef} className="relative flex-1 min-h-0 w-full overflow-hidden">
         <svg ref={svgRef} className="w-full h-full" />
 
-        {/* Zoom in and out belong to the expanded view, the same way the geo
-            map's do: this chart is 120px tall in the panel, where three buttons
-            are a third of its height and there is nothing to look closer at
-            anyway.
+        {/* Zoom in and out are gone with the expanded window that used to be
+            the only place they appeared: at card height three stacked buttons
+            are a third of the chart.
 
-            RESET is not gated with them, and that is deliberate. The wheel
-            still zooms the compact chart - hiding a button does not remove the
-            gesture - so gating the way back on being expanded would let someone
-            zoom in by accident and have no visible route out. It appears only
-            when there is something to undo, so it costs nothing the rest of the
-            time. */}
-        <ZoomControls
-          onZoomIn={roomy ? handleZoomIn : undefined}
-          onZoomOut={roomy ? handleZoomOut : undefined}
-          onReset={zoomTransform.k !== 1 ? handleResetZoom : undefined}
-        />
+            RESET stays, and that is deliberate. The wheel still zooms the card
+            - removing a button does not remove the gesture - so without this
+            somebody who zooms in by accident has no visible way back. It
+            appears only when there is something to undo, so it costs nothing
+            the rest of the time. */}
+        <ZoomControls onReset={zoomTransform.k !== 1 ? handleResetZoom : undefined} />
 
         {hoveredBucket && (
-          <div
-            className="absolute top-1 left-1 text-xs px-2 py-1 rounded border pointer-events-none shadow-xl bg-popover border-border text-popover-foreground"
-          >
+          <div className="absolute top-1 left-1 text-xs px-2 py-1 rounded border pointer-events-none shadow-xl bg-popover border-border text-popover-foreground">
             <div className="font-mono text-[10px] text-primary font-bold">T = {hoveredBucket.timeLabel}</div>
             <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
-              <span>{hoveredBucket.packetCount} pkts</span> • <span>{hoveredBucket.kbps.toFixed(1)} Kbps</span>
+              <span>{hoveredBucket.packetCount} pkts</span> - <span>{hoveredBucket.kbps.toFixed(1)} Kbps</span>
             </div>
+            {overlayMatcher && (
+              <div className="text-[10px] font-mono mt-0.5 text-danger-muted">
+                {hoveredBucket.matchCount} matching
+                {hoveredBucket.packetCount > 0 && (
+                  <span className="text-muted-foreground">
+                    {' '}({((hoveredBucket.matchCount / hoveredBucket.packetCount) * 100).toFixed(0)} %)
+                  </span>
+                )}
+              </div>
+            )}
             {hoveredBucket.hasAnomaly && (
-              <div className="text-rose-400 font-bold text-[10px] mt-0.5 flex items-center gap-1">
-                <TbAlertTriangle className="w-3 h-3 text-rose-400" />
+              <div className="text-danger-muted font-bold text-[10px] mt-0.5 flex items-center gap-1">
+                <TbAlertTriangle className="w-3 h-3 text-danger" />
                 {hoveredBucket.anomalyTitle}
               </div>
             )}
@@ -503,32 +630,13 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
         )}
       </div>
 
-      {/* Timeline bounds (reflects the current zoomed/panned view) */}
-      <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono uppercase tracking-wider">
+      {/* The window currently in view, which zoom and pan move. */}
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono uppercase tracking-wider shrink-0">
         <span>T={Math.round(visibleDomain[0])}s</span>
-        <span className="text-primary font-bold">
+        <span className="font-bold">
           T={Math.round(visibleDomain[1])}s{Math.round(visibleDomain[1]) >= maxTime ? ' (NOW)' : ''}
         </span>
       </div>
-    </>
-  );
-
-  // The overlay already drew the frame, so this is just the contents at the
-  // tall layout. One branch, reached by both doors.
-  if (variant === 'full') {
-    return (
-      <div ref={containerRef} className="w-full h-full p-4 select-none space-y-2.5">
-        {body}
-      </div>
-    );
-  }
-
-  return (
-    <div
-      ref={containerRef}
-      className="rounded-lg border p-3.5 transition-colors select-none bg-card border-border text-card-foreground shadow-sm space-y-2.5"
-    >
-      {body}
     </div>
   );
 };
