@@ -160,6 +160,45 @@ check('a reset hands out a copy, not the shared array',
   const nonsense = [{ id: 'x', name: 'Broken', filter: 'this is not a filter (', enabled: true }];
   check('a rule that does not compile matches nothing rather than throwing',
     new ColorRulesEngine(nonsense).getMatchedRuleName(tlsHello), undefined);
+
+  // --- a frame's colour must not depend on bytes the buffer has released ----
+  //
+  // The buffer stops holding raw bytes past a window and reads them back from
+  // the store on demand (docs/decisions/0013). Wireshark writes the Broadcast
+  // rule as `eth[0] & 1`, straight out of the frame - and a byte read on a
+  // frame whose bytes are gone returns nothing, which a filter cannot tell from
+  // "this frame is not a broadcast". The row would quietly lose its colour on
+  // the next re-match: a minimap repaint, or any edit to the rule chain.
+  //
+  // So the rule reads `eth.ig`, dissected once and kept. These two frames are
+  // the same frame before and after eviction.
+  // An ordinary STP hello, which the chain's own comment names as the case
+  // that falls through to Broadcast - an ARP broadcast is coloured "ARP",
+  // because the ARP rule comes first and first match wins.
+  const stpHello = (rawBytes: Uint8Array): Packet => packet({
+    protocol: 'STP' as ProtocolType,
+    frameProtocols: ['frame', 'eth', 'llc', 'stp'],
+    // Not 0x80: a topology-change BPDU has its own rule above this one.
+    fields: { 'eth.dst': '01:80:c2:00:00:00', 'eth.ig': 1, 'stp.type': 0x00 },
+    rawBytes,
+  });
+  const broadcastBytes = stpHello(Uint8Array.from([0x01, 0x80, 0xc2, 0x00, 0x00, 0x00]));
+  const broadcastEvicted = stpHello(new Uint8Array(0));   // bytes released
+  const engine = new ColorRulesEngine(DEFAULT_COLOR_RULES);
+  check('a broadcast frame is coloured Broadcast',
+    engine.getMatchedRuleName(broadcastBytes), 'Broadcast');
+  check('...and still is once its bytes have been released',
+    new ColorRulesEngine(DEFAULT_COLOR_RULES).getMatchedRuleName(broadcastEvicted), 'Broadcast');
+
+  // The other direction: a unicast frame must not become a broadcast because
+  // its group bit says 0 rather than being absent.
+  const unicast = packet({
+    frameProtocols: ['frame', 'eth', 'ip', 'tcp'],
+    fields: { 'eth.dst': '44:15:24:5d:cc:62', 'eth.ig': 0, 'tcp.srcport': 1, 'tcp.dstport': 2 },
+    rawBytes: new Uint8Array(0),
+  });
+  check('a unicast frame with no bytes is not Broadcast',
+    new ColorRulesEngine(DEFAULT_COLOR_RULES).getMatchedRuleName(unicast), 'TCP');
 }
 
 console.log();
