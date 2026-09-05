@@ -19,6 +19,7 @@ file that supersedes the old one.
 | [0010](0010-raw-frame-capture.md) | The agent receives raw frames and dissects nothing | Accepted 2026-09-05 |
 | [0011](0011-dissection-cost-is-not-the-tree.md) | Dissection's cost was not the tree — **re-scopes 0001** | Accepted 2026-09-05 |
 | [0012](0012-stored-captures-persist.md) | A stored capture is discarded only when the user asks | Accepted 2026-09-05 |
+| [0013](0013-what-a-million-frames-actually-cost.md) | What a million frames actually cost — **re-targets the buffer work** | Accepted 2026-09-05 |
 
 ## Review outcome: amendments to the spec's execution order
 
