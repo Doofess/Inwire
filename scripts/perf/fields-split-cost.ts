@@ -24,14 +24,27 @@
  *          presence bit, since "absent" and "zero" are different answers
  *   sparse (everything else)                 -> the object, as today
  *
- * Nothing is built on this. It is here to say whether the split is worth
- * designing, and it reports the answer either way.
+ * **This models the NAIVE split, and the naive split loses.** Every numeric key
+ * gets a Float64Array and every key a byte of presence, and measured that way
+ * the columns cost 242 B a frame against the 194 they save - a net loss of 49 B.
+ *
+ * What was built is not that. Each column is the width of its field in its own
+ * protocol (a TTL is a byte, a port is two, a sequence number is four), presence
+ * is a packed bit rather than a byte, and a string column holds two-byte indices
+ * into a per-block table. That takes the columns from 242 B a frame to 78, which
+ * is the whole difference between a loss and 1,213 B a frame saved
+ * (`record-cost.ts`, `docs/decisions/0018`).
+ *
+ * It is kept in this shape deliberately: it is the evidence that the shape of
+ * the bag justifies a split at all, and the demonstration that the sizing is
+ * load-bearing rather than a refinement.
  *
  * A measurement, not an assertion: `check.ts` skips it by name.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
 import { clearAddressPool } from '../../src/services/addressFormat';
+import { fieldEntries } from '../../src/services/dissect/fieldAccess';
 import type { Packet } from '../../src/types/packet';
 
 const FIXTURES = [
@@ -46,13 +59,31 @@ const EMPTY = new Uint8Array(0);
 
 function heap(): number {
   if (global.gc) for (let i = 0; i < 6; i++) global.gc();
-  return process.memoryUsage().heapUsed;
+  const usage = process.memoryUsage();
+  // A typed array's bytes live OUTSIDE the JS heap, so counting only heapUsed
+  // measured the one string array and none of the typed ones beside it - which
+  // is how this script first reported 33 columns at 47 B a frame when they were
+  // 243. The same trap ADR 0013 documented for raw frame bytes.
+  return usage.heapUsed + usage.arrayBuffers;
 }
 
 function median(values: number[]): number {
   return [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 }
 
+/**
+ * The fixtures, with every frame's fields back in one bag.
+ *
+ * `parseCaptureFile` now performs the very split this script exists to
+ * evaluate, so its frames arrive already divided - and measured as they come,
+ * this reported **0 dense keys of 0 entries** and a saving of 11 B. It was not
+ * wrong, it was measuring a world where the work is already done.
+ *
+ * So the bag is reconstituted from both halves and the block pointer dropped,
+ * which puts a frame back the shape it had before the split. That keeps the
+ * decision reproducible: this is the evidence behind `docs/decisions/0017`, and
+ * evidence that stops re-deriving its own conclusion is not evidence.
+ */
 async function dissect(): Promise<Packet[]> {
   clearAddressPool();
   const out: Packet[] = [];
@@ -60,7 +91,13 @@ async function dissect(): Promise<Packet[]> {
     const parsed = await PcapService.parseCaptureFile(
       new File([new Uint8Array(readFileSync(path))], 'f.pcap'), 1_000_000,
     );
-    for (const p of parsed.packets) { p.rawBytes = EMPTY; out.push(p); }
+    for (const p of parsed.packets) {
+      p.rawBytes = EMPTY;
+      p.fields = Object.fromEntries(fieldEntries(p));
+      p.cols = undefined;
+      p.row = undefined;
+      out.push(p);
+    }
   }
   return out;
 }
@@ -177,9 +214,10 @@ async function main() {
   console.log('  the split would save         ' + per(whole - split));
   console.log('  the columns themselves cost  ' + per(split - sparse));
   console.log();
-  console.log('For comparison, ADR 0013 measured a column for EVERY key at 976 B a');
-  console.log('frame against 294 for the object - three times worse - because a key');
-  console.log('a few frames carry still takes a slot in all of them.');
+  console.log('A Float64 per numeric key and a byte of presence per key is the naive');
+  console.log('shape, and it loses. The built one sizes each column to its protocol and');
+  console.log('packs presence into bits: 78 B a frame rather than the figure above, and');
+  console.log('a 1,213 B saving rather than a loss (record-cost.ts, ADR 0018).');
 }
 
 main();
