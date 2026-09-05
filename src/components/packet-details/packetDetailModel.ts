@@ -70,6 +70,36 @@ export function lookupFrame(packets: Packet[], text: string): FrameLookup {
   };
 }
 
+/**
+ * Why a jump to frame `id` cannot happen, or null when it can.
+ *
+ * Every cross-reference in the app points at a frame by number - `[Response In:
+ * N]`, `[Reassembled in N]`, `(request in N)`, a Statistics row's first frame,
+ * a related-frame link. All of them were written when that frame was in the
+ * buffer, and the buffer trims its oldest frames, so all of them can outlive
+ * their target. Clicking one then did **nothing at all**: no movement, no
+ * message, nothing to distinguish "gone" from "broken".
+ *
+ * The frame-number box already had this right - it is `lookupFrame`'s
+ * `outOfRange`, which carries the range that IS held precisely so a refusal can
+ * say what the buffer has instead. This is that answer in the shape the
+ * navigation callbacks need, so the four places that jump between frames give
+ * one explanation rather than four.
+ */
+export function frameJumpRefusal(packets: Packet[], id: number): string | null {
+  const lookup = lookupFrame(packets, String(id));
+  if (lookup.kind !== 'outOfRange') return null;
+  if (lookup.first === null || lookup.last === null) {
+    return `Frame ${id.toLocaleString()} is not here - the buffer is empty.`;
+  }
+  // Which end it fell off matters: one means the capture has not got there
+  // yet, the other means it has been trimmed away, and only the second is
+  // permanent.
+  const trimmed = id < lookup.first;
+  return `Frame ${id.toLocaleString()} is ${trimmed ? 'no longer' : 'not yet'} in the buffer, `
+    + `which holds ${lookup.first.toLocaleString()}–${lookup.last.toLocaleString()}.`;
+}
+
 /** The frame-level facts shown in the summary strip. */
 export interface FrameSummary {
   /** Epoch milliseconds, formatted in the viewer's own zone. */
