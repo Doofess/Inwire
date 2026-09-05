@@ -48,7 +48,7 @@ export class PipelineClient {
   /** Detail requests waiting on the Worker, by frame number. */
   private pendingDetail = new Map<number, {
     resolve: (layers: ProtocolLayer[]) => void;
-    replay: () => ReplayBundle;
+    replay: () => ReplayBundle | Promise<ReplayBundle>;
   }>();
 
   onStatus: (status: PipelineStatus) => void = () => {};
@@ -102,12 +102,18 @@ export class PipelineClient {
         // could have answered from its cache.
         const waiting = this.pendingDetail.get(message.id);
         if (!waiting) break;
-        const bundle = waiting.replay();
-        this.send({
-          type: 'replay', id: message.id,
-          frames: bundle.frames, truncated: bundle.truncated,
-          streamId: bundle.streamId, retroactive: bundle.retroactive,
-          process: bundle.process,
+        // The bundle may have to be awaited: a frame whose bytes the buffer no
+        // longer holds gets them back from the store, and so may the frames
+        // before it on its conversation (services/packetBytes.ts). Wrapped
+        // rather than awaited, because a message handler that blocks would
+        // stall every other message behind it.
+        void Promise.resolve(waiting.replay()).then((bundle) => {
+          this.send({
+            type: 'replay', id: message.id,
+            frames: bundle.frames, truncated: bundle.truncated,
+            streamId: bundle.streamId, retroactive: bundle.retroactive,
+            process: bundle.process,
+          });
         });
         break;
       }
@@ -166,7 +172,7 @@ export class PipelineClient {
    * queueing behind it - arrow-keying down the packet list issues one of these
    * per row, and most of them are superseded before they are answered.
    */
-  detail(id: number, replay: () => ReplayBundle): Promise<ProtocolLayer[]> {
+  detail(id: number, replay: () => ReplayBundle | Promise<ReplayBundle>): Promise<ProtocolLayer[]> {
     const inFlight = this.pendingDetail.get(id);
     if (inFlight) {
       return new Promise((resolve) => {
