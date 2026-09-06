@@ -411,6 +411,15 @@ export function dissectQuic(
 }
 
 /**
+ * Matches a short header's connection id against the ones a flow has shown.
+ *
+ * A short header writes the id with no length before it, so its length is only
+ * knowable from what the flow has already used - which is state the tracker
+ * holds and this module deliberately does not.
+ */
+export type ConnectionIdResolver = (bytes: Uint8Array, offset: number) => string | undefined;
+
+/**
  * Dissects every QUIC packet coalesced into one UDP datagram.
  *
  * A datagram may carry several packets back to back - typically a Handshake
@@ -423,7 +432,7 @@ export function dissectQuicDatagram(
   bytes: Uint8Array,
   start: number,
   end: number,
-  knownConnectionId?: string,
+  resolveConnectionId?: ConnectionIdResolver,
   decryptPacket?: PacketDecryptor
 ): QuicDissectorResult | null {
   let offset = start;
@@ -436,6 +445,16 @@ export function dissectQuicDatagram(
   // Bounded so a packet that fails to advance can't spin; real datagrams
   // coalesce a handful of packets at most.
   for (let packets = 0; packets < 8 && offset < end; packets++) {
+    // Resolved per PACKET, not per datagram. A short header carries a
+    // connection id with no length in front of it, so it can only be read by
+    // matching against the ids this flow has already shown - and in a
+    // coalesced datagram the short header is not at the start, so a lookup
+    // done once on the datagram's first byte answers for the wrong packet.
+    // That is what left a 1-RTT packet behind a Handshake with no `DCID=`.
+    const isShortHeader = offset < end && (bytes[offset] & 0x80) === 0;
+    const knownConnectionId = isShortHeader
+      ? resolveConnectionId?.(bytes, offset + 1)
+      : undefined;
     const result = dissectQuic(bytes, offset, end, knownConnectionId, decryptPacket);
     if (!result) break;
 
