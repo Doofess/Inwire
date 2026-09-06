@@ -276,7 +276,10 @@ function ctrXor(roundKeys: Uint8Array, initialCounter: Uint8Array, data: Uint8Ar
  *
  * This is memory, not disk. ADR 0008's rule - key material never persists - is
  * untouched; a schedule derived from a key already in memory is not a new
- * exposure, and it is dropped with the module.
+ * exposure. It outlives the key log that produced it, though, so
+ * `KeyLogStore.clear` calls `clearDerivedKeys` - the map is keyed by the key
+ * BYTES, so leaving it behind after a "Cleared." message would leave both the
+ * keys and their schedules in memory.
  */
 interface DerivedKey { roundKeys: Uint8Array; h: Uint8Array }
 
@@ -315,7 +318,10 @@ export function expandKeyCached(key: Uint8Array): Uint8Array {
   return derive(key).roundKeys;
 }
 
-/** Forgets every derived schedule. For a capture ending, and for tests. */
+/**
+ * Forgets every derived schedule, and with it the key bytes the map is keyed
+ * by. Called by `KeyLogStore.clear`, so clearing the key log clears this too.
+ */
 export function clearDerivedKeys(): void {
   derivedKeys.clear();
 }

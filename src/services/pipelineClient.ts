@@ -119,14 +119,33 @@ export class PipelineClient {
         // before it on its conversation (services/packetBytes.ts). Wrapped
         // rather than awaited, because a message handler that blocks would
         // stall every other message behind it.
-        void Promise.resolve(waiting.replay()).then((bundle) => {
-          this.send({
-            type: 'replay', id: message.id,
-            frames: bundle.frames, truncated: bundle.truncated,
-            streamId: bundle.streamId, retroactive: bundle.retroactive,
-            process: bundle.process,
-          });
-        });
+        void Promise.resolve(waiting.replay()).then(
+          (bundle) => {
+            this.send({
+              type: 'replay', id: message.id,
+              frames: bundle.frames, truncated: bundle.truncated,
+              streamId: bundle.streamId, retroactive: bundle.retroactive,
+              process: bundle.process,
+            });
+          },
+          // A rejected replay used to wedge the frame permanently. Nothing
+          // caught it, and the pending entry is only removed when a `detail`
+          // reply arrives - so the promise `detail()` handed back never
+          // settled, the pane spun for ever, and because a second request for
+          // the same id JOINS the one in flight, that frame could not be
+          // opened again for the life of the page.
+          //
+          // Answered with an empty tree rather than a rejection, which is the
+          // rule the sibling path already follows: `packetBytes` gives a frame
+          // the store cannot supply an empty array, because a frame whose
+          // bytes are gone is a thing to render and not an error to handle.
+          // Dropping the entry first is what makes the next attempt a fresh
+          // request rather than a join onto a dead one.
+          () => {
+            this.pendingDetail.delete(message.id);
+            waiting.resolve([]);
+          },
+        );
         break;
       }
     }

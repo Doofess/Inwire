@@ -16,6 +16,7 @@ import { DecryptionSettingsPanel } from './DecryptionSettingsPanel';
 import type { AgentLogEntry } from '../../services/agentProtocol';
 import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/packet';
 import type { PacketTheme } from '../../services/packetThemes';
+import { formatBytes } from '../../lib/formatBytes';
 
 // Mirrors AUTO_PAUSE_AT in App.tsx, purely for the explanatory copy below.
 const AUTO_PAUSE_PERCENT = 99;
@@ -259,7 +260,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           <span className="text-muted-foreground"> ({bufferPercent.toFixed(1)}%)</span>
                         </dd>
                         <dt className="text-muted-foreground">Captured</dt>
-                        <dd className="font-mono">{(totalBytes / 1024 / 1024).toFixed(2)} MB</dd>
+                        <dd className="font-mono">{formatBytes(totalBytes)}</dd>
                       </dl>
                     </div>
 
