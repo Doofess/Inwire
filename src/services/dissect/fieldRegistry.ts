@@ -59,7 +59,7 @@ export const LAYERS = [
   'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905',
   'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'tcp', 'udp',
   'dns', 'nbns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'http', 'http2', 'http3',
+  'syslog', 'radius', 'snmp', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -274,6 +274,19 @@ export const FIELDS: readonly FieldDef[] = [
   uint('syslog.facility', 'Facility', 'syslog'),
   uint('syslog.level', 'Level', 'syslog'),
   str('syslog.msg', 'Message', 'syslog', { label: 'Syslog message', align: 'left' }),
+
+  // --- SNMP ------------------------------------------------------------------
+  //
+  // `snmp.community` is the credential, in the clear on v1 and v2c. It is a
+  // column because its presence in a capture is itself the finding.
+  uint('snmp.version', 'Version', 'snmp'),
+  str('snmp.community', 'Community', 'snmp', { label: 'SNMP community', align: 'left' }),
+  uint('snmp.request_id', 'Request Id', 'snmp'),
+  uint('snmp.error_status', 'Error Status', 'snmp'),
+  uint('snmp.error_index', 'Error Index', 'snmp'),
+  str('snmp.name', 'Object Name', 'snmp', { label: 'SNMP OID', align: 'left' }),
+  str('snmp.value', 'Value', 'snmp'),
+  str('snmp.enterprise', 'Enterprise', 'snmp'),
 
   // --- RADIUS ----------------------------------------------------------------
   uint('radius.code', 'Code', 'radius'),
