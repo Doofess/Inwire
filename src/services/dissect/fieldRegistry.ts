@@ -59,7 +59,7 @@ export const LAYERS = [
   'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905',
   'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'tcp', 'udp',
   'dns', 'nbns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'sip', 'http', 'http2', 'http3',
+  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -274,6 +274,19 @@ export const FIELDS: readonly FieldDef[] = [
   uint('syslog.facility', 'Facility', 'syslog'),
   uint('syslog.level', 'Level', 'syslog'),
   str('syslog.msg', 'Message', 'syslog', { label: 'Syslog message', align: 'left' }),
+
+  // --- RTCP ------------------------------------------------------------------
+  //
+  // The SSRC is the join key: it is what ties a control packet to the media
+  // stream it reports on, and the filter anyone tracing one call types.
+  uint('rtcp.version', 'Version', 'rtcp'),
+  bool('rtcp.padding', 'Padding', 'rtcp'),
+  uint('rtcp.pt', 'Packet type', 'rtcp'),
+  uint('rtcp.length', 'Length', 'rtcp'),
+  uint('rtcp.ssrc.sender', 'Sender SSRC', 'rtcp', { label: 'RTCP SSRC', align: 'right' }),
+  uint('rtcp.timestamp', 'RTP timestamp', 'rtcp'),
+  uint('rtcp.sender.packetcount', "Sender's packet count", 'rtcp'),
+  uint('rtcp.sender.octetcount', "Sender's octet count", 'rtcp'),
 
   // --- SIP -------------------------------------------------------------------
   //

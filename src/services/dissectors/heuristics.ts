@@ -33,6 +33,7 @@ import { dissectSnmp, looksLikeSnmp } from './snmp';
 import { dissectSip, looksLikeSip } from './sip';
 import { dissectRadius, looksLikeRadius } from './radius';
 import { dissectSyslog, looksLikeSyslog } from './syslog';
+import { dissectRtcp, looksLikeRtcp } from './rtcp';
 
 export interface HeuristicDissector {
   /** The detector's name, so a match can be explained rather than just made. */
@@ -76,6 +77,7 @@ export const HEURISTIC_DISSECTORS: readonly HeuristicDissector[] = [
   { name: 'SNMP', looksLike: looksLikeSnmp, dissect: adapt('snmp', dissectSnmp) },
   { name: 'NBNS', looksLike: looksLikeNbns, dissect: adapt('nbns', dissectNbns) },
   { name: 'SIP', looksLike: looksLikeSip, dissect: adapt('sip', dissectSip) },
+  { name: 'RTCP', looksLike: looksLikeRtcp, dissect: adapt('rtcp', dissectRtcp) },
   { name: 'Syslog', looksLike: looksLikeSyslog, dissect: adapt('syslog', dissectSyslog) },
 ];
 
