@@ -316,8 +316,15 @@ export function dissectLldp(rawBytes: Uint8Array, offset: number): L2DissectorRe
 
   if (fields.length === 0) return null;
 
-  // The reference analyzer's Info column, exactly: chassis, port, TTL, then System Name
-  // and System Description when those TLVs are present.
+  // The reference analyzer's Info column, exactly: chassis, port, TTL, then
+  // System Name and System Description when those TLVs are present.
+  //
+  // Each element is FOLLOWED by a space rather than joined by one, so the line
+  // ends in whitespace - verified against tshark on synthetic frames at every
+  // combination of present TLVs, not inferred from the single LLDP frame in
+  // the fixtures. `join(' ')` is one character short on every LLDP frame, and
+  // this is the third dissector here to trip on trailing space after SIP's
+  // `" | "` and CDP's two.
   const parts: string[] = [];
   if (chassisSummary) parts.push(chassisSummary);
   if (portSummary) parts.push(portSummary);
@@ -330,7 +337,7 @@ export function dissectLldp(rawBytes: Uint8Array, offset: number): L2DissectorRe
     // A frame with no recognisable mandatory TLVs still gets a name rather
     // than falling back to the frame-length placeholder this dissector exists
     // to eliminate.
-    info: parts.length ? parts.join(' ') : 'LLDP Data Unit',
+    info: parts.length ? `${parts.join(' ')} ` : 'LLDP Data Unit',
     fields: filterFields,
     layer: {
       name: 'Link Layer Discovery Protocol',

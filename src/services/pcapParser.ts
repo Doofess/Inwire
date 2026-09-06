@@ -2061,6 +2061,28 @@ function describeNeighborSolicitation(rawBytes: Uint8Array, transportOffset: num
 }
 
 /**
+ * "Router Advertisement from 44:15:24:aa:bb:cc"
+ *
+ * The router names itself with the same option a Neighbor Solicitation uses -
+ * type 1, the sender's link-layer address - which is the one fact that
+ * distinguishes two routers advertising on the same link. Without it every
+ * advertisement in a capture reads identically, which is exactly the case
+ * somebody opens a capture to tell apart.
+ *
+ * Layout after the 4-byte ICMPv6 header: hop limit, flags, router lifetime,
+ * reachable time and retrans timer - 12 bytes - and then the options. The
+ * option is optional, and an advertisement without one is named without it.
+ */
+function describeRouterAdvertisement(rawBytes: Uint8Array, transportOffset: number): string {
+  const optionsOffset = transportOffset + 16;
+  if (optionsOffset > rawBytes.length) return 'Router Advertisement';
+  const sourceLinkAddr = findNdpOption(rawBytes, optionsOffset, 1);
+  return sourceLinkAddr && sourceLinkAddr.length >= 6
+    ? `Router Advertisement from ${formatMac(sourceLinkAddr.subarray(0, 6))}`
+    : 'Router Advertisement';
+}
+
+/**
  * "Neighbor Advertisement fe80::17a6:... (sol, ovr) is at 04:7c:16:52:db:17"
  *
  * Same layout as a solicitation, except the first reserved byte carries the
@@ -2738,14 +2760,18 @@ function decodeTransportLayer(
       const flowIsKnown = quicTracker?.isKnownFlow(srcIp, srcPort, dstIp, dstPort) ?? false;
 
       if (!isShortHeaderCandidate || flowIsKnown) {
-        const knownConnectionId = isShortHeaderCandidate
-          ? quicTracker?.matchConnectionId(srcIp, srcPort, dstIp, dstPort, rawBytes, udpPayloadStart + 1)
+        // A resolver rather than an id: a datagram coalesces several packets
+        // and only the short-header ones carry an id to match, so the lookup
+        // belongs at each packet rather than once at the datagram's first byte.
+        const resolveConnectionId = quicTracker
+          ? (bytes: Uint8Array, at: number) =>
+            quicTracker.matchConnectionId(srcIp, srcPort, dstIp, dstPort, bytes, at)
           : undefined;
         const quic = dissectQuicDatagram(
           rawBytes,
           udpPayloadStart,
           Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen),
-          knownConnectionId,
+          resolveConnectionId,
           quicTracker?.createInitialDecryptor(srcIp, srcPort, dstIp, dstPort, rawBytes)
         );
         if (quic) {
@@ -2949,7 +2975,7 @@ function decodeTransportLayer(
         case 128: info = 'Echo (ping) request '; break;
         case 129: info = 'Echo (ping) reply   '; break;
         case 133: info = 'Router Solicitation'; break;
-        case 134: info = 'Router Advertisement'; break;
+        case 134: info = describeRouterAdvertisement(rawBytes, transportOffset); break;
         case 135: info = describeNeighborSolicitation(rawBytes, transportOffset); break;
         case 136: info = describeNeighborAdvertisement(rawBytes, transportOffset); break;
         case 137: info = 'Redirect'; break;
