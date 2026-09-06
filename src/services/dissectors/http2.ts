@@ -330,7 +330,3 @@ function summarise(frame: Http2Frame): string {
 export function http2ErrorName(code: number): string {
   return ERROR_NAMES[code] ?? `Unknown (${code})`;
 }
-
-export function isEndStream(frame: Http2Frame): boolean {
-  return (frame.type === 0 || frame.type === 1) && (frame.flags & FLAG_END_STREAM) !== 0;
-}

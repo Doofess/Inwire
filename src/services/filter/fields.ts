@@ -241,14 +241,6 @@ export function isUndissected(name: string): boolean {
   return UNDISSECTED.some((prefix) => name.startsWith(prefix + '.'));
 }
 
-export function isLayerToken(name: string): boolean {
-  return LAYER_TOKENS.has(name);
-}
-
-export function isProtocolBareword(name: string): boolean {
-  return LAYER_TOKENS.has(name) || name in PROTOCOL_PREDICATES;
-}
-
 /** The presence test for a bareword, or null when the name names no protocol. */
 export function layerPresence(name: string): ((p: Packet) => boolean) | null {
   if (LAYER_TOKENS.has(name)) {

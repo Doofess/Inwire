@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Packet, UserRolePermissions } from '../../types/packet';
+import { Packet, Capabilities } from '../../types/packet';
 import { TbStack2 } from 'react-icons/tb';
 import { ProtocolTreeView } from './ProtocolTreeView';
 import { ExpertFindings } from './ExpertFindings';
@@ -17,7 +17,7 @@ interface PacketDetailsTreeProps {
   accentColor?: string | null;
   onHoverByteRange: (range: [number, number] | null) => void;
   activeByteRange: [number, number] | null;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
   /** Follows a cross-packet reference such as `[Response In: 11]`. */
   onSelectFrame?: (frameNumber: number) => void;
   /** Puts an expression in the filter bar; `apply` also runs it. */

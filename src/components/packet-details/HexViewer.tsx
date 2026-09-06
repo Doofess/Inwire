@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Packet, UserRolePermissions } from '../../types/packet';
+import { Packet, Capabilities } from '../../types/packet';
 import { TbBinary, TbCopy, TbCheck, TbShield, TbLoader2, TbDatabaseOff } from 'react-icons/tb';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 import { ByteInspector, HexDumpView } from './HexDumpView';
@@ -14,7 +14,7 @@ interface HexViewerProps {
   accentColor?: string | null;
   activeByteRange: [number, number] | null;
   onHoverByte: (byteIndex: number | null) => void;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
   /**
    * Whether this frame's bytes are here, coming, or gone (`usePacketDetail`).
    *

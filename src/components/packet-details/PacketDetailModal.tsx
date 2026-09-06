@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { usePacketDetail } from '../../lib/usePacketDetail';
 import { motion } from 'motion/react';
 import { targetForPacket, type StreamTarget } from '../../services/followStream';
-import { Packet, UserRolePermissions } from '../../types/packet';
+import { Packet, Capabilities } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
@@ -155,7 +155,7 @@ interface PacketDetailModalProps {
    * because the frame changes under this window's own navigation.
    */
   packetTheme: PacketTheme;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
   /**
    * True when another window is open on top of this one.
    *

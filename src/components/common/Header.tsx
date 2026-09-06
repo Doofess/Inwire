@@ -6,7 +6,7 @@ import {
   TbAlertTriangle,
   TbNetwork,
 } from 'react-icons/tb';
-import { UserRole, UserRolePermissions } from '../../types/packet';
+import { Capabilities } from '../../types/packet';
 import { AppMenu } from './AppMenu';
 import { BrandMark } from './BrandMark';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
@@ -39,7 +39,7 @@ interface HeaderProps {
    */
   captureOwnedElsewhere?: boolean;
   onInterfacePickerOpenChange?: (open: boolean) => void;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
   onOpenDissectorModal: () => void;
   onOpenExportModal: () => void;
   onOpenStatisticsModal: () => void;

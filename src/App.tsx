@@ -35,14 +35,14 @@ import { resetGeoSession } from "./components/analytics/geoSession";
 import { DashboardAside } from "./components/analytics/DashboardAside";
 import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
-import { Packet, UserRole } from "./types/packet";
+import { Capabilities, Packet } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
 import { pipeline } from "./services/pipelineClient";
 import { usePacketDetail } from "./lib/usePacketDetail";
 import { applyInfoPatchesInPlace, type InfoPatch } from './services/pcapParser';
 import { flowAnnotations } from './services/flowAnnotations';
 import { NO_HOST, type HostIdentity } from './services/direction';
-import { hostFromAdapters, inferHostIdentity, overrideHostIdentity } from './services/hostIdentity';
+import { hostFromAdapters, inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
 import { emptyNetworkFacts, NetworkFactsCollector, type NetworkFacts } from './services/networkFacts';
 import type { AgentAdapter } from './services/agentProtocol';
@@ -80,7 +80,6 @@ import {
   defaultColorRules,
   normalizeColorRules,
 } from "./services/colorRules";
-import { ROLE_PERMISSIONS } from "./services/rbacService";
 import { isAgentOutdated, summarizeCaptureStats, REQUIRED_AGENT_VERSION, type AgentCommand, type AgentInterface, type CaptureDropStats } from "./services/agentProtocol";
 import type { AgentLogEntry } from "./services/agentProtocol";
 // Loopback is dropped here, at the single point where the agent's list
@@ -496,12 +495,19 @@ export default function App() {
    * How this machine's adapters are configured, and who this machine is.
    *
    * The Network panel reads the first; the packet list's Direction column
-   * reads the second. `hostIdentityRef` shadows the state because the
-   * identity is needed inside callbacks that must not re-create themselves
-   * every time it changes - the same pattern `isCapturingRef` uses.
+   * reads the second - through `Packet.direction`, which the identity decides
+   * at dissection, not by reading the identity itself.
+   *
+   * A ref and NOT a state, deliberately. There was a `hostIdentity` state
+   * beside this ref and nothing ever read it, so each of the four places that
+   * settle the identity - stored session, agent adapters, inference, override -
+   * re-rendered a 2,900-line component to publish a value with no reader. The
+   * ref is what the callbacks want anyway: they must not re-create themselves
+   * every time it changes, the same pattern `isCapturingRef` uses. Anything
+   * that later wants to *display* the identity should take the state back,
+   * rather than reading the ref during render and getting a stale one.
    */
   const [adapters, setAdapters] = useState<AgentAdapter[]>([]);
-  const [hostIdentity, setHostIdentity] = useState<HostIdentity>(NO_HOST);
   const hostIdentityRef = useRef<HostIdentity>(NO_HOST);
   /**
    * Cancels a re-derive that is still running.
@@ -961,7 +967,6 @@ export default function App() {
         };
         if (storedHost) {
           hostIdentityRef.current = storedHost;
-          setHostIdentity(storedHost);
           // The Worker rebuilds the detail tree by replaying the conversation
           // (`pipeline/replay.ts`), so it needs the same answer or the tree
           // will contradict the row that opened it.
@@ -1111,13 +1116,24 @@ export default function App() {
     });
   }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick]);
 
-  // RBAC Role (Simplified: Always Admin)
-  const permissions = {
+  /**
+   * What this build lets the user do.
+   *
+   * Every capability is on, and stated rather than derived: there is no auth,
+   * so there is nobody to derive it from. It was read from a role table
+   * (`services/rbacService.ts`) that shipped four roles and was never consulted
+   * - the object below was already hardcoded beside the import. The table is
+   * gone; this is the whole of the model.
+   *
+   * It is still threaded to the components rather than inlined at each gate,
+   * because the seventeen `permissions.*` reads are where a real one would
+   * plug in.
+   */
+  const permissions: Capabilities = {
     canCapture: true,
     canExportPcap: true,
     canViewPayloads: true,
     canEditDissectors: true,
-    canConfigureAlerts: true,
     canChangeColorRules: true,
     canClearBuffer: true,
   };
@@ -1613,7 +1629,6 @@ export default function App() {
         const identity = hostFromAdapters(message.adapters);
         if (identity !== null) {
           hostIdentityRef.current = identity;
-          setHostIdentity(identity);
           pipeline.setHost(identity);
         }
         return;
@@ -2324,7 +2339,6 @@ export default function App() {
       // of, but the router advertisement, the DHCP server and the LLDP
       // neighbour are facts about the segment and do not.
       host = inferred ?? NO_HOST;
-      setHostIdentity(host);
       hostIdentityRef.current = host;
       // The Worker too, and not as bookkeeping: it is what rebuilds the detail
       // tree on demand (`pipeline/replay.ts`), and a replay that does not know
@@ -2346,25 +2360,6 @@ export default function App() {
       setPackets((prev) => prev.slice());
     }, (packet, forHost) => collector.observe(packet, forHost));
   }, []);
-
-  /**
-   * The host a user picked by hand, which replaces whatever was inferred.
-   *
-   * An override is the answer rather than a hint: somebody who says which
-   * machine took a capture knows something the scoring does not, and blending
-   * the two would produce a third answer neither of them asked for.
-   */
-  const handleOverrideHost = useCallback((mac: string) => {
-    const identity = overrideHostIdentity(mac);
-    hostIdentityRef.current = identity;
-    setHostIdentity(identity);
-    pipeline.setHost(identity);
-    rederiveRef.current?.();
-    rederiveRef.current = rederiveDirections(packets, identity, () => {
-      rederiveRef.current = null;
-      setPackets((prev) => prev.slice());
-    });
-  }, [packets]);
 
   const handleUpdateDissectors = () => {
     packetGenerator.setDissectorEngine(dissectorEngine);

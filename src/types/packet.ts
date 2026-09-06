@@ -16,13 +16,6 @@ export type ProtocolType =
 
 export type PacketStatus = 'ok' | 'warning' | 'alert' | 'retransmit' | 'dropped';
 
-export interface FieldHighlight {
-  startByte: number; // 0-indexed byte offset in raw packet
-  endByte: number;   // inclusive 0-indexed byte offset
-  layerName: string;
-  fieldName: string;
-}
-
 /**
  * What a finding means, and what the reader should conclude from it.
  *
@@ -321,7 +314,6 @@ export interface CustomDissectorRule {
   description: string;
   enabled: boolean;
   fields: CustomDissectorFieldDef[];
-  customParserJs?: string; // Optional custom JS parsing snippet
 }
 
 export interface ColorRule {
@@ -379,14 +371,23 @@ export interface FilterPresetLibrary {
   groups: FilterPresetGroup[];
 }
 
-export type UserRole = 'ADMIN' | 'SOC_ANALYST' | 'NETWORK_ENGINEER' | 'AUDITOR_GUEST';
-
-export interface UserRolePermissions {
+/**
+ * What this build lets the user do.
+ *
+ * It was `UserRolePermissions`, one of four sets handed out by role from
+ * `services/rbacService.ts`. No role ever reached it - `App.tsx` built the
+ * admin set by hand and the role tables sat unread - so the name promised an
+ * authorisation model the app does not have. Renamed to say what it is: a flat
+ * set of capabilities, read at seventeen sites to gate real controls.
+ *
+ * `canConfigureAlerts` went with the alerts feature; nothing read it after the
+ * anomaly model was removed.
+ */
+export interface Capabilities {
   canCapture: boolean;
   canExportPcap: boolean;
   canViewPayloads: boolean;
   canEditDissectors: boolean;
-  canConfigureAlerts: boolean;
   canChangeColorRules: boolean;
   canClearBuffer: boolean;
 }

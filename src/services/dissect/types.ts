@@ -94,6 +94,3 @@ export interface DissectContext {
   /** Live capture only: the adapter, for the Frame layer's interface rows. */
   captureInterface?: { name: string; label: string };
 }
-
-export type DissectSummaryFn = (input: DissectInput, ctx: DissectContext) => DissectSummary;
-export type DissectTreeFn = (input: DissectInput, summary: DissectSummary) => ProtocolLayer[];

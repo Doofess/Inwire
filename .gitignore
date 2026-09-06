@@ -5,7 +5,6 @@ coverage/
 .DS_Store
 *.log
 .env*
-!.env.local.example
 
 # Compiled local-agent build artifacts (~19-21MB Windows binaries). Regenerate
 # rather than tracking them:
@@ -14,11 +13,6 @@ coverage/
 #   copy the installer into public/downloads/    -> served by the web app
 local-agent/installer/output/
 public/downloads/
-
-# Pre-existing scratch script from before this repo's git history; targets a
-# component (LocalAgentModal.tsx) that no longer exists. Left on disk, just
-# not part of source control.
-/tmp/
 
 # Python bytecode cache
 __pycache__/
