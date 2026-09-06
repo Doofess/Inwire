@@ -352,6 +352,31 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
     nextSeq = add(nextSeq, 1);
   }
   if (fwd.nextSeq === 0 || gt(nextSeq, add(fwd.nextSeq, synOrFin ? 1 : 0))) fwd.lastAckLen = seglen;
+  /**
+   * `|| fwd.nextSeq === 0` is a DELIBERATE divergence from the reference, which
+   * wraps this whole update in `seglen != 0 || SYN || FIN` so that a segment
+   * carrying nothing never seeds the next expected sequence number.
+   *
+   * Transplanting that guard was tried and reverted. It cost **63 -> 563
+   * Info mismatches on inwire and 107 -> 2,142 on netview**, nearly all of them
+   * a lost `[TCP Window Update]`: that check needs `seq === fwd.nextSeq`, and
+   * the direction it fires on is a pure receiver that sends only bare ACKs, so
+   * under the reference's rule its `nextSeq` is seeded by the SYN or never.
+   *
+   * Never, here. **netview holds 30 TCP streams and exactly one SYN** - these
+   * are captures of traffic already in flight, which is the normal case for
+   * somebody who starts capturing to look at a problem. The reference gets away
+   * with the stricter rule because it is usually handed a capture that opens
+   * with a handshake.
+   *
+   * The divergence is not free and the price is known: 4 frames across both
+   * fixtures where a bare ACK seeds `nextSeq` and the NEXT segment then looks
+   * like it landed exactly where one was expected - a 1-byte payload read as a
+   * zero-window probe (netview #959), the ACK of it as acknowledging a segment
+   * never seen (#974), and two Dup ACKs read as Window Updates (inwire #9379,
+   * netview #1707). Four frames against two thousand is the trade, and it is
+   * the right way round.
+   */
   if (gt(nextSeq, fwd.nextSeq) || fwd.nextSeq === 0) {
     if (!flags.has('zero_window_probe')) {
       fwd.nextSeq = nextSeq;
