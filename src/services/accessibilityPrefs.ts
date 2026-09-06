@@ -10,7 +10,7 @@ import { createPreferenceStore } from './preferenceStore';
  * reset one of these. For someone who set Hyperlegible because they cannot
  * comfortably read the default, silently reverting to it is not a cosmetic
  * regression, and folding this in with the layout values would make a bad
- * `netview.layout` blob able to cause exactly that.
+ * `inwire.layout` blob able to cause exactly that.
  *
  * It is also why this is deliberately NOT in `INTERFACE_STORES`, whose reset
  * button clears everything it lists.
