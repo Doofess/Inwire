@@ -5,7 +5,7 @@
 ## Context
 
 The acceptance oracle for every phase is tshark parity on two real captures from the
-author's PC (`inwire_capture_1788478187989.pcap`, `netview_capture_1788426090876.pcap`).
+author's PC (`inwire_capture_1788478187989.pcap`, `bulk_capture_1788426090876.pcap`).
 They contain the author's DNS and SNI history, mDNS device names, and the home
 network's rotating IPv6 addresses. The tshark ground-truth `.psv` files carry the same
 names in their Info column. The repository's `origin` is on GitHub and its visibility

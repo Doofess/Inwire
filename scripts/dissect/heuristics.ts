@@ -143,7 +143,7 @@ for (const sample of NOT_PROTOCOLS) {
 // ones I did not.
 const FIXTURES = [
   'test/fixtures/inwire_capture_1788478187989.pcap',
-  'test/fixtures/netview_capture_1788426090876.pcap',
+  'test/fixtures/bulk_capture_1788426090876.pcap',
 ];
 
 async function corpus(): Promise<void> {

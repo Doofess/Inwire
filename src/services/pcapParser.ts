@@ -2333,7 +2333,7 @@ function decodeTransportLayer(
       // never told, kept waiting for a record whose remaining bytes were never
       // captured, and swallowed everything that followed into it.
       //
-      // Measured on the netview fixture: 671,438 bytes go missing between
+      // Measured on the bulk fixture: 671,438 bytes go missing between
       // frames 2884 and 4035, and the gap is reported on frame 3195 - a
       // zero-length ACK. The reference analyzer abandons the record there and
       // resynchronises; this build carried it across and attributed some

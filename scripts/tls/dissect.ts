@@ -127,7 +127,7 @@ function segmentAt(bytes: Uint8Array, frameId: number, seq: number, gap: boolean
   // nothing about what came before.
   //
   // Getting this wrong is not a missing tag but an invented one. Before this,
-  // the record completed anyway: thirty consecutive netview frames were tagged
+  // the record completed anyway: thirty consecutive bulk frames were tagged
   // `[TCP PDU reassembled in 1450]` for a PDU that never existed, and the bytes
   // that would have resynchronised the direction were consumed by it.
   const conv = freshTlsConversation();
@@ -192,7 +192,7 @@ function segmentAt(bytes: Uint8Array, frameId: number, seq: number, gap: boolean
   // Rejecting them meant such a record could not close the desynchronised
   // region it opened, so the direction stayed lost and every following segment
   // came back `Ignored Unknown Record`. Measured over the two fixtures, that
-  // one comparison was **632 Protocol and 632 Info mismatches**: netview
+  // one comparison was **632 Protocol and 632 Info mismatches**: bulk
   // Protocol 96.16 -> 99.49%, Info 94.93 -> 98.86%.
   for (const contentType of [25, 26]) {
     const conv = freshTlsConversation();
@@ -214,7 +214,7 @@ function segmentAt(bytes: Uint8Array, frameId: number, seq: number, gap: boolean
     // version and length - and writes no element to the column, so a frame
     // holding one plus trailing bytes reads as a bare `Ignored Unknown Record`.
     // Naming it gave `Unknown (25), Ignored Unknown Record` on 3 fixture frames
-    // and cascaded to 22 more on netview; giving it the ignored wording instead
+    // and cascaded to 22 more on bulk; giving it the ignored wording instead
     // would have printed that wording twice.
     check(`...and contributes no element to the Info column`,
       rest.kind === 'tls' && rest.result.info, '');

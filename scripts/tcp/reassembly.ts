@@ -2,8 +2,8 @@
  * Where this build and tshark disagree about TCP PDU boundaries.
  *
  *   npx tsx scripts/tcp/reassembly.ts             # both fixtures
- *   npx tsx scripts/tcp/reassembly.ts netview     # one
- *   npx tsx scripts/tcp/reassembly.ts netview 4   # ...and show 4 connections
+ *   npx tsx scripts/tcp/reassembly.ts bulk     # one
+ *   npx tsx scripts/tcp/reassembly.ts bulk 4   # ...and show 4 connections
  *
  * `parity-check.ts` reports *that* 861 of 883 remaining Info mismatches are
  * reassembly. It cannot say *why*, because it compares frames independently and
@@ -243,7 +243,7 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const named = args.filter(a => !/^\d+$/.test(a));
   const count = Number(args.find(a => /^\d+$/.test(a)) ?? 2);
-  const names = named.length > 0 ? named : ['inwire', 'netview'];
+  const names = named.length > 0 ? named : ['inwire', 'bulk'];
   for (const name of names) await report(name, count);
   process.exit(0);
 }

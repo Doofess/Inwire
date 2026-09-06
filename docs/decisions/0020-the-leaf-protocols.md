@@ -30,14 +30,14 @@ one thing this build does not do, and it is where essentially the whole
 remaining Info gap already lives. Measured over both fixtures
 (`PARITY_MAX_DIFFS=100000`), of **883** Info mismatches:
 
-| group | inwire | netview |
+| group | inwire | bulk |
 |---|---:|---:|
 | `TCP (segment of reassembled PDU)` | 46 | 471 |
 | `TLSv1.2` (the record cursor) | 48 | 157 |
 | `TCP` | 19 | 120 |
 | everything else (QUIC, ICMP, ICMPv6, LLDP) | 20 | 2 |
 
-**861 of 883 — 97.5% — are the same problem**, and on the netview fixture it is
+**861 of 883 — 97.5% — are the same problem**, and on the bulk fixture it is
 99.7% of them. Adding a protocol on top of an unsolved reassembly problem
 inherits it: SMB2 over a stream this build cannot reassemble would produce a
 new column of mismatches with the same root cause, and would make that root

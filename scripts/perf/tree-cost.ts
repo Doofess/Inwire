@@ -2,7 +2,7 @@
  * How much of a frame's dissection is BUILDING the tree, as opposed to reading
  * the bytes?
  *
- *   npx tsx scripts/perf/tree-cost.ts [--fixture inwire|netview]
+ *   npx tsx scripts/perf/tree-cost.ts [--fixture inwire|bulk]
  *
  * ADR 0001 says the summary pass "must be O(bytes) and allocate no tree nodes",
  * and that migration was never done - `decodeRawEthernetPacket` still builds
@@ -30,7 +30,7 @@ import type { ProtocolField, ProtocolLayer } from '../../src/types/packet';
 
 const FIXTURES: Record<string, string> = {
   inwire: 'test/fixtures/inwire_capture_1788478187989.pcap',
-  netview: 'test/fixtures/netview_capture_1788426090876.pcap',
+  bulk: 'test/fixtures/bulk_capture_1788426090876.pcap',
 };
 
 function arg(name: string, fallback: string): string {
