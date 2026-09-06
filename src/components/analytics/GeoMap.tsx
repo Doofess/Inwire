@@ -381,7 +381,6 @@ interface GeoMapProps {
    * Absent in `full` - the window is already open - and absent wherever the
    * parent has nowhere to put it.
    */
-  onExpand?: () => void;
 }
 
 const escapeHtml = (value: string) =>
@@ -438,7 +437,6 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   isDark,
   themeKey,
   variant = 'card',
-  onExpand,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);

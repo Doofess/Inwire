@@ -14,7 +14,7 @@
 import { sha256, hmacSha256 } from '../../src/services/crypto/sha256';
 import { md5Hex } from '../../src/services/crypto/md5';
 import { expandKey128, encryptBlock128, aes128GcmDecrypt } from '../../src/services/crypto/aes';
-import { hkdfExtract, hkdfExpand, hkdfExpandLabel } from '../../src/services/crypto/hkdf';
+import { hkdfExtract, hkdfExpand } from '../../src/services/crypto/hkdf';
 import { deriveInitialKeys, QUIC_V1_INITIAL_SALT } from '../../src/services/dissectors/quicCrypto';
 
 const hex = (bytes: Uint8Array) => Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');

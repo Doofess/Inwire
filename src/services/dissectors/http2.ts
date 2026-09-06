@@ -56,7 +56,6 @@ const ERROR_NAMES: Record<number, string> = {
   12: 'INADEQUATE_SECURITY', 13: 'HTTP_1_1_REQUIRED',
 };
 
-const FLAG_END_STREAM = 0x01;
 const FLAG_END_HEADERS = 0x04;
 const FLAG_PADDED = 0x08;
 const FLAG_PRIORITY = 0x20;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Packet, Capabilities } from '../../types/packet';
+import { Packet } from '../../types/packet';
 import { virtualWindow } from '../../lib/virtualWindow';
 import {
   Direction, DirectionSignal, DIRECTION_GLYPH, DIRECTION_LABEL, SIGNAL_LABEL,
@@ -27,7 +27,6 @@ import { ColumnOptionsMenu } from './ColumnOptionsMenu';
 import {
   COLUMN_ALIGNS,
   COLUMN_ALIGN_CLASS,
-  COLUMN_ALIGN_JUSTIFY,
   COLUMN_ALIGN_LABELS,
   COLUMN_LABELS,
   HIDEABLE_COLUMNS,
@@ -97,7 +96,6 @@ interface PacketListProps {
    */
   droppedBuffer?: number;
   colorEngine: ColorRulesEngine;
-  permissions: Capabilities;
   /** Colors for the list itself. Independent of the app theme by design -
    *  see services/packetThemes. */
   packetTheme: PacketTheme;
@@ -245,7 +243,6 @@ export const PacketList: React.FC<PacketListProps> = ({
   searchText,
   droppedBuffer = 0,
   colorEngine,
-  permissions,
   packetTheme,
   themeKey,
 }) => {
@@ -860,8 +857,6 @@ export const PacketList: React.FC<PacketListProps> = ({
   // ragged - a centred title also sits over both a left-aligned and a
   // right-aligned column without looking attached to the wrong one.
   const cellAlign = (column: AlignableColumn) => COLUMN_ALIGN_CLASS[listPrefs.align[column]];
-  /** For cells whose content is a flex row rather than plain text. */
-  const cellJustify = (column: AlignableColumn) => COLUMN_ALIGN_JUSTIFY[listPrefs.align[column]];
   const HEADER_TITLE = 'justify-center';
 
   const columnMenuTrigger = (

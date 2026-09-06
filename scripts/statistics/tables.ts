@@ -16,7 +16,7 @@
 import {
   conversations, endpoints, protocolHierarchy, devices, processes, processFilter,
   conversationFilter, endpointFilter, deviceFilter,
-  type HierarchyNode, type ProcessGroup,
+  type HierarchyNode,
 } from '../../src/services/statistics';
 import { FilterEngine } from '../../src/services/filterEngine';
 import type { Packet, ProtocolType } from '../../src/types/packet';

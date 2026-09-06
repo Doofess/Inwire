@@ -1,19 +1,16 @@
-import { CustomDissectorEngine } from './customDissectorEngine';
-
+/**
+ * Packet numbers, and nothing else.
+ *
+ * It used to hold a `CustomDissectorEngine` too - taken in the constructor,
+ * replaced by `setDissectorEngine` - and **never read it**. Nothing in this
+ * class consulted the engine, so the field was a reference kept alive for no
+ * reader. See `App.handleUpdateDissectors` for the gap that leaves.
+ */
 export class PacketGenerator {
   private packetIdCounter = 1;
-  private dissectorEngine: CustomDissectorEngine;
-
-  constructor(dissectorEngine?: CustomDissectorEngine) {
-    this.dissectorEngine = dissectorEngine || new CustomDissectorEngine();
-  }
 
   public reset(): void {
     this.packetIdCounter = 1;
-  }
-
-  public setDissectorEngine(engine: CustomDissectorEngine): void {
-    this.dissectorEngine = engine;
   }
 
   public getNextId(): number {

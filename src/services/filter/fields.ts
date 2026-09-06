@@ -20,7 +20,7 @@
 import { Packet } from '../../types/packet';
 import { DIRECTION_NAMES, directionOf, isDuplicate } from '../direction';
 import { FIELDS, FIELD_BY_ABBREV, FieldDef, FieldType, LAYERS } from '../dissect/fieldRegistry';
-import { fieldReader, fieldValue } from '../dissect/fieldAccess';
+import { fieldReader } from '../dissect/fieldAccess';
 
 export type Scalar = string | number;
 

@@ -61,7 +61,6 @@ interface HeaderProps {
   totalPacketsCount: number;
   /** Set while a stored session is being decoded back in; null otherwise. */
   restoreProgress?: { done: number; total: number } | null;
-  filteredPacketsCount: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -89,7 +88,6 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSettingsModal,
   totalPacketsCount,
   restoreProgress,
-  filteredPacketsCount,
 }) => {
   const selectedInterface = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
 

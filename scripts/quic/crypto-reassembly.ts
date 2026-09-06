@@ -34,7 +34,6 @@ function check(name: string, actual: unknown, expected: unknown) {
 function clientHello(sni: string, alpn: string[]): Uint8Array {
   const b: number[] = [];
   const u16 = (v: number) => b.push((v >> 8) & 0xff, v & 0xff);
-  const ascii = (s: string) => { for (const c of s) b.push(c.charCodeAt(0)); };
 
   b.push(0x03, 0x03);                       // legacy_version TLS 1.2
   for (let i = 0; i < 32; i++) b.push(i);   // random
