@@ -56,15 +56,19 @@ export interface FieldDef {
  * `Packet.frameProtocols`. Every `FieldDef.layer` is one of these.
  */
 export const LAYERS = [
-  'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905',
-  'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'tcp', 'udp',
-  'dns', 'nbns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'http', 'http2', 'http3',
-  // The leaf protocols: each reads one datagram and keeps no state, which is
-  // what made them cheap enough to add together. `nbdgm` and `hsrp` are spelt
-  // as the reference analyzer spells them rather than as the Protocol column
-  // shows them (NBDS, HSRP), because the filter name is what a user types.
-  'tftp', 'nbdgm', 'bfd', 'coap', 'ptp', 'hsrp', 'vrrp', 'ospf', 'rip', 'ripng', 'cdp',
+  // Outermost first, and that is the contract rather than a tidiness: this list
+  // is where the autocomplete's order comes from, so a token appended at the
+  // end reads as an application protocol however low in the stack it sits.
+  // `cdp` belongs beside `lldp` for that reason, and `vrrp`/`ospf` beside
+  // `igmp` - all three sit directly on their lower layer with no ports.
+  'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905', 'cdp',
+  'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
+  // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
+  // than as the Protocol column shows them (NBDS, HSRP): the filter name is
+  // what a user types, and it has to be the one they already know.
+  'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
+  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'tftp', 'bfd', 'coap', 'ptp',
+  'hsrp', 'rip', 'ripng', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
