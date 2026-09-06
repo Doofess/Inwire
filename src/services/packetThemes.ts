@@ -73,7 +73,22 @@ export interface PacketTheme {
  * `color-checksum-errors` share one role: both mean "this is broken".
  */
 export type RuleRole =
-  | 'error'    // something is wrong: bad TCP, RST, abort, checksum, ICMP errors
+  | 'error'    // something is wrong: bad TCP, abort, checksum, ICMP errors
+  /**
+   * A connection was killed. Louder than `error`, and separate from it.
+   *
+   * The reference analyzer draws this distinction and it is worth keeping: its
+   * whole default set works by polarity, with ordinary rows a pale fill under
+   * one dark text colour and the broken ones inverting that - dark ground,
+   * bright text. `TCP RST` is the single rule that breaks even from *those*,
+   * taking a saturated red fill rather than the near-black the other error
+   * rules share. Bad TCP and a checksum failure mean "something is off with
+   * this segment"; a reset means the conversation is over.
+   *
+   * Folded into `error` here until now, which lost that step - the two
+   * rendered identically.
+   */
+  | 'reset'
   | 'warn'     // suspicious but not broken: low TTL, SYN+FIN
   | 'notice'   // topology and routing state changed
   | 'web'      // HTTP
@@ -108,6 +123,11 @@ export type RuleRole =
  */
 const HUE_BY_ROLE: Record<RuleRole, Hue> = {
   error: 'red',
+  // Red as well, and only ever used when a colour set substitutes the hues -
+  // see FIXED_ROLE_COLORS, which normally answers for this role instead. It is
+  // still declared because a role without a hue is a role the palette cannot
+  // fall back for, and `colorblind` needs exactly that fallback.
+  reset: 'red',
   warn: 'orange',
   notice: 'orange',
   arp: 'yellow',
@@ -122,7 +142,7 @@ const HUE_BY_ROLE: Record<RuleRole, Hue> = {
 /** Every built-in rule, and what it means. Theme-independent by design. */
 const ROLE_BY_RULE_ID: Record<string, RuleRole> = {
   'color-bad-tcp': 'error',
-  'color-tcp-rst': 'error',
+  'color-tcp-rst': 'reset',
   'color-sctp-abort': 'error',
   'color-checksum-errors': 'error',
   'color-icmp-errors': 'error',
@@ -510,7 +530,20 @@ export function getPacketThemeForApp(
     const role = ROLE_BY_RULE_ID[rule.id] ?? 'neutral';
     const name = HUE_BY_ROLE[role];
     const hue = hues[name];
-    rules[rule.id] = derive(name, hue, palette, shift, spec);
+    // A stated colour wins over a derived one - unless the set has substituted
+    // the hues, which is the colourblind set saying the derived ramp is the
+    // whole point of it.
+    const fixed = spec.hues === undefined ? FIXED_ROLE_COLORS[role] : undefined;
+    rules[rule.id] = fixed ?? derive(name, hue, palette, shift, spec);
+    // From the theme's HUE, even for a stated fill.
+    //
+    // An accent is panel text, not a row fill: its job is to sit legibly on a
+    // card and stay on the same hue axis as every other accent, which is what
+    // `scripts/themes/packet-themes.ts` asserts. Taking it from the stated
+    // `#a40000` instead put the reset accent 13.6 degrees off the theme's red
+    // - still red, but off the axis the rest of the panel is built on, for no
+    // gain. The row is the thing that has to shout; the accent only has to be
+    // recognisably the same colour family.
     accents[rule.id] = legibleOn(hue, palette.surface.card, AA);
   }
 
@@ -527,8 +560,33 @@ export function getPacketThemeForApp(
 /** Re-exported so callers of the packet palette need only one import. */
 export { contrastRatio };
 
+/**
+ * Roles whose colours are stated rather than derived from the theme's hues.
+ *
+ * The reference analyzer's own `TCP RST` pair, transcribed from its shipped
+ * `colorfilters` (`[42148,0,0][65535,64764,40092]` in its 16-bit form). Kept
+ * literal because the point of this role is to be the loudest thing in the
+ * list, and a fill tinted into the theme's ground is by construction not that
+ * - on Day the derived red came out `#ffdfd7`, a pale salmon that reads as
+ * "red" only if you already knew.
+ *
+ * It is safe to state both halves because the row supplies its own ground AND
+ * its own text: nothing about it depends on the theme underneath, and the pair
+ * clears WCAG AAA at 7.6:1. That is what makes this different from hard-coding
+ * a background and hoping the theme's foreground still reads on it.
+ *
+ * **A colour set that substitutes the hues overrides this** - see
+ * `getPacketThemeForApp`. `colorblind` exists so that somebody who cannot rely
+ * on the red/green axis still gets a list they can read, and answering them
+ * with a saturated red because another analyzer uses one would defeat the only
+ * thing that set is for.
+ */
+const FIXED_ROLE_COLORS: Partial<Record<RuleRole, PacketThemeColors>> = {
+  reset: { background: '#a40000', color: '#fffc9c' },
+};
+
 /** Every rule id a theme is expected to cover. Used by the tests. */
 export const REQUIRED_RULE_IDS: string[] = DEFAULT_COLOR_RULES.map((r) => r.id);
 
 /** The role assignments, exported so the tests can assert full coverage. */
-export { ROLE_BY_RULE_ID, HUE_BY_ROLE };
+export { ROLE_BY_RULE_ID, HUE_BY_ROLE, FIXED_ROLE_COLORS };
