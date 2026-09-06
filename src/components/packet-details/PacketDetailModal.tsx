@@ -16,7 +16,7 @@ import { LayerRail } from './LayerRail';
 import { ByteInspector, HexDumpView } from './HexDumpView';
 import { hasBytes } from '../../services/packetBytes';
 import { HexCopyButtons } from './HexViewer';
-import { AnomalyBanners } from './AnomalyBanners';
+import { ExpertFindings } from './ExpertFindings';
 import { packetAccentStyle } from '../../lib/packetAccent';
 import {
   buildFrameSummary,
@@ -704,11 +704,9 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
                     packet, the thing saying something is wrong should not be in
                     a column. Capped, though: they used to be unbounded, and
                     three of them squeezed the fields and the dump to nothing. */}
-                {packet.anomalies && packet.anomalies.length > 0 && (
-                  <div className="shrink-0 max-h-[9rem] overflow-y-auto custom-scrollbar border-b border-border">
-                    <AnomalyBanners anomalies={packet.anomalies} className="px-5 py-3" />
-                  </div>
-                )}
+                <div className="shrink-0 max-h-[9rem] overflow-y-auto custom-scrollbar empty:hidden">
+                  <ExpertFindings packet={packet} className="px-5 py-3 border-b border-border" />
+                </div>
 
                 {/* The protocol stack as a band across the canvas: a scale
                     drawing of the frame, and the way any layer is isolated. */}

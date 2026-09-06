@@ -138,8 +138,7 @@ export function dissectIpv4Options(bytes: Uint8Array, start: number, end: number
         value: `Malformed: length ${length}`,
         rawBytesRange: [at, Math.min(bytes.length, end) - 1],
         expertInfo: {
-          severity: 'warn',
-          group: 'Malformed',
+          category: 'Broken',
           message: `IPv4 option ${type} declares a length of ${length}, which does not fit the header`,
         },
       });

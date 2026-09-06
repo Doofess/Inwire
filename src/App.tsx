@@ -947,12 +947,32 @@ export default function App() {
         const interfaceIdByLabel = new Map(
           (meta?.interfaces ?? []).map((iface) => [iface.label, iface.name]),
         );
+        // Whose machine this was, read back rather than re-inferred. It has to
+        // be in hand BEFORE the first frame is dissected - see
+        // `SessionMeta.host` - which is why it is not left to `deriveForBuffer`
+        // below like everything else about direction. A session written before
+        // this was saved has none, and restores the way it always did.
+        const storedHost: HostIdentity | undefined = meta?.host && {
+          macs: new Set(meta.host.macs),
+          addresses: new Set(meta.host.addresses),
+          inferred: meta.host.inferred,
+          confidence: meta.host.confidence,
+          basis: meta.host.basis,
+        };
+        if (storedHost) {
+          hostIdentityRef.current = storedHost;
+          setHostIdentity(storedHost);
+          // The Worker rebuilds the detail tree by replaying the conversation
+          // (`pipeline/replay.ts`), so it needs the same answer or the tree
+          // will contradict the row that opened it.
+          pipeline.setHost(storedHost);
+        }
         let done = 0;
         let lastId = 0;
 
         await readFrames(RESTORE_CHUNK_SIZE, async (frames) => {
           // Same trackers across every chunk, in id order - see restoreBatch.
-          const { packets: batch, icmpReplies, infoPatches } = restoreBatch(frames, trackers, interfaceIdByLabel);
+          const { packets: batch, icmpReplies, infoPatches } = restoreBatch(frames, trackers, interfaceIdByLabel, undefined, false, storedHost);
           // A restored session fills the buffer as full as a live capture ever
           // does - fuller, since it arrives all at once - so its frames get the
           // same treatment. `restoreBatch` returns them undivided because the
@@ -1076,6 +1096,18 @@ export default function App() {
       captureStartMs: captureStartRef.current === null ? null : captureStartRef.current / 1000,
       lastPacketMs: lastPacketTimeRef.current === null ? null : lastPacketTimeRef.current / 1000,
       updatedAt: Date.now(),
+      // Written from the ref rather than the state beside it: the identity
+      // settles when the adapter list arrives or a buffer is scored, neither
+      // of which is in this effect's dependency list, and the throttled
+      // packet tick is what brings it back here. A host that names nothing is
+      // stored as nothing (`readStoredHost`), so `NO_HOST` costs no bytes.
+      host: {
+        macs: [...hostIdentityRef.current.macs],
+        addresses: [...hostIdentityRef.current.addresses],
+        inferred: hostIdentityRef.current.inferred,
+        confidence: hostIdentityRef.current.confidence,
+        ...(hostIdentityRef.current.basis ? { basis: hostIdentityRef.current.basis } : {}),
+      },
     });
   }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick]);
 
@@ -2294,6 +2326,13 @@ export default function App() {
       host = inferred ?? NO_HOST;
       setHostIdentity(host);
       hostIdentityRef.current = host;
+      // The Worker too, and not as bookkeeping: it is what rebuilds the detail
+      // tree on demand (`pipeline/replay.ts`), and a replay that does not know
+      // whose machine this is decides `Bad checksum` where the summary decided
+      // `Unverified`. Without this line an imported capture's tree contradicts
+      // the row that opened it - only for frames the machine sent, which is
+      // the half a reader is least likely to doubt.
+      pipeline.setHost(host);
     }
 
     const collector = new NetworkFactsCollector();
@@ -2497,7 +2536,6 @@ export default function App() {
               }`}
             >
               <PacketList
-                expert={expertLog}
                 names={nameMap}
                 resolveNames={nameResolution.network}
                 sourceProcess={sourceProcessFor}

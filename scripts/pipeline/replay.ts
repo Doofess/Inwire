@@ -28,6 +28,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
 import { dissectReplay } from '../../src/services/pipeline/replay';
+import { inferHostIdentity } from '../../src/services/hostIdentity';
 import { streamPackets, targetForPacket } from '../../src/services/followStream';
 import type { ReplayFrame } from '../../src/services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../../src/types/packet';
@@ -113,6 +114,16 @@ async function main() {
     return undefined;
   };
 
+  // Who took the capture. The importer works this out before it dissects
+  // (`PcapService.inferHostFromFrames`) and the Worker holds the same value for
+  // a live capture, so a replay that did not have it would be comparing a tree
+  // built with the host against one built without - and the only rows that
+  // differ are the checksum verdicts on frames this machine sent, which is a
+  // difference easy to read as noise. `inferHostIdentity` caps itself at
+  // `SCORING_FRAMES`, so passing the whole buffer scores the same prefix the
+  // importer scored.
+  const host = inferHostIdentity(truth) ?? undefined;
+
   const cases: { label: string; packet: Packet | undefined }[] = [
     { label: 'a TCP segment deep in its stream', packet: byProtocol('tcp', 20) },
     { label: 'a TLS record', packet: byProtocol('tls', 3) },
@@ -133,7 +144,7 @@ async function main() {
     const retroactive = typeof responseIn === 'number'
       ? { frameId: packet.id, responseInFrame: responseIn }
       : undefined;
-    const { layers } = dissectReplay(frames, false, packet.streamId, retroactive);
+    const { layers } = dissectReplay(frames, false, packet.streamId, retroactive, host);
     check(`${label} (frame ${packet.id}, ${frames.length} replayed) rebuilds identically`,
       render(layers), render(packet.layers));
   }
@@ -146,8 +157,8 @@ async function main() {
   const tcpFrame = truth.find((p) => (p.streamId ?? 0) > 3 && p.frameProtocols?.includes('tcp'));
   if (tcpFrame) {
     const frames = bundleFor(tcpFrame, buffer);
-    const unseeded = render(dissectReplay(frames, false).layers);
-    const seeded = render(dissectReplay(frames, false, tcpFrame.streamId).layers);
+    const unseeded = render(dissectReplay(frames, false, undefined, undefined, host).layers);
+    const seeded = render(dissectReplay(frames, false, tcpFrame.streamId, undefined, host).layers);
     checkTrue('an unseeded replay gets the stream index wrong', unseeded !== seeded);
     check('...and a seeded one gets it right', seeded, render(tcpFrame.layers));
   }
@@ -161,12 +172,12 @@ async function main() {
   const deep = byProtocol('tcp', 40);
   if (deep) {
     const frames = bundleFor(deep, buffer);
-    const partial = dissectReplay(frames.slice(-5), true, deep.streamId);
+    const partial = dissectReplay(frames.slice(-5), true, deep.streamId, undefined, host);
     checkTrue('a replay that could not start at the beginning reports it', partial.truncated);
     checkTrue('...and says so in the tree rather than only to its caller',
       render(partial.layers).includes('[Reassembly context]'));
     checkTrue('a complete replay says nothing of the sort',
-      !render(dissectReplay(frames, false, deep.streamId).layers).includes('[Reassembly context]'));
+      !render(dissectReplay(frames, false, deep.streamId, undefined, host).layers).includes('[Reassembly context]'));
   }
 
   // --- degenerate inputs --------------------------------------------------------

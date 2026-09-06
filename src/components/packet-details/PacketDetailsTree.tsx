@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
 import { TbStack2 } from 'react-icons/tb';
 import { ProtocolTreeView } from './ProtocolTreeView';
-import { AnomalyBanners } from './AnomalyBanners';
+import { ExpertFindings } from './ExpertFindings';
 import { packetAccentStyle } from '../../lib/packetAccent';
 
 interface PacketDetailsTreeProps {
@@ -89,7 +89,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
         )}
       </div>
 
-      <AnomalyBanners anomalies={packet.anomalies} className="p-3 pb-0" />
+      <ExpertFindings packet={packet} className="p-3 pb-0" />
 
       <div className="flex-1 overflow-y-auto p-3 custom-scrollbar">
         <ProtocolTreeView

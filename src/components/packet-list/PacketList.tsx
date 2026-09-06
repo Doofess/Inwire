@@ -12,7 +12,6 @@ import {
   TbArrowsSort,
   TbArrowUp,
   TbArrowDown,
-  TbShieldExclamation,
   TbMessage,
   TbArrowsExchange,
   TbFilter,
@@ -39,9 +38,7 @@ import {
 } from '../../lib/packetColumns';
 import { fieldDef } from '../../services/dissect/fieldRegistry';
 import type { NameLookup } from '../../services/nameResolution';
-import type { ExpertLookup } from '../../services/expertInfo';
 import { targetForPacket, type StreamTarget } from '../../services/followStream';
-import { SEVERITY_DOT, SEVERITY_LABELS } from '../../services/expertInfo';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -81,16 +78,6 @@ interface PacketListProps {
    * row and the filter that selects it cannot disagree.
    */
   sourceProcess?: (packet: Packet) => string | null;
-  /**
-   * The expert log, for the severity dot in the No. column.
-   *
-   * A dot rather than the shield icon this column used to carry for anomalies
-   * alone: the icon answered one question ("did the detector flag this") while
-   * a frame can also be a bad checksum, a lost segment or an expired
-   * certificate, and those had no mark in the list at all. One mark, four
-   * levels, the same colours the tree and the Expert Information tab use.
-   */
-  expert?: ExpertLookup;
   packets: Packet[];
   selectedPacket: Packet | null;
   onSelectPacket: (packet: Packet) => void;
@@ -249,7 +236,6 @@ export const PacketList: React.FC<PacketListProps> = ({
   names,
   resolveNames = false,
   sourceProcess,
-  expert,
   packets,
   selectedPacket,
   onSelectPacket,
@@ -1201,23 +1187,17 @@ export const PacketList: React.FC<PacketListProps> = ({
                   >
                     {/* No. - right-aligned with tabular figures so the column
                         stays a clean edge as the number of digits grows. */}
+                    {/* Just the number.
+
+                        A severity dot and an anomaly shield used to sit here.
+                        Both are gone because the row itself now carries the
+                        answer: every expert category is a colouring rule, so a
+                        frame with a finding is a coloured row rather than an
+                        ordinary row wearing a 6px mark that had to be hovered
+                        to be read. */}
                     {columns.id && (
                     <td className={`px-2 ${density.cell} font-mono whitespace-nowrap truncate tabular-nums ${cellAlign('id')}`}>
-                      <div className={`flex items-center gap-1 ${cellJustify('id')}`}>
-                        {(() => {
-                          const severity = expert?.severityOf(packet.id);
-                          if ((packet.anomalies?.length ?? 0) > 0 || packet.status === 'alert') {
-                            return <TbShieldExclamation className="w-3 h-3 text-rose-500 shrink-0" title="Flagged by the anomaly detector" />;
-                          }
-                          return severity ? (
-                            <span
-                              className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${SEVERITY_DOT[severity]}`}
-                              title={`${SEVERITY_LABELS[severity]} - see Expert Information`}
-                            />
-                          ) : null;
-                        })()}
-                        <span>{packet.id}</span>
-                      </div>
+                      {packet.id}
                     </td>
                     )}
 

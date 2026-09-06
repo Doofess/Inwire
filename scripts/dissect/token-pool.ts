@@ -94,7 +94,7 @@ function checkTrue(name: string, condition: boolean) { check(name, condition, tr
 {
   clearTokenPool();
   const retransmit = (): ExpertInfo[] => [
-    { severity: 'warn', message: 'This frame is a (suspected) retransmission' },
+    { category: 'Loss', message: 'This frame is a (suspected) retransmission' },
   ];
   const a = poolExpert(retransmit());
   const b = poolExpert(retransmit());
@@ -103,26 +103,26 @@ function checkTrue(name: string, condition: boolean) { check(name, condition, tr
   check('...with the finding intact', a[0].message,
     'This frame is a (suspected) retransmission');
 
-  // Severity is part of what a finding IS, so the same sentence at two
-  // severities is two different findings - and the colour rules and the expert
+  // The category is part of what a finding IS, so the same sentence in two
+  // categories is two different findings - and the colour rules and the expert
   // tab both branch on it.
-  const warn = poolExpert([{ severity: 'warn', message: 'same words' }]);
-  const error = poolExpert([{ severity: 'error', message: 'same words' }]);
-  checkTrue('the same message at a different severity is not shared', warn !== error);
-  check('...and keeps its own severity', error[0].severity, 'error');
+  const loss = poolExpert([{ category: 'Loss', message: 'same words' }]);
+  const broken = poolExpert([{ category: 'Broken', message: 'same words' }]);
+  checkTrue('the same message in a different category is not shared', loss !== broken);
+  check('...and keeps its own category', broken[0].category, 'Broken');
 
   // Two findings in one set, against the same two in the other order.
   const ab = poolExpert([
-    { severity: 'note', message: 'a' }, { severity: 'note', message: 'b' },
+    { category: 'Note', message: 'a' }, { category: 'Note', message: 'b' },
   ]);
   const ba = poolExpert([
-    { severity: 'note', message: 'b' }, { severity: 'note', message: 'a' },
+    { category: 'Note', message: 'b' }, { category: 'Note', message: 'a' },
   ]);
   checkTrue('finding order distinguishes two sets', ab !== ba);
 
   // A set of one finding whose message is the concatenation of two, against
   // the set of those two. Different lists; a careless key would agree.
-  const one = poolExpert([{ severity: 'note', message: 'ab' }]);
+  const one = poolExpert([{ category: 'Note', message: 'ab' }]);
   checkTrue('one joined message is not two findings', one !== ab);
 
   checkTrue('the expert pool is counted separately',

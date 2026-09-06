@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { Packet } from '../../types/packet';
+import { CATEGORY_LABELS, categoryOfPacket, isFaultCategory } from '../../services/expertInfo';
 import { TbAlertTriangle } from 'react-icons/tb';
 import { ZoomControls } from './ZoomControls';
 import { useElementSize } from '../../lib/useElementSize';
@@ -220,9 +221,10 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
         } catch { /* not a match */ }
       }
 
-      if (p.status === 'alert' || (p.anomalies && p.anomalies.length > 0)) {
+      const category = categoryOfPacket(p);
+      if (isFaultCategory(category)) {
         bucket.hasAnomaly = true;
-        bucket.anomalyTitle = p.anomalies?.[0]?.title || 'Security Alert';
+        bucket.anomalyTitle = CATEGORY_LABELS[category!];
       }
     },
     (acc) => {

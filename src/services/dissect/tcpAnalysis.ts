@@ -96,6 +96,8 @@ export interface TcpSegment {
   sackBlocks?: { left: number; right: number }[];
 }
 
+import type { ExpertCategory } from '../../types/packet';
+
 export type TcpAnalysisFlag =
   | 'retransmission' | 'fast_retransmission' | 'spurious_retransmission' | 'out_of_order'
   | 'lost_segment' | 'ack_lost_segment' | 'window_update' | 'window_full'
@@ -153,6 +155,46 @@ const PRINT_ORDER: [TcpAnalysisFlag, string][] = [
   ['zero_window', '[TCP ZeroWindow]'],
   ['zero_window_probe_ack', '[TCP ZeroWindowProbeAck]'],
 ];
+
+/**
+ * What each analysis flag actually means, for the expert categories.
+ *
+ * The split that matters is between **Loss** and **CaptureGap**, and Wireshark
+ * does not make it: it files "Previous segment not captured" and "ACKed unseen
+ * segment" under Sequence alongside real retransmissions, so a capture that
+ * dropped frames reads as a network that dropped packets. They are different
+ * problems with different owners - one is the wire, the other is the sniffer -
+ * and on the inwire fixture the second is 2,427 frames against the first's
+ * ~190. Reading those as network loss is the single most misleading thing the
+ * expert system did.
+ *
+ * **FlowControl** is the other rescue. A zero window, a window-full and a
+ * keep-alive are a peer applying back-pressure, which is TCP working, not TCP
+ * failing - they were `warn` and `note` before and drew the eye for nothing.
+ */
+export const CATEGORY_BY_FLAG: Record<TcpAnalysisFlag, ExpertCategory> = {
+  retransmission: 'Loss',
+  fast_retransmission: 'Loss',
+  spurious_retransmission: 'Loss',
+  out_of_order: 'Loss',
+  duplicate_ack: 'Loss',
+
+  // The sniffer missed frames. Nothing here says the network did.
+  lost_segment: 'CaptureGap',
+  ack_lost_segment: 'CaptureGap',
+
+  window_update: 'FlowControl',
+  window_full: 'FlowControl',
+  keep_alive: 'FlowControl',
+  keep_alive_ack: 'FlowControl',
+  zero_window: 'FlowControl',
+  zero_window_probe: 'FlowControl',
+  zero_window_probe_ack: 'FlowControl',
+
+  // A port reused while the old connection is still live ends that connection
+  // as surely as a RST does, and from the reader's side it is the same event.
+  reused_ports: 'Reset',
+};
 
 export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b', s: TcpSegment): TcpAnalysis {
   const fwd = direction === 'a' ? conn.a : conn.b;

@@ -3,7 +3,7 @@
  *
  *   npx tsx scripts/themes/status.ts
  *
- * Three controls - the Interfaces button, Start/Stop capture, and the anomaly
+ * Three controls - the Interfaces button, Start/Stop capture, and the fault
  * panel - used to carry raw Tailwind shades, so they rendered identically under
  * every theme - emerald and rose sitting in the header of a warm-accented UI,
  * from a palette none of the four themes contains.
@@ -265,9 +265,16 @@ for (const theme of THEMES) {
 
 // The failure mode this whole change exists to prevent, pinned so it cannot
 // come back one className at a time.
+//
+// `AnomalyAlertsPanel.tsx` used to be the second entry and is gone with the
+// anomaly model. The two that replaced it are the surviving surfaces that
+// paint a fault state - both now ask `isFaultCategory(categoryOfPacket(p))`
+// rather than reading an anomaly list - so they are where a raw shade would
+// next creep in.
 const GUARDED_FILES = [
   'src/components/common/Header.tsx',
-  'src/components/analytics/AnomalyAlertsPanel.tsx',
+  'src/components/analytics/NetworkMatrix.tsx',
+  'src/components/analytics/TrafficTimelineChart.tsx',
 ];
 const RAW_SHADE = /\b(?:bg|text|border|shadow|ring)-(?:rose|emerald|amber|red|green)-\d{2,3}\b/g;
 for (const file of GUARDED_FILES) {

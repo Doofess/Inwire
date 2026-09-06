@@ -73,7 +73,7 @@ export const DENSE_FIELDS: readonly DenseKey[] = [
 
   // Published per frame so a colour rule and a display filter can ask about
   // severity without walking a tree; see `services/expertInfo.ts`.
-  { abbrev: 'inwire.expert.severity', width: 'str' },
+  { abbrev: 'inwire.expert.category', width: 'str' },
 ];
 
 /**

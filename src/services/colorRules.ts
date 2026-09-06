@@ -266,26 +266,72 @@ export const WIRESHARK_DEFAULT_RULES: ColorRule[] = [
  * alone.
  */
 export const INWIRE_EXTRA_RULES: ColorRule[] = [
+  // --- the expert categories -------------------------------------------------
+  //
+  // One band per `ExpertCategory`, in `CATEGORY_ORDER`, at the head of the
+  // chain. This is where the whole expert system reaches the packet list, and
+  // it goes through the ordinary colour-rules machinery rather than a second
+  // painter: one system owns a row's colour, `Packet.colorSlot` memoises it
+  // for free, the minimap picks it up for free, and every band is reorderable
+  // and disable-able in Settings like any other.
+  //
+  // It replaces a single "Expert Warnings" band keyed on
+  // `inwire.expert.severity`, which shipped **disabled** because it painted
+  // 14% and 22% of the two fixtures - almost all of it "Bad checksum" on
+  // frames this machine had sent, where the NIC had not filled the checksum
+  // in yet. Those frames are `Unverifiable` now and the checksum is not
+  // reported as bad at all, which is what makes painting by category viable.
+  //
+  // The colours are not here. Every built-in rule is painted by the theme
+  // (`resolveRuleColors`), and these four carry *stated* pairs rather than
+  // derived ones - see `FIXED_ROLE_COLORS` in packetThemes.ts.
   {
-    id: 'color-expert',
-    name: 'Expert Warnings',
-    // `inwire.expert.severity` is the worst finding anywhere in the frame's
-    // tree, published at dissection: a colour rule cannot walk a tree, so
-    // without that field this band could not exist.
-    filter: 'inwire.expert.severity == "error" || inwire.expert.severity == "warn"',
-    bgColor: '#2e1f0d',
-    textColor: '#f0b866',
-    lightBgColor: '#fff3d9',
-    lightTextColor: '#7a4d00',
-    // Off by default, for the same reason Wireshark ships Checksum Errors off:
-    // on a capture taken ON the sending host, NIC checksum offload means the
-    // checksum has not been filled in yet, and those frames dominate. Measured
-    // on the two parity fixtures, this band would paint 14 % and 22 % of the
-    // list - almost all of it "Bad checksum" on locally-originated traffic.
-    // On a capture from a mirror port, where the checksums are real, it is the
-    // most useful band in the chain, which is why it ships ready to switch on
-    // in Settings -> Colouring Rules rather than not existing.
-    enabled: false,
+    id: 'color-expert-broken',
+    name: 'Expert: Broken',
+    filter: 'inwire.expert.category == "Broken"',
+    enabled: true,
+  },
+  {
+    id: 'color-expert-reset',
+    name: 'Expert: Reset',
+    filter: 'inwire.expert.category == "Reset"',
+    enabled: true,
+  },
+  {
+    id: 'color-expert-security',
+    name: 'Expert: Security',
+    filter: 'inwire.expert.category == "Security"',
+    enabled: true,
+  },
+  {
+    id: 'color-expert-loss',
+    name: 'Expert: Loss',
+    filter: 'inwire.expert.category == "Loss"',
+    enabled: true,
+  },
+  {
+    id: 'color-expert-capture-gap',
+    name: 'Expert: Capture gap',
+    filter: 'inwire.expert.category == "CaptureGap"',
+    enabled: true,
+  },
+  {
+    id: 'color-expert-flow-control',
+    name: 'Expert: Flow control',
+    filter: 'inwire.expert.category == "FlowControl"',
+    enabled: true,
+  },
+  {
+    id: 'color-expert-unverifiable',
+    name: 'Expert: Unverifiable',
+    filter: 'inwire.expert.category == "Unverifiable"',
+    enabled: true,
+  },
+  {
+    id: 'color-expert-note',
+    name: 'Expert: Note',
+    filter: 'inwire.expert.category == "Note"',
+    enabled: true,
   },
   {
     id: 'color-tls-handshake',
@@ -314,10 +360,11 @@ export const INWIRE_EXTRA_RULES: ColorRule[] = [
 /**
  * The chain the app ships with.
  *
- * The three extra bands are inserted where first-match-wins puts them to work:
- * Expert Warnings just after the other "something is broken" rules, so a bad
- * frame is flagged before its protocol is; TLS Handshake and QUIC before the
- * generic TCP and UDP bands, which would otherwise swallow them.
+ * The extra bands are inserted where first-match-wins puts them to work: the
+ * eight expert categories at the head, so a frame a dissector had something to
+ * say about is painted for what is wrong with it rather than for its protocol;
+ * TLS Handshake and QUIC before the generic TCP and UDP bands, which would
+ * otherwise swallow them.
  */
 export const DEFAULT_COLOR_RULES: ColorRule[] = insertExtraRules(
   WIRESHARK_DEFAULT_RULES,
@@ -326,10 +373,12 @@ export const DEFAULT_COLOR_RULES: ColorRule[] = insertExtraRules(
 
 function insertExtraRules(base: ColorRule[], extra: ColorRule[]): ColorRule[] {
   const byId = new Map(extra.map((r) => [r.id, r]));
-  const out: ColorRule[] = [];
+  // The expert bands lead the chain, where Wireshark puts Bad TCP and for the
+  // same reason: a frame with a finding is more interesting than the fact that
+  // it is TCP, and first-match-wins means whatever leads decides.
+  const expertBands = extra.filter((r) => r.id.startsWith('color-expert-'));
+  const out: ColorRule[] = [...expertBands];
   for (const rule of base) {
-    // Just after Checksum Errors, which ends Wireshark's run of "broken" bands.
-    if (rule.id === 'color-checksum-errors') { out.push(rule); out.push(byId.get('color-expert')!); continue; }
     // Before TCP SYN/FIN, which is the first band that would swallow them.
     if (rule.id === 'color-tcp-syn-fin') {
       out.push(byId.get('color-tls-handshake')!, byId.get('color-quic')!, rule);

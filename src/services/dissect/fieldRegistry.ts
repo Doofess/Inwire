@@ -324,7 +324,7 @@ export const FIELDS: readonly FieldDef[] = [
   // this frame" - its expert info is a per-item list, not a frame property. It
   // is one here because a colour rule and a display filter both want to ask the
   // question, and neither can walk a tree.
-  str('inwire.expert.severity', 'Expert severity', 'frame', { label: 'Expert', align: 'left' }),
+  str('inwire.expert.category', 'Expert category', 'frame', { label: 'Expert', align: 'left' }),
 
   // Which program on this machine opened the socket the frame belongs to.
   //

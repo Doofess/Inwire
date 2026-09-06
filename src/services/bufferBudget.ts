@@ -98,7 +98,6 @@ export function estimateSummaryBytes(packet: Packet): number {
     bytes += Object.keys(packet.fields).length * PER_SPARSE_KEY;
   }
   bytes += (packet.expert?.length ?? 0) * PER_FINDING;
-  bytes += (packet.anomalies?.length ?? 0) * PER_FINDING;
   return bytes;
 }
 

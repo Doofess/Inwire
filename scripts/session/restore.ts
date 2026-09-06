@@ -20,6 +20,9 @@ import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
 import { PacketGenerator } from '../../src/services/packetGenerator';
 import { toStoredFrame, type StoredFrame } from '../../src/services/sessionStore';
 import { applyIcmpReplies, buildFallbackPacket, restoreBatch } from '../../src/services/sessionRestore';
+import { Direction, directionOf, type HostIdentity } from '../../src/services/direction';
+import { fieldValue } from '../../src/services/dissect/fieldAccess';
+import { expertItemsFor } from '../../src/services/expertInfo';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -111,6 +114,10 @@ function decodeLive(raws: Uint8Array[]): { packets: Packet[]; replies: { request
   });
   return { packets, replies };
 }
+
+/** The summaries of one frame's expert findings, for the checks below. */
+const findingsOf = (packets: Packet[], id: number) =>
+  expertItemsFor(packets.find((p) => p.id === id)!).map((i) => i.summary);
 
 const raws = buildCapture();
 const live = decodeLive(raws);
@@ -278,6 +285,72 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
   const anonymous = { ...stored, interfaceName: undefined };
   const anon = frameFields(restoreBatch([anonymous], freshTrackers(), undefined, undefined, true).packets[0]);
   check('a frame with no adapter still reads as an imported capture', anon['Interface description'], 'Imported capture');
+}
+
+// --- The host travels with the session, and has to ------------------------
+//
+// A restore re-dissects from bytes, and the checksum verdict is decided during
+// that dissection: a frame this machine SENT was handed to the sniffer before
+// the NIC filled its checksum in, so the honest verdict is `Unverified` and
+// there is no finding. The pass that re-derives direction afterwards is too
+// late - the verdict is already a tree row, an expert finding and a dense
+// column. So the identity is stored in the session and handed back in
+// (`SessionMeta.host`), and these two restores of the SAME bytes must differ.
+{
+  const host: HostIdentity = {
+    macs: new Set(['00:11:22:33:44:55']), addresses: new Set(['10.0.0.1']),
+    inferred: false, confidence: 1,
+  };
+
+  // A pair built for this check rather than taken from `buildCapture`, which
+  // sends every frame from one MAC and leaves every checksum zero. A ZERO
+  // checksum is `Unverified` on its own - that is the other half of the
+  // offload policy - so it cannot tell whether the direction was consulted.
+  // These carry a non-zero checksum that is simply wrong, which is what
+  // partial offload leaves and what corruption looks like: indistinguishable
+  // without knowing who sent the frame, which is the whole point.
+  const withBadChecksum = (fromUs: boolean): Uint8Array => {
+    const tcp = [
+      0xc3, 0x50, 0x01, 0xbb,
+      0x00, 0x00, 0x00, 0x01,
+      0x00, 0x00, 0x00, 0x00,
+      0x50, 0x10, 0x20, 0x00,
+      0xbe, 0xef,             // a checksum that is neither zero nor correct
+      0x00, 0x00,
+    ];
+    const ip = [
+      0x45, 0x00, 0x00, 0x28,
+      0x00, 0x01, 0x40, 0x00,
+      0x40, 0x06, 0x00, 0x00,
+      ...(fromUs ? [10, 0, 0, 1] : [10, 0, 0, 2]),
+      ...(fromUs ? [10, 0, 0, 2] : [10, 0, 0, 1]),
+    ];
+    // Destination MAC first, then source - so `fromUs` puts MAC_A in the
+    // source half, which is the one the host identity names.
+    const eth = fromUs ? [...MAC_B, ...MAC_A] : [...MAC_A, ...MAC_B];
+    return new Uint8Array([...eth, 0x08, 0x00, ...ip, ...tcp]);
+  };
+
+  const pair = [withBadChecksum(true), withBadChecksum(false)];
+  const asStored = decodeLive(pair).packets.map(toStoredFrame);
+  const verdict = (packets: Packet[], id: number) =>
+    fieldValue(packets.find((p) => p.id === id)!, 'tcp.checksum.status');
+
+  const blind = restoreBatch(asStored, freshTrackers(), undefined, undefined, true).packets;
+  const knowing = restoreBatch(asStored, freshTrackers(), undefined, undefined, true, host).packets;
+
+  check('a restore that does not know the host calls the checksum bad',
+    verdict(blind, 1), 'Bad');
+  check('...and says so as a finding', findingsOf(blind, 1), ['Bad checksum']);
+  check('...while one that does declines to judge it', verdict(knowing, 1), 'Unverified');
+  check('...and raises nothing', findingsOf(knowing, 1), []);
+  check('a frame the machine RECEIVED is still judged', verdict(knowing, 2), 'Bad');
+
+  // And the direction itself, which is what the stored host is for.
+  check('the frame this machine sent is marked as sent',
+    directionOf(knowing.find((p) => p.id === 1)!.direction), Direction.Out);
+  check('...and the one it received as received',
+    directionOf(knowing.find((p) => p.id === 2)!.direction), Direction.In);
 }
 
 // --- Packet numbering continues after a restore ---------------------------

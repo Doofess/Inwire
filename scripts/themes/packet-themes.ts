@@ -86,7 +86,7 @@ const COMBOS: { theme: string; set: PacketColorSet; label: string }[] = THEMES.f
 // Wireshark's twenty, plus Inwire's three (Expert Warnings, TLS Handshake,
 // QUIC - see INWIRE_EXTRA_RULES for why they exist and why they are kept out
 // of the array the parity harness compares against).
-check('the rule chain has 23 rules to cover', REQUIRED_RULE_IDS.length, 23);
+check('the rule chain has 30 rules to cover', REQUIRED_RULE_IDS.length, 30);
 
 const rulesWithoutRole = REQUIRED_RULE_IDS.filter((id) => !ROLE_BY_RULE_ID[id]);
 check('every rule in the chain has a role', rulesWithoutRole, []);

@@ -23,7 +23,7 @@
  * frames, nothing here will complete and every check below fails.
  */
 import { rederiveDirections, countDirections } from '../../src/services/redirect';
-import { Direction, packDirection, withDuplicate, isDuplicate, DirectionSignal,
+import { Direction, packDirection, withDuplicate, isDuplicate, signalOf, DirectionSignal,
   type HostIdentity } from '../../src/services/direction';
 import type { Packet } from '../../src/types/packet';
 
@@ -113,6 +113,42 @@ checkTrue('this runs without requestAnimationFrame, as a hidden tab does',
   await done([marked], host);
   check('the direction is re-decided', countDirections([marked])[Direction.Out], 1);
   checkTrue('...and the duplicate mark survives it', isDuplicate(marked.direction));
+}
+
+// --- An answer this pass cannot reproduce is kept, not erased ---------------------------
+//
+// Both offload signals are read out of the raw bytes and the frame's own link
+// type at dissection - a frame past the MTU, a required checksum still zero -
+// and neither is in reach here. Clearing them was harmless while imports had
+// no direction at all; the moment the dissector started deciding for them, this
+// pass ran straight over the top and set them back to nothing.
+{
+  // A frame off a link with no Ethernet header - a TUN-style VPN, a raw-IP
+  // adapter - and addresses that are not the host's. Nothing here for either
+  // of this pass's two tests to bite on, which is the only situation where the
+  // dissector's answer is the better one.
+  const linkless = (direction: number): Packet => ({
+    id: 1, source: '198.51.100.7', destination: '203.0.113.9', direction, fields: {},
+  } as unknown as Packet);
+
+  for (const [name, signal] of [
+    ['segmentation offload', DirectionSignal.Offload],
+    ['an unfilled checksum', DirectionSignal.ChecksumOffload],
+  ] as const) {
+    const offloaded = linkless(packDirection(Direction.Out, signal));
+    await done([offloaded], host);
+    check(`a frame decided by ${name} keeps its direction`,
+      countDirections([offloaded])[Direction.Out], 1);
+    check('...and the signal that decided it', signalOf(offloaded.direction), signal);
+  }
+
+  // The other half of the same rule. `InferredHost` is a signal this pass DOES
+  // produce, so an answer carrying it is the previous host's answer and must
+  // give way - otherwise an override could never take a frame back.
+  const weak = linkless(packDirection(Direction.Out, DirectionSignal.InferredHost));
+  await done([weak], host);
+  check('an answer this pass can produce is replaced, not kept',
+    countDirections([weak])[Direction.Unknown], 1);
 }
 
 // --- An empty buffer still reports done ----------------------------------------------------

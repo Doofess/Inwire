@@ -7,6 +7,7 @@ import { IcmpEchoTracker } from './icmpEchoTracker';
 import { QuicFlowTracker } from './quicFlowTracker';
 import type { L3Tracker } from './l3Tracker';
 import { StoredFrame } from './sessionStore';
+import type { HostIdentity } from './direction';
 
 /**
  * Rebuilding live Packets from the frames a previous session stored.
@@ -143,6 +144,17 @@ export function restoreBatch(
    * (docs/decisions/0007). Scripts that assert on tree content ask for it.
    */
   keepTrees = false,
+  /**
+   * Whose machine took the capture, from the session's own metadata.
+   *
+   * The direction pass that runs after a restore cannot stand in for this: the
+   * checksum verdict is decided *during* dissection and lands in a tree row,
+   * an expert finding and a dense column, none of which can be rewritten
+   * afterwards. A restore without it shows "Bad checksum" on every frame this
+   * machine sent - most of them, and exactly the offload artefact the expert
+   * categories exist to stop reporting. See `SessionMeta.host`.
+   */
+  host?: HostIdentity,
 ): { packets: Packet[]; icmpReplies: { requestFrameId: number; replyId: number }[]; infoPatches: InfoPatch[] } {
   const packets: Packet[] = [];
   const icmpReplies: { requestFrameId: number; replyId: number }[] = [];
@@ -177,6 +189,7 @@ export function restoreBatch(
         captureInterface,
         undefined,
         trackers.l3Tracker,
+        host,
       );
       // The tree has done its work by here - it is what the fields, the Info
       // line and the expert findings were read out of - and keeping one per

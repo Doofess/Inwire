@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 import { TbCopy, TbCheck } from 'react-icons/tb';
 import { renderBitfield } from '../../lib/bitfield';
-import { SEVERITY_TEXT } from '../../services/expertInfo';
+import { CATEGORY_TEXT } from '../../services/expertInfo';
 
 /**
  * The dissected fields as an aligned two-column table.
@@ -21,10 +21,9 @@ import { SEVERITY_TEXT } from '../../services/expertInfo';
  * The reference analyzer's dotted binary, and a cross-frame reference is a link.
  */
 
-// The severity palette lives in services/expertInfo, so one level means one
-// colour here, in the workspace tree, in the packet list's severity dot and in
-// the Expert Information tab.
-const EXPERT_SEVERITY_CLASS = SEVERITY_TEXT;
+// See ProtocolTreeView: one map, in services/expertInfo, so a category means
+// one colour here, in the workspace tree and in the Expert Information tab.
+const EXPERT_CATEGORY_CLASS = CATEGORY_TEXT;
 
 interface FrameFieldTableProps {
   packet: Packet;
@@ -143,7 +142,7 @@ export const FrameFieldTable: React.FC<FrameFieldTableProps> = ({
               <span
                 className={`font-semibold break-all ${
                   field.expertInfo
-                    ? EXPERT_SEVERITY_CLASS[field.expertInfo.severity] ?? 'text-foreground'
+                    ? EXPERT_CATEGORY_CLASS[field.expertInfo.category ?? 'Note'] ?? 'text-foreground'
                     : field.generated
                       ? 'text-muted-foreground italic'
                       : 'text-foreground'

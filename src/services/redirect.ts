@@ -38,8 +38,8 @@
 import type { Packet } from '../types/packet';
 import { fieldValue } from './dissect/fieldAccess';
 import {
-  Direction, directionFromAddresses, directionFromMacs, directionOf,
-  isDuplicate, withDuplicate, type HostIdentity,
+  Direction, DirectionSignal, directionFromAddresses, directionFromMacs, directionOf,
+  isDuplicate, signalOf, withDuplicate, type HostIdentity,
 } from './direction';
 
 /**
@@ -63,6 +63,23 @@ function decide(packet: Packet, host: HostIdentity): number {
   );
   if (slot === 0) {
     slot = directionFromAddresses(packet.source, packet.destination, host);
+  }
+  // Neither MAC nor address could answer - but the DISSECTOR may already have,
+  // from a signal this pass has no way to reproduce. A frame larger than the
+  // link can carry, or one whose required checksum is still zero, was left
+  // that way by a transmitting stack; both are read out of the raw bytes and
+  // the frame's own link type, neither of which is in reach here.
+  //
+  // Erasing that was wrong, and only became visible once imports carried a
+  // direction at all: this pass runs over every imported buffer, so an
+  // offload-decided frame was set by the dissector and cleared moments later.
+  // Overwriting a *worse* answer with a better one is the point of the pass;
+  // overwriting a good answer with none is not.
+  if (slot === 0) {
+    const signal = signalOf(packet.direction);
+    if (signal === DirectionSignal.Offload || signal === DirectionSignal.ChecksumOffload) {
+      return packet.direction ?? 0;
+    }
   }
   // The duplicate bit belongs to a different question and is preserved: a
   // frame that duplicates one on another adapter still does, whoever the host
