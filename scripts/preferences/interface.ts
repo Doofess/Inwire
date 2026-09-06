@@ -24,6 +24,7 @@ import {
   normalizePerformance,
 } from '../../src/services/interfacePrefs';
 import { DEFAULT_COLUMN_ALIGN } from '../../src/lib/packetColumns';
+import { DEFAULT_BUFFER_BUDGET_BYTES } from '../../src/services/bufferBudget';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -132,10 +133,13 @@ for (const [name, fn] of [
 }
 
 {
-  const out = normalizePerformance({ dashboardRefreshMs: 1234, packetBufferCap: 25000 });
-  check('an unoffered refresh rate defaults while the cap survives', out, {
+  // One bad field does not take the other down with it.
+  const out = normalizePerformance({
+    dashboardRefreshMs: 1234, packetBufferBytes: 256 * 1024 * 1024,
+  });
+  check('an unoffered refresh rate defaults while the budget survives', out, {
     dashboardRefreshMs: PERFORMANCE_DEFAULTS.dashboardRefreshMs,
-    packetBufferCap: 25000,
+    packetBufferBytes: 256 * 1024 * 1024,
   });
 }
 
@@ -157,11 +161,25 @@ for (const [name, fn] of [
 }
 
 {
-  // The buffer cap is SNAPPED rather than clamped: it is a choice between three
-  // offered values, and an arbitrary number would render a segmented control
-  // with nothing selected.
-  const out = normalizePerformance({ ...PERFORMANCE_DEFAULTS, packetBufferCap: 33333 });
-  check('an unoffered buffer cap falls back rather than clamping', out?.packetBufferCap, 50000);
+  // The buffer budget is SNAPPED rather than clamped: it is a choice between
+  // four offered values, and an arbitrary number would render a segmented
+  // control with nothing selected.
+  const odd = normalizePerformance({ ...PERFORMANCE_DEFAULTS, packetBufferBytes: 33333 });
+  check('an unoffered buffer budget falls back rather than clamping',
+    odd?.packetBufferBytes, DEFAULT_BUFFER_BUDGET_BYTES);
+
+  // The setting used to be a frame count, and a stored one has to fall back
+  // rather than be read as bytes. 50,000 was the old default; taken as a
+  // budget it is 50 kB, which is about seventy frames - a buffer that would
+  // look broken and that nobody chose.
+  const legacy = normalizePerformance({ dashboardRefreshMs: 500, packetBufferCap: 50000 });
+  check('a buffer cap stored before this was a budget falls back',
+    legacy?.packetBufferBytes, DEFAULT_BUFFER_BUDGET_BYTES);
+
+  const offered = normalizePerformance({
+    ...PERFORMANCE_DEFAULTS, packetBufferBytes: 128 * 1024 * 1024,
+  });
+  check('an offered budget is kept', offered?.packetBufferBytes, 128 * 1024 * 1024);
 }
 
 // --- Motion is the one that must not drift ---------------------------------

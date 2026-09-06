@@ -6,6 +6,7 @@ import { ImportFailure } from '../../services/exportSchema';
 import { importAnyFile, IMPORT_ACCEPT } from '../../services/tabularImport';
 import { performanceStore } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
+import { AVERAGE_FRAME_BYTES, framesForBudget } from '../../services/bufferBudget';
 
 /**
  * The Import half of the Import/Export centre.
@@ -50,7 +51,13 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
     setNotes([]);
 
     try {
-      const outcome = await importAnyFile(file, { maxFrames: perf.packetBufferCap });
+      // The importer caps by frame count, so the budget is turned into one at
+      // the measured average. An import that overshoots is trimmed by the same
+      // planner as a live capture on its way into the buffer; this only stops
+      // the importer building frames the buffer would immediately drop.
+      const outcome = await importAnyFile(file, {
+        maxFrames: framesForBudget(perf.packetBufferBytes, AVERAGE_FRAME_BYTES),
+      });
       if (outcome.ok === false) {
         setStatus(null);
         onFailure(file.name, outcome.failure);

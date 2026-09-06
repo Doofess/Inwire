@@ -10,6 +10,7 @@ import {
   type ColumnVisibility,
 } from '../lib/packetColumns';
 import { FIELD_BY_ABBREV } from './dissect/fieldRegistry';
+import { BUDGET_CHOICES, DEFAULT_BUFFER_BUDGET_BYTES } from './bufferBudget';
 
 const TIME_FORMATS: readonly TimeFormat[] = ['relative', 'clock', 'date', 'utc', 'delta'];
 
@@ -192,23 +193,24 @@ export type DashboardRefresh = 500 | 2000 | 0;
 export interface PerformancePrefs {
   /** 0 means the panels update only when the user asks. */
   dashboardRefreshMs: DashboardRefresh;
-  packetBufferCap: number;
+  /**
+   * Memory the packet buffer's summaries may use, in bytes.
+   *
+   * Was `packetBufferCap`, a number of frames. A frame cost 2,342 B when that
+   * list of counts was written and costs 740 B now, so the largest option had
+   * quietly become about 74 MB - the setting was capping a resource nobody was
+   * short of, in a unit that says nothing about the one they are.
+   *
+   * See `services/bufferBudget.ts` for what the budget governs and what it
+   * deliberately does not.
+   */
+  packetBufferBytes: number;
 }
 
 export const PERFORMANCE_DEFAULTS: PerformancePrefs = {
   dashboardRefreshMs: 500,
-  packetBufferCap: 50000,
+  packetBufferBytes: DEFAULT_BUFFER_BUDGET_BYTES,
 };
-
-/**
- * 100,000 became a real option in Phase 11.
- *
- * It was not one before: every frame carried its protocol tree, at 10.6 kB
- * against the frame's own 1.2 kB, so a 100,000-frame buffer was a gigabyte and
- * the tab died before it filled. The tree is dissected on demand now
- * (docs/decisions/0007) and the same buffer is about 180 MB.
- */
-export const BUFFER_CAPS = [10000, 25000, 50000, 100000] as const;
 
 export function normalizePerformance(raw: unknown): PerformancePrefs | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -218,14 +220,19 @@ export function normalizePerformance(raw: unknown): PerformancePrefs | null {
       v.dashboardRefreshMs === 500 || v.dashboardRefreshMs === 2000 || v.dashboardRefreshMs === 0
         ? v.dashboardRefreshMs
         : PERFORMANCE_DEFAULTS.dashboardRefreshMs,
-    // Snapped to an offered value rather than clamped to a range: the cap is a
-    // choice between three, and an arbitrary number out of storage would render
-    // a settings control with nothing selected.
-    packetBufferCap:
-      typeof v.packetBufferCap === 'number' &&
-      (BUFFER_CAPS as readonly number[]).includes(v.packetBufferCap)
-        ? v.packetBufferCap
-        : PERFORMANCE_DEFAULTS.packetBufferCap,
+    // Snapped to an offered value rather than clamped to a range: the budget is
+    // a choice between four, and an arbitrary number out of storage would
+    // render a settings control with nothing selected.
+    //
+    // A stored `packetBufferCap` from before this was a budget lands here as an
+    // unrecognised value and falls back to the default, which is the right
+    // answer: the old numbers are frame counts, and reading 50000 as 50 kB
+    // would give someone a buffer of about seventy frames.
+    packetBufferBytes:
+      typeof v.packetBufferBytes === 'number' &&
+      (BUDGET_CHOICES as readonly number[]).includes(v.packetBufferBytes)
+        ? v.packetBufferBytes
+        : PERFORMANCE_DEFAULTS.packetBufferBytes,
   };
 }
 
