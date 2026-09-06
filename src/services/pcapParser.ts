@@ -38,10 +38,10 @@ import type { TcpAnalysis } from './dissect/tcpAnalysis';
 import { LINKTYPE } from './dissect/types';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dissectors/dns';
 import { dissectNbns } from './dissectors/nbns';
-import { dissectSyslog } from './dissectors/syslog';
-import { dissectRadius } from './dissectors/radius';
-import { dissectSnmp } from './dissectors/snmp';
-import { dissectSip } from './dissectors/sip';
+import { findUdpSubdissector } from './dissectors/udpDispatch';
+import { dissectCdp, CDP_SNAP_PID, CISCO_OUI } from './dissectors/cdp';
+import { dissectVrrp } from './dissectors/vrrp';
+import { dissectOspf } from './dissectors/ospf';
 import { DnsTracker } from './dnsTracker';
 import { dissectQuicDatagram } from './dissectors/quic';
 import { buildQuicTlsLayer } from './dissectors/tls';
@@ -703,6 +703,18 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'DHCPv6': 'dhcpv6',
   'Link Layer Discovery Protocol': 'lldp',
   'Internet Group Management Protocol': 'igmp',
+  'Trivial File Transfer Protocol': 'tftp',
+  'NetBIOS Datagram Service': 'nbdgm',
+  'BFD Control Message': 'bfd',
+  'BFD Echo Message': 'bfd',
+  'Constrained Application Protocol': 'coap',
+  'Precision Time Protocol (IEEE1588)': 'ptp',
+  'Cisco Hot Standby Router Protocol': 'hsrp',
+  'Virtual Router Redundancy Protocol': 'vrrp',
+  'Open Shortest Path First': 'ospf',
+  'Routing Information Protocol': 'rip',
+  'RIPng': 'ripng',
+  'Cisco Discovery Protocol': 'cdp',
   // The IPv6 extension headers. Without these the layer names fall through to
   // the underscore rule and the protocol hierarchy reads
   // `ipv6_hop-by-hop_options` where Wireshark reads `ipv6.hopopts` - and the
@@ -919,6 +931,12 @@ export function decodeRawEthernetPacket(
     l2Result = dissectIeee1905(rawBytes, l3Offset);
   } else if (currentEtherType === 0x88cc) {
     l2Result = dissectLldp(rawBytes, l3Offset);
+  } else if (currentEtherType === CDP_SNAP_PID && link.snapOui === CISCO_OUI) {
+    // CDP is not an ethertype: 0x2000 is a protocol id under Cisco's OUI, and
+    // is only CDP in that company. Dispatching on the pair is what keeps this
+    // from claiming a SNAP frame that happens to carry the same number under
+    // somebody else's organisation code.
+    l2Result = dissectCdp(rawBytes, l3Offset, rawBytes.length);
   } else if (link.llcDsap === 0x42 && link.llcOffset !== undefined) {
     // A BPDU's offsets are defined relative to its LLC header, not to the
     // frame, so the STP dissector is given where that header started rather
@@ -2501,7 +2519,7 @@ function decodeTransportLayer(
         'tcp.ack_raw': ackNum,
         'tcp.checksum': storedChecksum,
         'tcp.checksum.status': checksum.status,
-        ...(tcpOptions?.mss !== undefined ? { 'tcp.options.mss': tcpOptions.mss } : {}),
+        ...(tcpOptions?.mss !== undefined ? { 'tcp.options.mss_val': tcpOptions.mss } : {}),
         ...(tcpOptions?.windowScale !== undefined ? { 'tcp.options.wscale.shift': tcpOptions.windowScale } : {}),
         ...(tcpOptions?.sackPermitted ? { 'tcp.options.sack_perm': 1 } : {}),
         ...(tcpOptions?.tsval !== undefined ? { 'tcp.options.timestamp.tsval': tcpOptions.tsval } : {}),
@@ -2616,6 +2634,9 @@ function decodeTransportLayer(
     const isSsdp = srcPort === 1900 || dstPort === 1900;
     const isDhcp = (srcPort === 67 || srcPort === 68) && (dstPort === 67 || dstPort === 68);
     const isDhcpv6 = (srcPort === 546 || srcPort === 547) && (dstPort === 546 || dstPort === 547);
+    // Which leaf protocol claims these ports, if any. Resolved once here rather
+    // than as a branch per protocol - the table is in `dissectors/udpDispatch.ts`.
+    const subdissector = findUdpSubdissector(srcPort, dstPort, dstIp);
 
     // The UDP header's Length field counts the 8-byte header itself, but
     // The reference analyzer's "Len=" - like TCP's - reports payload only.
@@ -2644,47 +2665,18 @@ function decodeTransportLayer(
         extraLayers.push(dhcp.layer);
         Object.assign(dhcpFields, dhcp.fields);
       }
-    } else if (srcPort === 5060 || dstPort === 5060 || srcPort === 5061 || dstPort === 5061) {
+    } else if (subdissector !== null) {
+      // Every leaf UDP protocol - one label, one Info line, one tree layer and
+      // a bag of fields - goes through `dissectors/udpDispatch.ts` rather than
+      // through a branch of its own here. See that module for why.
       const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
-      const sip = dissectSip(rawBytes, udpPayloadStart, payloadEnd);
-      if (sip) {
-        protocolLabel = sip.protocolLabel;
-        info = sip.info;
-        extraLayers.push(sip.layer);
-        protocolTokens.push('sip');
-        Object.assign(appFields, sip.fields);
-      }
-    } else if (srcPort === 161 || dstPort === 161 || srcPort === 162 || dstPort === 162) {
-      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
-      const snmp = dissectSnmp(rawBytes, udpPayloadStart, payloadEnd);
-      if (snmp) {
-        protocolLabel = snmp.protocolLabel;
-        info = snmp.info;
-        extraLayers.push(snmp.layer);
-        protocolTokens.push('snmp');
-        Object.assign(appFields, snmp.fields);
-      }
-    } else if (srcPort === 514 || dstPort === 514) {
-      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
-      const syslog = dissectSyslog(rawBytes, udpPayloadStart, payloadEnd);
-      if (syslog) {
-        protocolLabel = syslog.protocolLabel;
-        info = syslog.info;
-        extraLayers.push(syslog.layer);
-        protocolTokens.push('syslog');
-        Object.assign(appFields, syslog.fields);
-      }
-    } else if (srcPort === 1812 || dstPort === 1812 || srcPort === 1813 || dstPort === 1813
-      || srcPort === 1645 || dstPort === 1645 || srcPort === 1646 || dstPort === 1646) {
-      // 1645/1646 are the pre-standard ports a lot of kit still ships with.
-      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
-      const radius = dissectRadius(rawBytes, udpPayloadStart, payloadEnd);
-      if (radius) {
-        protocolLabel = radius.protocolLabel;
-        info = radius.info;
-        extraLayers.push(radius.layer);
-        protocolTokens.push('radius');
-        Object.assign(appFields, radius.fields);
+      const read = subdissector.dissect(rawBytes, udpPayloadStart, payloadEnd);
+      if (read) {
+        protocolLabel = read.protocolLabel;
+        info = read.info;
+        extraLayers.push(read.layer);
+        protocolTokens.push(subdissector.token);
+        Object.assign(appFields, read.fields);
       }
     } else if (nbnsPort) {
       const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
@@ -2913,6 +2905,24 @@ function decodeTransportLayer(
         layer: igmp.layer,
       };
     }
+  } else if (ipProtocolNum === 112 || ipProtocolNum === 89) {
+    // The other two protocols that sit directly on IP with no ports: VRRP and
+    // OSPF. Same shape as IGMP above, and the same reason for the `proto` key -
+    // the coarse union has no member for either, and `protocolLabel` is what
+    // the Protocol column and the parity harness actually read.
+    const end = l4SegmentLen ?? rawBytes.length - transportOffset;
+    const read = ipProtocolNum === 112
+      ? dissectVrrp(rawBytes, transportOffset, transportOffset + end)
+      : dissectOspf(rawBytes, transportOffset, transportOffset + end);
+    if (read) {
+      return {
+        proto: 'ICMP',
+        protocolLabel: read.protocolLabel,
+        info: read.info,
+        fields: read.fields,
+        layer: read.layer,
+      };
+    }
   } else if ((ipProtocolNum === 1 || ipProtocolNum === 58) && rawBytes.length >= transportOffset + 4) {
     // ICMP (v4, protocol 1) / ICMPv6 (protocol 58) Decode - ICMPv6 uses
     // different type numbers than ICMPv4 for the same messages (e.g. echo
@@ -3089,7 +3099,7 @@ function parseTcpOptions(
     if (kind === 2 && length === 4) {
       mss = (rawBytes[offset + 2] << 8) | rawBytes[offset + 3];
       infoParts.push(`MSS=${mss}`);
-      fields.push({ name: 'TCP Option - Maximum Segment Size', value: `MSS: ${mss}`, rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.mss' });
+      fields.push({ name: 'TCP Option - Maximum Segment Size', value: `MSS: ${mss}`, rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.mss_val' });
     } else if (kind === 3 && length === 3) {
       windowScale = rawBytes[offset + 2];
       infoParts.push(`WS=${2 ** windowScale}`);

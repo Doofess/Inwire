@@ -60,6 +60,11 @@ export const LAYERS = [
   'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'tcp', 'udp',
   'dns', 'nbns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'http', 'http2', 'http3',
+  // The leaf protocols: each reads one datagram and keeps no state, which is
+  // what made them cheap enough to add together. `nbdgm` and `hsrp` are spelt
+  // as the reference analyzer spells them rather than as the Protocol column
+  // shows them (NBDS, HSRP), because the filter name is what a user types.
+  'tftp', 'nbdgm', 'bfd', 'coap', 'ptp', 'hsrp', 'vrrp', 'ospf', 'rip', 'ripng', 'cdp',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -144,7 +149,7 @@ export const FIELDS: readonly FieldDef[] = [
   uint('tcp.ack_raw', 'Acknowledgment Number (raw)', 'tcp'),
   uint('tcp.checksum', 'Checksum', 'tcp'),
   str('tcp.checksum.status', 'Checksum Status', 'tcp'),
-  uint('tcp.options.mss', 'MSS Value', 'tcp'),
+  uint('tcp.options.mss_val', 'MSS Value', 'tcp'),
   uint('tcp.options.wscale.shift', 'Window Scale Shift', 'tcp'),
   bool('tcp.options.sack_perm', 'SACK Permitted', 'tcp'),
   uint('tcp.options.timestamp.tsval', 'Timestamp value', 'tcp'),
@@ -205,8 +210,8 @@ export const FIELDS: readonly FieldDef[] = [
   str('lldp.port.desc', 'Port Description', 'lldp'),
   str('lldp.tlv.system.name', 'System Name', 'lldp', { label: 'System name', align: 'left' }),
   str('lldp.tlv.system.desc', 'System Description', 'lldp'),
-  str('lldp.tlv.system.cap', 'Capabilities', 'lldp'),
-  str('lldp.mgn.addr', 'Management Address', 'lldp'),
+  str('lldp.tlv.system_cap', 'Capabilities', 'lldp'),
+  str('lldp.mgn.addr.ip4', 'Management Address', 'lldp'),
 
   // --- TLS -------------------------------------------------------------------
   uint('tls.record.content_type', 'Content Type', 'tls'),
@@ -259,7 +264,7 @@ export const FIELDS: readonly FieldDef[] = [
   // unlike TLS over TCP, where the record layer is in the clear even when its
   // contents are not, a QUIC packet is protected header and all.
   uint('http3.frame_type', 'Frame Type', 'http3'),
-  uint('http3.stream_id', 'Stream ID', 'http3'),
+  uint('http3.frame_streamid', 'Stream ID', 'http3'),
   str('http3.headers.method', 'Method', 'http3'),
   str('http3.headers.path', 'Path', 'http3'),
   str('http3.headers.authority', 'Authority', 'http3'),
@@ -283,24 +288,155 @@ export const FIELDS: readonly FieldDef[] = [
   bool('rtcp.padding', 'Padding', 'rtcp'),
   uint('rtcp.pt', 'Packet type', 'rtcp'),
   uint('rtcp.length', 'Length', 'rtcp'),
-  uint('rtcp.ssrc.sender', 'Sender SSRC', 'rtcp', { label: 'RTCP SSRC', align: 'right' }),
-  uint('rtcp.timestamp', 'RTP timestamp', 'rtcp'),
+  uint('rtcp.senderssrc', 'Sender SSRC', 'rtcp', { label: 'RTCP SSRC', align: 'right' }),
+  uint('rtcp.timestamp.rtp', 'RTP timestamp', 'rtcp'),
   uint('rtcp.sender.packetcount', "Sender's packet count", 'rtcp'),
   uint('rtcp.sender.octetcount', "Sender's octet count", 'rtcp'),
+
+  // --- TFTP ------------------------------------------------------------------
+  uint('tftp.opcode', 'Opcode', 'tftp'),
+  str('tftp.source_file', 'Source File', 'tftp', { label: 'TFTP File', align: 'left' }),
+  str('tftp.type', 'Type', 'tftp'),
+  uint('tftp.block', 'Block', 'tftp'),
+  uint('tftp.data_length', 'Data length', 'tftp'),
+  uint('tftp.last_block', 'Last block', 'tftp'),
+  uint('tftp.error.code', 'Error code', 'tftp'),
+  str('tftp.error.message', 'Error message', 'tftp'),
+
+  // --- NetBIOS Datagram Service ----------------------------------------------
+  uint('nbdgm.type', 'Message Type', 'nbdgm'),
+  uint('nbdgm.dgram_id', 'Datagram ID', 'nbdgm'),
+  str('nbdgm.src.ip', 'Source IP', 'nbdgm'),
+  uint('nbdgm.src.port', 'Source Port', 'nbdgm'),
+  uint('nbdgm.dgram_len', 'Datagram length', 'nbdgm'),
+  str('nbdgm.source_name', 'Source name', 'nbdgm', { label: 'NBDS Source', align: 'left' }),
+  str('nbdgm.destination_name', 'Destination name', 'nbdgm'),
+  uint('nbdgm.error_code', 'Error code', 'nbdgm'),
+
+  // --- BFD -------------------------------------------------------------------
+  uint('bfd.version', 'Version', 'bfd'),
+  uint('bfd.diag', 'Diagnostic', 'bfd'),
+  uint('bfd.sta', 'Session State', 'bfd', { label: 'BFD State', align: 'left' }),
+  uint('bfd.flags', 'Message Flags', 'bfd'),
+  uint('bfd.detect_time_multiplier', 'Detect Time Multiplier', 'bfd'),
+  uint('bfd.message_length', 'Message Length', 'bfd'),
+  uint('bfd.my_discriminator', 'My Discriminator', 'bfd'),
+  uint('bfd.your_discriminator', 'Your Discriminator', 'bfd'),
+  uint('bfd.desired_min_tx_interval', 'Desired Min TX Interval', 'bfd'),
+  uint('bfd.required_min_rx_interval', 'Required Min RX Interval', 'bfd'),
+  uint('bfd.required_min_echo_interval', 'Required Min Echo Interval', 'bfd'),
+
+  // --- CoAP ------------------------------------------------------------------
+  uint('coap.version', 'Version', 'coap'),
+  uint('coap.type', 'Type', 'coap'),
+  uint('coap.token_len', 'Token Length', 'coap'),
+  str('coap.token', 'Token', 'coap'),
+  uint('coap.code', 'Code', 'coap'),
+  uint('coap.mid', 'Message ID', 'coap'),
+  str('coap.opt.uri_path', 'Uri-Path', 'coap', { label: 'CoAP Path', align: 'left' }),
+  str('coap.opt.uri_query', 'Uri-Query', 'coap'),
+  uint('coap.payload_length', 'Payload length', 'coap'),
+
+  // --- PTP -------------------------------------------------------------------
+  uint('ptp.v2.messagetype', 'messageType', 'ptp'),
+  uint('ptp.v2.versionptp', 'versionPTP', 'ptp'),
+  uint('ptp.v2.messagelength', 'messageLength', 'ptp'),
+  uint('ptp.v2.domainnumber', 'domainNumber', 'ptp'),
+  uint('ptp.v2.flags', 'flags', 'ptp'),
+  uint('ptp.v2.sequenceid', 'sequenceId', 'ptp'),
+  uint('ptp.v2.sourceportid', 'sourcePortID', 'ptp'),
+  str('ptp.v2.clockidentity', 'clockIdentity', 'ptp'),
+  uint('ptp.v2.logmessageperiod', 'logMessageInterval', 'ptp'),
+  uint('ptp.v2.an.grandmasterclockclass', 'grandmasterClockClass', 'ptp'),
+  str('ptp.v2.an.grandmasterclockidentity', 'grandmasterClockIdentity', 'ptp'),
+  uint('ptp.v2.an.localstepsremoved', 'stepsRemoved', 'ptp'),
+  uint('ptp.v2.mm.managementId', 'managementId', 'ptp'),
+  uint('ptp.v2.mm.action', 'actionField', 'ptp'),
+
+  // --- HSRP ------------------------------------------------------------------
+  uint('hsrp.version', 'Version', 'hsrp'),
+  uint('hsrp.opcode', 'Op Code', 'hsrp'),
+  uint('hsrp.state', 'State', 'hsrp', { label: 'HSRP State', align: 'left' }),
+  uint('hsrp.hellotime', 'Hellotime', 'hsrp'),
+  uint('hsrp.holdtime', 'Holdtime', 'hsrp'),
+  uint('hsrp.priority', 'Priority', 'hsrp'),
+  uint('hsrp.group', 'Group', 'hsrp'),
+  str('hsrp.auth_data', 'Authentication Data', 'hsrp'),
+  str('hsrp.virt_ip', 'Virtual IP Address', 'hsrp'),
+
+  // --- VRRP ------------------------------------------------------------------
+  uint('vrrp.version', 'Version', 'vrrp'),
+  uint('vrrp.type', 'Type', 'vrrp'),
+  uint('vrrp.virt_rtr_id', 'Virtual Rtr ID', 'vrrp'),
+  uint('vrrp.prio', 'Priority', 'vrrp', { label: 'VRRP Priority', align: 'right' }),
+  uint('vrrp.addr_count', 'Addr Count', 'vrrp'),
+  uint('vrrp.auth_type', 'Auth Type', 'vrrp'),
+  uint('vrrp.adver_int', 'Adver Int', 'vrrp'),
+  uint('vrrp.short_adver_int', 'Max Adver Int', 'vrrp'),
+  uint('vrrp.checksum', 'Checksum', 'vrrp'),
+  str('vrrp.ip_addr', 'IP Address', 'vrrp'),
+
+  // --- OSPF ------------------------------------------------------------------
+  uint('ospf.version', 'Version', 'ospf'),
+  uint('ospf.msg', 'Message Type', 'ospf'),
+  uint('ospf.packet_length', 'Packet Length', 'ospf'),
+  str('ospf.srcrouter', 'Source OSPF Router', 'ospf', { label: 'OSPF Router', align: 'left' }),
+  str('ospf.area_id', 'Area ID', 'ospf'),
+  uint('ospf.checksum', 'Checksum', 'ospf'),
+  uint('ospf.auth.type', 'Auth Type', 'ospf'),
+  str('ospf.hello.network_mask', 'Network Mask', 'ospf'),
+  uint('ospf.hello.hello_interval', 'Hello Interval', 'ospf'),
+  uint('ospf.hello.router_priority', 'Router Priority', 'ospf'),
+  uint('ospf.hello.router_dead_interval', 'Router Dead Interval', 'ospf'),
+  str('ospf.hello.designated_router', 'Designated Router', 'ospf'),
+  str('ospf.hello.backup_designated_router', 'Backup Designated Router', 'ospf'),
+  str('ospf.hello.active_neighbor', 'Active Neighbor', 'ospf'),
+  uint('ospf.hello.neighbor_count', 'Neighbor count', 'ospf'),
+  uint('ospf.db.interface_mtu', 'Interface MTU', 'ospf'),
+  uint('ospf.db.dd_sequence', 'DD Sequence', 'ospf'),
+  uint('ospf.ls.number_of_lsas', 'Number of LSAs', 'ospf'),
+
+  // --- RIP and RIPng ---------------------------------------------------------
+  // One dissector, two layer tokens: the versions share a preamble and nothing
+  // else, so a filter naming `ripng` must not match a RIPv2 frame. The fields
+  // are registered under `rip`, which is the abbreviation the reference
+  // analyzer gives both.
+  uint('rip.command', 'Command', 'rip'),
+  uint('rip.version', 'Version', 'rip'),
+  uint('rip.family', 'Address Family', 'rip'),
+  str('rip.ip', 'IP Address', 'rip'),
+  str('rip.netmask', 'Netmask', 'rip'),
+  str('rip.next_hop', 'Next Hop', 'rip'),
+  uint('rip.route_tag', 'Route Tag', 'rip'),
+  uint('rip.metric', 'Metric', 'rip', { label: 'RIP Metric', align: 'right' }),
+  uint('rip.route_count', 'Route count', 'rip'),
+
+  // --- CDP -------------------------------------------------------------------
+  uint('cdp.version', 'Version', 'cdp'),
+  uint('cdp.ttl', 'TTL', 'cdp'),
+  uint('cdp.checksum', 'Checksum', 'cdp'),
+  str('cdp.deviceid', 'Device ID', 'cdp', { label: 'CDP Device', align: 'left' }),
+  str('cdp.portid', 'Port ID', 'cdp', { label: 'CDP Port', align: 'left' }),
+  str('cdp.software_version', 'Software Version', 'cdp'),
+  str('cdp.platform', 'Platform', 'cdp'),
+  uint('cdp.capabilities', 'Capabilities', 'cdp'),
+  uint('cdp.native_vlan', 'Native VLAN', 'cdp'),
+  str('cdp.duplex', 'Duplex', 'cdp'),
+  str('cdp.nrgyz.ip_address', 'Address', 'cdp'),
 
   // --- SIP -------------------------------------------------------------------
   //
   // `sip.call_id` is a column because it is the one value that ties every frame
   // of a call together - the thing you filter on to see one conversation.
-  str('sip.method', 'Method', 'sip'),
-  str('sip.r_uri', 'Request-URI', 'sip', { label: 'SIP URI', align: 'left' }),
-  uint('sip.status_code', 'Status-Code', 'sip'),
-  str('sip.reason_phrase', 'Reason-Phrase', 'sip'),
-  str('sip.from', 'From', 'sip'),
-  str('sip.to', 'To', 'sip'),
-  str('sip.call_id', 'Call-ID', 'sip', { label: 'SIP Call-ID', align: 'left' }),
-  str('sip.cseq', 'CSeq', 'sip'),
-  str('sip.user_agent', 'User-Agent', 'sip'),
+  str('sip.Method', 'Method', 'sip'),
+  str('sip.r-uri', 'Request-URI', 'sip', { label: 'SIP URI', align: 'left' }),
+  uint('sip.Status-Code', 'Status-Code', 'sip'),
+  str('sip.Reason-Phrase', 'Reason-Phrase', 'sip'),
+  str('sip.From', 'From', 'sip'),
+  str('sip.To', 'To', 'sip'),
+  str('sip.Call-ID', 'Call-ID', 'sip', { label: 'SIP Call-ID', align: 'left' }),
+  str('sip.CSeq', 'CSeq', 'sip'),
+  str('sip.User-Agent', 'User-Agent', 'sip'),
 
   // --- SNMP ------------------------------------------------------------------
   //
@@ -320,7 +456,7 @@ export const FIELDS: readonly FieldDef[] = [
   uint('radius.id', 'Packet identifier', 'radius'),
   uint('radius.length', 'Length', 'radius'),
   { abbrev: 'radius.authenticator', label: 'Authenticator', type: 'bytes', layer: 'radius' },
-  str('radius.username', 'User-Name', 'radius', { label: 'RADIUS user', align: 'left' }),
+  str('radius.User_Name', 'User-Name', 'radius', { label: 'RADIUS user', align: 'left' }),
   uint('radius.avp.type', 'AVP Type', 'radius'),
   uint('radius.avp.length', 'AVP Length', 'radius'),
 
@@ -371,8 +507,8 @@ export const FIELDS: readonly FieldDef[] = [
   str('dns.txt', 'TXT', 'dns'),
   uint('dns.srv.port', 'Port', 'dns'),
   str('dns.srv.target', 'Target', 'dns'),
-  uint('dns.svcb.priority', 'SvcPriority', 'dns'),
-  str('dns.svcb.alpn', 'SvcParam alpn', 'dns'),
+  uint('dns.svcb.svcpriority', 'SvcPriority', 'dns'),
+  str('dns.svcb.svcparam.alpn', 'SvcParam alpn', 'dns'),
   uint('dns.rr.udp_payload_size', 'UDP payload size', 'dns'),
   bool('dns.resp.z.do', 'DO bit', 'dns'),
   { abbrev: 'dns.response_to', label: 'Request In', type: 'uint', layer: 'dns', generated: true },
@@ -385,7 +521,7 @@ export const FIELDS: readonly FieldDef[] = [
   str('dhcp.option.hostname', 'Host Name', 'dhcp', { label: 'Hostname', align: 'left' }),
   str('dhcp.option.vendor_class_id', 'Vendor class identifier', 'dhcp'),
   str('dhcp.option.domain_name', 'Domain Name', 'dhcp'),
-  str('dhcp.option.request_list', 'Parameter Request List', 'dhcp'),
+  str('dhcp.option.request_list_item', 'Parameter Request List', 'dhcp'),
   { abbrev: 'dhcp.option.requested_ip_address', label: 'Requested IP Address', type: 'ipv4', layer: 'dhcp' },
   { abbrev: 'dhcp.option.dhcp_server_id', label: 'DHCP Server Identifier', type: 'ipv4', layer: 'dhcp' },
   str('dhcp.client_id', 'Client identifier', 'dhcp'),
@@ -398,8 +534,8 @@ export const FIELDS: readonly FieldDef[] = [
   str('dhcpv6.client_domain', 'Client Domain', 'dhcpv6'),
 
   // --- IPv6 extension headers ------------------------------------------------
-  uint('ipv6.fragment.offset', 'Fragment Offset', 'ipv6'),
-  bool('ipv6.fragment.more', 'More Fragments', 'ipv6'),
+  uint('ipv6.fraghdr.offset', 'Fragment Offset', 'ipv6'),
+  bool('ipv6.fraghdr.more', 'More Fragments', 'ipv6'),
   str('ipv6.opt.router_alert', 'Router Alert', 'ipv6'),
 
   // --- Inwire's own ----------------------------------------------------------
@@ -429,8 +565,8 @@ export const FIELDS: readonly FieldDef[] = [
   str('inwire.process.ja4_match', 'Matches process', 'frame', { label: 'JA4 match', align: 'left' }),
 
   // --- IEEE 1905.1 -----------------------------------------------------------
-  uint('ieee1905.message.type', 'Message type', 'ieee1905'),
-  uint('ieee1905.message.id', 'Message id', 'ieee1905'),
+  uint('ieee1905.message_type', 'Message type', 'ieee1905'),
+  uint('ieee1905.message_id', 'Message id', 'ieee1905'),
 ];
 
 export const FIELD_BY_ABBREV: ReadonlyMap<string, FieldDef> = new Map(FIELDS.map((f) => [f.abbrev, f]));
