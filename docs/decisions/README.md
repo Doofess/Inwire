@@ -46,7 +46,8 @@ Revised order: 1 -> 1b -> 2a -> 3 -> 4 -> 5 -> (2b alongside) -> 6 -> 7 -> 8 -> 
 - At least one new assertion script under `scripts/`, discovered by `npm run check`.
 - `CLAUDE.md` describes the new behaviour; `docs/specs/...v3.md` phase marked done.
 - No new dissector on the old eager-tree shape (0001); no field published without an
-  `abbrev` (0002, enforced by script).
+  `abbrev` (0002, enforced by script), and no `abbrev` the reference analyzer does not
+  itself define (0020, enforced by `scripts/dissect/wireshark-abbrevs.ts`).
 - No new `async` in the dissection path (0003).
 - No fixture bytes, names or addresses in the diff (0004).
 - Agent protocol change => version bumped in all three places (`test_protocol.py`).
