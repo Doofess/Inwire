@@ -228,8 +228,11 @@ const UNDISSECTED = [
   // `nbns` was here until it became a real layer token - see dissectors/nbns.ts.
   'smb', 'smb2', 'nbss', 'netbios', 'dcerpc', 'browser',
   // Transport and application layers not yet decoded.
-  // sip, radius and snmp left this list when they became real layer tokens.
-  'sctp', 'rtp', 'rtcp', 'ldap', 'kerberos',
+  // sip, radius, snmp and rtcp left this list when they became real layer
+  // tokens. `rtcp` outstayed the others by a batch, which meant a misspelt
+  // `rtcp.*` name was reported as "a protocol this build cannot decode"
+  // rather than as the typo it was - the check below is what caught it.
+  'sctp', 'rtp', 'ldap', 'kerberos',
   // Never available from a capture, whatever is implemented.
   'eth.fcs',
 ];
@@ -263,6 +266,26 @@ export function layerPresence(name: string): ((p: Packet) => boolean) | null {
 }
 
 /**
+ * Every registered abbrev, indexed by its lower-cased form.
+ *
+ * The parser lower-cases a field name, which was harmless while every abbrev
+ * was lower case and is not any more: the reference analyzer spells ten of
+ * them with capitals (`sip.Method`, `sip.Call-ID`, `radius.User_Name`,
+ * `ptp.v2.mm.managementId`), and holding the registry to Wireshark's spelling
+ * made those names unresolvable - `sip.Method` looked up `sip.method`, found
+ * nothing, and was reported as a typo.
+ *
+ * Matching stays case-insensitive, which is deliberately **more forgiving than
+ * Wireshark**, whose own filter names are case-sensitive. Someone typing
+ * `sip.call-id` from memory should not be told it does not exist. What the
+ * index adds is the canonical spelling to read the bag under, since that is
+ * the key the dissector actually wrote.
+ */
+const BY_LOWERCASE_ABBREV: ReadonlyMap<string, FieldDef> = new Map(
+  FIELDS.map((f) => [f.abbrev.toLowerCase(), f]),
+);
+
+/**
  * Resolves a filter name to a reader. Returns a resolution with
  * `known: false` for a name nothing in this build produces, rather than
  * throwing: a colour rule written for a protocol Inwire does not dissect
@@ -275,9 +298,17 @@ export function resolveField(name: string): FieldResolution {
     return { name, type: alias.type, known: true, ci, read: alias.read };
   }
 
-  const def = FIELD_BY_ABBREV.get(name);
+  // Exact first, then case-insensitively. `read` uses the REGISTERED spelling
+  // rather than what was typed - the bag is keyed by what the dissector wrote.
+  const def = FIELD_BY_ABBREV.get(name) ?? BY_LOWERCASE_ABBREV.get(name.toLowerCase());
   if (def) {
-    return { name, type: def.type, known: true, ci: CASE_INSENSITIVE_TYPES.has(def.type), read: fromBag(name) };
+    return {
+      name: def.abbrev,
+      type: def.type,
+      known: true,
+      ci: CASE_INSENSITIVE_TYPES.has(def.type),
+      read: fromBag(def.abbrev),
+    };
   }
 
   return {
