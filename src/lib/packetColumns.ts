@@ -10,6 +10,7 @@
 /** Columns that can be hidden. `info` is not one - see below. */
 export type HideableColumn =
   | 'id'
+  | 'direction'
   | 'relativeTime'
   | 'source'
   | 'destination'
@@ -28,6 +29,10 @@ export type SortField = HideableColumn | 'info';
 
 export const HIDEABLE_COLUMNS: readonly HideableColumn[] = [
   'id',
+  // Between the number and the time, which is where it reads best: an arrow
+  // is about the frame itself rather than about its contents, so it belongs
+  // with the frame's identity rather than out among the addresses.
+  'direction',
   'relativeTime',
   'source',
   'destination',
@@ -37,6 +42,7 @@ export const HIDEABLE_COLUMNS: readonly HideableColumn[] = [
 
 export const COLUMN_LABELS: Record<HideableColumn, string> = {
   id: 'No.',
+  direction: 'Dir',
   relativeTime: 'Time',
   source: 'Source',
   destination: 'Destination',
@@ -184,6 +190,10 @@ export type ColumnAlignMap = Record<AlignableColumn, ColumnAlign>;
  */
 export const DEFAULT_COLUMN_ALIGN: ColumnAlignMap = {
   id: 'right',
+  // Centred, and the only column that is: it holds a single glyph rather than
+  // a value, so there is neither a digit column to line up on the right nor a
+  // first letter to line up on the left.
+  direction: 'center',
   relativeTime: 'right',
   length: 'right',
   source: 'left',

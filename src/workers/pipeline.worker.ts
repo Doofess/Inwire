@@ -33,6 +33,7 @@ import { DnsTracker } from '../services/dnsTracker';
 import { L3Tracker } from '../services/l3Tracker';
 import { NO_HOST, type HostIdentity } from '../services/direction';
 import { NetworkFactsCollector } from '../services/networkFacts';
+import { DuplicateFinder, duplicateSuffix } from '../services/duplicateFrames';
 import { dissectReplay } from '../services/pipeline/replay';
 import type {
   FromPipeline, PipelineInterface, ToPipeline,
@@ -95,6 +96,15 @@ let l3Tracker = new L3Tracker();
  */
 let host: HostIdentity = NO_HOST;
 const networkFacts = new NetworkFactsCollector();
+/**
+ * Frames captured twice, on two adapters at once.
+ *
+ * Only consulted when more than one interface is being captured. In the common
+ * single-interface case there is by construction nothing to find, and hashing
+ * every frame to discover that would be work on the hot path in exchange for
+ * a guaranteed empty answer.
+ */
+const duplicates = new DuplicateFinder();
 
 const ordering = new OrderingWindow<LiveFrame>(ORDERING_HOLD_MS);
 
@@ -137,6 +147,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   // re-deriving the adapter's own MAC would mean every frame after a clear
   // read as unknown until the agent next spoke.
   networkFacts.reset();
+  duplicates.reset();
   treeCache.clear();
   pendingPackets = [];
   pendingIcmpReplies = [];
@@ -232,6 +243,15 @@ function flush(): void {
   // releases whatever is still held rather than stranding it.
   const ready = capturing ? ordering.drain(performance.now()) : ordering.flush();
   for (const frame of ready) ingest(frame);
+
+  // Frames the same capture saw twice, on two adapters. Done over the batch
+  // rather than per frame because a duplicate is a relationship BETWEEN
+  // frames, and the two copies routinely land in one flush.
+  if (interfaces.length > 1 && pendingPackets.length > 0) {
+    for (const mark of duplicates.scan(pendingPackets)) {
+      pendingInfoPatches.push({ frameId: mark.frameId, suffix: duplicateSuffix(mark) });
+    }
+  }
 
   // Before the early return below, and deliberately: a capture can learn
   // something about the network in a flush that produced no frames the app

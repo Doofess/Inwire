@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
+import {
+  Direction, DirectionSignal, DIRECTION_GLYPH, DIRECTION_LABEL, SIGNAL_LABEL,
+  directionOf, signalOf,
+} from '../../services/direction';
 import { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
 import { PacketListMinimap } from './PacketListMinimap';
@@ -111,18 +115,29 @@ interface PacketListProps {
   themeKey?: string;
 }
 
-type SortField = 'id' | 'relativeTime' | 'source' | 'destination' | 'protocol' | 'length' | 'info';
+/**
+ * Aliased rather than re-declared.
+ *
+ * This used to be a second hand-written copy of the union in
+ * `lib/packetColumns.ts`, and the two were free to drift - adding a column
+ * there compiled fine and then failed here, with the local copy silently
+ * deciding what the list could sort by. One definition, one place to add to.
+ */
+type SortField = ColumnSortField;
 type SortOrder = 'asc' | 'desc';
 
 // 'info' is deliberately excluded: it's the last column and always absorbs
 // whatever width the fixed-width columns don't use, the same way VS Code's
 // rightmost panel does - it never needs its own draggable handle.
-type ColumnKey = 'id' | 'relativeTime' | 'source' | 'destination' | 'protocol' | 'length';
+type ColumnKey = 'id' | 'direction' | 'relativeTime' | 'source' | 'destination' | 'protocol' | 'length';
 
 const COLUMN_WIDTHS_STORAGE_KEY = 'inwire.packetListColumnWidths';
 const SORT_STORAGE_KEY = 'inwire.packetListSort';
 const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
   id: 64,
+  // One glyph and a header of three letters. Narrow on purpose: this column
+  // earns its place by being scannable down the page, not by being read.
+  direction: 40,
   relativeTime: 116,
   source: 280,
   destination: 280,
@@ -140,6 +155,26 @@ const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
  * are what these columns are usually added for.
  */
 const CUSTOM_COLUMN_WIDTH = 200;
+
+/**
+ * The tooltip for one frame's direction.
+ *
+ * The word, and what decided it. An arrow a reader did not expect is owed a
+ * reason, and "the capture adapter's MAC said so" and "the frame was too big
+ * to have arrived over Ethernet" are very different amounts of confidence to
+ * have in the same glyph - so both are said rather than only the first.
+ */
+function directionTitle(slot: number | undefined): string {
+  const direction = directionOf(slot);
+  if (direction === Direction.Unknown) {
+    return 'Unknown - nothing identified the capturing host';
+  }
+  const label = DIRECTION_LABEL[direction];
+  const because = SIGNAL_LABEL[signalOf(slot)];
+  const inferred = signalOf(slot) === DirectionSignal.InferredHost
+    ? ' (inferred, not read from an adapter)' : '';
+  return `${label} - from ${because}${inferred}`;
+}
 /**
  * The three densities, as designed pairs.
  *
@@ -192,7 +227,7 @@ function normalizeColumnWidths(raw: unknown): Record<ColumnKey, number> | null {
  * there is no nearest valid sort column, and sorting by a field that does not
  * exist would render an empty list with no clue why.
  */
-const SORT_FIELDS: SortField[] = ['id', 'relativeTime', 'source', 'destination', 'protocol', 'length', 'info'];
+const SORT_FIELDS: SortField[] = ['id', 'direction', 'relativeTime', 'source', 'destination', 'protocol', 'length', 'info'];
 
 function normalizeSort(raw: unknown): { field: SortField; order: SortOrder } | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -436,6 +471,16 @@ export const PacketList: React.FC<PacketListProps> = ({
     if (effectiveSortField === 'id' && sortOrder === 'asc') return processedPackets;
 
     return [...processedPackets].sort((a, b) => {
+      // Direction is a PACKED number - the direction in its low bits, the
+      // deciding signal above them - so comparing the field itself would
+      // interleave the directions by which signal decided them. Sorting has to
+      // see the direction alone. Unknown sorts as 0, which gathers the frames
+      // nobody could answer for at one end rather than scattering them.
+      if (effectiveSortField === 'direction') {
+        const dA = directionOf(a.direction);
+        const dB = directionOf(b.direction);
+        return sortOrder === 'asc' ? dA - dB : dB - dA;
+      }
       let valA: any = a[effectiveSortField as keyof Packet];
       let valB: any = b[effectiveSortField as keyof Packet];
       if (typeof valA === 'string') {
@@ -889,6 +934,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               after it onto the wrong column. */}
           <colgroup>
             {columns.id && <col style={{ width: columnWidths.id }} />}
+            {columns.direction && <col style={{ width: columnWidths.direction }} />}
             {columns.relativeTime && <col style={{ width: columnWidths.relativeTime }} />}
             {columns.source && <col style={{ width: columnWidths.source }} />}
             {columns.destination && <col style={{ width: columnWidths.destination }} />}
@@ -931,6 +977,22 @@ export const PacketList: React.FC<PacketListProps> = ({
                     {renderSortIcon('id')}
                 </button>
                 {renderColumnResizeHandle('id')}
+              </th>
+              )}
+
+              {columns.direction && (
+              <th
+                data-column="direction"
+                aria-sort={sortAttr('direction')}
+                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+              >
+                <button type="button" onClick={() => handleSort('direction')}
+                  title="Which way the frame went, relative to the capturing host"
+                  className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
+                    <span>Dir</span>
+                    {renderSortIcon('direction')}
+                </button>
+                {renderColumnResizeHandle('direction')}
               </th>
               )}
 
@@ -1153,6 +1215,29 @@ export const PacketList: React.FC<PacketListProps> = ({
                         })()}
                         <span>{packet.id}</span>
                       </div>
+                    </td>
+                    )}
+
+                    {/* Direction.
+
+                        A glyph and no colour, deliberately: the row's fill is
+                        already the colouring rule's answer, and a second
+                        colour scheme running down the same row would compete
+                        with it for the same meaning. The tooltip carries the
+                        word and the signal that decided it, because an arrow
+                        somebody did not expect is owed a reason - and the
+                        marker on an inferred one is what keeps a guess from
+                        reading like a measurement. */}
+                    {columns.direction && (
+                    <td className={`px-2 ${density.cell} whitespace-nowrap ${cellAlign('direction')}`}
+                      title={directionTitle(packet.direction)}>
+                      <span className={directionOf(packet.direction) === Direction.Unknown
+                        ? 'opacity-40' : undefined}>
+                        {DIRECTION_GLYPH[directionOf(packet.direction)]}
+                        {signalOf(packet.direction) === DirectionSignal.InferredHost && (
+                          <span className="text-[9px] align-super opacity-60">*</span>
+                        )}
+                      </span>
                     </td>
                     )}
 

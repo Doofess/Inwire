@@ -132,6 +132,20 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
     onClose();
   };
 
+  /**
+   * When a direction was active, as one cell.
+   *
+   * A single instant reads as itself rather than as a zero-length range: a
+   * conversation with one frame each way is common, and "0.100 s - 0.100 s"
+   * is noise where "0.100 s" is a fact.
+   */
+  const span = (first: number | null, last: number | null) => {
+    if (first === null || last === null) return '—';
+    return first === last
+      ? `${first.toFixed(3)} s`
+      : `${first.toFixed(3)} – ${last.toFixed(3)} s`;
+  };
+
   const conversationColumns: StatColumn<Conversation>[] = [
     { key: 'a', label: 'Address A', render: (r) => addr(r.addressA), sortValue: (r) => r.addressA, className: 'max-w-[15rem]' },
     ...(kind === 'tcp' || kind === 'udp'
@@ -145,7 +159,19 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
     { key: 'packets', label: 'Packets', align: 'right', render: (r) => count(r.packets), sortValue: (r) => r.packets },
     { key: 'bytes', label: 'Bytes', align: 'right', render: (r) => bytes(r.bytes), sortValue: (r) => r.bytes },
     { key: 'ab', label: 'A → B', align: 'right', render: (r) => count(r.packetsAtoB), sortValue: (r) => r.packetsAtoB },
+    { key: 'abBytes', label: 'A → B bytes', align: 'right', render: (r) => bytes(r.bytesAtoB), sortValue: (r) => r.bytesAtoB },
     { key: 'ba', label: 'B → A', align: 'right', render: (r) => count(r.packetsBtoA), sortValue: (r) => r.packetsBtoA },
+    { key: 'baBytes', label: 'B → A bytes', align: 'right', render: (r) => bytes(r.bytesBtoA), sortValue: (r) => r.bytesBtoA },
+    // Per direction, because one Start and one Duration describe the pair and
+    // hide what is usually the question: a request at 0.1s answered at 4.2s,
+    // or one side that went quiet a minute before the other did, both read as
+    // a healthy conversation when there is only one span for the two of them.
+    // An em dash for a direction that never spoke - which is itself a finding,
+    // and is not the same as a duration of zero.
+    { key: 'abSpan', label: 'A → B span', align: 'right',
+      render: (r) => span(r.firstAtoB, r.lastAtoB), sortValue: (r) => r.firstAtoB ?? Infinity },
+    { key: 'baSpan', label: 'B → A span', align: 'right',
+      render: (r) => span(r.firstBtoA, r.lastBtoA), sortValue: (r) => r.firstBtoA ?? Infinity },
     { key: 'start', label: 'Start', align: 'right', render: (r) => `${r.startRel.toFixed(3)} s`, sortValue: (r) => r.startRel },
     { key: 'dur', label: 'Duration', align: 'right', render: (r) => seconds(r.duration), sortValue: (r) => r.duration },
     { key: 'rate', label: 'Bits/s', align: 'right', render: (r) => bitrate(r.bytes, r.duration), sortValue: (r) => (r.duration > 0 ? r.bytes / r.duration : 0) },

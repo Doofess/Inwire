@@ -26,6 +26,7 @@
 import type { Packet } from '../types/packet';
 import { LINKTYPE } from './dissect/types';
 import { fieldValue } from './dissect/fieldAccess';
+import { Direction, directionOf } from './direction';
 
 const BLOCK_SHB = 0x0a0d0d0a;
 const BLOCK_IDB = 0x00000001;
@@ -46,6 +47,20 @@ const BYTE_ORDER_MAGIC = 0x1a2b3c4d;
 /** Options are `code (u16) | length (u16) | value | padding`, ending in opt_endofopt. */
 const OPT_ENDOFOPT = 0;
 const OPT_COMMENT = 1;
+/**
+ * epb_flags: a 32-bit word whose low two bits are the frame's direction.
+ *
+ * 0 = not available, 1 = inbound, 2 = outbound. This is the format's own field
+ * for the thing this app now knows, so it goes in the field rather than into
+ * the comment beside it - a reader that understands pcapng gets it without
+ * understanding anything about Inwire. Wireshark shows it in the Frame tree.
+ *
+ * Transit has no encoding here. The specification's two bits describe a frame
+ * relative to the capturing interface, and a frame that was merely overheard
+ * is neither - so it is written as "not available", which is true, rather than
+ * squeezed into whichever of the two is less wrong.
+ */
+const OPT_EPB_FLAGS = 2;
 const SHB_HARDWARE = 2;
 const SHB_OS = 3;
 const SHB_USERAPPL = 4;
@@ -155,6 +170,13 @@ function stringOption(w: Writer, code: number, value: string): void {
   option(w, code, utf8(value));
 }
 
+/** A four-byte option value, little-endian like every other integer here. */
+function u32Option(w: Writer, code: number, value: number): void {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+  option(w, code, bytes);
+}
+
 /**
  * Frames a body as a block.
  *
@@ -246,6 +268,13 @@ function enhancedPacket(packet: Packet, interfaceId: number, unitsPerSecond: big
   //
   // Nothing is written when the frame was not attributed - an absent comment
   // says "not known", and an empty one would say "known to be nothing".
+  // Which way it went, in the format's own field for it. Written only when
+  // there is an answer: the flags word has a "not available" encoding, and
+  // writing that explicitly would be four bytes per frame to say nothing.
+  const direction = directionOf(packet.direction);
+  if (direction === Direction.In) u32Option(w, OPT_EPB_FLAGS, 0b01);
+  else if (direction === Direction.Out) u32Option(w, OPT_EPB_FLAGS, 0b10);
+
   const processName = fieldValue(packet, 'inwire.process.name');
   const processPid = fieldValue(packet, 'inwire.process.pid');
   if (typeof processName === 'string' && typeof processPid === 'number') {
