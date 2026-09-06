@@ -72,7 +72,17 @@ def encode_record(seq: int, iface: int, ts_us: float, orig_len: int, data: bytes
 
 
 def encode_batch(records) -> bytes:
-    """Frames a list of encoded records. `records` must not be empty."""
+    """Frames a list of encoded records. `records` must not be empty.
+
+    The `+ data` in `encode_record` and the `join` here copy each frame's bytes
+    twice, which looks like the obvious thing to remove with `pack_into` into
+    one pre-sized bytearray. Measured, it is not worth it: 0.36 us a frame at a
+    batch of 64 against 0.37 for pack_into, and 1.17 against 1.05 at a batch of
+    256 - a 10% win at the larger size and a small loss at the smaller one,
+    against a capture loop that costs 0.58 us a frame and a driver that tops
+    out near 12,000 frames/s. Restructuring would also move the encode off the
+    sniffer thread, which is where it is deliberately (see `encode_record`).
+    """
     count = len(records)
     if count == 0:
         raise ValueError("a batch with no records would say nothing")

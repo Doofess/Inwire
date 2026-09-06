@@ -1,5 +1,5 @@
 import { Packet, ProtocolLayer, ProtocolField, ExpertCategory, ExpertInfo } from '../types/packet';
-import { CATEGORY_ORDER, expertItemsFor } from './expertInfo';
+import { CATEGORY_RANK, expertItemsFor } from './expertInfo';
 import { CATEGORY_BY_FLAG } from './dissect/tcpAnalysis';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacName } from './macVendors';
@@ -533,8 +533,13 @@ export class PcapService {
       parsedPackets.push(packet);
 
       if (icmpMatchedRequestFrameId !== undefined) {
-        const requestPacket = parsedPackets.find(p => p.id === icmpMatchedRequestFrameId);
-        if (requestPacket) {
+        // Indexed, not searched - on the same invariant the block below states
+        // and has always relied on. As a `.find` this scanned the whole
+        // growing array once per ICMP reply, so importing a ping-heavy capture
+        // of N frames with k replies cost O(N*k); the guard on `id` is what
+        // makes the index safe if that invariant ever stops holding.
+        const requestPacket = parsedPackets[icmpMatchedRequestFrameId - 1];
+        if (requestPacket && requestPacket.id === icmpMatchedRequestFrameId) {
           requestPacket.info += ` (reply in ${packet.id})`;
         }
       }
@@ -638,8 +643,7 @@ function collectExpert(
   // rules sit in - so the category published as a field is the one the row is
   // actually painted by, rather than a second opinion about the same frame.
   const consider = (c: ExpertCategory) => {
-    if (strongest === undefined
-      || CATEGORY_ORDER.indexOf(c) < CATEGORY_ORDER.indexOf(strongest)) strongest = c;
+    if (strongest === undefined || CATEGORY_RANK[c] < CATEGORY_RANK[strongest]) strongest = c;
   };
   const visit = (fields: ProtocolField[]) => {
     for (const field of fields) {
