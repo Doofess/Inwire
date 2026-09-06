@@ -395,6 +395,10 @@ export const FIELDS: readonly FieldDef[] = [
   // is one here because a colour rule and a display filter both want to ask the
   // question, and neither can walk a tree.
   str('inwire.expert.category', 'Expert category', 'frame', { label: 'Expert', align: 'left' }),
+  // Which content detector claimed a payload no port dispatched. Published so
+  // a wrong label can be traced to the rule that produced it rather than
+  // guessed at - `inwire.heuristic == "Syslog"` is how you find them all.
+  str('inwire.heuristic', 'Matched by heuristic', 'frame', { label: 'Heuristic', align: 'left' }),
 
   // Which program on this machine opened the socket the frame belongs to.
   //

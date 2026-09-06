@@ -300,14 +300,8 @@ export function dissectStun(bytes: Uint8Array, start: number, end: number): UdpA
   };
 }
 
-/**
- * Whichever of these the payload turns out to be, or null.
- *
- * Consulted when no port claimed the payload, which is how a STUN exchange on
- * an arbitrary ICE port stops being reported as anonymous UDP.
- */
-export function dissectUdpByContent(bytes: Uint8Array, start: number, end: number): UdpAppResult | null {
-  if (looksLikeStun(bytes, start, end)) return dissectStun(bytes, start, end);
-  if (looksLikeNtp(bytes, start, end)) return dissectNtp(bytes, start, end);
-  return null;
-}
+// `dissectUdpByContent` used to live here as a two-line `if` chain over STUN
+// and NTP - the whole of this app's content-based dispatch. It is
+// `dissectors/heuristics.ts` now, which holds seven detectors and, more to the
+// point, an assertion that each rejects every other's payloads.
+

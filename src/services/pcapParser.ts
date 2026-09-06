@@ -7,7 +7,8 @@ import { formatMac, formatIpv6Address } from './addressFormat';
 import { dissectArp, dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
 import { dissectLinkLayer } from './dissectors/linkLayer';
 import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './dissectors/ipv4';
-import { dissectNtp, dissectStun, dissectUdpByContent } from './dissectors/udpApps';
+import { dissectNtp, dissectStun } from './dissectors/udpApps';
+import { detectUdpPayload } from './dissectors/heuristics';
 import { L3Tracker } from './l3Tracker';
 import {
   Direction, directionFromAddresses, directionFromMacs, directionFromOffload,
@@ -2819,17 +2820,26 @@ function decodeTransportLayer(
       // that it could be recognised anywhere. Without this every one of those
       // frames reads as anonymous UDP with a length.
       const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
-      const app = (srcPort === 123 || dstPort === 123)
+      const byPort = (srcPort === 123 || dstPort === 123)
         ? dissectNtp(rawBytes, udpPayloadStart, payloadEnd)
         : (srcPort === 3478 || dstPort === 3478 || srcPort === 3479 || dstPort === 3479)
           ? dissectStun(rawBytes, udpPayloadStart, payloadEnd)
-          : dissectUdpByContent(rawBytes, udpPayloadStart, payloadEnd);
-      if (app) {
+          : null;
+      // Content-based detection, and only where no port claimed the payload -
+      // see the rules at the top of dissectors/heuristics.ts.
+      const found = byPort !== null
+        ? { result: byPort, detector: null as string | null }
+        : detectUdpPayload(rawBytes, udpPayloadStart, payloadEnd);
+      if (found) {
+        const app = found.result;
         protocolLabel = app.protocolLabel;
         info = app.info;
         extraLayers.push(app.layer);
         protocolTokens.push(app.token);
         Object.assign(appFields, app.fields);
+        // Which detector claimed it, so a wrong label can be traced to the
+        // rule that made it rather than guessed at.
+        if (found.detector !== null) appFields['inwire.heuristic'] = found.detector;
       }
     }
 
