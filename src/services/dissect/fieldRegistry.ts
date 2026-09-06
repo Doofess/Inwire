@@ -58,7 +58,7 @@ export interface FieldDef {
 export const LAYERS = [
   'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905',
   'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'tcp', 'udp',
-  'dns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun', 'http', 'http2', 'http3',
+  'dns', 'nbns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -263,6 +263,29 @@ export const FIELDS: readonly FieldDef[] = [
   str('http3.headers.path', 'Path', 'http3'),
   str('http3.headers.authority', 'Authority', 'http3'),
   uint('http3.headers.status', 'Status', 'http3'),
+
+  // --- NBNS ------------------------------------------------------------------
+  //
+  // NetBIOS name service. Wireshark's own abbrevs, which are `nbns.*` and not
+  // `netbios.*` - the latter is the datagram service on port 138, a different
+  // dissector. The name field is a column because "which machine is this" is
+  // the question the protocol exists to answer.
+  uint('nbns.id', 'Transaction ID', 'nbns'),
+  uint('nbns.flags', 'Flags', 'nbns'),
+  bool('nbns.flags.response', 'Response', 'nbns'),
+  uint('nbns.flags.opcode', 'Opcode', 'nbns'),
+  uint('nbns.flags.rcode', 'Reply code', 'nbns'),
+  uint('nbns.count.queries', 'Questions', 'nbns'),
+  uint('nbns.count.answers', 'Answer RRs', 'nbns'),
+  uint('nbns.count.auth_rr', 'Authority RRs', 'nbns'),
+  uint('nbns.count.add_rr', 'Additional RRs', 'nbns'),
+  str('nbns.name', 'Name', 'nbns', { label: 'NetBIOS name', align: 'left' }),
+  uint('nbns.type', 'Type', 'nbns'),
+  uint('nbns.class', 'Class', 'nbns'),
+  uint('nbns.ttl', 'Time to live', 'nbns'),
+  uint('nbns.data_length', 'Data length', 'nbns'),
+  str('nbns.nb_flags', 'Name flags', 'nbns'),
+  { abbrev: 'nbns.addr', label: 'Addr', type: 'ipv4', layer: 'nbns' },
 
   // --- DNS -------------------------------------------------------------------
   uint('dns.id', 'Transaction ID', 'dns'),

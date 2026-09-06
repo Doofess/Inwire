@@ -222,7 +222,8 @@ const UNDISSECTED = [
   // Discovery and management.
   'cdp', 'gvrp', 'ismp', 'vtp', 'dtp', 'edp',
   // Windows file sharing, from the "SMB" rule.
-  'smb', 'smb2', 'nbss', 'nbns', 'netbios', 'dcerpc', 'browser',
+  // `nbns` was here until it became a real layer token - see dissectors/nbns.ts.
+  'smb', 'smb2', 'nbss', 'netbios', 'dcerpc', 'browser',
   // Transport and application layers not yet decoded.
   'sctp', 'rtp', 'rtcp', 'sip', 'ldap', 'kerberos', 'radius', 'snmp',
   // Never available from a capture, whatever is implemented.
