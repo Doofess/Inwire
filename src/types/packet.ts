@@ -223,6 +223,32 @@ export interface Packet {
    */
   colorSlot?: number;
   /**
+   * Which way this frame went, relative to the machine that captured it, the
+   * signal that decided it, and whether it duplicates a frame already seen on
+   * another adapter - packed into one number.
+   *
+   * The fact a capture taken *on an endpoint* has and one taken anywhere else
+   * does not: Wireshark has no way to know which of the two MACs in a frame
+   * belongs to the machine you are sitting at.
+   *
+   * Packed for the same reason `colorSlot` is, and it really is three facts
+   * rather than one dressed up - the column's tooltip names the deciding
+   * signal, so the signal has to be stored whatever shape this takes. A
+   * `fields` entry would cost ~30 B a frame against ~8, and a dense column is
+   * ruled out outright by `POST_DISSECTION_KEYS`, because a host override has
+   * to re-derive direction for frames already in the buffer and a filled
+   * column row cannot be rewritten.
+   *
+   * Absent means unknown, and unknown means nobody could answer - never that
+   * the frame went nowhere. Read it through `services/direction.ts`; nothing
+   * else should touch the bits.
+   *
+   * Not persisted (`toStoredFrame` builds an explicit object) - a restored
+   * frame is re-dissected and decides again, which is right, because the host
+   * identity may have changed since.
+   */
+  direction?: number;
+  /**
    * The column block holding this frame's dense fields, and its row in it.
    *
    * Set when the frame joins the buffer (`services/dissect/fieldSplit.ts`);

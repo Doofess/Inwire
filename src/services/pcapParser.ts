@@ -7,6 +7,10 @@ import { describeEtherType, dissectLinkLayer, macAddressFields } from './dissect
 import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './dissectors/ipv4';
 import { dissectNtp, dissectStun, dissectUdpByContent } from './dissectors/udpApps';
 import { L3Tracker } from './l3Tracker';
+import {
+  Direction, directionFromAddresses, directionFromMacs, directionFromOffload,
+  type HostIdentity,
+} from './direction';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './dissectors/tls';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './dissectors/appStream';
 import { keyLog } from './tls/keyLog';
@@ -675,6 +679,15 @@ export function decodeRawEthernetPacket(
    * See services/l3Tracker.ts.
    */
   l3Tracker?: L3Tracker,
+  /**
+   * Who this machine is, for deciding which way each frame went.
+   *
+   * Appended last, like `l3Tracker` before it, so no positional call site
+   * moves. Absent - or empty - means the question cannot be answered, and the
+   * frame carries `Direction.Unknown` rather than a guess. See
+   * `services/direction.ts`.
+   */
+  host?: HostIdentity,
 ): {
   packet: Packet;
   icmpMatchedRequestFrameId?: number;
@@ -707,6 +720,15 @@ export function decodeRawEthernetPacket(
   // The IPv4/IPv6 branches below overwrite these when an L3 address exists.
   let srcIp = link.srcMac ? resolveMacName(srcMac) : '';
   let dstIp = link.dstMac ? resolveMacName(dstMac) : '';
+
+  // Which way this frame went, decided here because this is the last moment
+  // the MACs are still the frame's own: the IPv4 and IPv6 branches below
+  // overwrite srcIp/dstIp with network addresses. The MAC test is the
+  // strongest signal there is and answers for every frame on an Ethernet link,
+  // including the broadcasts this machine sends - which is why the source is
+  // tested before the destination. Links with no MACs at all (a TUN-style VPN)
+  // fall through to the address test after dissection.
+  let direction = host ? directionFromMacs(link.srcMac, link.dstMac, host) : 0;
   let proto: Packet['protocol'] = 'TCP';
   // The Protocol column's free-form label, when it differs from the coarse
   // ProtocolType - "TLSv1.2", "ICMPv6", "STP". Left undefined when the two
@@ -1408,6 +1430,25 @@ export function decodeRawEthernetPacket(
   // The worst finding anywhere in this frame's tree, as one field. A colour
   // rule and a display filter can both ask about it; neither can walk a tree,
   // which is why "Expert Warnings" could not be a rule before this existed.
+  // Only for frames the MACs could not answer for. Two cases reach here: a
+  // link with no Ethernet header at all, where there were never any MACs to
+  // compare, and a host identity that knows an address but not a MAC - which
+  // is what the socket table alone gives.
+  if (direction === 0 && host) {
+    direction = directionFromAddresses(srcIp, dstIp, host);
+  }
+  if (direction === 0) {
+    // Last, and only ever able to say "out". A frame larger than the link can
+    // carry was handed to the sniffer above segmentation offload, and a
+    // required checksum the NIC has not filled in yet is the same story: both
+    // are artefacts only a *transmitting* stack leaves, so their absence
+    // proves nothing and they can never conclude "in".
+    const unfilled = filterFields['tcp.checksum'] === 0 || filterFields['udp.checksum'] === 0;
+    direction = directionFromOffload(
+      origLen || rawBytes.length, link.srcMac !== undefined, unfilled,
+    );
+  }
+
   const { expert, worst: worstExpert } = collectExpert(layers, anomalies);
   if (worstExpert) filterFields['inwire.expert.severity'] = worstExpert;
 
@@ -1451,6 +1492,10 @@ export function decodeRawEthernetPacket(
       info,
       status,
       streamId,
+      // Packed: direction, the signal that decided it, and the duplicate bit.
+      // Left off entirely when nothing decided, so a frame with no answer
+      // costs no slot at all (`services/direction.ts`).
+      ...(direction !== Direction.Unknown ? { direction } : {}),
       layers,
       rawBytes,
       anomalies,
@@ -1815,6 +1860,85 @@ function findNdpOption(rawBytes: Uint8Array, optionsStart: number, wantedType: n
     offset = optionEnd;
   }
   return null;
+}
+
+/**
+ * Every Neighbor Discovery option of one type, in order.
+ *
+ * `findNdpOption` stops at the first, which is right for a link-layer address
+ * but wrong for the two things a Router Advertisement carries several of: a
+ * router may advertise more than one prefix, and more than one RDNSS option.
+ * Shares the termination rules with it - a zero length would loop forever, and
+ * an option claiming to run past the frame is truncated rather than trusted.
+ */
+function collectNdpOptions(rawBytes: Uint8Array, optionsStart: number, wantedType: number): Uint8Array[] {
+  const found: Uint8Array[] = [];
+  let offset = optionsStart;
+  while (offset + 2 <= rawBytes.length) {
+    const lengthUnits = rawBytes[offset + 1];
+    if (lengthUnits === 0) break;
+    const optionEnd = offset + lengthUnits * 8;
+    if (optionEnd > rawBytes.length) break;
+    if (rawBytes[offset] === wantedType) found.push(rawBytes.subarray(offset + 2, optionEnd));
+    offset = optionEnd;
+  }
+  return found;
+}
+
+/**
+ * What a Router Advertisement announces, as filterable fields.
+ *
+ * The RA is how a passive observer learns an IPv6 network's shape without
+ * asking anything: the prefix hosts are autoconfiguring from, the resolvers
+ * they were handed, how long the router expects to be the default one, and
+ * whether it is telling them to use DHCPv6 as well. Nothing else on the wire
+ * carries it, and the machine's own configuration does not say where any of it
+ * came from - which is exactly what makes it worth putting beside the OS's
+ * answer in the Network panel.
+ *
+ * RFC 4861 4.2: after the 4-byte ICMPv6 header come the hop limit, a flags
+ * byte, the router lifetime, reachable time and retransmit timer, then
+ * options. Option 3 is Prefix Information and option 25 (RFC 8106) is RDNSS.
+ */
+function routerAdvertisementFields(
+  rawBytes: Uint8Array, transportOffset: number,
+): Record<string, string | number> {
+  const body = transportOffset + 4;
+  if (body + 12 > rawBytes.length) return {};
+  const flags = rawBytes[body + 1];
+  const out: Record<string, string | number> = {
+    'icmpv6.nd.ra.cur_hop_limit': rawBytes[body],
+    // Managed and Other: "get your address from DHCPv6" and "get everything
+    // else from DHCPv6". A network where both are clear is pure SLAAC.
+    'icmpv6.nd.ra.flag.m': (flags & 0x80) !== 0 ? 1 : 0,
+    'icmpv6.nd.ra.flag.o': (flags & 0x40) !== 0 ? 1 : 0,
+    // Zero is meaningful and not missing: it says "I am not a default router",
+    // which is how a router announces it is going away.
+    'icmpv6.nd.ra.router_lifetime': (rawBytes[body + 2] << 8) | rawBytes[body + 3],
+  };
+
+  const prefixes: string[] = [];
+  for (const option of collectNdpOptions(rawBytes, body + 12, 3)) {
+    if (option.length < 30) continue;
+    prefixes.push(`${formatIpv6Address(option, 14)}/${option[0]}`);
+    if (prefixes.length === 1) {
+      out['icmpv6.opt.prefix.valid_lifetime'] =
+        ((option[2] << 24) | (option[3] << 16) | (option[4] << 8) | option[5]) >>> 0;
+      out['icmpv6.opt.prefix.preferred_lifetime'] =
+        ((option[6] << 24) | (option[7] << 16) | (option[8] << 8) | option[9]) >>> 0;
+    }
+  }
+  if (prefixes.length > 0) out['icmpv6.opt.prefix'] = prefixes.join(',');
+
+  const resolvers: string[] = [];
+  for (const option of collectNdpOptions(rawBytes, body + 12, 25)) {
+    // 2 reserved bytes and a 4-byte lifetime, then whole addresses.
+    for (let at = 6; at + 16 <= option.length; at += 16) {
+      resolvers.push(formatIpv6Address(option, at));
+    }
+  }
+  if (resolvers.length > 0) out['icmpv6.opt.rdnss'] = resolvers.join(',');
+  return out;
 }
 
 /**
@@ -2723,7 +2847,13 @@ function decodeTransportLayer(
       proto: 'ICMP',
       protocolLabel: icmpProtocolLabel,
       fields: isIcmpv6
-        ? { 'icmpv6.type': icmpType, 'icmpv6.code': icmpCode }
+        ? {
+            'icmpv6.type': icmpType, 'icmpv6.code': icmpCode,
+            // Only for an RA. Every other ICMPv6 type would carry a bag of
+            // empty keys, and a field a frame does not have is a field that
+            // correctly matches nothing.
+            ...(icmpType === 134 ? routerAdvertisementFields(rawBytes, transportOffset) : {}),
+          }
         : { 'icmp.type': icmpType, 'icmp.code': icmpCode },
       info,
       icmpMatchedRequestFrameId,

@@ -163,6 +163,18 @@ export const FIELDS: readonly FieldDef[] = [
   uint('icmp.code', 'Code', 'icmp'),
   uint('icmpv6.type', 'Type', 'icmpv6'),
   uint('icmpv6.code', 'Code', 'icmpv6'),
+  // Router Advertisement. How a passive observer learns an IPv6 network's
+  // shape - the prefix hosts autoconfigure from, the resolvers they were
+  // handed, and whether they were also told to use DHCPv6 - none of which is
+  // recorded anywhere on the machine as having come from the router.
+  uint('icmpv6.nd.ra.cur_hop_limit', 'Cur hop limit', 'icmpv6'),
+  uint('icmpv6.nd.ra.flag.m', 'Managed address configuration', 'icmpv6'),
+  uint('icmpv6.nd.ra.flag.o', 'Other configuration', 'icmpv6'),
+  uint('icmpv6.nd.ra.router_lifetime', 'Router lifetime', 'icmpv6'),
+  str('icmpv6.opt.prefix', 'Prefix', 'icmpv6'),
+  uint('icmpv6.opt.prefix.valid_lifetime', 'Prefix valid lifetime', 'icmpv6'),
+  uint('icmpv6.opt.prefix.preferred_lifetime', 'Prefix preferred lifetime', 'icmpv6'),
+  str('icmpv6.opt.rdnss', 'Recursive DNS server', 'icmpv6'),
 
   // --- IGMP ------------------------------------------------------------------
   uint('igmp.type', 'Type', 'igmp'),

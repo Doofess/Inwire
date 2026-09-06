@@ -16,6 +16,7 @@
  */
 import type { AgentCommand, AgentMessage } from '../agentProtocol';
 import type { Packet } from '../../types/packet';
+import type { NetworkFacts } from '../networkFacts';
 import type { InfoPatch } from '../pcapParser';
 
 /** Where a connection stands, in the terms the header already shows. */
@@ -69,6 +70,20 @@ export type ToPipeline =
    * what a pcapng Decryption Secrets Block wants back out.
    */
   | { type: 'keylog'; text: string }
+  /**
+   * Who this machine is, for deciding which way each frame went.
+   *
+   * Sent as plain arrays rather than as a `HostIdentity` because a `Set` does
+   * not survive structured clone into a Worker as the same thing on both
+   * sides; the Worker rebuilds them. `macs` empty means "nobody knows", and
+   * every frame after it carries no direction rather than a guessed one - so
+   * clearing this is how the app says the answer has been lost.
+   */
+  | {
+      type: 'host';
+      macs: string[]; addresses: string[];
+      inferred: boolean; confidence: number; basis?: string;
+    }
   /** The protocol tree for one frame. Replies with `detail` or `needReplay`. */
   | { type: 'detail'; id: number }
   /**
@@ -115,6 +130,14 @@ export type FromPipeline =
       lateCount: number;
     }
   | { type: 'detail'; id: number; layers: Packet['layers'] }
+  /**
+   * What the capture has revealed about the network it was taken on.
+   *
+   * Posted only when something new was learned rather than per flush: these
+   * are facts about a network, and a network does not acquire a new resolver
+   * ten times a second. See `services/networkFacts.ts`.
+   */
+  | { type: 'networkFacts'; facts: NetworkFacts }
   /**
    * The tree for this frame is no longer cached, and rebuilding it needs the
    * frames before it on its stream - which the main thread has and the Worker

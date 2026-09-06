@@ -41,6 +41,11 @@ import { pipeline } from "./services/pipelineClient";
 import { usePacketDetail } from "./lib/usePacketDetail";
 import { applyInfoPatchesInPlace, type InfoPatch } from './services/pcapParser';
 import { flowAnnotations } from './services/flowAnnotations';
+import { NO_HOST, type HostIdentity } from './services/direction';
+import { hostFromAdapters, inferHostIdentity, overrideHostIdentity } from './services/hostIdentity';
+import { rederiveDirections } from './services/redirect';
+import { emptyNetworkFacts, type NetworkFacts } from './services/networkFacts';
+import type { AgentAdapter } from './services/agentProtocol';
 import {
   readLinkContext, watchLinkChanges, type LinkChange, type LinkContext,
 } from './services/linkContext';
@@ -485,6 +490,27 @@ export default function App() {
    * as zero.
    */
   const [captureStats, setCaptureStats] = useState<CaptureDropStats | null>(null);
+  /**
+   * How this machine's adapters are configured, and who this machine is.
+   *
+   * The Network panel reads the first; the packet list's Direction column
+   * reads the second. `hostIdentityRef` shadows the state because the
+   * identity is needed inside callbacks that must not re-create themselves
+   * every time it changes - the same pattern `isCapturingRef` uses.
+   */
+  const [adapters, setAdapters] = useState<AgentAdapter[]>([]);
+  const [hostIdentity, setHostIdentity] = useState<HostIdentity>(NO_HOST);
+  const hostIdentityRef = useRef<HostIdentity>(NO_HOST);
+  /**
+   * Cancels a re-derive that is still running.
+   *
+   * The pass is sliced across animation frames, so a second import - or an
+   * override while the first is still going - would otherwise leave two of
+   * them writing different identities into the same frames.
+   */
+  const rederiveRef = useRef<(() => void) | null>(null);
+  /** What the capture itself revealed, derived in the Worker and only read here. */
+  const [networkFacts, setNetworkFacts] = useState<NetworkFacts>(() => emptyNetworkFacts());
   /**
    * Frames pushed out of the buffer because it filled.
    *
@@ -1483,6 +1509,12 @@ export default function App() {
         // that were already open, which are exactly the long-lived ones a
         // capture catches mid-stream.
         pipeline.command({ type: 'subscribe_sockets' });
+        // How this machine's adapters are configured. The Network panel shows
+        // it, and the packet list needs one field out of it - the adapter's
+        // own MAC - to say which way each frame went. Subscribed here for the
+        // same ordering reason as the socket table: it queues behind
+        // `authenticate` on a connection that may still be unpaired.
+        pipeline.command({ type: 'subscribe_adapters' });
         return;
       }
 
@@ -1515,6 +1547,20 @@ export default function App() {
 
       if (message.type === 'capture_stats') {
         setCaptureStats(summarizeCaptureStats(message));
+        return;
+      }
+
+      if (message.type === 'adapter_config') {
+        setAdapters(message.adapters);
+        // The one fact the packet list needs from this: which MACs and
+        // addresses are ours. Told to the Worker, which dissects live frames
+        // and is the only side that can decide a direction as a frame arrives.
+        const identity = hostFromAdapters(message.adapters);
+        if (identity !== null) {
+          hostIdentityRef.current = identity;
+          setHostIdentity(identity);
+          pipeline.setHost(identity);
+        }
         return;
       }
 
@@ -1614,6 +1660,10 @@ export default function App() {
       console.warn('[Inwire] packet pipeline:', message);
     };
 
+    // Derived in the Worker and only read here, so a fact cannot be invented
+    // on its way to the screen.
+    pipeline.onNetworkFacts = setNetworkFacts;
+
     pipeline.connect("ws://localhost:8999");
 
     return () => {
@@ -1623,6 +1673,7 @@ export default function App() {
       pipeline.onAgentMessage = () => {};
       pipeline.onFrames = () => {};
       pipeline.onFailure = () => {};
+      pipeline.onNetworkFacts = () => {};
       pipeline.disconnect();
       setAgentStatus("disconnected");
     };
@@ -2160,7 +2211,55 @@ export default function App() {
     // previous buffer would keep the tree and hex views showing a frame that
     // is not in the list any more.
     setSelectedPacket(imported.length > 0 ? imported[0] : null);
+
+    // An imported file has no agent to ask who took it, so the host is worked
+    // out from the frames (`services/hostIdentity.ts`) and every frame is then
+    // re-decided. It cannot happen during dissection - the scoring needs the
+    // frames that dissection is producing - so it is a second pass, and a
+    // cheap one: it reads back two dense columns rather than re-dissecting.
+    //
+    // Nothing is inferred when the agent has already said who this machine is.
+    // A file imported on the machine that captured it is the common case, and
+    // a measured identity beats a scored one.
+    rederiveRef.current?.();
+    rederiveRef.current = null;
+    if (!hostIdentityRef.current.inferred && hostIdentityRef.current.macs.size > 0) {
+      rederiveRef.current = rederiveDirections(imported, hostIdentityRef.current,
+        () => { rederiveRef.current = null; setPackets((prev) => prev.slice()); });
+      return;
+    }
+    const inferred = inferHostIdentity(imported);
+    setHostIdentity(inferred ?? NO_HOST);
+    hostIdentityRef.current = inferred ?? NO_HOST;
+    if (inferred === null) return;
+    rederiveRef.current = rederiveDirections(imported, inferred, () => {
+      rederiveRef.current = null;
+      // A new array, because the frames were mutated in place: React compares
+      // by identity and would otherwise not re-read a single row. The frames
+      // themselves are the same objects, which is the point - every cache in
+      // the app keyed on frame identity survives this.
+      setPackets((prev) => prev.slice());
+    });
   };
+
+  /**
+   * The host a user picked by hand, which replaces whatever was inferred.
+   *
+   * An override is the answer rather than a hint: somebody who says which
+   * machine took a capture knows something the scoring does not, and blending
+   * the two would produce a third answer neither of them asked for.
+   */
+  const handleOverrideHost = useCallback((mac: string) => {
+    const identity = overrideHostIdentity(mac);
+    hostIdentityRef.current = identity;
+    setHostIdentity(identity);
+    pipeline.setHost(identity);
+    rederiveRef.current?.();
+    rederiveRef.current = rederiveDirections(packets, identity, () => {
+      rederiveRef.current = null;
+      setPackets((prev) => prev.slice());
+    });
+  }, [packets]);
 
   const handleUpdateDissectors = () => {
     packetGenerator.setDissectorEngine(dissectorEngine);
