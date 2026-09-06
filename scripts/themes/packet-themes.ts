@@ -36,6 +36,7 @@ import {
   REQUIRED_RULE_IDS,
   ROLE_BY_RULE_ID,
   HUE_BY_ROLE,
+  FIXED_ROLE_COLORS,
   contrastRatio,
   type PacketColorSet,
   type RuleRole,
@@ -287,11 +288,20 @@ for (const { theme, set, label } of COMBOS) {
     d >= MIN_TCP_UDP_DELTA_E);
 }
 
-// Nine hues, ten roles - warn and notice share yellow - so nine distinct fills.
+// Nine hues, eleven roles - warn and notice share orange - so nine distinct
+// DERIVED fills, plus one for every role that states its colour instead of
+// deriving it. `reset` is the only such role, and it is stated precisely so
+// that it does not collapse into the red the other error rules tint into.
+//
+// A colour set that substitutes the hues declines the stated colours (see
+// getPacketThemeForApp), so it is back to nine.
 for (const { theme, set, label } of COMBOS) {
   const packet = getPacketThemeForApp(theme, set);
   const distinct = new Set(Object.values(packet.rules).map((c) => c.background));
-  checkTrue(`${label}: roles produce 9 distinct fills (${distinct.size})`, distinct.size === 9);
+  const stated = PACKET_COLOR_SET_SPECS[set].hues === undefined
+    ? new Set(Object.keys(FIXED_ROLE_COLORS)).size : 0;
+  checkTrue(`${label}: roles produce ${9 + stated} distinct fills (${distinct.size})`,
+    distinct.size === 9 + stated);
 }
 
 /**
@@ -315,14 +325,64 @@ for (const { theme, set, label } of COMBOS) {
  * lands, so all three remain tripwires rather than decoration - and every
  * FLOOR above (AA, and the three deltaE bars) is identical for all three.
  */
+// Over the DERIVED fills only.
+//
+// The ceiling is a tripwire for one specific thing: somebody raising
+// CHROMA_SCALE to buy separation the deltaE floors are supposed to buy. A
+// stated colour is not produced by CHROMA_SCALE and cannot be raised by it, so
+// including it here would not catch that mistake - it would only force the
+// ceiling up to accommodate a value that was never in danger of drifting,
+// which is how a tripwire stops being one. The stated colours are asserted
+// exactly instead, below.
+const STATED_RULES = new Set(
+  Object.entries(ROLE_BY_RULE_ID)
+    .filter(([, role]) => role in FIXED_ROLE_COLORS)
+    .map(([id]) => id),
+);
 for (const { theme, set, label } of COMBOS) {
   const packet = getPacketThemeForApp(theme, set);
   const ceiling = PACKET_COLOR_SET_SPECS[set].maxChroma;
-  const loudest = Math.max(...Object.values(packet.rules).map((c) => chroma(c.background)));
+  const derived = Object.entries(packet.rules)
+    // A set that substitutes the hues derives everything, so nothing is exempt.
+    .filter(([id]) => PACKET_COLOR_SET_SPECS[set].hues !== undefined || !STATED_RULES.has(id));
+  const loudest = Math.max(...derived.map(([, c]) => chroma(c.background)));
   checkTrue(
-    `${label}: no row fill is louder than ${ceiling} chroma (${loudest.toFixed(1)})`,
+    `${label}: no derived row fill is louder than ${ceiling} chroma (${loudest.toFixed(1)})`,
     loudest <= ceiling,
   );
+}
+
+// The stated colours, held to the exact values they were transcribed from.
+//
+// This is the check the chroma ceiling gave up. A stated colour cannot drift
+// by someone tuning the ramp, but it can drift by someone editing it - and the
+// whole reason it is stated is that it matches the reference analyzer, so the
+// value IS the requirement.
+check('the reset role states the reference analyzer’s own RST pair',
+  FIXED_ROLE_COLORS.reset, { background: '#a40000', color: '#fffc9c' });
+
+for (const { theme, set, label } of COMBOS) {
+  const packet = getPacketThemeForApp(theme, set);
+  const row = packet.rules['color-tcp-rst'];
+  if (PACKET_COLOR_SET_SPECS[set].hues !== undefined) {
+    // Colourblind declines the stated pair: somebody who cannot rely on the
+    // red/green axis is not helped by a saturated red because another
+    // analyzer uses one, and that set exists for exactly that reader.
+    checkTrue(`${label}: colourblind derives its own reset fill (${row.background})`,
+      row.background !== '#a40000');
+    continue;
+  }
+  check(`${label}: a reset row is the stated pair`, row, FIXED_ROLE_COLORS.reset);
+  // A stated pair carries its own ground and its own text, so it has to clear
+  // legibility on its own - it cannot lean on the theme underneath it.
+  const ratio = contrastRatio(row.background, row.color);
+  checkTrue(`${label}: ...and clears AAA on its own (${ratio.toFixed(2)}:1)`, ratio >= 7);
+  // And it must be unmistakably louder than the error rules it was split from,
+  // or the split bought nothing.
+  const errorFill = packet.rules['color-bad-tcp'].background;
+  const d = deltaE76(row.background, errorFill);
+  checkTrue(`${label}: ...and clearly apart from Bad TCP (${d.toFixed(1)} deltaE)`,
+    d >= MIN_FREQUENT_DELTA_E);
 }
 
 // The ceilings have to stay ordered, or the picker is offering a distinction it
@@ -336,8 +396,14 @@ checkTrue('Colourblind sits between the two',
 
 // And Vibrant has to actually BE louder somewhere, not merely permitted to be.
 for (const theme of THEMES) {
+  // Derived fills only, for the same reason the ceiling above excludes the
+  // stated ones: a colour every set states identically says nothing about
+  // whether one set's RAMP is louder than another's, and letting it in made
+  // both sets report the same number and the comparison vacuous.
   const loudest = (set: PacketColorSet) =>
-    Math.max(...Object.values(getPacketThemeForApp(theme, set).rules).map((c) => chroma(c.background)));
+    Math.max(...Object.entries(getPacketThemeForApp(theme, set).rules)
+      .filter(([id]) => !STATED_RULES.has(id))
+      .map(([, c]) => chroma(c.background)));
   checkTrue(
     `${theme}: Vibrant is visibly louder than Default (${loudest('vibrant').toFixed(1)} vs ${loudest('default').toFixed(1)})`,
     loudest('vibrant') > loudest('default') * 1.25,
