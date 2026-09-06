@@ -295,7 +295,6 @@ function http2ClientFrames(): Uint8Array {
   keyLog.clear();
   const clientRandom = filled(32, 0xa1);
   const serverRandom = filled(32, 0xa2);
-  const spec = cipherSuiteSpec(0x1301)!;
   const clientApp = filled(32, 0xb1);
   const serverApp = filled(32, 0xb2);
   keyLog.add([

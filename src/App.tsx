@@ -54,7 +54,6 @@ import { fieldValue } from './services/dissect/fieldAccess';
 import { TcpStreamTracker } from "./services/tcpStreamTracker";
 import { IcmpEchoTracker } from "./services/icmpEchoTracker";
 import { QuicFlowTracker } from "./services/quicFlowTracker";
-import { FilterEngine } from "./services/filterEngine";
 import { filterIncrementally, type FilterCache } from "./services/incrementalFilter";
 import {
   appendFrames,
@@ -67,7 +66,7 @@ import {
   saveSessionMeta,
   trimFramesBelow,
 } from "./services/sessionStore";
-import { applyIcmpRepliesInPlace, buildFallbackPacket, restoreBatch } from "./services/sessionRestore";
+import { applyIcmpRepliesInPlace, restoreBatch } from "./services/sessionRestore";
 import {
   answerLivenessPings,
   prepareStoredSession,
@@ -149,44 +148,13 @@ const SOCKET_RETRO_WINDOW_US = 3_000_000;
 // burst arriving and passing, short enough that it still reads as "now".
 const INTERFACE_RATE_SAMPLES = 30;
 
-/**
- * How many captured packets the live buffer holds before the oldest are
- * dropped.
- *
- * Raised from 4,000 once two things stopped scaling with it: packets are now
- * committed to state in batches rather than one at a time, and hex/ASCII
- * dumps are derived on demand instead of stored per packet (which had cost
- * ~13KB of strings for every full-size frame). Both were required - the old
- * ingest path would have frozen the tab well before a buffer this size ever
- * filled.
- */
-// The default only. The live value is a preference - see interfacePrefs -
-// because the cap scales every O(buffer) pass in the app at once.
-const PACKET_BUFFER_CAP = 50000;
-
-/**
- * How far past the cap the buffer may run before it is trimmed back to it.
- *
- * Trimming on every flush looked right and was the single most expensive
- * thing the app did once the buffer was full. Three separate caches detect a
- * trim by watching `packets[0]` - the incremental display filter, the packet
- * list's column auto-sizer and the geo map's address scan - and each answers
- * "the head moved" with a full pass over the whole buffer. Trim every flush
- * and the head moves ten times a second, so all three ran their O(n) fallback
- * ten times a second, forever, on a 50,000-packet array.
- *
- * With slack the head moves once per few thousand packets instead. The caches
- * take their fallback once and then stay hot. The price is that the buffer
- * briefly holds up to 5% more than the cap, which is why this is a proportion
- * and not a count: it has to stay small next to the cap, not next to a flush.
- */
-const TRIM_SLACK = 0.05;
-
-/** The last `cap` packets of `packets`, or `packets` itself while it is within the slack. */
-function trimToCap<T>(packets: T[], cap: number): T[] {
-  const slack = Math.max(1, Math.floor(cap * TRIM_SLACK));
-  return packets.length > cap + slack ? packets.slice(packets.length - cap) : packets;
-}
+// The frame-count cap, its slack and `trimToCap` used to live here. The buffer
+// is bounded by BYTES now (`services/bufferBudget.ts`: `planBufferTrim` against
+// the `packetBufferBytes` preference), because a frame count cannot answer "how
+// much memory is this" when a frame is anywhere from 60 bytes to 64 kB. The
+// slack survives as `BUDGET_SLACK` there, for the same reason it existed here:
+// trimming on every flush moves `packets[0]` ten times a second, and three
+// caches take an O(buffer) fallback each time it moves.
 
 /**
  * Capture stops on its own at this fraction of the buffer, so a full buffer
@@ -201,17 +169,6 @@ const AUTO_PAUSE_AT = 0.99;
  * renders rather than one per packet.
  */
 const PACKET_FLUSH_MS = 100;
-
-/**
- * How often the analytics aside is handed a new packet buffer.
- *
- * Separate from PACKET_FLUSH_MS on purpose: the packet list has to keep up
- * with ingest, but a protocol breakdown or a top-talkers table does not. See
- * `dashboardPackets` below for the measurements this comes from. Twice a
- * second still reads as live for a summary while cutting their cost fivefold.
- */
-const DASHBOARD_REFRESH_MS = 500;
-// Kept as the documented default; the live value comes from interfacePrefs.
 
 /**
  * How many stored frames are decoded per chunk when restoring a session.
@@ -1301,10 +1258,7 @@ export default function App() {
   useDebouncedPreference(COLOR_RULES_STORAGE_KEY, colorRules);
   usePreferenceSync(COLOR_RULES_STORAGE_KEY, normalizeColorRules, setColorRules);
   const colorEngine = useMemo(() => new ColorRulesEngine(colorRules), [colorRules]);
-  const packetGenerator = useMemo(
-    () => new PacketGenerator(dissectorEngine),
-    [dissectorEngine],
-  );
+  const packetGenerator = useMemo(() => new PacketGenerator(), []);
   /**
    * The colour of the row the selected packet was picked from.
    *
@@ -2361,9 +2315,18 @@ export default function App() {
     }, (packet, forHost) => collector.observe(packet, forHost));
   }, []);
 
-  const handleUpdateDissectors = () => {
-    packetGenerator.setDissectorEngine(dissectorEngine);
-  };
+  /**
+   * Called by the Custom Dissectors modal after every edit.
+   *
+   * It has nothing to do, and that is a gap rather than a design: it used to
+   * hand the engine to `PacketGenerator`, which never read it, and **nothing
+   * else in the app consults `CustomDissectorEngine` either** - no dissection
+   * path asks it about a frame. So the modal edits and stores rules that are
+   * never applied. Left wired rather than deleted, because this is the seam a
+   * working implementation would push through; the engine itself and its
+   * storage are untouched.
+   */
+  const handleUpdateDissectors = () => {};
 
   /**
    * Everything the analytics widgets need, in one object.
@@ -2462,7 +2425,6 @@ export default function App() {
           agentOutdated={agentOutdated}
           totalPacketsCount={packets.length}
           restoreProgress={restoreProgress}
-          filteredPacketsCount={filteredPackets.length}
         />
 
 
@@ -2551,7 +2513,6 @@ export default function App() {
                 // the capture or only what is left of it.
                 droppedBuffer={droppedBuffer}
                 colorEngine={colorEngine}
-                permissions={permissions}
                 packetTheme={packetTheme}
               />
             </div>
@@ -2625,7 +2586,6 @@ export default function App() {
                   onHoverByteRange={setActiveByteRange}
                   onSelectFrame={goToFrame}
                   activeByteRange={activeByteRange}
-                  permissions={permissions}
                   onFieldFilter={handleFieldFilter}
                   currentFilter={filterText}
                   onAddColumn={handleAddColumn}

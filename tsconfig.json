@@ -10,6 +10,24 @@
       "DOM.Iterable"
     ],
     "skipLibCheck": true,
+    /* `strict` was off, and the cost of turning it on was six errors across
+       three files - so the codebase had been written as though it were on
+       without the compiler ever holding it to that. Off, `undefined` was
+       assignable everywhere, which is a poor fit for an app whose stated rule
+       is that "a null is always an em dash and never a guess".
+
+       `noUnusedLocals`/`noUnusedParameters` are the dead-code ratchet. They
+       surfaced thirty symbols on the first run, including two features that
+       were written, documented and wired to nothing. `npm run check` runs tsc,
+       so from here that class of rot fails the build instead of accumulating.
+
+       `noImplicitReturns` is deliberately NOT on: 34 errors, nearly all of them
+       a switch whose branches all return, which is a style argument rather than
+       a correctness one and deserves its own pass. */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
     "moduleResolution": "bundler",
     "isolatedModules": true,
     "moduleDetection": "force",

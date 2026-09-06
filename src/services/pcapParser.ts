@@ -2,10 +2,10 @@ import { Packet, ProtocolLayer, ProtocolField, ExpertCategory, ExpertInfo } from
 import { CATEGORY_ORDER, expertItemsFor } from './expertInfo';
 import { CATEGORY_BY_FLAG } from './dissect/tcpAnalysis';
 import { TcpStreamTracker } from './tcpStreamTracker';
-import { resolveMacVendor, resolveMacName } from './macVendors';
-import { formatMac, formatIpv4Address, formatIpv6Address } from './addressFormat';
+import { resolveMacName } from './macVendors';
+import { formatMac, formatIpv6Address } from './addressFormat';
 import { dissectArp, dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
-import { describeEtherType, dissectLinkLayer, macAddressFields } from './dissectors/linkLayer';
+import { dissectLinkLayer } from './dissectors/linkLayer';
 import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './dissectors/ipv4';
 import { dissectNtp, dissectStun, dissectUdpByContent } from './dissectors/udpApps';
 import { L3Tracker } from './l3Tracker';
@@ -902,7 +902,12 @@ export function decodeRawEthernetPacket(
     // or somebody spoofing, and it is invisible in either frame alone. Only a
     // claim counts - a request's target fields are a question, and treating
     // them as a binding would report every ARP scan as a conflict.
-    if (l2Result.protocolLabel === 'ARP' && l3Tracker) {
+    // `fields` is optional on the result and the ARP dissector always sets it,
+    // so this guard has never fired. It is here because the type says it can
+    // be absent and a dissector added later may well leave it so - which under
+    // the old non-strict compiler would have read two properties off
+    // `undefined` at runtime rather than failing to build.
+    if (l2Result.protocolLabel === 'ARP' && l3Tracker && l2Result.fields) {
       const claimedIp = l2Result.fields['arp.src.proto_ipv4'];
       const claimedMac = l2Result.fields['arp.src.hw_mac'];
       if (typeof claimedIp === 'string' && typeof claimedMac === 'string') {
@@ -3315,35 +3320,4 @@ function extractLiteralUrlOrHost(rawBytes: Uint8Array, payloadStart: number): st
   if (urlMatch) return urlMatch[0].replace(/[.,;:)]+$/, '');
   const hostMatch = text.match(HTTP_HOST_HEADER_PATTERN);
   return hostMatch ? hostMatch[1].trim() : null;
-}
-
-/**
- * Decodes the QNAME of the first question in a DNS message using the real
- * length-prefixed label wire format (RFC 1035 4.1.2), starting right after
- * the fixed 12-byte DNS header. Returns null on anything that doesn't look
- * like a well-formed, fully-printable name (including compression pointers,
- * which aren't resolved here) rather than guessing.
- */
-function decodeDnsQueryName(rawBytes: Uint8Array, dnsMessageStart: number): string | null {
-  let offset = dnsMessageStart + 12; // past ID/Flags/QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT
-  const labels: string[] = [];
-
-  for (let guard = 0; guard < 32; guard++) {
-    if (offset >= rawBytes.length) return null;
-    const len = rawBytes[offset];
-    if (len === 0) break; // root label - end of name
-    if ((len & 0xc0) === 0xc0) return null; // compression pointer - not resolved here
-    if (len > 63 || offset + 1 + len > rawBytes.length) return null; // malformed/truncated
-
-    let label = '';
-    for (let i = 0; i < len; i++) {
-      const byte = rawBytes[offset + 1 + i];
-      if (byte < 32 || byte > 126) return null; // not a printable hostname label
-      label += String.fromCharCode(byte);
-    }
-    labels.push(label);
-    offset += 1 + len;
-  }
-
-  return labels.length > 0 ? labels.join('.') : null;
 }

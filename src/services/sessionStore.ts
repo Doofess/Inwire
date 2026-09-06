@@ -792,9 +792,16 @@ export async function readFrames(
 
   let lastKey: number | null = null;
   for (;;) {
-    const range = lastKey === null ? null : IDBKeyRange.lowerBound(lastKey, true);
-    const batch = await runTx<StoredFrame[]>(db, FRAME_STORE, 'readonly', (store) =>
-      store.getAll(range, batchSize),
+    // Both annotated, and not for decoration: without them the inference runs
+    // in a circle - `range` is read inside the callback that produces `batch`,
+    // whose element type is what `lastKey` is assigned from, and `lastKey` is
+    // what `range` is built from. Under the old non-strict compiler the whole
+    // loop silently resolved to `any`; strict reports it as TS7022/TS7024.
+    const range: IDBKeyRange | null =
+      lastKey === null ? null : IDBKeyRange.lowerBound(lastKey, true);
+    const batch: StoredFrame[] | null = await runTx<StoredFrame[]>(
+      db, FRAME_STORE, 'readonly', (store): IDBRequest<StoredFrame[]> =>
+        store.getAll(range, batchSize),
     );
     if (!batch || batch.length === 0) return;
     lastKey = batch[batch.length - 1].id;

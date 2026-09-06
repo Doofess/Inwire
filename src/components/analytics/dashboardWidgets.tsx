@@ -4,7 +4,6 @@ import {
   TbActivity,
   TbChartPie,
   TbNetwork,
-  TbAlertTriangle,
   TbRulerMeasure,
 } from 'react-icons/tb';
 import type { Packet } from '../../types/packet';
@@ -129,7 +128,6 @@ export const WIDGET_RENDERERS: Record<WidgetTypeId, WidgetRenderer> = {
         isDark={ctx.isDark}
         themeKey={ctx.themeKey}
         variant={frame.variant ?? 'card'}
-        onExpand={frame.onExpand}
       />
     ),
   },
@@ -143,7 +141,6 @@ export const WIDGET_RENDERERS: Record<WidgetTypeId, WidgetRenderer> = {
     render: (ctx, config) => (
       <TrafficTimelineChart
         packets={ctx.packets}
-        isCapturing={ctx.isCapturing}
         isDark={ctx.isDark}
         themeKey={ctx.themeKey}
         metric={config.metric as TimelineMetric}

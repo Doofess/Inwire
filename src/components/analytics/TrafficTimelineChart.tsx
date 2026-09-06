@@ -15,7 +15,6 @@ export type TimelineChart = 'area' | 'bars';
 
 interface TrafficTimelineProps {
   packets: Packet[];
-  isCapturing: boolean;
   isDark: boolean;
   /** The active theme's name. Not used for styling - it exists so this
    *  imperative D3 draw re-runs when the theme changes. isDark alone cannot
@@ -69,7 +68,6 @@ interface TimelineBucket {
 
 export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
   packets,
-  isCapturing,
   isDark,
   themeKey,
   metric,
@@ -124,16 +122,6 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
   // reduced-motion rule does not apply to them. Zero duration keeps the same
   // call path and simply lands immediately.
   const zoomDuration = () => (prefersReducedMotion() ? 0 : 200);
-
-  const handleZoomIn = () => {
-    if (!zoomRectNodeRef.current || !zoomBehaviorRef.current) return;
-    d3.select(zoomRectNodeRef.current).transition().duration(zoomDuration()).call(zoomBehaviorRef.current.scaleBy, 1.5);
-  };
-
-  const handleZoomOut = () => {
-    if (!zoomRectNodeRef.current || !zoomBehaviorRef.current) return;
-    d3.select(zoomRectNodeRef.current).transition().duration(zoomDuration()).call(zoomBehaviorRef.current.scaleBy, 1 / 1.5);
-  };
 
   const handleResetZoom = () => {
     if (!zoomRectNodeRef.current || !zoomBehaviorRef.current) return;

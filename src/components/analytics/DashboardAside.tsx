@@ -20,7 +20,6 @@ import { WIDGET_RENDERERS, type DashboardWidgetContext } from './dashboardWidget
 import { RenderedWidget } from './RenderedWidget';
 import { WidgetOverlay } from './WidgetOverlay';
 import { Popover, PopoverContent, PopoverTrigger, PopoverArrow } from '../ui/popover';
-import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
 
 /**
  * The analytics column, and the icon rail it collapses to.
@@ -471,7 +470,10 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
               widget,
               widget.type === 'geo'
                 ? () => {
-                    const card = cardRefs.current.get(widget.type);
+                    // Normalised to null at the read: a Map miss is `undefined`
+                    // and `openFrom` speaks the DOM's `Element | null`, so
+                    // without this the two spellings of "nothing" meet.
+                    const card = cardRefs.current.get(widget.type) ?? null;
                     openFrom(widget.type, card?.querySelector('[data-widget-expand]') ?? card);
                   }
                 : undefined,

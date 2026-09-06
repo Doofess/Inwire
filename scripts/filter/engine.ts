@@ -16,7 +16,6 @@
  */
 import { FilterEngine } from '../../src/services/filterEngine';
 import { compile } from '../../src/services/filter/compile';
-import { parseFilter } from '../../src/services/filter/parser';
 import { tokenize } from '../../src/services/filter/lexer';
 import { knownFieldNames } from '../../src/services/filter/fields';
 import { combineFilter, fieldTerm } from '../../src/services/filter/fromField';

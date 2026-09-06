@@ -12,7 +12,7 @@
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import {
   DNS_OPCODE_NAMES, DNS_RCODE_NAMES, DNS_TYPE_DESCRIPTIONS,
-  dnsInfoLine, dnsTypeName, parseDnsMessage,
+  dnsTypeName, parseDnsMessage,
   type DnsMessage, type DnsRecord,
 } from './dnsRecords';
 
