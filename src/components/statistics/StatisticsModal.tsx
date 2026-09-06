@@ -59,7 +59,7 @@ interface StatisticsModalProps {
   /** Applies a display filter in the main window and closes this dialog. */
   onApplyFilter: (expression: string) => void;
   /** Opens the stream follower on a TCP or UDP conversation. */
-  onFollowStream?: (target: StreamTarget) => void;
+  onFollowStream?: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
   /** Everything the dissectors and the anomaly detector found. */
   expert: ExpertLookup;
   /** Selects a frame in the main window. */
@@ -487,6 +487,19 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
                     }}
                   >
                     Follow Stream
+                  </ContextMenuItem>
+                  {/* The same conversation, asked about its shape rather than
+                      its content: which side spoke when, how long an answer
+                      took, where it went quiet. */}
+                  <ContextMenuItem
+                    disabled={menuRow.stream === undefined || !onFollowStream}
+                    onSelect={() => {
+                      if (menuRow.stream === undefined) return;
+                      onFollowStream?.(menuRow.stream, 'ladder');
+                      onClose();
+                    }}
+                  >
+                    Show conversation
                   </ContextMenuItem>
                   <ContextMenuItem
                     disabled={menuRow.frame === undefined || !onSelectFrame}

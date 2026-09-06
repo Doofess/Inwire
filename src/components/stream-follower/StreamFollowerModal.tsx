@@ -9,6 +9,8 @@ import {
 } from '../../services/followStream';
 import { portLabel } from '../../services/portServices';
 import { useHydratedBytes } from '../../lib/useHydratedBytes';
+import { Segmented } from '../ui/segmented';
+import { LadderView } from '../ladder/LadderView';
 
 /**
  * One conversation's payload, both directions, in order.
@@ -32,13 +34,40 @@ interface StreamFollowerModalProps {
   target: StreamTarget | null;
   packets: Packet[];
   onClose: () => void;
+  /**
+   * The frame selected in the packet list, and how to change it.
+   *
+   * This window used to print `Frame #N` as plain text and have no way back to
+   * the list at all - which meant finding a frame you had just read about
+   * involved closing the window and scrolling. Optional, because the export
+   * dialog opens a follower over a buffer it does not own.
+   */
+  selectedId?: number;
+  onSelectFrame?: (id: number) => void;
+  /**
+   * Which view to open on.
+   *
+   * "Show conversation" and "Follow stream" are the same window opened with a
+   * different question in mind - one asks about shape, the other about
+   * content - so they are one component with two doors rather than two
+   * components that would drift apart.
+   */
+  initialTab?: 'dialogue' | 'ladder';
 }
 
 export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
   target,
   packets,
   onClose,
+  selectedId,
+  onSelectFrame,
+  initialTab = 'dialogue',
 }) => {
+  // Which of the two ways of reading a conversation is showing. The dialogue
+  // answers "what was said"; the ladder answers "in what shape" - a request
+  // answered four seconds later, a side that went quiet, a retransmission
+  // burst. Both are the same frames.
+  const [tab, setTab] = useState<'dialogue' | 'ladder'>(initialTab);
   const [viewFormat, setViewFormat] = useState<'ascii' | 'hex' | 'raw'>('ascii');
   const [copied, setCopied] = useState(false);
 
@@ -171,8 +200,21 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {/* View Format Switcher */}
-            <div className="flex rounded-md border border-border bg-secondary p-0.5 text-xs">
+            <Segmented<'dialogue' | 'ladder'>
+              size="sm"
+              ariaLabel="How to read this stream"
+              value={tab}
+              onValueChange={setTab}
+              options={[
+                { value: 'dialogue', label: 'Dialogue' },
+                { value: 'ladder', label: 'Ladder' },
+              ]}
+            />
+            {/* View Format Switcher. Only for the dialogue - a ladder has no
+                payload to render as hex, and leaving a dead control on screen
+                is worse than removing it. */}
+            <div className={`flex rounded-md border border-border bg-secondary p-0.5 text-xs ${
+              tab === 'ladder' ? 'hidden' : ''}`}>
               <button
                 onClick={() => setViewFormat('ascii')}
                 className={`px-2 py-1 rounded font-medium transition-all ${
@@ -266,7 +308,15 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
           </div>
         )}
 
-        {/* Stream Dialogue Viewport */}
+        {tab === 'ladder' ? (
+          <LadderView
+            target={target}
+            packets={packets}
+            selectedId={selectedId}
+            onSelectFrame={onSelectFrame}
+          />
+        ) : (
+        /* Stream Dialogue Viewport */
         <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs custom-scrollbar">
           {streamPackets.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">No frames on this stream are in the buffer.</div>
@@ -278,14 +328,26 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
                 <div
                   key={p.id}
                   className={`p-3 rounded-lg border leading-relaxed ${
+                    p.id === selectedId ? 'ring-2 ring-primary/60 ' : ''}${
                     isClient
                       ? 'bg-rose-50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/40 text-rose-900 dark:text-rose-300'
                       : 'bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-900/40 text-sky-900 dark:text-sky-300'
                   }`}
                 >
                   <div className="flex items-center justify-between pb-1 mb-1 border-b border-current/20 text-[10px] opacity-75 font-sans">
+                    {/* Clickable, at last. This printed as plain text, so the
+                        only way to find a frame you had just read about was to
+                        close the window and scroll for it. */}
                     <span className="font-semibold">
-                      Frame #{p.id} • {isClient ? 'Client Request' : 'Server Response'} ({p.source}:{p.sourcePort} → {p.destination}:{p.destPort})
+                      {onSelectFrame ? (
+                        <button onClick={() => onSelectFrame(p.id)}
+                          className="underline decoration-dotted underline-offset-2
+                            hover:decoration-solid cursor-pointer"
+                          title="Select this frame in the packet list">
+                          Frame #{p.id}
+                        </button>
+                      ) : <>Frame #{p.id}</>}
+                      {' • '}{isClient ? 'Client Request' : 'Server Response'} ({p.source}:{p.sourcePort} → {p.destination}:{p.destPort})
                     </span>
                     <span>{p.relativeTime.toFixed(4)}s ({p.length} bytes)</span>
                   </div>
@@ -298,6 +360,7 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
             })
           )}
         </div>
+        )}
 
         {/* Modal Footer */}
         <div className="px-4 py-2.5 border-t border-border flex items-center justify-between text-xs">

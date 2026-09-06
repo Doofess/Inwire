@@ -352,6 +352,8 @@ export default function App() {
   // Packets Buffer & Selection
   const [packets, setPackets] = useState<Packet[]>([]);
   const [selectedPacket, setSelectedPacket] = useState<Packet | null>(null);
+  /** Which view the stream window opens on - see handleFollowStream. */
+  const [streamView, setStreamView] = useState<'dialogue' | 'ladder'>('dialogue');
   // Stored as an id, not the packet: the object a refresh restores is a fresh
   // one decoded from bytes, so only its number survives the round trip.
   // Zero stands for "nothing selected" and is rejected by the validator.
@@ -2186,8 +2188,18 @@ export default function App() {
   }, []);
 
 
-  const handleFollowStream = (target: StreamTarget) => {
+  /**
+   * Opens the stream window, on whichever of its two views was asked for.
+   *
+   * "Follow stream" and "Show conversation" are the same window with a
+   * different question in mind - content against shape - so the view is a
+   * parameter rather than a second modal that would drift out of step.
+   */
+  const handleFollowStream = (
+    target: StreamTarget, view: 'dialogue' | 'ladder' = 'dialogue',
+  ) => {
     setStreamToFollow(target);
+    setStreamView(view);
   };
 
   const handleImportPackets = (imported: Packet[]) => {
@@ -2632,6 +2644,13 @@ export default function App() {
           target={streamToFollow}
           packets={packets}
           onClose={() => setStreamToFollow(null)}
+          initialTab={streamView}
+          selectedId={selectedPacket?.id}
+          // The window stays open. Selecting a frame from in here is usually
+          // one of several - reading down a conversation and checking each
+          // against the tree - and closing on the first would make that a
+          // dozen round trips through the context menu.
+          onSelectFrame={goToFrame}
         />
       )}
 

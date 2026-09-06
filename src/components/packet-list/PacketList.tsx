@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Packet, UserRolePermissions } from '../../types/packet';
+import { virtualWindow } from '../../lib/virtualWindow';
 import {
   Direction, DirectionSignal, DIRECTION_GLYPH, DIRECTION_LABEL, SIGNAL_LABEL,
   directionOf, signalOf,
@@ -13,6 +14,7 @@ import {
   TbArrowDown,
   TbShieldExclamation,
   TbMessage,
+  TbArrowsExchange,
   TbFilter,
   TbCopy,
 } from 'react-icons/tb';
@@ -94,7 +96,7 @@ interface PacketListProps {
   onSelectPacket: (packet: Packet) => void;
   /** Double-clicking a row opens the full-window view of that frame. */
   onInspectPacket?: (packet: Packet) => void;
-  onFollowStream: (target: StreamTarget) => void;
+  onFollowStream: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
   onQuickFilter: (filter: string) => void;
   searchText: string;
   /**
@@ -619,12 +621,13 @@ export const PacketList: React.FC<PacketListProps> = ({
     return () => observer.disconnect();
   }, []);
 
+  // The arithmetic lives in `lib/virtualWindow.ts` so it can be asserted:
+  // a slice computed past the end leaves the list blank with no error
+  // anywhere, which is exactly what happened here (see that file's header).
   const totalRows = sortedPackets.length;
-  const startIndex = totalRows === 0 ? 0 : Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS);
-  const endIndex = totalRows === 0 ? 0 : Math.min(totalRows, Math.ceil((scrollTop + viewportHeight) / rowHeight) + OVERSCAN_ROWS);
+  const { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight } =
+    virtualWindow(totalRows, scrollTop, viewportHeight, rowHeight, OVERSCAN_ROWS);
   const visiblePackets = sortedPackets.slice(startIndex, endIndex);
-  const topSpacerHeight = startIndex * rowHeight;
-  const bottomSpacerHeight = (totalRows - endIndex) * rowHeight;
 
   // Auto scroll to bottom
   const shouldAutoScrollRef = useRef(true);
@@ -1398,6 +1401,24 @@ export const PacketList: React.FC<PacketListProps> = ({
                   Follow {target.kind.toUpperCase()} Stream
                   {target.streamId !== undefined ? ` (#${target.streamId})` : ''}
                 </span>
+              </button>
+            );
+          })()}
+
+          {/* The same conversation, asked a different question. Following it
+              is about what was said; showing it is about the shape - a request
+              answered four seconds later, a side that went quiet, a burst of
+              retransmissions. Two doors onto one window. */}
+          {(() => {
+            const target = targetForPacket(contextMenu.packet);
+            if (!target) return null;
+            return (
+              <button
+                onClick={() => onFollowStream(target, 'ladder')}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
+              >
+                <TbArrowsExchange className="w-3.5 h-3.5 text-foreground" />
+                <span>Show conversation</span>
               </button>
             );
           })()}
