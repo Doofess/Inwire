@@ -110,7 +110,7 @@ async function main(): Promise<void> {
   const frame = udpFrame(50001, 50003, sr);
   const { packet } = decodeRawEthernetPacket(frame, 1, 1_700_000_000_000_000, 0, 0, frame.length);
   check('the protocol chain is right', packet.frameProtocols, ['frame', 'eth', 'ip', 'udp', 'rtcp']);
-  check('the SSRC is published', packet.fields?.['rtcp.ssrc.sender'], SSRC);
+  check('the SSRC is published', packet.fields?.['rtcp.senderssrc'], SSRC);
   check("the sender's packet count is published", packet.fields?.['rtcp.sender.packetcount'], 10);
   // Which rule claimed it, so a wrong label is traceable.
   check('the match records which detector made it', packet.fields?.['inwire.heuristic'], 'RTCP');

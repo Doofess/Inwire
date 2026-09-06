@@ -272,7 +272,7 @@ export function buildHttp3Layer(streams: Http3StreamResult[]): {
     if (stream.streamTypeName !== undefined) info.push(stream.streamTypeName);
     info.push(...summaries);
 
-    const children: ProtocolField[] = [{ name: 'Stream ID', value: stream.streamId, abbrev: 'http3.stream_id' }];
+    const children: ProtocolField[] = [{ name: 'Stream ID', value: stream.streamId, abbrev: 'http3.frame_streamid' }];
     for (const frame of stream.frames) {
       const frameRows: ProtocolField[] = [
         { name: 'Type', value: `${frame.typeName} (0x${frame.type.toString(16)})`, abbrev: 'http3.frame_type' },
@@ -316,7 +316,7 @@ export function buildHttp3Layer(streams: Http3StreamResult[]): {
       fields['http3.frame_type'] = frame.type;
     }
 
-    fields['http3.stream_id'] = stream.streamId;
+    fields['http3.frame_streamid'] = stream.streamId;
     rows.push({ name: label, value: '', isExpanded: true, children });
   }
 

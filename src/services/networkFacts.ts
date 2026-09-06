@@ -353,7 +353,7 @@ export class NetworkFactsCollector {
       systemName,
       portId,
       portDescription: stringField(packet, 'lldp.port.desc'),
-      managementAddress: stringField(packet, 'lldp.mgn.addr'),
+      managementAddress: stringField(packet, 'lldp.mgn.addr.ip4'),
     };
     if (JSON.stringify(neighbour) !== JSON.stringify(this.facts.neighbour)) {
       this.facts.neighbour = neighbour;

@@ -130,8 +130,8 @@ export function dissectRadius(bytes: Uint8Array, start: number, end: number): Ra
       ],
     });
     // The first User-Name is what makes a RADIUS capture readable at a glance.
-    if (type === 1 && fields['radius.username'] === undefined) {
-      fields['radius.username'] = utf8.decode(bytes.subarray(valueStart, valueEnd));
+    if (type === 1 && fields['radius.User_Name'] === undefined) {
+      fields['radius.User_Name'] = utf8.decode(bytes.subarray(valueStart, valueEnd));
     }
     p = valueEnd;
   }

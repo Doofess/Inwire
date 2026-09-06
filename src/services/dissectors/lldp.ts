@@ -261,7 +261,7 @@ export function dissectLldp(rawBytes: Uint8Array, offset: number): L2DissectorRe
       case TLV_SYSTEM_CAPABILITIES: {
         const capabilities = length >= 2 ? (value[0] << 8) | value[1] : 0;
         const enabled = length >= 4 ? (value[2] << 8) | value[3] : 0;
-        filterFields['lldp.tlv.system.cap'] = capabilities;
+        filterFields['lldp.tlv.system_cap'] = capabilities;
         fields.push({
           name: 'Capabilities',
           value: describeCapabilities(enabled),
@@ -280,7 +280,7 @@ export function dissectLldp(rawBytes: Uint8Array, offset: number): L2DissectorRe
         // interface number, OID length, OID.
         const addrStringLen = value[0] ?? 0;
         const address = formatNetworkAddress(value.subarray(1, 1 + addrStringLen));
-        filterFields['lldp.mgn.addr'] = address;
+        filterFields['lldp.mgn.addr.ip4'] = address;
         const children: ProtocolField[] = [
           { name: 'Address String Length', value: addrStringLen, rawBytesRange: [valueStart, valueStart] },
           { name: 'Management Address', value: address, rawBytesRange: [valueStart + 1, valueStart + addrStringLen] },

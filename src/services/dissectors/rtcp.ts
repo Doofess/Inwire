@@ -162,10 +162,10 @@ export function dissectRtcp(bytes: Uint8Array, start: number, end: number): Rtcp
       rows.push({
         name: packet.type === SDES ? 'Chunk SSRC' : 'Sender SSRC',
         value: `0x${ssrc.toString(16).padStart(8, '0')} (${ssrc})`,
-        abbrev: 'rtcp.ssrc.sender',
+        abbrev: 'rtcp.senderssrc',
         rawBytesRange: [packet.start + 4, packet.start + 7],
       });
-      fields['rtcp.ssrc.sender'] ??= ssrc;
+      fields['rtcp.senderssrc'] ??= ssrc;
     }
 
     if (packet.type === SR && packet.start + 28 <= packet.end) {
@@ -174,11 +174,11 @@ export function dissectRtcp(bytes: Uint8Array, start: number, end: number): Rtcp
       rows.push(
         { name: 'Timestamp, MSW', value: u32(packet.start + 8) },
         { name: 'Timestamp, LSW', value: u32(packet.start + 12) },
-        { name: 'RTP timestamp', value: u32(packet.start + 16), abbrev: 'rtcp.timestamp' },
+        { name: 'RTP timestamp', value: u32(packet.start + 16), abbrev: 'rtcp.timestamp.rtp' },
         { name: "Sender's packet count", value: u32(packet.start + 20), abbrev: 'rtcp.sender.packetcount' },
         { name: "Sender's octet count", value: u32(packet.start + 24), abbrev: 'rtcp.sender.octetcount' },
       );
-      fields['rtcp.timestamp'] = u32(packet.start + 16);
+      fields['rtcp.timestamp.rtp'] = u32(packet.start + 16);
       fields['rtcp.sender.packetcount'] = u32(packet.start + 20);
       fields['rtcp.sender.octetcount'] = u32(packet.start + 24);
     }

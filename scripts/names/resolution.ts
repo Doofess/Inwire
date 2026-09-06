@@ -113,7 +113,7 @@ function packet(over: Partial<Packet>): Packet {
   nextId = 1;
   const map = new NameResolutionMap();
   map.learnFromPacket(packet({
-    fields: { 'lldp.tlv.system.name': 'sw-core-1', 'lldp.mgn.addr': '10.0.0.1', 'lldp.chassis.id': '00:11:22:33:44:55' },
+    fields: { 'lldp.tlv.system.name': 'sw-core-1', 'lldp.mgn.addr.ip4': '10.0.0.1', 'lldp.chassis.id': '00:11:22:33:44:55' },
   }));
   check('LLDP names its management address', map.hostName('10.0.0.1'), 'sw-core-1');
   check('...and its chassis MAC', map.macName('00:11:22:33:44:55'), 'sw-core-1');

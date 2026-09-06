@@ -218,9 +218,12 @@ const NO_LAYERS_FALLBACK: Record<string, (p: Packet) => boolean> = {
 const UNDISSECTED = [
   // Routing and redundancy, from the reference analyzer's "Routing" and
   // "Checksum Errors" default rules.
-  'hsrp', 'vrrp', 'carp', 'glbp', 'ospf', 'bgp', 'eigrp', 'rip', 'pim', 'isis', 'babel',
-  // Discovery and management.
-  'cdp', 'gvrp', 'ismp', 'vtp', 'dtp', 'edp',
+  // hsrp, vrrp, ospf and rip left this list when they became real layer
+  // tokens; the ones here are the stateful or tunnelling half, which is a
+  // different piece of work - see docs/decisions/0019.
+  'carp', 'glbp', 'bgp', 'eigrp', 'pim', 'isis', 'babel',
+  // Discovery and management. `cdp` left this list - see dissectors/cdp.ts.
+  'gvrp', 'ismp', 'vtp', 'dtp', 'edp',
   // Windows file sharing, from the "SMB" rule.
   // `nbns` was here until it became a real layer token - see dissectors/nbns.ts.
   'smb', 'smb2', 'nbss', 'netbios', 'dcerpc', 'browser',
