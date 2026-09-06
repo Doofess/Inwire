@@ -34,6 +34,7 @@
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { TlsConversationState, TlsRecordCursor } from '../tcpStreamTracker';
+import { applyGapToCursor } from '../tcpStreamTracker';
 import { toHex } from '../addressFormat';
 import { md5Hex } from '../crypto/md5';
 import { sha256 } from '../crypto/sha256';
@@ -836,17 +837,10 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   // which the gap did not move, so what this segment owes it is recomputed
   // from that rather than from the bytes counted so far. A gap that swallowed
   // the record's end leaves nothing to complete; the direction starts over.
-  if (ctx.gap && cursor.remaining > 0) {
-    const owed = (cursor.recordEndSeq - ctx.segmentSeq) | 0;
-    if (owed <= 0) {
-      cursor.remaining = 0; cursor.contributors = []; cursor.contributions = []; cursor.buffer = null; cursor.bufferedBytes = 0;
-    } else {
-      cursor.remaining = owed;
-      cursor.buffer = null; cursor.bufferedBytes = 0; // bytes are missing; nothing to parse
-    }
-  } else if (ctx.gap && cursor.headerPartial.length > 0) {
-    cursor.headerPartial = [];
-  }
+  // The same rule a payload-less segment reporting the same gap applies, and
+  // deliberately the same function: the two paths disagreeing is how a record
+  // came to survive a 671 kB hole on one and not the other.
+  if (ctx.gap) applyGapToCursor(cursor, ctx.segmentSeq);
 
   // 2. The record in progress from earlier segments.
   if (cursor.remaining > 0 && p < end) {

@@ -2326,6 +2326,21 @@ function decodeTransportLayer(
       });
       isKeepAlive = analysis.flags.includes('keep_alive');
       lostSegment = analysis.flags.includes('lost_segment');
+      // A gap has to reach the TLS record cursor even when the segment that
+      // reports it carries no payload, and very often it does not: the frame
+      // that first lands past a hole is frequently a bare ACK. TLS dissection
+      // is gated on `payloadLength > 0`, so on those frames the cursor was
+      // never told, kept waiting for a record whose remaining bytes were never
+      // captured, and swallowed everything that followed into it.
+      //
+      // Measured on the netview fixture: 671,438 bytes go missing between
+      // frames 2884 and 4035, and the gap is reported on frame 3195 - a
+      // zero-length ACK. The reference analyzer abandons the record there and
+      // resynchronises; this build carried it across and attributed some
+      // eleven hundred frames to one impossible record.
+      if (lostSegment && payloadLength === 0 && tcpTracker) {
+        tcpTracker.noteGap(srcIp, srcPort, dstIp, dstPort, seqNum);
+      }
       // `status` still moves, because the list and the display filter read it.
       // What is gone is the pair of `AnomalyInfo` objects that used to be built
       // here: they duplicated the analysis flags that already raise a Loss
