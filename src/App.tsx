@@ -990,6 +990,21 @@ export default function App() {
           await new Promise((resolve) => setTimeout(resolve, 0));
         });
 
+        // A restored session takes the same second pass an import does, and
+        // needs it for the same reason: `restoreBatch` runs on the main thread
+        // and never sees the Worker, so no frame in it was given a direction
+        // and nothing collected what the capture revealed. Without this a
+        // reloaded tab came back with a column of dots over frames whose host
+        // the agent had already named.
+        //
+        // After the loop rather than per chunk: the host inference wants the
+        // whole capture, and re-running it 400 times would be 400 scoring
+        // passes to reach the same answer.
+        // Read through the ref rather than from inside a state updater. An
+        // updater must be pure - StrictMode double-invokes it - and this one
+        // would have started the derive pass twice.
+        deriveForBuffer(packetsRef.current);
+
         // Numbering continues from the restored session rather than restarting
         // at 1 and colliding with packets already in the list.
         packetGenerator.resumeAfter(lastId);
@@ -1909,6 +1924,15 @@ export default function App() {
   // than re-registered on every flush - which, with `filteredPackets` in its
   // dependency list, it was: ten window listener swaps a second for the whole
   // life of a capture.
+  /**
+   * The buffer, for the paths that need to read it outside a render.
+   *
+   * The restore loop finishes after many `setPackets` calls and then wants the
+   * whole result. Reading it from inside a state updater would work and is
+   * wrong: an updater must be pure, because StrictMode invokes it twice.
+   */
+  const packetsRef = useRef(packets);
+  packetsRef.current = packets;
   const filteredPacketsRef = useRef(filteredPackets);
   filteredPacketsRef.current = filteredPackets;
   const selectedPacketRef = useRef(selectedPacket);
@@ -2224,48 +2248,45 @@ export default function App() {
     // is not in the list any more.
     setSelectedPacket(imported.length > 0 ? imported[0] : null);
 
-    // An imported file has no agent to ask who took it, so the host is worked
-    // out from the frames (`services/hostIdentity.ts`) and every frame is then
-    // re-decided. It cannot happen during dissection - the scoring needs the
-    // frames that dissection is producing - so it is a second pass, and a
-    // cheap one: it reads back two dense columns rather than re-dissecting.
-    //
-    // Nothing is inferred when the agent has already said who this machine is.
-    // A file imported on the machine that captured it is the common case, and
-    // a measured identity beats a scored one.
+    deriveForBuffer(imported);
+  };
+
+  /**
+   * Decides direction, and collects what the capture reveals, for a whole
+   * buffer that arrived at once.
+   *
+   * Both paths that fill the buffer without going through the Worker need
+   * this: an **import**, and a **restored session**. Neither can decide
+   * direction while it is dissecting - an imported file has no agent to ask
+   * who took it, and the scoring that answers that needs the very frames the
+   * dissection is producing - so it is a second pass over the finished buffer.
+   *
+   * Cheap, because it re-dissects nothing: it reads back the `eth.src` and
+   * `eth.dst` dense columns and assigns a property. Chunked between animation
+   * frames, because a synchronous pass over a full buffer is the stall ADR
+   * 0015 recorded.
+   */
+  const deriveForBuffer = useCallback((frames: Packet[]) => {
     rederiveRef.current?.();
     rederiveRef.current = null;
-    if (!hostIdentityRef.current.inferred && hostIdentityRef.current.macs.size > 0) {
-      const known = new NetworkFactsCollector();
-      rederiveRef.current = rederiveDirections(imported, hostIdentityRef.current,
-        () => {
-          rederiveRef.current = null;
-          setNetworkFacts(known.snapshot());
-          setPackets((prev) => prev.slice());
-        },
-        (packet, host) => known.observe(packet, host));
-      return;
+    if (frames.length === 0) return;
+
+    // A measured identity beats a scored one, and it is the common case: a
+    // session restored - or a file imported - on the machine that captured it.
+    const known = !hostIdentityRef.current.inferred && hostIdentityRef.current.macs.size > 0;
+    let host = hostIdentityRef.current;
+    if (!known) {
+      const inferred = inferHostIdentity(frames);
+      // NO_HOST rather than bailing out: the gateway needs a host to be sure
+      // of, but the router advertisement, the DHCP server and the LLDP
+      // neighbour are facts about the segment and do not.
+      host = inferred ?? NO_HOST;
+      setHostIdentity(host);
+      hostIdentityRef.current = host;
     }
-    const inferred = inferHostIdentity(imported);
-    setHostIdentity(inferred ?? NO_HOST);
-    hostIdentityRef.current = inferred ?? NO_HOST;
-    // The facts an imported capture reveals about the network it came from.
-    // Collected here rather than in the Worker because an import never goes
-    // near the Worker - and this is the case the Network panel earns its keep
-    // in, since a file from somebody else's network is one you cannot ask.
+
     const collector = new NetworkFactsCollector();
-    const observe = (packet: Packet, host: HostIdentity) => collector.observe(packet, host);
-    if (inferred === null) {
-      // Still worth collecting: the gateway needs a host to be sure of, but
-      // the router advertisement, the DHCP server and the LLDP neighbour are
-      // facts about the segment and do not.
-      rederiveRef.current = rederiveDirections(imported, NO_HOST, () => {
-        rederiveRef.current = null;
-        setNetworkFacts(collector.snapshot());
-      }, observe);
-      return;
-    }
-    rederiveRef.current = rederiveDirections(imported, inferred, () => {
+    rederiveRef.current = rederiveDirections(frames, host, () => {
       rederiveRef.current = null;
       setNetworkFacts(collector.snapshot());
       // A new array, because the frames were mutated in place: React compares
@@ -2273,8 +2294,8 @@ export default function App() {
       // themselves are the same objects, which is the point - every cache in
       // the app keyed on frame identity survives this.
       setPackets((prev) => prev.slice());
-    }, observe);
-  };
+    }, (packet, forHost) => collector.observe(packet, forHost));
+  }, []);
 
   /**
    * The host a user picked by hand, which replaces whatever was inferred.
