@@ -23,6 +23,7 @@ import { hkdfExpandLabel, SHA256, SHA384, tls12Prf } from '../../src/services/cr
 import { cipherSuiteSpec } from '../../src/services/tls/cipherSuites';
 import { decryptRecord, deriveFromKeyLog } from '../../src/services/tls/decrypt';
 import { keyLog, toHex } from '../../src/services/tls/keyLog';
+import { expandKeyCached } from '../../src/services/crypto/aes';
 import { dissectTlsSegment } from '../../src/services/dissectors/tls';
 import { freshTlsConversation, freshTlsCursor } from '../../src/services/tcpStreamTracker';
 import { HTTP2_PREFACE } from '../../src/services/dissectors/http2';
@@ -37,6 +38,7 @@ function check(name: string, actual: unknown, expected: unknown) {
     console.log(`        actual   ${JSON.stringify(actual)}`);
   }
 }
+function checkTrue(name: string, condition: boolean) { check(name, condition, true); }
 
 const bytes = (...values: number[]) => Uint8Array.from(values);
 const filled = (length: number, value: number) => new Uint8Array(length).fill(value);
@@ -376,6 +378,28 @@ function http2ClientFrames(): Uint8Array {
   const opaque = feedClean(first, cleanClient);
   check('with no key log the same record is Application Data', opaque?.info, 'Application Data');
   check('...and no application protocol is claimed', opaque?.appProtocolLabel, undefined);
+}
+
+// --- clearing the key log clears the derived keys ------------------------------
+//
+// `crypto/aes.ts` caches expanded AES schedules in a map keyed by the KEY BYTES
+// themselves. Nothing ever flushed it, so Settings -> Decryption said "Cleared."
+// while up to 64 keys and their schedules stayed in memory for the life of the
+// page - the one place ADR 0008's "key material is transient" was not true.
+//
+// Asserted through the cache's own documented contract - the returned array is
+// shared, so a hit is the SAME object - rather than by exporting a size for the
+// test to read.
+{
+  const key = new Uint8Array(16).fill(0x2b);
+  const first = expandKeyCached(key);
+  checkTrue('a derived schedule is cached, not rebuilt', expandKeyCached(key) === first);
+
+  keyLog.clear();
+
+  const afterClear = expandKeyCached(key);
+  checkTrue('...and clearing the key log drops it', afterClear !== first);
+  check('...having derived the same schedule again', [...afterClear], [...first]);
 }
 
 keyLog.clear();

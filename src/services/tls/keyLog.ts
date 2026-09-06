@@ -30,6 +30,7 @@
  * only: never written to session storage, never included in an export unless
  * the user asks for the Decryption Secrets Block explicitly.
  */
+import { clearDerivedKeys } from '../crypto/aes';
 
 /** The labels a line may carry. Anything else is counted and ignored. */
 const KNOWN_LABELS = new Set([
@@ -142,9 +143,21 @@ export class KeyLogStore {
     return this.lines.length === 0 ? '' : `${this.lines.join('\n')}\n`;
   }
 
+  /**
+   * Forgets every secret.
+   *
+   * `clearDerivedKeys` too, and that is the point rather than tidiness. The
+   * AES cache in `crypto/aes.ts` is keyed by the key bytes themselves and
+   * holds up to 64 expanded schedules; nothing else ever flushed it, so
+   * Settings -> Decryption reported "Cleared." while both the keys and their
+   * schedules stayed in memory for the life of the page. ADR 0008's position
+   * is that key material is transient, and a clear that leaves it behind is
+   * the one place that was not true.
+   */
   public clear(): void {
     this.generation++;
     this.byRandom.clear();
+    clearDerivedKeys();
     this.lines = [];
     this.ignoredLines = 0;
     this.acceptedLines = 0;

@@ -3,6 +3,7 @@ import * as d3 from 'd3';
 import { Packet } from '../../types/packet';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
 import { protocolColor } from '../../services/protocolColors';
+import { formatBytes } from '../../lib/formatBytes';
 
 /**
  * What the capture is made of, drawn three ways.
@@ -65,12 +66,6 @@ interface ProtocolDatum {
 const BAR_COLOR = 'bg-primary';
 
 /** Bytes, at the width a 352px card gives a right-aligned number. */
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)}K`;
-  return `${bytes}B`;
-}
-
 export const ProtocolBreakdown: React.FC<ProtocolBreakdownProps> = ({
   packets,
   metric,
@@ -180,7 +175,7 @@ export const ProtocolBreakdown: React.FC<ProtocolBreakdownProps> = ({
                 <td className="py-1 px-1 text-right text-muted-foreground">
                   {(totalCount > 0 ? (row.count / totalCount) * 100 : 0).toFixed(1)}
                 </td>
-                <td className="py-1 px-1 text-right text-foreground">{formatBytes(row.bytes)}</td>
+                <td className="py-1 px-1 text-right text-foreground">{formatBytes(row.bytes, { compact: true })}</td>
                 <td className="py-1 px-1 text-right text-muted-foreground">
                   {(totalBytes > 0 ? (row.bytes / totalBytes) * 100 : 0).toFixed(1)}
                 </td>

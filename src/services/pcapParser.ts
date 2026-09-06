@@ -1736,18 +1736,6 @@ function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolF
   });
 }
 
-const DSCP_NAMES: Record<number, string> = {
-  0: 'Default (0)', 8: 'CS1 (8)', 10: 'AF11 (10)', 16: 'CS2 (16)', 18: 'AF21 (18)',
-  24: 'CS3 (24)', 26: 'AF31 (26)', 32: 'CS4 (32)', 34: 'AF41 (34)', 40: 'CS5 (40)',
-  46: 'EF PHB (46)', 48: 'CS6 (48)', 56: 'CS7 (56)',
-};
-
-const ECN_NAMES = [
-  'Not ECN-Capable Transport (0)',
-  'ECN-Capable Transport codepoint 1 (1)',
-  'ECN-Capable Transport codepoint 0 (2)',
-  'Congestion Experienced (3)',
-];
 
 /**
  * Traffic Class and the DSCP/ECN pair nested beneath it.
@@ -1755,31 +1743,38 @@ const ECN_NAMES = [
  * All three render at 32 bits even though the class is 8 bits and its parts
  * are 6 and 2: the reference analyzer draws a child at its parent's width so the nested
  * rows line up as one ruler down the column. Verified against `tshark -V`.
+ *
+ * The names come from `dissectors/ipv4.ts`, which is the only copy. There were
+ * two: this file held a private 13-entry `DSCP_NAMES` in a different format
+ * (`'Default (0)'` against `'CS0'`) while the IPv4 branch imported the full
+ * 24-entry table taken from Wireshark's `dscp_vals`. So **nine codepoints -
+ * AF12, AF13, AF22, AF23, AF32, AF33, AF42, AF43 and Voice-Admit - rendered as
+ * a name over IPv4 and as a bare number over IPv6 in the same capture**, and
+ * the ones both tables did carry were spelled differently. `ECN_NAMES` had
+ * diverged the same way. The IPv4 spelling wins because it is the one checked
+ * against the reference analyzer.
  */
 function ipv6TrafficClassFields(rawBytes: Uint8Array, l3Offset: number): ProtocolField[] {
   const trafficClass = ((rawBytes[l3Offset] & 0x0f) << 4) | ((rawBytes[l3Offset + 1] & 0xf0) >> 4);
   const dscp = trafficClass >> 2;
   const ecn = trafficClass & 0x03;
-  const dscpName = DSCP_NAMES[dscp] ?? `${dscp}`;
-  const shortDscp = dscp === 0 ? 'CS0' : (dscpName.split(' ')[0]);
-  const shortEcn = ecn === 0 ? 'Not-ECT' : ECN_NAMES[ecn].split(' ')[0];
 
   return [
     {
       name: 'Traffic Class',
-      value: `0x${trafficClass.toString(16).padStart(2, '0')} (DSCP: ${shortDscp}, ECN: ${shortEcn})`,
+      value: `0x${trafficClass.toString(16).padStart(2, '0')} (DSCP: ${dscpName(dscp)}, ECN: ${ecnName(ecn)})`,
       rawBytesRange: [l3Offset, l3Offset + 3],
       bitfield: { bitOffset: 4, bitLength: 8, totalBits: 32 },
       children: [
         {
           name: 'Differentiated Services Codepoint',
-          value: dscpName,
+          value: `${dscpName(dscp)} (${dscp})`,
           rawBytesRange: [l3Offset, l3Offset + 3],
           bitfield: { bitOffset: 4, bitLength: 6, totalBits: 32 },
         },
         {
           name: 'Explicit Congestion Notification',
-          value: ECN_NAMES[ecn],
+          value: `${ecnName(ecn)} (${ecn})`,
           rawBytesRange: [l3Offset, l3Offset + 3],
           bitfield: { bitOffset: 10, bitLength: 2, totalBits: 32 },
         },

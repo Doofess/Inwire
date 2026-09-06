@@ -3,6 +3,7 @@ import { Packet } from '../../types/packet';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
 import { categoryOfPacket, isFaultCategory } from '../../services/expertInfo';
 import { TbArrowsExchange, TbShieldExclamation } from 'react-icons/tb';
+import { formatBytes } from '../../lib/formatBytes';
 
 export type TalkersView = 'flows' | 'hosts';
 
@@ -177,9 +178,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({
                     toggle - which is the only interactive thing here. Weight
                     carries the hierarchy instead. */}
                 <span className="font-bold">
-                  {conv.totalBytes >= 1024
-                    ? `${(conv.totalBytes / 1024).toFixed(1)}K`
-                    : `${conv.totalBytes}B`}
+                  {formatBytes(conv.totalBytes, { compact: true })}
                 </span>
               </div>
             </div>
@@ -209,7 +208,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({
               <div className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground shrink-0">
                 <span className="opacity-70">{ep.txPkts + ep.rxPkts} pkts</span>
                 <span className="font-bold">
-                  {ep.bytes >= 1024 ? `${(ep.bytes / 1024).toFixed(1)}K` : `${ep.bytes}B`}
+                  {formatBytes(ep.bytes, { compact: true })}
                 </span>
               </div>
             </div>

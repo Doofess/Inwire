@@ -26,6 +26,7 @@ import { FilterBar } from '../common/FilterBar';
 import { Switch } from '../ui/switch';
 import { buildPdfReport } from './pdfReport';
 import { useHydratedBytes } from '../../lib/useHydratedBytes';
+import { formatBytes } from '../../lib/formatBytes';
 
 /**
  * The Export half of the Import/Export centre.
@@ -51,12 +52,6 @@ interface ExportPanelProps {
    * the number beside the capture button.
    */
   captureStats?: CaptureDropStats | null;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 type FormatId = 'pcap' | 'pcapng' | 'json' | 'csv' | 'xlsx' | 'pdf';
