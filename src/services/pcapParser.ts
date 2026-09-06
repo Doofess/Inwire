@@ -37,6 +37,8 @@ import type { TcpAnalysis } from './dissect/tcpAnalysis';
 import { LINKTYPE } from './dissect/types';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dissectors/dns';
 import { dissectNbns } from './dissectors/nbns';
+import { dissectSyslog } from './dissectors/syslog';
+import { dissectRadius } from './dissectors/radius';
 import { DnsTracker } from './dnsTracker';
 import { dissectQuicDatagram } from './dissectors/quic';
 import { buildQuicTlsLayer } from './dissectors/tls';
@@ -665,6 +667,8 @@ function collectExpert(
 const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Frame': 'frame',
   'NetBIOS Name Service': 'nbns',
+  'Syslog message': 'syslog',
+  'RADIUS Protocol': 'radius',
   'Transport Layer Security': 'tls',
   'Hypertext Transfer Protocol': 'http',
   'HyperText Transfer Protocol 2': 'http2',
@@ -2633,6 +2637,28 @@ function decodeTransportLayer(
         info = dhcp.info;
         extraLayers.push(dhcp.layer);
         Object.assign(dhcpFields, dhcp.fields);
+      }
+    } else if (srcPort === 514 || dstPort === 514) {
+      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+      const syslog = dissectSyslog(rawBytes, udpPayloadStart, payloadEnd);
+      if (syslog) {
+        protocolLabel = syslog.protocolLabel;
+        info = syslog.info;
+        extraLayers.push(syslog.layer);
+        protocolTokens.push('syslog');
+        Object.assign(appFields, syslog.fields);
+      }
+    } else if (srcPort === 1812 || dstPort === 1812 || srcPort === 1813 || dstPort === 1813
+      || srcPort === 1645 || dstPort === 1645 || srcPort === 1646 || dstPort === 1646) {
+      // 1645/1646 are the pre-standard ports a lot of kit still ships with.
+      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+      const radius = dissectRadius(rawBytes, udpPayloadStart, payloadEnd);
+      if (radius) {
+        protocolLabel = radius.protocolLabel;
+        info = radius.info;
+        extraLayers.push(radius.layer);
+        protocolTokens.push('radius');
+        Object.assign(appFields, radius.fields);
       }
     } else if (nbnsPort) {
       const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
