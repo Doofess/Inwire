@@ -62,6 +62,18 @@ const CT_CHANGE_CIPHER_SPEC = 20;
 const CT_ALERT = 21;
 const CT_HANDSHAKE = 22;
 const CT_APPLICATION_DATA = 23;
+/**
+ * The highest content type that counts as a record header.
+ *
+ * 24 (Heartbeat) was the ceiling here, which is every type this build decodes -
+ * and that is the wrong question. The ceiling decides what may *resynchronise*
+ * a stream, not what may be read, and the reference analyzer's
+ * `ssl_is_valid_content_type` runs to 26: 25 is `tls12_cid` (RFC 9146) and 26
+ * is the DTLS 1.3 ACK. Stopping at 24 meant a record this build cannot decode
+ * could not even end the desynchronised region it began, so the stream stayed
+ * lost and every following segment came back `Ignored Unknown Record`.
+ */
+const CT_MAX = 26;
 
 /** A record body larger than this is not buffered for parsing - nothing in a hello needs it. */
 const MAX_BUFFERED_RECORD = 65536;
@@ -124,7 +136,7 @@ function readRecordHeader(b: Uint8Array, p: number, strict: boolean): RecordHead
   const contentType = b[p];
   const version = (b[p + 1] << 8) | b[p + 2];
   const length = (b[p + 3] << 8) | b[p + 4];
-  if (contentType < CT_CHANGE_CIPHER_SPEC || contentType > 24) return null;
+  if (contentType < CT_CHANGE_CIPHER_SPEC || contentType > CT_MAX) return null;
   if (strict && (TLS_VERSION_NAMES[version] === undefined || length === 0 || length > 0x4800)) return null;
   return { contentType, version, length };
 }

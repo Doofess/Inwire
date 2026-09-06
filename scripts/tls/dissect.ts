@@ -138,6 +138,51 @@ function segment(bytes: Uint8Array, frameId: number, cursor: ReturnType<typeof f
 }
 
 {
+  // A content type this build does not decode still has to END a record.
+  //
+  // The ceiling on a valid record header was 24 (Heartbeat) - every type this
+  // build renders - and that is the wrong question to ask. The ceiling decides
+  // what may **resynchronise** a stream, not what may be read. The reference
+  // analyzer's `ssl_is_valid_content_type` runs to 26: 25 is `tls12_cid`
+  // (RFC 9146), 26 the DTLS 1.3 ACK.
+  //
+  // Rejecting them meant such a record could not close the desynchronised
+  // region it opened, so the direction stayed lost and every following segment
+  // came back `Ignored Unknown Record`. Measured over the two fixtures, that
+  // one comparison was **632 Protocol and 632 Info mismatches**: netview
+  // Protocol 96.16 -> 99.49%, Info 94.93 -> 98.86%.
+  for (const contentType of [25, 26]) {
+    const conv = freshTlsConversation();
+    conv.negotiatedVersion = 0x0303;
+    const cursor = freshTlsCursor();
+    // Establish the direction as TLS first, so the strict check is off and the
+    // content type is the only thing under test.
+    segment(new Uint8Array([23, 3, 3, 0, 2, 0xaa, 0xbb]), 1, cursor, conv);
+    // Then a record of the undecoded type, split so it can only complete if the
+    // header was accepted and its length believed.
+    const record = new Uint8Array(5 + 40);
+    record.set([contentType, 3, 3, 0, 40]);
+    const first = segment(record.subarray(0, 20), 2, cursor, conv);
+    check(`content type ${contentType} opens a record`, first.kind, 'continuation');
+    const rest = segment(record.subarray(20), 3, cursor, conv);
+    check(`...and completing it does not desynchronise the stream`, rest.kind, 'tls');
+    // The stream is back at a boundary, so an ordinary record after it reads
+    // normally rather than as an ignored one.
+    const after = segment(new Uint8Array([23, 3, 3, 0, 3, 1, 2, 3]), 4, cursor, conv);
+    check(`...leaving the next Application Data readable`,
+      after.kind === 'tls' && !after.result.info.includes('Ignored'), true);
+  }
+  // 27 is not assigned and must still be refused, or this is not a ceiling.
+  const conv = freshTlsConversation();
+  conv.negotiatedVersion = 0x0303;
+  const cursor = freshTlsCursor();
+  segment(new Uint8Array([23, 3, 3, 0, 2, 0xaa, 0xbb]), 1, cursor, conv);
+  const unassigned = segment(new Uint8Array([27, 3, 3, 0, 3, 1, 2, 3]), 2, cursor, conv);
+  check('content type 27 is still not a record header',
+    unassigned.kind === 'tls' && unassigned.result.info.includes('Ignored'), true);
+}
+
+{
   // The case the whole file exists for: a 4,118-byte Application Data record
   // over three 1,428-byte segments (2 -> 3 -> 4), then a second record.
   const conv = freshTlsConversation();
