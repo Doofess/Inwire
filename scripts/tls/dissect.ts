@@ -111,6 +111,49 @@ function segment(bytes: Uint8Array, frameId: number, cursor: ReturnType<typeof f
   return dissectTlsSegment(bytes, 0, bytes.length, { frameId, cursor, conversation: conv, inOrder: true, segmentSeq: frameId * 100000, gap: false });
 }
 
+/** A segment at an explicit sequence number, optionally reporting a capture gap. */
+function segmentAt(bytes: Uint8Array, frameId: number, seq: number, gap: boolean,
+  cursor: ReturnType<typeof freshTlsCursor>, conv: ReturnType<typeof freshTlsConversation>) {
+  return dissectTlsSegment(bytes, 0, bytes.length, { frameId, cursor, conversation: conv, inOrder: true, segmentSeq: seq, gap });
+}
+
+{
+  // A record with a HOLE in it does not complete as a record.
+  //
+  // The record's end is a sequence number and a gap does not move it, so a
+  // holed record still knows where it finishes - and that is all it knows.
+  // Part of the body was never captured, so there is no record to show and no
+  // frame to credit; the direction resynchronises at the end sequence and says
+  // nothing about what came before.
+  //
+  // Getting this wrong is not a missing tag but an invented one. Before this,
+  // the record completed anyway: thirty consecutive netview frames were tagged
+  // `[TCP PDU reassembled in 1450]` for a PDU that never existed, and the bytes
+  // that would have resynchronised the direction were consumed by it.
+  const conv = freshTlsConversation();
+  conv.negotiatedVersion = 0x0303;
+  const cursor = freshTlsCursor();
+  // Establish the direction as TLS, then open a 400-byte record at seq 1000
+  // whose header and first 100 bytes are present.
+  segmentAt(new Uint8Array([23, 3, 3, 0, 2, 0xaa, 0xbb]), 1, 993, false, cursor, conv);
+  const head = new Uint8Array(105);
+  head.set([23, 3, 3, 1, 0x90]);
+  check('a record that outruns its segment is a continuation',
+    segmentAt(head, 2, 1000, false, cursor, conv).kind, 'continuation');
+  // 200 bytes go missing; the next segment lands at the record's last 100 and
+  // reports the gap. The record's end (1005 + 400 = 1405) is still ahead, so
+  // the span survives - but its body never will be.
+  const tail = segmentAt(new Uint8Array(100), 3, 1305, true, cursor, conv);
+  check('...and completing it across an unfilled hole yields no record', tail.kind, 'none');
+  check('...crediting no frame with a PDU that never existed',
+    tail.kind === 'none', true);
+  // The direction resynchronised exactly at the record's end, so an ordinary
+  // record starting there reads normally rather than as an ignored one.
+  const after = segmentAt(new Uint8Array([23, 3, 3, 0, 3, 1, 2, 3]), 4, 1405, false, cursor, conv);
+  check('...and the next record at the end sequence reads normally',
+    after.kind === 'tls' && after.result.info, 'Application Data');
+}
+
 {
   // A whole handshake in one segment.
   const conv = freshTlsConversation();

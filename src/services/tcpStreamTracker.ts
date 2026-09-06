@@ -41,6 +41,17 @@ export interface TlsRecordCursor {
    * PDU open across the gap and completes it when the end sequence arrives.
    */
   recordEndSeq: number;
+  /**
+   * True when a capture gap opened inside the record in progress and the bytes
+   * it swallowed have not turned up since.
+   *
+   * The record's END is a sequence number and a gap does not move it, so a
+   * holed record still knows exactly where it finishes - it just cannot be
+   * shown, because part of its body was never captured. Keeping the two facts
+   * apart is what lets the direction resynchronise at the right byte while
+   * refusing to claim the record or the frames that carried it.
+   */
+  holed: boolean;
   /** Frames that carried the record in progress and completed nothing of their own. */
   contributors: number[];
   /** Byte counts per frame, for the "[Reassembled TCP segments]" note. */
@@ -125,7 +136,7 @@ export interface TlsConversationState {
 export function freshTlsCursor(): TlsRecordCursor {
   return {
     remaining: 0, headerPartial: [], contentType: 0, version: 0, recordLength: 0,
-    contributors: [], contributions: [], buffer: null, bufferedBytes: 0, unknown: true, encrypted: false,
+    contributors: [], contributions: [], buffer: null, bufferedBytes: 0, unknown: true, encrypted: false, holed: false,
     recordEndSeq: 0, role: 'unknown', readOnly: false, epoch: 0, recordSeq: 0,
   };
 }
@@ -157,8 +168,16 @@ export function applyGapToCursor(cursor: TlsRecordCursor, segmentSeq: number): v
       cursor.remaining = 0;
       cursor.contributors = [];
       cursor.contributions = [];
+      cursor.holed = false;
     } else {
+      // The end is still ahead, so the record survives as a SPAN - this build
+      // knows which byte finishes it and can resynchronise there. What it can
+      // no longer do is show the record or credit the frames that carried it,
+      // because the bytes in the hole were never captured. `holed` carries that
+      // second fact; before it existed the record completed anyway and every
+      // segment behind it was tagged as part of a PDU nobody could read.
       cursor.remaining = owed;
+      cursor.holed = true;
     }
   } else if (cursor.headerPartial.length > 0) {
     cursor.headerPartial = [];
