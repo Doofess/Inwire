@@ -287,21 +287,3 @@ export function hostFromAdapters(adapters: readonly AgentAdapter[]): HostIdentit
   if (macs.size === 0 && addresses.size === 0) return null;
   return { macs, addresses, inferred: false, confidence: 1 };
 }
-
-/**
- * The identity a user chose by hand, which is never second-guessed.
- *
- * An override is not a hint to the scorer - it is the answer. Someone who has
- * told the app which machine took the capture knows something it does not, and
- * blending that with a score would produce a third answer neither of them
- * asked for.
- */
-export function overrideHostIdentity(mac: string, addresses: Iterable<string> = []): HostIdentity {
-  return {
-    macs: new Set([mac.toLowerCase()]),
-    addresses: new Set(addresses),
-    inferred: true,
-    confidence: 1,
-    basis: 'you chose this host',
-  };
-}

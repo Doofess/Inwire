@@ -206,9 +206,6 @@ export type PacketDecryptor = (
   kind: QuicPacketKind
 ) => { packetNumber: number; payload: Uint8Array } | null;
 
-/** The name it had when Initial packets were the only ones anything could open. */
-export type InitialDecryptor = PacketDecryptor;
-
 /** One STREAM frame's contribution to a QUIC stream. */
 export interface StreamFragment {
   streamId: number;

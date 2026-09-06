@@ -28,8 +28,6 @@ import { contrastRatio, isDarkColor, labToHex, legibleOn, toLabColor } from '../
  * drifted, so the copy in the stylesheet cannot rot.
  */
 
-export type StatusName = 'success' | 'warning' | 'danger';
-
 export interface StatusColors {
   /** The solid fill: a button, a status dot. */
   success: string;

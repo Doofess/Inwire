@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Packet, UserRolePermissions } from '../../types/packet';
+import { Packet, Capabilities } from '../../types/packet';
 import { virtualWindow } from '../../lib/virtualWindow';
 import {
   Direction, DirectionSignal, DIRECTION_GLYPH, DIRECTION_LABEL, SIGNAL_LABEL,
@@ -97,7 +97,7 @@ interface PacketListProps {
    */
   droppedBuffer?: number;
   colorEngine: ColorRulesEngine;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
   /** Colors for the list itself. Independent of the app theme by design -
    *  see services/packetThemes. */
   packetTheme: PacketTheme;

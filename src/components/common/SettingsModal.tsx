@@ -14,7 +14,7 @@ import { DisplayFiltersPanel } from './DisplayFiltersPanel';
 import { ColorRulesPanel } from './ColorRulesPanel';
 import { DecryptionSettingsPanel } from './DecryptionSettingsPanel';
 import type { AgentLogEntry } from '../../services/agentProtocol';
-import type { ColorRule, FilterPresetLibrary, UserRolePermissions } from '../../types/packet';
+import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/packet';
 import type { PacketTheme } from '../../services/packetThemes';
 
 // Mirrors AUTO_PAUSE_AT in App.tsx, purely for the explanatory copy below.
@@ -84,7 +84,7 @@ interface SettingsModalProps {
   onColorRulesChange: (rules: ColorRule[]) => void;
   /** The active packet theme, so a rule previews in the colours it will use. */
   packetTheme: PacketTheme;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   agentVersion: string | null;
   agentOutdated: boolean;

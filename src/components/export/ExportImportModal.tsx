@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { TbDownload, TbUpload, TbX } from 'react-icons/tb';
 
-import { FilterPresetLibrary, Packet, UserRolePermissions } from '../../types/packet';
+import { FilterPresetLibrary, Packet, Capabilities } from '../../types/packet';
 import { ImportFailure } from '../../services/exportSchema';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import type { CaptureDropStats } from '../../services/agentProtocol';
@@ -24,7 +24,7 @@ interface ExportImportModalProps {
   packets: Packet[];
   onImportPackets: (imported: Packet[]) => void;
   onClose: () => void;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
   isDark: boolean;
   /** The filter active in the main window, which the export filter starts from. */
   appliedFilter: string;

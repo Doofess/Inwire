@@ -199,10 +199,6 @@ function hmac(
   return hash(outer);
 }
 
-export function hmacSha512(key: Uint8Array, message: Uint8Array): Uint8Array {
-  return hmac(sha512, SHA512_DIGEST_LENGTH, key, message);
-}
-
 export function hmacSha384(key: Uint8Array, message: Uint8Array): Uint8Array {
   return hmac(sha384, SHA384_DIGEST_LENGTH, key, message);
 }

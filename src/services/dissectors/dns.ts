@@ -19,15 +19,6 @@ import {
 export { parseDnsMessage, dnsInfoLine } from './dnsRecords';
 export type { DnsMessage, DnsRecord } from './dnsRecords';
 
-/**
- * The Info column. Returns null when the bytes are not DNS, so the caller can
- * fall back to a plain UDP summary.
- */
-export function dissectDns(bytes: Uint8Array, messageStart: number, multicast = false): string | null {
-  const msg = parseDnsMessage(bytes, messageStart);
-  return msg === null ? null : dnsInfoLine(msg, multicast);
-}
-
 /** Seconds as Wireshark writes a TTL: `4500 (1 hour, 15 minutes)`. */
 function describeTtl(ttl: number): string {
   if (ttl === 0) return '0';

@@ -10,7 +10,7 @@ import {
   TbShield,
 } from 'react-icons/tb';
 
-import { FilterPresetLibrary, Packet, UserRolePermissions } from '../../types/packet';
+import { FilterPresetLibrary, Packet, Capabilities } from '../../types/packet';
 import { FilterEngine } from '../../services/filterEngine';
 import { estimateRawBytesSize } from '../../services/exportSchema';
 import { PcapService } from '../../services/pcapParser';
@@ -42,7 +42,7 @@ interface ExportPanelProps {
   /** The filter active in the main window, used as the starting point. */
   initialFilter: string;
   filterPresetLibrary: FilterPresetLibrary;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
   isDark: boolean;
   /**
    * What the driver and the agent dropped during this capture, for the

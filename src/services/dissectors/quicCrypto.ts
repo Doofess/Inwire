@@ -157,26 +157,6 @@ export interface DecryptedPacket {
 }
 
 /**
- * Removes header protection and decrypts one Initial packet's payload.
- *
- * `packetStart` points at the packet's first byte, `pnOffset` at its packet
- * number field (i.e. just past the Length varint), and `packetEnd` at the byte
- * after its final one. Returns null whenever anything fails to line up -
- * including a failed authentication tag, which is the honest answer when the
- * keys are wrong, and keeps a wrong guess from rendering as plausible frames.
- */
-export function decryptInitialPacket(
-  bytes: Uint8Array,
-  packetStart: number,
-  pnOffset: number,
-  packetEnd: number,
-  keys: DirectionKeys,
-  largestPacketNumber: number
-): DecryptedPacket | null {
-  return decryptQuicPacket(bytes, packetStart, pnOffset, packetEnd, keys, largestPacketNumber, true);
-}
-
-/**
  * Removes header protection and decrypts one packet's payload, long header or
  * short.
  *

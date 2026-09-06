@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { CustomDissectorRule, CustomDissectorFieldDef, UserRolePermissions } from '../../types/packet';
+import { CustomDissectorRule, CustomDissectorFieldDef, Capabilities } from '../../types/packet';
 import { CustomDissectorEngine } from '../../services/customDissectorEngine';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import {
@@ -19,7 +19,7 @@ interface CustomDissectorModalProps {
   dissectorEngine: CustomDissectorEngine;
   onUpdateDissectors: () => void;
   onClose: () => void;
-  permissions: UserRolePermissions;
+  permissions: Capabilities;
 }
 
 export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
