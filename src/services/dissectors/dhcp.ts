@@ -122,7 +122,7 @@ export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResu
         const list = Array.from(b.subarray(v, v + len));
         result.parameterRequestList = list;
         value = list.map((c) => `${OPTION_NAMES[c] ?? 'Unknown'} (${c})`).join(', ');
-        fields['dhcp.option.request_list'] = list.join(',');
+        fields['dhcp.option.request_list_item'] = list.join(',');
         break;
       }
       case 57: value = String((b[v] << 8) | b[v + 1]); break;

@@ -163,23 +163,23 @@ export function dissectSip(bytes: Uint8Array, start: number, end: number): SipRe
   const set = (key: string, value: string | undefined) => {
     if (value !== undefined && value.length > 0) fields[key] = value;
   };
-  set('sip.from', header('from'));
-  set('sip.to', header('to'));
-  set('sip.call_id', header('call-id'));
-  set('sip.user_agent', header('user-agent'));
+  set('sip.From', header('from'));
+  set('sip.To', header('to'));
+  set('sip.Call-ID', header('call-id'));
+  set('sip.User-Agent', header('user-agent'));
 
   // The CSeq is `<number> <METHOD>`, and its method is what lets a response
   // name the request it answers without any transaction state.
   const cseq = header('cseq');
   const cseqMethod = cseq?.trim().split(/\s+/)[1];
-  if (cseq) fields['sip.cseq'] = cseq;
+  if (cseq) fields['sip.CSeq'] = cseq;
 
   if (message.kind === 'request') {
-    fields['sip.method'] = message.method!;
-    if (message.uri) fields['sip.r_uri'] = message.uri;
+    fields['sip.Method'] = message.method!;
+    if (message.uri) fields['sip.r-uri'] = message.uri;
   } else {
-    fields['sip.status_code'] = message.status!;
-    if (message.reason) fields['sip.reason_phrase'] = message.reason;
+    fields['sip.Status-Code'] = message.status!;
+    if (message.reason) fields['sip.Reason-Phrase'] = message.reason;
   }
 
   const headerRows: ProtocolField[] = message.headers.map((h) => ({
@@ -195,16 +195,16 @@ export function dissectSip(bytes: Uint8Array, start: number, end: number): SipRe
         name: 'Request-Line',
         value: startLine.text,
         children: [
-          { name: 'Method', value: message.method!, abbrev: 'sip.method' },
-          { name: 'Request-URI', value: message.uri ?? '', abbrev: 'sip.r_uri' },
+          { name: 'Method', value: message.method!, abbrev: 'sip.Method' },
+          { name: 'Request-URI', value: message.uri ?? '', abbrev: 'sip.r-uri' },
         ],
       }
     : {
         name: 'Status-Line',
         value: startLine.text,
         children: [
-          { name: 'Status-Code', value: message.status!, abbrev: 'sip.status_code' },
-          { name: 'Reason-Phrase', value: message.reason ?? '', abbrev: 'sip.reason_phrase' },
+          { name: 'Status-Code', value: message.status!, abbrev: 'sip.Status-Code' },
+          { name: 'Reason-Phrase', value: message.reason ?? '', abbrev: 'sip.Reason-Phrase' },
         ],
       };
 
@@ -228,11 +228,11 @@ export function dissectSip(bytes: Uint8Array, start: number, end: number): SipRe
 /** Which registry name a header publishes under, for the rows that have one. */
 function headerAbbrev(lower: string): string | undefined {
   switch (lower) {
-    case 'from': return 'sip.from';
-    case 'to': return 'sip.to';
-    case 'call-id': return 'sip.call_id';
-    case 'cseq': return 'sip.cseq';
-    case 'user-agent': return 'sip.user_agent';
+    case 'from': return 'sip.From';
+    case 'to': return 'sip.To';
+    case 'call-id': return 'sip.Call-ID';
+    case 'cseq': return 'sip.CSeq';
+    case 'user-agent': return 'sip.User-Agent';
     default: return undefined;
   }
 }

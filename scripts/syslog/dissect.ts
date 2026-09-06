@@ -91,7 +91,7 @@ async function main(): Promise<void> {
   const { packet } = decodeRawEthernetPacket(frame, 1, 1_700_000_000_000_000, 0, 0, frame.length);
   check('the RADIUS protocol chain is right',
     packet.frameProtocols, ['frame', 'eth', 'ip', 'udp', 'radius']);
-  check('the user name is published', packet.fields?.['radius.username'], 'alice');
+  check('the user name is published', packet.fields?.['radius.User_Name'], 'alice');
   check('the identifier is published', packet.fields?.['radius.id'], 42);
 
   const radiusLayer = packet.layers.find((l) => l.name === 'RADIUS Protocol');

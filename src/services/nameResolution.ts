@@ -152,7 +152,7 @@ export class NameResolutionMap {
     // is the one that name belongs to.
     const lldpName = fieldValue(packet, 'lldp.tlv.system.name');
     if (typeof lldpName === 'string') {
-      const mgmt = fieldValue(packet, 'lldp.mgn.addr');
+      const mgmt = fieldValue(packet, 'lldp.mgn.addr.ip4');
       if (typeof mgmt === 'string') this.learn(mgmt, lldpName, 'lldp', frame);
       const chassis = fieldValue(packet, 'lldp.chassis.id');
       if (typeof chassis === 'string') this.learn(chassis, lldpName, 'lldp', frame, 'mac');

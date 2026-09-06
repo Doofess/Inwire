@@ -113,8 +113,8 @@ export function walkIpv6Extensions(
       const more = (offsetAndFlags & 1) === 1;
       const id = ((b[p + 4] << 24) | (b[p + 5] << 16) | (b[p + 6] << 8) | b[p + 7]) >>> 0;
       fields.push(
-        { name: 'Offset', value: fragOffset * 8, rawBytesRange: [p + 2, p + 3], abbrev: 'ipv6.fragment.offset' },
-        { name: 'More Fragments', value: more ? 'Yes' : 'No', rawBytesRange: [p + 3, p + 3], abbrev: 'ipv6.fragment.more' },
+        { name: 'Offset', value: fragOffset * 8, rawBytesRange: [p + 2, p + 3], abbrev: 'ipv6.fraghdr.offset' },
+        { name: 'More Fragments', value: more ? 'Yes' : 'No', rawBytesRange: [p + 3, p + 3], abbrev: 'ipv6.fraghdr.more' },
         { name: 'Identification', value: `0x${id.toString(16).padStart(8, '0')}`, rawBytesRange: [p + 4, p + 7] },
       );
       out.fragmentOffset = fragOffset * 8;

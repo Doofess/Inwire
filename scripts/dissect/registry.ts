@@ -64,12 +64,22 @@ const written = new Set<string>();
 const writersByKey = new Map<string, string[]>();
 for (const file of DISSECTION_SOURCES) {
   const text = readFileSync(file, 'utf8');
-  for (const m of text.matchAll(/'([a-z][a-z0-9_]*\.[a-z0-9_.]+)'/g)) {
+  // The tail allows upper case for the same reason the identifier check below
+  // does: `ptp.v2.mm.managementId` is the reference analyzer's own spelling.
+  for (const m of text.matchAll(/'([a-z][a-z0-9_]*\.[A-Za-z0-9_.-]+)'/g)) {
     const key = m[1];
     if (NOT_FIELDS.has(key)) continue;
     // Something like 'e.g.' or a file name is not a field: require the last
     // segment to be a plausible identifier and the first to be a layer token.
-    if (!/^[a-z][a-z0-9_]*$/.test(key.split('.').at(-1) ?? '')) continue;
+    //
+    // Upper case and hyphens are both allowed, because the reference analyzer
+    // uses both: `sip.Call-ID`, `sip.Method`, `radius.User_Name` and
+    // `ptp.v2.mm.managementId` are all real field names. An abbrev has to match
+    // Wireshark's spelling rather than a convention of ours, so this cannot be
+    // narrowed to what looks tidy. What still excludes `e.g.` and a file name
+    // is the layer-token check immediately below - `e` and `packet` are not
+    // layer tokens - which is a stronger filter than the shape of the tail.
+    if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(key.split('.').at(-1) ?? '')) continue;
     // `inwire.` is the prefix for a field with no Wireshark equivalent, and it
     // is not a layer token - the registry's own naming rule already allows it,
     // so the scanner has to as well or such a field reads as "registered with

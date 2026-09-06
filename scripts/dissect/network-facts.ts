@@ -191,7 +191,7 @@ const collect = (packets: Packet[]) => {
 
   const switchAd = collect([frame(['eth', 'lldp'], {
     'eth.src': STRANGER, 'lldp.port.id': 'GigabitEthernet0/1',
-    'lldp.tlv.system.name': 'sw-core-01', 'lldp.mgn.addr': '10.0.0.2',
+    'lldp.tlv.system.name': 'sw-core-01', 'lldp.mgn.addr.ip4': '10.0.0.2',
   })]).snapshot();
   check('a real switch is a neighbour', switchAd.neighbour?.systemName, 'sw-core-01');
   check('...with the port it told us', switchAd.neighbour?.portId, 'GigabitEthernet0/1');

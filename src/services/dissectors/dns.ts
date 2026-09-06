@@ -82,12 +82,12 @@ function rdataFields(r: DnsRecord): ProtocolField[] {
     case 64: case 65:
       if (r.svcb) {
         out.push(
-          { name: 'SvcPriority', value: r.svcb.priority, rawBytesRange: [r.rdataStart, r.rdataStart + 1], abbrev: 'dns.svcb.priority' },
+          { name: 'SvcPriority', value: r.svcb.priority, rawBytesRange: [r.rdataStart, r.rdataStart + 1], abbrev: 'dns.svcb.svcpriority' },
           { name: 'TargetName', value: r.svcb.target, rawBytesRange: range },
           ...r.svcb.params.map((param): ProtocolField => ({
             name: `SvcParam: ${param.name}${param.value ? `=${param.value}` : ''}`,
             value: '', rawBytesRange: range,
-            ...(param.key === 1 ? { abbrev: 'dns.svcb.alpn' } : {}),
+            ...(param.key === 1 ? { abbrev: 'dns.svcb.svcparam.alpn' } : {}),
             ...(param.key === 5 ? { description: 'This name supports Encrypted Client Hello, so its TLS handshakes hide the real server name.' } : {}),
           })),
         );

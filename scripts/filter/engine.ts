@@ -245,9 +245,13 @@ check('an undissected protocol is a warning, not an error', {
   valid: FilterEngine.validateFilter('dcerpc', { strict: true }).isValid,
   warnings: FilterEngine.validateFilter('dcerpc', { strict: true }).warnings?.length,
 }, { valid: true, warnings: 1 });
+// `ospf.msg` stood here until OSPF became a real layer token, at which point
+// this asserted the opposite of what it means to. Named a protocol that is
+// still genuinely undissected instead - and one that is not close to being
+// dissected, since a stateful TCP protocol is a different piece of work.
 check('...and so is a field belonging to one', {
-  valid: FilterEngine.validateFilter('ospf.msg != 1').isValid,
-  warnings: FilterEngine.validateFilter('ospf.msg != 1').warnings?.length,
+  valid: FilterEngine.validateFilter('bgp.type != 1').isValid,
+  warnings: FilterEngine.validateFilter('bgp.type != 1').warnings?.length,
 }, { valid: true, warnings: 1 });
 check('a typo is still an error, not a warning',
   FilterEngine.validateFilter('ospg.msg != 1').isValid, false);

@@ -120,7 +120,7 @@ async function main(): Promise<void> {
   // --- the CSeq method, which is what names the answered request ---------------
   const okResult = dissectSip(ok, 0, ok.length);
   check('a response names the request it answers', okResult?.info, 'Status: 200 OK (INVITE) | ');
-  check('...from the CSeq header', okResult?.fields['sip.cseq'], '314159 INVITE');
+  check('...from the CSeq header', okResult?.fields['sip.CSeq'], '314159 INVITE');
   // A response with no CSeq must not invent one, nor print an empty bracket.
   const noCseq = crlf('SIP/2.0 200 OK', VIA, CALL_ID, 'Content-Length: 0', '', '');
   check('a response with no CSeq names no method',
@@ -130,14 +130,14 @@ async function main(): Promise<void> {
   const frame = udpFrame(5060, 5060, invite);
   const { packet } = decodeRawEthernetPacket(frame, 1, 1_700_000_000_000_000, 0, 0, frame.length);
   check('the protocol chain is right', packet.frameProtocols, ['frame', 'eth', 'ip', 'udp', 'sip']);
-  check('the method is published', packet.fields?.['sip.method'], 'INVITE');
-  check('the request URI is published', packet.fields?.['sip.r_uri'], 'sip:bob@example.com');
+  check('the method is published', packet.fields?.['sip.Method'], 'INVITE');
+  check('the request URI is published', packet.fields?.['sip.r-uri'], 'sip:bob@example.com');
   // The Call-ID ties every frame of one call together, which is the filter
   // anybody reading a capture of a call actually types.
-  check('the Call-ID is published', packet.fields?.['sip.call_id'], 'a84b4c76e66710');
+  check('the Call-ID is published', packet.fields?.['sip.Call-ID'], 'a84b4c76e66710');
   check('the From header is published',
-    packet.fields?.['sip.from'], 'Alice <sip:alice@example.com>;tag=1928301774');
-  check('the User-Agent is published', packet.fields?.['sip.user_agent'], 'Inwire-Test/1.0');
+    packet.fields?.['sip.From'], 'Alice <sip:alice@example.com>;tag=1928301774');
+  check('the User-Agent is published', packet.fields?.['sip.User-Agent'], 'Inwire-Test/1.0');
 
   const layer = packet.layers.find((l) => l.name === 'Session Initiation Protocol');
   check('the tree carries a SIP layer', layer !== undefined, true);
