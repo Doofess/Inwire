@@ -787,12 +787,28 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   let p = start;
 
   const completeSpanning = (): void => {
-    const body = cursor.buffer ? concat(cursor.buffer, cursor.bufferedBytes) : null;
-    completed.push({
-      contentType: cursor.contentType, version: cursor.version, length: cursor.recordLength,
-      body, reassembledFrom: [...cursor.contributors], contributions: [...cursor.contributions], description: '',
-    });
+    // A record with a hole in it does not complete as a record.
+    //
+    // Reaching its end sequence means the direction can resynchronise here, and
+    // nothing more: part of the body was never captured, so there is no record
+    // to show and no frame to credit. Emitting nothing is what the reference
+    // does - it prints the plain TCP summary on the frame that would have
+    // finished the record, and on every segment that fed it.
+    //
+    // Getting this wrong is not a missing tag, it is an invented one. Carrying
+    // a record across an unfilled hole tagged thirty consecutive netview frames
+    // `[TCP PDU reassembled in 1450]` for a PDU that never existed, and
+    // consumed the bytes that would have resynchronised the direction, so the
+    // error propagated well past the frames that showed it.
+    if (!cursor.holed) {
+      const body = cursor.buffer ? concat(cursor.buffer, cursor.bufferedBytes) : null;
+      completed.push({
+        contentType: cursor.contentType, version: cursor.version, length: cursor.recordLength,
+        body, reassembledFrom: [...cursor.contributors], contributions: [...cursor.contributions], description: '',
+      });
+    }
     cursor.remaining = 0; cursor.contributors = []; cursor.contributions = []; cursor.buffer = null; cursor.bufferedBytes = 0;
+    cursor.holed = false;
   };
 
   const startSpanning = (h: RecordHeader, bodyStart: number): void => {
@@ -802,6 +818,8 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     cursor.recordEndSeq = (ctx.segmentSeq + (bodyStart - start) + h.length) >>> 0;
     cursor.contributions = [{ frame, bytes: avail }];
     cursor.contributors = [];
+    // A new record inherits nothing from the one that went before it.
+    cursor.holed = false;
     // Handshake records are always buffered, because a hello can outgrow a
     // segment; application data is buffered only once a key log has opened the
     // conversation, since holding every record of every TLS stream would cost
