@@ -130,6 +130,41 @@ export function freshTlsCursor(): TlsRecordCursor {
   };
 }
 
+/**
+ * What a capture gap does to a record in progress.
+ *
+ * A record's end is a **sequence number**, and a gap does not move it - so the
+ * question is not "did we lose bytes" but "did we lose the bytes this record
+ * was still waiting for". If its end is still ahead of where the stream has
+ * resumed, the record survives and only its buffered body is dropped, because
+ * the bytes now missing from the middle can never be parsed. If its end is
+ * behind, the gap swallowed it and there is nothing left to complete.
+ *
+ * Abandoning unconditionally instead costs seven frames on the inwire fixture,
+ * where a record really did survive its gap - measured, not reasoned.
+ *
+ * `unknown`, `role`, `encrypted`, `epoch` and `recordSeq` are never touched
+ * here. A gap loses this direction's PLACE in the record layer, not what the
+ * conversation has established: it is still TLS, still the same role, still on
+ * the same epoch and AEAD sequence.
+ */
+export function applyGapToCursor(cursor: TlsRecordCursor, segmentSeq: number): void {
+  if (cursor.remaining > 0) {
+    const owed = (cursor.recordEndSeq - segmentSeq) | 0;
+    cursor.buffer = null;
+    cursor.bufferedBytes = 0;
+    if (owed <= 0) {
+      cursor.remaining = 0;
+      cursor.contributors = [];
+      cursor.contributions = [];
+    } else {
+      cursor.remaining = owed;
+    }
+  } else if (cursor.headerPartial.length > 0) {
+    cursor.headerPartial = [];
+  }
+}
+
 export function freshTlsConversation(): TlsConversationState {
   return { clientHelloSeen: false, serverHelloSeen: false, encryptedHandshake: false, pendingVersionFrames: [] };
 }
@@ -433,9 +468,17 @@ export class TcpStreamTracker {
     return this.peek(srcIp, srcPort, dstIp, dstPort)?.dir.tlsCursor;
   }
 
-  /** Forgets where this direction was in the record layer - after a gap, nothing about it is known. */
-  public resetTlsCursor(srcIp: string, srcPort: number, dstIp: string, dstPort: number): void {
-    this.locate(srcIp, srcPort, dstIp, dstPort).dir.tlsCursor = freshTlsCursor();
+  /**
+   * Tells this direction's record cursor that bytes before this segment were
+   * never captured.
+   *
+   * Only needed for a segment with **no payload**, because one with a payload
+   * carries the same news into `dissectTlsSegment` as `ctx.gap`. Both end up
+   * in `applyGapToCursor`, which is the point: the rule lives once.
+   */
+  public noteGap(srcIp: string, srcPort: number, dstIp: string, dstPort: number, segmentSeq: number): void {
+    const cursor = this.peek(srcIp, srcPort, dstIp, dstPort)?.dir.tlsCursor;
+    if (cursor !== undefined) applyGapToCursor(cursor, segmentSeq);
   }
 
   /** The TLS facts both directions share, created on first use. */
