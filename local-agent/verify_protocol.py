@@ -255,6 +255,61 @@ async def main():
         await ws.send(json.dumps({"type": "stop_capture"}))
         await recv_type(ws, "state")
 
+    # --- adapter configuration (3.6.0) ---
+    #
+    # The one part of this feature that cannot be checked without a real
+    # agent: test_protocol.py drives the handler with a fake socket and fake
+    # providers, so what is untested until here is whether the providers
+    # actually read THIS machine. A subscription that answers with an empty
+    # list would pass every unit test and show an empty panel.
+    async with websockets.connect(AGENT_URL, origin="http://localhost:3000") as ws:
+        hello = await recv_type(ws, "hello")
+        # Same pairing step as above: an unpaired connection is answered with
+        # auth_required and nothing else, which would read here as the whole
+        # feature being broken.
+        if hello.get("authRequired"):
+            token = read_pairing_token()
+            if token:
+                await ws.send(json.dumps({"type": "authenticate", "token": token}))
+                await recv_type(ws, "state")
+        await ws.send(json.dumps({"type": "subscribe_adapters"}))
+        message = await recv_type(ws, "adapter_config", timeout=20)
+        adapters = message.get("adapters") or []
+        check("subscribe_adapters answers with a snapshot", len(adapters) > 0)
+
+        # Narrowed to the capture list rather than every binding Windows
+        # lists - which is 51 on the machine this was written on.
+        check("...only the adapters the capture list names", len(adapters) <= 24)
+
+        # At least one adapter this machine could actually capture on has to
+        # be answerable, or the panel has nothing to show.
+        usable = [a for a in adapters if a.get("mac") and (a.get("ipv4") or a.get("ipv6"))]
+        check("...including at least one with a MAC and an address", len(usable) > 0)
+        if usable:
+            one = usable[0]
+            check("an adapter carries the join key to a capture interface", bool(one.get("id")))
+            check("...and says which provider answered", isinstance(one.get("source"), dict))
+            # Nulls are the contract, so their absence is not required - but
+            # every key has to be PRESENT, or the panel cannot tell "not
+            # known" from "this build does not report it".
+            for key in ("name", "status", "mtu", "dhcpEnabled", "gatewayV4",
+                        "gatewayMac", "dnsServers", "leaseExpires"):
+                check(f"...and carries the key {key!r}", key in one)
+            print(f"      {len(adapters)} adapters, {len(usable)} with an address")
+            print(f"      e.g. {one.get('name')!r} mac={one.get('mac')} "
+                  f"gw={one.get('gatewayV4')} gwmac={one.get('gatewayMac')} "
+                  f"dns={one.get('dnsServers')}")
+
+        # Refresh drops the cache and answers even when nothing has changed -
+        # which is the whole point of it, since pressing Refresh is a
+        # statement that something just did.
+        await ws.send(json.dumps({"type": "refresh_adapters"}))
+        again = await recv_type(ws, "adapter_config", timeout=30)
+        check("refresh_adapters answers even when nothing changed",
+              isinstance(again.get("adapters"), list))
+
+        await ws.send(json.dumps({"type": "unsubscribe_adapters"}))
+
     # --- origin allowlist actually rejects disallowed/missing origins ---
     # This is the agent's ONLY authentication mechanism. If either of these
     # connections *succeeds*, the allowlist has stopped working and that is
