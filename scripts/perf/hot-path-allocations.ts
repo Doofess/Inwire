@@ -20,11 +20,19 @@
  * The rule is deliberately about *where the line is*, not about how hot the
  * caller is, because "this one is not on a hot path" is exactly the reasoning
  * that put the formatter where it was.
+ *
+ * **Scope: all of `src/`, `.ts` and `.tsx` alike.** It walked only
+ * `src/services/**\/*.ts`, which left out the two places most likely to
+ * reoffend: `workers/pipeline.worker.ts`, which is the hottest file in the
+ * app and dissects every live frame, and every component under `src/components`
+ * - excluded twice over, by directory and by file extension. Widening it was
+ * free: nothing outside `src/services` constructs one of these today, so this
+ * is a ratchet rather than a fix.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
-const ROOT = join(process.cwd(), 'src', 'services');
+const ROOT = join(process.cwd(), 'src');
 
 /** Constructors whose cost is in the constructor, not the call. */
 const EXPENSIVE = /new\s+(Intl\.[A-Za-z]+|TextDecoder|TextEncoder)\s*\(/;
@@ -43,7 +51,7 @@ function walk(dir: string): string[] {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) out.push(...walk(full));
-    else if (entry.endsWith('.ts')) out.push(full);
+    else if (entry.endsWith('.ts') || entry.endsWith('.tsx')) out.push(full);
   }
   return out;
 }
@@ -77,7 +85,7 @@ for (const file of walk(ROOT)) {
   }
 }
 
-console.log(`Scanned src/services for per-call construction of expensive objects.`);
+console.log(`Scanned src/ for per-call construction of expensive objects.`);
 console.log(`  ${checked} construction(s) found, ${hoisted} at module scope\n`);
 
 if (failures > 0) {

@@ -174,9 +174,30 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
  * and the interface column. Same rule as the drop counters and process
  * attribution: an unknown is not a zero, and is never rendered as one.
  */
+/**
+ * Prebuilt, and rebuilt only when the list changes.
+ *
+ * This is read once per captured frame. As a `find` with a closure it was a
+ * linear scan of the adapter list per frame, and it allocated a fresh
+ * `{name, label}` per frame for the dissector to read once and drop - at tens
+ * of thousands of frames a second, for a list that changes when the user picks
+ * an adapter. The objects in this map are shared and live as long as the list.
+ */
+let interfaceById = new Map<number, { name: string; label: string }>();
+
+function rebuildInterfaceIndex(): void {
+  interfaceById = new Map(
+    // `entry.id ?? index` is the agent's own indexing rule, kept exactly: the
+    // list this searches is the *capturable* one and the agent indexes into
+    // the unfiltered one, so the fallback is load-bearing.
+    interfaces.map((entry, index) => [
+      entry.id ?? index, { name: entry.name, label: entry.label },
+    ]),
+  );
+}
+
 function interfaceFor(iface: number): { name: string; label: string } | undefined {
-  const found = interfaces.find((entry, index) => (entry.id ?? index) === iface);
-  return found ? { name: found.name, label: found.label } : undefined;
+  return interfaceById.get(iface);
 }
 
 function ingest(frame: LiveFrame): void {
@@ -480,6 +501,7 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
 
     case 'interfaces':
       interfaces = command.interfaces;
+      rebuildInterfaceIndex();
       break;
 
     case 'host':

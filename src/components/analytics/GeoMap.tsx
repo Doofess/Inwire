@@ -15,7 +15,7 @@ import { useThemeToken } from '../../lib/themeColor';
 import { protocolColor } from '../../services/protocolColors';
 import { greatCircleArc, splitAtAntimeridian } from '../../lib/greatCircle';
 import { ArcLayer, type Arc } from './arcLayer';
-import { addPacketToPairs, aggregateRoutes, type AddressPair } from './geoRoutes';
+import { addPacketToPairs, aggregateRoutes, type AddressPair, type Route } from './geoRoutes';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
 import {
   applySkin,
@@ -472,7 +472,33 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   const hoveredPinRef = useRef<string | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const isExpandedRef = useRef(false);
-  const connectionsRef = useRef<Arc[]>([]);
+  /** What `arcsForSync` needs to build a frame's worth of arcs. */
+  interface ArcInput {
+    routes: Route[];
+    themeKey: string | undefined;
+    arcProtocolColors: boolean;
+    accent: string;
+  }
+
+  /**
+   * The arcs, and the inputs they were built from.
+   *
+   * Split in two because the build is expensive and its only consumer is
+   * throttled. `routes` gets a new identity on every dashboard tick (~10 Hz
+   * while capturing), and building here produced up to `MAX_ROUTES` great
+   * circles of `ARC_STEPS` points each - about 2,880 coordinate arrays plus 60
+   * antimeridian splits - for a `syncConnectionsLayer` that runs at most once
+   * per `CONNECTIONS_SYNC_THROTTLE_MS`. Five builds in six were discarded
+   * before anything read them, and the two early returns in the sync (style
+   * not ready, camera moving) discarded more.
+   *
+   * So the effect now stores its inputs, which is a property assignment, and
+   * `arcsForSync` builds at the point of use and memoises on the input
+   * identity. The invariant the throttle relies on is unchanged: whatever the
+   * sync reads is the newest data, because it reads the newest inputs.
+   */
+  const arcInputRef = useRef<ArcInput | null>(null);
+  const connectionsRef = useRef<{ input: ArcInput | null; arcs: Arc[] }>({ input: null, arcs: [] });
   /**
    * The arc layer instance, kept across style reloads.
    *
@@ -580,6 +606,24 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   const [projectionMode, setProjectionMode] = usePreferenceValue(mapProjectionStore);
 
   const sessionRef = useRef(geoSession());
+  /**
+   * One state commit per burst of resolutions, not one per resolution.
+   *
+   * Each answer used to do `setLocations(new Map(...))` and, for the hostname,
+   * a second one - so a lookup batch (up to `MAX_BATCH`, 25 in `geoIpService`)
+   * cost up to fifty O(n) Map copies and fifty renders of this component,
+   * arriving in a burst at capture start, which is exactly when the map is
+   * least responsive. `sessionRef` already holds the authoritative maps; these
+   * `setState` calls only exist to tell React they changed.
+   *
+   * `setTimeout` rather than `requestAnimationFrame`: a hidden tab gets no
+   * animation frames (measured elsewhere in this repo at zero callbacks over
+   * 3.8 s), and these maps feed `routes` and the location list, not just paint.
+   * The trailing commit always lands, which is what the late-answer rule above
+   * requires - a lookup that resolves after the scan has moved on must still
+   * draw.
+   */
+  const resolutionCommitRef = useRef<number | null>(null);
   const placesRef = { current: sessionRef.current.places };
   const unresolvedRef = { current: sessionRef.current.unresolved };
   const seenIps = { current: sessionRef.current.seenIps };
@@ -732,6 +776,16 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     publishStats();
   }, [publishStats]);
 
+  /** See `resolutionCommitRef`: coalesces a burst of answers into one render. */
+  const commitResolutions = () => {
+    if (resolutionCommitRef.current !== null) return;
+    resolutionCommitRef.current = window.setTimeout(() => {
+      resolutionCommitRef.current = null;
+      setLocations(new Map(sessionRef.current.locations));
+      setHostnames(new Map(sessionRef.current.hostnames));
+    }, 0);
+  };
+
   // Resolve geolocation + reverse-DNS hostname for newly-seen public IPs.
   //
   // Scans the packets appended since the last run rather than a fixed
@@ -788,11 +842,11 @@ export const GeoMap: React.FC<GeoMapProps> = ({
             if (result.location.precision !== "city") return;
 
             sessionRef.current.locations.set(ip, result.location);
-            setLocations(new Map(sessionRef.current.locations));
+            commitResolutions();
           });
           resolveHostname(ip).then((hostname) => {
             sessionRef.current.hostnames.set(ip, hostname);
-            setHostnames(new Map(sessionRef.current.hostnames));
+            commitResolutions();
           });
         }
       });
@@ -848,6 +902,52 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     return aggregateRoutes(pairs.values(), locate);
   }, [pairs, locations, ispLocation]);
 
+  /**
+   * The arcs for `arcInputRef`'s current contents, built at most once each.
+   *
+   * Called from the sync rather than from the effect - see `connectionsRef`.
+   * The identity check is what makes repeated syncs free: a sync that bails on
+   * a moving camera and reschedules does not rebuild anything.
+   */
+  const arcsForSync = (): Arc[] => {
+    const input = arcInputRef.current;
+    if (input === null) return connectionsRef.current.arcs;
+    if (connectionsRef.current.input === input) return connectionsRef.current.arcs;
+
+    const { routes: forRoutes, themeKey: forTheme, arcProtocolColors: byProtocol, accent: forAccent } = input;
+    // Weight is normalised against the busiest route rather than an absolute
+    // packet count: what the line width should say is "this one is busier than
+    // that one", and an absolute scale would render every line hairline-thin
+    // on a quiet capture and uniformly fat on a loud one.
+    const busiest = Math.max(1, ...forRoutes.map((r) => r.total));
+
+    const arcs = forRoutes.flatMap((route) => {
+      // Two questions, and only one of them is worth colour at a time. Coloured
+      // by protocol, an arc answers "what is this route carrying" in the same
+      // nine hues the protocol donut uses. Painted the accent, it answers "where
+      // is my traffic going" and spends no attention on the first - which is
+      // often the question being asked, and colour encoding something nobody is
+      // reading is noise. See services/mapPrefs.
+      const color = byProtocol
+        ? protocolColor(route.dominantProtocol, forTheme)
+        : forAccent;
+      const weight = route.total / busiest;
+      // Still split at the antimeridian, in BOTH projections. On the globe the
+      // two halves meet at the same point on the sphere, so the cut is
+      // invisible; under Mercator, with world copies disabled, a single
+      // unsplit route would be drawn back across the whole map instead of over
+      // the Pacific. One geometry for both is also what makes the shader's
+      // mercator-globe crossfade safe, since the same vertices have to be
+      // valid at every point of the transition.
+      return splitAtAntimeridian(
+        greatCircleArc(route.from, route.to, ARC_STEPS, ARC_CURVATURE),
+      ).map((points) => ({ points, color, weight }));
+    });
+
+    connectionsRef.current = { input, arcs };
+    return arcs;
+  };
+
   // Sync the connections GeoJSON source/layer with the map's currently loaded
   // style. Re-invoked on every style load (including after theme switches,
   // since setStyle() tears down all custom sources/layers) as well as
@@ -901,7 +1001,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // `setStyle` removes the layer but leaves this object holding its
     // geometry, so re-adding is enough - onAdd rebuilds the buffer.
     if (!map.getLayer(layer.id)) map.addLayer(layer);
-    layer.setArcs(connectionsRef.current);
+    layer.setArcs(arcsForSync());
   };
 
   // During active capture `packets` (and therefore `routes`)
@@ -940,35 +1040,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   };
 
   useEffect(() => {
-    // Weight is normalised against the busiest route rather than an absolute
-    // packet count: what the line width should say is "this one is busier than
-    // that one", and an absolute scale would render every line hairline-thin
-    // on a quiet capture and uniformly fat on a loud one.
-    const busiest = Math.max(1, ...routes.map((r) => r.total));
-
-    connectionsRef.current = routes.flatMap((route) => {
-      // Two questions, and only one of them is worth colour at a time. Coloured
-      // by protocol, an arc answers "what is this route carrying" in the same
-      // nine hues the protocol donut uses. Painted the accent, it answers "where
-      // is my traffic going" and spends no attention on the first - which is
-      // often the question being asked, and colour encoding something nobody is
-      // reading is noise. See services/mapPrefs.
-      const color = arcProtocolColors
-        ? protocolColor(route.dominantProtocol, themeKey)
-        : accent;
-      const weight = route.total / busiest;
-      // Still split at the antimeridian, in BOTH projections. On the globe the
-      // two halves meet at the same point on the sphere, so the cut is
-      // invisible; under Mercator, with world copies disabled, a single
-      // unsplit route would be drawn back across the whole map instead of over
-      // the Pacific. One geometry for both is also what makes the shader's
-      // mercator-globe crossfade safe, since the same vertices have to be
-      // valid at every point of the transition.
-      return splitAtAntimeridian(
-        greatCircleArc(route.from, route.to, ARC_STEPS, ARC_CURVATURE),
-      ).map((points) => ({ points, color, weight }));
-    });
-
+    arcInputRef.current = { routes, themeKey, arcProtocolColors, accent };
     scheduleConnectionsSync();
     // `accent` and the switch join the dependencies because the arc colours are
     // baked into a vertex buffer rather than read at draw time - the sync is
@@ -1604,10 +1676,10 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     );
   }, [routes, arcProtocolColors]);
 
-  const topRoutes = React.useMemo(
-    () => [...routes].sort((a, b) => b.total - a.total).slice(0, 8),
-    [routes],
-  );
+  // `aggregateRoutes` already returns these sorted by total, descending
+  // (`geoRoutes.ts`), so the copy and the re-sort this used to do were both
+  // dead work on every dashboard tick.
+  const topRoutes = React.useMemo(() => routes.slice(0, 8), [routes]);
 
   const map = (
     <div className="flex-1 min-h-0 relative overflow-hidden">

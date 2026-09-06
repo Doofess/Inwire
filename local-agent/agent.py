@@ -1041,11 +1041,25 @@ class AgentServer:
         asyncio.run_coroutine_threadsafe(self._send_to_all(json.dumps(message)), self.loop)
 
     async def _send_to_all(self, data: str):
+        """Broadcasts to every connection, dropping the ones that have died.
+
+        The failure used to be swallowed whole - `except Exception: pass` - so
+        a socket that had gone away stayed in `self.connections` for ever and
+        every later broadcast tried it again and failed again, silently. A
+        client that stopped receiving state updates left no trace anywhere,
+        which is the one thing the log exists to prevent.
+        """
+        dead = []
         for ws in list(self.connections):
             try:
                 await ws.send(data)
-            except Exception:
-                pass
+            except Exception as exc:
+                dead.append((ws, exc))
+        for ws, exc in dead:
+            # Discard, not remove: the close handler may have got there first,
+            # and that is the normal way a connection leaves.
+            self.connections.discard(ws)
+            log.debug("dropping a connection that could not be written to: %s", exc)
 
     def report_capture_failure(self, iface_id, iface_name, iface_label, reason):
         """A sniffer thread could not open or read its adapter.

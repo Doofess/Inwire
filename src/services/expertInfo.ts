@@ -42,6 +42,17 @@ export const CATEGORY_ORDER: readonly ExpertCategory[] = [
   'CaptureGap', 'FlowControl', 'Unverifiable', 'Note',
 ];
 
+/**
+ * `CATEGORY_ORDER` as a lookup, derived rather than restated.
+ *
+ * `indexOf` is fine for a list of eight until it runs twice per finding per
+ * frame, which is where `collectExpert` had it - a linear scan on the hot path
+ * to compare two positions in a fixed array.
+ */
+export const CATEGORY_RANK: Record<ExpertCategory, number> = Object.fromEntries(
+  CATEGORY_ORDER.map((category, index) => [category, index]),
+) as Record<ExpertCategory, number>;
+
 export const CATEGORY_LABELS: Record<ExpertCategory, string> = {
   Broken: 'Broken',
   Reset: 'Reset',
@@ -134,7 +145,7 @@ export interface ExpertGroupRow {
 const MAX_REMEMBERED_FRAMES = 200;
 
 function rank(c: ExpertCategory): number {
-  return CATEGORY_ORDER.indexOf(c);
+  return CATEGORY_RANK[c];
 }
 
 /**
