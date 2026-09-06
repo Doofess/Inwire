@@ -253,6 +253,39 @@ check('...and so is a field belonging to one', {
   valid: FilterEngine.validateFilter('bgp.type != 1').isValid,
   warnings: FilterEngine.validateFilter('bgp.type != 1').warnings?.length,
 }, { valid: true, warnings: 1 });
+// --- every registered name is actually reachable -------------------------------
+//
+// The parser lower-cases a field name, which was harmless while every abbrev
+// was lower case. Holding the registry to Wireshark's spelling made ten of
+// them mixed-case (`sip.Method`, `radius.User_Name`, `ptp.v2.mm.managementId`)
+// and every one became unreachable: the name looked up its own lower-cased
+// form, found nothing, and was reported as a typo. Nothing caught it - the
+// registry check saw a registered field with a writer and a row, and the
+// parity harness never types a filter.
+//
+// So: every name the registry offers must resolve, as spelt AND lower-cased.
+// The second half is the promise that matters - `sip.call-id` typed from
+// memory must work, which is deliberately more forgiving than Wireshark.
+const unreachable = knownFieldNames().filter((name) => {
+  const asWritten = FilterEngine.validateFilter(`${name} == 1`);
+  const lowered = FilterEngine.validateFilter(`${name.toLowerCase()} == 1`);
+  return !asWritten.isValid || !lowered.isValid;
+});
+check('every name the registry offers resolves, in either case', unreachable, []);
+
+// ...and the canonical spelling is what reads the bag, since that is the key
+// the dissector wrote. Resolving the name is not enough on its own.
+const mixedCase = packet({
+  id: 200, protocol: 'UDP', protocolLabel: 'SIP',
+  source: '192.0.2.1', destination: '192.0.2.2',
+  frameProtocols: ['frame', 'eth', 'ip', 'udp', 'sip'],
+  fields: { 'sip.Method': 'INVITE' },
+});
+check('a mixed-case field reads the bag under its registered spelling',
+  [mixedCase].filter(compile('sip.Method == "INVITE"')).map(p => p.id), [200]);
+check('...however the user typed it',
+  [mixedCase].filter(compile('sip.method == "INVITE"')).map(p => p.id), [200]);
+
 check('a typo is still an error, not a warning',
   FilterEngine.validateFilter('ospg.msg != 1').isValid, false);
 
