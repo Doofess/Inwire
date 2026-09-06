@@ -39,6 +39,7 @@ import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dissectors/dns';
 import { dissectNbns } from './dissectors/nbns';
 import { dissectSyslog } from './dissectors/syslog';
 import { dissectRadius } from './dissectors/radius';
+import { dissectSnmp } from './dissectors/snmp';
 import { DnsTracker } from './dnsTracker';
 import { dissectQuicDatagram } from './dissectors/quic';
 import { buildQuicTlsLayer } from './dissectors/tls';
@@ -669,6 +670,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'NetBIOS Name Service': 'nbns',
   'Syslog message': 'syslog',
   'RADIUS Protocol': 'radius',
+  'Simple Network Management Protocol': 'snmp',
   'Transport Layer Security': 'tls',
   'Hypertext Transfer Protocol': 'http',
   'HyperText Transfer Protocol 2': 'http2',
@@ -2637,6 +2639,16 @@ function decodeTransportLayer(
         info = dhcp.info;
         extraLayers.push(dhcp.layer);
         Object.assign(dhcpFields, dhcp.fields);
+      }
+    } else if (srcPort === 161 || dstPort === 161 || srcPort === 162 || dstPort === 162) {
+      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+      const snmp = dissectSnmp(rawBytes, udpPayloadStart, payloadEnd);
+      if (snmp) {
+        protocolLabel = snmp.protocolLabel;
+        info = snmp.info;
+        extraLayers.push(snmp.layer);
+        protocolTokens.push('snmp');
+        Object.assign(appFields, snmp.fields);
       }
     } else if (srcPort === 514 || dstPort === 514) {
       const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
