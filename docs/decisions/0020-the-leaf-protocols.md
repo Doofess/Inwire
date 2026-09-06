@@ -25,16 +25,31 @@ Everything that is not a leaf is a project, and the two ways of failing to be
 one are worth naming separately.
 
 **Cross-frame state.** SMB2, LDAP, Kerberos and BGP all run over TCP, so
-reading them means reassembling a byte stream across segments — which is where
-the TLS record cursor already disagrees with the reference analyzer on 94% of
-the remaining Info gap. Adding a protocol on top of an unsolved reassembly
-problem inherits it.
+reading them means reassembling a byte stream across segments — which is the
+one thing this build does not do, and it is where essentially the whole
+remaining Info gap already lives. Measured over both fixtures
+(`PARITY_MAX_DIFFS=100000`), of **883** Info mismatches:
+
+| group | inwire | netview |
+|---|---:|---:|
+| `TCP (segment of reassembled PDU)` | 46 | 471 |
+| `TLSv1.2` (the record cursor) | 48 | 157 |
+| `TCP` | 19 | 120 |
+| everything else (QUIC, ICMP, ICMPv6, LLDP) | 20 | 2 |
+
+**861 of 883 — 97.5% — are the same problem**, and on the netview fixture it is
+99.7% of them. Adding a protocol on top of an unsolved reassembly problem
+inherits it: SMB2 over a stream this build cannot reassemble would produce a
+new column of mismatches with the same root cause, and would make that root
+cause harder to fix rather than easier.
 
 **Recursion.** GRE, VXLAN, L2TP and GTP are tunnels: tshark dissects *through*
 them, replacing the outer addresses with the inner ones. That means recursing
-into the L3 branch of an 891-line function already flagged for decomposition,
-and a half-GRE that names the tunnel without recursing fails the oracle. The
-cost is the decomposition, not the protocol.
+into the L3 branch of `decodeTransportLayer`, which is **959 lines** and
+already flagged for decomposition — and a half-GRE that names the tunnel
+without recursing fails the oracle, because tshark would report the inner
+addresses where this build reported the outer. The cost is the decomposition,
+not the protocol.
 
 ## What the leaves still cost
 
