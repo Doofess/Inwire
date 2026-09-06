@@ -76,7 +76,7 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "3.5.0"
+AGENT_VERSION = "3.6.0"
 
 # How often per-interface traffic rates are sampled while a client has the
 # capture-interface picker open. 500ms is fast enough that the sparkline
@@ -127,6 +127,16 @@ CAPTURE_STATS_INTERVAL_SECONDS = 1.0
 # ~890 sockets, 60 processes), so a tick is well under 1% of a core.
 SOCKET_TABLE_INTERVAL_SECONDS = 1.0
 
+# How often the adapter configuration is re-read.
+#
+# Ten seconds, because that is the timescale the thing being watched
+# actually moves on: an IPv6 privacy address rotates, a DHCP lease renews,
+# a cable is unplugged. None of those is a sub-second event, and the read
+# is far more expensive than the socket table's - the Windows path spawns
+# PowerShell when the address list changes, at about half a second. It is
+# cached against exactly that, so a quiet poll costs 26 ms (measured).
+ADAPTER_CONFIG_INTERVAL_SECONDS = 10.0
+
 # How long one sniff() call may block before the thread re-checks its stop
 # event. Bounds how long a stopped capture can linger on a quiet adapter,
 # which before was "until the next packet arrives".
@@ -136,6 +146,7 @@ import logging_setup
 import agent_log
 import interface_stats
 import sockets
+import adapters
 
 # Configured for real in main(); until then this is a plain logger, so an
 # import-time failure still has somewhere to go.
@@ -647,6 +658,18 @@ class AgentServer:
         # gets its own full snapshot on the spot (see subscribe_sockets) and
         # then follows these deltas.
         self._socket_tracker = sockets.SocketTracker()
+        # Sockets that asked how this machine's adapters are configured. Same
+        # lifecycle rule as every other subscription: a client that never opens
+        # the Network panel never causes the registry to be read.
+        self.adapter_subscribers = set()
+        self._adapter_task = None
+        # Narrowed to the capture list rather than reporting all 51 bindings
+        # Windows lists - see adapters.read_adapters. Passed as a callable
+        # because refresh_interfaces() replaces that list whenever a client
+        # connects, and a set captured here would go stale the first time an
+        # adapter was unplugged.
+        self._adapter_tracker = adapters.AdapterTracker(
+            keep=lambda: {name for name, _label in AVAILABLE_INTERFACES})
         self.loop = None
         # Frames the agent itself dropped this process, because the queue was
         # full (see queue_packet). Reported per capture in capture_stats.
@@ -720,6 +743,8 @@ class AgentServer:
         self._stop_interface_stats_task_if_idle()
         self.socket_subscribers.discard(ws)
         self._stop_socket_task_if_idle()
+        self.adapter_subscribers.discard(ws)
+        self._stop_adapter_task_if_idle()
         log.info("client disconnected (%d remaining)", len(self.connections))
 
         # The owner leaving stops the capture even when other tabs are still
@@ -872,6 +897,42 @@ class AgentServer:
         elif msg_type == "unsubscribe_sockets":
             self.socket_subscribers.discard(ws)
             self._stop_socket_task_if_idle()
+            return
+        elif msg_type == "subscribe_adapters":
+            self.adapter_subscribers.add(ws)
+            # This client's own snapshot immediately, for the same reason
+            # subscribe_sockets sends one: the shared ticker only speaks when
+            # something changed, and adapter configuration changes on the
+            # timescale of a lease. A client that waited for the next change
+            # could sit in front of an empty panel for an hour.
+            #
+            # Off the event loop because the first read on Windows spawns
+            # PowerShell - about half a second, measured - and doing that
+            # inline would stall packet delivery for every other client.
+            snapshot = await asyncio.to_thread(
+                lambda: adapters.AdapterTracker(
+                    keep=lambda: {n for n, _l in AVAILABLE_INTERFACES}).poll())
+            await ws.send(json.dumps(snapshot))
+            self._ensure_adapter_task()
+            return
+        elif msg_type == "unsubscribe_adapters":
+            self.adapter_subscribers.discard(ws)
+            self._stop_adapter_task_if_idle()
+            return
+        elif msg_type == "refresh_adapters":
+            # The user pressed Refresh, which is a statement that they have
+            # just changed something. Answering from a cached reading taken
+            # before they changed it is the one answer that is certainly wrong,
+            # so the caches are dropped and the tracker is made to speak even
+            # if the result is identical.
+            self.adapter_subscribers.add(ws)
+            def _reread():
+                adapters.invalidate_caches()
+                self._adapter_tracker.reset()
+                return self._adapter_tracker.poll()
+            snapshot = await asyncio.to_thread(_reread)
+            await ws.send(json.dumps(snapshot))
+            self._ensure_adapter_task()
             return
         elif msg_type == "restart_agent":
             if not RESTART_SUPPORTED:
@@ -1095,6 +1156,51 @@ class AgentServer:
             log.warning("socket table polling stopped: %s", exc)
         finally:
             self._socket_task = None
+
+    def _ensure_adapter_task(self):
+        if self._adapter_task is None or self._adapter_task.done():
+            self._adapter_task = asyncio.create_task(self._adapter_loop())
+
+    def _stop_adapter_task_if_idle(self):
+        if not self.adapter_subscribers and self._adapter_task is not None:
+            self._adapter_task.cancel()
+            self._adapter_task = None
+            # The next subscriber is sent a snapshot of its own, but the shared
+            # tracker must not hold a reading from before the gap: it would
+            # compare the next poll against a configuration that may be hours
+            # old and stay silent about everything that changed in between.
+            self._adapter_tracker.reset()
+
+    async def _adapter_loop(self):
+        """Pushes adapter configuration to whoever asked for it.
+
+        Reading it is blocking work - the registry on Windows, `ip` and
+        `resolvectl` on Linux - so it runs in a thread rather than on the event
+        loop, where it would stall packet delivery for as long as it took.
+        """
+        try:
+            while self.adapter_subscribers:
+                await asyncio.sleep(ADAPTER_CONFIG_INTERVAL_SECONDS)
+                message = await asyncio.to_thread(self._adapter_tracker.poll)
+                # None means nothing about any adapter changed, which is almost
+                # every poll: this is configuration, not traffic.
+                if message is None:
+                    continue
+                encoded = json.dumps(message)
+                for ws in list(self.adapter_subscribers):
+                    try:
+                        await ws.send(encoded)
+                    except Exception:
+                        self.adapter_subscribers.discard(ws)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Never take a capture down over configuration. Same rule as the
+            # socket loop: the packet list is the product, and this is an
+            # annotation on it.
+            log.warning("adapter configuration polling stopped: %s", exc)
+        finally:
+            self._adapter_task = None
 
     async def _interface_stats_loop(self):
         # Constructed per subscription rather than kept alive: its first sample

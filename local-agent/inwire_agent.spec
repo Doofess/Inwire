@@ -30,6 +30,10 @@ a = Analysis(
         # so a module PyInstaller quietly dropped shows up as a service that
         # will not start and says nothing about why.
         'packet_batch',
+        # Adapter configuration (3.6.0). It imports winreg, which is
+        # stdlib, and scapy.arch.windows, which is already listed below.
+        'adapters',
+        'sockets',
         # Scapy's dynamically loaded layers.
         'scapy.layers.all',
         'scapy.layers.inet',

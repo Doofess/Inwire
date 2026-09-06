@@ -107,6 +107,46 @@ check('capture_stats with a negative count returns null',
 check('capture_stats with a malformed interface entry returns null',
   parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"interfaces":[{"iface":0}]}'), null);
 
+// --- adapter_config (3.6.0) ---------------------------------------------------
+//
+// The validator here is deliberately permissive about every field but `id`,
+// and these assertions are what hold it to that. A provider that could not
+// read a lease time reports null - that is the contract - so a message full of
+// nulls has to survive, or the app would discard the half the OS did know.
+const adapter = {
+  id: '\Device\NPF_{ABC}', name: 'Ethernet 2', description: 'Intel I225-V',
+  mac: '04:7c:16:52:db:17', status: 'up', speedMbps: 2500, mtu: 1500,
+  dhcpEnabled: true, dhcpServer: '10.0.0.138',
+  leaseObtained: 1788655468, leaseExpires: 1788659068,
+  ipv4: [{ address: '10.0.0.4', prefixLength: 24, broadcast: '10.0.0.255' }],
+  ipv6: [{ address: 'fe80::1', prefixLength: 64, scope: 'link-local', temporary: false }],
+  gatewayV4: '10.0.0.138', gatewayV6: null, gatewayMac: '44:15:24:aa:bb:cc',
+  dnsServers: ['10.0.0.138'], dnsSuffix: 'home', source: { dhcp: 'registry' },
+};
+check('valid adapter_config parses',
+  parseAgentMessage(JSON.stringify({ type: 'adapter_config', adapters: [adapter] }))?.type,
+  'adapter_config');
+check('an adapter the OS could answer almost nothing about still parses',
+  parseAgentMessage(JSON.stringify({
+    type: 'adapter_config',
+    adapters: [{
+      id: 'eth0', name: 'eth0', description: null, mac: null, status: null,
+      speedMbps: null, mtu: null, dhcpEnabled: null, dhcpServer: null,
+      leaseObtained: null, leaseExpires: null, ipv4: [], ipv6: [],
+      gatewayV4: null, gatewayV6: null, gatewayMac: null,
+      dnsServers: [], dnsSuffix: null, source: {},
+    }],
+  }))?.type,
+  'adapter_config');
+// `id` is the join key to a capture interface. An entry without one has
+// nowhere to attach, so it is the single field that is not optional.
+check('an adapter with no id returns null',
+  parseAgentMessage(JSON.stringify({ type: 'adapter_config', adapters: [{ ...adapter, id: '' }] })), null);
+check('adapter_config with a non-array adapters returns null',
+  parseAgentMessage('{"type":"adapter_config","adapters":{}}'), null);
+check('an empty adapter list is legitimate - a machine may have none we can read',
+  parseAgentMessage('{"type":"adapter_config","adapters":[]}')?.type, 'adapter_config');
+
 check('error carries its code and interface through',
   parseAgentMessage('{"type":"error","code":"capture_failed","iface":1,"message":"no"}'),
   { type: 'error', code: 'capture_failed', iface: 1, message: 'no' });

@@ -229,6 +229,88 @@ export interface AgentSocketTableMessage {
   gone: [string, string, number][];
 }
 
+/** One address the OS has configured, with what it knows about it. */
+export interface AgentAdapterIpv4 {
+  address: string;
+  /** Null when the OS would not say - never a default that looks like one. */
+  prefixLength: number | null;
+  broadcast: string | null;
+}
+
+export interface AgentAdapterIpv6 {
+  address: string;
+  prefixLength: number | null;
+  scope: 'global' | 'link-local' | 'ula' | 'loopback' | null;
+  /**
+   * An RFC 4941 privacy address, which rotates.
+   *
+   * Three states, and the third matters: `true` is "the OS said temporary",
+   * `false` is "the OS said otherwise", and `null` is macOS, where nothing
+   * cheap answers the question. A capture taken yesterday will not match a
+   * temporary address held today, so the distinction is worth showing.
+   */
+  temporary: boolean | null;
+}
+
+/**
+ * How one adapter is configured, as the operating system has it.
+ *
+ * The counterpart to `socket_table`: both are facts about the captured machine
+ * that no frame carries, read on that machine and sent over the local socket
+ * alone (`docs/decisions/0009-off-wire-enrichment.md`). What makes it worth
+ * having is the comparison - the capture reveals the gateway, the resolvers
+ * and the DHCP server independently, so configured and observed can be put
+ * side by side and disagreements called out.
+ *
+ * **Every field is nullable and a null means "not known".** It never means
+ * zero, absent, or disabled. A provider that cannot read a lease time reports
+ * no lease time, and `source` says which provider answered for each group so a
+ * value on screen can be traced to where it came from.
+ */
+export interface AgentAdapter {
+  /**
+   * The capture device name, which is what the interface list is keyed by -
+   * `\Device\NPF_{GUID}` on Windows, `eth0` elsewhere. Built from the GUID
+   * rather than matched on a display name, so the join with a capture
+   * interface is exact rather than a longest-prefix guess.
+   */
+  id: string;
+  name: string;
+  description: string | null;
+  mac: string | null;
+  status: 'up' | 'down' | null;
+  speedMbps: number | null;
+  mtu: number | null;
+  dhcpEnabled: boolean | null;
+  dhcpServer: string | null;
+  /** Epoch seconds. Formatting a time belongs to whoever knows the locale. */
+  leaseObtained: number | null;
+  leaseExpires: number | null;
+  ipv4: AgentAdapterIpv4[];
+  ipv6: AgentAdapterIpv6[];
+  gatewayV4: string | null;
+  gatewayV6: string | null;
+  gatewayMac: string | null;
+  dnsServers: string[];
+  dnsSuffix: string | null;
+  /** Which provider supplied each group: `registry`, `powershell`, `ip`, ... */
+  source: Record<string, string | null>;
+}
+
+/**
+ * A whole snapshot, not a delta - unlike `socket_table`, and deliberately.
+ *
+ * A machine has a handful of adapters and the message is a couple of
+ * kilobytes, where the socket table is 890 entries and 52 KB. A delta protocol
+ * for two kilobytes would cost more in complexity than it could save in bytes.
+ * What the two do share is the silence: the agent sends nothing at all when
+ * nothing has changed, which is almost every poll.
+ */
+export interface AgentAdapterConfigMessage {
+  type: 'adapter_config';
+  adapters: AgentAdapter[];
+}
+
 export type AgentMessage =
   | AgentHelloMessage
   | AgentStateMessage
@@ -237,7 +319,28 @@ export type AgentMessage =
   | AgentInterfaceStatsMessage
   | AgentCaptureStatsMessage
   | AgentSocketTableMessage
+  | AgentAdapterConfigMessage
   | AgentPacketMessage;
+
+/**
+ * Checks only what the app would break without, and lets the rest be null.
+ *
+ * Every field but `id` is allowed to be missing, because a provider that could
+ * not read something reports nothing - that is the contract, not a fault - and
+ * a validator that rejected a partially-answerable adapter would throw away
+ * the half the OS did know. `id` is the exception because it is the join key
+ * to the capture interface, and an entry that cannot be attached to one is an
+ * entry with nowhere to go.
+ */
+function isValidAdapterList(adapters: unknown): adapters is AgentAdapter[] {
+  return Array.isArray(adapters) && adapters.every((a) => {
+    if (!a || typeof a !== 'object') return false;
+    const entry = a as Record<string, unknown>;
+    return typeof entry.id === 'string' && entry.id.length > 0
+      && Array.isArray(entry.ipv4) && Array.isArray(entry.ipv6)
+      && Array.isArray(entry.dnsServers);
+  });
+}
 
 function isValidState(state: unknown): state is 'idle' | 'sniffing' {
   return state === 'idle' || state === 'sniffing';
@@ -329,6 +432,9 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
       if (typeof msg.full !== 'boolean' || !Array.isArray(msg.add) || !Array.isArray(msg.gone)
         || typeof msg.procs !== 'object' || msg.procs === null) return null;
       return msg as unknown as AgentSocketTableMessage;
+    case 'adapter_config':
+      if (!isValidAdapterList(msg.adapters)) return null;
+      return msg as unknown as AgentAdapterConfigMessage;
     case 'packet':
       return msg as unknown as AgentPacketMessage;
     default:
@@ -341,7 +447,7 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
  * whatever the connected agent reports in its hello message to flag a
  * stale build in the UI.
  */
-export const REQUIRED_AGENT_VERSION = '3.5.0';
+export const REQUIRED_AGENT_VERSION = '3.6.0';
 
 /**
  * Simple major.minor.patch comparison - good enough for this agent's
@@ -375,6 +481,26 @@ export type AgentCommand =
    */
   | { type: 'subscribe_sockets' }
   | { type: 'unsubscribe_sockets' }
+  /**
+   * Asks how this machine's adapters are configured, then again on any change.
+   *
+   * Subscribed rather than sent with `hello` for the same reason the socket
+   * table is: reading it costs real work - the registry, and a PowerShell
+   * spawn when the address list has moved - and a client that never opens the
+   * Network panel should not cause any of it.
+   */
+  | { type: 'subscribe_adapters' }
+  | { type: 'unsubscribe_adapters' }
+  /**
+   * Re-reads from the machine, discarding anything the agent had cached.
+   *
+   * What Refresh sends. Pressing it is a statement that something has just
+   * been changed, so answering from a reading taken before the change is the
+   * one answer that is certainly wrong - and the agent replies even when the
+   * result is identical, because "nothing changed" is itself the answer the
+   * user asked for.
+   */
+  | { type: 'refresh_adapters' }
   /**
    * Asks the agent to restart its own process.
    *

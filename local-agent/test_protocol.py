@@ -1137,6 +1137,8 @@ if os.name != "nt":
 
 
 
+import adapters
+
 # --- 3.1.0: every state-changing command answers with a state broadcast -------
 # This went missing in a refactor once (the broadcast ended up after the
 # interface-stats loop, where it never ran) and the app's "Capture:" row sat
@@ -1194,6 +1196,34 @@ try:
 
     _drive(srv, ws, {"type": "subscribe_logs"})
     check("a subscription does not broadcast state", len(sent_states), 3)
+
+    # 3.6.0. Reading adapters changes nothing about what the agent is DOING,
+    # so like every other subscription it must take the early return rather
+    # than falling through to the broadcast at the foot of the handler.
+    _prev_read = adapters.read_adapters
+    try:
+        adapters.read_adapters = lambda provider=None, keep=None: [
+            {"id": "eth0", "name": "eth0", "ipv4": [], "ipv6": [], "dnsServers": []}]
+        _drive(srv, ws, {"type": "subscribe_adapters"})
+        check("subscribe_adapters answers with a snapshot", ws.sent[-1]["type"], "adapter_config")
+        check("...immediately, rather than waiting for a change",
+              [a["id"] for a in ws.sent[-1]["adapters"]], ["eth0"])
+        check("...and broadcasts no state", len(sent_states), 3)
+        check_true("...and the socket is now a subscriber", ws in srv.adapter_subscribers)
+
+        # The tracker is silent when nothing changed, which is almost every
+        # poll - so Refresh has to drop the previous reading, or pressing it
+        # after changing nothing would answer with nothing at all.
+        _drive(srv, ws, {"type": "refresh_adapters"})
+        check("refresh_adapters answers even when nothing changed",
+              ws.sent[-1]["type"], "adapter_config")
+        check("...and still broadcasts no state", len(sent_states), 3)
+
+        _drive(srv, ws, {"type": "unsubscribe_adapters"})
+        check_true("unsubscribe_adapters drops the subscription",
+                   ws not in srv.adapter_subscribers)
+    finally:
+        adapters.read_adapters = _prev_read
 finally:
     agent.spawn_sniffer_thread = _prev_spawn
     if _prev_sniffer is None:
@@ -1597,3 +1627,84 @@ if failures:
     print(f"{failures} check(s) FAILED")
     sys.exit(1)
 print("All checks passed.")
+
+
+# --- 3.6.0: adapter configuration -----------------------------------------------
+#
+# The providers are per-platform and only one of them can run on any given
+# machine, so what is held here is the platform-independent half: the decoding,
+# the normalisation, and the tracker's silence. The Windows registry decode in
+# particular is worth pinning because its layout is undocumented and was
+# derived by reading a live machine - a wrong stride would silently produce a
+# plausible MAC rather than an error.
+check("a gateway hardware record decodes to its address and MAC",
+      adapters.decode_gateway_hardware(
+          bytes([0x0a, 0, 0, 0x8a]) + (6).to_bytes(4, "little")
+          + bytes([0x44, 0x15, 0x24, 0xaa, 0xbb, 0xcc])),
+      {"10.0.0.138": "44:15:24:aa:bb:cc"})
+check("two gateways decode from one blob",
+      adapters.decode_gateway_hardware(
+          bytes([10, 0, 0, 1]) + (6).to_bytes(4, "little") + bytes([1, 2, 3, 4, 5, 6])
+          + bytes([10, 0, 0, 2]) + (6).to_bytes(4, "little") + bytes([7, 8, 9, 10, 11, 12])),
+      {"10.0.0.1": "01:02:03:04:05:06", "10.0.0.2": "07:08:09:0a:0b:0c"})
+# A truncated value must not read past its end. The count field is not trusted
+# for this: the count and the blob are separate registry values that a
+# half-written key could disagree about.
+check("a truncated gateway record yields nothing rather than reading past the end",
+      adapters.decode_gateway_hardware(
+          bytes([10, 0, 0, 1]) + (6).to_bytes(4, "little") + bytes([1, 2, 3])), {})
+check("a non-binary gateway value is ignored", adapters.decode_gateway_hardware("10.0.0.1"), {})
+
+check("a MAC is normalised to the lowercase colon form every dissector uses",
+      adapters._mac("04-7C-16-52-DB-17"), "04:7c:16:52:db:17")
+check("something that is not a MAC is None, not a mangled string",
+      adapters._mac("Intel(R) Ethernet"), None)
+
+# The RTL marks are real: this machine reports its adapter as
+# '\u200f\u200fEthernet 2', and build_interface_label strips them from the
+# capture list. If these two disagree the Network panel names an adapter the
+# picker does not.
+check("right-to-left marks are stripped, so the name matches the capture list",
+      adapters._text("\u200f\u200fEthernet 2"), "Ethernet 2")
+check("a name that is only marks is nothing, not whitespace", adapters._text("\u200f\u200f"), None)
+
+check("an IPv6 scope is named", adapters.address_scope("2001:db8::1"), "global")
+check("...link-local", adapters.address_scope("fe80::1"), "link-local")
+check("...and a unique local address", adapters.address_scope("fd00::1"), "ula")
+check("an unparseable address has no scope rather than a wrong one",
+      adapters.address_scope("not-an-address"), None)
+
+# Windows reports no broadcast address at all, so it is computed. That is
+# arithmetic the OS declined to do, not a guess about what it might be.
+check("a broadcast address is computed from the prefix",
+      adapters._broadcast("10.0.0.4", 24), "10.0.0.255")
+check("...and is meaningless for IPv6, so there is none",
+      adapters._broadcast("fe80::1", 64), None)
+check("no prefix means no broadcast, rather than assuming /24",
+      adapters._broadcast("10.0.0.4", None), None)
+
+# The tracker speaks once and then stays quiet. Configuration changes when a
+# lease renews or a cable moves, so a poll with nothing to say is the common
+# case and a message every ten seconds would be noise the app has to diff.
+_one = [{"id": "eth0", "name": "eth0", "ipv4": [], "ipv6": [], "dnsServers": []}]
+_tracker = adapters.AdapterTracker(provider=lambda: [dict(a) for a in _one])
+check("the first poll speaks", _tracker.poll()["type"], "adapter_config")
+check("an unchanged poll says nothing at all", _tracker.poll(), None)
+_one[0]["dhcpServer"] = "10.0.0.138"
+check_true("a changed poll speaks again", _tracker.poll() is not None)
+check("...and then goes quiet once more", _tracker.poll(), None)
+_tracker.reset()
+check_true("a reset makes the next poll speak, which is what Refresh needs",
+           _tracker.poll() is not None)
+
+# Windows lists 51 adapters - every LWF binding, WAN miniport and tunnel. The
+# capture list is a handful. Sending all of them would be ten times the bytes
+# and would hand the browser the configuration of adapters nobody is capturing
+# on, which the privacy rule for this data does not justify.
+_all = [{"id": "eth0", "name": "eth0", "ipv4": [], "ipv6": [], "dnsServers": []},
+        {"id": "tunnel7", "name": "tunnel7", "ipv4": [], "ipv6": [], "dnsServers": []}]
+check("only the adapters the capture list names are reported",
+      [a["id"] for a in adapters.read_adapters(provider=lambda: _all, keep={"eth0"})],
+      ["eth0"])
+check("no filter means everything, which is what a direct read wants",
+      len(adapters.read_adapters(provider=lambda: _all)), 2)

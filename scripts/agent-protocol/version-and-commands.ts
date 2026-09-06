@@ -37,7 +37,7 @@ check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', int
 // different install. Major, not minor. This constant has to move with
 // AGENT_VERSION in agent.py and MyAppVersion in setup.iss;
 // local-agent/test_protocol.py is what enforces that all three agree.
-check('required agent version is 3.5.0', REQUIRED_AGENT_VERSION, '3.5.0');
+check('required agent version is 3.6.0', REQUIRED_AGENT_VERSION, '3.6.0');
 
 // Pairing. The token goes on the wire as an ordinary command rather than in
 // the handshake, because a handshake this agent refuses reaches the browser as
@@ -53,6 +53,18 @@ check('a 1.1.0 agent is outdated against 2.4.0', isAgentOutdated('1.1.0', '2.4.0
 check('a 2.3.0 agent is outdated against 2.4.0', isAgentOutdated('2.3.0', '2.4.0'), true);
 check('a 2.4.0 agent is current', isAgentOutdated('2.4.0', '2.4.0'), false);
 check('a 2.5.0 agent is not outdated', isAgentOutdated('2.5.0', '2.4.0'), false);
+
+// 3.6.0: how this machine's adapters are configured. Subscribed for the same
+// reason the socket table is - reading it spawns PowerShell on Windows when
+// the address list has moved, and a client that never opens the Network panel
+// should not pay for that.
+check('subscribe_adapters encodes', encodeAgentCommand({ type: 'subscribe_adapters' }), '{"type":"subscribe_adapters"}');
+check('unsubscribe_adapters encodes', encodeAgentCommand({ type: 'unsubscribe_adapters' }), '{"type":"unsubscribe_adapters"}');
+// Distinct from subscribing, and it has to be: subscribing is answered from
+// whatever the agent has, while this drops the cache first. A Refresh that
+// replied with a reading taken before the user changed something would be
+// the one answer guaranteed to be wrong.
+check('refresh_adapters encodes', encodeAgentCommand({ type: 'refresh_adapters' }), '{"type":"refresh_adapters"}');
 
 check('subscribe_logs encodes', encodeAgentCommand({ type: 'subscribe_logs' }), '{"type":"subscribe_logs"}');
 check('unsubscribe_logs encodes', encodeAgentCommand({ type: 'unsubscribe_logs' }), '{"type":"unsubscribe_logs"}');
