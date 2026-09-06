@@ -294,7 +294,7 @@ export interface NameResolutionPrefs {
   /**
    * Permits the app's outbound location lookups: captured addresses to
    * get.geojs.io for the map, and this machine's own public address to
-   * ipapi.co for the ISP panel. One switch rather than two because both are
+   * ipapi.co for the Network panel's Public identity section. One switch rather than two because both are
    * the same disclosure - a third party learns an address and says where it
    * is - and a switch per vendor invites agreeing to each without noticing
    * they add up to the same thing.
@@ -410,3 +410,38 @@ export function saveAgentToken(token: string): void {
     /* nothing to do; the user can paste it again */
   }
 }
+
+// ---------------------------------------------------------------------------
+// The Network panel
+// ---------------------------------------------------------------------------
+
+/**
+ * What the Network panel remembers between openings.
+ *
+ * One field, and it earns a store rather than component state because of what
+ * it is for: masking addresses and MACs while sharing a screen. Somebody who
+ * shares their screen once tends to do it again, and a switch that reset every
+ * time the panel closed is one they would forget to set the second time -
+ * which is the time it matters.
+ */
+export interface NetworkPanelPrefs {
+  hideSensitive: boolean;
+}
+
+export const NETWORK_PANEL_DEFAULTS: NetworkPanelPrefs = { hideSensitive: false };
+
+export function normalizeNetworkPanel(raw: unknown): NetworkPanelPrefs | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const value = raw as Record<string, unknown>;
+  return {
+    hideSensitive: typeof value.hideSensitive === 'boolean'
+      ? value.hideSensitive
+      : NETWORK_PANEL_DEFAULTS.hideSensitive,
+  };
+}
+
+export const networkPanelStore = createPreferenceStore(
+  'inwire.networkPanel',
+  normalizeNetworkPanel,
+  NETWORK_PANEL_DEFAULTS,
+);

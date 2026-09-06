@@ -44,7 +44,7 @@ import { flowAnnotations } from './services/flowAnnotations';
 import { NO_HOST, type HostIdentity } from './services/direction';
 import { hostFromAdapters, inferHostIdentity, overrideHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
-import { emptyNetworkFacts, type NetworkFacts } from './services/networkFacts';
+import { emptyNetworkFacts, NetworkFactsCollector, type NetworkFacts } from './services/networkFacts';
 import type { AgentAdapter } from './services/agentProtocol';
 import {
   readLinkContext, watchLinkChanges, type LinkChange, type LinkContext,
@@ -100,7 +100,7 @@ import { findPacketIndexById, frameJumpRefusal } from "./components/packet-detai
 import { CustomDissectorModal } from "./components/dissectors/CustomDissectorModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsModal } from "./components/statistics/StatisticsModal";
-import { IspStatsModal } from "./components/isp/IspStatsModal";
+import { NetworkModal } from "./components/network/NetworkModal";
 import { SettingsModal } from "./components/common/SettingsModal";
 import {
   FILTER_PRESETS_STORAGE_KEY,
@@ -432,7 +432,7 @@ export default function App() {
   const [showDissectorModal, setShowDissectorModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showStatisticsModal, setShowStatisticsModal] = useState(false);
-  const [showIspModal, setShowIspModal] = useState(false);
+  const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [agentStatus, setAgentStatus] = useState<
     "disconnected" | "connecting" | "connected" | "error"
@@ -2224,22 +2224,44 @@ export default function App() {
     rederiveRef.current?.();
     rederiveRef.current = null;
     if (!hostIdentityRef.current.inferred && hostIdentityRef.current.macs.size > 0) {
+      const known = new NetworkFactsCollector();
       rederiveRef.current = rederiveDirections(imported, hostIdentityRef.current,
-        () => { rederiveRef.current = null; setPackets((prev) => prev.slice()); });
+        () => {
+          rederiveRef.current = null;
+          setNetworkFacts(known.snapshot());
+          setPackets((prev) => prev.slice());
+        },
+        (packet, host) => known.observe(packet, host));
       return;
     }
     const inferred = inferHostIdentity(imported);
     setHostIdentity(inferred ?? NO_HOST);
     hostIdentityRef.current = inferred ?? NO_HOST;
-    if (inferred === null) return;
+    // The facts an imported capture reveals about the network it came from.
+    // Collected here rather than in the Worker because an import never goes
+    // near the Worker - and this is the case the Network panel earns its keep
+    // in, since a file from somebody else's network is one you cannot ask.
+    const collector = new NetworkFactsCollector();
+    const observe = (packet: Packet, host: HostIdentity) => collector.observe(packet, host);
+    if (inferred === null) {
+      // Still worth collecting: the gateway needs a host to be sure of, but
+      // the router advertisement, the DHCP server and the LLDP neighbour are
+      // facts about the segment and do not.
+      rederiveRef.current = rederiveDirections(imported, NO_HOST, () => {
+        rederiveRef.current = null;
+        setNetworkFacts(collector.snapshot());
+      }, observe);
+      return;
+    }
     rederiveRef.current = rederiveDirections(imported, inferred, () => {
       rederiveRef.current = null;
+      setNetworkFacts(collector.snapshot());
       // A new array, because the frames were mutated in place: React compares
       // by identity and would otherwise not re-read a single row. The frames
       // themselves are the same objects, which is the point - every cache in
       // the app keyed on frame identity survives this.
       setPackets((prev) => prev.slice());
-    });
+    }, observe);
   };
 
   /**
@@ -2340,7 +2362,7 @@ export default function App() {
           onOpenStatisticsModal={() => setShowStatisticsModal(true)}
           nameResolution={nameResolution}
           onNameResolutionChange={patchNameResolution}
-          onOpenIspModal={() => setShowIspModal(true)}
+          onOpenNetworkModal={() => setShowNetworkModal(true)}
           filterSlot={
           <FilterBar
             filterText={filterText}
@@ -2693,8 +2715,16 @@ export default function App() {
       </AnimatePresence>
 
       <AnimatePresence>
-        {showIspModal && (
-          <IspStatsModal key="isp-modal" onClose={() => setShowIspModal(false)} />
+        {showNetworkModal && (
+          <NetworkModal
+            key="network-modal"
+            onClose={() => setShowNetworkModal(false)}
+            adapters={adapters}
+            facts={networkFacts}
+            captureInterfaces={selectedInterfaces}
+            agentConnected={agentStatus === 'connected'}
+            onRefresh={() => sendAgentCommand({ type: 'refresh_adapters' })}
+          />
         )}
       </AnimatePresence>
 

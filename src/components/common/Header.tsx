@@ -43,7 +43,7 @@ interface HeaderProps {
   onOpenDissectorModal: () => void;
   onOpenExportModal: () => void;
   onOpenStatisticsModal: () => void;
-  onOpenIspModal?: () => void;
+  onOpenNetworkModal?: () => void;
   /** The View -> Name Resolution switches, shown in the menu. */
   nameResolution: NameResolutionPrefs;
   onNameResolutionChange: (patch: Partial<NameResolutionPrefs>) => void;
@@ -79,7 +79,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenDissectorModal,
   onOpenExportModal,
   onOpenStatisticsModal,
-  onOpenIspModal,
+  onOpenNetworkModal,
   nameResolution,
   onNameResolutionChange,
   agentStatus,
@@ -225,7 +225,7 @@ export const Header: React.FC<HeaderProps> = ({
           onOpenDissectorModal={onOpenDissectorModal}
           onOpenExportModal={onOpenExportModal}
           onOpenStatisticsModal={onOpenStatisticsModal}
-          onOpenIspModal={onOpenIspModal}
+          onOpenNetworkModal={onOpenNetworkModal}
           nameResolution={nameResolution}
           onNameResolutionChange={onNameResolutionChange}
           onOpenSettingsModal={onOpenSettingsModal}
