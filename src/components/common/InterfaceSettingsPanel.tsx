@@ -17,6 +17,7 @@ import { usePreferenceStore, usePreferenceValue } from '../../services/preferenc
 import { dashboardStore, type DashboardMode } from '../../services/dashboardPrefs';
 import { DashboardWidgetList } from './DashboardWidgetList';
 import { Section, SettingRow } from './settingsLayout';
+import { AVERAGE_FRAME_BYTES, framesForBudget } from '../../services/bufferBudget';
 
 /**
  * Settings -> Interface: how the app looks and behaves as a UI.
@@ -61,11 +62,19 @@ const REFRESH_OPTIONS = [
   { value: '0' as const, label: 'Paused' },
 ];
 
+/**
+ * The buffer budget, in megabytes.
+ *
+ * It used to be a count of packets - 10k / 25k / 50k / 100k. A frame cost
+ * 2,342 B when those were chosen and costs 740 B now, so the largest was about
+ * 74 MB: the setting was rationing a resource nobody was short of, in a unit
+ * that says nothing about the one they are.
+ */
 const BUFFER_OPTIONS = [
-  { value: '10000' as const, label: '10k' },
-  { value: '25000' as const, label: '25k' },
-  { value: '50000' as const, label: '50k' },
-  { value: '100000' as const, label: '100k' },
+  { value: String(128 * 1024 * 1024), label: '128 MB' },
+  { value: String(256 * 1024 * 1024), label: '256 MB' },
+  { value: String(512 * 1024 * 1024), label: '512 MB' },
+  { value: String(1024 * 1024 * 1024), label: '1 GB' },
 ];
 
 const DASHBOARD_MODE_OPTIONS = [
@@ -188,12 +197,18 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Buffer size"
-          description="How many packets are kept before the oldest are dropped. A smaller buffer makes every calculation in the app proportionally cheaper; 100k is about 180 MB of memory."
+          description={
+            `Memory the captured frames may use before the oldest are dropped - about `
+            + `${framesForBudget(perf.packetBufferBytes, AVERAGE_FRAME_BYTES).toLocaleString()} packets at this `
+            + `capture's average. A smaller buffer makes every calculation in the app `
+            + `proportionally cheaper. Frame data and analysis state are held separately and `
+            + `add roughly 60 MB on top of this.`
+          }
         >
           <Segmented
             ariaLabel="Buffer size"
-            value={String(perf.packetBufferCap) as '10000' | '25000' | '50000' | '100000'}
-            onValueChange={(v) => patchPerf({ packetBufferCap: Number(v) })}
+            value={String(perf.packetBufferBytes)}
+            onValueChange={(v) => patchPerf({ packetBufferBytes: Number(v) })}
             options={BUFFER_OPTIONS}
           />
         </SettingRow>

@@ -58,7 +58,8 @@ interface SettingsModalProps {
   onClose: () => void;
   totalPacketsCount: number;
   totalBytes: number;
-  packetBufferCap: number;
+  packetBufferBytes: number;
+  bufferResidentBytes: number;
   bufferAutoPaused: boolean;
   onClearPackets: () => void;
   /**
@@ -112,7 +113,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   totalPacketsCount,
   totalBytes,
-  packetBufferCap,
+  packetBufferBytes,
+  bufferResidentBytes,
   bufferAutoPaused,
   onClearPackets,
   storage,
@@ -145,8 +147,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClearAgentLog,
 }) => {
   const [section, setSection] = useState<SettingsSection>('appearance');
-  const bufferPercent = packetBufferCap > 0
-    ? Math.min(100, (totalPacketsCount / packetBufferCap) * 100)
+  const bufferPercent = packetBufferBytes > 0
+    ? Math.min(100, (bufferResidentBytes / packetBufferBytes) * 100)
     : 0;
 
   return (
@@ -253,7 +255,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs mt-3">
                         <dt className="text-muted-foreground">Used</dt>
                         <dd className="font-mono">
-                          {totalPacketsCount.toLocaleString()} / {packetBufferCap.toLocaleString()} packets
+                          {totalPacketsCount.toLocaleString()} packets, {(bufferResidentBytes / 1024 / 1024).toFixed(0)} / {(packetBufferBytes / 1024 / 1024).toFixed(0)} MB
                           <span className="text-muted-foreground"> ({bufferPercent.toFixed(1)}%)</span>
                         </dd>
                         <dt className="text-muted-foreground">Captured</dt>

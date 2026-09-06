@@ -122,6 +122,7 @@ import {
 } from "react-icons/tb";
 import { evictOldBytes } from './services/packetBytes';
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
+import { estimateSummaryBytes, planBufferTrim } from './services/bufferBudget';
 
 // Bounded, oldest dropped first. A session left open for hours must not grow
 // the log pane without limit.
@@ -507,6 +508,20 @@ export default function App() {
   const fieldWriter = useRef(new FieldBlockWriter());
 
   /**
+   * What the buffer's summaries are estimated to cost, in bytes.
+   *
+   * Added to outside the state updater and subtracted inside the one guard that
+   * already survives StrictMode's double invoke - see the trim below. A ref
+   * rather than state because nothing renders from it: it decides when to trim
+   * and when to auto-pause, both of which happen inside the flush.
+   *
+   * An estimate, with a tested error bound: `scripts/perf/buffer-budget.ts`
+   * holds it to within 15% of the heap those frames actually occupy.
+   */
+  const residentBytesRef = useRef(0);
+
+
+  /**
    * How much of this capture is on disk.
    *
    * Shown because the stored capture now outlives the app
@@ -650,6 +665,11 @@ export default function App() {
       // be pure and React runs this one twice under StrictMode: `absorb` skips a
       // frame that already has a block, but claiming a row twice would waste one.
       fieldWriter.current.absorb(incoming);
+      // Counted here rather than in the updater, which React runs twice under
+      // StrictMode - adding on both passes would double the total and trim a
+      // buffer that was nowhere near its budget. The split above has already
+      // moved the dense fields out, so what is measured is what will be held.
+      for (const packet of incoming) residentBytesRef.current += estimateSummaryBytes(packet);
 
       setPackets((prev) => {
         // The concat first, then both patch passes written into its result.
@@ -668,8 +688,9 @@ export default function App() {
         let next = prev.concat(incoming);
         if (replies.length > 0) applyIcmpRepliesInPlace(next, replies);
         if (patches.length > 0) applyInfoPatchesInPlace(next, patches);
-        const cap = packetBufferCapRef.current;
-        const trimmed = trimToCap(next, cap);
+        const budget = packetBufferBytesRef.current;
+        const plan = planBufferTrim(next, residentBytesRef.current, budget);
+        const trimmed = plan.dropCount > 0 ? next.slice(plan.dropCount) : next;
         if (trimmed !== next) {
           const forgotten = next.length - trimmed.length;
           // Outside the updater's return value on purpose: a state updater has
@@ -690,6 +711,12 @@ export default function App() {
             };
             const total = droppedBufferRef.current.total;
             queueMicrotask(() => setDroppedBuffer(total));
+            // Inside the guard, and for the same reason the counter is: the
+            // updater runs twice under StrictMode, and subtracting the freed
+            // bytes on both passes would walk the running total down until the
+            // buffer stopped trimming at all. Both passes compute the same
+            // head, so only the first gets here.
+            residentBytesRef.current -= plan.freedBytes;
           }
           next = trimmed;
           // The stored session mirrors the live buffer, including its
@@ -708,7 +735,7 @@ export default function App() {
         // Stopping is decided here, where the true post-trim size is known.
         // isCapturingRef rather than isCapturing: this effect is set up once
         // and its closure would otherwise never see a later capture start.
-        if (isCapturingRef.current && next.length >= cap * AUTO_PAUSE_AT) {
+        if (isCapturingRef.current && residentBytesRef.current >= budget * AUTO_PAUSE_AT) {
           setIsCapturing(false);
           setBufferAutoPaused(true);
           sendAgentCommand({ type: 'stop_capture' });
@@ -904,6 +931,7 @@ export default function App() {
           // bag is the contract and it has no business knowing about blocks;
           // the split belongs here, where the frames join the buffer.
           fieldWriter.current.absorb(batch);
+          for (const packet of batch) residentBytesRef.current += estimateSummaryBytes(packet);
           lastId = frames[frames.length - 1].id;
           done += frames.length;
 
@@ -919,7 +947,15 @@ export default function App() {
             const next = prev.concat(batch);
             applyIcmpRepliesInPlace(next, icmpReplies);
             applyInfoPatchesInPlace(next, infoPatches);
-            return trimToCap(next, packetBufferCapRef.current);
+            // A stored session can be larger than the budget - it was written
+            // under whatever budget was set then, and the storage budget is
+            // its own 512 MB - so a restore trims on the way in exactly as the
+            // live flush does. Without this the buffer would come back over
+            // budget and stay there until the next captured frame.
+            const plan = planBufferTrim(next, residentBytesRef.current, packetBufferBytesRef.current);
+            if (plan.dropCount === 0) return next;
+            residentBytesRef.current -= plan.freedBytes;
+            return next.slice(plan.dropCount);
           });
           setRestoreProgress({ done, total });
           // Yield so React can commit and the browser can paint this chunk.
@@ -942,6 +978,7 @@ export default function App() {
         // already in the list, and its Time column restarts at zero halfway
         // down a capture.
         fieldWriter.current = new FieldBlockWriter();
+        residentBytesRef.current = 0;
         pipeline.reset(Math.floor(lastId) + 1, captureStartRef.current, lastPacketTimeRef.current);
       }
 
@@ -1014,18 +1051,19 @@ export default function App() {
   // `performance.now()` in this scope and gets a confusing type error.
   const [perf] = usePreferenceStore(performanceStore);
   usePreferenceSync(performanceStore.key, performanceStore.normalize, performanceStore.accept);
-  const { packetBufferCap, dashboardRefreshMs } = perf;
+  const { packetBufferBytes, dashboardRefreshMs } = perf;
   /**
-   * The cap, for the ingest handler.
+   * The budget, for the ingest handler.
    *
    * That handler is registered once and its closure never sees a later render,
-   * which is the same reason `isCapturingRef` exists beside it. Reading the cap
-   * from state there would pin it at whatever it was when the socket opened.
+   * which is the same reason `isCapturingRef` exists beside it. Reading the
+   * budget from state there would pin it at whatever it was when the socket
+   * opened.
    */
-  const packetBufferCapRef = useRef(packetBufferCap);
+  const packetBufferBytesRef = useRef(packetBufferBytes);
   useEffect(() => {
-    packetBufferCapRef.current = packetBufferCap;
-  }, [packetBufferCap]);
+    packetBufferBytesRef.current = packetBufferBytes;
+  }, [packetBufferBytes]);
 
   const [layout, patchLayout] = usePreferenceStore(layoutStore);
   const { bottomPaneHeight, detailsPaneRatio, panes: showPanes, arrangement } = layout;
@@ -1989,6 +2027,7 @@ export default function App() {
     // tracker would keep describing streams from a capture that no longer
     // exists, and the next frame would be numbered after frames that are gone.
     fieldWriter.current = new FieldBlockWriter();
+    residentBytesRef.current = 0;
     pipeline.reset(1);
     // Clearing the buffer is the only way a fresh capture begins, so this is
     // where the relative-time clock resets. captureStartRef === null is then
@@ -2030,6 +2069,7 @@ export default function App() {
     // exists, and the next frame must not be numbered after frames that are
     // gone - the same reset Clear does.
     fieldWriter.current = new FieldBlockWriter();
+    residentBytesRef.current = 0;
     pipeline.reset(1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
@@ -2112,6 +2152,7 @@ export default function App() {
     // are no longer in the buffer.
     const lastId = imported.length > 0 ? imported[imported.length - 1].id : 0;
     fieldWriter.current = new FieldBlockWriter();
+    residentBytesRef.current = 0;
     pipeline.reset(Math.floor(lastId) + 1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
@@ -2591,7 +2632,13 @@ export default function App() {
             onClearAgentLog={handleClearAgentLog}
             totalPacketsCount={packets.length}
             totalBytes={totalBytes}
-            packetBufferCap={packetBufferCap}
+            packetBufferBytes={packetBufferBytes}
+            // Read off the ref during render rather than mirrored into state:
+            // `packets` changes on every flush, so this render is the one that
+            // follows each change and the ref is current by then. A state copy
+            // would be a second thing to keep in step for a number only Driver
+            // Info reads.
+            bufferResidentBytes={residentBytesRef.current}
             bufferAutoPaused={bufferAutoPaused}
             onClearPackets={handleClearPackets}
             storage={storage}
