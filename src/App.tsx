@@ -1020,8 +1020,14 @@ export default function App() {
         // frame after a restore is numbered 1, colliding with everything
         // already in the list, and its Time column restarts at zero halfway
         // down a capture.
+        // A fresh column block, so live frames start one of their own rather
+        // than extending the restored capture's - but NOT a fresh byte count.
+        // The loop above added every restored frame to it, and those frames
+        // are still in the buffer. Zeroing it here reported a full buffer as
+        // "0 / 512 MB", and worse: `planBufferTrim` reads the same number, so
+        // a restored session never trimmed until enough live frames had
+        // arrived to rebuild a total from nothing.
         fieldWriter.current = new FieldBlockWriter();
-        residentBytesRef.current = 0;
         pipeline.reset(Math.floor(lastId) + 1, captureStartRef.current, lastPacketTimeRef.current);
       }
 
@@ -2239,7 +2245,12 @@ export default function App() {
     // are no longer in the buffer.
     const lastId = imported.length > 0 ? imported[imported.length - 1].id : 0;
     fieldWriter.current = new FieldBlockWriter();
-    residentBytesRef.current = 0;
+    // What the imported frames actually cost. Setting this to zero and
+    // leaving it - which is what happened before - reported a full buffer as
+    // empty, and stopped it trimming: `planBufferTrim` reads this number, so
+    // an import of a million frames sat over budget until enough live frames
+    // had arrived to rebuild a total from scratch.
+    residentBytesRef.current = imported.reduce((sum, p) => sum + estimateSummaryBytes(p), 0);
     pipeline.reset(Math.floor(lastId) + 1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
