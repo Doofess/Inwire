@@ -40,6 +40,7 @@ import { dissectNbns } from './dissectors/nbns';
 import { dissectSyslog } from './dissectors/syslog';
 import { dissectRadius } from './dissectors/radius';
 import { dissectSnmp } from './dissectors/snmp';
+import { dissectSip } from './dissectors/sip';
 import { DnsTracker } from './dnsTracker';
 import { dissectQuicDatagram } from './dissectors/quic';
 import { buildQuicTlsLayer } from './dissectors/tls';
@@ -671,6 +672,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Syslog message': 'syslog',
   'RADIUS Protocol': 'radius',
   'Simple Network Management Protocol': 'snmp',
+  'Session Initiation Protocol': 'sip',
   'Transport Layer Security': 'tls',
   'Hypertext Transfer Protocol': 'http',
   'HyperText Transfer Protocol 2': 'http2',
@@ -2639,6 +2641,16 @@ function decodeTransportLayer(
         info = dhcp.info;
         extraLayers.push(dhcp.layer);
         Object.assign(dhcpFields, dhcp.fields);
+      }
+    } else if (srcPort === 5060 || dstPort === 5060 || srcPort === 5061 || dstPort === 5061) {
+      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+      const sip = dissectSip(rawBytes, udpPayloadStart, payloadEnd);
+      if (sip) {
+        protocolLabel = sip.protocolLabel;
+        info = sip.info;
+        extraLayers.push(sip.layer);
+        protocolTokens.push('sip');
+        Object.assign(appFields, sip.fields);
       }
     } else if (srcPort === 161 || dstPort === 161 || srcPort === 162 || dstPort === 162) {
       const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);

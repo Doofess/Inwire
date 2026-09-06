@@ -59,7 +59,7 @@ export const LAYERS = [
   'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905',
   'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'tcp', 'udp',
   'dns', 'nbns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'http', 'http2', 'http3',
+  'syslog', 'radius', 'snmp', 'sip', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -274,6 +274,20 @@ export const FIELDS: readonly FieldDef[] = [
   uint('syslog.facility', 'Facility', 'syslog'),
   uint('syslog.level', 'Level', 'syslog'),
   str('syslog.msg', 'Message', 'syslog', { label: 'Syslog message', align: 'left' }),
+
+  // --- SIP -------------------------------------------------------------------
+  //
+  // `sip.call_id` is a column because it is the one value that ties every frame
+  // of a call together - the thing you filter on to see one conversation.
+  str('sip.method', 'Method', 'sip'),
+  str('sip.r_uri', 'Request-URI', 'sip', { label: 'SIP URI', align: 'left' }),
+  uint('sip.status_code', 'Status-Code', 'sip'),
+  str('sip.reason_phrase', 'Reason-Phrase', 'sip'),
+  str('sip.from', 'From', 'sip'),
+  str('sip.to', 'To', 'sip'),
+  str('sip.call_id', 'Call-ID', 'sip', { label: 'SIP Call-ID', align: 'left' }),
+  str('sip.cseq', 'CSeq', 'sip'),
+  str('sip.user_agent', 'User-Agent', 'sip'),
 
   // --- SNMP ------------------------------------------------------------------
   //
