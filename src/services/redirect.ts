@@ -18,8 +18,22 @@
  * is precisely the failure `docs/decisions/0015` recorded: repainting every
  * frame in one go stalled the main thread for 202 ms at the old 100k cap and
  * 1,985 ms at a million, and the buffer is larger now that it is bounded by
- * memory rather than by a frame count. So the work is sliced between animation
- * frames, the same shape the minimap's colour fill ended up with.
+ * memory rather than by a frame count.
+ *
+ * **Sliced on a MessageChannel, not on animation frames** - and the difference
+ * is not a detail. `requestAnimationFrame` does not fire **at all** in a
+ * background tab: measured here at zero callbacks over 3.8 seconds in a hidden
+ * tab. A restore or an import that finished while the tab was in the
+ * background would therefore leave every frame without a direction until the
+ * tab was looked at again, which is exactly when nobody is watching to notice.
+ *
+ * The minimap's colour fill (ADR 0015) uses animation frames and is right to:
+ * it is *painting*, and there is no point painting a tab nobody can see. This
+ * is *data*, and the buffer has to be correct whether or not anyone is
+ * looking. A `setTimeout` would fire, but Chrome throttles chained timers in a
+ * hidden tab to roughly one a second - thirty five slices at a full buffer
+ * would take half a minute. A MessageChannel task is neither paused nor
+ * throttled, which is why React's own scheduler uses one.
  */
 import type { Packet } from '../types/packet';
 import { fieldValue } from './dissect/fieldAccess';
@@ -91,8 +105,10 @@ export function rederiveDirections(
 ): () => void {
   let index = 0;
   let changed = 0;
-  let handle: number | null = null;
   let cancelled = false;
+  // One channel per pass, closed when it finishes or is cancelled, so a
+  // cancelled pass leaves nothing holding the frames it was walking.
+  const channel = new MessageChannel();
 
   const step = () => {
     if (cancelled) return;
@@ -112,21 +128,28 @@ export function rederiveDirections(
       }
     }
     if (index < packets.length) {
-      handle = requestAnimationFrame(step);
+      channel.port2.postMessage(0);
       return;
     }
-    handle = null;
+    close();
     onDone(changed);
   };
 
-  // The first slice runs on the next frame rather than now: the caller is
+  const close = () => {
+    channel.port1.onmessage = null;
+    channel.port1.close();
+    channel.port2.close();
+  };
+
+  channel.port1.onmessage = step;
+  // The first slice runs on the next task rather than now: the caller is
   // usually mid-render (an import that has just set state), and doing work
   // before that render commits delays the thing the user is waiting to see.
-  handle = requestAnimationFrame(step);
+  channel.port2.postMessage(0);
 
   return () => {
     cancelled = true;
-    if (handle !== null) cancelAnimationFrame(handle);
+    close();
   };
 }
 
