@@ -79,7 +79,7 @@ import {
   defaultColorRules,
   normalizeColorRules,
 } from "./services/colorRules";
-import { isAgentOutdated, summarizeCaptureStats, REQUIRED_AGENT_VERSION, type AgentCommand, type AgentInterface, type CaptureDropStats } from "./services/agentProtocol";
+import { AGENT_WS_URL, isAgentOutdated, summarizeCaptureStats, REQUIRED_AGENT_VERSION, type AgentCommand, type AgentInterface, type CaptureDropStats } from "./services/agentProtocol";
 import type { AgentLogEntry } from "./services/agentProtocol";
 // Loopback is dropped here, at the single point where the agent's list
 // enters app state, so every consumer below sees the same adapters.
@@ -125,7 +125,7 @@ import {
 } from "react-icons/tb";
 import { evictOldBytes } from './services/packetBytes';
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
-import { estimateSummaryBytes, planBufferTrim } from './services/bufferBudget';
+import { AUTO_PAUSE_AT, estimateSummaryBytes, planBufferTrim } from './services/bufferBudget';
 
 // Bounded, oldest dropped first. A session left open for hours must not grow
 // the log pane without limit.
@@ -155,13 +155,6 @@ const INTERFACE_RATE_SAMPLES = 30;
 // slack survives as `BUDGET_SLACK` there, for the same reason it existed here:
 // trimming on every flush moves `packets[0]` ten times a second, and three
 // caches take an O(buffer) fallback each time it moves.
-
-/**
- * Capture stops on its own at this fraction of the buffer, so a full buffer
- * is a deliberate stop rather than packets silently falling off the back
- * while the user believes they are still recording everything.
- */
-const AUTO_PAUSE_AT = 0.99;
 
 /**
  * How often queued packets are committed to React state. Fast enough that
@@ -1688,7 +1681,7 @@ export default function App() {
     // on its way to the screen.
     pipeline.onNetworkFacts = setNetworkFacts;
 
-    pipeline.connect("ws://localhost:8999");
+    pipeline.connect(AGENT_WS_URL);
 
     return () => {
       if (connectedDelay) clearTimeout(connectedDelay);

@@ -15,6 +15,7 @@
  * Handshake and 1-RTT packets need the TLS session secrets, so they carry no
  * tail here - and none in the reference analyzer either.
  */
+import { toHex } from '../addressFormat';
 
 /** Long-header packet types for QUIC v1 (RFC 9000). */
 const LONG_PACKET_TYPES_V1: Record<number, string> = {
@@ -233,9 +234,6 @@ export interface QuicDissectorResult {
   nextPacketOffset: number;
 }
 
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-}
 
 /**
  * Reads a QUIC variable-length integer (RFC 9000 §16). The top two bits of the

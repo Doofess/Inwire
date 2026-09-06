@@ -11,7 +11,9 @@
  * This is what turns "Initial, DCID=9635b6f53a7cb323" into
  * "Initial, DCID=9635b6f53a7cb323, PKN: 1, CRYPTO, CRYPTO, PING".
  */
-import { encryptBlock, expandKeyCached, aesGcmDecrypt, AES_BLOCK_SIZE } from '../crypto/aes';
+import {
+  encryptBlock, expandKeyCached, aesGcmDecrypt, AES_BLOCK_SIZE, AEAD_TAG_LENGTH,
+} from '../crypto/aes';
 import { chacha20, chacha20Poly1305Decrypt } from '../crypto/chacha20poly1305';
 import { hkdfExtract, hkdfExpandLabel } from '../crypto/hkdf';
 import type { CipherSuiteSpec } from '../tls/cipherSuites';
@@ -31,7 +33,6 @@ export const QUIC_V2_INITIAL_SALT = new Uint8Array([
 export const QUIC_VERSION_1 = 0x00000001;
 export const QUIC_VERSION_2 = 0x6b3343cf;
 
-const AEAD_TAG_LENGTH = 16;
 /** The sample used for header protection is always 16 bytes, taken 4 past the packet number. */
 const HEADER_PROTECTION_SAMPLE_OFFSET = 4;
 

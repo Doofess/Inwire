@@ -9,6 +9,7 @@
  * (the type name padded to eight characters, which is why "ACK" carries five
  * spaces) and `Solicit XID: 0x1a2b3c CID: ...` for v6.
  */
+import { toHex } from '../addressFormat';
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 
 /**
@@ -225,7 +226,7 @@ export function dissectDhcpv6(b: Uint8Array, start: number, end: number): DhcpRe
     let value = '';
     if (code === 1 || code === 2) {
       const duidType = (b[v] << 8) | b[v + 1];
-      const hex = Array.from(b.subarray(v, v + len)).map((x) => x.toString(16).padStart(2, '0')).join('');
+      const hex = toHex(b.subarray(v, v + len));
       value = `DUID type ${duidType}: ${hex}`;
       if (code === 1) { cid = hex; fields['dhcpv6.duid.bytes'] = hex; }
       if (duidType === 3 && len >= 10) result.clientMac = mac(b, v + 4, 6);

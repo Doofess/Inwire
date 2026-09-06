@@ -31,6 +31,7 @@
  * the user asks for the Decryption Secrets Block explicitly.
  */
 import { clearDerivedKeys } from '../crypto/aes';
+import { toHex } from '../addressFormat';
 
 /** The labels a line may carry. Anything else is counted and ignored. */
 const KNOWN_LABELS = new Set([
@@ -64,11 +65,9 @@ function fromHex(text: string): Uint8Array | null {
   return out;
 }
 
-export function toHex(bytes: Uint8Array): string {
-  let out = '';
-  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
-  return out;
-}
+// Re-exported rather than moved out of reach: `toHex` reads as part of this
+// module's surface at every call site that pairs it with `fromHex` above.
+export { toHex };
 
 /**
  * Secrets indexed by client random.

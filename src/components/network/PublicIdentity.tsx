@@ -3,6 +3,14 @@ import { TbShield } from 'react-icons/tb';
 import { Row, Section, Empty, Value } from './rows';
 
 /**
+ * The public-identity lookup: what the internet sees when this machine
+ * connects. Named rather than inline in the effect, so every host this app
+ * contacts is greppable - it is behind the `nameResolution.geoIp` consent
+ * switch like the others.
+ */
+const IPAPI_ENDPOINT = 'https://ipapi.co/json/';
+
+/**
  * How this machine looks from the outside: its public address, and the ISP,
  * network block and location it is registered to.
  *
@@ -54,7 +62,7 @@ export const PublicIdentity: React.FC<PublicIdentityProps> = ({ allowed, hidden,
     setLoading(true);
     (async () => {
       try {
-        const response = await fetch('https://ipapi.co/json/');
+        const response = await fetch(IPAPI_ENDPOINT);
         if (!response.ok) throw new Error('Could not reach the lookup service');
         const json = await response.json();
         if (json.error) throw new Error(json.reason || 'The lookup service refused the request');

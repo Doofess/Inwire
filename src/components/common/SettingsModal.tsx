@@ -17,9 +17,12 @@ import type { AgentLogEntry } from '../../services/agentProtocol';
 import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/packet';
 import type { PacketTheme } from '../../services/packetThemes';
 import { formatBytes } from '../../lib/formatBytes';
+import { AUTO_PAUSE_AT } from '../../services/bufferBudget';
 
-// Mirrors AUTO_PAUSE_AT in App.tsx, purely for the explanatory copy below.
-const AUTO_PAUSE_PERCENT = 99;
+// Read from the constant capture actually stops at, not restated: this number
+// only appears in explanatory copy, and copy that drifts from the behaviour it
+// describes is worse than no copy.
+const AUTO_PAUSE_PERCENT = Math.round(AUTO_PAUSE_AT * 100);
 
 /**
  * Capture folded into Driver Info rather than standing beside it.

@@ -16,6 +16,7 @@ import {
   type Object3D,
 } from 'three';
 import { mixHex, toRgb } from '../../lib/colorMix';
+import { EARTH_RADIUS_METRES } from '../../lib/greatCircle';
 
 /**
  * The location pins, as real 3D geometry rather than DOM markers.
@@ -157,8 +158,9 @@ export function gamutSafe(hex: string): string {
  */
 const PIN_TILT_RAD = (26 * Math.PI) / 180;
 
-/** The globe projection's unit sphere is one earth radius. See globeModelMatrix. */
-const EARTH_RADIUS_M = 6371008.8;
+// The globe projection's unit sphere is one earth radius. See globeModelMatrix.
+// The number itself lives in lib/greatCircle.ts, which is where the arc layer
+// and the shader read it from too.
 
 /**
  * How far past 90 degrees from the map centre a pin survives on the globe.
@@ -211,7 +213,7 @@ function globeUnitVector(lng: number, lat: number): Vector3 {
  * the nested frames built in `onAdd`.
  */
 function globeModelMatrix(lng: number, lat: number): Matrix4 {
-  const scale = 1 / EARTH_RADIUS_M;
+  const scale = 1 / EARTH_RADIUS_METRES;
   return new Matrix4()
     .makeRotationY((lng / 180) * Math.PI)
     .multiply(new Matrix4().makeRotationX((-lat / 180) * Math.PI))

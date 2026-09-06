@@ -277,7 +277,19 @@ export function parseGeoResponse(ip: string, raw: unknown): GeoLocation | null {
 // Lookup
 // ---------------------------------------------------------------------------
 
+/**
+ * The two hosts this module talks to, named rather than written inline.
+ *
+ * Both are behind the `nameResolution.geoIp` consent switch, and both send an
+ * address off this machine - which makes "what does this app contact" a
+ * question somebody is entitled to answer with one grep. The DoH URL used to
+ * be a template literal buried inside `resolveHostname`, where it was
+ * findable only by knowing to look.
+ */
 const GEO_ENDPOINT = 'https://get.geojs.io/v1/ip/geo.json';
+
+/** Cloudflare's DNS-over-HTTPS resolver, for reverse lookups. */
+const DOH_ENDPOINT = 'https://cloudflare-dns.com/dns-query';
 
 /**
  * How long to gather addresses before asking.
@@ -556,7 +568,7 @@ export const resolveHostname = async (ip: string): Promise<string | null> => {
   try {
     const reversed = ip.split('.').reverse().join('.');
     const res = await fetch(
-      `https://cloudflare-dns.com/dns-query?name=${reversed}.in-addr.arpa&type=PTR`,
+      `${DOH_ENDPOINT}?name=${reversed}.in-addr.arpa&type=PTR`,
       { headers: { accept: 'application/dns-json' } },
     );
     if (!res.ok) throw new Error('DoH request failed');

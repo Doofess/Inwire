@@ -21,7 +21,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { contrastRatio } from '../../src/lib/colorMix';
+import { contrastRatio, deltaE76 } from '../../src/lib/colorMix';
 import {
   RETIRED_THEMES,
   SYSTEM_THEME_PAIR,
@@ -159,24 +159,6 @@ for (const t of THEME_OPTIONS) {
  * most of the screen, so they are what "looks like a different theme" actually
  * means; an accent can differ wildly and still leave two themes twins.
  */
-function toLab(hex: string): [number, number, number] {
-  const n = parseInt(hex.slice(1), 16);
-  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => {
-    const s = c / 255;
-    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  });
-  const x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047;
-  const y = r * 0.2126 + g * 0.7152 + b * 0.0722;
-  const z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883;
-  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
-  const [fx, fy, fz] = [f(x), f(y), f(z)];
-  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
-}
-function deltaE(a: string, b: string): number {
-  const [l1, a1, b1] = toLab(a);
-  const [l2, a2, b2] = toLab(b);
-  return Math.hypot(l1 - l2, a1 - a2, b1 - b2);
-}
 
 /**
  * 5.0 sits well above the ~2.3 "just noticeable difference" while staying under
@@ -207,7 +189,7 @@ for (let i = 0; i < realThemes.length; i++) {
     const a = surfaceColors(realThemes[i]);
     const b = surfaceColors(realThemes[j]);
     if (!a || !b) continue;
-    const d = (deltaE(a.background, b.background) + deltaE(a.card, b.card)) / 2;
+    const d = (deltaE76(a.background, b.background) + deltaE76(a.card, b.card)) / 2;
     if (d < MIN_SURFACE_DELTA_E) {
       tooAlike.push(`${realThemes[i]} vs ${realThemes[j]} (${d.toFixed(1)} deltaE)`);
     }

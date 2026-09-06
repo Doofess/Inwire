@@ -326,6 +326,15 @@ export function clearDerivedKeys(): void {
   derivedKeys.clear();
 }
 
+/**
+ * The authentication tag every AEAD construction here appends, in bytes.
+ *
+ * Sixteen for AES-GCM, ChaCha20-Poly1305 and AES-CCM alike, which is why one
+ * constant serves TLS and QUIC both - each had declared its own, and only one
+ * of the two said why.
+ */
+export const AEAD_TAG_LENGTH = 16;
+
 export function aesGcmDecrypt(
   key: Uint8Array,
   nonce: Uint8Array,

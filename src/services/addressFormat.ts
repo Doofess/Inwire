@@ -135,6 +135,24 @@ export function clearAddressPool(): void {
   addressPool.clear();
 }
 
+/**
+ * Bytes as lowercase hex, no separator.
+ *
+ * There were six of these: an exported one in `tls/keyLog.ts`, private copies
+ * in `lldp.ts` and `quic.ts`, a differently-named `hexOf` in `tls.ts`, and two
+ * more written inline in `dhcp.ts` and `ipv4.ts`. All six produced identical
+ * output by three different routes.
+ *
+ * This is the index-loop form rather than `Array.from(...).map(...).join('')`,
+ * which was the commonest of the three: it allocates neither the intermediate
+ * array nor the array of strings, and some of these callers run per frame.
+ */
+export function toHex(bytes: Uint8Array): string {
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
+  return out;
+}
+
 export function formatMac(bytes: Uint8Array): string {
   return pooled(Array.from(bytes)
     .map(b => b.toString(16).padStart(2, '0'))

@@ -1,5 +1,5 @@
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MapLibreMap } from 'maplibre-gl';
-import type { LngLatAlt } from '../../lib/greatCircle';
+import { EARTH_RADIUS_METRES, type LngLatAlt } from '../../lib/greatCircle';
 
 /**
  * One route, as a polyline with altitude and a colour.
@@ -65,8 +65,6 @@ export interface Arc {
  * its segment in SCREEN space, so a route keeps its width however the sphere
  * turns underneath it.
  */
-const GLOBE_RADIUS_METRES = 6371008.8;
-
 /** Floats per vertex - see ATTRIBUTES for the layout. */
 const STRIDE = 12;
 
@@ -106,7 +104,7 @@ vec3 projectToSphere(vec2 merc) {
 
 vec4 project(vec2 merc, float elev) {
   vec3 sphere = projectToSphere(merc);
-  vec3 elevated = sphere * (1.0 + elev / 6371008.8);
+  vec3 elevated = sphere * (1.0 + elev / ${EARTH_RADIUS_METRES.toFixed(1)});
   vec4 globePos = u_matrix * vec4(elevated, 1.0);
   globePos.z = (1.0 - (dot(elevated, u_clip.xyz) + u_clip.w)) * globePos.w;
   if (u_transition > 0.999) return globePos;
@@ -332,8 +330,8 @@ export class ArcLayer implements CustomLayerInterface {
         const b = arc.points[i + 1];
         const ma = toMercator(a[0], a[1]);
         const mb = toMercator(b[0], b[1]);
-        const ea = a[2] * GLOBE_RADIUS_METRES;
-        const eb = b[2] * GLOBE_RADIUS_METRES;
+        const ea = a[2] * EARTH_RADIUS_METRES;
+        const eb = b[2] * EARTH_RADIUS_METRES;
 
         // `flip` is +1 at the segment's start and -1 at its end, so both ends
         // compute the same direction and the quad cannot twist.

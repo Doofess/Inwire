@@ -1,6 +1,6 @@
 import { DEFAULT_COLOR_RULES } from './colorRules';
 import { themePalette, type Hue, type ThemePalette } from './themePalettes';
-import { contrastRatio, isDarkColor, labToHex, legibleOn, toLabColor } from '../lib/colorMix';
+import { AA_CONTRAST, contrastRatio, isDarkColor, labToHex, legibleOn, toLabColor } from '../lib/colorMix';
 
 /**
  * The colours the packet list paints itself with, derived from the app theme.
@@ -425,8 +425,8 @@ export function packetColorSet(raw: unknown): PacketColorSet {
   return PACKET_COLOR_SETS.includes(raw as PacketColorSet) ? (raw as PacketColorSet) : 'default';
 }
 
-/** WCAG AA for normal text. The list is small monospace, so this is a floor. */
-const AA = 4.5;
+// WCAG AA for normal text. The list is small monospace, so this is a floor.
+const AA = AA_CONTRAST;
 
 function bestForeground(palette: ThemePalette, background: string): string {
   const onForeground = contrastRatio(palette.surface.foreground, background);

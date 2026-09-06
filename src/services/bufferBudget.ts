@@ -50,6 +50,17 @@ export const BUDGET_CHOICES = [
  * instant it was exceeded would do the same thing at a buffer size where the
  * full pass costs far more.
  */
+/**
+ * Capture stops on its own at this fraction of the budget, so a full buffer is
+ * a deliberate stop rather than packets silently falling off the back while
+ * the user believes they are still recording everything.
+ *
+ * `SettingsModal` prints it as a percentage, and used to keep its own `99`
+ * beside a comment admitting the mirror. A number the UI explains has to be
+ * the number the code enforces, or the explanation is just confident.
+ */
+export const AUTO_PAUSE_AT = 0.99;
+
 export const BUDGET_SLACK = 0.05;
 
 /**
