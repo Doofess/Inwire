@@ -34,6 +34,7 @@
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { TlsConversationState, TlsRecordCursor } from '../tcpStreamTracker';
+import { toHex } from '../addressFormat';
 import { md5Hex } from '../crypto/md5';
 import { sha256 } from '../crypto/sha256';
 import { summarizeCertificate, type CertificateSummary } from './x509';
@@ -278,8 +279,7 @@ function parseSni(body: Uint8Array): string | null {
 }
 
 const hex4 = (n: number) => n.toString(16).padStart(4, '0');
-const hexOf = (bytes: Uint8Array) => Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
-const sha256Prefix12 = (s: string) => hexOf(sha256(utf8Encoder.encode(s))).slice(0, 12);
+const sha256Prefix12 = (s: string) => toHex(sha256(utf8Encoder.encode(s))).slice(0, 12);
 
 function ja4Version(v: number): string {
   switch (v) {
@@ -301,7 +301,7 @@ function ja4Alpn(alpn: string[]): string {
   const z = first[first.length - 1];
   if (isAlnum(a) && isAlnum(z)) return `${a}${z}`;
   const bytes = utf8Encoder.encode(first);
-  const h = hexOf(bytes);
+  const h = toHex(bytes);
   return `${h[0]}${h[h.length - 1]}`;
 }
 
@@ -1038,7 +1038,7 @@ function ignoredUnknownRecord(conv: TlsConversationState, frame: number): TlsSeg
 // --- the tree ----------------------------------------------------------------------
 
 const hexField = (name: string, value: Uint8Array, range?: [number, number]): ProtocolField =>
-  ({ name, value: hexOf(value), ...(range ? { rawBytesRange: range } : {}) });
+  ({ name, value: toHex(value), ...(range ? { rawBytesRange: range } : {}) });
 
 function versionField(name: string, v: number, abbrev: string): ProtocolField {
   return { name, value: `${TLS_VERSION_NAMES[v]?.replace('TLSv', 'TLS ') ?? 'Unknown'} (0x${hex4(v)})`, abbrev };

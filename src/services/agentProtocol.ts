@@ -443,6 +443,17 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
 }
 
 /**
+ * Where the local capture agent listens.
+ *
+ * Loopback and a fixed port, which is the whole of the discovery story: the
+ * agent binds `127.0.0.1:8999` and the browser has no way to scan for it. It
+ * lived as a string literal in `App.tsx` while this module's own header
+ * documented the address in prose - so the one place that describes the
+ * protocol was not the place that dialled it.
+ */
+export const AGENT_WS_URL = 'ws://localhost:8999';
+
+/**
  * Bumped alongside AGENT_VERSION in local-agent/agent.py. Compared against
  * whatever the connected agent reports in its hello message to flag a
  * stale build in the UI.

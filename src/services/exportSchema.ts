@@ -263,9 +263,11 @@ export const REQUIRED_COLUMNS: ColumnKey[] = ['source', 'destination', 'protocol
 /**
  * The ceiling on an imported table.
  *
- * Matches App's own `PACKET_BUFFER_CAP`, not the 10,000-frame limit the pcap
- * extractors use: a spreadsheet exported from a full buffer must be able to
- * come back, and a row costs far less to hold than a decoded frame.
+ * Deliberately far above the 10,000-frame limit the pcap extractors use: a
+ * spreadsheet exported from a full buffer must be able to come back, and a row
+ * costs far less to hold than a decoded frame. It is a standalone ceiling now -
+ * it used to be described as matching App's `PACKET_BUFFER_CAP`, which no
+ * longer exists, because the buffer is bounded by bytes rather than frames.
  */
 export const MAX_IMPORT_ROWS = 50000;
 

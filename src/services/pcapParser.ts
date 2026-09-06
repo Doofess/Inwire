@@ -12,7 +12,20 @@ import { L3Tracker } from './l3Tracker';
 import {
   Direction, directionFromAddresses, directionFromMacs, directionFromOffload,
   directionOf, type HostIdentity,
+  ETHERNET_MAX_FRAME,
 } from './direction';
+
+/**
+ * What sits in front of a transport segment on a plain Ethernet/IPv4 frame:
+ * the 14-byte Ethernet header and a 20-byte IPv4 header with no options.
+ *
+ * `ETHERNET_MAX_FRAME` minus this is the largest transport segment that can
+ * have travelled as one frame - 1,480 bytes. Past that the adapter segmented
+ * it, so the bytes in the buffer were never the bytes on the wire and a
+ * checksum over them means nothing. Named because `1514 - 34` stated neither
+ * number's job, and 34 is the one that reads as arbitrary.
+ */
+const ETHERNET_IPV4_HEADER_BYTES = 14 + 20;
 import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './dissectors/tls';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './dissectors/appStream';
@@ -854,7 +867,7 @@ export function decodeRawEthernetPacket(
         // shape: the adapter's segmentation offload split it, and the capture
         // was taken before that happened. It is why the checksum in it is
         // often zero, and saying so here is what stops that reading as damage.
-        ...((origLen || rawBytes.length) > 1514 ? [{
+        ...((origLen || rawBytes.length) > ETHERNET_MAX_FRAME ? [{
           name: '[Frame exceeds MTU]',
           value: 'Segmentation offloaded to the adapter; this frame was never sent in this form',
           generated: true,
@@ -863,7 +876,7 @@ export function decodeRawEthernetPacket(
             // handed to the sniffer above segmentation offload, so its size is
             // an artefact of where we are standing, not of the wire.
             category: 'Unverifiable' as const,
-            message: `Frame is ${origLen || rawBytes.length} bytes, past the 1514-byte Ethernet MTU - segmentation offload`,
+            message: `Frame is ${origLen || rawBytes.length} bytes, past the ${ETHERNET_MAX_FRAME}-byte Ethernet MTU - segmentation offload`,
           },
         }] : []),
       ],
@@ -978,7 +991,7 @@ export function decodeRawEthernetPacket(
     // the bytes here were never the bytes that were sent.
     // ...and a header on a frame we sent, for the same reason: partial offload
     // leaves a non-zero wrong value that looks exactly like corruption.
-    const ipChecksumStatus = headerChecksumActual === 0 || origLen > 1514 || sentByUs
+    const ipChecksumStatus = headerChecksumActual === 0 || origLen > ETHERNET_MAX_FRAME || sentByUs
       ? 'Unverified'
       : checksumCorrect ? 'Good' : 'Bad';
     const ttlGuess = inferTtl(ttl);
@@ -3148,7 +3161,7 @@ function checksumVerdict(
    */
   sentByUs: boolean,
 ): { status: 'Good' | 'Bad' | 'Unverified'; computed?: number } {
-  if (pseudoHeader === undefined || stored === 0 || declaredEnd > rawBytes.length || declaredEnd - start > 1514 - 34) {
+  if (pseudoHeader === undefined || stored === 0 || declaredEnd > rawBytes.length || declaredEnd - start > ETHERNET_MAX_FRAME - ETHERNET_IPV4_HEADER_BYTES) {
     return { status: 'Unverified' };
   }
   if (sentByUs) return { status: 'Unverified' };

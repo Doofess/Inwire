@@ -41,6 +41,15 @@ export function relativeLuminance(hex: string): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+/**
+ * WCAG AA for normal text: the floor both palettes hold themselves to.
+ *
+ * Stated once because it is a standard, not a preference - `packetThemes` and
+ * `statusColors` had each declared their own `AA = 4.5`, and two copies of an
+ * external constant can only ever drift apart, never usefully.
+ */
+export const AA_CONTRAST = 4.5;
+
 /** WCAG contrast ratio between two colours, 1:1 to 21:1. */
 export function contrastRatio(a: string, b: string): number {
   const [x, y] = [relativeLuminance(a), relativeLuminance(b)];

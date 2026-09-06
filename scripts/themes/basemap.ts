@@ -40,7 +40,7 @@ import {
 } from '../../src/components/analytics/mapTheme';
 import { PALETTE_BY_THEME } from '../../src/services/themePalettes';
 import { THEME_OPTIONS, isDarkTheme } from '../../src/lib/themeOptions';
-import { contrastRatio, isDarkColor, toRgb } from '../../src/lib/colorMix';
+import { contrastRatio, isDarkColor, toRgb, relativeLuminance } from '../../src/lib/colorMix';
 import { AMBIENT_INTENSITY, gamutSafe } from '../../src/components/analytics/pinLayer';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -349,18 +349,6 @@ function hue(hex: string): number {
   if (c === 0) return 0;
   const h = max === r ? ((g - b) / c) % 6 : max === g ? (b - r) / c + 2 : (r - g) / c + 4;
   return (h * 60 + 360) % 360;
-}
-
-/** WCAG relative luminance, for the "is this darker than that" checks. */
-function relativeLuminance(hex: string): number {
-  const channel = (value: number) => {
-    const c = value / 255;
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  };
-  const n = parseInt(hex.replace('#', ''), 16);
-  return 0.2126 * channel((n >> 16) & 255)
-    + 0.7152 * channel((n >> 8) & 255)
-    + 0.0722 * channel(n & 255);
 }
 
 console.log();

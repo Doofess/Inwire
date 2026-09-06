@@ -57,14 +57,21 @@ import { ProjectionSwitcher } from './ProjectionSwitcher';
 // maplibre-gl itself is). `lazy: true` defers fetching the ~130KB shaping
 // bundle until a tile actually contains RTL text. Must be called at most
 // once per page load, so this sits at module scope, not inside the
+/**
+ * MapLibre's right-to-left text shaper, loaded from a CDN at first use.
+ *
+ * The one host this component contacts that is not the basemap. Named for the
+ * same reason the lookup endpoints are: it fetches and runs a script, and that
+ * should be visible without reading the call.
+ */
+const RTL_TEXT_PLUGIN_URL =
+  'https://unpkg.com/@mapbox/mapbox-gl-rtl-text@0.4.0/dist/mapbox-gl-rtl-text.js';
+
 // component. Guarded by status check because Vite HMR re-executes module
 // top-level code on every edit-triggered reload in dev, and MapLibre throws
 // if this is ever called a second time in the same page session.
 if (maplibregl.getRTLTextPluginStatus() === "unavailable") {
-  maplibregl.setRTLTextPlugin(
-    "https://unpkg.com/@mapbox/mapbox-gl-rtl-text@0.4.0/dist/mapbox-gl-rtl-text.js",
-    true
-  );
+  maplibregl.setRTLTextPlugin(RTL_TEXT_PLUGIN_URL, true);
 }
 
 // OpenFreeMap: free, no API key, no request limits (donation-supported).

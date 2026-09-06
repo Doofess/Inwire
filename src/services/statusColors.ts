@@ -1,5 +1,5 @@
 import { themePalette } from './themePalettes';
-import { contrastRatio, isDarkColor, labToHex, legibleOn, toLabColor } from '../lib/colorMix';
+import { AA_CONTRAST, contrastRatio, isDarkColor, labToHex, legibleOn, toLabColor } from '../lib/colorMix';
 
 /**
  * The colours that mean "fine", "check this" and "wrong".
@@ -176,8 +176,8 @@ const OVERRIDES: Record<string, Partial<Pick<StatusColors,
 /** How far `dangerStrong` sits from `danger` in lightness, when not pinned. */
 const STRONG_LIGHTNESS_STEP = 16;
 
-/** WCAG AA for normal text, the bar the `-muted` variants must clear. */
-const AA = 4.5;
+// WCAG AA for normal text, the bar the `-muted` variants must clear.
+const AA = AA_CONTRAST;
 
 /**
  * Black or white, whichever can be read on this fill.

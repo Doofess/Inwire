@@ -13,12 +13,10 @@
  * failure is returned as a failure: a TLS record that will not authenticate
  * under the key we derived is a record we have no business rendering.
  */
-import { aesGcmDecrypt } from '../crypto/aes';
+import { aesGcmDecrypt, AEAD_TAG_LENGTH } from '../crypto/aes';
 import { chacha20Poly1305Decrypt } from '../crypto/chacha20poly1305';
 import { hkdfExpandLabel, tls12Prf } from '../crypto/hkdf';
 import type { CipherSuiteSpec } from './cipherSuites';
-
-const AEAD_TAG_LENGTH = 16;
 
 /** One direction's keys for one epoch. */
 export interface DirectionEpoch {

@@ -172,7 +172,10 @@ export const NO_HOST: HostIdentity = {
   macs: new Set(), addresses: new Set(), inferred: false, confidence: 0,
 };
 
-const BROADCAST_MAC = 'ff:ff:ff:ff:ff:ff';
+export const BROADCAST_MAC = 'ff:ff:ff:ff:ff:ff';
+
+/** The all-zero MAC, which is a placeholder rather than an address. */
+export const ZERO_MAC = '00:00:00:00:00:00';
 
 /**
  * Group traffic - broadcast, and IPv4/IPv6 multicast.
@@ -182,7 +185,7 @@ const BROADCAST_MAC = 'ff:ff:ff:ff:ff:ff';
  * stacks map group addresses onto. A frame *to* a group did not single this
  * machine out, but this machine did receive it, which is what `in` means here.
  */
-function isGroupMac(mac: string): boolean {
+export function isGroupMac(mac: string): boolean {
   if (mac === BROADCAST_MAC) return true;
   const firstOctet = parseInt(mac.slice(0, 2), 16);
   return Number.isFinite(firstOctet) && (firstOctet & 0x01) === 1;
@@ -248,8 +251,15 @@ export function directionFromAddresses(
   return 0;
 }
 
-/** The largest frame that can arrive over standard Ethernet, without an FCS. */
-const ETHERNET_MAX_FRAME = 1514;
+/**
+ * The largest frame that can arrive over standard Ethernet, without an FCS.
+ *
+ * Exported because three other modules need the same number for the same
+ * reason - a frame past it was handed to the sniffer above segmentation
+ * offload, so it never travelled as one frame. It was declared twice and
+ * written inline four more times.
+ */
+export const ETHERNET_MAX_FRAME = 1514;
 
 /**
  * The last resort: artefacts only a transmitting NIC leaves.

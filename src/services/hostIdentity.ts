@@ -47,7 +47,9 @@
  */
 import type { Packet } from '../types/packet';
 import { fieldValue } from './dissect/fieldAccess';
-import type { HostIdentity } from './direction';
+import {
+  ETHERNET_MAX_FRAME, ZERO_MAC, isGroupMac, type HostIdentity,
+} from './direction';
 import type { AgentAdapter } from './agentProtocol';
 
 /**
@@ -64,10 +66,6 @@ export const CONFIDENT_AT = 0.6;
 
 /** TTL and hop-limit values a stack starts at. A frame at one has not been routed. */
 const INITIAL_TTLS = new Set([32, 64, 128, 255]);
-
-const ETHERNET_MAX_FRAME = 1514;
-const BROADCAST_MAC = 'ff:ff:ff:ff:ff:ff';
-const ZERO_MAC = '00:00:00:00:00:00';
 
 interface Candidate {
   mac: string;
@@ -155,12 +153,6 @@ function describe(c: Candidate): string {
 function readMac(packet: Packet, key: 'eth.src' | 'eth.dst'): string | undefined {
   const value = fieldValue(packet, key);
   return typeof value === 'string' && value !== ZERO_MAC ? value : undefined;
-}
-
-function isGroupMac(mac: string): boolean {
-  if (mac === BROADCAST_MAC) return true;
-  const first = parseInt(mac.slice(0, 2), 16);
-  return Number.isFinite(first) && (first & 0x01) === 1;
 }
 
 /**

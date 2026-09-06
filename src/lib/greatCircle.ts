@@ -12,6 +12,20 @@ export type LngLat = [number, number];
  */
 export type LngLatAlt = [number, number, number];
 
+/**
+ * The earth's mean radius, in metres (IUGG R1).
+ *
+ * One number, three former homes: `arcLayer` called it `GLOBE_RADIUS_METRES`,
+ * `pinLayer` called it `EARTH_RADIUS_M`, and the globe vertex shader had it
+ * typed out a third time as a GLSL literal. The shader interpolates this now,
+ * so an edit here cannot leave the geometry and the shader disagreeing about
+ * how big the world is.
+ *
+ * It is the scale MapLibre's globe projection works in: the unit sphere is one
+ * earth radius, so an altitude in metres becomes a fraction by dividing by it.
+ */
+export const EARTH_RADIUS_METRES = 6371008.8;
+
 const RAD = Math.PI / 180;
 const DEG = 180 / Math.PI;
 

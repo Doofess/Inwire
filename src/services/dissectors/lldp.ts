@@ -1,5 +1,5 @@
 import { ProtocolField } from '../../types/packet';
-import { formatMac } from '../addressFormat';
+import { toHex, formatMac } from '../addressFormat';
 import { L2DissectorResult } from './l2';
 
 /**
@@ -83,11 +83,6 @@ function toAscii(bytes: Uint8Array): string {
   return out;
 }
 
-function toHex(bytes: Uint8Array): string {
-  let out = '';
-  for (const b of bytes) out += b.toString(16).padStart(2, '0');
-  return out;
-}
 
 /**
  * A network address as it appears inside a Chassis/Port ID TLV: one address
