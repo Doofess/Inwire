@@ -76,6 +76,20 @@ const CT_APPLICATION_DATA = 23;
  */
 const CT_MAX = 26;
 
+/**
+ * The highest content type that puts an element in the **Info column**.
+ *
+ * Distinct from `CT_MAX`, and the two answer different questions. `CT_MAX`
+ * decides what may resynchronise a stream; this decides what the reader is
+ * told about. Asked directly, tshark parses a type-25 record - naming it
+ * "Connection ID (25)" in the tree, with its version and length - and writes
+ * **nothing** to Info for it, so a frame carrying one followed by trailing
+ * bytes reads as a bare `Ignored Unknown Record`. Naming it there produced
+ * `Unknown (25), Ignored Unknown Record`, and giving it the ignored wording
+ * instead would have printed that wording twice.
+ */
+const INFO_NAMED_CONTENT_TYPE_MAX = 24;
+
 /** A record body larger than this is not buffered for parsing - nothing in a hello needs it. */
 const MAX_BUFFERED_RECORD = 65536;
 
@@ -678,7 +692,10 @@ function describeRecord(record: TlsRecord, conv: TlsConversationState, cursor: T
       return;
     }
     default:
-      record.description = CONTENT_TYPE_NAMES[record.contentType] ?? `Unknown (${record.contentType})`;
+      // A record above the Info ceiling is read and shown in the tree, and says
+      // nothing in the column - an empty description is dropped from the join.
+      record.description = record.contentType > INFO_NAMED_CONTENT_TYPE_MAX
+        ? '' : (CONTENT_TYPE_NAMES[record.contentType] ?? `Unknown (${record.contentType})`);
   }
 }
 
@@ -974,7 +991,9 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
 
   const last = completed[completed.length - 1];
   const protocolLabel = nameVersion(labelVersion(last, conv));
-  const info = completed.map((r) => r.description).join(', ');
+  // A record that describes itself as nothing is omitted rather than joined as
+  // an empty element, which would leave a leading ", " in front of the next.
+  const info = completed.map((r) => r.description).filter((d) => d !== '').join(', ');
   const layer = buildTlsLayer(completed, conv, frame);
 
   // What the decryption produced, gathered across the frame's records.

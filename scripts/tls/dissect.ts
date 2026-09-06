@@ -166,6 +166,15 @@ function segment(bytes: Uint8Array, frameId: number, cursor: ReturnType<typeof f
     check(`content type ${contentType} opens a record`, first.kind, 'continuation');
     const rest = segment(record.subarray(20), 3, cursor, conv);
     check(`...and completing it does not desynchronise the stream`, rest.kind, 'tls');
+    // ...and says NOTHING in the Info column while doing it. Asked directly,
+    // tshark reads such a record - "Content Type: Connection ID (25)", with its
+    // version and length - and writes no element to the column, so a frame
+    // holding one plus trailing bytes reads as a bare `Ignored Unknown Record`.
+    // Naming it gave `Unknown (25), Ignored Unknown Record` on 3 fixture frames
+    // and cascaded to 22 more on netview; giving it the ignored wording instead
+    // would have printed that wording twice.
+    check(`...and contributes no element to the Info column`,
+      rest.kind === 'tls' && rest.result.info, '');
     // The stream is back at a boundary, so an ordinary record after it reads
     // normally rather than as an ignored one.
     const after = segment(new Uint8Array([23, 3, 3, 0, 3, 1, 2, 3]), 4, cursor, conv);

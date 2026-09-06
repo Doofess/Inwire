@@ -20,6 +20,11 @@ export const CONTENT_TYPE_NAMES: Record<number, string> = {
   22: 'Handshake',
   23: 'Application Data',
   24: 'Heartbeat',
+  // 25 and 26 are inside `CT_MAX` - they may resynchronise a stream - but only
+  // 25 has a name. The reference analyzer's tree reads "Connection ID (25)" and
+  // "Unknown (26)", and NEITHER contributes an element to the Info column; see
+  // `INFO_NAMED_CONTENT_TYPE_MAX` in tls.ts.
+  25: 'Connection ID',
 };
 
 export const HANDSHAKE_TYPE_NAMES: Record<number, string> = {
