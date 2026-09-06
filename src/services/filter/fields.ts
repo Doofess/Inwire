@@ -225,7 +225,8 @@ const UNDISSECTED = [
   // `nbns` was here until it became a real layer token - see dissectors/nbns.ts.
   'smb', 'smb2', 'nbss', 'netbios', 'dcerpc', 'browser',
   // Transport and application layers not yet decoded.
-  'sctp', 'rtp', 'rtcp', 'sip', 'ldap', 'kerberos', 'radius', 'snmp',
+  // sip, radius and snmp left this list when they became real layer tokens.
+  'sctp', 'rtp', 'rtcp', 'ldap', 'kerberos',
   // Never available from a capture, whatever is implemented.
   'eth.fcs',
 ];

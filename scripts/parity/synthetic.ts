@@ -184,8 +184,15 @@ export function askTshark(tshark: string, frames: Uint8Array[]): TsharkRow[] {
     ], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
     if (run.status !== 0) throw new Error(`tshark exited ${run.status}: ${run.error ?? ''} ${run.stderr ?? ''}`.slice(0, 400));
     return run.stdout.split('\n').filter((l) => l.length > 0).map((line) => {
-      const parts = line.split('	');
-      return { protocol: parts[0] ?? '', info: parts.slice(1).join('	').trimEnd() };
+      const parts = line.split('\t');
+      // Only the line ending is stripped, never trailing spaces. Wireshark's
+      // Info column ends in a space on several protocols - SIP writes
+      // `... | `, HTTP/1.1 writes one after the media type - and the fixture
+      // harness compares those character for character. A `trimEnd()` here
+      // would quietly forgive exactly the difference this exists to catch.
+      let info = parts.slice(1).join('\t');
+      while (info.endsWith('\r') || info.endsWith('\n')) info = info.slice(0, -1);
+      return { protocol: parts[0] ?? '', info };
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
