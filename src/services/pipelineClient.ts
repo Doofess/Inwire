@@ -12,6 +12,8 @@
 import type { AgentMessage, AgentCommand } from './agentProtocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
 import type { InfoPatch } from './pcapParser';
+import type { HostIdentity } from './direction';
+import type { NetworkFacts } from './networkFacts';
 import type {
   FromPipeline, PipelineInterface, PipelineStatus, ReplayFrame, ToPipeline,
 } from './pipeline/protocol';
@@ -55,6 +57,13 @@ export class PipelineClient {
   onAgentMessage: (message: AgentMessage) => void = () => {};
   onFrames: (batch: FrameBatch) => void = () => {};
   onFailure: (message: string) => void = () => {};
+  /**
+   * What the capture revealed about the network, when it changes.
+   *
+   * Not per flush: these are facts about a network, and a network does not
+   * acquire a new resolver ten times a second.
+   */
+  onNetworkFacts: (facts: NetworkFacts) => void = () => {};
 
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
@@ -87,6 +96,9 @@ export class PipelineClient {
         break;
       case 'failure':
         this.onFailure(message.message);
+        break;
+      case 'networkFacts':
+        this.onNetworkFacts(message.facts);
         break;
       case 'detail': {
         const waiting = this.pendingDetail.get(message.id);
@@ -148,6 +160,25 @@ export class PipelineClient {
    */
   addKeyLog(text: string) {
     this.send({ type: 'keylog', text });
+  }
+
+  /**
+   * Who this machine is, so the Worker can say which way each frame went.
+   *
+   * Sets rather than arrays at this boundary, because that is what the rest of
+   * the app holds; the wire carries arrays because a Set does not survive a
+   * structured clone as itself.
+   *
+   * Applies to frames dissected from here on. The ones already in the buffer
+   * are re-derived by the main thread, which is the side that holds them - the
+   * Worker keeps no buffer to revisit.
+   */
+  setHost(host: HostIdentity) {
+    this.send({
+      type: 'host',
+      macs: [...host.macs], addresses: [...host.addresses],
+      inferred: host.inferred, confidence: host.confidence, basis: host.basis,
+    });
   }
 
   /**

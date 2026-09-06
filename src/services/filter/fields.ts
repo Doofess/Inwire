@@ -18,6 +18,7 @@
  */
 
 import { Packet } from '../../types/packet';
+import { DIRECTION_NAMES, directionOf, isDuplicate } from '../direction';
 import { FIELDS, FIELD_BY_ABBREV, FieldDef, FieldType, LAYERS } from '../dissect/fieldRegistry';
 import { fieldReader, fieldValue } from '../dissect/fieldAccess';
 
@@ -109,6 +110,21 @@ const ALIASES: Record<string, AliasDef> = {
   'frame.time_epoch': { type: 'time', read: (p) => [p.tsUs / 1_000_000] },
   'frame.protocols': { type: 'string', read: (p) => [(p.frameProtocols ?? []).join(':')] },
   'frame.interface_name': { type: 'string', read: (p) => [p.interfaceName] },
+  // Which way the frame went, relative to the capturing host. Two spellings
+  // each, and the aliasing needs no new machinery: a reader may return several
+  // values, which is how `proto == tls` and `proto == tlsv1.2` both match one
+  // frame. `out` is what the column and the pcapng flag mean; `sent` is what
+  // somebody types. Both are true of the frame, so both match it.
+  'frame.direction': {
+    type: 'string', ci: true,
+    read: (p) => DIRECTION_NAMES[directionOf(p.direction)],
+  },
+  // Reads as nothing at all on a frame that is not a duplicate, rather than
+  // as a false. That is what makes a bare `frame.duplicate` work: presence is
+  // `read(p).length > 0`, and the engine's own rule is that a field a frame
+  // does not carry never matches under any operator. `frame.duplicate == 1`
+  // works too, for anyone who prefers to spell it out.
+  'frame.duplicate': { type: 'uint', read: (p) => (isDuplicate(p.direction) ? [1] : []) },
   len: { type: 'uint', read: (p) => [p.length] },
   length: { type: 'uint', read: (p) => [p.length] },
 

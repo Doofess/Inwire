@@ -31,6 +31,8 @@ import { IcmpEchoTracker } from '../services/icmpEchoTracker';
 import { QuicFlowTracker } from '../services/quicFlowTracker';
 import { DnsTracker } from '../services/dnsTracker';
 import { L3Tracker } from '../services/l3Tracker';
+import { NO_HOST, type HostIdentity } from '../services/direction';
+import { NetworkFactsCollector } from '../services/networkFacts';
 import { dissectReplay } from '../services/pipeline/replay';
 import type {
   FromPipeline, PipelineInterface, ToPipeline,
@@ -82,6 +84,18 @@ let quicTracker = new QuicFlowTracker();
 let dnsTracker = new DnsTracker();
 let l3Tracker = new L3Tracker();
 
+/**
+ * Who this machine is, and what the capture says about the network.
+ *
+ * Both live beside the trackers because both are cross-frame state the
+ * dissection reads, and both are reset with them. The identity comes from the
+ * agent's `adapter_config` for a live capture - the only source that is a fact
+ * rather than an inference - so it is empty until a client subscribes, and
+ * every frame before that carries no direction rather than a guessed one.
+ */
+let host: HostIdentity = NO_HOST;
+const networkFacts = new NetworkFactsCollector();
+
 const ordering = new OrderingWindow<LiveFrame>(ORDERING_HOLD_MS);
 
 /** Ids are assigned here now: the frame is numbered where it is dissected. */
@@ -118,6 +132,11 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   quicTracker = new QuicFlowTracker();
   dnsTracker = new DnsTracker();
   l3Tracker = new L3Tracker();
+  // The facts, but not the identity. Clearing the buffer discards what this
+  // capture observed; it does not make the machine a different machine, and
+  // re-deriving the adapter's own MAC would mean every frame after a clear
+  // read as unknown until the agent next spoke.
+  networkFacts.reset();
   treeCache.clear();
   pendingPackets = [];
   pendingIcmpReplies = [];
@@ -165,7 +184,7 @@ function ingest(frame: LiveFrame): void {
     const decoded = decodeRawEthernetPacket(
       frame.bytes, id, frame.tsUs, relativeTime, timeDelta, frame.origLen,
       tcpTracker, icmpTracker, quicTracker, dnsTracker, interfaceFor(frame.iface),
-      undefined, l3Tracker,
+      undefined, l3Tracker, host,
     );
     const packet = decoded.packet;
     packet.tsPrecision = 6;
@@ -188,6 +207,12 @@ function ingest(frame: LiveFrame): void {
     // not is what the teaching is for.
     learnOrLabelFingerprint(packet.fields, clientFingerprints, packet.layers);
 
+    // What this frame reveals about the network it crossed: the resolver that
+    // was really asked, the router that really advertised, the MAC that really
+    // forwards. Read off a frame that was going to be dissected anyway, so it
+    // costs comparisons rather than work, and posted only when it changes.
+    networkFacts.observe(packet, host);
+
     cacheTree(id, packet.layers);
     packet.layers = [];
 
@@ -207,6 +232,14 @@ function flush(): void {
   // releases whatever is still held rather than stranding it.
   const ready = capturing ? ordering.drain(performance.now()) : ordering.flush();
   for (const frame of ready) ingest(frame);
+
+  // Before the early return below, and deliberately: a capture can learn
+  // something about the network in a flush that produced no frames the app
+  // wants - and more importantly, the facts must not be held hostage to
+  // there being packets pending.
+  if (networkFacts.takeChanged()) {
+    post({ type: 'networkFacts', facts: networkFacts.snapshot() });
+  }
 
   if (pendingPackets.length === 0 && pendingIcmpReplies.length === 0 && pendingInfoPatches.length === 0) {
     return;
@@ -429,6 +462,17 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       interfaces = command.interfaces;
       break;
 
+    case 'host':
+      // Rebuilt into Sets here: a Set does not survive structured clone as
+      // itself, so the wire carries arrays and the Worker is the one place
+      // that turns them back. Frames already dissected keep whatever they
+      // decided - the main thread re-derives those, because it is the side
+      // that holds the buffer.
+      host = {
+        macs: new Set(command.macs), addresses: new Set(command.addresses),
+        inferred: command.inferred, confidence: command.confidence, basis: command.basis,
+      };
+      break;
     case 'reset':
       resetPipeline(command.nextId, command.captureStartUs, command.lastPacketUs);
       // A cleared buffer is a new capture. Keeping the old socket table would
