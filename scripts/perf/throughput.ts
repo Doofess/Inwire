@@ -1,7 +1,7 @@
 /**
  * Where does the Worker's per-frame time actually go, and what rate can it hold?
  *
- *   npx tsx scripts/perf/throughput.ts [--fixture inwire|netview] [--frames N]
+ *   npx tsx scripts/perf/throughput.ts [--fixture inwire|bulk] [--frames N]
  *
  * Every performance number this project has about the capture pipeline is a
  * total: `clone-cost.ts` says dissection costs ~170 us a frame and crossing the
@@ -46,7 +46,7 @@ const BATCH = 512;
 
 const FIXTURES: Record<string, string> = {
   inwire: 'test/fixtures/inwire_capture_1788478187989.pcap',
-  netview: 'test/fixtures/netview_capture_1788426090876.pcap',
+  bulk: 'test/fixtures/bulk_capture_1788426090876.pcap',
 };
 
 function arg(name: string, fallback: string): string {

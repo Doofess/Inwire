@@ -796,7 +796,7 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     // finished the record, and on every segment that fed it.
     //
     // Getting this wrong is not a missing tag, it is an invented one. Carrying
-    // a record across an unfilled hole tagged thirty consecutive netview frames
+    // a record across an unfilled hole tagged thirty consecutive bulk frames
     // `[TCP PDU reassembled in 1450]` for a PDU that never existed, and
     // consumed the bytes that would have resynchronised the direction, so the
     // error propagated well past the frames that showed it.

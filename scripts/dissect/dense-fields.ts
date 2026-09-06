@@ -36,7 +36,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 
 const FIXTURES = [
   'test/fixtures/inwire_capture_1788478187989.pcap',
-  'test/fixtures/netview_capture_1788426090876.pcap',
+  'test/fixtures/bulk_capture_1788426090876.pcap',
 ];
 
 /** A key is worth a column when this much of a capture carries it. */

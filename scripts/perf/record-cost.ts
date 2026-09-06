@@ -42,7 +42,7 @@ import type { Packet } from '../../src/types/packet';
  */
 const FIXTURES = [
   'test/fixtures/inwire_capture_1788478187989.pcap',
-  'test/fixtures/netview_capture_1788426090876.pcap',
+  'test/fixtures/bulk_capture_1788426090876.pcap',
 ];
 
 /**

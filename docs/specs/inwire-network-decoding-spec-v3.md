@@ -26,7 +26,7 @@ in v2 at step 14, after thirteen steps that would have to be redone.
 |---|---|---|---|
 | A | Agent stamps packets with `time.time()` at ms | **Stale.** Agent ≥2.3.0 uses libpcap's `pkt.time` as fractional ms | `agent.py:348-360`; only 30 of 12,858 fixture frames are ms-truncated |
 | B | ClientHello now spans 2 segments; reassembly finds 12 not 9 | **Wrong on its own fixture.** tshark finds 9 TCP ClientHellos with reassembly on *or* off; 0 span a segment. "12" is the SYN count | `tshark -Y "tls.handshake.type==1 && tcp"` = 9; `tcp.reassembled_in` = 0 |
-| B' | TLS reassembly is mandatory | **Still true, for a different reason.** 2,186 Application-Data records span segments in `netview`; the app labels the segment holding the record *header*, Wireshark labels the one where the record *completes*. Result: Protocol 59 %, Info 57 % match on that capture | gap diff below |
+| B' | TLS reassembly is mandatory | **Still true, for a different reason.** 2,186 Application-Data records span segments in `bulk`; the app labels the segment holding the record *header*, Wireshark labels the one where the record *completes*. Result: Protocol 59 %, Info 57 % match on that capture | gap diff below |
 | C | ECH ext 0xfe0d; outer SNI may be a decoy | Confirmed. 34 of 43 ClientHellos carry it (all QUIC/h3, i.e. Chrome GREASE) | tshark |
 | D | DoH bootstrap queries present | Confirmed (`cloudflare-dns.com` SNI and A/AAAA/HTTPS queries) | tshark |
 | E | Checksum false-positives on offloaded outbound frames | Confirmed; 315 frames >1514 B, 200 of them tshark itself marks malformed | `-z io,phs` |
@@ -44,7 +44,7 @@ in v2 at step 14, after thirteen steps that would have to be redone.
 
 ### A.2 Measured baseline (app vs tshark, first 10,000 frames — the import cap)
 
-| Column | `inwire` (12,858) | `netview` (14,782) | Dominant cause |
+| Column | `inwire` (12,858) | `bulk` (14,782) | Dominant cause |
 |---|---|---|---|
 | Protocol | 95.9 % | **58.9 %** | TLS record boundary across segments; TLS version never read from `supported_versions` (TLSv1 / 1.2 / 1.3 mislabels: 342 rows) |
 | Info | 90.7 % | **56.6 %** | same; plus spurious `[TCP ACKed unseen segment]` on SYN-ACKs, TCP option order, DNS multi-answer Info, mDNS `"QM" question`, RA `from <mac>`, DHCP absent |
@@ -78,7 +78,7 @@ a fast pipe that still drops silently is worse than a slow one that says so.
 Acceptance is **parity with tshark 4.6.8 (`-2`) on the two fixtures**, per column, with
 thresholds per phase — not v2's hand counts. Fixed reference counts (from tshark):
 
-| Metric | `netview` | `inwire` |
+| Metric | `bulk` | `inwire` |
 |---|---|---|
 | Frames | 14,782 | 12,858 |
 | TCP ClientHello (with SNI) | 3 | **9** |
@@ -145,7 +145,7 @@ both fixtures, and a `CLAUDE.md` update. Files named are the ones that must chan
 
 ### Phase 1 — Harness, fixtures, import cap
 
-**Status: done 2026-09-04.** Import cap removed (caller-supplied, exact total reported); two-pass ground truth with `tcp.reassembled_in`; `parity-check.ts` rewritten with per-column floors in `test/fixtures/acceptance.json`; `scripts/import/capture-cap.ts` and `scripts/parity/acceptance.ts` added (suite 36 → 38). Baseline under two-pass: inwire Protocol 96.3 % / Info 86.5 %, netview 60.4 % / 25.9 % (reassembled-PDU rows now labelled by tshark). Enforced counts: frames, quicRows, tcpRst on both; tcpClientHelloSni on inwire.
+**Status: done 2026-09-04.** Import cap removed (caller-supplied, exact total reported); two-pass ground truth with `tcp.reassembled_in`; `parity-check.ts` rewritten with per-column floors in `test/fixtures/acceptance.json`; `scripts/import/capture-cap.ts` and `scripts/parity/acceptance.ts` added (suite 36 → 38). Baseline under two-pass: inwire Protocol 96.3 % / Info 86.5 %, bulk 60.4 % / 25.9 % (reassembled-PDU rows now labelled by tshark). Enforced counts: frames, quicRows, tcpRst on both; tcpClientHelloSni on inwire.
 
 *Why first:* everything after is measured by it, and the current harness is pinned to a
 115-frame `tmp.pcapng` with single-pass ground truth.
@@ -403,9 +403,9 @@ like the thing it is verifying being broken.
 
 ### Phase 4 — TLS over TCP: reassembly, negotiated version, a real TLS layer
 
-**Status: done 2026-09-04.** `src/services/dissectors/tls.ts` rewritten on the summary/tree split: a per-direction record cursor in `TcpStreamTracker` (sequence-number based, so a lost segment inside a record does not lose the record), Wireshark's resync rules (a known direction accepts any valid content-type byte as a header; "Ignored Unknown Record"), the frame that *completes* a record carries the TLS label while earlier segments get "[TCP PDU reassembled in N]" via `InfoPatch`; negotiated version per conversation with the ClientHello re-labelled once the ServerHello settles it; a full TLS layer (records, hellos with every extension named, key-share sizes, ECH heuristic, alerts, TLS 1.2 certificates via `x509.ts`); JA3/JA3S/JA4 (`crypto/md5.ts` added). tshark's JA3/JA3S/JA4 are now ground-truth columns. Measured: **netview Protocol 60.4 → 96.1 %, Info 25.9 → 92.6 %; inwire Protocol 96.3 → 99.0 %, Info 86.5 → 89.8 %**; all 9 TCP ClientHello JA3/JA4 match tshark exactly. What remains on netview is TCP-analysis classification (Out-Of-Order vs Retransmission, Window Update) and its effect on reassembly - Phase 5. `scripts/tls/dissect.ts` added (suite 41).
+**Status: done 2026-09-04.** `src/services/dissectors/tls.ts` rewritten on the summary/tree split: a per-direction record cursor in `TcpStreamTracker` (sequence-number based, so a lost segment inside a record does not lose the record), Wireshark's resync rules (a known direction accepts any valid content-type byte as a header; "Ignored Unknown Record"), the frame that *completes* a record carries the TLS label while earlier segments get "[TCP PDU reassembled in N]" via `InfoPatch`; negotiated version per conversation with the ClientHello re-labelled once the ServerHello settles it; a full TLS layer (records, hellos with every extension named, key-share sizes, ECH heuristic, alerts, TLS 1.2 certificates via `x509.ts`); JA3/JA3S/JA4 (`crypto/md5.ts` added). tshark's JA3/JA3S/JA4 are now ground-truth columns. Measured: **bulk Protocol 60.4 → 96.1 %, Info 25.9 → 92.6 %; inwire Protocol 96.3 → 99.0 %, Info 86.5 → 89.8 %**; all 9 TCP ClientHello JA3/JA4 match tshark exactly. What remains on bulk is TCP-analysis classification (Out-Of-Order vs Retransmission, Window Update) and its effect on reassembly - Phase 5. `scripts/tls/dissect.ts` added (suite 41).
 
-*Largest measured win (netview 59 % → ≥99 % Protocol).*
+*Largest measured win (bulk 59 % → ≥99 % Protocol).*
 
 - Per-direction record cursor in `TcpStreamTracker`: carry bytes-remaining-in-record
   across segments; label the frame where a record **completes**; mark earlier segments
@@ -421,13 +421,13 @@ like the thing it is verifying being broken.
   issuer/validity; alerts; `[Certificate: encrypted (TLS 1.3)]`.
 - JA3, JA3S, JA4 (core only — licence note kept from v2) as generated fields.
 
-**Accept when:** `netview` Protocol ≥ 99 %, Info ≥ 97 %; `inwire` TLS rows ≥ 99 %;
+**Accept when:** `bulk` Protocol ≥ 99 %, Info ≥ 97 %; `inwire` TLS rows ≥ 99 %;
 9 TCP ClientHellos each with SNI + ALPN + JA4; assertion script with byte-level vectors
 for the two hellos.
 
 ### Phase 5 — TCP analysis completion and bugs
 
-**Status: done 2026-09-04.** `src/services/dissect/tcpAnalysis.ts` reimplements Wireshark 4.6's `tcp_analyze_sequence_number` check for check (source read, not recalled): zero window / probe / probe ACK, lost segment, keep-alive and its ACK, window update and window full, duplicate ACK with the original frame number, ACKed unseen segment with the contiguous-run rule, spurious / fast (dup-ACK and SACK based) / plain retransmission vs out-of-order by the peer's last-ACK timer and iRTT, initial RTT, ACK RTT with partial ACKs, bytes in flight, reused ports; the SYN/FIN sequence accounting bug is gone with it. Tags print in Wireshark's (prepend) order; options print in wire order; TCP and UDP checksums are computed with the offload policy (`Unverified` for zero, truncated or over-MTU segments) and published as `*.checksum.status`. Measured on the tag vocabulary: **1 disagreeing frame on inwire and 4 on netview** out of every TCP row; Info 89.8 → 94.2 % (inwire) and 92.6 → 94.3 % (netview); colour-rule parity 95.5 → 99.9 % and 98.9 → 99.98 %. Enforced counts on inwire now include retransmission (70), outOfOrder (33), lostSegment (111). `scripts/tcp/analysis.ts` added (suite 42).
+**Status: done 2026-09-04.** `src/services/dissect/tcpAnalysis.ts` reimplements Wireshark 4.6's `tcp_analyze_sequence_number` check for check (source read, not recalled): zero window / probe / probe ACK, lost segment, keep-alive and its ACK, window update and window full, duplicate ACK with the original frame number, ACKed unseen segment with the contiguous-run rule, spurious / fast (dup-ACK and SACK based) / plain retransmission vs out-of-order by the peer's last-ACK timer and iRTT, initial RTT, ACK RTT with partial ACKs, bytes in flight, reused ports; the SYN/FIN sequence accounting bug is gone with it. Tags print in Wireshark's (prepend) order; options print in wire order; TCP and UDP checksums are computed with the offload policy (`Unverified` for zero, truncated or over-MTU segments) and published as `*.checksum.status`. Measured on the tag vocabulary: **1 disagreeing frame on inwire and 4 on bulk** out of every TCP row; Info 89.8 → 94.2 % (inwire) and 92.6 → 94.3 % (bulk); colour-rule parity 95.5 → 99.9 % and 98.9 → 99.98 %. Enforced counts on inwire now include retransmission (70), outOfOrder (33), lostSegment (111). `scripts/tcp/analysis.ts` added (suite 42).
 
 - **Bug:** SYN/FIN consume one sequence number; `checkSequence` ignores it, producing
   `[TCP ACKed unseen segment]` on SYN-ACKs and `[Previous segment not captured]` on the
@@ -446,7 +446,7 @@ timing-rule differences, each listed); TCP Info parity ≥ 99 % on both fixtures
 
 ### Phase 6 — L2/L3 completeness
 
-**Status: partly done 2026-09-04.** Done: the IPv6 extension-header chain (`dissectors/ipv6Ext.ts` - Hop-by-Hop, Destination Options, Routing, Fragment with the non-first-fragment stop, AH's 4-byte length rule, ESP, No Next Header, Router Alert options), which fixes the MLDv2 frames that were reported as `IPv6 Hop-by-Hop`; DHCP and DHCPv6 (`dissectors/dhcp.ts`, hostname / vendor class / parameter list / client id, Wireshark's padded Info); ICMPv4 and ICMPv6 error type and code names; the echo Info padding; mDNS `"QM"/"QU" question` and full answer lists with SRV priority/weight/port; the OUI table regenerated from IEEE's registry (40,083 entries, short names derived by this project's own rule - `scripts/gen-oui.ts`) plus the IEEE 1905.1 control group address. **Both address columns are now exact on both fixtures (100 %).** Info: 94.2 → 98.5 % (inwire), 94.3 → 94.7 % (netview). `scripts/ipv6/extensions.ts` added (suite 43).
+**Status: partly done 2026-09-04.** Done: the IPv6 extension-header chain (`dissectors/ipv6Ext.ts` - Hop-by-Hop, Destination Options, Routing, Fragment with the non-first-fragment stop, AH's 4-byte length rule, ESP, No Next Header, Router Alert options), which fixes the MLDv2 frames that were reported as `IPv6 Hop-by-Hop`; DHCP and DHCPv6 (`dissectors/dhcp.ts`, hostname / vendor class / parameter list / client id, Wireshark's padded Info); ICMPv4 and ICMPv6 error type and code names; the echo Info padding; mDNS `"QM"/"QU" question` and full answer lists with SRV priority/weight/port; the OUI table regenerated from IEEE's registry (40,083 entries, short names derived by this project's own rule - `scripts/gen-oui.ts`) plus the IEEE 1905.1 control group address. **Both address columns are now exact on both fixtures (100 %).** Info: 94.2 → 98.5 % (inwire), 94.3 → 94.7 % (bulk). `scripts/ipv6/extensions.ts` added (suite 43).
 
 **Status: done 2026-09-04 (second half).** The remainder, in the order it mattered:
 
@@ -554,7 +554,7 @@ option nodes; 2 DHCP rows; Source/Destination parity 100 %.
 
 ### Phase 7 — DNS family
 
-**Status: done 2026-09-04.** The message is parsed once (`dissectors/dnsRecords.ts`) and rendered twice - Info line and tree - so a record can no longer be readable in the list and absent from the details pane. Added: Answers / Authoritative nameservers / Additional records sections, EDNS(0) (payload size, DO bit, options incl. Client Subnet and cookies), SVCB and HTTPS rdata with `alpn`/`ipv4hint`/`ipv6hint`/`ech` (the `ech` parameter is what will tell Phase 4's ECH heuristic that an outer SNI is a decoy), SOA/SRV/CAA/TXT rdata, TTLs in Wireshark's wording, and query/response pairing (`dnsTracker.ts`) giving `[Request In]`, `[Time]` and a `[Response In]` patched back onto the query frame, plus an NXDOMAIN expert note and an unanswered-query sweep. `resolved` (name to addresses) is returned per frame, ready for Phase 10's passive name map. Info parity: 98.5 → 98.8 % (inwire), 94.7 % (netview). `scripts/dns/records.ts` added (suite 44).
+**Status: done 2026-09-04.** The message is parsed once (`dissectors/dnsRecords.ts`) and rendered twice - Info line and tree - so a record can no longer be readable in the list and absent from the details pane. Added: Answers / Authoritative nameservers / Additional records sections, EDNS(0) (payload size, DO bit, options incl. Client Subnet and cookies), SVCB and HTTPS rdata with `alpn`/`ipv4hint`/`ipv6hint`/`ech` (the `ech` parameter is what will tell Phase 4's ECH heuristic that an outer SNI is a decoy), SOA/SRV/CAA/TXT rdata, TTLs in Wireshark's wording, and query/response pairing (`dnsTracker.ts`) giving `[Request In]`, `[Time]` and a `[Response In]` patched back onto the query frame, plus an NXDOMAIN expert note and an unanswered-query sweep. `resolved` (name to addresses) is returned per frame, ready for Phase 10's passive name map. Info parity: 98.5 → 98.8 % (inwire), 94.7 % (bulk). `scripts/dns/records.ts` added (suite 44).
 
 **Deviation:** the mDNS pairing key is the question name alone, not the client address - on a shared bus the answer comes from whichever host owns the name, never from the host that asked.
 
@@ -569,7 +569,7 @@ rdata on responses; 4 NXDOMAIN notes; every response has `[Request In]`.
 
 ### Phase 8 — QUIC: CRYPTO reassembly -> SNI/ALPN, tree, parity
 
-**Status: done 2026-09-04.** CRYPTO frames are collected out of decrypted Initial packets and reassembled per direction in `QuicFlowTracker` into a sparse buffer, parsed only when contiguous from zero and complete to the declared length; the same hello parser as TLS-over-TCP then yields SNI, ALPN, the extensions and a JA4 with the `q` transport prefix, plus JA3S from the server's Initial. A TLS layer is added to the QUIC frame. **All 34 QUIC ClientHello server names are now recovered (0 before), and JA3, JA3S and JA4 are exact on both fixtures** (JA3 20.9 → 100 %, JA3S 15.9 → 100 %, JA4 20.9 → 100 %); `quicClientHelloSni` is an enforced count. Also fixed here: an out-of-order segment is now dissected against a cloned record cursor (Wireshark reassembles it) while a retransmission still is not (Wireshark shows the plain TCP line) - worth 0.5 % of inwire's Protocol column and, got backwards, 8 % of netview's.
+**Status: done 2026-09-04.** CRYPTO frames are collected out of decrypted Initial packets and reassembled per direction in `QuicFlowTracker` into a sparse buffer, parsed only when contiguous from zero and complete to the declared length; the same hello parser as TLS-over-TCP then yields SNI, ALPN, the extensions and a JA4 with the `q` transport prefix, plus JA3S from the server's Initial. A TLS layer is added to the QUIC frame. **All 34 QUIC ClientHello server names are now recovered (0 before), and JA3, JA3S and JA4 are exact on both fixtures** (JA3 20.9 → 100 %, JA3S 15.9 → 100 %, JA4 20.9 → 100 %); `quicClientHelloSni` is an enforced count. Also fixed here: an out-of-order segment is now dissected against a cloned record cursor (Wireshark reassembles it) while a retransmission still is not (Wireshark shows the plain TCP line) - worth 0.5 % of inwire's Protocol column and, got backwards, 8 % of bulk's.
 
 **Deviation:** the Info column does not name the QUIC server name, because tshark's does not either. The name is a field (`tls.handshake.extensions_server_name`), which is what Phase 10's passive resolution reads.
 
@@ -606,7 +606,7 @@ decoder, so ARP, IGMP and broadcast Ethernet frames were all matching `tcp` (391
 mis-coloured). And `frameProtocols` had no token for DNS, DHCP, LLDP, IGMP or QUIC,
 because those layers' display names fell through `PROTOCOL_NAME_MAP` to
 `domain_name_system`; both are fixed, and colour-rule parity **rose to 99.99 % (inwire)
-and 99.98 % (netview)**.
+and 99.98 % (bulk)**.
 
 An unknown name is no longer a substring search. `dcerpc` in a shipped colour rule used
 to paint any frame whose Info happened to contain those letters; a name this build
@@ -656,7 +656,7 @@ ranked, because they disagree: a host naming itself over DHCP outranks a DNS ans
 which outranks an SNI - one CDN address serves thousands of names, so an SNI says very
 little about the address. A **real ECH ClientHello's outer name is deliberately not
 learned**: `cloudflare-ech.com` is genuinely carried and genuinely wrong, which is the
-worst combination. On the fixtures this learns 115 names (inwire) and 14 (netview) with
+worst combination. On the fixtures this learns 115 names (inwire) and 14 (bulk) with
 no network access, and **the 3,395-frame IPv6 conversation resolves to `claude.ai`** -
 the acceptance criterion. Resolution is a *rendering* choice throughout: `Packet.source`
 stays the address on every path, so filters, exports and the parity harness are
@@ -666,7 +666,7 @@ traffic this cannot generate. `services/portServices.ts` does the same for ports
 **Statistics** (`services/statistics.ts`, `components/statistics/`). Conversations,
 endpoints, protocol hierarchy, devices, expert information and resolved addresses, on
 six tabs, with Ethernet/IPv4/IPv6/TCP/UDP sub-tabs where they apply. **`inwire` shows
-145 conversations (88 IPv4 + 57 IPv6)** and netview 38, both matching Part A.4. Every row
+145 conversations (88 IPv4 + 57 IPv6)** and bulk 38, both matching Part A.4. Every row
 is a filter: clicking one applies the display filter that selects exactly its frames, and
 the filters come from the statistics module rather than being spelled out in the dialog,
 so a row and its filter cannot disagree. The hierarchy is built from `frameProtocols` and

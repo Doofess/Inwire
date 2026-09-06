@@ -7,7 +7,7 @@
 ADR 0020 recorded 883 Info mismatches and asserted that 97.5% of them were one
 problem. `scripts/tcp/reassembly.ts` was written to check that claim and found
 it was one *area*, not one problem. Four commits and this one later the gap is
-**130** — inwire 50, netview 80 — and the question is no longer "what is the
+**130** — inwire 50, bulk 80 — and the question is no longer "what is the
 cause" but "which of the causes left is a defect".
 
 Two were, and are fixed. A record this build could not read named itself
@@ -22,7 +22,7 @@ What is left divides cleanly, and the division is the point.
 **Stop chasing the Info column here.** Three of the remaining buckets cannot be
 closed single-pass, and one is the reference analyzer's own inconsistency.
 
-### The largest bucket is not ours to fix (64 of netview's 80)
+### The largest bucket is not ours to fix (64 of bulk's 80)
 
 `we claim TLS, tshark shows TCP` — we print `Ignored Unknown Record` on a
 segment tshark prints as a plain TCP summary. Measured, **50 of those 64 sit
@@ -45,7 +45,7 @@ an out-of-order segment inside a PDU is a two-pass fact.
 ### Refusing to claim TLS on an out-of-order segment is worse, not better
 
 The obvious response to that run — a segment this build cannot place should not
-claim TLS — was tried and measured: **inwire 50 → 65, netview 80 → 107.** An
+claim TLS — was tried and measured: **inwire 50 → 65, bulk 80 → 107.** An
 out-of-order segment often *does* carry a readable record, and reading it is how
 a direction resynchronises. The floors caught it in one run.
 
@@ -58,7 +58,7 @@ a direction resynchronises. The floors caught it in one run.
   no reply arrives in the whole capture.
 - **`[TCP Dup ACK]` vs `[TCP Window Update]`, the zero-window probe and its
   ACK** (4). Traced to a deliberate divergence and its price is recorded at the
-  line: this build seeds `fwd.nextSeq` from a bare ACK because **netview holds
+  line: this build seeds `fwd.nextSeq` from a bare ACK because **bulk holds
   30 TCP streams and exactly one SYN**, and the reference's stricter rule costs
   2,000 frames on captures of traffic already in flight.
 - **Five QUIC Initials** where this build prints the decrypted frame types and
@@ -70,7 +70,7 @@ a direction resynchronises. The floors caught it in one run.
 
 ## Consequences
 
-194 → 130 Info mismatches; floors at inwire 99.6% / netview 99.4%. Both fixes
+194 → 130 Info mismatches; floors at inwire 99.6% / bulk 99.4%. Both fixes
 are pinned in `scripts/tls/dissect.ts`, which grew from 60 checks to 64.
 
 The rule this leaves behind is the one worth keeping: **a bucket in

@@ -55,7 +55,7 @@ import { clearAddressPool } from '../../src/services/addressFormat';
 
 const FIXTURES: Record<string, string> = {
   inwire: 'test/fixtures/inwire_capture_1788478187989.pcap',
-  netview: 'test/fixtures/netview_capture_1788426090876.pcap',
+  bulk: 'test/fixtures/bulk_capture_1788426090876.pcap',
 };
 
 function arg(name: string, fallback: string): string {

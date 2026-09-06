@@ -10,9 +10,18 @@ somewhere other than `Downloads/`; they are the only copies.
 | name | file | frames | SHA-256 |
 |---|---|---|---|
 | `inwire` | `inwire_capture_1788478187989.pcap` | 12,858 | `01f184b7ff5f1078460f08e64eb1a3944ffda89f961736488da8abfc2c427937` |
-| `netview` | `netview_capture_1788426090876.pcap` | 14,782 | `2d20930051c0d1f91e5e40a1413ce5c7c73f432ad0e3f2c609789916a7b432e8` |
+| `bulk` | `bulk_capture_1788426090876.pcap` | 14,782 | `2d20930051c0d1f91e5e40a1413ce5c7c73f432ad0e3f2c609789916a7b432e8` |
 
 Both are Ethernet, snaplen 65535, microsecond timestamps, exported by the app itself.
+
+They are named for what they hold, because a measurement is only comparable if you
+know which capture produced it. `inwire` is general browsing - 3,088 QUIC rows, 43
+TLS hellos, and most of the TCP analysis this build is held to. `bulk` is long TLS
+transfer: 86 QUIC rows, multi-megabyte sequence spaces, and **30 TCP streams with
+exactly one SYN between them**, which makes it the one that catches anything
+assuming a capture opens with a handshake. It was called `netview` until the app was
+renamed; the label moved and the bytes did not, so every number recorded against the
+old name still refers to this file.
 
 ## Files
 

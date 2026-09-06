@@ -52,8 +52,8 @@
         "lostSegment"
       ]
     },
-    "netview": {
-      "file": "netview_capture_1788426090876.pcap",
+    "bulk": {
+      "file": "bulk_capture_1788426090876.pcap",
       "sha256": "2d20930051c0d1f91e5e40a1413ce5c7c73f432ad0e3f2c609789916a7b432e8",
       "frames": 14782,
       "floors": {
