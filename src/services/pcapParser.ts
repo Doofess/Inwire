@@ -36,6 +36,7 @@ import { freshTlsConversation, freshTlsCursor } from './tcpStreamTracker';
 import type { TcpAnalysis } from './dissect/tcpAnalysis';
 import { LINKTYPE } from './dissect/types';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dissectors/dns';
+import { dissectNbns } from './dissectors/nbns';
 import { DnsTracker } from './dnsTracker';
 import { dissectQuicDatagram } from './dissectors/quic';
 import { buildQuicTlsLayer } from './dissectors/tls';
@@ -663,6 +664,7 @@ function collectExpert(
 
 const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Frame': 'frame',
+  'NetBIOS Name Service': 'nbns',
   'Transport Layer Security': 'tls',
   'Hypertext Transfer Protocol': 'http',
   'HyperText Transfer Protocol 2': 'http2',
@@ -2579,15 +2581,21 @@ function decodeTransportLayer(
 
     let proto: Packet['protocol'] = 'UDP';
     let protocolLabel: string | undefined;
-    // The DNS wire format is reused verbatim by mDNS, LLMNR and NBNS; each
-    // keeps its own name in the Protocol column while sharing the dissector.
+    // The DNS wire format is reused verbatim by mDNS and LLMNR; each keeps its
+    // own name in the Protocol column while sharing the dissector.
+    //
+    // NBNS used to be in this list and is not any more. It shares the message
+    // STRUCTURE and nothing else - its names are RFC 1001 encoded, its opcodes
+    // and record types are its own - so reading it as DNS produced
+    // `Standard query 0x8f8e TYPE32 FHEPFCELEHFCEPFFFACACACACACACAAA`, which is
+    // the name `WORKGROUP<00>` with the encoding left on. See dissectors/nbns.ts.
+    const nbnsPort = srcPort === 137 || dstPort === 137;
     const dnsPortLabel =
       srcPort === 53 || dstPort === 53 ? 'DNS' :
       srcPort === 5353 || dstPort === 5353 ? 'MDNS' :
       srcPort === 5355 || dstPort === 5355 ? 'LLMNR' :
-      srcPort === 137 || dstPort === 137 ? 'NBNS' :
       undefined;
-    if (dnsPortLabel) proto = 'DNS';
+    if (dnsPortLabel || nbnsPort) proto = 'DNS';
     else if (srcPort === 1883 || dstPort === 1883) proto = 'MQTT';
 
     // QUIC (HTTP/3) rides on UDP:443 and, like TLS, is encrypted from
@@ -2625,6 +2633,17 @@ function decodeTransportLayer(
         info = dhcp.info;
         extraLayers.push(dhcp.layer);
         Object.assign(dhcpFields, dhcp.fields);
+      }
+    } else if (nbnsPort) {
+      const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+      const nbns = dissectNbns(rawBytes, udpPayloadStart, payloadEnd);
+      if (nbns) {
+        protocolLabel = nbns.protocolLabel;
+        info = nbns.info;
+        extraLayers.push(nbns.layer);
+        protocolTokens.push('nbns');
+        Object.assign(dnsFields, nbns.fields);
+        if (nbns.resolved.length > 0) resolvedNames = nbns.resolved;
       }
     } else if (dnsPortLabel) {
       const multicast = dnsPortLabel === 'MDNS';

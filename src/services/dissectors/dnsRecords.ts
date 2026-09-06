@@ -171,11 +171,25 @@ const u32 = (b: Uint8Array, p: number) => ((b[p] << 24) | (b[p + 1] << 16) | (b[
  * Parses a DNS message. Returns null when the bytes are not DNS, so the caller
  * can fall back to a plain UDP summary.
  */
-export function parseDnsMessage(b: Uint8Array, messageStart: number, messageEnd = b.length): DnsMessage | null {
+export function parseDnsMessage(
+  b: Uint8Array,
+  messageStart: number,
+  messageEnd = b.length,
+  /**
+   * Which opcodes count as a message at all.
+   *
+   * The default is DNS's own table, and it is load-bearing rather than
+   * decorative: it is most of what stops this claiming arbitrary UDP payloads
+   * that happen to be twelve bytes long. NBNS reuses this structure with four
+   * opcodes DNS does not have (5-8, RFC 1002 §4.2.1.1), so it passes its own
+   * set - which is narrower than removing the check and wider than DNS's.
+   */
+  knownOpcode: (opcode: number) => boolean = (opcode) => DNS_OPCODE_NAMES[opcode] !== undefined,
+): DnsMessage | null {
   if (messageStart + 12 > messageEnd) return null;
   const flags = u16(b, messageStart + 2);
   const opcode = (flags >> 11) & 0x0f;
-  if (DNS_OPCODE_NAMES[opcode] === undefined) return null;
+  if (!knownOpcode(opcode)) return null;
 
   const msg: DnsMessage = {
     transactionId: u16(b, messageStart),
