@@ -58,6 +58,15 @@ export interface LinkLayerResult {
    */
   llcOffset?: number;
   llcDsap?: number;
+  /**
+   * The SNAP header's organisation code, when the frame has one.
+   *
+   * A SNAP protocol id means nothing on its own: it is only unique **within**
+   * an OUI. Cisco's 0x2000 under OUI 00:00:0C is CDP, and 0x2000 under
+   * OUI 00:00:00 would be an ethertype nobody has assigned. `etherType` alone
+   * cannot express that difference, so the OUI travels beside it.
+   */
+  snapOui?: number;
   /** True when the link layer ran off the end of a truncated capture. */
   truncated: boolean;
 }
@@ -347,6 +356,7 @@ function readLlc(rawBytes: Uint8Array, out: LinkLayerResult): void {
     // headers, exactly as if the frame had been Ethernet II all along.
     out.etherType = snapType;
     out.l3Offset = headerEnd;
+    out.snapOui = oui;
     out.fields['llc.oui'] = oui;
     out.fields['llc.type'] = snapType;
     out.fields['eth.type'] = snapType;

@@ -154,6 +154,66 @@ export function ipFrame(protocol: number, payload: Uint8Array): Uint8Array {
   return Uint8Array.from([...ethernet(0x0800).build(), ...ipv4(protocol, payload)]);
 }
 
+/**
+ * An Ethernet/IPv4/UDP frame to a chosen destination.
+ *
+ * `udpFrame` sends between the documentation addresses, which is right for
+ * every protocol whose dissection does not depend on where it was going. HSRP
+ * and the routing protocols are addressed to a multicast group and are only
+ * themselves when they are - see `dissectors/hsrp.ts`.
+ */
+export function udpFrameTo(
+  src: string, dst: string, srcPort: number, dstPort: number, payload: Uint8Array,
+): Uint8Array {
+  return Uint8Array.from([
+    ...ethernet(0x0800).build(),
+    ...ipv4(17, udp(srcPort, dstPort, payload), src, dst),
+  ]);
+}
+
+/** An Ethernet/IPv6/UDP frame, for the protocols that only exist over IPv6. */
+export function udp6Frame(
+  srcPort: number, dstPort: number, payload: Uint8Array,
+  src = '2001:0db8:0000:0000:0000:0000:0000:0001',
+  dst = 'ff02:0000:0000:0000:0000:0000:0000:0009',
+): Uint8Array {
+  const datagram = udp(srcPort, dstPort, payload);
+  const address = (text: string) => text.split(':').flatMap((group) => {
+    const value = parseInt(group, 16);
+    return [(value >> 8) & 0xff, value & 0xff];
+  });
+  const header = new Bytes()
+    .u32(0x60000000)
+    .u16(datagram.length)
+    .u8(17, 255)              // next header: UDP, hop limit
+    .raw(address(src)).raw(address(dst))
+    .build();
+  return Uint8Array.from([...ethernet(0x86dd).build(), ...header, ...datagram]);
+}
+
+/**
+ * An 802.3 frame carrying an LLC/SNAP header.
+ *
+ * Not Ethernet II: the type/length field holds a **length**, which is what
+ * makes what follows an LLC header rather than a network header. The SNAP
+ * protocol id is only meaningful within its organisation code, so both are
+ * arguments.
+ */
+export function llcSnapFrame(
+  oui: number, pid: number, payload: Uint8Array, dstMac = '01:00:0c:cc:cc:cc',
+): Uint8Array {
+  const llc = new Bytes()
+    .u8(0xaa, 0xaa, 0x03)                                  // DSAP, SSAP, control
+    .u8((oui >> 16) & 0xff, (oui >> 8) & 0xff, oui & 0xff)
+    .u16(pid)
+    .build();
+  return new Bytes()
+    .mac(dstMac).mac(MAC_SRC)
+    .u16(llc.length + payload.length)
+    .raw(llc).raw(payload)
+    .build();
+}
+
 // --- asking tshark -----------------------------------------------------------
 
 /** One frame's columns, as tshark reports them. */
