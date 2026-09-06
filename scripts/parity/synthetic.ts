@@ -167,6 +167,10 @@ export interface TsharkRow {
  *
  * `-o tcp.desegment_tcp_streams:FALSE` is deliberately NOT set: the point is to
  * compare against Wireshark's default behaviour, which is what a user sees.
+ *
+ * The field separator is a TAB and not a pipe. SIP's own Info column contains
+ * a pipe, and tshark escapes a separator that collides rather than picking
+ * another - so every SIP expectation would have carried a stray backslash.
  */
 export function askTshark(tshark: string, frames: Uint8Array[]): TsharkRow[] {
   const dir = mkdtempSync(join(tmpdir(), 'inwire-synthetic-'));
@@ -176,12 +180,12 @@ export function askTshark(tshark: string, frames: Uint8Array[]): TsharkRow[] {
     const run = spawnSync(tshark, [
       '-r', file, '-T', 'fields',
       '-e', '_ws.col.Protocol', '-e', '_ws.col.Info',
-      '-E', 'separator=|',
+      '-E', 'separator=/t',
     ], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
     if (run.status !== 0) throw new Error(`tshark exited ${run.status}: ${run.error ?? ''} ${run.stderr ?? ''}`.slice(0, 400));
     return run.stdout.split('\n').filter((l) => l.length > 0).map((line) => {
-      const parts = line.split('|');
-      return { protocol: parts[0] ?? '', info: parts.slice(1).join('|').trimEnd() };
+      const parts = line.split('	');
+      return { protocol: parts[0] ?? '', info: parts.slice(1).join('	').trimEnd() };
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

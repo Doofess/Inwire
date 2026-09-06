@@ -58,7 +58,8 @@ export interface FieldDef {
 export const LAYERS = [
   'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905',
   'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'tcp', 'udp',
-  'dns', 'nbns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun', 'http', 'http2', 'http3',
+  'dns', 'nbns', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
+  'syslog', 'radius', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -263,6 +264,25 @@ export const FIELDS: readonly FieldDef[] = [
   str('http3.headers.path', 'Path', 'http3'),
   str('http3.headers.authority', 'Authority', 'http3'),
   uint('http3.headers.status', 'Status', 'http3'),
+
+  // --- Syslog ----------------------------------------------------------------
+  //
+  // `syslog.priority` is the byte on the wire; facility and level are the two
+  // halves of it, and they are what anyone actually filters on - "show me
+  // everything at ERR or worse" is `syslog.level <= 3`.
+  uint('syslog.priority', 'Priority', 'syslog'),
+  uint('syslog.facility', 'Facility', 'syslog'),
+  uint('syslog.level', 'Level', 'syslog'),
+  str('syslog.msg', 'Message', 'syslog', { label: 'Syslog message', align: 'left' }),
+
+  // --- RADIUS ----------------------------------------------------------------
+  uint('radius.code', 'Code', 'radius'),
+  uint('radius.id', 'Packet identifier', 'radius'),
+  uint('radius.length', 'Length', 'radius'),
+  { abbrev: 'radius.authenticator', label: 'Authenticator', type: 'bytes', layer: 'radius' },
+  str('radius.username', 'User-Name', 'radius', { label: 'RADIUS user', align: 'left' }),
+  uint('radius.avp.type', 'AVP Type', 'radius'),
+  uint('radius.avp.length', 'AVP Length', 'radius'),
 
   // --- NBNS ------------------------------------------------------------------
   //
