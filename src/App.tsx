@@ -21,8 +21,6 @@ import {
   layoutStore,
   packetListStore,
   performanceStore,
-  loadAgentToken,
-  saveAgentToken,
 } from "./services/interfacePrefs";
 import { NameResolutionMap, snapshot as nameSnapshot } from "./services/nameResolution";
 import type { StreamTarget } from "./services/followStream";
@@ -37,15 +35,15 @@ import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Capabilities, Packet } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
-import { pipeline } from "./services/pipelineClient";
+import { type FrameBatch, pipeline } from "./services/pipelineClient";
 import { usePacketDetail } from "./lib/usePacketDetail";
 import { applyInfoPatchesInPlace, type InfoPatch } from './services/pcapParser';
 import { flowAnnotations } from './services/flowAnnotations';
 import { NO_HOST, type HostIdentity } from './services/direction';
-import { hostFromAdapters, inferHostIdentity } from './services/hostIdentity';
+import { useAgentConnection } from './hooks/useAgentConnection';
+import { inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
 import { emptyNetworkFacts, NetworkFactsCollector, type NetworkFacts } from './services/networkFacts';
-import type { AgentAdapter } from './services/agentProtocol';
 import {
   readLinkContext, watchLinkChanges, type LinkChange, type LinkContext,
 } from './services/linkContext';
@@ -79,11 +77,9 @@ import {
   defaultColorRules,
   normalizeColorRules,
 } from "./services/colorRules";
-import { AGENT_WS_URL, isAgentOutdated, summarizeCaptureStats, REQUIRED_AGENT_VERSION, type AgentCommand, type AgentInterface, type CaptureDropStats } from "./services/agentProtocol";
-import type { AgentLogEntry } from "./services/agentProtocol";
-// Loopback is dropped here, at the single point where the agent's list
-// enters app state, so every consumer below sees the same adapters.
-import { filterCapturableInterfaces } from "./services/captureInterfaces";
+import {
+  isAgentOutdated, REQUIRED_AGENT_VERSION, type AgentMessage,
+} from "./services/agentProtocol";
 
 // UI Components
 import { Header } from "./components/common/Header";
@@ -127,10 +123,6 @@ import { evictOldBytes } from './services/packetBytes';
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
 import { AUTO_PAUSE_AT, estimateSummaryBytes, planBufferTrim } from './services/bufferBudget';
 
-// Bounded, oldest dropped first. A session left open for hours must not grow
-// the log pane without limit.
-const AGENT_LOG_BUFFER_LIMIT = 1000;
-
 /**
  * How far back a socket-table DELTA is allowed to re-annotate.
  *
@@ -142,11 +134,6 @@ const AGENT_LOG_BUFFER_LIMIT = 1000;
  * worth. A full snapshot ignores this and sweeps everything, once.
  */
 const SOCKET_RETRO_WINDOW_US = 3_000_000;
-
-// Samples kept per interface for the picker's sparklines. At the agent's
-// 500ms sampling period this is a 15-second window - long enough to show a
-// burst arriving and passing, short enough that it still reads as "now".
-const INTERFACE_RATE_SAMPLES = 30;
 
 // The frame-count cap, its slack and `trimToCap` used to live here. The buffer
 // is bounded by BYTES now (`services/bufferBudget.ts`: `planBufferTrim` against
@@ -385,62 +372,6 @@ export default function App() {
   const [showStatisticsModal, setShowStatisticsModal] = useState(false);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [agentStatus, setAgentStatus] = useState<
-    "disconnected" | "connecting" | "connected" | "error"
-  >("disconnected");
-  const [agentCaptureState, setAgentCaptureState] = useState<'idle' | 'sniffing'>('idle');
-  /**
-   * This connection's id, and whose capture the agent is running.
-   *
-   * Two Inwire windows on one machine used to fight over a single global
-   * sniffer: the second one's remembered adapter selection restarted the
-   * capture on *its* adapter the moment it connected, and Stop in either
-   * stopped both. The agent owns a capture now, and these two are how this
-   * window tells its own capture from somebody else's.
-   */
-  const [agentClientId, setAgentClientId] = useState<string | null>(null);
-  const [captureOwner, setCaptureOwner] = useState<string | null>(null);
-  /**
-   * Whether this agent wants a pairing token, and whether the one we hold was
-   * accepted. `needsToken` is the state Driver Info asks about: the agent is
-   * there and answering, and will do nothing until it is paired.
-   */
-  const [agentNeedsToken, setAgentNeedsToken] = useState(false);
-  const [agentToken, setAgentTokenState] = useState<string>(() => loadAgentToken());
-  const agentTokenRef = useRef(agentToken);
-  useEffect(() => { agentTokenRef.current = agentToken; }, [agentToken]);
-  /**
-   * Whether the app should be holding a link to the agent at all.
-   *
-   * Distinct from agentStatus, which reports what the socket is actually
-   * doing: "disconnected" covers both "you pressed Disconnect" and "the agent
-   * is not running", and Driver Info has to tell those apart to say anything
-   * useful. This is the intent; agentStatus is the outcome.
-   *
-   * Not persisted, on purpose. A reload reconnects - an app that comes back
-   * permanently dead with no visible cause reads as broken, and everything
-   * else about a reload here is built to look like continuity.
-   */
-  const [agentLinkEnabled, setAgentLinkEnabled] = useState(true);
-  const [agentVersion, setAgentVersion] = useState<string | null>(null);
-  // Set when a connection's socket opened but no `hello` arrived within the
-  // grace period below - the only signal available for a pre-Task-4 agent,
-  // which never sends `hello` at all (see final review finding #5).
-  const [agentIncompatible, setAgentIncompatible] = useState(false);
-  const [agentInterfaces, setAgentInterfaces] = useState<AgentInterface[]>([]);
-  // The full list as the agent last sent it, for attributing a live frame to
-  // the adapter its `iface` index names. A ref because the decode runs inside
-  // the socket handler (see captureInterfaceRef below).
-  const agentInterfacesRef = useRef<AgentInterface[]>([]);
-  useEffect(() => { agentInterfacesRef.current = agentInterfaces; }, [agentInterfaces]);
-  /**
-   * What the driver and the agent dropped during this capture, from the
-   * agent's once-a-second capture_stats. Null until the first tick, and reset
-   * when a capture starts so the number is this capture's. `droppedKernel` is
-   * null when the driver's counters could not be read - shown as unknown, not
-   * as zero.
-   */
-  const [captureStats, setCaptureStats] = useState<CaptureDropStats | null>(null);
   /**
    * How this machine's adapters are configured, and who this machine is.
    *
@@ -457,7 +388,6 @@ export default function App() {
    * that later wants to *display* the identity should take the state back,
    * rather than reading the ref during render and getting a stale one.
    */
-  const [adapters, setAdapters] = useState<AgentAdapter[]>([]);
   const hostIdentityRef = useRef<HostIdentity>(NO_HOST);
   /**
    * Cancels a re-derive that is still running.
@@ -534,7 +464,6 @@ export default function App() {
    */
   const [linkContext, setLinkContext] = useState<LinkContext | null>(() => readLinkContext());
   const [linkChanges, setLinkChanges] = useState<LinkChange[]>([]);
-  const [selectedInterfaces, setSelectedInterfaces] = useState<string[]>([]);
 
   /**
    * Records network transitions for the life of the page.
@@ -550,20 +479,6 @@ export default function App() {
     setLinkContext(change.after);
     setLinkChanges((prev) => prev.concat(change).slice(-32));
   }), []);
-  const [agentLog, setAgentLog] = useState<AgentLogEntry[]>([]);
-  /**
-   * The agent's most recent rejection, surfaced in Driver Info.
-   *
-   * Agent errors only reached console.warn before, which was tolerable while
-   * the sole one was an empty interface list the picker already prevented. A
-   * refused Restart has no other visible outcome at all - the button would
-   * simply appear to do nothing - so the reason has to reach the panel.
-   */
-  const [agentError, setAgentError] = useState<string | null>(null);
-  // Recent packets/sec per interface, oldest first, for the picker's
-  // sparklines. Only populated while the picker is open - the agent samples
-  // nothing otherwise.
-  const [interfaceRates, setInterfaceRates] = useState<Record<string, number[]>>({});
   // Set when capture stopped itself because the buffer filled, so the reason
   // is visible rather than the capture appearing to have stopped for no
   // reason. Cleared by anything that makes room or deliberately restarts.
@@ -573,10 +488,6 @@ export default function App() {
   // packets are appearing without a capture being started.
   const [restoreProgress, setRestoreProgress] = useState<{ done: number; total: number } | null>(null);
 
-  // Whether the Driver Info panel currently wants log lines. Read inside the
-  // WebSocket handlers, so it must be a ref: those close over their first
-  // render's values and would otherwise never see this change.
-  const logSubscribedRef = useRef(false);
   // Packets arrive one WebSocket message at a time but are committed to state
   // in batches - see the ingest comment in the socket handler below.
   const pendingPacketsRef = useRef<Packet[]>([]);
@@ -586,6 +497,157 @@ export default function App() {
   const pendingIcmpRepliesRef = useRef<{ requestFrameId: number; replyId: number }[]>([]);
   /** Info suffixes for earlier frames, learned by later ones (reassembly); applied on the next flush. */
   const pendingInfoPatchesRef = useRef<InfoPatch[]>([]);
+
+  /**
+   * What this build lets the user do.
+   *
+   * Every capability is on, and stated rather than derived: there is no auth,
+   * so there is nobody to derive it from. It was read from a role table
+   * (`services/rbacService.ts`) that shipped four roles and was never consulted
+   * - the object below was already hardcoded beside the import. The table is
+   * gone; this is the whole of the model.
+   *
+   * It is still threaded to the components rather than inlined at each gate,
+   * because the seventeen `permissions.*` reads are where a real one would
+   * plug in.
+   */
+  const permissions: Capabilities = {
+    canCapture: true,
+    canExportPcap: true,
+    canViewPayloads: true,
+    canEditDissectors: true,
+    canChangeColorRules: true,
+    canClearBuffer: true,
+  };
+
+  // Track the latest isCapturing value for the always-on agent connection
+  // below, whose handlers are set up once and must not go stale.
+  const isCapturingRef = useRef(isCapturing);
+  useEffect(() => {
+    isCapturingRef.current = isCapturing;
+  }, [isCapturing]);
+
+  // Same reasoning, for the Space shortcut: its handler is registered once and
+  // needs to know whether there is a buffer that starting would discard. A ref
+  // rather than a dependency, because re-registering a window listener on
+  // every packet flush is ten new listeners a second during capture.
+  const packetCountRef = useRef(0);
+  useEffect(() => {
+    packetCountRef.current = packets.length;
+  }, [packets.length]);
+
+
+
+  // Live-capture relative-time clock (reference-analyzer style): resets whenever the
+  // packet buffer is emptied and a fresh capture begins.
+  const captureStartRef = useRef<number | null>(null);
+  const lastPacketTimeRef = useRef<number | null>(null);
+
+  /**
+   * Re-annotating frames that were dissected before the socket table arrived.
+   *
+   * Lifted out of the agent message handler with the rest of it, but kept
+   * here: the Worker annotates everything it dissects from now on, and this is
+   * the part that reaches back into the buffer - which is this component's.
+   */
+  const applySocketTable = useCallback((message: Extract<AgentMessage, { type: 'socket_table' }>) => {
+      // The Worker has its own copy and annotates every frame it dissects
+      // from here on. This copy exists for the frames that were dissected
+      // BEFORE the table arrived - the opening snapshot describes sockets
+      // that have been open for minutes, and the connection they belong to
+      // may already fill the buffer.
+      flowAnnotations.apply(message, Date.now() * 1000);
+
+      // A full snapshot is worth a pass over the whole buffer; it happens
+      // once per subscription. A delta is one or two sockets a second, and
+      // sweeping 100,000 frames every second to find the handful they might
+      // touch is not - so a delta re-annotates only the frames captured
+      // inside the polling window it is uncertain about, which is the only
+      // stretch where a frame can predate the socket's discovery.
+      const horizonUs = message.full
+        ? -Infinity
+        : Date.now() * 1000 - SOCKET_RETRO_WINDOW_US;
+      setPackets((prev) => {
+        let changed = false;
+        const next = prev.map((packet) => {
+          if (packet.tsUs < horizonUs) return packet;
+          if (fieldValue(packet, 'inwire.process.name') !== undefined) return packet;
+          const process = processForPacket(packet, flowAnnotations);
+          if (!process) return packet;
+          changed = true;
+          // A copy, because a packet already handed to React is not ours to
+          // mutate - a row that changed in place would not re-render.
+          //
+          // The spread carries `cols` and `row` across, which is what we
+          // want: the copy shares the original's block and its row, and a row
+          // is written once when the frame joins the buffer and never again,
+          // so two packets reading it see the same values. What is written
+          // HERE goes to the bag, because the process fields are declared
+          // post-dissection and so are never dense (`dissect/denseFields.ts`,
+          // asserted in `scripts/dissect/dense-fields.ts`).
+          const copy: typeof packet = { ...packet, fields: { ...packet.fields } };
+          writeProcessFields(copy, process);
+          return copy;
+        });
+        return changed ? next : prev;
+      });
+  }, []);
+
+  /**
+   * A flush of dissected frames from the Worker. Queued, not committed: the
+   * flush effect commits the batch in one state update, which is what keeps
+   * ingest cost independent of buffer size.
+   */
+  const queueFrames = useCallback(({ packets, icmpReplies, infoPatches }: FrameBatch) => {
+      if (packets.length > 0) {
+        // The relative-time origin and the last frame's stamp are written into
+        // the stored session so a restore can carry on from them. They used to
+        // be set per packet by the ingest that now lives in the Worker; the
+        // batch carries the same two facts.
+        if (captureStartRef.current === null) captureStartRef.current = packets[0].tsUs;
+        lastPacketTimeRef.current = packets[packets.length - 1].tsUs;
+        // A loop, not `push(...packets)`. Spreading passes one argument per
+        // frame, and an engine throws RangeError somewhere past ~65-125k of
+        // them. Nothing here bounds the batch: the Worker sends what one flush
+        // dissected, so a Worker that stalled for a few seconds at rate - the
+        // exact condition this whole change exists to survive - arrives as one
+        // batch large enough to throw, losing the batch and every frame queued
+        // behind it. See the sibling pushes below.
+        for (const packet of packets) pendingPacketsRef.current.push(packet);
+      }
+      for (const reply of icmpReplies) pendingIcmpRepliesRef.current.push(reply);
+      for (const patch of infoPatches) pendingInfoPatchesRef.current.push(patch);
+  }, []);
+
+  /**
+   * The link to the local capture agent.
+   *
+   * Sixteen pieces of state, four refs and five effects used to sit inline
+   * here; `hooks/useAgentConnection.ts` holds them now. The four callbacks are
+   * the seam: everything the connection has to do to the *buffer* stays on
+   * this side, because the buffer is this component's.
+   */
+  const agent = useAgentConnection({
+    canCapture: permissions.canCapture,
+    isCapturingRef,
+    onCaptureStopped: () => setIsCapturing(false),
+    onFrames: queueFrames,
+    onSocketTable: applySocketTable,
+    onHostIdentity: (identity) => {
+      hostIdentityRef.current = identity;
+      pipeline.setHost(identity);
+    },
+    onNetworkFacts: setNetworkFacts,
+  });
+  const {
+    agentStatus, agentCaptureState, agentClientId, captureOwner,
+    agentNeedsToken, agentToken, agentLinkEnabled, setAgentLinkEnabled,
+    agentVersion, agentIncompatible, agentInterfaces, captureStats, adapters,
+    agentLog, agentError, interfaceRates, selectedInterfaces,
+    setSelectedInterfaces, selectedInterfacesRef,
+    sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
+    clearAgentLog, clearInterfaceRates, clearCaptureStats, setAgentToken,
+  } = agent;
   /**
    * True while a stored session is being decoded back into the buffer. Read by
    * the effects that must not write a half-restored session back to disk.
@@ -1066,27 +1128,6 @@ export default function App() {
     });
   }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick]);
 
-  /**
-   * What this build lets the user do.
-   *
-   * Every capability is on, and stated rather than derived: there is no auth,
-   * so there is nobody to derive it from. It was read from a role table
-   * (`services/rbacService.ts`) that shipped four roles and was never consulted
-   * - the object below was already hardcoded beside the import. The table is
-   * gone; this is the whole of the model.
-   *
-   * It is still threaded to the components rather than inlined at each gate,
-   * because the seventeen `permissions.*` reads are where a real one would
-   * plug in.
-   */
-  const permissions: Capabilities = {
-    canCapture: true,
-    canExportPcap: true,
-    canViewPayloads: true,
-    canEditDissectors: true,
-    canChangeColorRules: true,
-    canClearBuffer: true,
-  };
 
   // Resizable Bottom Pane
   //
@@ -1313,388 +1354,7 @@ export default function App() {
     [selectedPacket, colorEngine, packetTheme],
   );
 
-  // Track the latest isCapturing value for the always-on agent connection
-  // below, whose handlers are set up once and must not go stale.
-  const isCapturingRef = useRef(isCapturing);
-  useEffect(() => {
-    isCapturingRef.current = isCapturing;
-  }, [isCapturing]);
 
-  // Same reasoning, for the Space shortcut: its handler is registered once and
-  // needs to know whether there is a buffer that starting would discard. A ref
-  // rather than a dependency, because re-registering a window listener on
-  // every packet flush is ten new listeners a second during capture.
-  const packetCountRef = useRef(0);
-  useEffect(() => {
-    packetCountRef.current = packets.length;
-  }, [packets.length]);
-
-  /**
-   * Drops a selected adapter the agent does not offer.
-   *
-   * An effect on the interface list rather than a line inside the `hello`
-   * handler, because a selection restored from a previous session can be set
-   * either before or after that message arrives - and a name that was valid
-   * yesterday can belong to an adapter that has since been unplugged or
-   * renamed. Keyed on the list, this is correct in both orderings and is a
-   * no-op when nothing is stale.
-   */
-  useEffect(() => {
-    if (agentInterfaces.length === 0) return;
-    setSelectedInterfaces((prev) => {
-      const valid = prev.filter((name) => agentInterfaces.some((iface) => iface.name === name));
-      return valid.length === prev.length ? prev : valid;
-    });
-  }, [agentInterfaces]);
-
-  // Same reasoning as isCapturingRef: the post-reconnect resync in the
-  // `hello` handler below needs the *current* interface selection, not
-  // whatever it was when the WebSocket effect's handlers were created.
-  const selectedInterfacesRef = useRef(selectedInterfaces);
-  useEffect(() => {
-    selectedInterfacesRef.current = selectedInterfaces;
-  }, [selectedInterfaces]);
-
-  // The adapter a live frame arrived on, named for the Frame layer's Interface
-  // id / name / description rows. A ref for the same reason as above: the
-  // decode happens inside the WebSocket message handler. Left undefined while
-  // nothing is selected, so the dissector falls back to its imported-file
-  // wording rather than naming an interface that was never captured on.
-  const captureInterfaceRef = useRef<{ name: string; label: string } | undefined>(undefined);
-  useEffect(() => {
-    captureInterfaceRef.current = agentInterfaces.find(
-      (iface) => iface.name === selectedInterfaces[0],
-    );
-  }, [agentInterfaces, selectedInterfaces]);
-
-  // Live-capture relative-time clock (reference-analyzer style): resets whenever the
-  // packet buffer is emptied and a fresh capture begins.
-  const captureStartRef = useRef<number | null>(null);
-  const lastPacketTimeRef = useRef<number | null>(null);
-
-  // Local Agent Connection - always tries to reach ws://localhost:8999 so
-  // the "Download Driver" button can auto-detect the agent running and
-  // flip to "Agent Connected", independent of whether capture is active.
-  // Packets are only recorded into the buffer while isCapturing is true.
-  //
-  // The socket itself lives in the pipeline Worker now, along with the
-  // ordering window, the trackers and dissection (docs/decisions/0003). What
-  // reaches this effect is what always reached it: control messages, and
-  // batches of finished frames. Nothing here parses a packet.
-  useEffect(() => {
-    if (!permissions.canCapture) return;
-    // Driver Info's Disconnect. Bailing out here rather than tearing the
-    // connection down somewhere else is the point: React runs this effect's
-    // existing cleanup on the way in, and that cleanup already does exactly
-    // what disconnecting means - it stops the Worker retrying, closes the
-    // socket, and reports "disconnected". A second teardown path would be a
-    // second thing to keep correct.
-    if (!agentLinkEnabled) return;
-
-    let connectedDelay: NodeJS.Timeout | null = null;
-    // A pre-Task-4 agent never sends `hello` at all, so its absence within
-    // this window (started on every fresh socket open, cleared the moment
-    // `hello` arrives) is the only way to flag it as incompatible instead of
-    // silently showing a normal "Agent Connected" with zero packets ever
-    // arriving.
-    let helloTimeout: NodeJS.Timeout | null = null;
-    // Only the very first connection attempt shows "Connecting..." - once we
-    // know the agent isn't there, silent background retries every 3s keep
-    // the status calmly on "disconnected" instead of flashing "Connecting"
-    // on every retry (which read as a repeating loop when the agent was
-    // never running to begin with).
-    let isFirstAttempt = true;
-
-    pipeline.onStatus = (status) => {
-      if (status === 'connecting') {
-        if (isFirstAttempt) setAgentStatus("connecting");
-        return;
-      }
-      if (status === 'connected') {
-        console.log("[Inwire] Connected to Local Agent");
-        // Hold "Connecting..." for a beat after the handshake succeeds so
-        // the button doesn't flash instantly - and so a socket that drops
-        // right back off (e.g. a page reload racing the connection) reads
-        // as still-connecting rather than a confusing connect/disconnect flicker.
-        if (connectedDelay) clearTimeout(connectedDelay);
-        connectedDelay = setTimeout(() => setAgentStatus("connected"), 2000);
-        setAgentIncompatible(false);
-        if (helloTimeout) clearTimeout(helloTimeout);
-        helloTimeout = setTimeout(() => {
-          console.warn("[Inwire] No hello received from agent within 5s - treating it as incompatible.");
-          setAgentIncompatible(true);
-        }, 5000);
-        return;
-      }
-
-      if (connectedDelay) { clearTimeout(connectedDelay); connectedDelay = null; }
-      if (helloTimeout) { clearTimeout(helloTimeout); helloTimeout = null; }
-      if (status === 'error') {
-        console.warn("[Inwire] WebSocket connection failed. Agent might not be running.");
-        if (isFirstAttempt) setAgentStatus("error");
-      } else {
-        console.log("[Inwire] Disconnected from Local Agent. Reconnecting in 3s...");
-        setAgentStatus("disconnected");
-        setAgentIncompatible(false);
-        // Facts about a connection that no longer exists. Driver Info kept
-        // showing the version and the last rejection of an agent that was
-        // gone, which read as "still there, still refusing".
-        setAgentVersion(null);
-        setAgentError(null);
-      }
-      isFirstAttempt = false;
-    };
-
-    pipeline.onAgentMessage = (message) => {
-      if (message.type === 'hello') {
-        if (helloTimeout) {
-          clearTimeout(helloTimeout);
-          helloTimeout = null;
-        }
-        setAgentIncompatible(false);
-        setAgentError(null);
-        setAgentVersion(message.version);
-        setAgentCaptureState(message.state);
-        setAgentClientId(message.clientId ?? null);
-        setCaptureOwner(message.owner ?? null);
-
-        // Pairing comes before anything else: an agent with a token
-        // configured answers every other command with `auth_required`.
-        const needsToken = message.authRequired === true;
-        setAgentNeedsToken(needsToken);
-        if (needsToken) {
-          if (agentTokenRef.current) {
-            pipeline.command({ type: 'authenticate', token: agentTokenRef.current });
-          } else {
-            // Nothing else is sent. The resync below would only collect
-            // refusals, and Driver Info is where the token goes in.
-            return;
-          }
-        }
-        setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
-
-        // Deliberately does NOT default to every interface. Capture is
-        // single-interface and the user has to name the adapter before a
-        // capture can start; pre-selecting all nine would hand Start a
-        // ready-made selection and quietly defeat that. An existing
-        // selection survives a reconnect untouched.
-        setSelectedInterfaces((prev) => (prev.length > 1 ? [prev[0]] : prev));
-
-        // Reconnect resync. A fresh connection always finds the agent idle
-        // with every interface selected - it stops capturing when the last
-        // client drops - so push our desired state back to it. `hello` is the
-        // only per-connection signal there is.
-        //
-        // On a first-ever connection selectedInterfacesRef is still empty
-        // (it gets populated from this very message), so nothing is sent and
-        // the agent keeps its own default of every interface. That is correct.
-        //
-        // Not when another window owns the capture: this resync is what used
-        // to hijack it. Both commands would be refused now, but asking at all
-        // would put a `capture_busy` error in front of a user who has done
-        // nothing.
-        const ownedElsewhere = (message.owner ?? null) !== null
-          && message.owner !== (message.clientId ?? null);
-        if (!ownedElsewhere) {
-          if (selectedInterfacesRef.current.length > 0) {
-            pipeline.command({ type: 'set_interfaces', interfaces: selectedInterfacesRef.current });
-          }
-          if (isCapturingRef.current) {
-            pipeline.command({ type: 'start_capture' });
-          }
-        }
-        // A log subscription lives on the agent's socket, so a reconnect
-        // drops it. Resubscribing here, and clearing first, avoids showing
-        // a fresh backlog stitched onto the tail of the dead connection's
-        // timeline as though it were continuous.
-        if (logSubscribedRef.current) {
-          setAgentLog([]);
-          pipeline.command({ type: 'subscribe_logs' });
-        }
-
-        // Who owns which socket, for process attribution.
-        //
-        // Here rather than when the WebSocket opens, and the difference is not
-        // cosmetic: an agent with a pairing token answers every command with
-        // `auth_required` until `authenticate` has been accepted, and the
-        // socket is open well before that. Sent from this handler it queues
-        // behind the `authenticate` above on the same connection, which
-        // delivers in order.
-        //
-        // Unconditional, like the log resync: a subscription lives on the
-        // agent's socket and dies with it, so a reconnect has to ask again.
-        // The opening snapshot is the valuable half - it describes connections
-        // that were already open, which are exactly the long-lived ones a
-        // capture catches mid-stream.
-        pipeline.command({ type: 'subscribe_sockets' });
-        // How this machine's adapters are configured. The Network panel shows
-        // it, and the packet list needs one field out of it - the adapter's
-        // own MAC - to say which way each frame went. Subscribed here for the
-        // same ordering reason as the socket table: it queues behind
-        // `authenticate` on a connection that may still be unpaired.
-        pipeline.command({ type: 'subscribe_adapters' });
-        return;
-      }
-
-      if (message.type === 'state') {
-        setAgentCaptureState(message.state);
-        setCaptureOwner(message.owner ?? null);
-        // A `state` arriving on a connection that was waiting to be paired is
-        // the agent saying the token was accepted.
-        setAgentNeedsToken(false);
-        setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
-        // The agent is the authority on whether capture is running. It says
-        // idle while this tab believes otherwise when every selected adapter
-        // failed to open, or when another tab stopped it - either way the
-        // Start button showing "stop" would be a promise about traffic
-        // nobody is capturing.
-        if (message.state === 'idle' && isCapturingRef.current) {
-          setIsCapturing(false);
-        }
-        return;
-      }
-
-      if (message.type === 'error') {
-        console.warn('[Inwire] Agent error:', message.code ?? '', message.message);
-        setAgentError(message.message);
-        // A rejected token is worth more than an error line: the field has to
-        // come back so it can be corrected, and the stored one is wrong.
-        if (message.code === 'auth_failed') setAgentNeedsToken(true);
-        return;
-      }
-
-      if (message.type === 'capture_stats') {
-        setCaptureStats(summarizeCaptureStats(message));
-        return;
-      }
-
-      if (message.type === 'adapter_config') {
-        setAdapters(message.adapters);
-        // The one fact the packet list needs from this: which MACs and
-        // addresses are ours. Told to the Worker, which dissects live frames
-        // and is the only side that can decide a direction as a frame arrives.
-        const identity = hostFromAdapters(message.adapters);
-        if (identity !== null) {
-          hostIdentityRef.current = identity;
-          pipeline.setHost(identity);
-        }
-        return;
-      }
-
-      if (message.type === 'socket_table') {
-        // The Worker has its own copy and annotates every frame it dissects
-        // from here on. This copy exists for the frames that were dissected
-        // BEFORE the table arrived - the opening snapshot describes sockets
-        // that have been open for minutes, and the connection they belong to
-        // may already fill the buffer.
-        flowAnnotations.apply(message, Date.now() * 1000);
-
-        // A full snapshot is worth a pass over the whole buffer; it happens
-        // once per subscription. A delta is one or two sockets a second, and
-        // sweeping 100,000 frames every second to find the handful they might
-        // touch is not - so a delta re-annotates only the frames captured
-        // inside the polling window it is uncertain about, which is the only
-        // stretch where a frame can predate the socket's discovery.
-        const horizonUs = message.full
-          ? -Infinity
-          : Date.now() * 1000 - SOCKET_RETRO_WINDOW_US;
-        setPackets((prev) => {
-          let changed = false;
-          const next = prev.map((packet) => {
-            if (packet.tsUs < horizonUs) return packet;
-            if (fieldValue(packet, 'inwire.process.name') !== undefined) return packet;
-            const process = processForPacket(packet, flowAnnotations);
-            if (!process) return packet;
-            changed = true;
-            // A copy, because a packet already handed to React is not ours to
-            // mutate - a row that changed in place would not re-render.
-            //
-            // The spread carries `cols` and `row` across, which is what we
-            // want: the copy shares the original's block and its row, and a row
-            // is written once when the frame joins the buffer and never again,
-            // so two packets reading it see the same values. What is written
-            // HERE goes to the bag, because the process fields are declared
-            // post-dissection and so are never dense (`dissect/denseFields.ts`,
-            // asserted in `scripts/dissect/dense-fields.ts`).
-            const copy: typeof packet = { ...packet, fields: { ...packet.fields } };
-            writeProcessFields(copy, process);
-            return copy;
-          });
-          return changed ? next : prev;
-        });
-        return;
-      }
-
-      if (message.type === 'log') {
-        setAgentLog((prev) => {
-          const next = prev.concat(message.lines);
-          return next.length > AGENT_LOG_BUFFER_LIMIT
-            ? next.slice(next.length - AGENT_LOG_BUFFER_LIMIT)
-            : next;
-        });
-        return;
-      }
-
-      if (message.type === 'interface_stats') {
-        setInterfaceRates((prev) => {
-          const next: Record<string, number[]> = {};
-          for (const rate of message.interfaces) {
-            const series = prev[rate.name] ?? [];
-            // A fixed-length window, so the sparkline scrolls rather than
-            // compressing an ever-longer history into the same 68px.
-            next[rate.name] = series.concat(rate.packetsPerSec).slice(-INTERFACE_RATE_SAMPLES);
-          }
-          return next;
-        });
-      }
-    };
-
-    // Dissected frames, in capture order, once per flush. Queued rather than
-    // committed: the flush below commits the batch in one state update, which
-    // is what keeps ingest cost independent of buffer size.
-    pipeline.onFrames = ({ packets, icmpReplies, infoPatches }) => {
-      if (packets.length > 0) {
-        // The relative-time origin and the last frame's stamp are written into
-        // the stored session so a restore can carry on from them. They used to
-        // be set per packet by the ingest that now lives in the Worker; the
-        // batch carries the same two facts.
-        if (captureStartRef.current === null) captureStartRef.current = packets[0].tsUs;
-        lastPacketTimeRef.current = packets[packets.length - 1].tsUs;
-        // A loop, not `push(...packets)`. Spreading passes one argument per
-        // frame, and an engine throws RangeError somewhere past ~65-125k of
-        // them. Nothing here bounds the batch: the Worker sends what one flush
-        // dissected, so a Worker that stalled for a few seconds at rate - the
-        // exact condition this whole change exists to survive - arrives as one
-        // batch large enough to throw, losing the batch and every frame queued
-        // behind it. See the sibling pushes below.
-        for (const packet of packets) pendingPacketsRef.current.push(packet);
-      }
-      for (const reply of icmpReplies) pendingIcmpRepliesRef.current.push(reply);
-      for (const patch of infoPatches) pendingInfoPatchesRef.current.push(patch);
-    };
-
-    pipeline.onFailure = (message) => {
-      console.warn('[Inwire] packet pipeline:', message);
-    };
-
-    // Derived in the Worker and only read here, so a fact cannot be invented
-    // on its way to the screen.
-    pipeline.onNetworkFacts = setNetworkFacts;
-
-    pipeline.connect(AGENT_WS_URL);
-
-    return () => {
-      if (connectedDelay) clearTimeout(connectedDelay);
-      if (helloTimeout) clearTimeout(helloTimeout);
-      pipeline.onStatus = () => {};
-      pipeline.onAgentMessage = () => {};
-      pipeline.onFrames = () => {};
-      pipeline.onFailure = () => {};
-      pipeline.onNetworkFacts = () => {};
-      pipeline.disconnect();
-      setAgentStatus("disconnected");
-    };
-  }, [permissions.canCapture, agentLinkEnabled]);
 
   // The Worker gates dissection on this: the socket stays open whether or not
   // capture is running, because the agent is detected before anyone presses
@@ -1703,38 +1363,7 @@ export default function App() {
     pipeline.setCapturing(isCapturing);
   }, [isCapturing]);
 
-  // Which adapter each frame's `iface` index names. The Worker builds the
-  // Frame layer's interface rows from it.
-  useEffect(() => {
-    pipeline.setInterfaces(agentInterfaces.map((iface, index) => ({
-      id: iface.id ?? index,
-      name: iface.name,
-      label: iface.label ?? iface.name,
-    })));
-  }, [agentInterfaces]);
 
-  const sendAgentCommand = (command: AgentCommand) => {
-    pipeline.command(command);
-  };
-
-  // Memoized with an empty dep array on purpose: DriverInfoPanel subscribes
-  // in a mount effect keyed on these identities, so a fresh function each
-  // render would drive an unsubscribe/subscribe loop. That is safe only
-  // while sendAgentCommand reads nothing but wsRef (a ref) and module-level
-  // helpers - if it ever depends on state, these captures go stale.
-  const handleSubscribeAgentLog = useCallback(() => {
-    logSubscribedRef.current = true;
-    setAgentLog([]);
-    sendAgentCommand({ type: 'subscribe_logs' });
-    // A closed socket is not an error: the hello handler resubscribes on
-    // reconnect, so opening the panel while the agent is down and having it
-    // fill in when the agent returns is the intended behavior.
-  }, []);
-
-  const handleUnsubscribeAgentLog = useCallback(() => {
-    logSubscribedRef.current = false;
-    sendAgentCommand({ type: 'unsubscribe_logs' });
-  }, []);
 
   /**
    * Driver Info's Connect / Disconnect.
@@ -1765,17 +1394,12 @@ export default function App() {
     sendAgentCommand({ type: 'restart_agent' });
   }, []);
 
-  const handleClearAgentLog = useCallback(() => setAgentLog([]), []);
-
   // Driven by the picker opening and closing. Sampling adapter counters is
   // cheap but not free, and nothing should be measured on the user's machine
   // while the menu that displays it is shut.
   const handleInterfacePickerOpenChange = useCallback((open: boolean) => {
     if (open) {
-      // Cleared on open so a reopened menu draws from now rather than
-      // stitching a fresh series onto samples from minutes ago as if the
-      // intervening time had been idle.
-      setInterfaceRates({});
+      clearInterfaceRates();
       sendAgentCommand({ type: 'subscribe_interface_stats' });
     } else {
       sendAgentCommand({ type: 'unsubscribe_interface_stats' });
@@ -2053,10 +1677,7 @@ export default function App() {
   // that would be empty and leave Start unable to start anything.
   const handleStartCapture = () => {
     setBufferAutoPaused(false);
-    // The drop counters describe one capture; the agent resets its own on
-    // start_capture and the first capture_stats tick replaces this within a
-    // second, but a stale "dropped" chip for that second would be a lie.
-    setCaptureStats(null);
+    clearCaptureStats();
     sendAgentCommand({ type: 'start_capture' });
     setIsCapturing(true);
   };
@@ -2064,19 +1685,6 @@ export default function App() {
   const handlePauseCapture = () => {
     sendAgentCommand({ type: 'stop_capture' });
     setIsCapturing(false);
-  };
-
-  /**
-   * A token pasted into Driver Info. Stored and offered immediately, so the
-   * pairing takes effect on the connection that is already open rather than
-   * waiting for a reconnect.
-   */
-  const handleAgentTokenChange = (token: string) => {
-    const trimmed = token.trim();
-    saveAgentToken(trimmed);
-    setAgentTokenState(trimmed);
-    setAgentError(null);
-    if (trimmed) sendAgentCommand({ type: 'authenticate', token: trimmed });
   };
 
   /**
@@ -2779,7 +2387,7 @@ export default function App() {
               <AgentPairingPanel
                 needsToken={agentNeedsToken}
                 token={agentToken}
-                onTokenChange={handleAgentTokenChange}
+                onTokenChange={setAgentToken}
               />
             }
             agentStatus={agentStatus}
@@ -2793,9 +2401,9 @@ export default function App() {
             linkChanges={linkChanges}
             selectedInterfaces={selectedInterfaces}
             agentLog={agentLog}
-            onSubscribeAgentLog={handleSubscribeAgentLog}
-            onUnsubscribeAgentLog={handleUnsubscribeAgentLog}
-            onClearAgentLog={handleClearAgentLog}
+            onSubscribeAgentLog={subscribeAgentLog}
+            onUnsubscribeAgentLog={unsubscribeAgentLog}
+            onClearAgentLog={clearAgentLog}
             totalPacketsCount={packets.length}
             totalBytes={totalBytes}
             packetBufferBytes={packetBufferBytes}
