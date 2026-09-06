@@ -8,7 +8,7 @@ import {
   TbDownload,
   TbCloudDownload,
   TbCode,
-  TbHome,
+  TbNetwork,
   TbSettings,
   TbChartBar,
   TbCheck,
@@ -30,7 +30,7 @@ interface AppMenuProps {
   onOpenDissectorModal: () => void;
   onOpenExportModal: () => void;
   onOpenStatisticsModal: () => void;
-  onOpenIspModal?: () => void;
+  onOpenNetworkModal?: () => void;
   /**
    * Wireshark puts name resolution under a View menu; this app's only menu is
    * this one, so the two passive switches live here beside the views they
@@ -80,7 +80,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   onOpenDissectorModal,
   onOpenExportModal,
   onOpenStatisticsModal,
-  onOpenIspModal,
+  onOpenNetworkModal,
   nameResolution,
   onNameResolutionChange,
   onOpenSettingsModal,
@@ -297,16 +297,19 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                     <TbCode className={itemIconClass} />
                     <span>Custom Dissectors</span>
                   </Command.Item>
-                  {onOpenIspModal && (
+                  {onOpenNetworkModal && (
                     <Command.Item
                       // cmdk matches typed search text against this value, so
                       // it tracks the label rather than staying "isp-stats".
-                      value="isp-information"
-                      onSelect={() => run(onOpenIspModal)}
+                      // "network" rather than "isp" because the panel is no
+                      // longer about the provider: the ISP is one of its seven
+                      // sections, and the other six are this machine's own.
+                      value="network"
+                      onSelect={() => run(onOpenNetworkModal)}
                       className={itemClass}
                     >
-                      <TbHome className={itemIconClass} />
-                      <span>ISP Information</span>
+                      <TbNetwork className={itemIconClass} />
+                      <span>Network</span>
                     </Command.Item>
                   )}
                   <Command.Item

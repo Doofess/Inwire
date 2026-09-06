@@ -1,5 +1,5 @@
 // Shared enter/exit animation for every full-screen modal (Statistics,
-// Export/Import, Custom Dissectors, Color Rules, ISP Stats). Kept in one
+// Export/Import, Custom Dissectors, Color Rules, Network). Kept in one
 // place so all of them animate identically - both for their own
 // direct-open path (Header buttons) and so their entrance overlaps in
 // time with the Command Palette's exit when opened from there, reading as

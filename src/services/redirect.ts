@@ -73,6 +73,21 @@ export function rederiveDirections(
   packets: readonly Packet[],
   host: HostIdentity,
   onDone: (changed: number) => void,
+  /**
+   * Called for each frame as it is passed, before its direction is decided.
+   *
+   * This is how an **imported** capture gets its network facts. The collector
+   * lives in the Worker for a live capture, and an import never goes near the
+   * Worker - it is dissected on the main thread, which is what makes live and
+   * imported frames identical. Without this the Network panel's "observed"
+   * column would be empty for every file, which is exactly the case it is
+   * most useful in: somebody else's capture, on a network you cannot ask.
+   *
+   * It rides on this pass rather than taking one of its own because the two
+   * want the same thing - every frame, once, without blocking - and a second
+   * chunked sweep would double the cost to save nothing.
+   */
+  onFrame?: (packet: Packet, host: HostIdentity) => void,
 ): () => void {
   let index = 0;
   let changed = 0;
@@ -84,6 +99,11 @@ export function rederiveDirections(
     const end = Math.min(index + CHUNK, packets.length);
     for (; index < end; index++) {
       const packet = packets[index];
+      // Before the decision, so a collector that reads `direction` sees the
+      // value this frame had rather than the one it is about to get. Nothing
+      // does today; getting the order right costs nothing and removes a
+      // question somebody would otherwise have to answer later.
+      onFrame?.(packet, host);
       const slot = decide(packet, host);
       const next = slot === 0 ? undefined : slot;
       if (next !== packet.direction) {

@@ -222,7 +222,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Locate addresses"
-          description="Sends the public IP addresses in your capture to get.geojs.io, in batches, as they first appear - and asks it once per launch where this machine is. Also lets the ISP panel ask ipapi.co about this connection. Without this the map has nothing to plot."
+          description="Sends the public IP addresses in your capture to get.geojs.io, in batches, as they first appear - and asks it once per launch where this machine is. Also lets the Network panel's Public identity section ask ipapi.co about this connection. Without this the map has nothing to plot."
           htmlFor="setting-geoip"
         >
           <Switch
