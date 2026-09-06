@@ -1,5 +1,6 @@
 import { Packet, ProtocolType, PacketStatus } from '../types/packet';
 import type { StoredFrame } from './sessionStore';
+import { expertItemsFor } from './expertInfo';
 
 /**
  * The one description of Inwire's tabular packet format.
@@ -26,7 +27,7 @@ export type ColumnKey =
   | 'length'
   | 'info'
   | 'status'
-  | 'anomaly'
+  | 'expert'
   | 'rawBytes';
 
 export interface ColumnSpec {
@@ -54,7 +55,7 @@ export const EXPORT_COLUMNS: ColumnSpec[] = [
   { key: 'length', header: 'Length', width: 9 },
   { key: 'info', header: 'Info', width: 60 },
   { key: 'status', header: 'Status', width: 11 },
-  { key: 'anomaly', header: 'Anomaly', width: 30 },
+  { key: 'expert', header: 'Expert', width: 30 },
 ];
 
 /** Appended only when the user opts in; see `packetToRow`. */
@@ -173,9 +174,9 @@ export function packetToRow(p: Packet, includeRawBytes: boolean): (string | numb
     p.length,
     guardFormula(p.info),
     p.status,
-    p.anomalies && p.anomalies.length > 0
-      ? guardFormula(p.anomalies.map(a => a.title).join('; '))
-      : '',
+    // Every finding on the frame, not the two hard-coded anomalies this used
+    // to carry - the column is wider than it was, not narrower.
+    guardFormula(expertItemsFor(p).map((i) => i.summary).join('; ')),
   ];
   if (includeRawBytes) row.push(p.rawBytes.length > 0 ? toBase64(p.rawBytes) : '');
   return row;
@@ -215,7 +216,11 @@ const HEADER_SYNONYMS: Record<ColumnKey, string[]> = {
   length: ['length', 'len', 'bytes', 'size', 'framelength', 'framelen', 'packetlength', 'bytecount', 'lengthbytes'],
   info: ['info', 'information', 'summary', 'details', 'description', 'message'],
   status: ['status', 'state', 'verdict'],
-  anomaly: ['anomaly', 'anomalies', 'alert', 'alerts', 'anomalydetails', 'alertdetails'],
+  // The old spellings stay in the alias list: this column was called
+  // "Anomaly" until the anomaly model was replaced by expert categories, and a
+  // file exported by an earlier build has to keep importing.
+  expert: ['expert', 'expertinfo', 'findings', 'finding',
+    'anomaly', 'anomalies', 'alert', 'alerts', 'anomalydetails', 'alertdetails'],
   rawBytes: ['rawbytes', 'rawbytesbase64', 'raw', 'rawdata', 'bytesbase64', 'base64', 'packetbytes', 'data'],
 };
 
@@ -305,8 +310,8 @@ export interface RowsToFramesOk {
   badRawBytes: number;
   /** True when times were anchored at import because the file had no epoch column. */
   synthesizedEpoch: boolean;
-  /** Non-empty anomaly cells, which a row cannot restore. See below. */
-  droppedAnomalies: number;
+  /** Non-empty Expert cells, which a row cannot restore. See below. */
+  droppedExpert: number;
 }
 
 /**
@@ -320,11 +325,12 @@ export interface RowsToFramesOk {
  * `sessionRestore.ts` states, which this module has no business restating
  * differently.
  *
- * Anomalies are counted and dropped, never rebuilt. A cell holds an anomaly's
- * *title*; its severity, description and recommendation are not in the file,
- * and a banner reading "critical" because the importer guessed would be worse
- * than no banner. Rows carrying bytes get their anomalies back from detection,
- * as they should.
+ * Expert findings are counted and dropped, never rebuilt. A cell holds the
+ * findings' *summaries* joined together; which category each belongs to, and
+ * the tree row each was raised on, are not in the file - and a frame painted
+ * Broken because the importer matched on a word would be worse than a frame
+ * painted nothing. Rows carrying wire bytes get their findings back from
+ * dissection, as they should.
  */
 export function rowsToFrames(
   rows: string[][],
@@ -396,7 +402,7 @@ export function rowsToFrames(
   let hadRawBytes = false;
   let badRawBytes = 0;
   let synthesizedEpoch = false;
-  let droppedAnomalies = 0;
+  let droppedExpert = 0;
   let previousRelative: number | null = null;
 
   body.forEach((row, index) => {
@@ -425,7 +431,7 @@ export function rowsToFrames(
     const timeDelta = previousRelative === null ? 0 : Math.max(0, relativeTime - previousRelative);
     previousRelative = relativeTime;
 
-    if ((cellAt(row, 'anomaly') ?? '').trim()) droppedAnomalies++;
+    if ((cellAt(row, 'expert') ?? '').trim()) droppedExpert++;
 
     const frame: StoredFrame = {
       id: Math.round(id),
@@ -475,5 +481,5 @@ export function rowsToFrames(
     };
   }
 
-  return { ok: true, frames, rejected, hadRawBytes, badRawBytes, synthesizedEpoch, droppedAnomalies };
+  return { ok: true, frames, rejected, hadRawBytes, badRawBytes, synthesizedEpoch, droppedExpert };
 }

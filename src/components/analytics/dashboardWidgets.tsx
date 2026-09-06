@@ -15,7 +15,6 @@ import { TrafficTimelineChart, type TimelineChart, type TimelineMetric } from '.
 import { ProtocolBreakdown, type BreakdownChart, type BreakdownMetric } from './ProtocolBreakdown';
 import { PacketSizeChart, type SizeChart } from './PacketSizeChart';
 import { NetworkMatrix, type TalkersView } from './NetworkMatrix';
-import { AnomalyAlertsPanel } from './AnomalyAlertsPanel';
 
 /**
  * How each widget type is drawn, as data.
@@ -200,22 +199,6 @@ export const WIDGET_RENDERERS: Record<WidgetTypeId, WidgetRenderer> = {
     ),
   },
 
-  alerts: {
-    icon: TbAlertTriangle,
-    // Bleeding, so the alert tint reaches the card's own edges instead of being
-    // a second bordered box inside it. See AnomalyAlertsPanel.
-    bleed: true,
-    // Tall enough for the worst case it actually draws: a status line, a
-    // two-line clamped title, a target line and the button. At 150 that
-    // overflowed the moment a real alert carried an IPv6 address.
-    cardHeight: () => 172,
-    // Deliberately no emptyMessage. An empty buffer is not an absence of an
-    // answer here - "zero threats active" IS the answer, and replacing it with
-    // "nothing to show" would be strictly less informative.
-    render: (ctx) => (
-      <AnomalyAlertsPanel packets={ctx.packets} onInspectPacket={ctx.onInspectPacket} />
-    ),
-  },
 };
 
 // The two halves of the catalogue must not drift apart: one drives validation

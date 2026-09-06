@@ -118,7 +118,7 @@ check(
   check(
     'the header control is the one you switch while reading, not while configuring',
     WIDGET_TYPE_IDS.map((id) => `${id}:${headerOption(id)?.id ?? '-'}`),
-    ['geo:-', 'timeseries:metric', 'breakdown:metric', 'sizes:-', 'talkers:view', 'alerts:-'],
+    ['geo:-', 'timeseries:metric', 'breakdown:metric', 'sizes:-', 'talkers:view'],
   );
 
   const stepper = WIDGET_TYPE_IDS.filter((id) =>
@@ -155,7 +155,11 @@ check(
 
 check(
   'fields the type does not declare are dropped, not carried',
-  Object.keys(normalizeConfig('alerts', { chart: 'donut', nonsense: true })),
+  // Phrased as "the undeclared keys are absent" rather than "the result is
+  // empty": every surviving widget type declares at least one option, so an
+  // empty result would only be asserting that this type has none.
+  Object.keys(normalizeConfig('talkers', { chart: 'donut', nonsense: true }))
+    .filter((k) => k === 'chart' || k === 'nonsense'),
   [],
 );
 
@@ -207,16 +211,16 @@ check(
 check(
   'a well-formed list is left in the order it was given',
   shape(normalizeWidgets([
-    { type: 'alerts', enabled: true },
+    { type: 'sizes', enabled: true },
     { type: 'geo', enabled: false },
   ])),
-  ['alerts', 'geo:off', 'timeseries', 'breakdown', 'sizes', 'talkers'],
+  ['sizes', 'geo:off', 'timeseries', 'breakdown', 'talkers'],
 );
 
 check(
   'a type this build does not have is dropped',
-  shape(normalizeWidgets([{ type: 'weather' }, { type: 'alerts' }])).slice(0, 2),
-  ['alerts', 'geo'],
+  shape(normalizeWidgets([{ type: 'weather' }, { type: 'sizes' }])).slice(0, 2),
+  ['sizes', 'geo'],
 );
 
 check(
@@ -244,7 +248,7 @@ check(
 
 check(
   'a widget with no enabled field is shown, not hidden',
-  normalizeWidgets([{ type: 'alerts' }])[0].enabled,
+  normalizeWidgets([{ type: 'sizes' }])[0].enabled,
   true,
 );
 
@@ -257,7 +261,7 @@ check(
 check(
   'a title is trimmed and capped, and a blank one is dropped',
   normalizeWidgets([
-    { type: 'alerts', title: '   ' },
+    { type: 'sizes', title: '   ' },
     { type: 'geo', title: '  Egress  ' },
     { type: 'talkers', title: 'x'.repeat(90) },
   ]).slice(0, 3).map((w) => w.title ?? null),
@@ -313,7 +317,7 @@ for (const junk of [null, undefined, 'geo', 7, {}, [[]], [null], [{ id: 'geo' }]
   const out = normalizeDashboard({
     mode: 'full',
     width: 512,
-    order: ['geo', 'timeline', 'protocols', 'talkers', 'alerts'],
+    order: ['geo', 'timeline', 'protocols', 'talkers'],
     disabled: [],
   });
   check('a legacy order keeps its order, with the renamed types translated', shape(out!.widgets), [
@@ -321,7 +325,6 @@ for (const junk of [null, undefined, 'geo', 7, {}, [[]], [null], [{ id: 'geo' }]
     'timeseries',
     'breakdown',
     'talkers',
-    'alerts',
     'sizes',
   ]);
   check('...at the width it was stored at', out!.width, 512);
@@ -329,20 +332,20 @@ for (const junk of [null, undefined, 'geo', 7, {}, [[]], [null], [{ id: 'geo' }]
 
 check(
   'a reordered legacy list keeps the order the user put it in',
-  shape(normalizeDashboard({ order: ['alerts', 'geo', 'talkers', 'protocols', 'timeline'] })!.widgets),
-  ['alerts', 'geo', 'talkers', 'breakdown', 'timeseries', 'sizes'],
+  shape(normalizeDashboard({ order: ['talkers', 'geo', 'protocols', 'timeline'] })!.widgets),
+  ['talkers', 'geo', 'breakdown', 'timeseries', 'sizes'],
 );
 
 check(
   'legacy widgets that were switched off are still switched off',
   shape(normalizeDashboard({ order: ['geo', 'timeline'], disabled: ['timeline'] })!.widgets),
-  ['geo', 'timeseries:off', 'breakdown', 'sizes', 'talkers', 'alerts'],
+  ['geo', 'timeseries:off', 'breakdown', 'sizes', 'talkers'],
 );
 
 check(
   'a repeated legacy id is taken once',
-  shape(normalizeDashboard({ order: ['geo', 'geo', 'geo', 'alerts'] })!.widgets),
-  ['geo', 'alerts', 'timeseries', 'breakdown', 'sizes', 'talkers'],
+  shape(normalizeDashboard({ order: ['geo', 'geo', 'geo', 'talkers'] })!.widgets),
+  ['geo', 'talkers', 'timeseries', 'breakdown', 'sizes'],
 );
 
 check(
@@ -356,10 +359,10 @@ check(
   // of `widgets` is what decides, so a stale `order` sitting beside it - which
   // is exactly what one upgrade-then-downgrade leaves behind - is ignored.
   const out = normalizeDashboard({
-    widgets: [{ type: 'alerts', enabled: true, config: {} }],
-    order: ['geo', 'timeline', 'protocols', 'talkers', 'alerts'],
+    widgets: [{ type: 'sizes', enabled: true, config: {} }],
+    order: ['geo', 'timeline', 'protocols', 'talkers'],
   });
-  check('a modern list wins over a stale legacy order beside it', shape(out!.widgets)[0], 'alerts');
+  check('a modern list wins over a stale legacy order beside it', shape(out!.widgets)[0], 'sizes');
 }
 
 {
@@ -380,7 +383,6 @@ check(
     'geo',
     'timeseries',
     'sizes',
-    'alerts',
   ]);
   check('...keeping the FIRST of a duplicated type, settings and all',
     out!.widgets[1].config, { metric: 'packets', chart: 'bars', top: 5 });
@@ -399,9 +401,9 @@ check(
 }
 
 {
-  const out = normalizeDashboard({ mode: 'sideways', widgets: [{ type: 'alerts' }] });
+  const out = normalizeDashboard({ mode: 'sideways', widgets: [{ type: 'sizes' }] });
   check('an unknown mode falls back while the list survives',
-    [out!.mode, shape(out!.widgets)[0]], [DASHBOARD_DEFAULTS.mode, 'alerts']);
+    [out!.mode, shape(out!.widgets)[0]], [DASHBOARD_DEFAULTS.mode, 'sizes']);
 }
 
 check('a non-object is rejected outright so the caller uses defaults', normalizeDashboard('icons'), null);
@@ -468,7 +470,7 @@ check('a width that is not a number defaults rather than throwing',
   // ...and that the round trip actually kept everything, rather than settling
   // on some other list that would also be idempotent.
   check('the round trip keeps every widget, its name and its switch',
-    shape(once!.widgets), ['geo', 'timeseries', 'breakdown:off', 'sizes', 'talkers', 'alerts']);
+    shape(once!.widgets), ['geo', 'timeseries', 'breakdown:off', 'sizes', 'talkers']);
   check('...including the rename', once!.widgets[1].title, 'Egress');
   check('...including the settings', once!.widgets[2].config,
     { metric: 'bytes', chart: 'donut', top: 5 });

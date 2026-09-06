@@ -109,10 +109,10 @@ export function importRows(
   if (parsed.synthesizedEpoch) {
     notes.push('The file carried no absolute timestamps, so the capture is anchored at the time of import.');
   }
-  if (parsed.droppedAnomalies > 0) {
+  if (parsed.droppedExpert > 0) {
     notes.push(
-      `${parsed.droppedAnomalies} row(s) named an anomaly. A row carries only its title, not its `
-      + 'severity or description, so the alerts were not rebuilt.',
+      `${parsed.droppedExpert} row(s) named an expert finding. A row carries only the summary, `
+      + 'not the category or the tree row it was raised on, so the findings were not rebuilt.',
     );
   }
 

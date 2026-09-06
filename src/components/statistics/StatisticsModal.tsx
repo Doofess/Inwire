@@ -15,7 +15,7 @@ import { resolveMacVendor } from '../../services/macVendors';
 import type { StreamTarget } from '../../services/followStream';
 import { NameLookup, SOURCE_LABELS } from '../../services/nameResolution';
 import {
-  SEVERITY_DOT, SEVERITY_LABELS, SEVERITY_ORDER, SEVERITY_TEXT,
+  CATEGORY_HINTS, CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TEXT,
   type ExpertGroupRow, type ExpertLookup,
 } from '../../services/expertInfo';
 import { portLabel } from '../../services/portServices';
@@ -384,39 +384,45 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
 
           {tab === 'expert' && (
             <>
-              <div className="flex items-center gap-4 mb-3 text-[11px] font-mono">
-                {SEVERITY_ORDER.map((s) => (
-                  <span key={s} className="flex items-center gap-1.5">
-                    <span className={`inline-block w-2 h-2 rounded-full ${SEVERITY_DOT[s]}`} />
-                    <span className="text-muted-foreground">{SEVERITY_LABELS[s]}</span>
-                    <span className="tabular-nums font-bold">{count(expertCounts[s])}</span>
+              {/* Only the categories this capture actually raised. A strip of
+                  eight zeroes says less than a strip of the three things that
+                  happened. */}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-[11px] font-mono">
+                {CATEGORY_ORDER.filter((c) => expertCounts[c] > 0).map((c) => (
+                  <span key={c} className="flex items-center gap-1.5" title={CATEGORY_HINTS[c]}>
+                    <span className={`font-semibold ${CATEGORY_TEXT[c]}`}>{CATEGORY_LABELS[c]}</span>
+                    <span className="tabular-nums font-bold">{count(expertCounts[c])}</span>
                   </span>
                 ))}
               </div>
               <StatTable
                 rows={expertRows}
                 columns={[
+                  // Summary first: it is the only column that says what
+                  // happened, and it sat fourth behind a severity that turned
+                  // out to be wrong more often than it was right.
+                  { key: 'summary', label: 'Summary', render: (r: ExpertGroupRow) => r.summary, sortValue: (r: ExpertGroupRow) => r.summary, className: 'max-w-[32rem]' },
                   {
-                    key: 'severity', label: 'Severity',
+                    key: 'category', label: 'Category',
                     render: (r: ExpertGroupRow) => (
-                      <span className={`flex items-center gap-1.5 ${SEVERITY_TEXT[r.severity]}`}>
-                        <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${SEVERITY_DOT[r.severity]}`} />
-                        {SEVERITY_LABELS[r.severity]}
+                      <span className={`font-semibold ${CATEGORY_TEXT[r.category]}`}
+                        title={CATEGORY_HINTS[r.category]}>
+                        {CATEGORY_LABELS[r.category]}
                       </span>
                     ),
-                    // Negated: the table sorts descending by default and
-                    // `SEVERITY_ORDER` runs worst-first, so the raw index would
-                    // put Chat at the top of a list whose whole purpose is to
-                    // show what is broken.
-                    sortValue: (r: ExpertGroupRow) => -SEVERITY_ORDER.indexOf(r.severity),
+                    // Negated, because the table sorts descending on the first
+                    // click and `CATEGORY_ORDER` runs most-consequential-first.
+                    sortValue: (r: ExpertGroupRow) => -CATEGORY_ORDER.indexOf(r.category),
                   },
-                  { key: 'group', label: 'Group', render: (r: ExpertGroupRow) => r.group, sortValue: (r: ExpertGroupRow) => r.group },
                   { key: 'proto', label: 'Protocol', render: (r: ExpertGroupRow) => r.protocol, sortValue: (r: ExpertGroupRow) => r.protocol },
-                  { key: 'summary', label: 'Summary', render: (r: ExpertGroupRow) => r.summary, sortValue: (r: ExpertGroupRow) => r.summary, className: 'max-w-[30rem]' },
                   { key: 'count', label: 'Count', align: 'right', render: (r: ExpertGroupRow) => count(r.count), sortValue: (r: ExpertGroupRow) => r.count },
                 ]}
                 rowKey={(r: ExpertGroupRow) => r.key}
-                initialSort="severity"
+                // Commonest first. With severity gone there is no single
+                // "worst" to lead with, and how often a thing happened is the
+                // next most useful ordering - the Category column sorts by
+                // consequence for whoever wants that.
+                initialSort="count"
                 // Clicking jumps to the first frame that raised it rather than
                 // filtering: an expert finding is a place in the capture, and
                 // the filter that would select "frames with this finding" is

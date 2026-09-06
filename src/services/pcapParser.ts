@@ -1,4 +1,6 @@
-import { Packet, ProtocolLayer, ProtocolField, AnomalyInfo, ExpertSeverity, ExpertInfo } from '../types/packet';
+import { Packet, ProtocolLayer, ProtocolField, ExpertCategory, ExpertInfo } from '../types/packet';
+import { CATEGORY_ORDER, expertItemsFor } from './expertInfo';
+import { CATEGORY_BY_FLAG } from './dissect/tcpAnalysis';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacVendor, resolveMacName } from './macVendors';
 import { formatMac, formatIpv4Address, formatIpv6Address } from './addressFormat';
@@ -9,8 +11,9 @@ import { dissectNtp, dissectStun, dissectUdpByContent } from './dissectors/udpAp
 import { L3Tracker } from './l3Tracker';
 import {
   Direction, directionFromAddresses, directionFromMacs, directionFromOffload,
-  type HostIdentity,
+  directionOf, type HostIdentity,
 } from './direction';
+import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './dissectors/tls';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './dissectors/appStream';
 import { keyLog } from './tls/keyLog';
@@ -193,9 +196,53 @@ export class PcapService {
   ): Promise<{ packets: Packet[]; totalFrames: number }> {
     const extracted = await PcapService.extractFrames(file, maxFrames);
     return {
-      packets: PcapService.buildPacketsFromFrames(extracted.frames, keepTrees),
+      packets: PcapService.buildPacketsFromFrames(
+        extracted.frames, keepTrees, PcapService.inferHostFromFrames(extracted.frames),
+      ),
       totalFrames: extracted.totalFrames,
     };
+  }
+
+  /**
+   * Who took this capture, decided before it is dissected for real.
+   *
+   * A live capture knows the answer from the agent's adapter list before the
+   * first frame arrives, so the Worker passes it straight in. A file knows
+   * nothing: the host has to be **inferred from the frames**, and there are no
+   * frames until they have been dissected. `App.deriveForBuffer` closed that
+   * loop after the fact - infer, then walk the buffer writing `direction` onto
+   * each frame - and for the Direction column that is enough, because the
+   * column reads the property.
+   *
+   * It is not enough for anything the dissector decides *using* the direction,
+   * and there is one: the checksum verdict. A frame this machine sent was
+   * handed to the sniffer before the NIC filled its checksum in, so the value
+   * in the buffer is not the value on the wire and the honest verdict is
+   * `Unverified` (see `checksumVerdict`). Deciding that after dissection is not
+   * an option - the verdict is a tree row, an expert finding and a dense
+   * column, and a filled column row cannot be rewritten. So the answer has to
+   * be known *first*.
+   *
+   * **Measured, not assumed**: with no host, the two parity fixtures raised
+   * 3,891 and 3,594 "Bad checksum" findings on import and painted 30.3 % and
+   * 24.4 % of their lists Broken - every one of them an artefact of the capture
+   * having been taken on the sending machine. That is the same noise that kept
+   * the old "Expert Warnings" band switched off, arriving by a different door.
+   *
+   * The cost is a **bounded** extra dissection: `SCORING_FRAMES` frames at
+   * most, whatever the file's size, because that is all `inferHostIdentity`
+   * reads anyway - its signals are frequency ratios and converge long before
+   * then. The prefix pass is thrown away; the trackers it advanced are its own.
+   *
+   * A second implementation of the scoring - reading MACs and TTLs straight
+   * out of the bytes - would avoid the pass and is the wrong trade: two
+   * implementations of one decision agree until they do not, and this repo has
+   * already paid that price once over the agent's wire format.
+   */
+  private static inferHostFromFrames(frames: ExtractedFrame[]): HostIdentity | undefined {
+    if (frames.length === 0) return undefined;
+    const prefix = frames.length > SCORING_FRAMES ? frames.slice(0, SCORING_FRAMES) : frames;
+    return inferHostIdentity(PcapService.buildPacketsFromFrames(prefix)) ?? undefined;
   }
 
   /** Every frame in the file, as a plain array. */
@@ -432,7 +479,12 @@ export class PcapService {
    * live-captured packets, so imported files and live capture produce
    * identical Packet shapes.
    */
-  private static buildPacketsFromFrames(frames: ExtractedFrame[], keepTrees = false): Packet[] {
+  private static buildPacketsFromFrames(
+    frames: ExtractedFrame[],
+    keepTrees = false,
+    /** See `inferHostFromFrames`. Absent means every frame reads as Unknown. */
+    host?: HostIdentity,
+  ): Packet[] {
     const parsedPackets: Packet[] = [];
     let packetIndex = 1;
     let baseNanos: bigint | null = null;
@@ -457,6 +509,7 @@ export class PcapService {
       const { packet, icmpMatchedRequestFrameId, infoPatches } = decodeRawEthernetPacket(
         frame.rawBytes, packetIndex++, tsUs, relativeTime, timeDelta, frame.origLen,
         tcpTracker, icmpTracker, quicTracker, dnsTracker, undefined, frame.linktype, l3Tracker,
+        host,
       );
       packet.tsPrecision = frame.tsPrecision;
       if (frame.tsPrecision > 6) packet.tsNanos = frame.tsNanos;
@@ -514,7 +567,7 @@ export class PcapService {
       length: p.length,
       info: p.info,
       status: p.status,
-      anomaly: p.anomalies?.map(a => a.title).join('; ') ?? '',
+      expert: expertItemsFor(p).map((i) => i.summary).join('; '),
       ...(includeRawBytes
         ? { rawBytes: p.rawBytes.length > 0 ? toBase64(p.rawBytes) : '' }
         : {}),
@@ -547,54 +600,48 @@ export class PcapService {
  * rebuilt once per decoded packet.
  */
 /**
- * The most serious thing any dissector said about a frame.
- *
- * Walks the tree once at dissection rather than being derived later, so the
- * value is a field like any other: `inwire.expert.severity == "error"` is a
- * display filter, and the "Expert Warnings" colour rule is written against it.
- * `services/expertInfo.ts` still walks the tree for the individual findings -
- * that list needs each one, this needs only the worst.
- */
-/**
- * Every finding in the tree, flattened, and the worst severity among them.
+ * Every finding in the tree, flattened, and the one the frame is painted by.
  *
  * Two answers from one walk because they are read by different things and
- * neither can go back for the other. `inwire.expert.severity` is published as
- * a field so a colour rule and a display filter can ask about a frame's worst
- * finding - neither can walk a tree. The flat list lands on `Packet.expert`
- * because the tree is dissected on demand (docs/decisions/0007) and Expert
- * Information aggregates over the whole buffer, where no tree exists to walk.
+ * neither can go back for the other. `inwire.expert.category` is published as
+ * a field so a colour rule and a display filter can ask what is wrong with a
+ * frame - neither can walk a tree, which is why the expert system could not
+ * reach the packet list at all before this existed. The flat list lands on
+ * `Packet.expert` because the tree is dissected on demand
+ * (docs/decisions/0007) and Expert Information aggregates over the whole
+ * buffer, where no tree exists to walk.
+ *
+ * "Strongest" is first in `CATEGORY_ORDER`, not worst on a scale - there is no
+ * scale any more. It is the same tie-break the shipped colour chain applies,
+ * stated once so the field and the chain cannot disagree about a frame that is
+ * both Broken and a Capture gap.
  */
 function collectExpert(
   layers: ProtocolLayer[],
-  anomalies: AnomalyInfo[] | undefined,
-): { expert?: ExpertInfo[]; worst?: ExpertSeverity } {
-  const RANK: Record<ExpertSeverity, number> = { error: 3, warn: 2, note: 1, chat: 0 };
-  let worst: ExpertSeverity | undefined;
+): { expert?: ExpertInfo[]; strongest?: ExpertCategory } {
+  let strongest: ExpertCategory | undefined;
   const found: ExpertInfo[] = [];
-  const consider = (s: ExpertSeverity) => {
-    if (worst === undefined || RANK[s] > RANK[worst]) worst = s;
+  // First in `CATEGORY_ORDER` wins, which is the same order the shipped colour
+  // rules sit in - so the category published as a field is the one the row is
+  // actually painted by, rather than a second opinion about the same frame.
+  const consider = (c: ExpertCategory) => {
+    if (strongest === undefined
+      || CATEGORY_ORDER.indexOf(c) < CATEGORY_ORDER.indexOf(strongest)) strongest = c;
   };
   const visit = (fields: ProtocolField[]) => {
     for (const field of fields) {
       if (field.expertInfo) {
         found.push(field.expertInfo);
-        consider(field.expertInfo.severity);
+        consider(field.expertInfo.category ?? 'Note');
       }
       if (field.children) visit(field.children);
     }
   };
   for (const layer of layers) visit(layer.fields);
-  // Anomalies raise the worst severity but are not repeated into the list:
-  // they travel on `Packet.anomalies` and expertInfo.ts reads them from there,
-  // so adding them here would count every one of them twice.
-  for (const anomaly of anomalies ?? []) {
-    consider(anomaly.severity === 'medium' ? 'warn' : anomaly.severity === 'low' ? 'note' : 'error');
-  }
   // Pooled: a finding is a fixed sentence a dissector emits, so the same set
   // recurs across a capture - 209 distinct sets over both fixtures, against
   // one array per frame that carries any (`dissect/tokenPool.ts`).
-  return { expert: found.length > 0 ? poolExpert(found) : undefined, worst };
+  return { expert: found.length > 0 ? poolExpert(found) : undefined, strongest };
 }
 
 const PROTOCOL_NAME_MAP: Record<string, string> = {
@@ -729,6 +776,17 @@ export function decodeRawEthernetPacket(
   // tested before the destination. Links with no MACs at all (a TUN-style VPN)
   // fall through to the address test after dissection.
   let direction = host ? directionFromMacs(link.srcMac, link.dstMac, host) : 0;
+  /**
+   * Did this machine send the frame?
+   *
+   * Read here, from the MAC decision alone, because it is needed by the
+   * checksum verdict deep in the network and transport branches - long before
+   * the address-based fallback runs. On any Ethernet capture the MACs have
+   * already answered; on a link with no MACs the answer is "not known", which
+   * is the safe way round: an unknown frame keeps the ordinary verdict rather
+   * than being excused.
+   */
+  const sentByUs = directionOf(direction) === Direction.Out;
   let proto: Packet['protocol'] = 'TCP';
   // The Protocol column's free-form label, when it differs from the coarse
   // ProtocolType - "TLSv1.2", "ICMPv6", "STP". Left undefined when the two
@@ -744,7 +802,6 @@ export function decodeRawEthernetPacket(
   let info = `Frame (${rawBytes.length} bytes)`;
   let status: Packet['status'] = 'ok';
   let streamId: number | undefined;
-  let anomalies: AnomalyInfo[] | undefined;
   let icmpMatchedRequestFrameId: number | undefined;
   let infoPatches: InfoPatch[] | undefined;
   /** frameProtocols tokens for IPv6 extension headers, which have no layer name mapping. */
@@ -802,8 +859,10 @@ export function decodeRawEthernetPacket(
           value: 'Segmentation offloaded to the adapter; this frame was never sent in this form',
           generated: true,
           expertInfo: {
-            severity: 'chat' as const,
-            group: 'Protocol' as const,
+            // Unverifiable rather than a protocol note: a frame this large was
+            // handed to the sniffer above segmentation offload, so its size is
+            // an artefact of where we are standing, not of the wire.
+            category: 'Unverifiable' as const,
             message: `Frame is ${origLen || rawBytes.length} bytes, past the 1514-byte Ethernet MTU - segmentation offload`,
           },
         }] : []),
@@ -855,8 +914,7 @@ export function decodeRawEthernetPacket(
             generated: true,
             linkToFrame: conflict.previousFrame,
             expertInfo: {
-              severity: 'warn',
-              group: 'Sequence',
+              category: 'Security',
               message: `Duplicate IP address configured (${conflict.address})`,
             },
           });
@@ -913,7 +971,9 @@ export function decodeRawEthernetPacket(
     // is "Unverified", never "Bad". A zero header checksum is not legal on the
     // wire, and a frame past the MTU was segmented by the adapter - both mean
     // the bytes here were never the bytes that were sent.
-    const ipChecksumStatus = headerChecksumActual === 0 || origLen > 1514
+    // ...and a header on a frame we sent, for the same reason: partial offload
+    // leaves a non-zero wrong value that looks exactly like corruption.
+    const ipChecksumStatus = headerChecksumActual === 0 || origLen > 1514 || sentByUs
       ? 'Unverified'
       : checksumCorrect ? 'Good' : 'Bad';
     const ttlGuess = inferTtl(ttl);
@@ -981,7 +1041,7 @@ export function decodeRawEthernetPacket(
               generated: true,
               abbrev: 'ip.checksum.status',
               ...(ipChecksumStatus === 'Bad'
-                ? { expertInfo: { severity: 'error' as const, group: 'Checksum' as const, message: `Bad checksum, should be 0x${headerChecksumComputed.toString(16).padStart(4, '0')}` } }
+                ? { expertInfo: { category: 'Broken' as const, message: `Bad checksum, should be 0x${headerChecksumComputed.toString(16).padStart(4, '0')}` } }
                 : {}),
             },
           ],
@@ -1067,8 +1127,7 @@ export function decodeRawEthernetPacket(
             })),
             ...(datagram.overlapped ? {
               expertInfo: {
-                severity: 'warn' as const,
-                group: 'Malformed' as const,
+                category: 'Broken' as const,
                 message: 'Fragments overlap; the first copy of each byte was used',
               },
             } : {}),
@@ -1092,8 +1151,9 @@ export function decodeRawEthernetPacket(
               value: `${datagram.totalLength} bytes expected, ${datagram.bytesSoFar} captured - waiting for a missing fragment`,
               generated: true,
               expertInfo: {
-                severity: 'note',
-                group: 'Malformed',
+                // The datagram is not malformed - we simply never saw all of
+                // it. That is the sniffer's gap, not the sender's fault.
+                category: 'CaptureGap',
                 message: 'IPv4 datagram not reassembled: a fragment has not been captured',
               },
             });
@@ -1123,11 +1183,11 @@ export function decodeRawEthernetPacket(
       // real length, so the transport checksum is verified against what was
       // actually sent rather than against one fragment of it.
       ? decodeTransportLayer(reassembled, 0, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, reassembled.length, quicTracker, tsUs, dnsTracker,
-        ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, reassembled.length))
+        ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, reassembled.length), sentByUs)
       : isFragment
         ? null
         : decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen, quicTracker, tsUs, dnsTracker,
-          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen));
+          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen), sentByUs);
 
     if (isFragment && !reassembled) {
       // Wireshark's own wording for a fragment it cannot yet reassemble.
@@ -1170,7 +1230,6 @@ export function decodeRawEthernetPacket(
       if (transport.protocolTokens) transportTokens = transport.protocolTokens;
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
-      anomalies = transport.anomalies;
       icmpMatchedRequestFrameId = transport.icmpMatchedRequestFrameId;
       // Concatenated, not replaced: the fragment block above may already have
       // written `[Reassembled in N]` onto this datagram's earlier fragments,
@@ -1322,8 +1381,7 @@ export function decodeRawEthernetPacket(
             })),
             ...(v6Datagram.overlapped ? {
               expertInfo: {
-                severity: 'warn' as const,
-                group: 'Malformed' as const,
+                category: 'Broken' as const,
                 message: 'Fragments overlap; the first copy of each byte was used',
               },
             } : {}),
@@ -1341,8 +1399,7 @@ export function decodeRawEthernetPacket(
               value: `${v6Datagram.totalLength} bytes expected, ${v6Datagram.bytesSoFar} captured - waiting for a missing fragment`,
               generated: true,
               expertInfo: {
-                severity: 'note',
-                group: 'Malformed',
+                category: 'CaptureGap',
                 message: 'IPv6 datagram not reassembled: a fragment has not been captured',
               },
             });
@@ -1362,10 +1419,10 @@ export function decodeRawEthernetPacket(
     const transport = isMalformedJumbo
       ? null
       : v6Reassembled
-        ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset))
+        ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset), sentByUs)
         : (chain?.stopsHere ?? false)
           ? null
-          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen));
+          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen), sentByUs);
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
@@ -1398,7 +1455,6 @@ export function decodeRawEthernetPacket(
       if (transport.protocolTokens) transportTokens = transport.protocolTokens;
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
-      anomalies = transport.anomalies;
       icmpMatchedRequestFrameId = transport.icmpMatchedRequestFrameId;
       // Concatenated, not replaced, for the same reason as the IPv4 branch:
       // the fragment block above may already have written `[Reassembled in N]`
@@ -1449,8 +1505,8 @@ export function decodeRawEthernetPacket(
     );
   }
 
-  const { expert, worst: worstExpert } = collectExpert(layers, anomalies);
-  if (worstExpert) filterFields['inwire.expert.severity'] = worstExpert;
+  const { expert, strongest } = collectExpert(layers);
+  if (strongest) filterFields['inwire.expert.category'] = strongest;
 
   const frameProtocols = layers.map(l => PROTOCOL_NAME_MAP[l.name] ?? l.name.toLowerCase().replace(/\s+/g, '_'));
   if (transportTokens.length > 0 && transportLayerIndex >= 0) {
@@ -1498,7 +1554,6 @@ export function decodeRawEthernetPacket(
       ...(direction !== Direction.Unknown ? { direction } : {}),
       layers,
       rawBytes,
-      anomalies,
       ...(expert ? { expert } : {}),
       ...(resolvedNames && resolvedNames.length > 0 ? { resolved: resolvedNames } : {}),
       interfaceName: captureInterface?.label ?? 'eth0',
@@ -2015,6 +2070,9 @@ function decodeTransportLayer(
    * undefined when the network layer could not supply one.
    */
   pseudoHeader?: Uint8Array,
+  /** See `checksumVerdict` - this machine sent the frame, so its checksums
+   *  may not have been filled in yet. */
+  sentByUs = false,
 ): {
   proto: Packet['protocol'];
   protocolLabel?: string;
@@ -2041,7 +2099,6 @@ function decodeTransportLayer(
   status?: Packet['status'];
   analysisFlags?: string[];
   fields?: Record<string, string | number>;
-  anomalies?: AnomalyInfo[];
   icmpMatchedRequestFrameId?: number;
   /** Earlier frames that carried parts of a TLS record this segment completed. */
   reassembledFrom?: number[];
@@ -2134,7 +2191,7 @@ function decodeTransportLayer(
     const storedChecksum = (rawBytes[transportOffset + 16] << 8) | rawBytes[transportOffset + 17];
     const checksum = checksumVerdict(pseudoHeader, rawBytes, transportOffset,
       l4SegmentLen !== undefined && l4SegmentLen >= tcpHeaderLen ? transportOffset + l4SegmentLen : rawBytes.length,
-      storedChecksum, false);
+      storedChecksum, false, sentByUs);
 
     // TLS payloads are encrypted from essentially the first byte - never
     // scan them, since any "match" there would be a false positive.
@@ -2179,7 +2236,6 @@ function decodeTransportLayer(
 
     let streamId: number | undefined;
     let status: Packet['status'] | undefined;
-    let anomalies: AnomalyInfo[] | undefined;
     let streamPacketNumber: number | undefined;
     let conversationCompleteness: string | undefined;
     let isKeepAlive = false;
@@ -2201,24 +2257,16 @@ function decodeTransportLayer(
       });
       isKeepAlive = analysis.flags.includes('keep_alive');
       lostSegment = analysis.flags.includes('lost_segment');
+      // `status` still moves, because the list and the display filter read it.
+      // What is gone is the pair of `AnomalyInfo` objects that used to be built
+      // here: they duplicated the analysis flags that already raise a Loss
+      // finding of their own, so every retransmission was counted twice in the
+      // Expert tab - once as Sequence from the tree and once as Security from
+      // the anomaly. One event, one finding.
       if (analysis.flags.includes('retransmission') || analysis.flags.includes('fast_retransmission') || analysis.flags.includes('spurious_retransmission')) {
         status = 'retransmit';
-        anomalies = [{
-          type: 'tcp-retransmission',
-          severity: 'low',
-          title: 'TCP Retransmission',
-          description: `Segment with sequence number ${seqNum} was already seen on stream #${streamId} - likely a retransmission after packet loss or a duplicate ACK race.`,
-          recommendation: 'Check for network congestion, packet loss, or an unusually high round-trip time on this path.',
-        }];
       } else if (analysis.flags.includes('out_of_order')) {
         status = 'warning';
-        anomalies = [{
-          type: 'tcp-out-of-order',
-          severity: 'low',
-          title: 'TCP Out-of-Order Segment',
-          description: `Segment with sequence number ${seqNum} arrived out of order relative to previously seen data on stream #${streamId}.`,
-          recommendation: 'Usually harmless (multi-path routing or reordering in transit) - investigate further only if paired with retransmissions or application-level errors.',
-        }];
       }
 
       conversationCompleteness = tcpTracker.getConversationCompleteness(streamId);
@@ -2435,7 +2483,6 @@ function decodeTransportLayer(
       },
       status: status ?? (analysisFlags.length > 0 && !isKeepAlive && !isKeepAliveAck ? 'warning' : undefined),
       analysisFlags,
-      anomalies,
       layer: {
         name: 'Transmission Control Protocol',
         summary: `Transmission Control Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
@@ -2475,6 +2522,13 @@ function decodeTransportLayer(
             abbrev: 'tcp.flags',
             rawBytesRange: [transportOffset + 12, transportOffset + 13],
             children: tcpFlagFields(rawBytes, transportOffset),
+            // A reset is an expert finding in its own right, which it never
+            // was: it had a colour rule but nothing in the Expert tab, so a
+            // capture where four connections were killed said so in the row
+            // colours and nowhere you could count it. The category is Reset
+            // rather than Broken because nothing is damaged - a conversation
+            // ended, abruptly and on purpose.
+            ...(rst ? { expertInfo: { category: 'Reset' as const, message: 'Connection reset (RST)' } } : {}),
           },
           ...(expectedNextRel !== undefined ? [{ name: '[Next Sequence Number]', value: expectedNextRel, generated: true }] : []),
           // The window as sent, then the window after the scale factor from
@@ -2489,7 +2543,7 @@ function decodeTransportLayer(
             rawBytesRange: [transportOffset + 16, transportOffset + 17],
             abbrev: 'tcp.checksum',
             children: [{ name: '[Checksum Status]', value: checksum.status, generated: true, abbrev: 'tcp.checksum.status',
-              ...(checksum.status === 'Bad' ? { expertInfo: { severity: 'error' as const, group: 'Checksum' as const, message: 'Bad checksum' } } : {}) }],
+              ...(checksum.status === 'Bad' ? { expertInfo: { category: 'Broken' as const, message: 'Bad checksum' } } : {}) }],
           },
           ...(streamPacketNumber !== undefined ? [{ name: '[Stream Packet Number]', value: streamPacketNumber, generated: true }] : []),
           ...(conversationCompleteness !== undefined ? [{ name: '[Conversation completeness]', value: conversationCompleteness, generated: true }] : []),
@@ -2504,7 +2558,7 @@ function decodeTransportLayer(
     const dstPort = (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3];
     const udpLen = (rawBytes[transportOffset + 4] << 8) | rawBytes[transportOffset + 5];
     const udpChecksum = (rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7];
-    const udpVerdict = checksumVerdict(pseudoHeader, rawBytes, transportOffset, transportOffset + udpLen, udpChecksum, true);
+    const udpVerdict = checksumVerdict(pseudoHeader, rawBytes, transportOffset, transportOffset + udpLen, udpChecksum, true, sentByUs);
 
     let proto: Packet['protocol'] = 'UDP';
     let protocolLabel: string | undefined;
@@ -2735,7 +2789,13 @@ function decodeTransportLayer(
             name: 'Checksum',
             value: `0x${udpChecksum.toString(16).padStart(4, '0')} [${udpVerdict.status === 'Good' ? 'correct' : udpVerdict.status === 'Bad' ? 'incorrect' : 'unverified'}]`,
             rawBytesRange: [transportOffset + 6, transportOffset + 7], abbrev: 'udp.checksum',
-            children: [{ name: '[Checksum Status]', value: udpVerdict.status, generated: true, abbrev: 'udp.checksum.status' }],
+            // The finding IPv4 and TCP both raised and UDP did not, so a
+            // damaged datagram was reported in the tree and nowhere else -
+            // not in the Expert tab, not by a colour band, not by a filter on
+            // the category. Same verdict function and so the same offload
+            // policy: a frame this machine sent is `Unverified`, never `Bad`.
+            children: [{ name: '[Checksum Status]', value: udpVerdict.status, generated: true, abbrev: 'udp.checksum.status',
+              ...(udpVerdict.status === 'Bad' ? { expertInfo: { category: 'Broken' as const, message: 'Bad checksum' } } : {}) }],
           },
           { name: 'UDP payload', value: `${Math.max(0, udpLen - 8)} bytes`, rawBytesRange: [transportOffset + 8, transportOffset + Math.max(8, udpLen - 1)] },
         ],
@@ -2978,16 +3038,20 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
     children.push({ name: '[Bytes in flight]', value: a.bytesInFlight, generated: true, abbrev: 'tcp.analysis.bytes_in_flight' });
   }
   if (a.flags.length > 0) {
-    const severity = (flag: string): 'chat' | 'note' | 'warn' | 'error' =>
-      flag === 'lost_segment' || flag === 'ack_lost_segment' || flag === 'out_of_order' || flag === 'zero_window' || flag === 'window_full' || flag === 'reused_ports' ? 'warn'
-        : flag === 'window_update' ? 'chat' : 'note';
+    // The flag decides the category (`dissect/tcpAnalysis.ts`), which is where
+    // "the sniffer missed frames" finally stops being filed as network loss.
+    const categoryOf = (flag: string): ExpertCategory =>
+      CATEGORY_BY_FLAG[flag as keyof typeof CATEGORY_BY_FLAG] ?? 'Note';
     children.push({
       name: '[TCP Analysis Flags]', value: '', generated: true,
-      children: a.tags.map((tag, i) => ({
-        name: `[Expert Info (${severity(a.flags[i] ?? '') === 'warn' ? 'Warning' : severity(a.flags[i] ?? '') === 'chat' ? 'Chat' : 'Note'}/Sequence)]`,
-        value: tag.replace(/^\[TCP |\]$/g, ''), generated: true,
-        expertInfo: { severity: severity(a.flags[i] ?? ''), group: 'Sequence', message: tag },
-      })),
+      children: a.tags.map((tag, i) => {
+        const category = categoryOf(a.flags[i] ?? '');
+        return {
+          name: `[Expert Info (${category})]`,
+          value: tag.replace(/^\[TCP |\]$/g, ''), generated: true,
+          expertInfo: { category, message: tag },
+        };
+      }),
     });
   }
   if (children.length === 0) return [];
@@ -3067,10 +3131,27 @@ function transportChecksum(pseudoHeader: Uint8Array, rawBytes: Uint8Array, start
  */
 function checksumVerdict(
   pseudoHeader: Uint8Array | undefined, rawBytes: Uint8Array, start: number, declaredEnd: number, stored: number, udp: boolean,
+  /**
+   * True when this machine SENT the frame, which settles the question.
+   *
+   * The existing guards catch offload only where it leaves an obvious trace -
+   * a zero checksum, a frame past the MTU. Windows' partial checksum offload
+   * leaves neither: the NIC writes the pseudo-header sum and finishes the job
+   * afterwards, so the field is non-zero, wrong, and indistinguishable from
+   * corruption by looking at the bytes.
+   *
+   * Measured over both fixtures, that is **1,998 and 3,459 frames, and 100% of
+   * them outbound** - every "Bad" checksum in either capture. Wireshark cannot
+   * make this call because it does not know which frames the host sent; it
+   * settles for shipping TCP/UDP validation off by default. Knowing the
+   * direction, the honest verdict is Unverified.
+   */
+  sentByUs: boolean,
 ): { status: 'Good' | 'Bad' | 'Unverified'; computed?: number } {
   if (pseudoHeader === undefined || stored === 0 || declaredEnd > rawBytes.length || declaredEnd - start > 1514 - 34) {
     return { status: 'Unverified' };
   }
+  if (sentByUs) return { status: 'Unverified' };
   const computed = transportChecksum(pseudoHeader, rawBytes, start, declaredEnd);
   // A UDP checksum computing to 0 is sent as 0xffff.
   const good = computed === 0 || (udp && computed === 0 && stored === 0xffff);

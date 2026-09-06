@@ -268,7 +268,7 @@ export function buildDnsLayer(
   if (msg.isResponse && msg.rcode === 3) {
     generated.push({
       name: '[Expert Info]', value: 'No such name', generated: true,
-      expertInfo: { severity: 'note', group: 'Response', message: 'DNS: the name does not exist (NXDOMAIN)' },
+      expertInfo: { category: 'Note', message: 'DNS: the name does not exist (NXDOMAIN)' },
     });
   }
 

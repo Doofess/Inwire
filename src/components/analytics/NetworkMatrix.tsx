@@ -1,6 +1,7 @@
 import React from 'react';
 import { Packet } from '../../types/packet';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
+import { categoryOfPacket, isFaultCategory } from '../../services/expertInfo';
 import { TbArrowsExchange, TbShieldExclamation } from 'react-icons/tb';
 
 export type TalkersView = 'flows' | 'hosts';
@@ -79,9 +80,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({
       existing.packetsCount += 1;
       existing.totalBytes += p.length;
       existing.protocols.add(p.protocol);
-      if ((p.anomalies && p.anomalies.length > 0) || p.status === 'alert') {
-        existing.hasAnomaly = true;
-      }
+      if (isFaultCategory(categoryOfPacket(p))) existing.hasAnomaly = true;
     },
     // Sorted but NOT cut. The row count is a setting now, and listing it in
     // this hook's deps would discard the fold and re-walk every packet in the
@@ -96,7 +95,7 @@ export const NetworkMatrix: React.FC<NetworkMatrixProps> = ({
     packets,
     () => new Map<string, { ip: string; txPkts: number; rxPkts: number; bytes: number; anomalies: number }>(),
     (epMap, p) => {
-      const flagged = (p.anomalies && p.anomalies.length > 0) || p.status === 'alert';
+      const flagged = isFaultCategory(categoryOfPacket(p));
 
       let srcEp = epMap.get(p.source);
       if (!srcEp) {

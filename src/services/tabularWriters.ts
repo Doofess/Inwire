@@ -2,6 +2,7 @@ import type { Worksheet } from 'exceljs';
 
 import { Packet } from '../types/packet';
 import { exportColumns, packetToRow } from './exportSchema';
+import { expertItemsFor } from './expertInfo';
 
 /**
  * Writing the tabular export formats.
@@ -70,7 +71,7 @@ export function protocolBreakdown(packets: Packet[]): { protocol: string; count:
 }
 
 export function alertPackets(packets: Packet[]): Packet[] {
-  return packets.filter(p => (p.anomalies && p.anomalies.length > 0) || p.status === 'alert');
+  return packets.filter(p => p.status === 'alert' || p.status === 'warning' || p.status === 'retransmit');
 }
 
 // --- Excel -------------------------------------------------------------------
@@ -130,7 +131,7 @@ export async function buildXlsx(packets: Packet[], options: XlsxOptions): Promis
     { header: 'Alert', key: 'alert', width: 48 },
   ];
   for (const p of alertPackets(packets)) {
-    alerts.addRow([p.id, p.protocol, p.source, p.destination, p.anomalies?.[0]?.title ?? 'Flagged frame']);
+    alerts.addRow([p.id, p.protocol, p.source, p.destination, expertItemsFor(p)[0]?.summary ?? 'Flagged frame']);
   }
   styleHeader(alerts);
 

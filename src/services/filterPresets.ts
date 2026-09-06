@@ -38,7 +38,7 @@ export const DEFAULT_FILTER_PRESET_LIBRARY: FilterPresetLibrary = {
         {
           id: 'threats-anomalies',
           name: 'Security Anomalies & Alerts',
-          filter: 'status == alert || status == warning || anomaly',
+          filter: 'inwire.expert.category == "Broken" || inwire.expert.category == "Reset" || inwire.expert.category == "Security"',
           description: 'SYN floods, port scans, DNS tunneling, and IDS triggers',
         },
       ],

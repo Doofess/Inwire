@@ -158,8 +158,10 @@ const ALIASES: Record<string, AliasDef> = {
   status: { type: 'string', ci: true, read: (p) => [p.status] },
   stream: { type: 'uint', read: (p) => one(p.streamId) },
   'tcp.stream': { type: 'uint', read: (p) => one(p.streamId) },
-  'anomaly.severity': { type: 'string', ci: true, read: (p) => (p.anomalies ?? []).map((a) => a.severity) },
-  'anomaly.type': { type: 'string', ci: true, read: (p) => (p.anomalies ?? []).map((a) => a.type) },
+  // `anomaly.severity` and `anomaly.type` were here. The anomaly detector was
+  // two hard-coded TCP findings that duplicated the analysis flags, so both
+  // names now answer as `inwire.expert.category`, which covers every finding
+  // rather than those two.
 };
 
 /**
@@ -176,7 +178,6 @@ const PROTOCOL_PREDICATES: Record<string, (p: Packet) => boolean> = {
   mqtt: (p) => p.protocol === 'MQTT',
   mdns: (p) => p.protocolLabel === 'MDNS',
   llmnr: (p) => p.protocolLabel === 'LLMNR',
-  anomaly: (p) => (p.anomalies?.length ?? 0) > 0 || p.status === 'alert',
   proto_iot: (p) => p.protocol === 'CUSTOM' || p.info.includes('Proto-IoT'),
   finfast: (p) => p.protocol === 'CUSTOM' || p.info.includes('FinFast'),
 };

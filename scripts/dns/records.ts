@@ -112,7 +112,7 @@ const findField = (fields: ProtocolField[], name: string): ProtocolField | undef
 
   const dns = buildDnsLayer(w.out, 0)!;
   check('NXDOMAIN is reported', dns.nxdomain, true);
-  check('...as an expert note', findField(dns.layer.fields, '[Expert Info]')?.expertInfo?.severity, 'note');
+  check('...as an expert note', findField(dns.layer.fields, '[Expert Info]')?.expertInfo?.category, 'Note');
   check('...in the Authoritative nameservers section', dns.layer.fields.some((f) => f.name === 'Authoritative nameservers'), true);
   check('the reply code is filterable', dns.fields['dns.flags.rcode'], 3);
   check('soaStart is where the record began', msg.records[0].start, soaStart);

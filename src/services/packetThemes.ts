@@ -89,6 +89,22 @@ export type RuleRole =
    * rendered identically.
    */
   | 'reset'
+  /**
+   * The seven other expert categories.
+   *
+   * Every one carries a stated colour rather than a derived one, and it is not
+   * a preference: `derive()` has nine hues, all nine are spoken for, and the
+   * deltaE >= 4 floor between fills already sits at 4.6 with no room. A stated
+   * pair also carries its own text, so it depends on no theme underneath it -
+   * which is what lets eight new bands exist at all.
+   */
+  | 'broken'
+  | 'loss'
+  | 'captureGap'
+  | 'flowControl'
+  | 'unverifiable'
+  | 'expertNote'
+  | 'expertSecurity'
   | 'warn'     // suspicious but not broken: low TTL, SYN+FIN
   | 'notice'   // topology and routing state changed
   | 'web'      // HTTP
@@ -128,6 +144,17 @@ const HUE_BY_ROLE: Record<RuleRole, Hue> = {
   // still declared because a role without a hue is a role the palette cannot
   // fall back for, and `colorblind` needs exactly that fallback.
   reset: 'red',
+  // Fallbacks for `colorblind`, which declines stated colours. They collapse
+  // onto existing hues there, which is the right trade: that set exists so a
+  // reader who cannot use the red/green axis gets a list they can read, and
+  // eight more saturated fills is the opposite of that.
+  broken: 'red',
+  loss: 'orange',
+  captureGap: 'violet',
+  flowControl: 'cyan',
+  unverifiable: 'neutral',
+  expertNote: 'green',
+  expertSecurity: 'magenta',
   warn: 'orange',
   notice: 'orange',
   arp: 'yellow',
@@ -143,6 +170,19 @@ const HUE_BY_ROLE: Record<RuleRole, Hue> = {
 const ROLE_BY_RULE_ID: Record<string, RuleRole> = {
   'color-bad-tcp': 'error',
   'color-tcp-rst': 'reset',
+
+  // The expert bands. `color-expert-reset` shares `reset` with `color-tcp-rst`
+  // deliberately: they fire on the same frames from two directions - one on
+  // the flag, one on the finding - and painting them differently would be two
+  // colours for one event.
+  'color-expert-broken': 'broken',
+  'color-expert-reset': 'reset',
+  'color-expert-security': 'expertSecurity',
+  'color-expert-loss': 'loss',
+  'color-expert-capture-gap': 'captureGap',
+  'color-expert-flow-control': 'flowControl',
+  'color-expert-unverifiable': 'unverifiable',
+  'color-expert-note': 'expertNote',
   'color-sctp-abort': 'error',
   'color-checksum-errors': 'error',
   'color-icmp-errors': 'error',
@@ -167,13 +207,6 @@ const ROLE_BY_RULE_ID: Record<string, RuleRole> = {
   'color-broadcast': 'neutral',
 
   // Inwire's three additions (services/colorRules INWIRE_EXTRA_RULES).
-  // `color-expert` takes the warn hue rather than error: it fires on anything a
-  // dissector complained about, which is a wider net than the five rules above
-  // it, and painting all of that the same red as a RST would drain the red of
-  // meaning. TLS Handshake takes the web hue - it is the frame that says which
-  // site this is - and QUIC takes tcp's blue because it IS the transport for
-  // most of a modern capture's web traffic.
-  'color-expert': 'warn',
   'color-tls-handshake': 'web',
   'color-quic': 'tcp',
 };
@@ -582,7 +615,29 @@ export { contrastRatio };
  * thing that set is for.
  */
 const FIXED_ROLE_COLORS: Partial<Record<RuleRole, PacketThemeColors>> = {
+  // The reference analyzer's own RST pair, and the model for the rest.
   reset: { background: '#a40000', color: '#fffc9c' },
+
+  // The expert categories, following the same polarity convention the
+  // reference analyzer uses across its whole default set: ordinary rows are a
+  // pale fill under dark text, and the ones that mean something is wrong
+  // invert that - a dark ground with bright text. The eye catches the
+  // inversion far faster than it catches one pale tint among several.
+  //
+  // So the four that mean trouble are dark grounds...
+  broken: { background: '#4a0d0d', color: '#ffb3b3' },
+  expertSecurity: { background: '#4a0a52', color: '#f0a6ff' },
+  loss: { background: '#5c3200', color: '#ffcf80' },
+
+  // ...and the four that are context rather than fault are muted mid-tones,
+  // dark enough to read light text on every theme without shouting. A capture
+  // gap, a keep-alive and an unverifiable checksum are not faults, and giving
+  // them the same weight as a broken frame is what made the old expert band
+  // unusable.
+  captureGap: { background: '#2c2246', color: '#c3b6f0' },
+  flowControl: { background: '#0e2f3d', color: '#9adcf0' },
+  unverifiable: { background: '#2a2a2a', color: '#b0b0b0' },
+  expertNote: { background: '#0a4033', color: '#8fdcbb' },
 };
 
 /** Every rule id a theme is expected to cover. Used by the tests. */

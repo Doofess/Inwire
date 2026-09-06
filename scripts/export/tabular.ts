@@ -277,7 +277,7 @@ check('fixture carries wire bytes', capture[0].rawBytes.length > 0, true);
   // Our own headers must map to themselves, or an export cannot be re-imported.
   const own = matchHeaders([
     'No.', 'Time(s)', 'Epoch (ms)', 'Source', 'Destination',
-    'Protocol', 'Length', 'Info', 'Status', 'Anomaly', 'RawBytes (Base64)',
+    'Protocol', 'Length', 'Info', 'Status', 'Expert', 'RawBytes (Base64)',
   ]);
   check('our own headers all map', Object.keys(own).length, 11);
 

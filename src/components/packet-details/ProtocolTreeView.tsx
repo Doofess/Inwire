@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Packet, ProtocolField } from '../../types/packet';
 import { TbChevronRight, TbChevronDown, TbCopy, TbCheck } from 'react-icons/tb';
 import { renderBitfield } from '../../lib/bitfield';
-import { SEVERITY_TEXT } from '../../services/expertInfo';
+import { CATEGORY_TEXT } from '../../services/expertInfo';
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -27,11 +27,10 @@ import { fieldDef } from '../../services/dissect/fieldRegistry';
  * cross-frame link behaves identically wherever the tree is shown.
  */
 
-// The severity palette lives in services/expertInfo, so one level means one
-// colour in the tree, in the packet list's severity dot and in the Expert
-// Information tab - which is the point of having unified the two severity
-// vocabularies at all.
-const EXPERT_SEVERITY_CLASS = SEVERITY_TEXT;
+// The category palette lives in services/expertInfo, so a category means one
+// colour in the tree, in the frame field table and in the Expert Information
+// tab. Four copies of this map had accumulated when it was keyed by severity.
+const EXPERT_CATEGORY_CLASS = CATEGORY_TEXT;
 
 interface ProtocolTreeViewProps {
   packet: Packet;
@@ -214,7 +213,7 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
               <span
                 className={`font-semibold truncate ${
                   field.expertInfo
-                    ? EXPERT_SEVERITY_CLASS[field.expertInfo.severity] ?? 'text-foreground'
+                    ? EXPERT_CATEGORY_CLASS[field.expertInfo.category ?? 'Note'] ?? 'text-foreground'
                     : field.generated
                       ? 'text-muted-foreground italic'
                       : 'text-foreground'

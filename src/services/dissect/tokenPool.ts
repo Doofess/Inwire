@@ -78,8 +78,8 @@ export function poolTokens(tokens: string[]): string[] {
 /**
  * The shared list of expert findings equal to `entries`.
  *
- * The same idea one level deeper: an `ExpertInfo` is `{severity, message,
- * group?}`, and a finding is a fixed sentence a dissector emits - so a capture
+ * The same idea one level deeper: an `ExpertInfo` is `{message, category?}`,
+ * and a finding is a fixed sentence a dissector emits - so a capture
  * raising "TCP Retransmission" seven hundred times built seven hundred
  * identical objects inside seven hundred identical arrays.
  *
@@ -94,7 +94,7 @@ export function poolExpert(entries: ExpertInfo[]): ExpertInfo[] {
   // kind of cost that does not show up until it is a third of a profile.
   let key = '';
   for (const entry of entries) {
-    key += SEPARATOR + entry.severity + SUBSEP + (entry.group ?? '') + SUBSEP + entry.message;
+    key += SEPARATOR + (entry.category ?? '') + SUBSEP + entry.message;
   }
   const existing = expertLists.get(key);
   if (existing !== undefined) return existing as ExpertInfo[];

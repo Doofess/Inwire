@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 // mapping and nothing else - React owns every element, the same split
 // `TrafficTimelineChart` uses.
 import { scaleLinear } from 'd3';
-import type { Packet } from '../../types/packet';
+import type { ExpertCategory, Packet } from '../../types/packet';
 import { clientEnd, streamPackets, type StreamTarget } from '../../services/followStream';
 import {
   arrowsThatFit, initialWindow, ladderExtent, layoutLadder, panWindow,
@@ -49,11 +49,19 @@ const BOTTOM_PAD = 16;
 /** Enough for a label between the lanes without crowding either. */
 const MIN_HEIGHT = 240;
 
-const SEVERITY_COLOR: Record<string, string> = {
-  error: 'var(--color-rose-500, #f43f5e)',
-  warn: 'var(--color-amber-500, #f59e0b)',
-  note: 'var(--color-sky-500, #0ea5e9)',
-  chat: 'var(--color-muted-foreground, #888)',
+/**
+ * An arrow's stroke, when the frame carries a finding worth showing.
+ *
+ * This used to be a fourth private copy of the severity palette. It reads the
+ * shared category set now, and only for the categories that mean something
+ * went wrong - a keep-alive or an unverifiable checksum recolouring an arrow
+ * would drown the one thing the lane colours are for, which is direction.
+ */
+const CATEGORY_STROKE: Partial<Record<ExpertCategory, string>> = {
+  Broken: 'var(--color-rose-500, #f43f5e)',
+  Reset: 'var(--color-red-600, #dc2626)',
+  Security: 'var(--color-fuchsia-500, #d946ef)',
+  Loss: 'var(--color-amber-500, #f59e0b)',
 };
 
 interface LadderViewProps {
@@ -266,9 +274,8 @@ const Arrow: React.FC<{
   const toServer = arrow.from === 'client';
   const x1 = toServer ? clientX : serverX;
   const x2 = toServer ? serverX : clientX;
-  const colour = arrow.severity !== null && arrow.severity !== 'chat'
-    ? SEVERITY_COLOR[arrow.severity] ?? 'currentColor'
-    : toServer ? 'var(--color-rose-500, #f43f5e)' : 'var(--color-sky-500, #0ea5e9)';
+  const colour = (arrow.category !== null ? CATEGORY_STROKE[arrow.category] : undefined)
+    ?? (toServer ? 'var(--color-rose-500, #f43f5e)' : 'var(--color-sky-500, #0ea5e9)');
 
   // Thickness carries the frame's size, which is what makes a bulk transfer
   // look different from an exchange of acknowledgements at a glance. Capped

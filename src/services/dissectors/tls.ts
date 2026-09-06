@@ -1177,11 +1177,11 @@ function certificateFields(certs: CertificateSummary[], conv: TlsConversationSta
       ...(c.keyType ? [{ name: 'Public Key Algorithm', value: c.keyType }] : []),
       ...(c.serialHex ? [{ name: 'Serial Number', value: c.serialHex }] : []),
     ];
-    if (c.notAfter && c.notAfter < now) children.push({ name: '[Expert]', value: 'certificate has expired', generated: true, expertInfo: { severity: 'warn', group: 'Security', message: 'Certificate expired' } });
-    if (c.selfSigned) children.push({ name: '[Expert]', value: 'self-signed certificate', generated: true, expertInfo: { severity: 'note', group: 'Security', message: 'Self-signed certificate' } });
+    if (c.notAfter && c.notAfter < now) children.push({ name: '[Expert]', value: 'certificate has expired', generated: true, expertInfo: { category: 'Security', message: 'Certificate expired' } });
+    if (c.selfSigned) children.push({ name: '[Expert]', value: 'self-signed certificate', generated: true, expertInfo: { category: 'Security', message: 'Self-signed certificate' } });
     if (i === 0 && conv.sni && c.subjectCN && !c.dnsNames.includes(conv.sni) && c.subjectCN !== conv.sni
       && !c.dnsNames.some((n) => n.startsWith('*.') && conv.sni!.endsWith(n.slice(1)))) {
-      children.push({ name: '[Expert]', value: `name mismatch: SNI ${conv.sni} is not in this certificate`, generated: true, expertInfo: { severity: 'warn', group: 'Security', message: 'Certificate name does not match SNI' } });
+      children.push({ name: '[Expert]', value: `name mismatch: SNI ${conv.sni} is not in this certificate`, generated: true, expertInfo: { category: 'Security', message: 'Certificate name does not match SNI' } });
     }
     return { name: i === 0 ? `Certificate (leaf): ${c.subjectCN ?? c.subject}` : `Certificate: ${c.subjectCN ?? c.subject}`, value: '', children };
   });
@@ -1193,7 +1193,7 @@ export function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, 
     if (r.ignored) {
       fields.push({
         name: 'Ignored Unknown Record', value: `${r.length} bytes`, ...(r.range ? { rawBytesRange: r.range } : {}),
-        expertInfo: { severity: 'warn', group: 'Malformed', message: 'Ignored Unknown Record' },
+        expertInfo: { category: 'Broken', message: 'Ignored Unknown Record' },
       });
       continue;
     }

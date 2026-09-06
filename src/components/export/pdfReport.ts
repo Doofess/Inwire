@@ -8,6 +8,7 @@ import autoTable from 'jspdf-autotable';
 
 import { Packet } from '../../types/packet';
 import { alertPackets, protocolBreakdown } from '../../services/tabularWriters';
+import { expertItemsFor } from '../../services/expertInfo';
 import {
   PDF_INFO_LIMIT,
   PDF_PACKET_LIMIT,
@@ -81,7 +82,7 @@ export function buildPdfReport(packets: Packet[], filter: string): Blob {
         a.protocol,
         a.source,
         a.destination,
-        a.anomalies?.[0]?.title || 'Unknown Alert',
+        expertItemsFor(a)[0]?.summary || 'Flagged frame',
       ]),
       theme: 'grid',
       styles: { fontSize: 9 },

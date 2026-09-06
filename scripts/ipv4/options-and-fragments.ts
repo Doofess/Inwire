@@ -180,7 +180,7 @@ check('a TTL of 0 is not a distance', inferTtl(0), null);
   const options = findField(ipLayer(packet)!.fields, 'Options');
   checkTrue('an option that overruns the header is reported, not read',
     String(options?.children?.[0].value).startsWith('Malformed'));
-  checkTrue('...as an expert finding', options?.children?.[0].expertInfo?.severity === 'warn');
+  checkTrue('...as an expert finding', options?.children?.[0].expertInfo?.category === 'Broken');
 }
 
 // --- fragments -----------------------------------------------------------------------
@@ -263,7 +263,7 @@ const UDP_DATAGRAM = [
   // A note, not a warning: at this frame there is no way to tell a fragment
   // that is late from one that will never arrive.
   check('...as a note, because a late fragment is normal',
-    findField(ipLayer(last)!.fields, '[Datagram incomplete]')?.expertInfo?.severity, 'note');
+    findField(ipLayer(last)!.fields, '[Datagram incomplete]')?.expertInfo?.category, 'CaptureGap');
 }
 
 {
@@ -289,7 +289,7 @@ const UDP_DATAGRAM = [
   const reasm = ipLayer(last)!.fields.find((f) => f.name.includes('Reassembled IPv4 fragments'));
   check('...and the duplicate is not counted as a contributor',
     reasm?.name, '[2 Reassembled IPv4 fragments (37 bytes)]');
-  check('...but the overlap is reported', reasm?.expertInfo?.severity, 'warn');
+  check('...but the overlap is reported', reasm?.expertInfo?.category, 'Broken');
   checkTrue('...saying which copy was kept',
     String(reasm?.expertInfo?.message).includes('first copy'));
 }
@@ -562,7 +562,10 @@ function ipv6FragmentLayer(packet: Packet) {
     '[Duplicate IP address detected]');
   checkTrue('...with the frame that made the earlier claim, to jump to',
     row?.linkToFrame !== undefined);
-  checkTrue('...and as an expert warning', row?.expertInfo?.severity === 'warn');
+  // Security rather than Broken: the frame decoded perfectly. What is wrong is
+  // the network - two machines answering for one address, which is either a
+  // misconfiguration or someone poisoning the segment.
+  checkTrue('...and as a Security finding', row?.expertInfo?.category === 'Security');
 
   // A host really does change MAC - a failover, a new NIC, a laptop changing
   // docks - so the newest claim becomes the one to compare against. Reporting
@@ -702,7 +705,7 @@ function udpFrame(srcPort: number, dstPort: number, payload: number[]): Uint8Arr
   const note = findField(big.layers[0].fields, '[Frame exceeds MTU]');
   checkTrue('a frame past the MTU is explained rather than left to look like damage',
     note !== undefined);
-  check('...as a chat-level remark, since nothing is wrong', note?.expertInfo?.severity, 'chat');
+  check('...as unverifiable, since it is our own send path rather than the wire', note?.expertInfo?.category, 'Unverifiable');
 
   const normal = decode(frame);
   check('a normal frame gets no such note',

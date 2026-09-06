@@ -115,6 +115,39 @@ export interface SessionMeta {
   lastPacketMs: number | null;
   /** When this session was last written, for the "restored" notice. */
   updatedAt: number;
+  /**
+   * Whose machine took this capture.
+   *
+   * Saved rather than re-derived, and it is not an optimisation. A restore
+   * re-dissects every frame from its bytes, and the dissector needs the
+   * direction *while* it works: the checksum verdict depends on it (a frame
+   * this machine sent was handed to the sniffer before the NIC filled the
+   * checksum in, so the honest verdict is `Unverified`), and that verdict is a
+   * tree row, an expert finding and a dense column - none of which can be
+   * corrected afterwards. The direction pass that runs after a restore is
+   * therefore too late for it.
+   *
+   * An import solves the same problem by scoring a prefix before it dissects
+   * (`PcapService.inferHostFromFrames`). A session does not have to: it knew
+   * the answer when it captured - usually from the agent's own adapter list,
+   * which is better than any inference - so it writes it down. That also
+   * carries a user's manual override across a reload, which re-inferring
+   * would silently discard.
+   *
+   * A `Set` does not survive the trip into IndexedDB as itself, so the two
+   * sets travel as arrays and are rebuilt on load, exactly as they are on the
+   * way to the Worker.
+   */
+  host?: StoredHost;
+}
+
+/** `HostIdentity` in a shape IndexedDB can hold. See `SessionMeta.host`. */
+export interface StoredHost {
+  macs: string[];
+  addresses: string[];
+  inferred: boolean;
+  confidence: number;
+  basis?: string;
 }
 
 // --- Opening -----------------------------------------------------------------
@@ -301,7 +334,7 @@ function runTx<T>(
 /**
  * Reduces a live Packet to the bytes worth keeping.
  *
- * Deliberately drops `layers`, `fields`, `frameProtocols`, `anomalies`,
+ * Deliberately drops `layers`, `fields`, `frameProtocols`, `expert`,
  * `streamId` and the rest: all of them come back out of `raw` on restore, and
  * keeping them is what made the "store the whole packet" option 4.6x larger.
  */
@@ -633,6 +666,35 @@ export async function loadSessionMeta(): Promise<SessionMeta | null> {
     captureStartMs: typeof raw.captureStartMs === 'number' ? raw.captureStartMs : null,
     lastPacketMs: typeof raw.lastPacketMs === 'number' ? raw.lastPacketMs : null,
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+    host: readStoredHost((raw as { host?: unknown }).host),
+  };
+}
+
+/**
+ * Reads back a stored host, field by field like every other preference here.
+ *
+ * `undefined` for a session written before this was saved, which is the same
+ * answer as "this capture never had a host" and gets the same treatment: the
+ * frames restore with no direction, exactly as they did before, rather than
+ * with one invented out of a half-read record.
+ */
+function readStoredHost(raw: unknown): StoredHost | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const h = raw as Partial<StoredHost>;
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  const macs = strings(h.macs);
+  const addresses = strings(h.addresses);
+  // A host that names nothing cannot decide any frame's direction, so it is
+  // not a host: `NO_HOST` and a missing record are the same state and are
+  // deliberately not distinguished.
+  if (macs.length === 0 && addresses.length === 0) return undefined;
+  return {
+    macs,
+    addresses,
+    inferred: h.inferred === true,
+    confidence: typeof h.confidence === 'number' ? h.confidence : 0,
+    ...(typeof h.basis === 'string' ? { basis: h.basis } : {}),
   };
 }
 

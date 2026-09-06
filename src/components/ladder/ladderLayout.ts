@@ -30,6 +30,8 @@
 import type { Packet } from '../../types/packet';
 import { fieldValue } from '../../services/dissect/fieldAccess';
 import { isFromClient } from '../../services/followStream';
+import { categoryOfPacket } from '../../services/expertInfo';
+import type { ExpertCategory } from '../../types/packet';
 
 /** Which lane a frame leaves from. */
 export type Lane = 'client' | 'server';
@@ -49,8 +51,8 @@ export interface LadderArrow {
   flags: string;
   /** The Info line, which is what a ladder is actually read for. */
   info: string;
-  /** Worst expert severity on the frame, or null. */
-  severity: string | null;
+  /** The expert category this frame reads as, or null. */
+  category: ExpertCategory | null;
   /** True when two or more frames share this row because they are too close. */
   crowded: boolean;
 }
@@ -199,9 +201,7 @@ export function layoutLadder(
       length: packet.length,
       flags: flagsOf(packet),
       info: packet.info,
-      severity: typeof fieldValue(packet, 'inwire.expert.severity') === 'string'
-        ? (fieldValue(packet, 'inwire.expert.severity') as string)
-        : null,
+      category: categoryOfPacket(packet) ?? null,
       crowded,
     });
   }

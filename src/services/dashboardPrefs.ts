@@ -28,7 +28,6 @@ export const WIDGET_TYPE_IDS = [
   'breakdown',
   'sizes',
   'talkers',
-  'alerts',
 ] as const;
 
 export type WidgetTypeId = (typeof WIDGET_TYPE_IDS)[number];
@@ -241,12 +240,6 @@ export const WIDGET_TYPES: Record<WidgetTypeId, WidgetTypeSpec> = {
       ROWS,
     ],
   },
-  alerts: {
-    id: 'alerts',
-    label: 'Alerts',
-    description: 'The latest anomaly, and whether anything is wrong.',
-    options: [],
-  },
 };
 
 /** The one option a type also offers in its card header, if it has one. */
@@ -438,7 +431,10 @@ const LEGACY_TYPES: Record<string, WidgetTypeId> = {
   timeline: 'timeseries',
   protocols: 'breakdown',
   talkers: 'talkers',
-  alerts: 'alerts',
+  // `alerts` is deliberately absent. The widget is gone - it showed the newest
+  // of two hard-coded TCP anomalies, which are now ordinary expert findings
+  // like every other - so a stored layout naming it drops the entry rather
+  // than mapping it to something that no longer exists.
 };
 
 /**

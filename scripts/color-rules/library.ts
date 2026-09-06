@@ -20,7 +20,17 @@ import {
 } from '../../src/services/colorRules';
 import { FilterEngine } from '../../src/services/filterEngine';
 import { REQUIRED_RULE_IDS, ROLE_BY_RULE_ID } from '../../src/services/packetThemes';
+import { CATEGORY_ORDER } from '../../src/services/expertInfo';
+import type { ExpertCategory } from '../../src/types/packet';
 import type { Packet, ProtocolType } from '../../src/types/packet';
+
+/** The rule-id spelling of each category. Stated, because a derived one would
+ *  agree with whatever `colorRules.ts` typed. */
+const KEBAB: Record<ExpertCategory, string> = {
+  Broken: 'broken', Reset: 'reset', Security: 'security', Loss: 'loss',
+  CaptureGap: 'capture-gap', FlowControl: 'flow-control',
+  Unverifiable: 'unverifiable', Note: 'note',
+};
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -48,8 +58,17 @@ check('...keeping Wireshark\'s rules in Wireshark\'s order',
   const ids = DEFAULT_COLOR_RULES.map(r => r.id);
   const at = (id: string) => ids.indexOf(id);
   // First-match-wins is the whole design, so a band's POSITION is its meaning.
-  check('Expert Warnings sits after the broken-frame bands', at('color-expert') > at('color-checksum-errors'), true);
-  check('...and before the generic transport bands', at('color-expert') < at('color-tcp'), true);
+  //
+  // The eight expert bands LEAD the chain - where Wireshark puts Bad TCP, and
+  // for the same reason: a frame a dissector had something to say about is
+  // more interesting than the fact that it is TCP. They are also the answer to
+  // "this frame is both Broken and a Capture gap", so their order among
+  // themselves is `CATEGORY_ORDER` and nothing else.
+  const expertIds = CATEGORY_ORDER.map((c) => `color-expert-${KEBAB[c]}`);
+  check('the expert bands lead the chain, in category order',
+    ids.slice(0, expertIds.length), expertIds);
+  check('...ahead of the broken-frame bands', at(expertIds[0]) < at('color-checksum-errors'), true);
+  check('...and of the generic transport bands', at(expertIds[0]) < at('color-tcp'), true);
   check('TLS Handshake outranks plain TCP', at('color-tls-handshake') < at('color-tcp'), true);
   check('QUIC outranks plain UDP', at('color-quic') < at('color-udp'), true);
   check('every id is unique', new Set(ids).size, ids.length);
@@ -127,25 +146,35 @@ const packet = (over: Partial<Packet>): Packet => ({
   check('...but under Wireshark\'s own chain it is plain TCP',
     new ColorRulesEngine(WIRESHARK_DEFAULT_RULES).getMatchedRuleName(tlsHello), 'TCP');
 
-  // Checksum Errors ships DISABLED, as it does in Wireshark - NIC offload means
-  // a frame captured on the host that sent it has no checksum yet, and
-  // validating those paints half the list red. So a bad checksum reaches the
-  // list through Expert Warnings, which is exactly the gap that band was added
-  // for; enable the rule and it takes precedence again.
-  // Checksum Errors and Expert Warnings both ship DISABLED, and for the same
-  // reason: NIC offload means a frame captured on the host that sent it has no
-  // checksum yet, so on the two parity fixtures those two bands would have
-  // painted 14 % and 22 % of the list over an artefact of where the capture
-  // was taken. Both are one click away in the editor, which is what the editor
-  // is for.
-  const broken = packet({ fields: { 'tcp.checksum.status': 'Bad', 'inwire.expert.severity': 'error' } });
-  check('a bad checksum is not painted by default', new ColorRulesEngine().getMatchedRuleName(broken), 'TCP');
-  for (const id of ['color-checksum-errors', 'color-expert'] as const) {
-    const enabled = DEFAULT_COLOR_RULES.map(r => (r.id === id ? { ...r, enabled: true } : r));
-    check(`...and is once ${id} is enabled`,
-      new ColorRulesEngine(enabled).getMatchedRuleName(broken),
-      id === 'color-expert' ? 'Expert Warnings' : 'Checksum Errors');
-  }
+  // Checksum Errors still ships DISABLED, exactly as it does in Wireshark. What
+  // changed is that it is no longer the only thing standing between a bad
+  // checksum and the list.
+  //
+  // The band it used to share that job with - "Expert Warnings", keyed on
+  // `inwire.expert.severity` - shipped disabled too, because on the two parity
+  // fixtures it would have painted 14 % and 22 % of the list, and **every one**
+  // of those frames was outbound: 1,998 and 3,459 findings, 100 % of them on
+  // frames this machine had sent, where the NIC had not filled the checksum in
+  // yet. `checksumVerdict` reads `frame.direction` now, so those frames are
+  // `Unverified` and raise nothing, which is what makes shipping the expert
+  // bands ENABLED viable at all.
+  const broken = packet({ fields: { 'tcp.checksum.status': 'Bad', 'inwire.expert.category': 'Broken' } });
+  check('a frame with a Broken finding is painted by its category band',
+    new ColorRulesEngine().getMatchedRuleName(broken), 'Expert: Broken');
+  check('Checksum Errors still ships disabled',
+    DEFAULT_COLOR_RULES.find(r => r.id === 'color-checksum-errors')!.enabled, false);
+  check('...and enabling it does not take the frame back, because the bands lead',
+    new ColorRulesEngine(
+      DEFAULT_COLOR_RULES.map(r => (r.id === 'color-checksum-errors' ? { ...r, enabled: true } : r)),
+    ).getMatchedRuleName(broken),
+    'Expert: Broken');
+
+  // The frame the old band painted 1,998 times: this machine sent it, so the
+  // checksum on the wire was never the checksum in the buffer. No verdict, no
+  // finding, no band - plain TCP.
+  const offloaded = packet({ fields: { 'tcp.checksum.status': 'Unverified' } });
+  check('an outbound frame whose checksum was not written yet is plain TCP',
+    new ColorRulesEngine().getMatchedRuleName(offloaded), 'TCP');
 
   // Moving a rule up has to change the answer, or the arrows in the editor are
   // decoration.

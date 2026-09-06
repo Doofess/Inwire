@@ -24,36 +24,66 @@ export interface FieldHighlight {
 }
 
 /**
- * How serious a finding is, in Wireshark's four levels.
+ * What a finding means, and what the reader should conclude from it.
  *
- * The app had two vocabularies for this: dissectors wrote `chat/note/warn/error`
- * onto tree rows while `AnomalyInfo` used `low/medium/high/critical`, and
- * nothing related them - so the same frame could be a "warning" in the tree and
- * a "high" in the alerts panel, and no view could rank the two against each
- * other. This is the one enum; `services/expertInfo.ts` maps the anomaly
- * severities onto it.
+ * This replaced a severity (`chat/note/warn/error`) that was doing three jobs
+ * and none of them well. Measured over both fixtures, severity was dominated by
+ * `error/Checksum` - and **every one of those was a false alarm**: 1,998 and
+ * 3,459 findings, 100% of them on frames this machine SENT, where the NIC had
+ * not filled the checksum in yet. A single axis that cannot separate "damaged"
+ * from "not written yet" is not a severity, it is noise, and it is why the
+ * colour rule that painted rows from it shipped disabled.
+ *
+ * Named after the conclusion rather than after the subsystem that spoke, which
+ * is where this leaves Wireshark. Its seventeen groups - Reassemble, Undecoded,
+ * Dissector bug - tell you which part of Wireshark raised the finding; they do
+ * not tell you what to do about it. These eight tell you what it is.
+ *
+ * Two of them exist only because this app knows something Wireshark cannot.
+ * `Unverifiable` and `CaptureGap` are both "the vantage point is the problem,
+ * not the network" - the first needs `frame.direction` to know the frame was
+ * ours, and the second is the sniffer admitting it missed frames rather than
+ * blaming the wire.
+ *
+ * Ordering matters: it is the order the shipped colour rules sit in, and the
+ * chain is first-match-wins. A frame that is both Broken and a Capture gap
+ * paints as Broken.
  */
-export type ExpertSeverity = 'chat' | 'note' | 'warn' | 'error';
-
-/**
- * Wireshark's expert groups, which is what its Expert Information dialog
- * sorts by. Declared by whoever raises the finding rather than guessed from
- * the message text: a dissector knows whether it is complaining about a
- * checksum or a sequence number, and a keyword match over prose does not.
- */
-export type ExpertGroup =
-  | 'Checksum'
-  | 'Sequence'
-  | 'Malformed'
-  | 'Protocol'
+export type ExpertCategory =
+  /** The frame is damaged or could not be decoded. */
+  | 'Broken'
+  /** A conversation was terminated: RST, abort, a port reused under a live one. */
+  | 'Reset'
+  /** The network lost or reordered something: retransmission, out-of-order. */
+  | 'Loss'
+  /** Certificates, address conflicts - worth a look before anything else. */
   | 'Security'
-  | 'Response';
+  /**
+   * **This capture** is incomplete - the sniffer missed frames.
+   *
+   * Wireshark files "ACKed unseen segment" and "Previous segment not captured"
+   * under Sequence, alongside real retransmissions, so a dropped capture reads
+   * as a failing network. They are 2,427 frames of the inwire fixture - the
+   * largest non-checksum group in it - and they say nothing about the wire.
+   */
+  | 'CaptureGap'
+  /** The peer is throttling rather than failing: zero window, keep-alives. */
+  | 'FlowControl'
+  /**
+   * Cannot be judged from here.
+   *
+   * A checksum on a frame this machine sent was never filled in - the NIC does
+   * that after the sniffer sees it. Reporting that as an error is what made the
+   * whole expert system unusable on a locally-taken capture.
+   */
+  | 'Unverifiable'
+  /** Informational: NXDOMAIN, a duplicate across adapters. */
+  | 'Note';
 
 export interface ExpertInfo {
-  severity: ExpertSeverity;
   message: string;
-  /** Defaults to `Protocol` where a dissector does not say. */
-  group?: ExpertGroup;
+  /** Defaults to `Note` where a dissector does not say. */
+  category?: ExpertCategory;
 }
 
 export interface ProtocolField {
@@ -106,15 +136,6 @@ export interface ProtocolLayer {
   summary: string;
   rawBytesRange?: [number, number];
   fields: ProtocolField[];
-}
-
-export interface AnomalyInfo {
-  type: string;
-  severity: 'low' | 'medium' | 'high' | 'critical';
-  title: string;
-  description: string;
-  recommendation: string;
-  mitreTechnique?: string;
 }
 
 export interface Packet {
@@ -278,7 +299,6 @@ export interface Packet {
   hexDump?: string;
   /** Optional: see hexDump. Use packetAsciiDump(). */
   asciiDump?: string;
-  anomalies?: AnomalyInfo[];
   interfaceName: string;
 }
 
@@ -371,15 +391,3 @@ export interface UserRolePermissions {
   canClearBuffer: boolean;
 }
 
-export interface TrafficStats {
-  totalPackets: number;
-  totalBytes: number;
-  packetsPerSecond: number;
-  bytesPerSecond: number;
-  protocolCounts: Record<string, number>;
-  protocolBytes: Record<string, number>;
-  anomaliesDetected: number;
-  topTalkers: { ip: string; count: number; bytes: number }[];
-  topPorts: { port: number; count: number; service: string }[];
-  durationSeconds: number;
-}

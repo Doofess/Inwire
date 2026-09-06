@@ -21,7 +21,7 @@
  * (docs/decisions/0003-worker-boundary.md), and an assertion script checks
  * the imports.
  */
-import type { AnomalyInfo, ProtocolLayer, ProtocolType } from '../../types/packet';
+import type { ExpertCategory, ProtocolLayer, ProtocolType } from '../../types/packet';
 import type { TcpStreamTracker } from '../tcpStreamTracker';
 import type { IcmpEchoTracker } from '../icmpEchoTracker';
 import type { QuicFlowTracker } from '../quicFlowTracker';
@@ -49,12 +49,9 @@ export interface DissectInput {
   iface: number;
 }
 
-export type ExpertSeverity = 'chat' | 'note' | 'warn' | 'error';
-
 export interface ExpertItem {
-  severity: ExpertSeverity;
-  /** Wireshark's grouping: Sequence, Malformed, Protocol, Checksum, ... */
-  group: string;
+  /** What the reader should conclude - see `types/packet.ts`. */
+  category: ExpertCategory;
   message: string;
 }
 
@@ -76,7 +73,6 @@ export interface DissectSummary {
   frameProtocols: string[];
   analysisFlags?: string[];
   expert?: ExpertItem[];
-  anomalies?: AnomalyInfo[];
   streamId?: number;
   /**
    * Header positions the summary pass established, so the tree pass never

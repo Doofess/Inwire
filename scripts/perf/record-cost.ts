@@ -68,10 +68,8 @@ const COMPONENTS: { name: string; strip: (p: Packet) => void; plan?: string }[] 
     strip: (p) => { (p as { frameProtocols?: unknown }).frameProtocols = undefined; } },
   { name: 'analysisFlags', plan: 'bitmask',
     strip: (p) => { (p as { analysisFlags?: unknown }).analysisFlags = undefined; } },
-  { name: 'expert', plan: 'severity byte',
+  { name: 'expert', plan: 'pooled',
     strip: (p) => { (p as { expert?: unknown }).expert = undefined; } },
-  { name: 'anomalies',
-    strip: (p) => { (p as { anomalies?: unknown }).anomalies = undefined; } },
   { name: 'source + destination',
     strip: (p) => {
       (p as { source: unknown }).source = undefined;

@@ -53,25 +53,6 @@ interface DashboardAsideProps {
   isMobileTabActive: boolean;
 }
 
-/**
- * How many anomalies are in the buffer, for the rail's light.
- *
- * A running count rather than a `reduce` over the whole buffer: a packet's
- * anomalies are decided when it is dissected and never change, so re-reading
- * 43,000 of them twice a second to produce a number on a badge was the
- * cheapest of the dashboard's full-buffer passes and still entirely wasted.
- */
-function useAnomalyCount(packets: DashboardWidgetContext['packets']): number {
-  return useIncrementalAggregate(
-    packets,
-    () => ({ count: 0 }),
-    (acc, p) => {
-      if ((p.anomalies?.length ?? 0) > 0 || p.status === 'alert') acc.count += 1;
-    },
-    (acc) => acc.count,
-  );
-}
-
 /** A hairline between two kinds of thing in the rail. */
 const RailDivider: React.FC<{ className?: string }> = ({ className }) => (
   <span aria-hidden className={`w-5 h-px bg-border my-1 shrink-0 ${className ?? ''}`} />
@@ -114,7 +95,6 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
   // mode meant for leaving the app running. The count is one pass over the
   // buffer - trivial beside the map's per-packet address classification, which
   // is what minimizing actually saves.
-  const anomalyCount = useAnomalyCount(context.packets);
 
   /**
    * Escape lives in WidgetOverlay, so the map gets it however it was opened.
@@ -323,11 +303,12 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
   // The rail
   // ---------------------------------------------------------------------
 
-  // Alerts is not a widget button in the rail, so it is taken out of the strip
-  // and pinned to the bottom as a light. Any number of alert widgets in the
-  // column is one light here - it is a signal, not a count of widgets.
-  const railWidgets = widgets.filter((w) => w.type !== 'alerts');
-  const hasAlertWidget = widgets.some((w) => w.type === 'alerts');
+  // Every widget is a rail button now. The Alerts light that used to be pinned
+  // below a divider is gone with the widget it reported on: it lit for two
+  // hard-coded TCP anomalies, which are ordinary expert findings like any
+  // other now, and a light that means "a retransmission happened" is not a
+  // signal worth a permanent fixture in the rail.
+  const railWidgets = widgets;
 
   const focusRail = (from: WidgetTypeId, delta: number) => {
     const i = railWidgets.findIndex((w) => w.type === from);
@@ -444,55 +425,6 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
         );
       })}
 
-      {hasAlertWidget && (
-        <>
-          {/* Pinned to the bottom, behind a divider, and NOT a button.
-              It stopped being one when alerts lost its expanded window, and a
-              control that looks like its neighbours and does nothing when
-              clicked is worse than no control - so it does not take focus, has
-              no hover state and shows no pointer cursor. */}
-          <RailDivider className="mt-auto" />
-          <div
-            role="status"
-            aria-live="polite"
-            title={
-              anomalyCount > 0
-                ? `${anomalyCount} ${anomalyCount === 1 ? 'alert' : 'alerts'} captured`
-                : 'No alerts'
-            }
-            className={`relative w-8 h-8 flex items-center justify-center shrink-0 mb-0.5 ${
-              anomalyCount > 0 ? 'text-danger' : 'text-muted-foreground/40'
-            }`}
-          >
-            <WIDGET_RENDERERS.alerts.icon className="w-4 h-4" />
-            {anomalyCount > 0 && (
-              <>
-                <span className="sr-only">
-                  {anomalyCount} {anomalyCount === 1 ? 'alert' : 'alerts'} captured
-                </span>
-                {/* A light, not a badge. The count it replaced was three
-                    digits of 8px type on a 16px glyph, which at rail width was
-                    a smudge; the number is in the tooltip and the accessible
-                    name instead, where it is actually readable.
-
-                    Two elements because `animate-ping` scales the thing it is
-                    on to nothing at the end of each cycle - so the ring pings
-                    and a solid dot underneath stays put. The blanket
-                    reduced-motion rule in index.css stills the ring and leaves
-                    the dot, which is exactly the right fallback. */}
-                <span
-                  aria-hidden
-                  className="absolute top-1 right-1 w-2 h-2 rounded-full bg-danger opacity-75 animate-ping"
-                />
-                <span
-                  aria-hidden
-                  className="absolute top-1 right-1 w-2 h-2 rounded-full bg-danger ring-2 ring-background"
-                />
-              </>
-            )}
-          </div>
-        </>
-      )}
     </div>
   );
 

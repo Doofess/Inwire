@@ -20,6 +20,7 @@
  * the pipeline Worker.
  */
 import { applyInfoPatch, decodeRawEthernetPacket, type InfoPatch } from '../pcapParser';
+import type { HostIdentity } from '../direction';
 import { TcpStreamTracker } from '../tcpStreamTracker';
 import { IcmpEchoTracker } from '../icmpEchoTracker';
 import { QuicFlowTracker } from '../quicFlowTracker';
@@ -80,6 +81,16 @@ export function dissectReplay(
    * cannot be bounded without sometimes silently omitting it anyway.
    */
   retroactive?: InfoPatch,
+  /**
+   * Who took the capture.
+   *
+   * Needed for the same reason the summary pass needs it: the checksum verdict
+   * reads it (`checksumVerdict`), so a replay without it decides `Bad` where
+   * the summary decided `Unverified`, and the detail tree contradicts the row
+   * that opened it. It is not an approximation of the eager tree - the parity
+   * script below holds the two to exact equality, and this was the difference.
+   */
+  host?: HostIdentity,
 ): ReplayResult {
   if (frames.length === 0) return { layers: [], truncated };
 
@@ -98,7 +109,7 @@ export function dissectReplay(
     const frame = frames[i];
     const { packet } = decodeRawEthernetPacket(
       frame.bytes, frame.id, frame.tsUs, frame.relativeTime, frame.timeDelta,
-      frame.origLen, tcp, icmp, quic, dns, undefined, undefined, l3,
+      frame.origLen, tcp, icmp, quic, dns, undefined, undefined, l3, host,
     );
     // Only the last frame's tree is kept. The rest are dissected for their
     // effect on the trackers and thrown away, which is the whole mechanism.
@@ -115,8 +126,7 @@ export function dissectReplay(
       value: 'Rebuilt from part of the conversation - earlier frames are no longer in the buffer',
       generated: true,
       expertInfo: {
-        severity: 'note',
-        group: 'Protocol',
+        category: 'CaptureGap',
         message: 'This tree was rebuilt from the frames still held, not from the start of the conversation.',
       },
     });
