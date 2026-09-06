@@ -19,6 +19,7 @@
 import {
   AnomalyInfo, ExpertGroup, ExpertSeverity, Packet, ProtocolField,
 } from '../types/packet';
+import { isDuplicate } from './direction';
 
 export const SEVERITY_ORDER: readonly ExpertSeverity[] = ['error', 'warn', 'note', 'chat'];
 
@@ -140,6 +141,21 @@ export function expertItemsFor(packet: Packet): ExpertItem[] {
     }
   };
   for (const layer of packet.layers) visit(layer.fields);
+
+  // The same frame, captured twice on two adapters. Chat rather than a
+  // warning, and that is the honest severity: nothing is wrong with the
+  // network, the capture is simply watching one path from two places. It is
+  // worth surfacing because it changes how the rest of the capture reads - a
+  // doubled frame count, and what looks like a retransmission that is not one.
+  if (isDuplicate(packet.direction)) {
+    out.push({
+      frame: packet.id,
+      severity: 'chat',
+      group: 'Sequence',
+      summary: 'Frame also captured on another interface',
+      protocol,
+    });
+  }
 
   for (const anomaly of packet.anomalies ?? []) {
     out.push({

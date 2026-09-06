@@ -10,6 +10,8 @@ import {
 import { FilterEngine, FilterValidationResult } from '../../services/filterEngine';
 import { allPresets } from '../../services/filterPresets';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
+import { Segmented } from '../ui/segmented';
+import { directionModeOf, withDirection } from '../../lib/directionFilter';
 
 /**
  * Which surface this bar is standing on.
@@ -224,6 +226,34 @@ export const FilterBar: React.FC<FilterBarProps> = ({
       className={`relative z-30 min-w-0 ${isCompact ? 'w-full' : 'flex-1'}`}
     >
       <div className="flex flex-nowrap items-center gap-2">
+        {/* All / Sent / Received.
+
+            It writes into the expression beside it rather than keeping a
+            filter of its own, so the field always shows what the list is
+            actually doing - and the choice survives being typed over, because
+            the control reads its position back out of the text. Header only:
+            the export dialog filters what it is about to write, and "what this
+            machine sent" is a question about the capture rather than about the
+            file being produced. */}
+        {variant === 'header' && (
+          <Segmented
+            size="sm"
+            ariaLabel="Direction"
+            value={directionModeOf(filterText)}
+            onValueChange={(mode) => {
+              const next = withDirection(filterText, mode);
+              onFilterChange(next);
+              onApplyFilter(next);
+            }}
+            options={[
+              { value: 'all', label: 'All' },
+              { value: 'out', label: '↑ Sent' },
+              { value: 'in', label: '↓ Received' },
+            ]}
+            className="shrink-0"
+          />
+        )}
+
         {/* The filter field, which is now also the preset picker.
             Presets used to be a labelled button of its own to the left of this
             box. Two controls, one job: a preset IS a filter expression, and

@@ -21,6 +21,7 @@ import { generatePcapNg } from '../../src/services/pcapngWriter';
 import { PcapService } from '../../src/services/pcapParser';
 import { decodeRawEthernetPacket } from '../../src/services/pcapParser';
 import { LINKTYPE } from '../../src/services/dissect/types';
+import { Direction, DirectionSignal, packDirection } from '../../src/services/direction';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -322,6 +323,52 @@ async function main() {
     // Absent, not empty. An empty comment would read as "known to be nothing".
     check('an unattributed frame carries no comment at all',
       optionsOf(epbs[1]).get(1), undefined);
+  }
+
+  // --- epb_flags: which way the frame went ------------------------------------------------
+  //
+  // Asserted against the FORMAT rather than against this repo's reader: the
+  // whole value of writing the direction into the specification's own field
+  // rather than into the comment beside it is that a reader which knows
+  // nothing about this app can get it, and a writer fed to its own reader
+  // proves only that the two agree with each other.
+  //
+  // pcapng 4.3.1: option code 2, a 32-bit word, bits 0-1 = 00 not available,
+  // 01 inbound, 10 outbound.
+  {
+    const flagged = (id: number, direction: number | undefined) => {
+      const p = packet(id, 1_700_000_000_000_000 + id, 'eth0');
+      return { ...p, direction } as typeof p;
+    };
+    const bytes = new Uint8Array(await generatePcapNg([
+      flagged(1, packDirection(Direction.Out, DirectionSignal.InterfaceMac)),
+      flagged(2, packDirection(Direction.In, DirectionSignal.InterfaceMac)),
+      flagged(3, packDirection(Direction.Transit, DirectionSignal.InterfaceMac)),
+      flagged(4, undefined),
+    ], { interfaces: [{ name: 'eth0', description: 'Ethernet', tsPrecision: 6 }] }).arrayBuffer());
+    const epbs = walk(bytes).filter((b) => b.type === 0x00000006);
+    const flagsOf = (b: { body: Uint8Array }) => {
+      const view = new DataView(b.body.buffer, b.body.byteOffset, b.body.byteLength);
+      const capLen = view.getUint32(12, true);
+      const value = options(b.body, 20 + Math.ceil(capLen / 4) * 4).get(2)?.[0];
+      if (value === undefined) return null;
+      return new DataView(value.buffer, value.byteOffset, value.byteLength).getUint32(0, true) & 0b11;
+    };
+
+    check('an outbound frame is written as outbound', flagsOf(epbs[0]), 0b10);
+    check('an inbound frame is written as inbound', flagsOf(epbs[1]), 0b01);
+    // The format's two bits describe a frame relative to the capturing
+    // interface. A frame merely overheard is neither, so it is written as "not
+    // available" - which is true - rather than squeezed into whichever of the
+    // two is less wrong.
+    check('a transit frame carries no flags option at all', flagsOf(epbs[2]), null);
+    check('a frame with no direction carries none either', flagsOf(epbs[3]), null);
+    // Four bytes a frame to say "not available" is four bytes to say nothing,
+    // and the option's absence already says it.
+    check('the option is four bytes when it is present',
+      options(epbs[0].body, 20 + Math.ceil(
+        new DataView(epbs[0].body.buffer, epbs[0].body.byteOffset, epbs[0].body.byteLength)
+          .getUint32(12, true) / 4) * 4).get(2)?.[0].length, 4);
   }
 
   // --- degenerate inputs -----------------------------------------------------------------

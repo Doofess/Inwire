@@ -123,6 +123,9 @@ for (const [name, fn] of [
   // rearranges every existing user's packet list on upgrade.
   check('the defaults are what the list already showed', PACKET_LIST_DEFAULTS.align, {
     id: 'right',
+    // The one centred column: a single glyph has neither a digit column to
+    // line up on the right nor a first letter to line up on the left.
+    direction: 'center',
     relativeTime: 'right',
     length: 'right',
     source: 'left',

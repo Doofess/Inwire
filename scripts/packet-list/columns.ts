@@ -62,8 +62,8 @@ check(
 check('every column starts visible',
   defaultColumnVisibility(),
   {
-    id: true, relativeTime: true, source: true, destination: true,
-    protocol: true, length: true,
+    id: true, direction: true, relativeTime: true, source: true,
+    destination: true, protocol: true, length: true,
   });
 
 {

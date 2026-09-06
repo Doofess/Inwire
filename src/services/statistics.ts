@@ -55,6 +55,19 @@ export interface Conversation {
   bytesAtoB: number;
   packetsBtoA: number;
   bytesBtoA: number;
+  /**
+   * When each direction was first and last heard from, in seconds since the
+   * capture started. `null` for a direction that never spoke.
+   *
+   * The pair's own `startRel` and `duration` describe the conversation as a
+   * whole and hide the thing worth seeing: a request at 0.1s answered at 4.2s,
+   * or a side that stopped talking a minute before the other did. One
+   * `duration` reports both of those as a healthy four-minute conversation.
+   */
+  firstAtoB: number | null;
+  lastAtoB: number | null;
+  firstBtoA: number | null;
+  lastBtoA: number | null;
   packets: number;
   bytes: number;
   /** Seconds since the capture started, from the first frame of this pair. */
@@ -137,6 +150,8 @@ export function conversations(packets: readonly Packet[], kind: ConversationKind
         addressA: ends.a, addressB: ends.b, portA: ends.pa, portB: ends.pb,
         packetsAtoB: 1, bytesAtoB: packet.length,
         packetsBtoA: 0, bytesBtoA: 0,
+        firstAtoB: packet.relativeTime, lastAtoB: packet.relativeTime,
+        firstBtoA: null, lastBtoA: null,
         packets: 1, bytes: packet.length,
         startRel: packet.relativeTime,
         duration: 0,
@@ -151,9 +166,16 @@ export function conversations(packets: readonly Packet[], kind: ConversationKind
     if (isAtoB) {
       existing.packetsAtoB++;
       existing.bytesAtoB += packet.length;
+      // `??` rather than a plain assignment on the first: a relative time of
+      // exactly 0 is the capture's very first frame, and `||` would treat it
+      // as absent and keep overwriting it.
+      existing.firstAtoB = existing.firstAtoB ?? packet.relativeTime;
+      existing.lastAtoB = Math.max(existing.lastAtoB ?? packet.relativeTime, packet.relativeTime);
     } else {
       existing.packetsBtoA++;
       existing.bytesBtoA += packet.length;
+      existing.firstBtoA = existing.firstBtoA ?? packet.relativeTime;
+      existing.lastBtoA = Math.max(existing.lastBtoA ?? packet.relativeTime, packet.relativeTime);
     }
     existing.packets++;
     existing.bytes += packet.length;
