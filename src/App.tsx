@@ -35,13 +35,13 @@ import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Capabilities, Packet } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
-import { type FrameBatch, pipeline } from "./services/pipelineClient";
+import { pipeline } from "./services/pipelineClient";
 import { usePacketDetail } from "./lib/usePacketDetail";
-import { applyInfoPatchesInPlace, type InfoPatch } from './services/pcapParser';
+import { applyInfoPatchesInPlace } from './services/pcapParser';
 import { flowAnnotations } from './services/flowAnnotations';
 import { NO_HOST, type HostIdentity } from './services/direction';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
-import { commitBatch, prepareBatch, freshAccounting } from './services/packetBuffer';
+import { usePacketBuffer } from './hooks/usePacketBuffer';
 import { useAgentConnection } from './hooks/useAgentConnection';
 import { inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
@@ -56,15 +56,12 @@ import { IcmpEchoTracker } from "./services/icmpEchoTracker";
 import { QuicFlowTracker } from "./services/quicFlowTracker";
 import { filterIncrementally, type FilterCache } from "./services/incrementalFilter";
 import {
-  appendFrames,
   clearSession,
   countFrames,
   loadSessionMeta,
   pendingWriteBacklog,
-  storedIdRange,
   readFrames,
   saveSessionMeta,
-  trimFramesBelow,
 } from "./services/sessionStore";
 import { applyIcmpRepliesInPlace, restoreBatch } from "./services/sessionRestore";
 import {
@@ -144,12 +141,6 @@ const SOCKET_RETRO_WINDOW_US = 3_000_000;
 // trimming on every flush moves `packets[0]` ten times a second, and three
 // caches take an O(buffer) fallback each time it moves.
 
-/**
- * How often queued packets are committed to React state. Fast enough that
- * the list still reads as live, slow enough that a burst costs a handful of
- * renders rather than one per packet.
- */
-const PACKET_FLUSH_MS = 100;
 
 /**
  * How many stored frames are decoded per chunk when restoring a session.
@@ -162,21 +153,6 @@ const PACKET_FLUSH_MS = 100;
  */
 const RESTORE_CHUNK_SIZE = 250;
 
-/**
- * How many of the newest frames keep their raw bytes in memory.
- *
- * Beyond this the buffer stops holding them and reads them back from the
- * session store instead, where they already are - a frame is 1,176 B, so at the
- * 100,000 cap this is the difference between 118 MB of raw frames and 29 MB
- * (docs/decisions/0013-what-a-million-frames-actually-cost.md).
- *
- * Sized to cover what anyone is realistically about to click. Everything that
- * reads a frame's bytes goes through `services/packetBytes.ts` and can wait for
- * a read; this window is about not making them wait for the frames still on
- * screen. Below this many frames nothing is evicted at all, so a small capture
- * behaves exactly as it did.
- */
-const BYTES_RESIDENT_FRAMES = 25000;
 
 /**
  * The rest of what a refresh used to throw away.
@@ -286,8 +262,49 @@ export default function App() {
   // Stream & Capturing State
   const [isCapturing, setIsCapturing] = useState(false);
 
-  // Packets Buffer & Selection
-  const [packets, setPackets] = useState<Packet[]>([]);
+  // --- the packet buffer ----------------------------------------------------
+  //
+  // Hoisted above everything that reads `packets`, which is most of this file.
+  // The pieces it needs come first for the same reason.
+  // Named `perf`, not `performance`: the latter shadows the global timing API,
+  // which is exactly the sort of shadowing that is fine until somebody adds a
+  // `performance.now()` in this scope and gets a confusing type error.
+  const [perf] = usePreferenceStore(performanceStore);
+  usePreferenceSync(performanceStore.key, performanceStore.normalize, performanceStore.accept);
+  const { packetBufferBytes, dashboardRefreshMs } = perf;
+  // Track the latest isCapturing value for the always-on agent connection
+  // below, whose handlers are set up once and must not go stale.
+  const isCapturingRef = useRef(isCapturing);
+  useEffect(() => {
+    isCapturingRef.current = isCapturing;
+  }, [isCapturing]);
+
+  // Live-capture relative-time clock (reference-analyzer style): resets whenever the
+  // packet buffer is emptied and a fresh capture begins.
+  const captureStartRef = useRef<number | null>(null);
+  const lastPacketTimeRef = useRef<number | null>(null);
+  /**
+   * The auto-pause handler, held in a ref.
+   *
+   * The buffer hook has to be able to stop a capture, and stopping one needs
+   * `sendAgentCommand` - which comes from the agent hook, which needs
+   * `queueFrames` from the buffer hook. A ref breaks that circle the same way
+   * `useAgentConnection` already breaks it for its own callbacks: the hook gets
+   * one stable function, and what it points at is replaced every render.
+   */
+  const autoPauseRef = useRef<() => void>(() => {});
+  const onAutoPause = useCallback(() => autoPauseRef.current(), []);
+  const onFramesQueued = useCallback((firstTsUs: number, lastTsUs: number) => {
+    if (captureStartRef.current === null) captureStartRef.current = firstTsUs;
+    lastPacketTimeRef.current = lastTsUs;
+  }, []);
+
+  const {
+    packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
+    queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter,
+  } = usePacketBuffer({ packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued });
+
+
   const [selectedPacket, setSelectedPacket] = useState<Packet | null>(null);
   /** Which view the stream window opens on - see handleFollowStream. */
   const [streamView, setStreamView] = useState<'dialogue' | 'ladder'>('dialogue');
@@ -400,48 +417,8 @@ export default function App() {
   const rederiveRef = useRef<(() => void) | null>(null);
   /** What the capture itself revealed, derived in the Worker and only read here. */
   const [networkFacts, setNetworkFacts] = useState<NetworkFacts>(() => emptyNetworkFacts());
-  /**
-   * Frames pushed out of the buffer because it filled.
-   *
-   * The third of the three places a frame can go missing between the wire and
-   * the list - the driver's ring, the agent's send queue, and here - and the
-   * only one that was never counted. Capture auto-pauses at 99% of the buffer,
-   * so this moves during an import or a restore rather than during a capture,
-   * and it is what makes "the list starts at frame 40,001" a statement rather
-   * than a mystery.
-   */
-  const [droppedBuffer, setDroppedBuffer] = useState(0);
 
-  /**
-   * One column-block writer for the session.
-   *
-   * A writer per flush would mean a block per batch, and a slow capture's
-   * batches are small enough that the per-block overhead would exceed what the
-   * columns save. One writer lets a block fill across many flushes
-   * (`services/dissect/fieldSplit.ts`).
-   */
-  const fieldWriter = useRef(new FieldBlockWriter());
 
-  /**
-   * What the buffer's summaries are estimated to cost, in bytes.
-   *
-   * Added to outside the state updater and subtracted inside the one guard that
-   * already survives StrictMode's double invoke - see the trim below. A ref
-   * rather than state because nothing renders from it: it decides when to trim
-   * and when to auto-pause, both of which happen inside the flush.
-   *
-   * An estimate, with a tested error bound: `scripts/perf/buffer-budget.ts`
-   * holds it to within 15% of the heap those frames actually occupy.
-   */
-  /**
-   * The buffer's running accounting - resident bytes, frames dropped, the head
-   * id that guards a repeated trim, and how far the store has been written.
-   *
-   * One object rather than four refs because those four are read and written
-   * together by everything that touches the buffer, and because
-   * `services/packetBuffer.ts` needs them as a unit it can be handed in a test.
-   */
-  const accountingRef = useRef(freshAccounting());
 
 
   /**
@@ -487,24 +464,11 @@ export default function App() {
     setLinkContext(change.after);
     setLinkChanges((prev) => prev.concat(change).slice(-32));
   }), []);
-  // Set when capture stopped itself because the buffer filled, so the reason
-  // is visible rather than the capture appearing to have stopped for no
-  // reason. Cleared by anything that makes room or deliberately restarts.
-  const [bufferAutoPaused, setBufferAutoPaused] = useState(false);
   // How far a session restore has got, or null when none is running. Drives
   // the header's progress readout; also the flag the UI uses to explain why
   // packets are appearing without a capture being started.
   const [restoreProgress, setRestoreProgress] = useState<{ done: number; total: number } | null>(null);
 
-  // Packets arrive one WebSocket message at a time but are committed to state
-  // in batches - see the ingest comment in the socket handler below.
-  const pendingPacketsRef = useRef<Packet[]>([]);
-  // ICMP replies patch an EARLIER packet's info text. Collected alongside the
-  // new packets so the patch is applied once per flush over one array pass,
-  // rather than mapping the whole buffer per reply.
-  const pendingIcmpRepliesRef = useRef<{ requestFrameId: number; replyId: number }[]>([]);
-  /** Info suffixes for earlier frames, learned by later ones (reassembly); applied on the next flush. */
-  const pendingInfoPatchesRef = useRef<InfoPatch[]>([]);
 
   /**
    * What this build lets the user do.
@@ -528,13 +492,6 @@ export default function App() {
     canClearBuffer: true,
   };
 
-  // Track the latest isCapturing value for the always-on agent connection
-  // below, whose handlers are set up once and must not go stale.
-  const isCapturingRef = useRef(isCapturing);
-  useEffect(() => {
-    isCapturingRef.current = isCapturing;
-  }, [isCapturing]);
-
   // Same reasoning, for the Space shortcut: its handler is registered once and
   // needs to know whether there is a buffer that starting would discard. A ref
   // rather than a dependency, because re-registering a window listener on
@@ -546,10 +503,6 @@ export default function App() {
 
 
 
-  // Live-capture relative-time clock (reference-analyzer style): resets whenever the
-  // packet buffer is emptied and a fresh capture begins.
-  const captureStartRef = useRef<number | null>(null);
-  const lastPacketTimeRef = useRef<number | null>(null);
 
   /**
    * Re-annotating frames that were dissected before the socket table arrived.
@@ -603,29 +556,6 @@ export default function App() {
 
   /**
    * A flush of dissected frames from the Worker. Queued, not committed: the
-   * flush effect commits the batch in one state update, which is what keeps
-   * ingest cost independent of buffer size.
-   */
-  const queueFrames = useCallback(({ packets, icmpReplies, infoPatches }: FrameBatch) => {
-      if (packets.length > 0) {
-        // The relative-time origin and the last frame's stamp are written into
-        // the stored session so a restore can carry on from them. They used to
-        // be set per packet by the ingest that now lives in the Worker; the
-        // batch carries the same two facts.
-        if (captureStartRef.current === null) captureStartRef.current = packets[0].tsUs;
-        lastPacketTimeRef.current = packets[packets.length - 1].tsUs;
-        // A loop, not `push(...packets)`. Spreading passes one argument per
-        // frame, and an engine throws RangeError somewhere past ~65-125k of
-        // them. Nothing here bounds the batch: the Worker sends what one flush
-        // dissected, so a Worker that stalled for a few seconds at rate - the
-        // exact condition this whole change exists to survive - arrives as one
-        // batch large enough to throw, losing the batch and every frame queued
-        // behind it. See the sibling pushes below.
-        for (const packet of packets) pendingPacketsRef.current.push(packet);
-      }
-      for (const reply of icmpReplies) pendingIcmpRepliesRef.current.push(reply);
-      for (const patch of infoPatches) pendingInfoPatchesRef.current.push(patch);
-  }, []);
 
   /**
    * The link to the local capture agent.
@@ -656,6 +586,13 @@ export default function App() {
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
     clearAgentLog, clearInterfaceRates, clearCaptureStats, setAgentToken,
   } = agent;
+  // The other half of auto-pause. The buffer hook owns the flag and cannot own
+  // this, because stopping a capture needs the agent - and the agent needs the
+  // buffer's `queueFrames`. Assigned every render, so it never goes stale.
+  autoPauseRef.current = () => {
+    setIsCapturing(false);
+    sendAgentCommand({ type: 'stop_capture' });
+  };
   /**
    * True while a stored session is being decoded back into the buffer. Read by
    * the effects that must not write a half-restored session back to disk.
@@ -683,60 +620,6 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  // Drains the ingest queue into state on a fixed cadence. Runs for the life
-  // of the app rather than only while capturing, so packets queued in the
-  // instant before a stop still land instead of being stranded.
-  useEffect(() => {
-    const flush = () => {
-      // Already dissected, in capture order, by the pipeline Worker - which
-      // owns the ordering window and the trackers, so the wire's order is
-      // preserved where it matters (docs/decisions/0003). All that happens
-      // here is committing a batch to React state.
-      const incoming = pendingPacketsRef.current;
-      const replies = pendingIcmpRepliesRef.current;
-      const patches = pendingInfoPatchesRef.current;
-      if (incoming.length === 0 && replies.length === 0 && patches.length === 0) return;
-      pendingPacketsRef.current = [];
-      pendingIcmpRepliesRef.current = [];
-      pendingInfoPatchesRef.current = [];
-
-      // The half that must happen exactly once - the store write, the
-      // dense-field split, the byte count - outside the updater because React
-      // runs that twice under StrictMode. See services/packetBuffer.ts.
-      prepareBatch(incoming, accountingRef.current, {
-        persist: (frames) => appendFrames(frames as Packet[]),
-        absorb: (frames) => fieldWriter.current.absorb(frames),
-      });
-
-      // Snapshotted here, outside the updater, because React may run that twice
-      // and the trim plan must not be computed from a number the first run
-      // moved - see `residentBytesAtEntry` in services/packetBuffer.ts.
-      const residentBytesAtEntry = accountingRef.current.residentBytes;
-      setPackets((prev) => commitBatch(
-        prev, incoming, replies, patches, accountingRef.current,
-        {
-          budgetBytes: packetBufferBytesRef.current,
-          capturing: isCapturingRef.current,
-          residentFrames: BYTES_RESIDENT_FRAMES,
-          residentBytesAtEntry,
-        },
-        {
-          trimFramesBelow,
-          storedIdRange,
-          // Deferred: calling a setter from inside an updater is the impure
-          // part, and the head-id guard is what keeps it to one call.
-          reportDropped: (total) => queueMicrotask(() => setDroppedBuffer(total)),
-          autoPause: () => {
-            setIsCapturing(false);
-            setBufferAutoPaused(true);
-            sendAgentCommand({ type: 'stop_capture' });
-          },
-        },
-      ));
-    };
-    const timer = window.setInterval(flush, PACKET_FLUSH_MS);
-    return () => window.clearInterval(timer);
-  }, []);
 
   /**
    * Stored frames live exactly as long as the app is open.
@@ -962,7 +845,7 @@ export default function App() {
             // its own 512 MB - so a restore trims on the way in exactly as the
             // live flush does. Without this the buffer would come back over
             // budget and stay there until the next captured frame.
-            const plan = planBufferTrim(next, accountingRef.current.residentBytes, packetBufferBytesRef.current);
+            const plan = planBufferTrim(next, accountingRef.current.residentBytes, budgetBytes());
             if (plan.dropCount === 0) return next;
             accountingRef.current.residentBytes -= plan.freedBytes;
             return next.slice(plan.dropCount);
@@ -1079,24 +962,6 @@ export default function App() {
   // Sizes, visibility and arrangement share one preference, because
   // `arrangement` changes what `detailsPaneRatio` means - a fraction of width
   // side by side, a fraction of height stacked. See services/interfacePrefs.
-  // Named `perf`, not `performance`: the latter shadows the global timing API,
-  // which is exactly the sort of shadowing that is fine until somebody adds a
-  // `performance.now()` in this scope and gets a confusing type error.
-  const [perf] = usePreferenceStore(performanceStore);
-  usePreferenceSync(performanceStore.key, performanceStore.normalize, performanceStore.accept);
-  const { packetBufferBytes, dashboardRefreshMs } = perf;
-  /**
-   * The budget, for the ingest handler.
-   *
-   * That handler is registered once and its closure never sees a later render,
-   * which is the same reason `isCapturingRef` exists beside it. Reading the
-   * budget from state there would pin it at whatever it was when the socket
-   * opened.
-   */
-  const packetBufferBytesRef = useRef(packetBufferBytes);
-  useEffect(() => {
-    packetBufferBytesRef.current = packetBufferBytes;
-  }, [packetBufferBytes]);
 
   const [layout, patchLayout] = usePreferenceStore(layoutStore);
   const { bottomPaneHeight, detailsPaneRatio, panes: showPanes, arrangement } = layout;
@@ -1576,8 +1441,7 @@ export default function App() {
     // the pipeline Worker now; one message forgets the lot. Without it the TCP
     // tracker would keep describing streams from a capture that no longer
     // exists, and the next frame would be numbered after frames that are gone.
-    fieldWriter.current = new FieldBlockWriter();
-    accountingRef.current.residentBytes = 0;
+    adoptBuffer([], 0);
     pipeline.reset(1);
     // Clearing the buffer is the only way a fresh capture begins, so this is
     // where the relative-time clock resets. captureStartRef === null is then
@@ -1597,7 +1461,6 @@ export default function App() {
     // what they had captured. Discarding is its own action
     // (`handleDiscardCapture`), named as what it does
     // (docs/decisions/0012-stored-captures-persist.md).
-    setPackets([]);
     setSelectedPacket(null);
     setActiveByteRange(null);
   };
@@ -1612,14 +1475,12 @@ export default function App() {
    */
   const handleDiscardCapture = useCallback(async () => {
     await clearSession();
-    setPackets([]);
     setSelectedPacket(null);
     setActiveByteRange(null);
     // The Worker's trackers describe streams from a capture that no longer
     // exists, and the next frame must not be numbered after frames that are
     // gone - the same reset Clear does.
-    fieldWriter.current = new FieldBlockWriter();
-    accountingRef.current.residentBytes = 0;
+    adoptBuffer([], 0);
     pipeline.reset(1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
@@ -1701,7 +1562,6 @@ export default function App() {
 
   const handleImportPackets = (imported: Packet[]) => {
     setIsCapturing(false);
-    setPackets(imported);
     // The same reset Clear does, and for the same reasons. Imported frames are
     // numbered 1..N by buildPacketsFromFrames; without this the Worker's
     // counter is untouched, so pressing Start after an import issues live
@@ -1711,13 +1571,15 @@ export default function App() {
     // capture's TCP/TLS/QUIC/DNS tracker state, which describes streams that
     // are no longer in the buffer.
     const lastId = imported.length > 0 ? imported[imported.length - 1].id : 0;
-    fieldWriter.current = new FieldBlockWriter();
-    // What the imported frames actually cost. Setting this to zero and
-    // leaving it - which is what happened before - reported a full buffer as
-    // empty, and stopped it trimming: `planBufferTrim` reads this number, so
-    // an import of a million frames sat over budget until enough live frames
-    // had arrived to rebuild a total from scratch.
-    accountingRef.current.residentBytes = imported.reduce((sum, p) => sum + estimateSummaryBytes(p), 0);
+    // `adoptBuffer` counts what the imported frames actually cost. Setting the
+    // total to zero and leaving it - which is what happened before - reported a
+    // full buffer as empty and stopped it trimming: `planBufferTrim` reads that
+    // number, so an import of a million frames sat over budget until enough
+    // live frames had arrived to rebuild a total from scratch.
+    //
+    // `null` keeps `persistedThroughId` where it was, which is what this call
+    // site has always done - unlike Clear and Discard, which reset it to 0.
+    adoptBuffer(imported, null);
     pipeline.reset(Math.floor(lastId) + 1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
@@ -2277,7 +2139,7 @@ export default function App() {
             // follows each change and the ref is current by then. A state copy
             // would be a second thing to keep in step for a number only Driver
             // Info reads.
-            bufferResidentBytes={accountingRef.current.residentBytes}
+            bufferResidentBytes={residentBytes()}
             bufferAutoPaused={bufferAutoPaused}
             onClearPackets={handleClearPackets}
             storage={storage}
