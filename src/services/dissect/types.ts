@@ -139,3 +139,26 @@ export interface TransportResult {
   /** Names this frame mapped to addresses, for passive name resolution. */
   resolvedNames?: { name: string; addresses: string[] }[];
 }
+
+/**
+ * A change to an EARLIER frame's Info that only this frame can know about.
+ *
+ * "[TCP PDU reassembled in 12]" on frames 10 and 11 is written by frame 12,
+ * the one that completed the record; "(reply in 42)" on a ping request is
+ * written by the reply. Single-pass dissection cannot see the future, so the
+ * frame that learns the fact hands it back and the caller patches the list -
+ * the import path directly, the live path on its next flush.
+ */
+export interface InfoPatch {
+  frameId: number;
+  /** Appended to the frame's Info. */
+  suffix?: string;
+  /** Replaces the frame's Protocol label - a ClientHello re-labelled with the negotiated version. */
+  protocolLabel?: string;
+  /**
+   * The frame that answered this DNS query. Recorded as a field rather than
+   * appended to Info, because Wireshark shows it in the tree only - the query
+   * row's Info stays as it was.
+   */
+  responseInFrame?: number;
+}
