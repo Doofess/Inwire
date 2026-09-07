@@ -34,9 +34,11 @@ the time anything renders it.
 
 - **Live capture** from any adapter, with per-adapter throughput sparklines in
   the picker so you can see which one is carrying traffic before you commit.
-- **46 protocols dissected**, from Ethernet/VLAN/LLC and Linux cooked capture up
+- **47 protocols dissected**, from Ethernet/VLAN/LLC and Linux cooked capture up
   through IPv4/IPv6 with fragment reassembly, TCP/UDP, and DNS, TLS, QUIC,
-  HTTP/1.1, HTTP/2, HTTP/3, DHCP, LDAP, SIP, SNMP, RADIUS, OSPF and the rest.
+  HTTP/1.1, HTTP/2, HTTP/3, DHCP, LDAP, SIP, SNMP, RADIUS, OSPF and the rest —
+  plus GRE, which is dissected *through*, so a tunnelled packet reports what is
+  inside it rather than the tunnel.
   The list
   is `LAYERS` in `src/services/dissect/fieldRegistry.ts`, which is also where the
   filter's names, the autocomplete and the column catalogue come from.

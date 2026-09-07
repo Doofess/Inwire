@@ -3,6 +3,13 @@
 **Status:** accepted. Completes the second half of `0020`'s cost argument, and
 **unblocks** the tunnels it deferred.
 
+> **Tested, 2026-09-07.** The closing claim below - that GRE and VXLAN are
+> ordinary work now - was checked the way 0022 checked 0020's: by building the
+> smallest thing that could falsify it. GRE took four lines of recursion and
+> passed the oracle first run, including the inner Source and Destination. Both
+> cautions in the last paragraph turned out to be real, and the first is worse
+> than it reads: a half-tunnel is wrong on **four** columns, not one.
+
 ## Context
 
 ADR 0020 deferred GRE, VXLAN, L2TP and GTP with a reason that had nothing to do
