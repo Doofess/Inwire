@@ -30,7 +30,7 @@
  * the code it tests.
  */
 import {
-  commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
+  adoptAccounting, commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
 } from '../../src/services/packetBuffer';
 import { estimateSummaryBytes } from '../../src/services/bufferBudget';
 import type { Packet } from '../../src/types/packet';
@@ -218,6 +218,90 @@ function flush(
   const roomy = freshAccounting();
   flush([], Array.from({ length: 5 }, () => frame()), roomy, quiet, 100 * 1024 * 1024, true);
   check('...and one with room does not', quiet.autoPauses, 0);
+}
+
+
+// --- 6. Clear and Discard: the buffer is now nothing --------------------------
+{
+  const rec = recorder();
+  const accounting = freshAccounting();
+  const batch = Array.from({ length: 20 }, () => frame());
+  flush([], batch, accounting, rec, 100 * 1024 * 1024);
+
+  // What Clear and Discard do, through `adoptBuffer([], 0)`.
+  adoptAccounting(accounting, [], 0);
+  check('Clear leaves no bytes accounted for', accounting.residentBytes, 0);
+  check('...and rewinds the store high-water mark', accounting.persistedThroughId, 0);
+
+  // The point of rewinding it: a fresh capture numbers from 1 again, and those
+  // frames have to reach the store. Without the rewind `prepareBatch` would see
+  // ids below the old mark and decline.
+  const after = Array.from({ length: 5 }, () => frame());
+  const before = rec.persisted.length;
+  prepareBatch(after, accounting, rec.prepare);
+  check('...so a new capture after Clear is persisted', rec.persisted.length, before + 1);
+}
+
+// --- 7. Import: the buffer is now these frames -------------------------------
+{
+  const accounting = freshAccounting();
+  const imported = Array.from({ length: 30 }, () => frame());
+  adoptAccounting(accounting, imported, null);
+  // The bug this replaced: setting the total to zero reported a full buffer as
+  // empty and stopped it trimming.
+  check('an import accounts for what it actually costs',
+    accounting.residentBytes, recomputeBytes(imported));
+}
+
+// --- 8. The asymmetry between Import and Clear, and what it costs ------------
+//
+// CHARACTERISATION, not approval. Import passes `null` and so leaves
+// `persistedThroughId` where the previous capture left it. These two checks
+// state what that causes today; if somebody makes Import rewind the mark, they
+// fail, and that is the point - the behaviour changes deliberately or not at all.
+{
+  const rec = recorder();
+  const accounting = freshAccounting();
+
+  // A long capture, which pushes the store's high-water mark up.
+  nextId = 10_000;
+  prepareBatch(Array.from({ length: 10 }, () => frame()), accounting, rec.prepare);
+  const highWater = accounting.persistedThroughId;
+  check('a capture moves the store high-water mark', highWater > 0, true);
+
+  // Then an import, whose frames are numbered from 1 by the importer.
+  nextId = 1;
+  const imported = Array.from({ length: 5 }, () => frame());
+  adoptAccounting(accounting, imported, null);
+  check('an import does NOT rewind the mark (known gap)',
+    accounting.persistedThroughId, highWater);
+
+  // So a capture started after the import issues low ids, and they are declined.
+  const persistsBefore = rec.persisted.length;
+  prepareBatch(Array.from({ length: 5 }, () => frame()), accounting, rec.prepare);
+  check('...so a capture after an import is NOT persisted (known gap)',
+    rec.persisted.length, persistsBefore);
+}
+
+// --- 9. The dropped counter survives a Clear ----------------------------------
+//
+// Also characterisation. `reportDropped` is only ever called by the flush, so
+// nothing resets the running total: after a Clear the buffer is empty and the
+// "frames dropped (buffer full)" figure still reports the previous capture's.
+{
+  const rec = recorder();
+  const accounting = freshAccounting();
+  const budget = 200 * estimateSummaryBytes(frame());
+  let packets: Packet[] = [];
+  for (let i = 0; i < 12; i++) {
+    packets = flush(packets, Array.from({ length: 50 }, () => frame()),
+      accounting, rec, budget, false);
+  }
+  const droppedBeforeClear = accounting.droppedTotal;
+  check('the buffer dropped frames', droppedBeforeClear > 0, true);
+  adoptAccounting(accounting, [], 0);
+  check('...and Clear does not reset the count (known gap)',
+    accounting.droppedTotal, droppedBeforeClear);
 }
 
 console.log();

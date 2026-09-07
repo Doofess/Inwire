@@ -1449,7 +1449,6 @@ export default function App() {
     // test in the live-packet handler.
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
-    accountingRef.current.persistedThroughId = 0;
     // The Worker forgets its copy on the same reset message. Keeping this one
     // would let a local port reused since the last capture be attributed to
     // whatever held it during a capture that is no longer on screen.
