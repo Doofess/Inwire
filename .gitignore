@@ -29,3 +29,4 @@ scripts/brand/.raster.html
 test/fixtures/*
 !test/fixtures/README.md
 !test/fixtures/acceptance.json
+*.tmp
