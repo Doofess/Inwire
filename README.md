@@ -34,9 +34,10 @@ the time anything renders it.
 
 - **Live capture** from any adapter, with per-adapter throughput sparklines in
   the picker so you can see which one is carrying traffic before you commit.
-- **45 protocols dissected**, from Ethernet/VLAN/LLC and Linux cooked capture up
+- **46 protocols dissected**, from Ethernet/VLAN/LLC and Linux cooked capture up
   through IPv4/IPv6 with fragment reassembly, TCP/UDP, and DNS, TLS, QUIC,
-  HTTP/1.1, HTTP/2, HTTP/3, DHCP, SIP, SNMP, RADIUS, OSPF and the rest. The list
+  HTTP/1.1, HTTP/2, HTTP/3, DHCP, LDAP, SIP, SNMP, RADIUS, OSPF and the rest.
+  The list
   is `LAYERS` in `src/services/dissect/fieldRegistry.ts`, which is also where the
   filter's names, the autocomplete and the column catalogue come from.
 - **Decryption from a key log.** Point Settings → Decryption at the

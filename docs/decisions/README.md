@@ -28,6 +28,7 @@ file that supersedes the old one.
 | [0019](0019-packet-direction.md) | Which way the frame went | Accepted 2026-09-06 |
 | [0020](0020-the-leaf-protocols.md) | The leaf protocols, and where cheap stops | Accepted 2026-09-06 |
 | [0021](0021-where-the-parity-chase-stops.md) | Where the parity chase stops, and what is left is not a defect | Accepted 2026-09-07 |
+| [0022](0022-a-stream-protocol-is-not-expensive-any-more.md) | A stream protocol is not expensive any more — **corrects 0020** | Accepted 2026-09-07 |
 
 ## Review outcome: amendments to the spec's execution order
 
