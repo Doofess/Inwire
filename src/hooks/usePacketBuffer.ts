@@ -231,6 +231,9 @@ export function usePacketBuffer({
     // frames that are no longer here.
     fieldWriter.current = new FieldBlockWriter();
     adoptAccounting(accountingRef.current, next, persistedThroughId);
+    // `adoptAccounting` zeroes the running total; this is the copy Driver Info
+    // renders, and it has to follow or the panel keeps the old number.
+    setDroppedBuffer(0);
     setPackets(next);
   }, []);
 

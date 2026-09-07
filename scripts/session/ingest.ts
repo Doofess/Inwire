@@ -253,12 +253,20 @@ function flush(
     accounting.residentBytes, recomputeBytes(imported));
 }
 
-// --- 8. The asymmetry between Import and Clear, and what it costs ------------
+// --- 8. Import leaves the store's high-water mark alone ----------------------
 //
-// CHARACTERISATION, not approval. Import passes `null` and so leaves
-// `persistedThroughId` where the previous capture left it. These two checks
-// state what that causes today; if somebody makes Import rewind the mark, they
-// fail, and that is the point - the behaviour changes deliberately or not at all.
+// True at this level, and **not reachable from the buttons** - which is worth
+// stating precisely, because it was first reported here as a data-loss bug and
+// it is not one. Import passes `null`, so `persistedThroughId` keeps whatever
+// the previous capture left. On its own that would mean a capture started
+// afterwards issued lower ids and was silently not persisted.
+//
+// The UI never gets there. After an import the buffer is not empty, so the
+// Start button is "Start a new capture, discarding the current one", and it
+// calls `onClearPackets()` before `onStartCapture()` - which passes 0 and
+// rewinds the mark. The checks below pin the unit-level behaviour so that the
+// day something calls `prepareBatch` without that Clear in front of it, the
+// consequence is written down rather than rediscovered.
 {
   const rec = recorder();
   const accounting = freshAccounting();
@@ -273,13 +281,12 @@ function flush(
   nextId = 1;
   const imported = Array.from({ length: 5 }, () => frame());
   adoptAccounting(accounting, imported, null);
-  check('an import does NOT rewind the mark (known gap)',
-    accounting.persistedThroughId, highWater);
+  check('an import does not rewind the mark', accounting.persistedThroughId, highWater);
 
   // So a capture started after the import issues low ids, and they are declined.
   const persistsBefore = rec.persisted.length;
   prepareBatch(Array.from({ length: 5 }, () => frame()), accounting, rec.prepare);
-  check('...so a capture after an import is NOT persisted (known gap)',
+  check('...so a batch with lower ids would not be persisted without a Clear',
     rec.persisted.length, persistsBefore);
 }
 
@@ -297,11 +304,14 @@ function flush(
     packets = flush(packets, Array.from({ length: 50 }, () => frame()),
       accounting, rec, budget, false);
   }
-  const droppedBeforeClear = accounting.droppedTotal;
-  check('the buffer dropped frames', droppedBeforeClear > 0, true);
+  check('the buffer dropped frames', accounting.droppedTotal > 0, true);
   adoptAccounting(accounting, [], 0);
-  check('...and Clear does not reset the count (known gap)',
-    accounting.droppedTotal, droppedBeforeClear);
+  // The count belongs to the buffer it was dropped from, and that buffer is
+  // gone. Nothing reset it before, so Driver Info kept reporting the previous
+  // capture's figure after a Clear.
+  check('...and replacing the buffer resets it', accounting.droppedTotal, 0);
+  check('...along with the head-id guard, so the next trim is not a repeat',
+    accounting.droppedHeadId, -1);
 }
 
 console.log();

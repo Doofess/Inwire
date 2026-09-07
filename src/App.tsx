@@ -1405,9 +1405,36 @@ export default function App() {
   // The no-agent path. With no connection there are no adapters to choose
   // from, so the controls start immediately rather than opening a picker
   // that would be empty and leave Start unable to start anything.
-  const handleStartCapture = () => {
+  /**
+   * Starts a capture, and gives it a stored session of its own.
+   *
+   * The clear is the point. Before it, starting a capture wrote into whatever
+   * the last one had left on disk: `handleClearPackets` rewinds the frame
+   * numbering to 1 (`pipeline.reset(1)`) and the store keys frames by id, so
+   * the new capture overwrote the old one's frames 1..N by `put` while
+   * everything above N stayed exactly where it was. Nothing deleted it -
+   * `resetWriteQueue` is reachable only from Discard, and
+   * `prepareStoredSession` says in as many words that it performs no automatic
+   * deletion - and a restore reads the whole store back. So a refresh after a
+   * short second capture returned that capture *plus the tail of the previous
+   * one*, interleaved and indistinguishable.
+   *
+   * This does not weaken `docs/decisions/0012`. That decision is that a stored
+   * capture survives until the user asks; Clear View alone still keeps it, and
+   * still says so. Starting a NEW capture is the asking - the button that does
+   * it is labelled "Start a new capture, discarding the current one" and
+   * confirms first.
+   *
+   * Awaited before the agent is told to start, so the store is empty before any
+   * frame can be written to it. `clearSession` drops the pending write queue
+   * synchronously for the same reason, so nothing already queued can land after
+   * the clear and resurrect part of the previous capture.
+   */
+  const handleStartCapture = async () => {
     setBufferAutoPaused(false);
     clearCaptureStats();
+    await clearSession();
+    setStorage({ storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0 });
     sendAgentCommand({ type: 'start_capture' });
     setIsCapturing(true);
   };
