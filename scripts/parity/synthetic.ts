@@ -149,6 +149,43 @@ export function udpFrame(srcPort: number, dstPort: number, payload: Uint8Array):
   ]);
 }
 
+/**
+ * A TCP segment with a correct data offset; checksum zero.
+ *
+ * Zero is what a NIC leaves when it will fill the checksum in later, and
+ * `checksumVerdict`'s offload policy reads that as `Unverified` rather than
+ * `Bad` - so a synthetic segment does not paint itself as damaged. PSH+ACK
+ * because that is what a client sending a request actually sets, and the TCP
+ * analysis reads the flags.
+ */
+export function tcp(
+  srcPort: number, dstPort: number, seq: number, ack: number, payload: Uint8Array,
+): Uint8Array {
+  const header = new Bytes()
+    .u16(srcPort, dstPort).u32(seq).u32(ack)
+    .u8(0x50, 0x18)
+    .u16(8192, 0, 0)
+    .build();
+  return Uint8Array.from([...header, ...payload]);
+}
+
+/**
+ * A complete Ethernet/IPv4/TCP frame.
+ *
+ * `seq` and `ack` are explicit because a stream protocol's test cases are a
+ * conversation, not a bag of frames: get them wrong and tshark reports
+ * `[TCP Previous segment not captured]` in the Info column and the comparison
+ * fails on TCP analysis rather than on the protocol under test.
+ */
+export function tcpFrame(
+  srcPort: number, dstPort: number, seq: number, ack: number, payload: Uint8Array,
+): Uint8Array {
+  return Uint8Array.from([
+    ...ethernet(0x0800).build(),
+    ...ipv4(6, tcp(srcPort, dstPort, seq, ack, payload)),
+  ]);
+}
+
 /** A complete Ethernet/IPv4/<protocol> frame. */
 export function ipFrame(protocol: number, payload: Uint8Array): Uint8Array {
   return Uint8Array.from([...ethernet(0x0800).build(), ...ipv4(protocol, payload)]);
@@ -292,6 +329,16 @@ export function pcapOf(frames: Uint8Array[], linktype = 1): Uint8Array {
 
 // --- the harness -------------------------------------------------------------
 
+export interface RunOptions {
+  /**
+   * Decode every case against one `TcpStreamTracker`, so a stream protocol's
+   * cross-frame state survives between them. Off by default: a datagram
+   * protocol's cases are independent frames and sharing a tracker between them
+   * would let one case's TCP analysis change another's Info.
+   */
+  statefulTcp?: boolean;
+}
+
 export interface SyntheticCase {
   /** What this frame is, for the failure line. */
   name: string;
@@ -327,7 +374,7 @@ export function failureCount(): number { return failures; }
  * The app side goes through the real `decodeRawEthernetPacket`, not a
  * reimplementation, for the same reason the fixture harness does.
  */
-export async function runCases(cases: SyntheticCase[]): Promise<void> {
+export async function runCases(cases: SyntheticCase[], options: RunOptions = {}): Promise<void> {
   const tshark = findTshark();
   if (tshark === null) {
     console.log('SKIP  tshark not found - set TSHARK to its path to run these checks.');
@@ -337,6 +384,11 @@ export async function runCases(cases: SyntheticCase[]): Promise<void> {
   console.log(`Oracle: ${tshark}\n`);
 
   const { decodeRawEthernetPacket } = await import('../../src/services/pcapParser');
+  // A stream protocol's frames are a conversation: `[N results]` on an LDAP
+  // searchResDone counts the entries that came before it, so the frames have to
+  // be decoded against ONE tracker or every frame reads as a fresh connection.
+  const { TcpStreamTracker } = await import('../../src/services/tcpStreamTracker');
+  const tcpTracker = options.statefulTcp ? new TcpStreamTracker() : undefined;
   const reference = askTshark(tshark, cases.map((c) => c.frame));
   if (reference.length !== cases.length) {
     console.log(`FAIL  tshark read ${reference.length} frames of ${cases.length}`);
@@ -346,7 +398,7 @@ export async function runCases(cases: SyntheticCase[]): Promise<void> {
   cases.forEach((testCase, i) => {
     const { packet } = decodeRawEthernetPacket(
       testCase.frame, i + 1, 1_700_000_000_000_000 + i * 1_000_000, i, i === 0 ? 0 : 1,
-      testCase.frame.length,
+      testCase.frame.length, tcpTracker,
     );
     const ours = { protocol: packet.protocolLabel ?? packet.protocol, info: packet.info };
     check(`${testCase.name}: Protocol`, ours.protocol,
