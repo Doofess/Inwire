@@ -21,7 +21,7 @@
  * (docs/decisions/0003-worker-boundary.md), and an assertion script checks
  * the imports.
  */
-import type { ExpertCategory, ProtocolLayer, ProtocolType } from '../../types/packet';
+import type { ExpertCategory, Packet, ProtocolLayer, ProtocolType } from '../../types/packet';
 import type { TcpStreamTracker } from '../tcpStreamTracker';
 import type { IcmpEchoTracker } from '../icmpEchoTracker';
 import type { QuicFlowTracker } from '../quicFlowTracker';
@@ -93,4 +93,49 @@ export interface DissectContext {
   quic: QuicFlowTracker;
   /** Live capture only: the adapter, for the Frame layer's interface rows. */
   captureInterface?: { name: string; label: string };
+}
+
+/**
+ * What a transport decoder returns.
+ *
+ * Named rather than written inline on `decodeTransportLayer`, which is where it
+ * lived while that function was the only thing that could produce one. Each
+ * per-protocol branch is its own function now and they all answer in this
+ * shape, so the shape needs a name they can share.
+ */
+export interface TransportResult {
+  proto: Packet['protocol'];
+  protocolLabel?: string;
+  srcPort?: number;
+  dstPort?: number;
+  info: string;
+  layer: ProtocolLayer;
+  /**
+   * Layers sitting above the transport header - DNS over UDP, for instance.
+   * Separate from `layer` because the transport decoder owns exactly one
+   * header of its own, and a subdissector that claims the payload adds to the
+   * stack rather than replacing it.
+   */
+  extraLayers?: ProtocolLayer[];
+  /**
+   * Extra `frameProtocols` tokens for a dissector that claims the payload
+   * without contributing a layer of its own - QUIC, whose only tree output is
+   * the TLS handshake it carries, and SSDP, which is one request line. Without
+   * these the bareword `quic` in a filter or a colour rule would have no layer
+   * to find, which is the same gap the extension-header walker fills.
+   */
+  protocolTokens?: string[];
+  streamId?: number;
+  status?: Packet['status'];
+  analysisFlags?: string[];
+  fields?: Record<string, string | number>;
+  icmpMatchedRequestFrameId?: number;
+  /** Earlier frames that carried parts of a TLS record this segment completed. */
+  reassembledFrom?: number[];
+  /** Earlier frames whose Protocol label this segment's ServerHello settled. */
+  labelPatches?: { frameId: number; protocolLabel: string }[];
+  /** The query frame this DNS response answers, for its "[Response In]" patch. */
+  dnsMatchedQueryFrameId?: number;
+  /** Names this frame mapped to addresses, for passive name resolution. */
+  resolvedNames?: { name: string; addresses: string[] }[];
 }
