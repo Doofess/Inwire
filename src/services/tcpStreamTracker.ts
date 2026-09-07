@@ -26,6 +26,7 @@ import { analyzeTcpSegment, freshConnection, type TcpAnalysis, type TcpConnectio
 import type { TlsDecryptionKeys } from './tls/decrypt';
 import type { AppDirection } from './dissectors/appStream';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
+import { freshSmb2Conversation, type Smb2ConversationState } from './dissectors/smb2';
 
 export interface TlsRecordCursor {
   /** Bytes still owed to the record in progress; 0 means at a record boundary. */
@@ -241,6 +242,8 @@ interface TcpConnection {
    * connection of nothing (`docs/decisions/0014`).
    */
   ldap?: LdapConversationState;
+  /** SMB2's per-connection state, on the same terms as `ldap` above. */
+  smb2?: Smb2ConversationState;
   /** The endpoint that sorts first, and the other one. */
   a: TcpDirection;
   b: TcpDirection;
@@ -521,6 +524,13 @@ export class TcpStreamTracker {
     const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
     conn.ldap ??= freshLdapConversation();
     return conn.ldap;
+  }
+
+  /** SMB2's per-connection counters, created on first use. */
+  public smb2Conversation(srcIp: string, srcPort: number, dstIp: string, dstPort: number): Smb2ConversationState {
+    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.smb2 ??= freshSmb2Conversation();
+    return conn.smb2;
   }
 
   /** Returns this packet's 1-based position within its stream, recording it. */

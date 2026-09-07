@@ -68,7 +68,7 @@ export const LAYERS = [
   // what a user types, and it has to be the one they already know.
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'tftp', 'bfd', 'coap', 'ptp',
-  'hsrp', 'rip', 'ripng', 'ldap', 'http', 'http2', 'http3',
+  'hsrp', 'rip', 'ripng', 'ldap', 'smb2', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -465,6 +465,26 @@ export const FIELDS: readonly FieldDef[] = [
   uint('gre.key', 'Key', 'gre'),
   uint('gre.sequence_number', 'Sequence Number', 'gre'),
   uint('gre.checksum', 'Checksum', 'gre'),
+
+  // --- SMB2 ------------------------------------------------------------------
+  //
+  // Wireshark's own abbrevs, checked against `tshark -G fields`. Note
+  // `smb2.read_length` and `smb2.write_length` are separate fields rather than
+  // one `length`, which is what lets `smb2.write_length > 65536` mean what a
+  // reader expects.
+  uint('smb2.cmd', 'Command', 'smb2'),
+  uint('smb2.msg_id', 'Message ID', 'smb2'),
+  uint('smb2.flags', 'Flags', 'smb2'),
+  uint('smb2.nt_status', 'NT Status', 'smb2'),
+  uint('smb2.tid', 'Tree Id', 'smb2'),
+  uint('smb2.sesid', 'Session Id', 'smb2'),
+  str('smb2.tree', 'Tree', 'smb2', { label: 'SMB2 share', align: 'left' }),
+  str('smb2.filename', 'Filename', 'smb2', { label: 'SMB2 file', align: 'left' }),
+  str('smb2.find.pattern', 'Search Pattern', 'smb2'),
+  uint('smb2.read_length', 'Read Length', 'smb2'),
+  uint('smb2.write_length', 'Write Length', 'smb2'),
+  uint('smb2.file_offset', 'File Offset', 'smb2'),
+  uint('smb2.ioctl.function', 'Function', 'smb2'),
 
   // --- LDAP ------------------------------------------------------------------
   //

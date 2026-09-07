@@ -23,6 +23,7 @@ import { freshTlsConversation, freshTlsCursor } from '../tcpStreamTracker';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './appStream';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
 import { dissectLdap, looksLikeLdap, freshLdapConversation, type LdapResult } from './ldap';
+import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2Result } from './smb2';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
 
 /**
@@ -332,7 +333,22 @@ export function dissectTcpTransport(
     }
   }
 
-  if (!tcpDns && !ldapResult && payloadLength > 0 && !isKeepAlive && !isRetransmitted) {
+  // SMB2, the same shape as LDAP: a length-prefixed message on a well-known
+  // port, with per-connection state - a Create response names the file the
+  // REQUEST asked for, which no single frame carries.
+  let smb2Result: Smb2Result | null = null;
+  if (!tcpDns && !ldapResult && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder
+    && (srcPort === SMB2_PORT || dstPort === SMB2_PORT)) {
+    const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+    if (looksLikeSmb2(rawBytes, tcpPayloadStart, payloadEnd)) {
+      const state = tcpTracker
+        ? tcpTracker.smb2Conversation(srcIp, srcPort, dstIp, dstPort)
+        : freshSmb2Conversation();
+      smb2Result = dissectSmb2(rawBytes, tcpPayloadStart, payloadEnd, state);
+    }
+  }
+
+  if (!tcpDns && !ldapResult && !smb2Result && payloadLength > 0 && !isKeepAlive && !isRetransmitted) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
     if (isTlsPort || existing !== undefined || looksLikeTlsRecord(rawBytes, tcpPayloadStart, payloadEnd)) {
@@ -397,6 +413,9 @@ export function dissectTcpTransport(
   } else if (ldapResult) {
     proto = 'LDAP';
     protocolLabel = 'LDAP';
+  } else if (smb2Result) {
+    proto = 'SMB2';
+    protocolLabel = 'SMB2';
   } else if (tlsResult) {
     proto = 'TLS';
     protocolLabel = tlsResult.appProtocolLabel ?? tlsResult.protocolLabel;
@@ -425,7 +444,9 @@ export function dissectTcpTransport(
   // one - the reference analyzer shows "Application Data", not the ports and sequence
   // numbers underneath it. Expert tags still lead, since they describe the
   // segment rather than its contents.
-  const infoParts = ldapResult
+  const infoParts = smb2Result
+    ? [smb2Result.info]
+    : ldapResult
     ? [ldapResult.info]
     : tcpDns
     ? [tcpDns.info]
@@ -447,7 +468,7 @@ export function dissectTcpTransport(
   // subdissector provided the Info, Wireshark's column joins the TCP expert
   // tags to it with " , " - the artefact of two dissectors each appending
   // to one column. Matched exactly, since the column text is the contract.
-  const info = (tlsResult || tcpDns || httpResult || ldapResult) && expertTags.length > 0
+  const info = (tlsResult || tcpDns || httpResult || ldapResult || smb2Result) && expertTags.length > 0
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
 
@@ -458,7 +479,9 @@ export function dissectTcpTransport(
     dstPort,
     info,
     streamId,
-    extraLayers: ldapResult
+    extraLayers: smb2Result
+      ? [smb2Result.layer]
+      : ldapResult
       ? [ldapResult.layer]
       : tcpDns
       ? [tcpDns.layer]
@@ -473,6 +496,7 @@ export function dissectTcpTransport(
     reassembledFrom,
     labelPatches,
     fields: {
+      ...(smb2Result ? smb2Result.fields : {}),
       ...(ldapResult ? ldapResult.fields : {}),
       ...(tlsResult ? tlsResult.fields : {}),
       ...(httpResult ? httpResult.fields : {}),
