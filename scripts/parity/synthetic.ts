@@ -256,6 +256,9 @@ export function llcSnapFrame(
 /** One frame's columns, as tshark reports them. */
 export interface TsharkRow {
   protocol: string;
+  /** The Source column. Only compared when a suite asks - see `RunOptions`. */
+  source: string;
+  destination: string;
   info: string;
 }
 
@@ -276,7 +279,7 @@ export function askTshark(tshark: string, frames: Uint8Array[]): TsharkRow[] {
     writeFileSync(file, pcapOf(frames));
     const run = spawnSync(tshark, [
       '-r', file, '-T', 'fields',
-      '-e', '_ws.col.Protocol', '-e', '_ws.col.Info',
+      '-e', '_ws.col.Protocol', '-e', '_ws.col.Source', '-e', '_ws.col.Destination', '-e', '_ws.col.Info',
       '-E', 'separator=/t',
     ], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
     if (run.status !== 0) throw new Error(`tshark exited ${run.status}: ${run.error ?? ''} ${run.stderr ?? ''}`.slice(0, 400));
@@ -287,9 +290,9 @@ export function askTshark(tshark: string, frames: Uint8Array[]): TsharkRow[] {
       // `... | `, HTTP/1.1 writes one after the media type - and the fixture
       // harness compares those character for character. A `trimEnd()` here
       // would quietly forgive exactly the difference this exists to catch.
-      let info = parts.slice(1).join('\t');
+      let info = parts.slice(3).join('\t');
       while (info.endsWith('\r') || info.endsWith('\n')) info = info.slice(0, -1);
-      return { protocol: parts[0] ?? '', info };
+      return { protocol: parts[0] ?? '', source: parts[1] ?? '', destination: parts[2] ?? '', info };
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -337,6 +340,18 @@ export interface RunOptions {
    * would let one case's TCP analysis change another's Info.
    */
   statefulTcp?: boolean;
+  /**
+   * Also compare the Source and Destination columns.
+   *
+   * Off by default because most suites test what a payload SAYS, and their
+   * addresses are the frame builder's own constants - a check that can only
+   * fail if the harness itself is broken. A **tunnel** is the exception, and
+   * the reason this exists: the reference reports the INNER packet's
+   * addresses, so getting them right is most of what dissecting a tunnel
+   * means, and a suite comparing only Protocol and Info would pass on a build
+   * that reported the outer ones.
+   */
+  compareAddresses?: boolean;
 }
 
 export interface SyntheticCase {
@@ -405,6 +420,10 @@ export async function runCases(cases: SyntheticCase[], options: RunOptions = {})
       testCase.expectProtocol ?? reference[i].protocol);
     check(`${testCase.name}: Info`, ours.info,
       testCase.expectInfo ?? reference[i].info);
+    if (options.compareAddresses) {
+      check(`${testCase.name}: Source`, packet.source, reference[i].source);
+      check(`${testCase.name}: Destination`, packet.destination, reference[i].destination);
+    }
   });
 }
 
