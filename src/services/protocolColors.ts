@@ -25,7 +25,7 @@ import type { ProtocolType } from '../types/packet';
  */
 
 /**
- * Thirteen protocols onto nine hues, so some share. The shares are chosen, not
+ * Fourteen protocols onto nine hues, so some share. The shares are chosen, not
  * left over:
  *
  *   - HTTP, HTTPS and TLS share green because they are one thing to anyone
@@ -52,6 +52,9 @@ const HUE_BY_PROTOCOL: Record<ProtocolType, Hue> = {
   SSH: 'yellow',
   MQTT: 'yellow',
   LDAP: 'yellow',
+  // A GRE frame only reaches the map when its payload could not be read - a
+  // readable tunnel reports the INNER protocol, so it is never coloured GRE.
+  GRE: 'neutral',
   CUSTOM: 'neutral',
 };
 

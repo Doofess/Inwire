@@ -33,6 +33,7 @@ import { ETHERNET_MAX_FRAME } from '../direction';
 import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './ipv4';
 import { IPV6_EXT_HEADERS, NO_NEXT_HEADER, walkIpv6Extensions } from './ipv6Ext';
 import { dissectPortless, isPortlessProtocol } from './portless';
+import { GRE_PROTOCOL, encapsulatedInfo, innerNetworkStart, readGreHeader } from './gre';
 import { dissectTcpTransport } from './tcpTransport';
 import { dissectUdpTransport } from './udpTransport';
 
@@ -106,6 +107,38 @@ export function decodeNetworkLayer(
     id, tsUs, relativeTime, timeDelta, origLen, tcpTracker, icmpTracker, quicTracker,
     dnsTracker, l3Tracker, sentByUs,
   } = context;
+
+
+  /**
+   * A tunnel, looked *through* rather than named.
+   *
+   * The reference reports the inner packet in every column - Protocol, Info,
+   * Source and Destination - so this recurses and hands back whatever the
+   * inner packet decided. `layers` and `filterFields` are shared, so the outer
+   * IP header and the GRE header stay in the tree above the inner one, which
+   * is where they belong.
+   *
+   * When there is nothing readable inside, the frame reads as `GRE` with the
+   * reference's own `Encapsulated ...` wording - the one case the word appears.
+   */
+  const decodeGreTunnel = (payloadStart: number, payloadEnd: number): NetworkDecode | null => {
+    const header = readGreHeader(rawBytes, payloadStart, payloadEnd);
+    if (header === null) return null;
+    layers.push(header.layer);
+    Object.assign(filterFields, header.fields);
+    const carried: NetworkDecode = {
+      srcIp, dstIp, proto, protocolLabel, info, status, analysisFlags, srcPort, dstPort,
+      streamId, icmpMatchedRequestFrameId, infoPatches, resolvedNames, transportLayerIndex,
+      extensionTokens, transportTokens: [...transportTokens, 'gre'],
+    };
+    const inner = innerNetworkStart(
+      rawBytes, payloadStart + header.headerLength, header.protocolType, payloadEnd);
+    if (inner === null) {
+      return { ...carried, proto: 'GRE', protocolLabel: 'GRE', info: encapsulatedInfo(header.protocolType) };
+    }
+    return decodeNetworkLayer(
+      rawBytes, inner.offset, inner.etherType, layers, filterFields, carried, context);
+  };
 
   if (currentEtherType === 0x0800 && rawBytes.length >= l3Offset + 20) {
     const ipHeaderLen = (rawBytes[l3Offset] & 0x0f) * 4;
@@ -333,6 +366,11 @@ export function decodeNetworkLayer(
         );
         l3Tracker?.forgetFragments(srcIp, dstIp, identification, ipProtocolNum);
       }
+    }
+
+    if (ipProtocolNum === GRE_PROTOCOL && !isFragment) {
+      const tunnelled = decodeGreTunnel(transportOffset, Math.min(rawBytes.length, l3Offset + ipTotalLen));
+      if (tunnelled) return tunnelled;
     }
 
     const transport = reassembled
@@ -572,6 +610,13 @@ export function decodeNetworkLayer(
         );
         l3Tracker?.forgetFragments(srcIp, dstIp, chain!.fragmentId!, IPV6_FRAGMENT_KEY);
       }
+    }
+
+    if (effectiveNextHeader === GRE_PROTOCOL && !isV6Fragment && !isMalformedJumbo
+      && !(chain?.stopsHere ?? false)) {
+      const tunnelled = decodeGreTunnel(
+        transportOffset, Math.min(rawBytes.length, transportOffset + transportPayloadLen));
+      if (tunnelled) return tunnelled;
     }
 
     const transport = isMalformedJumbo

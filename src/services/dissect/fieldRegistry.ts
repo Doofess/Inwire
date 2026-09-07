@@ -62,7 +62,7 @@ export const LAYERS = [
   // `cdp` belongs beside `lldp` for that reason, and `vrrp`/`ospf` beside
   // `igmp` - all three sit directly on their lower layer with no ports.
   'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905', 'cdp',
-  'ip', 'ipv6', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
+  'ip', 'ipv6', 'gre', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
   // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
   // what a user types, and it has to be the one they already know.
@@ -454,6 +454,17 @@ export const FIELDS: readonly FieldDef[] = [
   str('snmp.name', 'Object Name', 'snmp', { label: 'SNMP OID', align: 'left' }),
   str('snmp.value', 'Value', 'snmp'),
   str('snmp.enterprise', 'Enterprise', 'snmp'),
+
+  // --- GRE -------------------------------------------------------------------
+  //
+  // A tunnel contributes fields but almost never a Protocol label: the
+  // reference reports the INNER packet in every column, so `gre` reaches
+  // `frameProtocols` as a token while `ip`/`tcp` carry the naming. That is
+  // exactly what makes `gre && tcp.port == 443` a useful filter.
+  uint('gre.proto', 'Protocol Type', 'gre'),
+  uint('gre.key', 'Key', 'gre'),
+  uint('gre.sequence_number', 'Sequence Number', 'gre'),
+  uint('gre.checksum', 'Checksum', 'gre'),
 
   // --- LDAP ------------------------------------------------------------------
   //
