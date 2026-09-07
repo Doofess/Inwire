@@ -41,6 +41,7 @@ import { applyInfoPatchesInPlace, type InfoPatch } from './services/pcapParser';
 import { flowAnnotations } from './services/flowAnnotations';
 import { NO_HOST, type HostIdentity } from './services/direction';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
+import { commitBatch, prepareBatch, freshAccounting } from './services/packetBuffer';
 import { useAgentConnection } from './hooks/useAgentConnection';
 import { inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
@@ -120,9 +121,8 @@ import {
   TbBinary,
   TbAlertTriangle,
 } from "react-icons/tb";
-import { evictOldBytes } from './services/packetBytes';
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
-import { AUTO_PAUSE_AT, estimateSummaryBytes, planBufferTrim } from './services/bufferBudget';
+import { estimateSummaryBytes, planBufferTrim } from './services/bufferBudget';
 
 /**
  * How far back a socket-table DELTA is allowed to re-annotate.
@@ -433,7 +433,15 @@ export default function App() {
    * An estimate, with a tested error bound: `scripts/perf/buffer-budget.ts`
    * holds it to within 15% of the heap those frames actually occupy.
    */
-  const residentBytesRef = useRef(0);
+  /**
+   * The buffer's running accounting - resident bytes, frames dropped, the head
+   * id that guards a repeated trim, and how far the store has been written.
+   *
+   * One object rather than four refs because those four are read and written
+   * together by everything that touches the buffer, and because
+   * `services/packetBuffer.ts` needs them as a unit it can be handed in a test.
+   */
+  const accountingRef = useRef(freshAccounting());
 
 
   /**
@@ -455,7 +463,6 @@ export default function App() {
    * head by definition, so a changed head is exactly one trim, counted once.
    * See the trim in the packet-flush effect.
    */
-  const droppedBufferRef = useRef({ total: 0, headId: -1 });
   /**
    * What the browser says about the link, and every time it changed.
    *
@@ -657,7 +664,6 @@ export default function App() {
   /** Whether the one restore this page load gets has been kicked off yet. */
   const restoreStartedRef = useRef(false);
   /** The highest packet id already written to disk, so a flush only appends. */
-  const persistedThroughIdRef = useRef(0);
 
   // The stored size, sampled rather than pushed: the store writes in batches
   // off the critical path, and a number that updates twice a second is as
@@ -694,101 +700,39 @@ export default function App() {
       pendingIcmpRepliesRef.current = [];
       pendingInfoPatchesRef.current = [];
 
-      // Persisted here rather than inside the updater below, because a state
-      // updater has to be pure - React may run it more than once, and in
-      // development StrictMode always does, which would write every batch to
-      // disk twice. Not awaited: the write is fire-and-forget so the flush
-      // cadence never waits on IndexedDB.
-      if (incoming.length > 0) {
-        const newest = incoming[incoming.length - 1].id;
-        if (newest > persistedThroughIdRef.current) {
-          persistedThroughIdRef.current = newest;
-          appendFrames(incoming);
-        }
-      }
-
-      // The dense fields move into shared columns here, where a finished frame
-      // joins the buffer. Before `setPackets`, because a state updater has to
-      // be pure and React runs this one twice under StrictMode: `absorb` skips a
-      // frame that already has a block, but claiming a row twice would waste one.
-      fieldWriter.current.absorb(incoming);
-      // Counted here rather than in the updater, which React runs twice under
-      // StrictMode - adding on both passes would double the total and trim a
-      // buffer that was nowhere near its budget. The split above has already
-      // moved the dense fields out, so what is measured is what will be held.
-      for (const packet of incoming) residentBytesRef.current += estimateSummaryBytes(packet);
-
-      setPackets((prev) => {
-        // The concat first, then both patch passes written into its result.
-        //
-        // That result is a fresh array nobody else has seen yet, so the patches
-        // can be applied by index instead of by rebuilding the buffer around
-        // them. Each pass used to be a `.map` over every frame to touch one or
-        // two: 14.1 ms each at a million frames, ten times a second, against
-        // 1.6 ms for the one copy the concat was doing anyway
-        // (`scripts/perf/buffer-cost.ts`). The packets themselves are still
-        // replaced rather than mutated, so a selection or a filtered array
-        // holding one of them is unaffected.
-        //
-        // Both passes run after the concat because a patch may target a frame
-        // in this very batch - a record that began and ended within one flush.
-        let next = prev.concat(incoming);
-        if (replies.length > 0) applyIcmpRepliesInPlace(next, replies);
-        if (patches.length > 0) applyInfoPatchesInPlace(next, patches);
-        const budget = packetBufferBytesRef.current;
-        const plan = planBufferTrim(next, residentBytesRef.current, budget);
-        const trimmed = plan.dropCount > 0 ? next.slice(plan.dropCount) : next;
-        if (trimmed !== next) {
-          const forgotten = next.length - trimmed.length;
-          // Outside the updater's return value on purpose: a state updater has
-          // to be pure, and React runs this one twice under StrictMode.
-          //
-          // Which is exactly why neither this nor the counter it feeds may be
-          // an increment. Scheduling the microtask IS the impure part and ran
-          // on both invocations, so `n + forgotten` was applied twice and the
-          // count came out roughly double - a miscount in the one number this
-          // whole feature exists to report accurately. Guarding on the head id
-          // makes the repeat a no-op: both runs see the same `prev`, so both
-          // compute the same head, and only the first one gets past this.
-          const headId = trimmed[0].id;
-          if (headId !== droppedBufferRef.current.headId) {
-            droppedBufferRef.current = {
-              total: droppedBufferRef.current.total + forgotten,
-              headId,
-            };
-            const total = droppedBufferRef.current.total;
-            queueMicrotask(() => setDroppedBuffer(total));
-            // Inside the guard, and for the same reason the counter is: the
-            // updater runs twice under StrictMode, and subtracting the freed
-            // bytes on both passes would walk the running total down until the
-            // buffer stopped trimming at all. Both passes compute the same
-            // head, so only the first gets here.
-            residentBytesRef.current -= plan.freedBytes;
-          }
-          next = trimmed;
-          // The stored session mirrors the live buffer, including its
-          // forgetting: without this the database would keep every frame of a
-          // multi-hour capture while the buffer held only the last 50,000.
-          trimFramesBelow(next[0].id);
-        }
-        // The oldest frames stop holding their bytes once the store has them.
-        // Called here rather than in an effect because this is where the buffer
-        // is settled, and it is safe to call from a state updater despite the
-        // updater-purity rule: it is idempotent, so StrictMode running it twice
-        // does the work once, and it changes no packet's identity so nothing
-        // re-renders because of it.
-        evictOldBytes(next, BYTES_RESIDENT_FRAMES, storedIdRange());
-
-        // Stopping is decided here, where the true post-trim size is known.
-        // isCapturingRef rather than isCapturing: this effect is set up once
-        // and its closure would otherwise never see a later capture start.
-        if (isCapturingRef.current && residentBytesRef.current >= budget * AUTO_PAUSE_AT) {
-          setIsCapturing(false);
-          setBufferAutoPaused(true);
-          sendAgentCommand({ type: 'stop_capture' });
-        }
-        return next;
+      // The half that must happen exactly once - the store write, the
+      // dense-field split, the byte count - outside the updater because React
+      // runs that twice under StrictMode. See services/packetBuffer.ts.
+      prepareBatch(incoming, accountingRef.current, {
+        persist: (frames) => appendFrames(frames as Packet[]),
+        absorb: (frames) => fieldWriter.current.absorb(frames),
       });
+
+      // Snapshotted here, outside the updater, because React may run that twice
+      // and the trim plan must not be computed from a number the first run
+      // moved - see `residentBytesAtEntry` in services/packetBuffer.ts.
+      const residentBytesAtEntry = accountingRef.current.residentBytes;
+      setPackets((prev) => commitBatch(
+        prev, incoming, replies, patches, accountingRef.current,
+        {
+          budgetBytes: packetBufferBytesRef.current,
+          capturing: isCapturingRef.current,
+          residentFrames: BYTES_RESIDENT_FRAMES,
+          residentBytesAtEntry,
+        },
+        {
+          trimFramesBelow,
+          storedIdRange,
+          // Deferred: calling a setter from inside an updater is the impure
+          // part, and the head-id guard is what keeps it to one call.
+          reportDropped: (total) => queueMicrotask(() => setDroppedBuffer(total)),
+          autoPause: () => {
+            setIsCapturing(false);
+            setBufferAutoPaused(true);
+            sendAgentCommand({ type: 'stop_capture' });
+          },
+        },
+      ));
     };
     const timer = window.setInterval(flush, PACKET_FLUSH_MS);
     return () => window.clearInterval(timer);
@@ -997,7 +941,7 @@ export default function App() {
           // bag is the contract and it has no business knowing about blocks;
           // the split belongs here, where the frames join the buffer.
           fieldWriter.current.absorb(batch);
-          for (const packet of batch) residentBytesRef.current += estimateSummaryBytes(packet);
+          for (const packet of batch) accountingRef.current.residentBytes += estimateSummaryBytes(packet);
           lastId = frames[frames.length - 1].id;
           done += frames.length;
 
@@ -1018,9 +962,9 @@ export default function App() {
             // its own 512 MB - so a restore trims on the way in exactly as the
             // live flush does. Without this the buffer would come back over
             // budget and stay there until the next captured frame.
-            const plan = planBufferTrim(next, residentBytesRef.current, packetBufferBytesRef.current);
+            const plan = planBufferTrim(next, accountingRef.current.residentBytes, packetBufferBytesRef.current);
             if (plan.dropCount === 0) return next;
-            residentBytesRef.current -= plan.freedBytes;
+            accountingRef.current.residentBytes -= plan.freedBytes;
             return next.slice(plan.dropCount);
           });
           setRestoreProgress({ done, total });
@@ -1046,7 +990,7 @@ export default function App() {
         // Numbering continues from the restored session rather than restarting
         // at 1 and colliding with packets already in the list.
         packetGenerator.resumeAfter(lastId);
-        persistedThroughIdRef.current = lastId;
+        accountingRef.current.persistedThroughId = lastId;
         // The relative-time clock is restored too, so a resumed capture's
         // timestamps continue the original timeline instead of jumping to 0.
         // The clock refs are microseconds; the stored meta stays in
@@ -1633,7 +1577,7 @@ export default function App() {
     // tracker would keep describing streams from a capture that no longer
     // exists, and the next frame would be numbered after frames that are gone.
     fieldWriter.current = new FieldBlockWriter();
-    residentBytesRef.current = 0;
+    accountingRef.current.residentBytes = 0;
     pipeline.reset(1);
     // Clearing the buffer is the only way a fresh capture begins, so this is
     // where the relative-time clock resets. captureStartRef === null is then
@@ -1641,7 +1585,7 @@ export default function App() {
     // test in the live-packet handler.
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
-    persistedThroughIdRef.current = 0;
+    accountingRef.current.persistedThroughId = 0;
     // The Worker forgets its copy on the same reset message. Keeping this one
     // would let a local port reused since the last capture be attributed to
     // whatever held it during a capture that is no longer on screen.
@@ -1675,11 +1619,11 @@ export default function App() {
     // exists, and the next frame must not be numbered after frames that are
     // gone - the same reset Clear does.
     fieldWriter.current = new FieldBlockWriter();
-    residentBytesRef.current = 0;
+    accountingRef.current.residentBytes = 0;
     pipeline.reset(1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
-    persistedThroughIdRef.current = 0;
+    accountingRef.current.persistedThroughId = 0;
     flowAnnotations.clear();
     setStorage({ storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0 });
   }, []);
@@ -1773,7 +1717,7 @@ export default function App() {
     // empty, and stopped it trimming: `planBufferTrim` reads this number, so
     // an import of a million frames sat over budget until enough live frames
     // had arrived to rebuild a total from scratch.
-    residentBytesRef.current = imported.reduce((sum, p) => sum + estimateSummaryBytes(p), 0);
+    accountingRef.current.residentBytes = imported.reduce((sum, p) => sum + estimateSummaryBytes(p), 0);
     pipeline.reset(Math.floor(lastId) + 1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
@@ -2333,7 +2277,7 @@ export default function App() {
             // follows each change and the ref is current by then. A state copy
             // would be a second thing to keep in step for a number only Driver
             // Info reads.
-            bufferResidentBytes={residentBytesRef.current}
+            bufferResidentBytes={accountingRef.current.residentBytes}
             bufferAutoPaused={bufferAutoPaused}
             onClearPackets={handleClearPackets}
             storage={storage}
