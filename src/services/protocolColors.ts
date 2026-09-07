@@ -25,14 +25,16 @@ import type { ProtocolType } from '../types/packet';
  */
 
 /**
- * Twelve protocols onto nine hues, so some share. The shares are chosen, not
+ * Thirteen protocols onto nine hues, so some share. The shares are chosen, not
  * left over:
  *
  *   - HTTP, HTTPS and TLS share green because they are one thing to anyone
  *     reading a map - web traffic, encrypted or not.
- *   - SSH and MQTT share yellow as the two remaining application protocols,
- *     both uncommon enough that telling them apart on a world map is not worth
- *     spending a hue that TCP, UDP or QUIC could use.
+ *   - SSH, MQTT and LDAP share yellow as the remaining application protocols,
+ *     all uncommon enough that telling them apart on a world map is not worth
+ *     spending a hue that TCP, UDP or QUIC could use. LDAP is additionally the
+ *     one of the three that is almost always talking to a server on the same
+ *     site, so it rarely reaches the map at all.
  *
  * Everything that matters at a glance - TCP vs UDP vs QUIC vs DNS vs ICMP vs
  * ARP - gets a hue to itself.
@@ -49,6 +51,7 @@ const HUE_BY_PROTOCOL: Record<ProtocolType, Hue> = {
   ARP: 'orange',
   SSH: 'yellow',
   MQTT: 'yellow',
+  LDAP: 'yellow',
   CUSTOM: 'neutral',
 };
 

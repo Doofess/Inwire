@@ -30,6 +30,7 @@ const ETHERNET_IPV4_HEADER_BYTES = 14 + 20;
 import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './dissectors/tls';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './dissectors/appStream';
+import { dissectLdap, looksLikeLdap, freshLdapConversation, type LdapResult } from './dissectors/ldap';
 import { keyLog } from './tls/keyLog';
 import { buildHttp3Layer } from './dissectors/http3';
 import { DSB_SECRETS_TYPE_TLS_KEY_LOG } from './pcapngWriter';
@@ -667,12 +668,20 @@ function collectExpert(
   return { expert: found.length > 0 ? poolExpert(found) : undefined, strongest };
 }
 
+/**
+ * The ports LDAP is dispatched on: 389, and Microsoft's Global Catalog on 3268
+ * which speaks the same protocol. 636 and 3269 are the TLS-wrapped forms and
+ * arrive here as TLS, never as LDAP.
+ */
+const LDAP_PORTS = new Set([389, 3268]);
+
 const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Frame': 'frame',
   'NetBIOS Name Service': 'nbns',
   'Syslog message': 'syslog',
   'RADIUS Protocol': 'radius',
   'Simple Network Management Protocol': 'snmp',
+  'Lightweight Directory Access Protocol': 'ldap',
   'Session Initiation Protocol': 'sip',
   'Real-time Transport Control Protocol': 'rtcp',
   'Transport Layer Security': 'tls',
@@ -2403,7 +2412,28 @@ function decodeTransportLayer(
       }
     }
 
-    if (!tcpDns && payloadLength > 0 && !isKeepAlive && !isRetransmitted) {
+    // LDAP, beside DNS-over-TCP and for the same reason: it is a length-delimited
+    // message on a well-known port, so it needs the stream only for its own
+    // framing. Unlike DNS it keeps per-connection state - the entry counter a
+    // `searchResDone` reports - which is why it is handed the tracker.
+    //
+    // Port-gated, and deliberately: `looksLikeLdap` is a SEQUENCE holding an
+    // INTEGER and a tag in a known range, which is a shape plenty of binary
+    // protocols share. Claiming an arbitrary TCP stream on that would be the
+    // confident wrong label `dissectors/heuristics.ts` exists to avoid.
+    let ldapResult: LdapResult | null = null;
+    if (!tcpDns && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder
+      && (LDAP_PORTS.has(srcPort) || LDAP_PORTS.has(dstPort))) {
+      const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+      if (looksLikeLdap(rawBytes, tcpPayloadStart, payloadEnd)) {
+        const state = tcpTracker
+          ? tcpTracker.ldapConversation(srcIp, srcPort, dstIp, dstPort)
+          : freshLdapConversation();
+        ldapResult = dissectLdap(rawBytes, tcpPayloadStart, payloadEnd, state);
+      }
+    }
+
+    if (!tcpDns && !ldapResult && payloadLength > 0 && !isKeepAlive && !isRetransmitted) {
       const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
       const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
       if (isTlsPort || existing !== undefined || looksLikeTlsRecord(rawBytes, tcpPayloadStart, payloadEnd)) {
@@ -2444,7 +2474,7 @@ function decodeTransportLayer(
       || tcpTracker.peekTlsCursor(srcIp, srcPort, dstIp, dstPort)?.unknown === false
       || tcpTracker.peekTlsCursor(dstIp, dstPort, srcIp, srcPort)?.unknown === false
     );
-    if (!tcpDns && !tlsResult && !tlsOnThisConnection
+    if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection
       && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder && tcpTracker) {
       const conversation = tcpTracker.tlsConversation(srcIp, srcPort, dstIp, dstPort);
       const serverIsDestination = HTTP_PORTS.has(dstPort) || (!HTTP_PORTS.has(srcPort) && dstPort < srcPort);
@@ -2465,6 +2495,9 @@ function decodeTransportLayer(
     if (tcpDns) {
       proto = 'DNS';
       protocolLabel = 'DNS';
+    } else if (ldapResult) {
+      proto = 'LDAP';
+      protocolLabel = 'LDAP';
     } else if (tlsResult) {
       proto = 'TLS';
       protocolLabel = tlsResult.appProtocolLabel ?? tlsResult.protocolLabel;
@@ -2493,7 +2526,9 @@ function decodeTransportLayer(
     // one - the reference analyzer shows "Application Data", not the ports and sequence
     // numbers underneath it. Expert tags still lead, since they describe the
     // segment rather than its contents.
-    const infoParts = tcpDns
+    const infoParts = ldapResult
+      ? [ldapResult.info]
+      : tcpDns
       ? [tcpDns.info]
       : tlsResult
       ? [tlsResult.info]
@@ -2513,7 +2548,7 @@ function decodeTransportLayer(
     // subdissector provided the Info, Wireshark's column joins the TCP expert
     // tags to it with " , " - the artefact of two dissectors each appending
     // to one column. Matched exactly, since the column text is the contract.
-    const info = (tlsResult || tcpDns || httpResult) && expertTags.length > 0
+    const info = (tlsResult || tcpDns || httpResult || ldapResult) && expertTags.length > 0
       ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
       : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
 
@@ -2524,7 +2559,9 @@ function decodeTransportLayer(
       dstPort,
       info,
       streamId,
-      extraLayers: tcpDns
+      extraLayers: ldapResult
+        ? [ldapResult.layer]
+        : tcpDns
         ? [tcpDns.layer]
         : tlsResult
         ? [tlsResult.layer, ...(tlsResult.appLayers ?? [])]
@@ -2537,6 +2574,7 @@ function decodeTransportLayer(
       reassembledFrom,
       labelPatches,
       fields: {
+        ...(ldapResult ? ldapResult.fields : {}),
         ...(tlsResult ? tlsResult.fields : {}),
         ...(httpResult ? httpResult.fields : {}),
         ...(tcpDns ? tcpDns.fields : {}),

@@ -6,6 +6,7 @@ export type ProtocolType =
   | 'TCP'
   | 'UDP'
   | 'DNS'
+  | 'LDAP'
   | 'TLS'
   | 'ICMP'
   | 'ARP'

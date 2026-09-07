@@ -68,7 +68,7 @@ export const LAYERS = [
   // what a user types, and it has to be the one they already know.
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'tftp', 'bfd', 'coap', 'ptp',
-  'hsrp', 'rip', 'ripng', 'http', 'http2', 'http3',
+  'hsrp', 'rip', 'ripng', 'ldap', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -454,6 +454,28 @@ export const FIELDS: readonly FieldDef[] = [
   str('snmp.name', 'Object Name', 'snmp', { label: 'SNMP OID', align: 'left' }),
   str('snmp.value', 'Value', 'snmp'),
   str('snmp.enterprise', 'Enterprise', 'snmp'),
+
+  // --- LDAP ------------------------------------------------------------------
+  //
+  // Every abbrev here was read out of `tshark -G fields` rather than invented,
+  // which is what `scripts/dissect/wireshark-abbrevs.ts` exists to enforce -
+  // it caught 27 invented names the last time a batch of dissectors landed.
+  // Note `ldap.name` (the bind DN) and `ldap.entry` (the delete target) are
+  // distinct from `ldap.objectName`, as they are in the reference.
+  uint('ldap.messageID', 'Message ID', 'ldap'),
+  uint('ldap.protocolOp', 'Protocol Op', 'ldap'),
+  uint('ldap.resultCode', 'Result Code', 'ldap'),
+  uint('ldap.version', 'Version', 'ldap'),
+  str('ldap.name', 'Bind Name', 'ldap', { label: 'LDAP bind DN', align: 'left' }),
+  str('ldap.authentication', 'Authentication', 'ldap'),
+  str('ldap.baseObject', 'Base Object', 'ldap', { label: 'LDAP base', align: 'left' }),
+  uint('ldap.scope', 'Scope', 'ldap'),
+  uint('ldap.derefAliases', 'Deref Aliases', 'ldap'),
+  str('ldap.objectName', 'Object Name', 'ldap', { label: 'LDAP object', align: 'left' }),
+  str('ldap.entry', 'Entry', 'ldap'),
+  str('ldap.matchedDN', 'Matched DN', 'ldap'),
+  str('ldap.errorMessage', 'Error Message', 'ldap'),
+  str('ldap.requestName', 'Request Name', 'ldap'),
 
   // --- RADIUS ----------------------------------------------------------------
   uint('radius.code', 'Code', 'radius'),

@@ -25,6 +25,7 @@ import { analyzeTcpSegment, freshConnection, type TcpAnalysis, type TcpConnectio
 
 import type { TlsDecryptionKeys } from './tls/decrypt';
 import type { AppDirection } from './dissectors/appStream';
+import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 
 export interface TlsRecordCursor {
   /** Bytes still owed to the record in progress; 0 means at a record boundary. */
@@ -232,6 +233,14 @@ interface TcpConnection {
   analysis?: TcpConnectionState;
   /** What both ends of the TLS conversation have agreed on. */
   tls?: TlsConversationState;
+  /**
+   * LDAP's per-connection counters, created only on a connection that speaks it.
+   *
+   * Optional for the reason `tls` is: the overwhelming majority of connections
+   * are neither, and a field allocated on every one of them is 2,162 bytes a
+   * connection of nothing (`docs/decisions/0014`).
+   */
+  ldap?: LdapConversationState;
   /** The endpoint that sorts first, and the other one. */
   a: TcpDirection;
   b: TcpDirection;
@@ -505,6 +514,13 @@ export class TcpStreamTracker {
     const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
     conn.tls ??= freshTlsConversation();
     return conn.tls;
+  }
+
+  /** LDAP's per-connection counters, created on first use. */
+  public ldapConversation(srcIp: string, srcPort: number, dstIp: string, dstPort: number): LdapConversationState {
+    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.ldap ??= freshLdapConversation();
+    return conn.ldap;
   }
 
   /** Returns this packet's 1-based position within its stream, recording it. */
