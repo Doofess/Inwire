@@ -109,6 +109,12 @@ export function adoptAccounting(
 ): void {
   accounting.residentBytes = packets.reduce((sum, packet) => sum + estimateSummaryBytes(packet), 0);
   if (persistedThroughId !== null) accounting.persistedThroughId = persistedThroughId;
+  // The drop count belongs to the buffer that was pushed out of, and that
+  // buffer is gone. Nothing used to reset it - `reportDropped` is only ever
+  // called by the flush - so after a Clear the "frames dropped (buffer full)"
+  // figure in Driver Info still reported the previous capture's.
+  accounting.droppedTotal = 0;
+  accounting.droppedHeadId = -1;
 }
 
 export interface CommitEffects {
