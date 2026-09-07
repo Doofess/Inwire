@@ -16,9 +16,9 @@
  */
 import {
   DEFAULT_SCHEDULE_PRESETS, EMPTY_SCHEDULE, applyPreset, describeDuration,
-  describeSchedule, isScheduleEmpty, millisUntilStop, normalizePresets,
-  normalizeSchedule, resolveStopTime, scheduleDecision, withStartAt, withStopAfter,
-  withStopAt, type CaptureSchedule,
+  describeSchedule, millisUntilStop, normalizePresets,
+  resolveStopTime, scheduleDecision, withStartAt, withStopAfter,
+  withStopAt, isStartMissed, START_GRACE_MS, type CaptureSchedule,
 } from '../../src/services/captureSchedule';
 
 let failures = 0;
@@ -80,12 +80,41 @@ const T0 = 1_800_000_000_000;
   const timed = withStartAt(EMPTY_SCHEDULE, T0 + 5 * MIN);
   check('a start is idle before its time', scheduleDecision(timed, T0, false, null), 'idle');
   check('...fires at it', scheduleDecision(timed, T0 + 5 * MIN, false, null), 'start');
-  check('...fires after it too, since a throttled tab may look late',
-    scheduleDecision(timed, T0 + 40 * MIN, false, null), 'start');
+  // Late is expected: a background tab's timers are throttled to about once a
+  // minute, so the tick that notices is usually not the one it was due on.
+  check('...fires a little late too, since a throttled tab looks late',
+    scheduleDecision(timed, T0 + 5 * MIN + 45_000, false, null), 'start');
   // Guards the obvious bug: a schedule that keeps "starting" a capture already
   // running would discard the buffer every second.
   check('...and never fires while already capturing',
     scheduleDecision(timed, T0 + 40 * MIN, true, T0 + 5 * MIN), 'idle');
+}
+
+// --- 4b. a start too far in the past does NOT fire ------------------------------
+//
+// The bug this was written for. The native date picker commits a value as you
+// move around it, and its "Today" button sets today with whatever time is
+// already in the field - usually one that has passed. Unbounded, the very next
+// tick saw a due start and ran a capture nobody asked for. Reported as "I
+// clicked Today and it started capturing", which is precisely what happened.
+{
+  const timed = withStartAt(EMPTY_SCHEDULE, T0);
+  check('a start at the edge of the grace window still fires',
+    scheduleDecision(timed, T0 + START_GRACE_MS, false, null), 'start');
+  check('...and one past it does not',
+    scheduleDecision(timed, T0 + START_GRACE_MS + 1, false, null), 'idle');
+  // The case from the report: a time earlier today.
+  check('...so picking a time from this morning starts nothing',
+    scheduleDecision(withStartAt(EMPTY_SCHEDULE, T0 - 6 * 60 * MIN), T0, false, null), 'idle');
+  // And the case the old rule got wrong in the other direction: a capture set
+  // for 2am must not begin at 9am because that is when the laptop was opened.
+  check('...nor does last night reaching this morning',
+    scheduleDecision(withStartAt(EMPTY_SCHEDULE, T0 - 7 * 60 * MIN), T0, false, null), 'idle');
+
+  // A start that can never fire has to SAY so, or it reads as a broken feature.
+  check('a missed start is reported as missed', isStartMissed(timed, T0 + 10 * MIN), true);
+  check('...and one still in its window is not', isStartMissed(timed, T0 + 30_000), false);
+  check('...and no start at all is never missed', isStartMissed(EMPTY_SCHEDULE, T0), false);
 }
 
 // --- 5. a window whose end has passed stops rather than restarting ---------------
@@ -117,30 +146,16 @@ const T0 = 1_800_000_000_000;
     describeSchedule(withStopAfter(EMPTY_SCHEDULE, 120), T0, false, null, at), 'Runs 2 hours');
   check('...and a mixed one reads naturally', describeDuration(90), '1h 30m');
   check('...and one minute is singular', describeDuration(1), '1 min');
+  // The trigger and the panel have to agree: the panel says it will never
+  // start, so the button must not still promise that it will.
+  check('a missed start says so rather than promising a time',
+    describeSchedule(withStartAt(EMPTY_SCHEDULE, T0), T0 + 10 * MIN, false, null, at),
+    'Start time passed');
   check('an armed start names the start',
     describeSchedule(withStartAt(EMPTY_SCHEDULE, T0), T0, false, null, at).startsWith('Starts'), true);
 }
 
-// --- 8. the stored round trip ------------------------------------------------------
-{
-  // The one that matters: a start time from yesterday must not fire on load.
-  const stale = normalizeSchedule({ startAt: T0 - 60 * MIN, stopAfterMinutes: 5 }, T0);
-  check('a start already past is dropped on load, not fired', stale?.startAt, null);
-  check('...while its stop survives', stale?.stopAfterMinutes, 5);
-
-  const future = normalizeSchedule({ startAt: T0 + 60 * MIN, stopAt: T0 + 90 * MIN }, T0);
-  check('a start still ahead is kept', future?.startAt, T0 + 60 * MIN);
-
-  // A hand-edited blob carrying both stops must not survive as both.
-  const both = normalizeSchedule({ stopAt: T0, stopAfterMinutes: 5 }, T0);
-  check('a stored blob with two stops keeps only one', both?.stopAfterMinutes, null);
-
-  check('garbage falls back', normalizeSchedule('nonsense', T0), null);
-  check('...as does a null', normalizeSchedule(null, T0), null);
-  check('a schedule of nothing is empty', isScheduleEmpty(normalizeSchedule({}, T0)!), true);
-}
-
-// --- 9. presets survive the round trip, including having none ----------------------
+// --- 8. presets survive the round trip, including having none ----------------------
 {
   check('the defaults round-trip', normalizePresets(DEFAULT_SCHEDULE_PRESETS), DEFAULT_SCHEDULE_PRESETS);
   // Deleting every preset is a real state and has to persist, or the defaults

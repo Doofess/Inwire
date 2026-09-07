@@ -1,6 +1,7 @@
 import React from 'react';
 import { TbTrash, TbAlertTriangle } from 'react-icons/tb';
 
+import { DateTimeCalendar } from './DateTimeCalendar';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,8 +11,8 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import {
-  DEFAULT_SCHEDULE_PRESETS, describeDuration, isScheduleEmpty, withStartAt,
-  withStopAfter, withStopAt, applyPreset,
+  DEFAULT_SCHEDULE_PRESETS, describeDuration, isScheduleEmpty, isStartMissed,
+  withStartAt, withStopAfter, withStopAt, applyPreset, START_GRACE_MS,
   type CaptureSchedule, type SchedulePreset,
 } from '../../services/captureSchedule';
 
@@ -25,33 +26,22 @@ interface CaptureSchedulePickerProps {
    * is what lets the warning name the number rather than saying "some".
    */
   bufferedPackets: number;
+  /** The schedule hook's clock, so "already passed" updates without a timer here. */
+  now: number;
   children: React.ReactNode;
   align?: 'start' | 'center' | 'end';
-}
-
-/**
- * `datetime-local` wants `YYYY-MM-DDTHH:mm` in LOCAL time.
- *
- * `toISOString` is UTC and would show somebody in a non-zero offset a time that
- * is not the one they set, so the offset is subtracted before slicing. This is
- * the standard round-trip for that input and it is easy to get subtly wrong in
- * a way that only shows up outside UTC.
- */
-function toLocalInputValue(epochMs: number): string {
-  const local = new Date(epochMs - new Date(epochMs).getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 16);
-}
-
-/** The inverse: an empty field is null, not `NaN`. */
-function fromLocalInputValue(value: string): number | null {
-  if (value === '') return null;
-  const parsed = new Date(value).getTime();
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 const fieldClass =
   'w-full rounded-sm border border-border bg-background px-2 py-1 font-mono text-xs '
   + 'text-foreground outline-none focus:border-primary';
+
+/** A stamp short enough for a row that also carries its label. */
+function formatStamp(epochMs: number): string {
+  return new Date(epochMs).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
 const rowLabelClass =
   'text-[10px] font-bold uppercase tracking-wider font-mono text-muted-foreground';
 
@@ -84,12 +74,19 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
   presets,
   onPresetsChange,
   bufferedPackets,
+  now,
   children,
   align = 'start',
 }) => {
   const [newPresetName, setNewPresetName] = React.useState('');
+  /** Which field the shared calendar is editing, or null when it is closed. */
+  const [editing, setEditing] = React.useState<'start' | 'stop' | null>(null);
 
   const willDiscard = schedule.startAt !== null && bufferedPackets > 0;
+  // A start too far in the past can no longer fire, and has to say so. Silently
+  // keeping a time that will never happen is how somebody sets a schedule,
+  // watches nothing occur, and concludes the feature is broken.
+  const startMissed = isStartMissed(schedule, now);
   // Only a duration is worth saving: an absolute stop is a moment, and a moment
   // saved as a preset is wrong by tomorrow.
   const canSavePreset = schedule.stopAfterMinutes !== null;
@@ -120,24 +117,61 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
         <DropdownMenuLabel className={rowLabelClass}>Schedule capture</DropdownMenuLabel>
         <DropdownMenuSeparator />
 
-        {/* The fields are not DropdownMenuItems: an item closes the menu and
-            steals arrow keys, and both are wrong for a text field somebody is
-            typing a date into. */}
-        <div className="px-2 py-1.5 space-y-1" onKeyDown={(e) => e.stopPropagation()}>
-          <label className={`${rowLabelClass} block`} htmlFor="schedule-start">
-            Start from
-          </label>
-          <input
-            id="schedule-start"
-            type="datetime-local"
-            className={fieldClass}
-            value={schedule.startAt === null ? '' : toLocalInputValue(schedule.startAt)}
-            onChange={(e) => onScheduleChange(withStartAt(schedule, fromLocalInputValue(e.target.value)))}
-          />
-          <p className="text-[10px] leading-tight text-muted-foreground">
-            Leave empty to start the capture yourself.
-          </p>
-          {willDiscard && (
+        {/* Two value rows and ONE calendar between them, rather than a picker
+            each. Nesting a popover inside a dropdown is fiddly with Radix, and
+            two month grids stacked would make the panel taller than the header
+            it hangs from. Clicking a row chooses what the calendar edits. */}
+        <div className="px-2 py-1.5 space-y-1">
+          {(['start', 'stop'] as const).map((field) => {
+            const value = field === 'start' ? schedule.startAt : schedule.stopAt;
+            const active = editing === field;
+            return (
+              <button
+                key={field}
+                type="button"
+                className={[
+                  'w-full flex items-center gap-2 rounded-sm border px-2 py-1 font-mono text-xs cursor-pointer',
+                  active ? 'border-primary' : 'border-border hover:border-primary/60',
+                ].join(' ')}
+                onClick={() => setEditing(active ? null : field)}
+              >
+                <span className={rowLabelClass}>
+                  {field === 'start' ? 'Start from' : 'Stop at'}
+                </span>
+                <span className="ml-auto truncate">
+                  {value === null
+                    ? (field === 'start' ? 'when you press Start' : 'not set')
+                    : formatStamp(value)}
+                </span>
+              </button>
+            );
+          })}
+
+          {editing !== null && (
+            <div className="rounded-sm border border-border p-2">
+              <DateTimeCalendar
+                value={editing === 'start' ? schedule.startAt : schedule.stopAt}
+                now={now}
+                label={editing === 'start' ? 'Starts at' : 'Stops at'}
+                onChange={(next) => onScheduleChange(
+                  editing === 'start'
+                    ? withStartAt(schedule, next)
+                    : withStopAt(schedule, next),
+                )}
+              />
+            </div>
+          )}
+
+          {startMissed && (
+            <p className="flex items-start gap-1 text-[10px] leading-tight text-destructive">
+              <TbAlertTriangle className="w-3 h-3 shrink-0 mt-px" />
+              <span>
+                That time has already passed, so nothing will start. Pick one more than{' '}
+                {Math.round(START_GRACE_MS / 60_000)} minutes ahead.
+              </span>
+            </p>
+          )}
+          {willDiscard && !startMissed && (
             <p className="flex items-start gap-1 text-[10px] leading-tight text-amber-500">
               <TbAlertTriangle className="w-3 h-3 shrink-0 mt-px" />
               <span>
@@ -146,19 +180,6 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
               </span>
             </p>
           )}
-        </div>
-
-        <div className="px-2 py-1.5 space-y-1" onKeyDown={(e) => e.stopPropagation()}>
-          <label className={`${rowLabelClass} block`} htmlFor="schedule-stop">
-            Stop at
-          </label>
-          <input
-            id="schedule-stop"
-            type="datetime-local"
-            className={fieldClass}
-            value={schedule.stopAt === null ? '' : toLocalInputValue(schedule.stopAt)}
-            onChange={(e) => onScheduleChange(withStopAt(schedule, fromLocalInputValue(e.target.value)))}
-          />
           {schedule.stopAfterMinutes !== null && (
             <p className="text-[10px] leading-tight text-muted-foreground">
               Set by a preset: stops {describeDuration(schedule.stopAfterMinutes)} after the
