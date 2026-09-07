@@ -4,10 +4,9 @@ import type { Packet } from '../types/packet';
 import type { InfoPatch } from '../services/dissect/types';
 import type { FrameBatch } from '../services/pipelineClient';
 import { FieldBlockWriter } from '../services/dissect/fieldSplit';
-import { estimateSummaryBytes } from '../services/bufferBudget';
 import { appendFrames, storedIdRange, trimFramesBelow } from '../services/sessionStore';
 import {
-  commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
+  adoptAccounting, commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
 } from '../services/packetBuffer';
 
 /** How often the ingest queue is drained into React state. */
@@ -231,9 +230,7 @@ export function usePacketBuffer({
     // A fresh writer, because the blocks the old one handed out belong to
     // frames that are no longer here.
     fieldWriter.current = new FieldBlockWriter();
-    accountingRef.current.residentBytes =
-      next.reduce((sum, packet) => sum + estimateSummaryBytes(packet), 0);
-    if (persistedThroughId !== null) accountingRef.current.persistedThroughId = persistedThroughId;
+    adoptAccounting(accountingRef.current, next, persistedThroughId);
     setPackets(next);
   }, []);
 

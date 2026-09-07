@@ -90,6 +90,27 @@ export function prepareBatch(
   for (const packet of incoming) accounting.residentBytes += estimateSummaryBytes(packet);
 }
 
+/**
+ * The buffer is now exactly these frames: reset the accounting to match.
+ *
+ * Clear, Discard and Import all do this, and they disagree about
+ * `persistedThroughId` - Clear and Discard pass 0, Import passes null to leave
+ * it alone. The parameter is explicit so that disagreement is visible at each
+ * call site rather than buried, and `scripts/session/ingest.ts` pins what each
+ * choice actually causes.
+ *
+ * The dense-field writer is replaced by the caller, not here: this file is
+ * deliberately free of anything React holds in a ref.
+ */
+export function adoptAccounting(
+  accounting: BufferAccounting,
+  packets: readonly Packet[],
+  persistedThroughId: number | null,
+): void {
+  accounting.residentBytes = packets.reduce((sum, packet) => sum + estimateSummaryBytes(packet), 0);
+  if (persistedThroughId !== null) accounting.persistedThroughId = persistedThroughId;
+}
+
 export interface CommitEffects {
   /** The stored session mirrors the live buffer, including its forgetting. */
   trimFramesBelow(id: number): void;
