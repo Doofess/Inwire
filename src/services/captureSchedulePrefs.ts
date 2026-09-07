@@ -1,5 +1,9 @@
 /**
- * Where the capture schedule and its presets are kept.
+ * Where the schedule presets are kept.
+ *
+ * The presets persist and the SCHEDULE does not - see the note in `App.tsx`. A
+ * preset is a habit worth keeping; a schedule is a decision about the next few
+ * minutes, and an app opened tomorrow should not still be armed with one.
  *
  * Split from `captureSchedule.ts` so that module stays free of storage: it is
  * pure, `scripts/schedule/decisions.ts` drives it directly, and a pure module
@@ -7,24 +11,8 @@
  */
 import { createPreferenceStore } from './preferenceStore';
 import {
-  DEFAULT_SCHEDULE_PRESETS, EMPTY_SCHEDULE, normalizePresets, normalizeSchedule,
-  type CaptureSchedule, type SchedulePreset,
+  DEFAULT_SCHEDULE_PRESETS, normalizePresets, type SchedulePreset,
 } from './captureSchedule';
-
-/**
- * The pending schedule.
- *
- * `Date.now()` is read here rather than inside `normalizeSchedule`, and the
- * moment it is read is the point: a store is loaded once, at module scope, so
- * this is exactly when a `startAt` from a previous session is judged stale and
- * dropped. Reopening the tab in the morning must not begin a capture that was
- * scheduled for the previous evening.
- */
-export const captureScheduleStore = createPreferenceStore<CaptureSchedule>(
-  'inwire.captureSchedule',
-  (raw) => normalizeSchedule(raw, Date.now()),
-  EMPTY_SCHEDULE,
-);
 
 /**
  * The preset library, seeded on first run the way the filter presets are.

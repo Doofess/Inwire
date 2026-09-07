@@ -22,6 +22,27 @@
  * the dropdown never shows two different answers to "when does this end".
  */
 
+/**
+ * How late a scheduled start may fire.
+ *
+ * A start deliberately fires for any `now >= startAt` rather than on the exact
+ * second, because a background tab's timers are throttled to roughly once a
+ * minute and a schedule that only fired on the tick it was due would be a
+ * schedule that usually did nothing.
+ *
+ * Unbounded, that rule starts captures nobody asked for. The native date picker
+ * commits a value as you move around it - pressing its "Today" button sets
+ * today with whatever time is already in the field, which is usually a time
+ * that has passed - and the next tick saw a due start and ran one. The report
+ * was "I clicked Today and it started capturing", and it was exactly right.
+ *
+ * Two minutes covers any amount of throttling and rejects a time typed an hour
+ * ago. It also answers a question the unbounded rule got wrong anyway: a
+ * capture scheduled for 2am should NOT begin at 9am because that is when the
+ * laptop was opened.
+ */
+export const START_GRACE_MS = 2 * 60_000;
+
 /** What the schedule wants done, checked once a second. */
 export type ScheduleAction = 'start' | 'stop' | 'idle';
 
@@ -127,7 +148,22 @@ export function scheduleDecision(
     const stopAt = resolveStopTime(schedule, startedAt);
     return stopAt !== null && now >= stopAt ? 'stop' : 'idle';
   }
-  return schedule.startAt !== null && now >= schedule.startAt ? 'start' : 'idle';
+  if (schedule.startAt === null) return 'idle';
+  // Due, and not so long ago that it must have been set in the past.
+  return now >= schedule.startAt && now <= schedule.startAt + START_GRACE_MS
+    ? 'start'
+    : 'idle';
+}
+
+/**
+ * True when a start is set that can no longer fire.
+ *
+ * The UI needs this to say so. Silently keeping a time that will never happen
+ * is how somebody sets a schedule, watches nothing occur, and concludes the
+ * feature is broken.
+ */
+export function isStartMissed(schedule: CaptureSchedule, now: number): boolean {
+  return schedule.startAt !== null && now > schedule.startAt + START_GRACE_MS;
 }
 
 /** Milliseconds until the running capture stops, or null when nothing will. */
@@ -179,6 +215,10 @@ export function describeSchedule(
     const left = millisUntilStop(schedule, now, startedAt);
     return left === null ? 'Schedule capture' : `Stops in ${hhmmss(left)}`;
   }
+  // A start that can no longer fire must not read as one that will. The panel
+  // already says so; a trigger still promising "Starts 14:00" would be the app
+  // disagreeing with itself in two places a centimetre apart.
+  if (isStartMissed(schedule, now)) return 'Start time passed';
   if (schedule.startAt !== null) return `Starts ${formatTime(schedule.startAt)}`;
   if (schedule.stopAt !== null) return `Stops ${formatTime(schedule.stopAt)}`;
   if (schedule.stopAfterMinutes !== null) return `Runs ${describeDuration(schedule.stopAfterMinutes)}`;
@@ -186,31 +226,11 @@ export function describeSchedule(
 }
 
 // --- the stored round trip ------------------------------------------------------
+//
+// Presets only. The SCHEDULE is session state and is never stored, so there is
+// nothing to read it back from - see the note on it in `App.tsx`.
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
-
-/**
- * Reads a stored schedule, dropping a `startAt` that has already passed.
- *
- * Dropped rather than fired: reopening the tab in the morning must not begin a
- * capture that was scheduled for the previous evening. The stop halves survive
- * - a stale absolute stop is harmless, because `scheduleDecision` reads it only
- * while capturing, and a capture starting now cannot already be past it.
- */
-export function normalizeSchedule(raw: unknown, now: number): CaptureSchedule | null {
-  if (typeof raw !== 'object' || raw === null) return null;
-  const v = raw as Record<string, unknown>;
-  const startAt = isFiniteNumber(v.startAt) && v.startAt > now ? v.startAt : null;
-  const stopAt = isFiniteNumber(v.stopAt) ? v.stopAt : null;
-  const stopAfterMinutes = isFiniteNumber(v.stopAfterMinutes) && v.stopAfterMinutes > 0
-    ? v.stopAfterMinutes
-    : null;
-  // Exclusivity is enforced on the way in as well as on the way out, so a
-  // hand-edited or older blob cannot produce a schedule with two stops.
-  return stopAt !== null
-    ? { startAt, stopAt, stopAfterMinutes: null }
-    : { startAt, stopAt: null, stopAfterMinutes };
-}
 
 export function normalizePresets(raw: unknown): SchedulePreset[] | null {
   if (!Array.isArray(raw)) return null;

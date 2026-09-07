@@ -49,6 +49,8 @@ interface HeaderProps {
   onSchedulePresetsChange: (next: SchedulePreset[]) => void;
   /** What the trigger shows - a countdown while capturing, else the armed time. */
   scheduleSummary: string;
+  /** The schedule hook's clock, forwarded to the picker. */
+  scheduleNow: number;
   /** Frames in the buffer, so the discard warning can name the number. */
   bufferedPackets: number;
   permissions: Capabilities;
@@ -91,6 +93,7 @@ export const Header: React.FC<HeaderProps> = ({
   schedulePresets,
   onSchedulePresetsChange,
   scheduleSummary,
+  scheduleNow,
   bufferedPackets,
   permissions,
   onOpenDissectorModal,
@@ -325,6 +328,7 @@ export const Header: React.FC<HeaderProps> = ({
             presets={schedulePresets}
             onPresetsChange={onSchedulePresetsChange}
             bufferedPackets={bufferedPackets}
+            now={scheduleNow}
             align="start"
           >
             <button

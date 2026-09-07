@@ -43,8 +43,10 @@ import { NO_HOST, type HostIdentity } from './services/direction';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
 import { usePacketBuffer } from './hooks/usePacketBuffer';
 import { useCaptureSchedule } from './hooks/useCaptureSchedule';
-import { captureScheduleStore, capturePresetStore } from './services/captureSchedulePrefs';
-import { describeSchedule } from './services/captureSchedule';
+import { capturePresetStore } from './services/captureSchedulePrefs';
+import {
+  describeSchedule, EMPTY_SCHEDULE, type CaptureSchedule,
+} from './services/captureSchedule';
 import { useAgentConnection } from './hooks/useAgentConnection';
 import { inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
@@ -600,8 +602,17 @@ export default function App() {
   };
 
   // --- the capture schedule ---------------------------------------------------
-  const [schedule, setSchedule] = usePreferenceValue(captureScheduleStore);
-  usePreferenceSync(captureScheduleStore.key, captureScheduleStore.normalize, captureScheduleStore.accept);
+  /**
+   * Session-only, and NOT a stored preference like the presets beside it.
+   *
+   * A schedule is a decision about the next few minutes; a preset is a habit.
+   * Persisting the first means an app opened tomorrow is still armed with a
+   * stop somebody set today and has long forgotten - and the one thing worse
+   * than a capture that will not stop is one that stops for a reason nobody
+   * remembers choosing. Reset on close, and on reload, which is a superset of
+   * what was asked and errs the safe way.
+   */
+  const [schedule, setSchedule] = useState<CaptureSchedule>(EMPTY_SCHEDULE);
   const [schedulePresets, setSchedulePresets] = usePreferenceValue(capturePresetStore);
   usePreferenceSync(capturePresetStore.key, capturePresetStore.normalize, capturePresetStore.accept);
 
@@ -1818,6 +1829,7 @@ export default function App() {
               month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
             }),
           )}
+          scheduleNow={scheduleNow}
           bufferedPackets={packets.length}
           permissions={permissions}
           onOpenDissectorModal={() => setShowDissectorModal(true)}
