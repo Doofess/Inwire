@@ -5,11 +5,14 @@ import {
   TbPlayerStop,
   TbAlertTriangle,
   TbNetwork,
+  TbClock,
 } from 'react-icons/tb';
 import { Capabilities } from '../../types/packet';
 import { AppMenu } from './AppMenu';
 import { BrandMark } from './BrandMark';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
+import { CaptureSchedulePicker } from './CaptureSchedulePicker';
+import type { CaptureSchedule, SchedulePreset } from '../../services/captureSchedule';
 import { headerButtonClass } from './headerButton';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import type { NameResolutionPrefs } from '../../services/interfacePrefs';
@@ -39,6 +42,15 @@ interface HeaderProps {
    */
   captureOwnedElsewhere?: boolean;
   onInterfacePickerOpenChange?: (open: boolean) => void;
+  /** The pending capture schedule, and its preset library. */
+  schedule: CaptureSchedule;
+  onScheduleChange: (next: CaptureSchedule) => void;
+  schedulePresets: SchedulePreset[];
+  onSchedulePresetsChange: (next: SchedulePreset[]) => void;
+  /** What the trigger shows - a countdown while capturing, else the armed time. */
+  scheduleSummary: string;
+  /** Frames in the buffer, so the discard warning can name the number. */
+  bufferedPackets: number;
   permissions: Capabilities;
   onOpenDissectorModal: () => void;
   onOpenExportModal: () => void;
@@ -74,6 +86,12 @@ export const Header: React.FC<HeaderProps> = ({
   interfaceRates,
   captureOwnedElsewhere = false,
   onInterfacePickerOpenChange,
+  schedule,
+  onScheduleChange,
+  schedulePresets,
+  onSchedulePresetsChange,
+  scheduleSummary,
+  bufferedPackets,
   permissions,
   onOpenDissectorModal,
   onOpenExportModal,
@@ -296,6 +314,28 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             </CaptureInterfacePicker>
           )}
+
+          {/* Beside the interface picker and drawn from the same button class,
+              so the two read as one pair. It sits BEFORE Start for the same
+              reason the adapter does: both are things you set before pressing
+              it, and the schedule changes what pressing it means. */}
+          <CaptureSchedulePicker
+            schedule={schedule}
+            onScheduleChange={onScheduleChange}
+            presets={schedulePresets}
+            onPresetsChange={onSchedulePresetsChange}
+            bufferedPackets={bufferedPackets}
+            align="start"
+          >
+            <button
+              data-tour="schedule"
+              className={`${interfaceButtonClass} active:scale-95 cursor-pointer`}
+              title="Schedule when this capture starts and stops"
+            >
+              <TbClock className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{scheduleSummary}</span>
+            </button>
+          </CaptureSchedulePicker>
 
           {/* One button, two states, and only the glyph changes.
               It was two buttons whose labels each named the OTHER half of the

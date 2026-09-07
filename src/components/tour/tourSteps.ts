@@ -25,7 +25,7 @@
  * No React and no DOM, so the assertion script can import it.
  */
 
-export type TourAnchor = 'menu' | 'interfaces' | 'start' | 'list' | 'detail';
+export type TourAnchor = 'menu' | 'interfaces' | 'schedule' | 'start' | 'list' | 'detail';
 
 export interface TourStep {
   anchor: TourAnchor;
@@ -54,6 +54,18 @@ export const TOUR_STEPS: TourStep[] = [
     body:
       'Pick the adapter carrying the traffic you care about - usually your Wi-Fi or '
       + 'Ethernet connection. You can select more than one.',
+    side: 'bottom',
+  },
+  {
+    // Between the adapter and Start, which is the order these are used in:
+    // both are things you set before pressing it, and this one changes what
+    // pressing it means.
+    anchor: 'schedule',
+    title: 'Set an end, or a start',
+    body:
+      'Optional. Give the capture a stop time and it ends on its own - useful when '
+      + 'you want fifteen minutes of something and not to sit watching it. Leave the '
+      + 'start empty and it begins when you press Start; set one and it begins then.',
     side: 'bottom',
   },
   {

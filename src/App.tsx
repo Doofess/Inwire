@@ -42,6 +42,9 @@ import { flowAnnotations } from './services/flowAnnotations';
 import { NO_HOST, type HostIdentity } from './services/direction';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
 import { usePacketBuffer } from './hooks/usePacketBuffer';
+import { useCaptureSchedule } from './hooks/useCaptureSchedule';
+import { captureScheduleStore, capturePresetStore } from './services/captureSchedulePrefs';
+import { describeSchedule } from './services/captureSchedule';
 import { useAgentConnection } from './hooks/useAgentConnection';
 import { inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
@@ -282,6 +285,8 @@ export default function App() {
   // Live-capture relative-time clock (reference-analyzer style): resets whenever the
   // packet buffer is emptied and a fresh capture begins.
   const captureStartRef = useRef<number | null>(null);
+  /** Wall-clock ms when the running capture was started, for the schedule. */
+  const captureStartedAtRef = useRef<number | null>(null);
   const lastPacketTimeRef = useRef<number | null>(null);
   /**
    * The auto-pause handler, held in a ref.
@@ -593,6 +598,49 @@ export default function App() {
     setIsCapturing(false);
     sendAgentCommand({ type: 'stop_capture' });
   };
+
+  // --- the capture schedule ---------------------------------------------------
+  const [schedule, setSchedule] = usePreferenceValue(captureScheduleStore);
+  usePreferenceSync(captureScheduleStore.key, captureScheduleStore.normalize, captureScheduleStore.accept);
+  const [schedulePresets, setSchedulePresets] = usePreferenceValue(capturePresetStore);
+  usePreferenceSync(capturePresetStore.key, capturePresetStore.normalize, capturePresetStore.accept);
+
+  /**
+   * Starts a capture the schedule asked for, or reports why it could not.
+   *
+   * It does what the header's own Start does - clear, then start - rather than
+   * opening a second path into the same state. The discard is deliberate and
+   * was consented to in the dropdown, which warns while the schedule is being
+   * set precisely because a timer cannot answer a confirmation dialog.
+   *
+   * Refused rather than forced when there is no adapter or no agent: nothing
+   * here can pop a picker, which is the same rule the Space shortcut follows.
+   */
+  const scheduledStart = (): boolean => {
+    if (!permissions.canCapture || selectedInterfacesRef.current.length === 0) {
+      setNavNotice('Scheduled capture skipped: no adapter selected.');
+      return false;
+    }
+    if (agentStatus !== 'connected') {
+      setNavNotice('Scheduled capture skipped: the agent is not connected.');
+      return false;
+    }
+    handleClearPackets();
+    void handleStartCapture();
+    setNavNotice('Scheduled capture started.');
+    return true;
+  };
+
+  const { now: scheduleNow } = useCaptureSchedule({
+    schedule,
+    isCapturingRef,
+    captureStartedAtRef,
+    onScheduledStart: scheduledStart,
+    onScheduledStop: () => {
+      handlePauseCapture();
+      setNavNotice('Scheduled capture stopped.');
+    },
+  });
   /**
    * True while a stored session is being decoded back into the buffer. Read by
    * the effects that must not write a half-restored session back to disk.
@@ -1435,6 +1483,12 @@ export default function App() {
     clearCaptureStats();
     await clearSession();
     setStorage({ storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0 });
+    // Wall-clock, and NOT `captureStartRef`: that one holds the first packet's
+    // capture time, so on a quiet adapter it stays null for as long as the
+    // network is silent. A scheduled duration has to measure from the moment
+    // the capture was asked for, or "capture for 5 minutes" on an idle link
+    // would never end.
+    captureStartedAtRef.current = Date.now();
     sendAgentCommand({ type: 'start_capture' });
     setIsCapturing(true);
   };
@@ -1442,6 +1496,7 @@ export default function App() {
   const handlePauseCapture = () => {
     sendAgentCommand({ type: 'stop_capture' });
     setIsCapturing(false);
+    captureStartedAtRef.current = null;
   };
 
   /**
@@ -1751,6 +1806,19 @@ export default function App() {
           interfaceRates={interfaceRates}
           captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
           onInterfacePickerOpenChange={handleInterfacePickerOpenChange}
+          schedule={schedule}
+          onScheduleChange={setSchedule}
+          schedulePresets={schedulePresets}
+          onSchedulePresetsChange={setSchedulePresets}
+          // Recomputed on the hook's own tick, which is what makes the
+          // countdown advance without this component owning a timer.
+          scheduleSummary={describeSchedule(
+            schedule, scheduleNow, isCapturing, captureStartedAtRef.current,
+            (epochMs) => new Date(epochMs).toLocaleString(undefined, {
+              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+            }),
+          )}
+          bufferedPackets={packets.length}
           permissions={permissions}
           onOpenDissectorModal={() => setShowDissectorModal(true)}
           onOpenExportModal={() => setShowExportModal(true)}
