@@ -28,6 +28,15 @@
  * implementation at all: **resident bytes must equal the sum recomputed over
  * the frames actually in the buffer.** That one cannot be satisfied by copying
  * the code it tests.
+ *
+ * What this file cannot do is prove the stored session matches the buffer,
+ * because the store needs IndexedDB. That was checked by hand once, on a real
+ * capture, and the result is recorded here so nobody has to repeat it blind: a
+ * 3,828-frame session was discarded, a fresh capture of 1,673 frames taken, and
+ * a reload restored **exactly 1,673** - contiguous, ending where the capture
+ * ended. Before `handleStartCapture` cleared the session it would have restored
+ * those 1,673 plus the previous capture's frames 1,674 and up, since the store
+ * keys by id and nothing deleted the tail.
  */
 import {
   adoptAccounting, commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
