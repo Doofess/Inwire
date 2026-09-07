@@ -8,6 +8,7 @@ export type ProtocolType =
   | 'DNS'
   | 'GRE'
   | 'LDAP'
+  | 'SMB2'
   | 'TLS'
   | 'ICMP'
   | 'ARP'

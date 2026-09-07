@@ -658,6 +658,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'RADIUS Protocol': 'radius',
   'Simple Network Management Protocol': 'snmp',
   'Lightweight Directory Access Protocol': 'ldap',
+  'SMB2': 'smb2',
   'Generic Routing Encapsulation': 'gre',
   'Session Initiation Protocol': 'sip',
   'Real-time Transport Control Protocol': 'rtcp',
