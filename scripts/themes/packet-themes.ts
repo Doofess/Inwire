@@ -38,11 +38,13 @@ import {
   HUE_BY_ROLE,
   FIXED_ROLE_COLORS,
   contrastRatio,
+  SENDER_INK_ALPHA,
+  SENDER_INK_MIN_CONTRAST,
   type PacketColorSet,
   type RuleRole,
 } from '../../src/services/packetThemes';
 import { PALETTE_BY_THEME, HUES, themePalette } from '../../src/services/themePalettes';
-import { deltaE76, chroma, toLabColor } from '../../src/lib/colorMix';
+import { deltaE76, chroma, toLabColor, mixHex } from '../../src/lib/colorMix';
 import { THEME_OPTIONS } from '../../src/lib/themeOptions';
 
 let failures = 0;
@@ -529,6 +531,42 @@ for (const theme of THEMES) {
   }
 }
 check('every palette surface matches its theme block in index.css', surfaceDrift, []);
+
+// --- the Source column's program annotation ------------------------------------
+//
+// `<address>\<program>` dims the program half, and that dim used to be
+// `text-muted-foreground` - the APP theme's grey, painted on a row the
+// COLOURING CHAIN filled. Measured across every rule in every theme and colour
+// set, its worst case was **1.06:1**: not dim, invisible. Eleven of the twelve
+// theme/set combinations came out below 1.5:1, which is why the report was
+// "hard to read in some of the packet colors" rather than "unreadable".
+//
+// It is a fraction of the row's own ink now, so it inherits the contrast the
+// rule already had to guarantee and gives back only a fixed part of it. This
+// holds that floor: the rule inks clear AA on their own fills with almost
+// nothing spare - 4.51:1 at the worst, undimmed - so the alpha cannot go much
+// lower without the annotation going the way the grey went.
+
+{
+  let worst = Infinity;
+  let where = '';
+  for (const themeName of THEMES) {
+    for (const set of PACKET_COLOR_SETS) {
+      const packet = getPacketThemeForApp(themeName, set);
+      const fills: [string, string, string][] = [
+        ['(no rule matched)', packet.surface.background, packet.surface.foreground],
+        ...Object.entries(packet.rules).map(([id, c]) =>
+          [id, c.background, c.color] as [string, string, string]),
+      ];
+      for (const [id, background, ink] of fills) {
+        const ratio = contrastRatio(mixHex(ink, background, SENDER_INK_ALPHA), background);
+        if (ratio < worst) { worst = ratio; where = `${themeName}/${set} ${id}`; }
+      }
+    }
+  }
+  checkTrue(`the dimmed program name clears ${SENDER_INK_MIN_CONTRAST}:1 everywhere`
+    + ` (worst ${worst.toFixed(2)}:1, ${where})`, worst >= SENDER_INK_MIN_CONTRAST);
+}
 
 // --- Fallback ----------------------------------------------------------------
 

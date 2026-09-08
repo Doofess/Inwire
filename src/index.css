@@ -38,6 +38,13 @@
 ));
 
 :root {
+  /* How much of a row's own ink its column separators keep - see `.packet-grid`
+     below. Higher on the light themes, and measured rather than tuned by eye: a
+     dark ink at a fixed alpha over a light ground yields LESS luminance ratio
+     than a light ink over a dark one, so one number cannot weigh the same in
+     both. At 14% the light rows measured 1.31:1 against the dark themes' 1.45;
+     20% brings them to 1.49 and the header to parity too. */
+  --packet-gridline-mix: 20%;
   --background: #f6f7f9;
   --foreground: #1b1f24;
   --card: #ffffff;
@@ -111,6 +118,9 @@
    to be visible ON accent-filled controls as well as beside them, and a ring
    the same colour as the button it surrounds is not a ring. */
 .dark {
+  /* See the note in `:root`. The dark themes are the baseline this was
+     equalised TO, so they keep 14%. */
+  --packet-gridline-mix: 14%;
   --background: #0c0a09;
   --foreground: #e7e5e4;
   --card: #1c1917;
@@ -484,11 +494,13 @@
    on a dark expert band. That is the same "visibility depends on which row it
    crosses" fault the borrowed `divide-border/40` had, with the sign flipped.
 
-   14% is quiet on purpose. This runs down every row on screen, and a grid the
-   eye has to look past is worse than no grid: the job is to say where one
-   column ends, not to draw a table. */
+   The fraction is quiet on purpose. This runs down every row on screen, and a
+   grid the eye has to look past is worse than no grid: the job is to say where
+   one column ends, not to draw a table. It is a per-theme token because a fixed
+   one does not weigh the same on a light ground as on a dark one - see
+   `--packet-gridline-mix` in `:root`. */
 .packet-grid tr > :not(:last-child) {
-  border-right-color: color-mix(in oklab, currentColor 14%, transparent);
+  border-right-color: color-mix(in oklab, currentColor var(--packet-gridline-mix, 14%), transparent);
 }
 
 /* Custom scrollbars for high-density packet tables.
@@ -578,6 +590,8 @@
    the wordmark, and as text on the card, and a true brown fails the last of
    those on a ground this light. */
 .paper {
+  /* See the note in `:root`. */
+  --packet-gridline-mix: 20%;
   --background: #f4efe4;
   --foreground: #2b2620;
   --card: #fdfaf3;
@@ -630,6 +644,8 @@
    different themes at a glance rather than as two greys - the registry's
    surface check wants 5 deltaE between any pair and this gives 7.8. */
 .midnight {
+  /* See the note in `:root`. */
+  --packet-gridline-mix: 14%;
   --background: #0d1219;
   --foreground: #dbe3ec;
   --card: #161d26;

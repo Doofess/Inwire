@@ -132,7 +132,12 @@ const REQUIRED_TOKENS = tokensIn(':root');
 // rather than a floor: it is the tripwire for someone adding a token to `:root`
 // and to nowhere else, which is silent - the other themes just inherit the
 // light value and nothing throws.
-check('the :root baseline declares 34 tokens', REQUIRED_TOKENS.length, 34);
+// 35 since `--packet-gridline-mix` joined them: how much of a row's own ink the
+// packet list's column separators keep, which has to differ between the light
+// and dark themes because a dark ink over a light ground carries less luminance
+// ratio than a light ink over a dark one. This check is what caught it being
+// added, which is exactly the tripwire it is there to be.
+check('the :root baseline declares 35 tokens', REQUIRED_TOKENS.length, 35);
 
 for (const t of THEME_OPTIONS) {
   if (!t.mode) continue;

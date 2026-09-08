@@ -421,6 +421,31 @@ export const PACKET_COLOR_SET_SPECS: Record<PacketColorSet, PacketColorSetSpec> 
 };
 
 /** The set for a stored value, falling back to `default` for anything else. */
+/**
+ * How much of the row's own ink the Source column's program name keeps.
+ *
+ * `<address>\<program>` is dimmed deliberately - the address is the identity
+ * and the program is an annotation, and at full strength the two read as one
+ * long token and the column stops scanning as a list of addresses. The dim was
+ * `text-muted-foreground`, which is the APP theme's grey painted on a row the
+ * colouring chain filled, and measured across every rule in every theme and
+ * colour set its worst case was **1.06:1** - invisible. Eleven of the twelve
+ * theme/set combinations were below 1.5:1.
+ *
+ * Dimming is now a reduction of the row's OWN ink, which the colouring rule
+ * chose to be legible on that row's fill, so the annotation inherits the
+ * contrast the rule already guaranteed and only gives back a fixed fraction of
+ * it. Worst case 3.77:1 at this value, against 4.51:1 undimmed - the rule inks
+ * clear AA on their own fills with almost nothing spare, so any dim at all
+ * costs some of it, and this buys back the hierarchy for the least.
+ * `scripts/themes/packet-themes.ts` holds it to a floor so a palette change
+ * cannot quietly undo this.
+ */
+export const SENDER_INK_ALPHA = 0.85;
+
+/** The floor that value is held to. Below this the annotation stops reading. */
+export const SENDER_INK_MIN_CONTRAST = 3;
+
 export function packetColorSet(raw: unknown): PacketColorSet {
   return PACKET_COLOR_SETS.includes(raw as PacketColorSet) ? (raw as PacketColorSet) : 'default';
 }
