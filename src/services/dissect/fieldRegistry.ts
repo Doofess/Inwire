@@ -68,7 +68,7 @@ export const LAYERS = [
   // what a user types, and it has to be the one they already know.
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'tftp', 'bfd', 'coap', 'ptp',
-  'hsrp', 'rip', 'ripng', 'ldap', 'smb2', 'http', 'http2', 'http3',
+  'hsrp', 'rip', 'ripng', 'ldap', 'smb2', 'kerberos', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -84,6 +84,18 @@ const bool = (abbrev: string, label: string, layer: LayerToken): FieldDef =>
   ({ abbrev, label, type: 'bool', layer });
 
 export const FIELDS: readonly FieldDef[] = [
+  // --- Kerberos ---------------------------------------------------------------
+  // The Protocol column reads KRB5 and the filter token reads `kerberos`; both
+  // are the reference's own spellings. `cname_string`/`sname_string` are the
+  // joined principal (`krbtgt/EXAMPLE.COM`), which is what the reference calls
+  // the name-string list rather than the `cname`/`sname` structural elements.
+  uint('kerberos.msg_type', 'Message Type', 'kerberos'),
+  uint('kerberos.pvno', 'Protocol Version', 'kerberos'),
+  uint('kerberos.error_code', 'Error Code', 'kerberos'),
+  str('kerberos.realm', 'Realm', 'kerberos'),
+  str('kerberos.crealm', 'Client Realm', 'kerberos'),
+  str('kerberos.cname_string', 'Client Name', 'kerberos'),
+  str('kerberos.sname_string', 'Server Name', 'kerberos'),
   // --- Ethernet --------------------------------------------------------------
   { abbrev: 'eth.src', label: 'Source', type: 'mac', layer: 'eth' },
   { abbrev: 'eth.dst', label: 'Destination', type: 'mac', layer: 'eth' },

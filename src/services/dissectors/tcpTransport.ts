@@ -23,6 +23,7 @@ import { freshTlsConversation, freshTlsCursor } from '../tcpStreamTracker';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './appStream';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
 import { dissectLdap, looksLikeLdap, freshLdapConversation, type LdapResult } from './ldap';
+import { dissectKerberos, looksLikeKerberos, KERBEROS_PORT, type KerberosResult } from './kerberos';
 import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2Result } from './smb2';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
 
@@ -333,12 +334,28 @@ export function dissectTcpTransport(
     }
   }
 
+  // Kerberos, the same shape again - a length-prefixed message on a well-known
+  // port - and the one of the three that needs NO per-connection state: every
+  // Info line the reference prints is a function of the message alone, since it
+  // prints only the message's name. `framed` is true here and false on UDP,
+  // which is the whole difference between the two transports.
+  let kerberosResult: KerberosResult | null = null;
+  if (!tcpDns && !ldapResult && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder
+    && (srcPort === KERBEROS_PORT || dstPort === KERBEROS_PORT)) {
+    const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+    // Past the four-byte length prefix before asking what the message looks
+    // like - the prefix is framing, not part of the DER.
+    if (looksLikeKerberos(rawBytes, tcpPayloadStart + 4, payloadEnd)) {
+      kerberosResult = dissectKerberos(rawBytes, tcpPayloadStart, payloadEnd, true);
+    }
+  }
+
   // SMB2, the same shape as LDAP: a length-prefixed message on a well-known
   // port, with per-connection state - a Create response names the file the
   // REQUEST asked for, which no single frame carries.
   let smb2Result: Smb2Result | null = null;
-  if (!tcpDns && !ldapResult && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder
-    && (srcPort === SMB2_PORT || dstPort === SMB2_PORT)) {
+  if (!tcpDns && !ldapResult && !kerberosResult && payloadLength > 0 && !isKeepAlive
+    && !isRetransmitted && tlsInOrder && (srcPort === SMB2_PORT || dstPort === SMB2_PORT)) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     if (looksLikeSmb2(rawBytes, tcpPayloadStart, payloadEnd)) {
       const state = tcpTracker
@@ -348,7 +365,8 @@ export function dissectTcpTransport(
     }
   }
 
-  if (!tcpDns && !ldapResult && !smb2Result && payloadLength > 0 && !isKeepAlive && !isRetransmitted) {
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && payloadLength > 0
+    && !isKeepAlive && !isRetransmitted) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
     if (isTlsPort || existing !== undefined || looksLikeTlsRecord(rawBytes, tcpPayloadStart, payloadEnd)) {
@@ -413,6 +431,11 @@ export function dissectTcpTransport(
   } else if (ldapResult) {
     proto = 'LDAP';
     protocolLabel = 'LDAP';
+  } else if (kerberosResult) {
+    proto = 'KRB5';
+    // The Protocol column says KRB5 and the filter token says `kerberos`. Both
+    // are the reference's own choice and they genuinely differ.
+    protocolLabel = 'KRB5';
   } else if (smb2Result) {
     proto = 'SMB2';
     protocolLabel = 'SMB2';
@@ -444,7 +467,9 @@ export function dissectTcpTransport(
   // one - the reference analyzer shows "Application Data", not the ports and sequence
   // numbers underneath it. Expert tags still lead, since they describe the
   // segment rather than its contents.
-  const infoParts = smb2Result
+  const infoParts = kerberosResult
+    ? [kerberosResult.info]
+    : smb2Result
     ? [smb2Result.info]
     : ldapResult
     ? [ldapResult.info]
@@ -468,7 +493,8 @@ export function dissectTcpTransport(
   // subdissector provided the Info, Wireshark's column joins the TCP expert
   // tags to it with " , " - the artefact of two dissectors each appending
   // to one column. Matched exactly, since the column text is the contract.
-  const info = (tlsResult || tcpDns || httpResult || ldapResult || smb2Result) && expertTags.length > 0
+  const info = (tlsResult || tcpDns || httpResult || ldapResult || smb2Result || kerberosResult)
+    && expertTags.length > 0
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
 
@@ -479,7 +505,9 @@ export function dissectTcpTransport(
     dstPort,
     info,
     streamId,
-    extraLayers: smb2Result
+    extraLayers: kerberosResult
+      ? [kerberosResult.layer]
+      : smb2Result
       ? [smb2Result.layer]
       : ldapResult
       ? [ldapResult.layer]
@@ -496,6 +524,7 @@ export function dissectTcpTransport(
     reassembledFrom,
     labelPatches,
     fields: {
+      ...(kerberosResult ? kerberosResult.fields : {}),
       ...(smb2Result ? smb2Result.fields : {}),
       ...(ldapResult ? ldapResult.fields : {}),
       ...(tlsResult ? tlsResult.fields : {}),
