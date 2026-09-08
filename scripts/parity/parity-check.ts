@@ -158,10 +158,15 @@ const COUNTERS: Record<string, (packets: Packet[]) => number> = {
  * printed as a gap for as long as the number sat there, and because the count
  * was never enforced, nothing ever failed to say so.
  *
- * Only some counts can be derived. The recorded ground-truth fields carry the
- * Protocol column, the Info line and the three fingerprints, and nothing at all
- * about `tcp.analysis` - so the retransmission family stays hand-written, and
- * says here that it is. The ones that CAN be derived are, and a disagreement
+ * Only some counts can be derived, but more than the first version of this
+ * claimed. `tcp.analysis` is not among the recorded fields - which is why the
+ * retransmission family stays hand-written - but the expert tags are PREFIXES
+ * on the Info column, so anything with a tag of its own can be counted from the
+ * text. `dupAck` is one, and reading it that way is what located the single
+ * frame behind `17 | 16`: the reference set and ours differed by frame 9379 and
+ * nothing else. The retransmission family still cannot come this way, because
+ * tshark's one flag covers the fast and spurious kinds, which print different
+ * tags. The ones that CAN be derived are, and a disagreement
  * fails the run: the same treatment the Wireshark abbrev exemptions get, for
  * the same reason. A hand-kept expectation is a second implementation of the
  * thing it is checking.
@@ -175,6 +180,9 @@ const REFERENCE_COUNTERS: Record<string, (rows: GroundTruthRow[]) => number> = {
   // connection's server name in the packet-list column - which is exactly why
   // the app-side counter reads a field for QUIC and the Info line for TCP.
   quicClientHelloSni: rows => rows.filter(r => r.protocol === 'QUIC' && r.ja3 !== '').length,
+  // The tag carries a per-frame number - `[TCP Dup ACK 7078#1]` - so the match
+  // is on the prefix alone.
+  dupAck: rows => rows.filter(r => r.info.includes('[TCP Dup ACK')).length,
 };
 
 // --- the run -----------------------------------------------------------------

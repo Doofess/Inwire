@@ -148,6 +148,69 @@ function seg(over: Partial<TcpSegment> & { timeUs: number }): TcpSegment {
   check('an ACK past a gap is again flagged', b2.flags, ['ack_lost_segment']);
 }
 
+// --- a SACK block settles dup-ACK vs window-update ------------------------------
+//
+// These four expectations are tshark's, taken by building the frames and asking
+// it, not read off the C. Two segments identical but for the option read
+// `[TCP Window Update]` without a SACK block and `[TCP Dup ACK]` with one, on a
+// segment whose advertised window had changed.
+//
+// It is the rule that closed the last mismatched analysis count in either
+// fixture. A keep-alive DOES update the remembered window - the first block
+// below pins that, because it is the half that surprises - so a direction that
+// sends one at a smaller window makes its next ordinary ACK look like a change.
+// inwire frame 9379 read as a window update 1,332 frames after two keep-alives
+// at 131072 pulled the remembered window down from 131584, and the SACK block
+// it carried is what says it was never a window update at all: a receiver
+// reporting a hole is the definition of a duplicate ACK.
+
+/** a sends 100 bytes, b acknowledges them, and b is the direction under test. */
+function primed(): ReturnType<typeof freshConnection> {
+  const c = freshConnection();
+  analyzeTcpSegment(c, 'a', seg({ timeUs: 0, seq: 1, segLen: 100, window: 8192 }));
+  analyzeTcpSegment(c, 'b', seg({ timeUs: 100, seq: 1, ack: 101, window: 8192 }));
+  return c;
+}
+
+{
+  const c = primed();
+  const again = analyzeTcpSegment(c, 'b', seg({ timeUs: 200, seq: 1, ack: 101, window: 8192 }));
+  check('the same ACK twice, same window, is a duplicate', again.flags, ['duplicate_ack']);
+  check('...and counts itself', again.dupAckNum, 1);
+}
+
+{
+  const c = primed();
+  const wider = analyzeTcpSegment(c, 'b', seg({ timeUs: 200, seq: 1, ack: 101, window: 4096 }));
+  check('the same ACK with a different window is a window update', wider.flags, ['window_update']);
+}
+
+{
+  const c = primed();
+  // seq = nextSeq - 1 is the keep-alive signature, and it carries a smaller
+  // window. The window it advertises IS remembered - measured, and the reason
+  // the fixture frame went wrong 1,332 frames later.
+  const ka = analyzeTcpSegment(c, 'b', seg({ timeUs: 200, seq: 0, ack: 101, window: 4096 }));
+  check('a keep-alive is recognised', ka.flags, ['keep_alive']);
+  const after = analyzeTcpSegment(c, 'b', seg({ timeUs: 300, seq: 1, ack: 101, window: 8192 }));
+  check('...and it moved the remembered window, so the next ACK reads as an update',
+    after.flags, ['window_update']);
+}
+
+{
+  const c = primed();
+  analyzeTcpSegment(c, 'b', seg({ timeUs: 200, seq: 0, ack: 101, window: 4096 }));
+  // The same frame as above, plus a SACK block. The receiver is reporting a
+  // hole, so the window it advertises cannot make this a window update.
+  const sacked = analyzeTcpSegment(c, 'b', seg({
+    timeUs: 300, seq: 1, ack: 101, window: 8192,
+    sackBlocks: [{ left: 200, right: 300 }],
+  }));
+  check('a SACK block makes it a duplicate ACK despite the changed window',
+    sacked.flags, ['duplicate_ack']);
+  check('...and never both at once', sacked.flags.includes('window_update'), false);
+}
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);

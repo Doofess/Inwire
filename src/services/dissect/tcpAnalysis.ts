@@ -227,9 +227,25 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   if (!finishedFwd && fwd.nextSeq !== 0 && gt(seq, fwd.nextSeq) && !s.rst) flags.add('lost_segment');
   // KEEP ALIVE
   if (!finishedFwd && (seglen === 0 || seglen === 1) && seq === add(fwd.nextSeq, -1) && plain) flags.add('keep_alive');
+  // A zero-length segment carrying a SACK block is reporting a HOLE - which is
+  // what a duplicate ACK is - so whatever window it happens to advertise does
+  // not make it a window update. Measured rather than read off the source: two
+  // frames identical but for the option read `[TCP Window Update]` without it
+  // and `[TCP Dup ACK 2#2]` with it, on a segment whose window had changed.
+  //
+  // It is worth the line because without it one keep-alive poisons everything
+  // after it. A keep-alive DOES update the remembered window (also measured),
+  // so a direction that sends one at a smaller window makes its next ordinary
+  // ACK look like a change - and inwire frame 9379 read as a window update
+  // 1,332 frames after two keep-alives at 131072 pulled the remembered window
+  // down from 131584. It was the last mismatched analysis count in either
+  // fixture, and fixing it took inwire's colour-rule column to 100%.
+  const hasSack = (s.sackBlocks ?? []).length > 0;
   // WINDOW UPDATE
   if (!finishedFwd && seglen === 0 && window !== 0 && window !== fwd.window
-    && seq === fwd.nextSeq && ack === fwd.lastAck && plain) flags.add('window_update');
+    && seq === fwd.nextSeq && ack === fwd.lastAck && plain && !hasSack) {
+    flags.add('window_update');
+  }
   // WINDOW FULL
   if (!finishedFwd && seglen > 0 && rev.winScale !== -1 && plain
     && add(seq, seglen) === add(rev.lastAck, rev.window << Math.max(0, rev.winScale))) flags.add('window_full');
@@ -246,9 +262,10 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
     if (ack === add(fwd.lastAck, 1)) { rev.nextSeq = ack; rev.maxSeqToBeAcked = ack; }
     finishedFwd = true;
   }
-  // DUPLICATE ACK
-  if (!finishedFwd && seglen === 0 && window !== 0 && window === fwd.window && seq === fwd.nextSeq
-    && ack === fwd.lastAck && plain) {
+  // DUPLICATE ACK. The window must match UNLESS the segment carries a SACK
+  // block, which reports the hole on its own - see the note above.
+  if (!finishedFwd && seglen === 0 && window !== 0 && (hasSack || window === fwd.window)
+    && seq === fwd.nextSeq && ack === fwd.lastAck && plain) {
     fwd.dupAckNum++;
     flags.add('duplicate_ack');
     out.dupAckNum = fwd.dupAckNum;
