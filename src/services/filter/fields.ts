@@ -215,7 +215,7 @@ const NO_LAYERS_FALLBACK: Record<string, (p: Packet) => boolean> = {
  * the Ethernet FCS, so the field can never have a value no matter what is
  * implemented.
  */
-const UNDISSECTED = [
+export const UNDISSECTED = [
   // Routing and redundancy, from the reference analyzer's "Routing" and
   // "Checksum Errors" default rules.
   // hsrp, vrrp, ospf and rip left this list when they became real layer
@@ -225,14 +225,18 @@ const UNDISSECTED = [
   // Discovery and management. `cdp` left this list - see dissectors/cdp.ts.
   'gvrp', 'ismp', 'vtp', 'dtp', 'edp',
   // Windows file sharing, from the "SMB" rule.
-  // `nbns` was here until it became a real layer token - see dissectors/nbns.ts.
-  'smb', 'smb2', 'nbss', 'netbios', 'dcerpc', 'browser',
+  // `nbns` was here until it became a real layer token - see dissectors/nbns.ts,
+  // and `smb2` went the same way - see dissectors/smb2.ts. `smb` is SMB1, which
+  // is a different wire format rather than the same protocol with a smaller
+  // number, so it stays.
+  'smb', 'nbss', 'netbios', 'dcerpc', 'browser',
   // Transport and application layers not yet decoded.
   // sip, radius, snmp and rtcp left this list when they became real layer
   // tokens. `rtcp` outstayed the others by a batch, which meant a misspelt
   // `rtcp.*` name was reported as "a protocol this build cannot decode"
   // rather than as the typo it was - the check below is what caught it.
-  'sctp', 'rtp', 'ldap', 'kerberos',
+  // `ldap` left this list when it became a real layer token - dissectors/ldap.ts.
+  'sctp', 'rtp', 'kerberos',
   // Never available from a capture, whatever is implemented.
   'eth.fcs',
 ];

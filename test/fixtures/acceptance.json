@@ -72,12 +72,15 @@
         "frames": 14782,
         "quicRows": 86,
         "tcpRst": 1,
-        "tcpClientHelloSni": 3
+        "tcpClientHelloSni": 1,
+        "quicClientHelloSni": 2
       },
       "enforce": [
         "frames",
         "quicRows",
-        "tcpRst"
+        "tcpRst",
+        "tcpClientHelloSni",
+        "quicClientHelloSni"
       ]
     }
   }

@@ -17,10 +17,10 @@
 import { FilterEngine } from '../../src/services/filterEngine';
 import { compile } from '../../src/services/filter/compile';
 import { tokenize } from '../../src/services/filter/lexer';
-import { knownFieldNames } from '../../src/services/filter/fields';
+import { knownFieldNames, UNDISSECTED } from '../../src/services/filter/fields';
 import { combineFilter, fieldTerm } from '../../src/services/filter/fromField';
 import { MAX_CUSTOM_COLUMNS, normalizeCustomColumns } from '../../src/lib/packetColumns';
-import { FIELD_BY_ABBREV } from '../../src/services/dissect/fieldRegistry';
+import { FIELD_BY_ABBREV, LAYERS } from '../../src/services/dissect/fieldRegistry';
 import { DEFAULT_COLOR_RULES } from '../../src/services/colorRules';
 import { DEFAULT_FILTER_PRESET_LIBRARY, allPresets } from '../../src/services/filterPresets';
 import type { Packet, ProtocolType } from '../../src/types/packet';
@@ -253,6 +253,34 @@ check('...and so is a field belonging to one', {
   valid: FilterEngine.validateFilter('bgp.type != 1').isValid,
   warnings: FilterEngine.validateFilter('bgp.type != 1').warnings?.length,
 }, { valid: true, warnings: 1 });
+// --- the two lists of protocol names must not overlap ---------------------------
+//
+// `UNDISSECTED` names protocols this build recognises and cannot decode, so a
+// colour rule written against one keeps its filter instead of reading as a
+// typo. `LAYERS` names the ones it CAN decode. A name on both is a claim and
+// its own denial, and the checks above could not catch it: they are hand-picked
+// examples, and each one had to be hand-edited as its protocol landed - the
+// comment above records `ospf.msg` standing here asserting the opposite of what
+// it meant, and `fields.ts` records `rtcp` outstaying the others by a batch.
+//
+// Both had in fact happened again by the time this was written: `ldap` and
+// `smb2` were still listed as undissected with working dissectors, real layer
+// tokens and registered fields. Nothing broke visibly, which is the point - a
+// bareword returns early from `layerPresence`, so `smb2` filtered correctly.
+// Only a MISSPELT `smb2.*` field took the wrong branch, and was reported as
+// "a protocol this build cannot decode" rather than as the typo it was: the
+// exact failure the rtcp note describes, found the same way, by accident.
+{
+  const overlap = UNDISSECTED.filter((n) => (LAYERS as readonly string[]).includes(n));
+  check('no protocol is both undissected and a layer token', overlap, []);
+  // The other direction: a name here that Wireshark's default rules do not use
+  // and no dissector is planned for is dead weight, but that is a judgement
+  // call rather than a contradiction - so only the prefix form is asserted,
+  // which is what makes the typo branch reachable at all.
+  check('every undissected name is a bare protocol, not a field',
+    UNDISSECTED.filter((n) => n.includes('.') && n !== 'eth.fcs'), []);
+}
+
 // --- every registered name is actually reachable -------------------------------
 //
 // The parser lower-cases a field name, which was harmless while every abbrev
