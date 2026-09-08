@@ -148,6 +148,35 @@ const COUNTERS: Record<string, (packets: Packet[]) => number> = {
   lostSegment: ps => ps.filter(p => has(p, 'lost_segment')).length,
 };
 
+/**
+ * The same counts, read off the ground truth instead of typed by hand.
+ *
+ * `spec.counts` is the tshark side of every count, and nothing checked it. One
+ * was wrong: bulk's `tcpClientHelloSni` said 3, which is how many ClientHellos
+ * that capture holds - but two of them are QUIC, and the counter deliberately
+ * asks for frames carrying `tcp`. So a build agreeing with tshark exactly
+ * printed as a gap for as long as the number sat there, and because the count
+ * was never enforced, nothing ever failed to say so.
+ *
+ * Only some counts can be derived. The recorded ground-truth fields carry the
+ * Protocol column, the Info line and the three fingerprints, and nothing at all
+ * about `tcp.analysis` - so the retransmission family stays hand-written, and
+ * says here that it is. The ones that CAN be derived are, and a disagreement
+ * fails the run: the same treatment the Wireshark abbrev exemptions get, for
+ * the same reason. A hand-kept expectation is a second implementation of the
+ * thing it is checking.
+ */
+const REFERENCE_COUNTERS: Record<string, (rows: GroundTruthRow[]) => number> = {
+  frames: rows => rows.length,
+  quicRows: rows => rows.filter(r => r.protocol === 'QUIC').length,
+  tcpClientHelloSni: rows =>
+    rows.filter(r => r.protocol !== 'QUIC' && /Client Hello \(SNI=/.test(r.info)).length,
+  // By fingerprint rather than by Info, because tshark does not put a QUIC
+  // connection's server name in the packet-list column - which is exactly why
+  // the app-side counter reads a field for QUIC and the Info line for TCP.
+  quicClientHelloSni: rows => rows.filter(r => r.protocol === 'QUIC' && r.ja3 !== '').length,
+};
+
 // --- the run -----------------------------------------------------------------
 
 interface ColumnResult { name: string; pct: number; mismatches: number; compared: number }
@@ -253,6 +282,17 @@ async function checkFixture(name: string, spec: FixtureSpec, maxDiffs: number): 
     if (!ok) failures.push(`${name}: ${c.name} ${c.pct.toFixed(2)}% is below its floor ${floor}%`);
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${c.name.padEnd(12)} ${c.pct.toFixed(2).padStart(6)}%  (floor ${floor}%)  ${c.compared - c.mismatches}/${c.compared}`);
   }
+  // Before comparing anything against the stored expectations, check the
+  // stored expectations against the reference they claim to be quoting.
+  for (const [key, fn] of Object.entries(REFERENCE_COUNTERS)) {
+    if (!(key in spec.counts)) continue;
+    const derived = fn(rows);
+    if (derived !== spec.counts[key]) {
+      failures.push(`${name}: acceptance.json says tshark counts ${spec.counts[key]} `
+        + `${key}, but the ground truth says ${derived}`);
+    }
+  }
+
   console.log('\n--- counts (tshark reference | inwire) ---');
   for (const [key, expected] of Object.entries(spec.counts)) {
     const actual = counts[key];
