@@ -38,13 +38,10 @@
 ));
 
 :root {
-  /* How much of a row's own ink its column separators keep - see `.packet-grid`
-     below. Higher on the light themes, and measured rather than tuned by eye: a
-     dark ink at a fixed alpha over a light ground yields LESS luminance ratio
-     than a light ink over a dark one, so one number cannot weigh the same in
-     both. At 14% the light rows measured 1.31:1 against the dark themes' 1.45;
-     20% brings them to 1.49 and the header to parity too. */
-  --packet-gridline-mix: 20%;
+  /* How much white a column separator mixes into the background it is drawn
+     on - see `.packet-grid` below. One value for every theme, because the line
+     is now a function of that background alone. */
+  --packet-gridline-lighten: 40%;
   --background: #f6f7f9;
   --foreground: #1b1f24;
   --card: #ffffff;
@@ -118,9 +115,8 @@
    to be visible ON accent-filled controls as well as beside them, and a ring
    the same colour as the button it surrounds is not a ring. */
 .dark {
-  /* See the note in `:root`. The dark themes are the baseline this was
-     equalised TO, so they keep 14%. */
-  --packet-gridline-mix: 14%;
+  /* See the note in `:root`. */
+  --packet-gridline-lighten: 40%;
   --background: #0c0a09;
   --foreground: #e7e5e4;
   --card: #1c1917;
@@ -468,39 +464,30 @@
 
 /* The packet list's column separators.
 
-   Every one of them is the same value in the markup, and that was the problem:
-   `divide-border` is the APP's panel border, and the packet list is the one
-   surface in this app that does not use the app's ground. It paints itself
-   from the packet theme (`surface.background`), and its rows are then painted
-   again by the colouring chain. So a single borrowed colour had to sit on
-   three different things at once, and on this theme it landed at #232b36
-   against a #1e2733 header - a line the same lightness as the thing behind it -
-   while the rows' /40 alpha let each colouring rule decide how visible its own
-   separators were. Whether a separator could be seen depended on which row it
-   crossed, which is why they did not look like one grid.
+   One rule for the whole grid: a separator is the background it is drawn on,
+   lightened. Nothing else - not the app's `--border`, which is what it used to
+   be and which knows nothing about a list that paints its own ground and then
+   lets the colouring chain paint every row again on top; and not the row's ink,
+   which was the second attempt and reads differently on a light theme than on a
+   dark one because a dark ink over a light ground carries less luminance ratio
+   than a light ink over a dark one.
 
-   A separator is now derived from `currentColor` - the ink of the row it is
-   drawn on - at a low alpha. That is the only value in reach that is correct
-   for every row, because the row's ink was CHOSEN to be legible on that row's
-   fill: a colouring rule sets both together, and a rule that painted a frame
-   yellow put readable text on it. So the separator inherits the contrast the
-   rule already guaranteed, in that rule's own colour family, and it does it
-   for the header, the matched rows, the unmatched ones and the selected one
-   without naming any of them.
+   Taking it from the background makes the line a property of the surface rather
+   than of anything layered over it, so it needs no per-theme value and no
+   per-rule reasoning: every row, matched or not, header or body, gets the same
+   treatment of whatever it happens to be painted.
 
-   Deriving it from the list's GROUND instead was tried and is wrong: a matched
-   row is painted by the colouring chain, not by the surface, so an opaque line
-   mixed from the ground lands near-black on a TCP RST's #fffc9c and near-white
-   on a dark expert band. That is the same "visibility depends on which row it
-   crosses" fault the borrowed `divide-border/40` had, with the sign flipped.
+   `--row-bg` is published by `PacketList.tsx` - the container sets the list's
+   own ground and each painted row overrides it with the colour its rule chose,
+   so the cascade does the per-row part with no work at the border. */
 
-   The fraction is quiet on purpose. This runs down every row on screen, and a
-   grid the eye has to look past is worse than no grid: the job is to say where
-   one column ends, not to draw a table. It is a per-theme token because a fixed
-   one does not weigh the same on a light ground as on a dark one - see
-   `--packet-gridline-mix` in `:root`. */
+/* The header sits on the app's chrome rather than on the list's ground. */
+.packet-grid thead tr {
+  --row-bg: var(--secondary);
+}
+
 .packet-grid tr > :not(:last-child) {
-  border-right-color: color-mix(in oklab, currentColor var(--packet-gridline-mix, 14%), transparent);
+  border-right-color: color-mix(in oklab, white var(--packet-gridline-lighten, 40%), var(--row-bg));
 }
 
 /* Custom scrollbars for high-density packet tables.
@@ -591,7 +578,7 @@
    those on a ground this light. */
 .paper {
   /* See the note in `:root`. */
-  --packet-gridline-mix: 20%;
+  --packet-gridline-lighten: 40%;
   --background: #f4efe4;
   --foreground: #2b2620;
   --card: #fdfaf3;
@@ -645,7 +632,7 @@
    surface check wants 5 deltaE between any pair and this gives 7.8. */
 .midnight {
   /* See the note in `:root`. */
-  --packet-gridline-mix: 14%;
+  --packet-gridline-lighten: 40%;
   --background: #0d1219;
   --foreground: #dbe3ec;
   --card: #161d26;
