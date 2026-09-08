@@ -7,6 +7,7 @@ import {
 } from '../../services/direction';
 import { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
+import { SENDER_INK_ALPHA } from '../../services/packetThemes';
 import { PacketListMinimap } from './PacketListMinimap';
 import {
   TbArrowsSort,
@@ -1279,7 +1280,14 @@ export const PacketList: React.FC<PacketListProps> = ({
                               // the program is the annotation. At full strength
                               // the two read as one long token and the column
                               // stops scanning as a list of addresses.
-                              <span className="shrink-0 text-muted-foreground">
+                              <span
+                                className="shrink-0"
+                                // The dim is a fraction of THIS ROW'S ink rather than a
+                                // fixed grey. It was `text-muted-foreground` - the app
+                                // theme's colour, on a row the colouring chain painted -
+                                // and its worst case measured 1.06:1. See SENDER_INK_ALPHA.
+                                style={{ opacity: SENDER_INK_ALPHA }}
+                              >
                                 {'\\'}{sender}
                               </span>
                             )}
