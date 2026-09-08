@@ -101,7 +101,7 @@ export const CaptureInterfacePicker: React.FC<CaptureInterfacePickerProps> = ({
       <DropdownMenuContent
         align={align}
         side={side}
-        className="w-72 max-h-80 overflow-y-auto border-0 shadow-lg"
+        className="w-72 max-h-80 overflow-y-auto custom-scrollbar border-0 shadow-lg"
       >
         <DropdownMenuLabel className="text-[10px] font-bold uppercase tracking-wider font-mono text-muted-foreground">
           Capture from

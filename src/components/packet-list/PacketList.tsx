@@ -912,7 +912,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         // stripe light rows across a dark list.
         style={{ backgroundColor: packetTheme.surface.background, color: packetTheme.surface.foreground }}
       >
-        <table className="w-full table-fixed text-left border-collapse font-mono text-xs">
+        <table className="packet-grid w-full table-fixed text-left border-collapse font-mono text-xs">
           {/* The colgroup has to track visibility exactly: `table-fixed` maps
               these to cells by POSITION, so one stale <col> shifts every width
               after it onto the wrong column. */}
@@ -948,7 +948,12 @@ export const PacketList: React.FC<PacketListProps> = ({
                 const cell = (e.target as HTMLElement).closest('th[data-column]');
                 setAlignColumn((cell?.getAttribute('data-column') as AlignableColumn) ?? null);
               }}
-              className="text-[11px] uppercase tracking-wider divide-x divide-border"
+              // `divide-x` for the width only - the colour comes from
+              // `.packet-grid`, which derives it from this row's own ink.
+              // `divide-border` put the app's panel border here, and on this
+              // theme that is #232b36 against a #1e2733 header: a line the
+              // same lightness as the thing behind it.
+              className="text-[11px] uppercase tracking-wider divide-x"
             >
               {columns.id && (
               <th
@@ -1161,11 +1166,15 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // where one value ended and the next began was carried
                     // entirely by the gap between them - which disappears the
                     // moment a column is narrow enough for its text to fill it.
-                    // Held at /40 rather than the header's full strength: this
-                    // runs behind the row colours and down every row on screen,
-                    // and at full strength it reads as a grid drawn over the
-                    // data rather than as a separation between columns.
-                    className={`cursor-pointer divide-x divide-border/40 ${
+                    //
+                    // The colour comes from `.packet-grid`, which derives it
+                    // from this row's own ink - the one value guaranteed to
+                    // read on this row's fill, since the colouring rule chose
+                    // the two together. It used to be `divide-border/40`, the
+                    // app's border at an alpha over whatever the rule painted,
+                    // so the same separator was a different colour on every row
+                    // and legible on almost none of them.
+                    className={`cursor-pointer divide-x ${
                       isSelected
                         ? '!bg-accent !text-primary dark:!text-primary ring-1 ring-inset ring-primary font-bold'
                         : 'hover:brightness-95 dark:hover:brightness-125'
