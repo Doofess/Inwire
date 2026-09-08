@@ -911,7 +911,15 @@ export const PacketList: React.FC<PacketListProps> = ({
         // matched - the chain has no catch-all, so everything else would show
         // the app surface, and a light packet theme inside a dark app would
         // stripe light rows across a dark list.
-        style={{ backgroundColor: packetTheme.surface.background, color: packetTheme.surface.foreground }}
+        // `--row-bg` is what `.packet-grid` lightens to draw a column
+        // separator. Set here to the list's own ground, and overridden below by
+        // any row the colouring chain painted - so an unmatched row needs no
+        // special case, it simply inherits.
+        style={{
+          backgroundColor: packetTheme.surface.background,
+          color: packetTheme.surface.foreground,
+          '--row-bg': packetTheme.surface.background,
+        } as React.CSSProperties}
       >
         <table className="packet-grid w-full table-fixed text-left border-collapse font-mono text-xs">
           {/* The colgroup has to track visibility exactly: `table-fixed` maps
@@ -1186,7 +1194,14 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // below inherit rather than setting their own color.
                     style={
                       !isSelected
-                        ? { backgroundColor: style.background, color: style.color }
+                        ? {
+                            backgroundColor: style.background,
+                            color: style.color,
+                            // The separator is this row's own fill, lightened.
+                            ...(style.background
+                              ? { '--row-bg': style.background }
+                              : {}),
+                          } as React.CSSProperties
                         : undefined
                     }
                   >
