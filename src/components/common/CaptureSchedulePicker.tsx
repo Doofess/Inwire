@@ -44,6 +44,22 @@ function formatStamp(epochMs: number): string {
 }
 const rowLabelClass =
   'text-[10px] font-bold uppercase tracking-wider font-mono text-muted-foreground';
+/** The same label on a selected row, which carries the accent rather than the mute. */
+const rowLabelActiveClass =
+  'text-[10px] font-bold uppercase tracking-wider font-mono text-primary';
+/**
+ * The interface picker's selection language, stated once here.
+ *
+ * A tinted accent ground, accent text, and a bar that scales out of the left
+ * edge - so a selection reads as MOVING between rows rather than appearing on
+ * one. Copied deliberately: the two menus sit beside each other in the header
+ * and "this is the one you picked" should not be said two different ways a
+ * centimetre apart.
+ */
+const selectedRowClass = 'bg-primary/15 text-primary font-semibold';
+const accentBarClass =
+  'absolute left-0 top-1 bottom-1 w-0.5 origin-center rounded-full bg-primary '
+  + 'transition-transform duration-150 ease-out';
 
 /**
  * The Schedule capture dropdown: a start time, a stop time, and presets.
@@ -112,7 +128,7 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
           draws a hard rectangle around the panel. */}
       <DropdownMenuContent
         align={align}
-        className="w-80 max-h-[32rem] overflow-y-auto border-0 shadow-lg"
+        className="w-80 max-h-[32rem] overflow-y-auto custom-scrollbar border-0 shadow-lg"
       >
         <DropdownMenuLabel className={rowLabelClass}>Schedule capture</DropdownMenuLabel>
         <DropdownMenuSeparator />
@@ -130,18 +146,38 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
                 key={field}
                 type="button"
                 className={[
-                  'w-full flex items-center gap-2 rounded-sm border px-2 py-1 font-mono text-xs cursor-pointer',
-                  active ? 'border-primary' : 'border-border hover:border-primary/60',
+                  'group relative w-full flex items-center gap-2 rounded-sm px-2 py-1.5',
+                  'font-mono text-xs cursor-pointer transition-colors',
+                  active ? selectedRowClass : 'hover:bg-accent',
                 ].join(' ')}
                 onClick={() => setEditing(active ? null : field)}
               >
-                <span className={rowLabelClass}>
-                  {field === 'start' ? 'Start from' : 'Stop at'}
+                <span
+                  aria-hidden
+                  className={[accentBarClass, active ? 'scale-y-100' : 'scale-y-0'].join(' ')}
+                />
+                <span
+                  className={[
+                    active ? rowLabelActiveClass : rowLabelClass,
+                    'transition-transform duration-150 ease-out group-hover:translate-x-0.5',
+                  ].join(' ')}
+                >
+                  {field === 'start' ? 'Starting Time' : 'Stopping Time'}
                 </span>
+                {/* A duration is a stop, so the row may not answer "Not Set"
+                    while a preset below it is highlighted as applied and the
+                    line beneath says when the capture ends - three statements
+                    about one field, one of them wrong. `withStopAfter` clears
+                    `stopAt`, so this field is empty in exactly the case where
+                    the OTHER form of the same answer is set. */}
                 <span className="ml-auto truncate">
-                  {value === null
-                    ? (field === 'start' ? 'when you press Start' : 'not set')
-                    : formatStamp(value)}
+                  {value !== null
+                    ? formatStamp(value)
+                    : field === 'start'
+                      ? 'Manually'
+                      : schedule.stopAfterMinutes !== null
+                        ? `${describeDuration(schedule.stopAfterMinutes)} after start`
+                        : 'Not Set'}
                 </span>
               </button>
             );
@@ -194,7 +230,22 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
               e.preventDefault();
               onScheduleChange({ startAt: null, stopAt: null, stopAfterMinutes: null });
             }}
-            className="font-mono text-xs text-muted-foreground"
+            // The theme's own accent, filled. It only exists while something IS
+            // scheduled, so there is no state in which it competes with the
+            // selection highlights - it appears, does one job, and goes away
+            // again with the schedule it cleared.
+            //
+            // Still a DropdownMenuItem, and that is the load-bearing part: a
+            // bare button inside the panel is skipped by Radix's roving focus,
+            // which would leave the one destructive control here as the only
+            // one the arrow keys cannot reach. The fill needs `!` to beat the
+            // primitive's own `focus:bg-accent` - equal specificity otherwise,
+            // decided by stylesheet order - so the highlight is carried by
+            // opacity, which nothing overrides.
+            className={
+              'mx-2 mb-1 justify-center rounded-sm !bg-primary !text-primary-foreground '
+              + 'font-mono text-xs font-semibold cursor-pointer transition-opacity focus:opacity-90'
+            }
           >
             Clear schedule
           </DropdownMenuItem>
@@ -209,16 +260,33 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
           </p>
         )}
 
-        {presets.map((preset) => (
+        {presets.map((preset) => {
+          // The schedule holds a DURATION, not a preset id, so "applied" is a
+          // question about minutes - and two presets naming the same duration
+          // both light up, because both of them are applied. Remembering which
+          // one was clicked would make this a memory of an action rather than a
+          // statement about the schedule, and the two disagree the moment the
+          // duration is changed by the chips below.
+          const applied = schedule.stopAfterMinutes === preset.stopAfterMinutes;
+          return (
           <div key={preset.id} className="flex items-center gap-1 pr-1">
             <DropdownMenuItem
-              className="flex-1 font-mono text-xs"
+              className={[
+                'group flex-1 font-mono text-xs cursor-pointer',
+                applied ? selectedRowClass : '',
+              ].join(' ')}
               onSelect={(e) => {
                 e.preventDefault();
                 onScheduleChange(applyPreset(schedule, preset));
               }}
             >
-              <span className="truncate">{preset.name}</span>
+              <span
+                aria-hidden
+                className={[accentBarClass, applied ? 'scale-y-100' : 'scale-y-0'].join(' ')}
+              />
+              <span className="truncate transition-transform duration-150 ease-out group-hover:translate-x-0.5">
+                {preset.name}
+              </span>
             </DropdownMenuItem>
             <button
               type="button"
@@ -230,7 +298,8 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
               <TbTrash className="w-3.5 h-3.5" />
             </button>
           </div>
-        ))}
+          );
+        })}
 
         <div className="px-2 py-1.5 space-y-1" onKeyDown={(e) => e.stopPropagation()}>
           {/* Only offered when there is a duration to save, and it says why
@@ -259,16 +328,28 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
             </p>
           )}
           <div className="flex flex-wrap gap-1 pt-0.5">
-            {[5, 15, 30, 60, 120].map((minutes) => (
-              <button
-                key={minutes}
-                type="button"
-                className="rounded-sm border border-border px-1.5 py-0.5 font-mono text-[10px] cursor-pointer hover:border-primary"
-                onClick={() => onScheduleChange(withStopAfter(schedule, minutes))}
-              >
-                {describeDuration(minutes)}
-              </button>
-            ))}
+            {[5, 15, 30, 60, 120].map((minutes) => {
+              const applied = schedule.stopAfterMinutes === minutes;
+              return (
+                <button
+                  key={minutes}
+                  type="button"
+                  // Too small to carry the accent bar, so a chip takes the
+                  // other half of the same language - the tinted ground and
+                  // the accent text - rather than inventing a third way to
+                  // say "this one".
+                  className={[
+                    'rounded-sm border px-1.5 py-0.5 font-mono text-[10px] cursor-pointer transition-colors',
+                    applied
+                      ? 'border-primary bg-primary/15 text-primary font-semibold'
+                      : 'border-border hover:border-primary',
+                  ].join(' ')}
+                  onClick={() => onScheduleChange(withStopAfter(schedule, minutes))}
+                >
+                  {describeDuration(minutes)}
+                </button>
+              );
+            })}
           </div>
         </div>
 

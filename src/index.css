@@ -456,7 +456,61 @@
   transform: none !important;
 }
 
-/* Custom scrollbars for high-density packet tables */
+/* The packet list's column separators.
+
+   Every one of them is the same value in the markup, and that was the problem:
+   `divide-border` is the APP's panel border, and the packet list is the one
+   surface in this app that does not use the app's ground. It paints itself
+   from the packet theme (`surface.background`), and its rows are then painted
+   again by the colouring chain. So a single borrowed colour had to sit on
+   three different things at once, and on this theme it landed at #232b36
+   against a #1e2733 header - a line the same lightness as the thing behind it -
+   while the rows' /40 alpha let each colouring rule decide how visible its own
+   separators were. Whether a separator could be seen depended on which row it
+   crossed, which is why they did not look like one grid.
+
+   A separator is now derived from `currentColor` - the ink of the row it is
+   drawn on - at a low alpha. That is the only value in reach that is correct
+   for every row, because the row's ink was CHOSEN to be legible on that row's
+   fill: a colouring rule sets both together, and a rule that painted a frame
+   yellow put readable text on it. So the separator inherits the contrast the
+   rule already guaranteed, in that rule's own colour family, and it does it
+   for the header, the matched rows, the unmatched ones and the selected one
+   without naming any of them.
+
+   Deriving it from the list's GROUND instead was tried and is wrong: a matched
+   row is painted by the colouring chain, not by the surface, so an opaque line
+   mixed from the ground lands near-black on a TCP RST's #fffc9c and near-white
+   on a dark expert band. That is the same "visibility depends on which row it
+   crosses" fault the borrowed `divide-border/40` had, with the sign flipped.
+
+   14% is quiet on purpose. This runs down every row on screen, and a grid the
+   eye has to look past is worse than no grid: the job is to say where one
+   column ends, not to draw a table. */
+.packet-grid tr > :not(:last-child) {
+  border-right-color: color-mix(in oklab, currentColor 14%, transparent);
+}
+
+/* Custom scrollbars for high-density packet tables.
+
+   Firefox ignores every ::-webkit- rule below, so it drew the full-width OS
+   bar in each of these panels. `scrollbar-width`/`scrollbar-color` are the
+   properties it does understand, and they take the same two colours.
+
+   They are behind @supports because setting either one makes Chrome 121+
+   **discard every ::-webkit-scrollbar rule on that element**. Applied
+   unguarded, the 5px bars below became Chrome's 11px `thin`, and - measured -
+   the packet list's `.minimap-scroll` override stopped applying too, putting a
+   10px scrollbar back beside the minimap: the second control for the same axis
+   that block exists to remove. `selector(::-webkit-scrollbar)` is the test
+   that separates the two engines, since it is exactly the feature at stake. */
+@supports not selector(::-webkit-scrollbar) {
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--muted-foreground) 40%, transparent) transparent;
+  }
+}
+
 .custom-scrollbar::-webkit-scrollbar {
   width: 5px;
   height: 5px;
@@ -467,7 +521,11 @@
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.4);
+  /* Was a literal slate, which stayed the same grey under all four themes -
+     the same mistake the hover state below already carries a note about. A
+     scrollbar belongs to the surface it sits on, so it mixes the theme's own
+     muted foreground into transparency rather than naming a colour. */
+  background: color-mix(in srgb, var(--muted-foreground) 40%, transparent);
   border-radius: 4px;
 }
 
