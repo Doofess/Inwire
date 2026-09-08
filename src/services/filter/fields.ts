@@ -235,8 +235,9 @@ export const UNDISSECTED = [
   // tokens. `rtcp` outstayed the others by a batch, which meant a misspelt
   // `rtcp.*` name was reported as "a protocol this build cannot decode"
   // rather than as the typo it was - the check below is what caught it.
-  // `ldap` left this list when it became a real layer token - dissectors/ldap.ts.
-  'sctp', 'rtp', 'kerberos',
+  // `ldap` and `kerberos` left this list when they became real layer tokens -
+  // see dissectors/ldap.ts and dissectors/kerberos.ts.
+  'sctp', 'rtp',
   // Never available from a capture, whatever is implemented.
   'eth.fcs',
 ];

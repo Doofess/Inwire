@@ -9,6 +9,9 @@ export type ProtocolType =
   | 'GRE'
   | 'LDAP'
   | 'SMB2'
+  // The reference's Protocol column says KRB5 where its filter token says
+  // `kerberos`. This is the column's spelling; the token is in `LAYERS`.
+  | 'KRB5'
   | 'TLS'
   | 'ICMP'
   | 'ARP'

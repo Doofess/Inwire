@@ -53,6 +53,10 @@ const HUE_BY_PROTOCOL: Record<ProtocolType, Hue> = {
   MQTT: 'yellow',
   LDAP: 'yellow',
   SMB2: 'yellow',
+  // With LDAP and SMB2: the three protocols a Windows domain is made of read
+  // as one family in the list, which is most of what makes that traffic
+  // legible at a glance.
+  KRB5: 'yellow',
   // A GRE frame only reaches the map when its payload could not be read - a
   // readable tunnel reports the INNER protocol, so it is never coloured GRE.
   GRE: 'neutral',

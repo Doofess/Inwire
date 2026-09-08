@@ -28,6 +28,7 @@ import { dissectCoap } from './coap';
 import { dissectPtp } from './ptp';
 import { dissectHsrp, HSRP_V1_GROUP, HSRP_V2_GROUP } from './hsrp';
 import { dissectRip, dissectRipng } from './rip';
+import { dissectKerberosDatagram, KERBEROS_PORT } from './kerberos';
 
 /** Everything a leaf UDP dissector produces. */
 export interface SimpleUdpResult {
@@ -67,6 +68,10 @@ export const UDP_SUBDISSECTORS: readonly UdpSubdissector[] = [
   // 1645/1646 are the pre-standard ports a lot of kit still ships with.
   { token: 'radius', claims: onPorts(1812, 1813, 1645, 1646), dissect: dissectRadius },
   { token: 'tftp', claims: onPorts(69), dissect: dissectTftp },
+  // The KDC answers on 88 over both transports. A datagram carries exactly
+  // one message and no length prefix, which is the whole difference from the
+  // TCP side in `tcpTransport.ts`.
+  { token: 'kerberos', claims: onPorts(KERBEROS_PORT), dissect: dissectKerberosDatagram },
   { token: 'nbdgm', claims: onPorts(138), dissect: dissectNbds },
   // 4784 is multihop and carries the same control header. 3785 does NOT - it
   // is the echo port, and an echo packet has no format at all.
