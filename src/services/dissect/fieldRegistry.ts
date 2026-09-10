@@ -62,7 +62,7 @@ export const LAYERS = [
   // `cdp` belongs beside `lldp` for that reason, and `vrrp`/`ospf` beside
   // `igmp` - all three sit directly on their lower layer with no ports.
   'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905', 'cdp',
-  'ip', 'ipv6', 'gre', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
+  'ip', 'ipv6', 'gre', 'vxlan', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
   // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
   // what a user types, and it has to be the one they already know.
@@ -84,6 +84,13 @@ const bool = (abbrev: string, label: string, layer: LayerToken): FieldDef =>
   ({ abbrev, label, type: 'bool', layer });
 
 export const FIELDS: readonly FieldDef[] = [
+  // --- VXLAN --------------------------------------------------------------------
+  // A layer-2 tunnel: the columns report the frame INSIDE it, so these are the
+  // only three keys the outer header contributes. `eth.src`/`eth.dst` are
+  // deliberately not rewritten from the inner frame - see dissectors/vxlan.ts.
+  uint('vxlan.vni', 'VXLAN Network Identifier', 'vxlan'),
+  uint('vxlan.flags', 'Flags', 'vxlan'),
+  uint('vxlan.flag_i', 'VNI Valid', 'vxlan'),
   // --- Kerberos ---------------------------------------------------------------
   // The Protocol column reads KRB5 and the filter token reads `kerberos`; both
   // are the reference's own spellings. `cname_string`/`sname_string` are the

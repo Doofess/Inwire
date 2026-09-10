@@ -16,6 +16,7 @@
  * and never reached in the app.
  */
 import { UDP_SUBDISSECTORS, findUdpSubdissector } from '../../src/services/dissectors/udpDispatch';
+import { VXLAN_PORTS } from '../../src/services/dissectors/vxlan';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -40,6 +41,11 @@ const CLAIMED_ELSEWHERE = [
   67, 68, 546, 547,      // DHCP and DHCPv6
   443,                   // QUIC
   1900,                  // SSDP
+  // Earlier still: VXLAN is read in `networkLayer.ts`, before the transport
+  // decoder is called at all, because a tunnel decides the ADDRESS columns and
+  // that is the function which owns them. Taken from the dissector's own
+  // constant rather than written out, so the two cannot drift.
+  ...VXLAN_PORTS,
 ];
 
 // A destination that is not any protocol's multicast group, so an entry that
