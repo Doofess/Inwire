@@ -30,6 +30,7 @@ file that supersedes the old one.
 | [0021](0021-where-the-parity-chase-stops.md) | Where the parity chase stops, and what is left is not a defect | Accepted 2026-09-07 |
 | [0022](0022-a-stream-protocol-is-not-expensive-any-more.md) | A stream protocol is not expensive any more — **corrects 0020** | Accepted 2026-09-07 |
 | [0023](0023-decomposing-the-parser.md) | Decomposing the parser — **unblocks 0020's tunnels** | Accepted 2026-09-07 |
+| [0024](0024-carrying-a-message-across-segments.md) | Carrying a message across segments — **closes 0020's fourth protocol**, and why DCERPC is not next | Accepted 2026-09-10 |
 
 ## Review outcome: amendments to the spec's execution order
 

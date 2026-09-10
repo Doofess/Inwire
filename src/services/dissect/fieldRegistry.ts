@@ -68,7 +68,7 @@ export const LAYERS = [
   // what a user types, and it has to be the one they already know.
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'tftp', 'bfd', 'coap', 'ptp',
-  'hsrp', 'rip', 'ripng', 'ldap', 'smb2', 'kerberos', 'http', 'http2', 'http3',
+  'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'smb2', 'kerberos', 'http', 'http2', 'http3',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -491,6 +491,30 @@ export const FIELDS: readonly FieldDef[] = [
   // `smb2.read_length` and `smb2.write_length` are separate fields rather than
   // one `length`, which is what lets `smb2.write_length > 65536` mean what a
   // reader expects.
+  // BGP. Every abbrev is the reference's own spelling, including the
+  // capitalised labels ("Major error Code") and the per-major minor-code
+  // fields - see `NOTIFY_MINOR_ABBREV` in dissectors/bgp.ts for why there are
+  // seven of those rather than one.
+  uint('bgp.type', 'Type', 'bgp'),
+  uint('bgp.length', 'Length', 'bgp'),
+  uint('bgp.open.version', 'Version', 'bgp'),
+  uint('bgp.open.myas', 'My AS', 'bgp'),
+  uint('bgp.open.holdtime', 'Hold Time', 'bgp'),
+  str('bgp.open.identifier', 'BGP Identifier', 'bgp'),
+  uint('bgp.open.opt.len', 'Optional Parameters Length', 'bgp'),
+  uint('bgp.notify.major_error', 'Major error Code', 'bgp'),
+  uint('bgp.notify.minor_error', 'Minor error Code (Message Header)', 'bgp'),
+  uint('bgp.notify.minor_error_open', 'Minor error Code (Open Message)', 'bgp'),
+  uint('bgp.notify.minor_error_update', 'Minor error Code (Update Message)', 'bgp'),
+  uint('bgp.notify.minor_error_expired', 'Minor error Code (Hold Timer Expired)', 'bgp'),
+  uint('bgp.notify.minor_error_state', 'Minor error Code (State Machine)', 'bgp'),
+  uint('bgp.notify.minor_error_cease', 'Minor error Code (Cease)', 'bgp'),
+  uint('bgp.notify.minor_error_route_refresh', 'Minor error Code (Route-Refresh message)', 'bgp'),
+  uint('bgp.notify.minor_error_unknown', 'Minor error Code (Unknown)', 'bgp'),
+  uint('bgp.route_refresh.afi', 'Address family identifier (AFI)', 'bgp'),
+  uint('bgp.route_refresh.safi', 'Subsequent address family identifier (SAFI)', 'bgp'),
+  uint('bgp.update.withdrawn_routes.length', 'Withdrawn Routes Length', 'bgp'),
+  uint('bgp.update.path_attributes.length', 'Total Path Attribute Length', 'bgp'),
   uint('smb2.cmd', 'Command', 'smb2'),
   uint('smb2.msg_id', 'Message ID', 'smb2'),
   uint('smb2.flags', 'Flags', 'smb2'),

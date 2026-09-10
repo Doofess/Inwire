@@ -659,6 +659,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Simple Network Management Protocol': 'snmp',
   'Lightweight Directory Access Protocol': 'ldap',
   'SMB2': 'smb2',
+  'Border Gateway Protocol': 'bgp',
   'Generic Routing Encapsulation': 'gre',
   'Session Initiation Protocol': 'sip',
   'Real-time Transport Control Protocol': 'rtcp',

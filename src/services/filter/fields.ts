@@ -221,7 +221,7 @@ export const UNDISSECTED = [
   // hsrp, vrrp, ospf and rip left this list when they became real layer
   // tokens; the ones here are the stateful or tunnelling half, which is a
   // different piece of work - see docs/decisions/0019.
-  'carp', 'glbp', 'bgp', 'eigrp', 'pim', 'isis', 'babel',
+  'carp', 'glbp', 'eigrp', 'pim', 'isis', 'babel',
   // Discovery and management. `cdp` left this list - see dissectors/cdp.ts.
   'gvrp', 'ismp', 'vtp', 'dtp', 'edp',
   // Windows file sharing, from the "SMB" rule.

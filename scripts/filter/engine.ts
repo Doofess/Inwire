@@ -245,13 +245,23 @@ check('an undissected protocol is a warning, not an error', {
   valid: FilterEngine.validateFilter('dcerpc', { strict: true }).isValid,
   warnings: FilterEngine.validateFilter('dcerpc', { strict: true }).warnings?.length,
 }, { valid: true, warnings: 1 });
-// `ospf.msg` stood here until OSPF became a real layer token, at which point
-// this asserted the opposite of what it means to. Named a protocol that is
-// still genuinely undissected instead - and one that is not close to being
-// dissected, since a stateful TCP protocol is a different piece of work.
+// `ospf.msg` stood here until OSPF became a real layer token, and `bgp.type`
+// until BGP became one - each time this quietly began asserting the opposite of
+// what it means to, and each time the failure was the fix. The overlap check
+// below is the structural version of this and needs no editing; what this adds
+// is that a field UNDER an undissected name warns too, which that check cannot
+// see.
+//
+// `dcerpc.opnum` should outlast the others, and for a measured reason rather
+// than a guess. The reference's Protocol and Info columns for DCERPC are not
+// the RPC layer at all: a bound context turns them into the INTERFACE's name
+// and its OPERATION's name (`SRVSVC` / `NetShareEnumAll request`), from some
+// hundred per-interface opnum tables and the NDR argument dissectors under
+// them. A build that read the RPC header and stopped would be right on the
+// interfaces nobody uses and wrong on every one they do.
 check('...and so is a field belonging to one', {
-  valid: FilterEngine.validateFilter('bgp.type != 1').isValid,
-  warnings: FilterEngine.validateFilter('bgp.type != 1').warnings?.length,
+  valid: FilterEngine.validateFilter('dcerpc.opnum != 1').isValid,
+  warnings: FilterEngine.validateFilter('dcerpc.opnum != 1').warnings?.length,
 }, { valid: true, warnings: 1 });
 // --- the two lists of protocol names must not overlap ---------------------------
 //
