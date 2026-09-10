@@ -33,30 +33,61 @@ field needs to be aligned):
 
   then `count` records, each:
 
-    seq      u32       per-capture sequence number (docs/decisions/0005)
-    iface    u16       index into the interface list in hello/state
-    _pad     u16       reserved, 0
-    tsUs     f64       capture time, epoch microseconds
-    origLen  u32       length on the wire
-    capLen   u32       bytes actually present
-    bytes    capLen    the frame
+    seq        u32       per-capture sequence number (docs/decisions/0005)
+    iface      u16       index into the interface list in hello/state
+    capLen     u16       bytes actually present
+    origExtra  u16       wire length MINUS capLen; 0 unless truncated
+    tsUs       f64       capture time, epoch microseconds
+    bytes      capLen    the frame
 
 A record carries no source, destination, protocol or info. It never needed to:
 the browser dissects the bytes with the same code an imported pcap goes
 through. What the agent used to send in those fields was overwritten before it
 was ever displayed.
+
+**The record is 18 bytes and was 24** (version 2). Three fields paid for
+themselves and one did not:
+
+  * `_pad` was two reserved bytes on a layout the browser reads with a
+    DataView, which needs no alignment. It bought nothing at all.
+  * `capLen` was a u32 for a number that cannot exceed the snaplen, and a
+    snaplen is a u16 in every capture format there is.
+  * `origLen` was a second u32 holding, on every untruncated frame in
+    existence, exactly what `capLen` already said. It is now the **difference**,
+    which is 0 whenever nothing was truncated and still describes a 64 kB
+    offloaded frame captured at 128 bytes.
+
+Measured on a real 300,228-frame capture: 7.21 MB of framing becomes 5.40 MB.
+Be honest about the size of that - it is **0.53% of the whole stream**, because
+a captured frame averaged 1,101 bytes and nothing about framing was ever going
+to matter beside the frame itself. On the 78,480 frames at or under 100 bytes
+it is 6% of each record, which is where it shows.
+
+**Six more bytes were available and deliberately left.** `seq` and `tsUs` are
+largely redundant WITHIN a batch - a u16 delta and a u32 delta off a base in
+the header would carry both, taking the record to 12 bytes. That encoding
+cannot be produced by `encode_record`, because a record is encoded on the
+**sniffer thread** and does not yet know which batch it will land in; deriving
+the bases would move the encoding to the event loop, the thread that already
+decides how fast the browser is fed. It would also make a record's meaning
+depend on its batch, so the queue could no longer drop, reorder or re-batch
+records freely - which is exactly what it does when a viewer falls behind.
+Another 0.5% of this stream does not buy either of those.
 """
 
 import struct
 
 MAGIC = b"IWP1"
-VERSION = 1
+# 2 since the record shrank from 24 bytes to 18. The browser refuses a version
+# it does not know rather than reading the old layout at the new offsets, which
+# would produce plausible frames with wrong lengths instead of an error.
+VERSION = 2
 
 HEADER = struct.Struct("<4sBBH")
-RECORD = struct.Struct("<IHHdII")
+RECORD = struct.Struct("<IHHHd")
 
 assert HEADER.size == 8
-assert RECORD.size == 24
+assert RECORD.size == 18
 
 
 def encode_record(seq: int, iface: int, ts_us: float, orig_len: int, data: bytes) -> bytes:
@@ -65,10 +96,24 @@ def encode_record(seq: int, iface: int, ts_us: float, orig_len: int, data: bytes
     Encoded on the sniffer thread - it is a struct pack and a bytes() of a
     frame that is already in memory, which is cheap enough to do there and is
     what lets the event loop see a queue of finished records rather than live
-    scapy packets it would have to serialize itself.
+    scapy packets it would have to serialize itself. That placement is also why
+    the record is self-contained rather than relative to its batch; see the
+    module docstring.
+
+    `orig_len` is the length on the wire and is sent as its EXCESS over what
+    was captured, which is zero unless a snaplen truncated the frame. Clamped
+    rather than wrapped: a frame captured 70 kB short would otherwise report a
+    wire length smaller than its own bytes, and a length that is merely
+    understated is recoverable where one that is nonsense is not.
     """
-    return RECORD.pack(seq & 0xFFFFFFFF, iface & 0xFFFF, 0, float(ts_us),
-                       orig_len & 0xFFFFFFFF, len(data)) + data
+    cap_len = len(data)
+    extra = orig_len - cap_len
+    if extra < 0:
+        extra = 0
+    elif extra > 0xFFFF:
+        extra = 0xFFFF
+    return RECORD.pack(seq & 0xFFFFFFFF, iface & 0xFFFF,
+                       cap_len & 0xFFFF, extra, float(ts_us)) + data
 
 
 def encode_batch(records) -> bytes:
@@ -107,7 +152,7 @@ def decode_batch(payload: bytes):
     for _ in range(count):
         if offset + RECORD.size > len(payload):
             raise ValueError("truncated record header")
-        seq, iface, _pad, ts_us, orig_len, cap_len = RECORD.unpack_from(payload, offset)
+        seq, iface, cap_len, orig_extra, ts_us = RECORD.unpack_from(payload, offset)
         offset += RECORD.size
         if offset + cap_len > len(payload):
             raise ValueError("truncated record payload")
@@ -115,7 +160,9 @@ def decode_batch(payload: bytes):
             "seq": seq,
             "iface": iface,
             "tsUs": ts_us,
-            "origLen": orig_len,
+            # Reconstructed, not read: the wire length is sent as its excess
+            # over what was captured. The browser's decoder does the same sum.
+            "origLen": cap_len + orig_extra,
             "data": payload[offset:offset + cap_len],
         })
         offset += cap_len
