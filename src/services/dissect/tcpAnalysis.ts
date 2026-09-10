@@ -44,6 +44,17 @@ export interface TcpDirectionState {
   lastAckLen: number;
   /** Raw window this direction last advertised. */
   window: number;
+  /**
+   * Whether any segment has been seen in this direction at all.
+   *
+   * `window` starts at 0, which is indistinguishable from a peer that really
+   * did advertise a zero window - and the zero-window-probe rule reads the
+   * REVERSE direction's window, so on a capture where one side was never seen
+   * every one-byte segment was reported as a probe. That is not a rare shape:
+   * `bulk` is 30 TCP streams with a single SYN, and a one-sided capture is the
+   * normal result of spanning a port in one direction.
+   */
+  windowSeen: boolean;
   /** Window scale shift this direction advertised in its SYN; -1 when unknown. */
   winScale: number;
   dupAckNum: number;
@@ -69,7 +80,7 @@ export interface TcpConnectionState {
 export function freshDirection(): TcpDirectionState {
   return {
     nextSeq: 0, nextSeqTimeUs: 0, nextSeqFrame: 0, maxSeqToBeAcked: 0, lastAck: 0, lastAckTimeUs: 0, lastAckLen: 0,
-    window: 0, winScale: -1, dupAckNum: 0, lastNonDupAckFrame: 0, lastWasKeepAlive: false, lastWasZeroWindowProbe: false,
+    window: 0, windowSeen: false, winScale: -1, dupAckNum: 0, lastNonDupAckFrame: 0, lastWasKeepAlive: false, lastWasZeroWindowProbe: false,
     sackRanges: [], segments: [], synTimeUs: null, synSeen: false,
   };
 }
@@ -217,7 +228,10 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   let finishedFwd = false;
 
   // ZERO WINDOW PROBE
-  if (seglen === 1 && seq === fwd.nextSeq && rev.window === 0) {
+  // `rev.windowSeen` and not just `rev.window === 0`: a window nobody has
+  // advertised is unknown, and calling it zero turns every one-byte segment on
+  // a half-captured stream into a probe (and its answer into a probe-ack).
+  if (seglen === 1 && seq === fwd.nextSeq && rev.windowSeen && rev.window === 0) {
     flags.add('zero_window_probe');
     finishedFwd = true;
   }
@@ -405,6 +419,7 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
     if (!flags.has('zero_window_probe')) fwd.maxSeqToBeAcked = fwd.nextSeq;
   }
   fwd.window = window;
+  fwd.windowSeen = true;
   fwd.lastAck = ack;
   fwd.lastAckTimeUs = s.timeUs;
   fwd.sackRanges = s.sackBlocks ?? [];

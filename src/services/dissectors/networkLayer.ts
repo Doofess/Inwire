@@ -34,6 +34,11 @@ import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './ipv4';
 import { IPV6_EXT_HEADERS, NO_NEXT_HEADER, walkIpv6Extensions } from './ipv6Ext';
 import { dissectPortless, isPortlessProtocol } from './portless';
 import { GRE_PROTOCOL, encapsulatedInfo, innerNetworkStart, readGreHeader } from './gre';
+import {
+  VXLAN_HEADER_LENGTH, isVxlanPort, readInnerEthernet, readVxlanHeader,
+} from './vxlan';
+import { dissectArp } from './l2';
+import { resolveMacName } from '../macVendors';
 import { dissectTcpTransport } from './tcpTransport';
 import { dissectUdpTransport } from './udpTransport';
 
@@ -138,6 +143,69 @@ export function decodeNetworkLayer(
     }
     return decodeNetworkLayer(
       rawBytes, inner.offset, inner.etherType, layers, filterFields, carried, context);
+  };
+
+  /**
+   * VXLAN, which differs from GRE in where the recursion lands.
+   *
+   * GRE's payload is a network packet, so `innerNetworkStart` hands an offset
+   * and an ethertype straight to `decodeNetworkLayer`. VXLAN's payload is a
+   * whole Ethernet FRAME, so its own header has to be read first and then the
+   * ethertype dispatched - and that dispatch lives in `decodeRawEthernetPacket`
+   * rather than here, because until now no tunnel needed it. Rather than lift
+   * the whole chain out for one caller, the two cases that occur inside an
+   * overlay are handled: IP recurses exactly as GRE does, and ARP goes to the
+   * same `dissectArp` the outer frame would use.
+   *
+   * ARP is the case that makes this a layer-2 tunnel rather than a layer-3 one.
+   * It carries no addresses this column can show, so the reference reports the
+   * inner MACs - and `pcapParser` has already filled those columns with the
+   * OUTER pair, which is why they are overwritten here and nowhere else.
+   */
+  const decodeVxlanTunnel = (payloadStart: number, payloadEnd: number): NetworkDecode | null => {
+    const header = readVxlanHeader(rawBytes, payloadStart, payloadEnd);
+    if (header === null) return null;
+    const inner = readInnerEthernet(rawBytes, payloadStart + VXLAN_HEADER_LENGTH, payloadEnd);
+    if (inner === null) return null;
+    layers.push(header.layer);
+    layers.push(inner.layer);
+    Object.assign(filterFields, header.fields);
+    const carried: NetworkDecode = {
+      srcIp, dstIp, proto, protocolLabel, info, status, analysisFlags, srcPort, dstPort,
+      streamId, icmpMatchedRequestFrameId, infoPatches, resolvedNames, transportLayerIndex,
+      extensionTokens, transportTokens: [...transportTokens, 'vxlan', 'eth'],
+    };
+
+    if (inner.etherType === 0x0800 || inner.etherType === 0x86dd) {
+      return decodeNetworkLayer(
+        rawBytes, inner.l3Offset, inner.etherType, layers, filterFields, carried, context);
+    }
+
+    if (inner.etherType === 0x0806) {
+      const arp = dissectArp(rawBytes, inner.l3Offset);
+      if (arp === null) return null;
+      layers.push(arp.layer);
+      Object.assign(filterFields, arp.fields);
+      return {
+        ...carried,
+        // The inner pair, resolved the way the outer pair is - which is what
+        // turns ff:ff:ff:ff:ff:ff into `Broadcast`.
+        srcIp: resolveMacName(inner.srcMac),
+        dstIp: resolveMacName(inner.dstMac),
+        proto: 'ARP',
+        protocolLabel: arp.protocolLabel,
+        info: arp.info,
+        transportTokens: [...carried.transportTokens, 'arp'],
+      };
+    }
+
+    // Anything else inside an overlay is not something this build reads, and
+    // the tunnel is what it can honestly report.
+    return {
+      ...carried,
+      protocolLabel: 'VxLAN',
+      info: `Virtual eXtensible Local Area Network, VNI: ${header.vni}`,
+    };
   };
 
   if (currentEtherType === 0x0800 && rawBytes.length >= l3Offset + 20) {
@@ -370,6 +438,18 @@ export function decodeNetworkLayer(
 
     if (ipProtocolNum === GRE_PROTOCOL && !isFragment) {
       const tunnelled = decodeGreTunnel(transportOffset, Math.min(rawBytes.length, l3Offset + ipTotalLen));
+      if (tunnelled) return tunnelled;
+    }
+
+    // Port-gated, and read here rather than in `udpDispatch.ts` for the same
+    // reason GRE is read here: a tunnel decides the ADDRESS columns, and this
+    // is the function that owns them. A subdissector returning up through the
+    // transport result could only ever change the label.
+    if (ipProtocolNum === 17 && !isFragment && rawBytes.length >= transportOffset + 8
+      && isVxlanPort((rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1],
+        (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3])) {
+      const tunnelled = decodeVxlanTunnel(
+        transportOffset + 8, Math.min(rawBytes.length, l3Offset + ipTotalLen));
       if (tunnelled) return tunnelled;
     }
 
@@ -616,6 +696,15 @@ export function decodeNetworkLayer(
       && !(chain?.stopsHere ?? false)) {
       const tunnelled = decodeGreTunnel(
         transportOffset, Math.min(rawBytes.length, transportOffset + transportPayloadLen));
+      if (tunnelled) return tunnelled;
+    }
+
+    if (effectiveNextHeader === 17 && !isV6Fragment && !isMalformedJumbo
+      && !(chain?.stopsHere ?? false) && rawBytes.length >= transportOffset + 8
+      && isVxlanPort((rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1],
+        (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3])) {
+      const tunnelled = decodeVxlanTunnel(transportOffset + 8,
+        Math.min(rawBytes.length, transportOffset + transportPayloadLen));
       if (tunnelled) return tunnelled;
     }
 
