@@ -27,6 +27,7 @@ import type { TlsDecryptionKeys } from './tls/decrypt';
 import type { AppDirection } from './dissectors/appStream';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 import { freshSmb2Conversation, type Smb2ConversationState } from './dissectors/smb2';
+import { freshBgpDirection, type BgpDirectionState } from './dissectors/bgp';
 
 export interface TlsRecordCursor {
   /** Bytes still owed to the record in progress; 0 means at a record boundary. */
@@ -204,6 +205,14 @@ interface TcpDirection {
   windowScaleShift?: number;
   /** Where this direction is inside the TLS record layer. */
   tlsCursor?: TlsRecordCursor;
+  /**
+   * Where this direction is inside the BGP message stream.
+   *
+   * Per direction rather than per connection, unlike LDAP's and SMB2's state:
+   * the two halves of a peering are independent byte streams, so a message
+   * boundary in one says nothing about where the other is.
+   */
+  bgp?: BgpDirectionState;
 }
 
 /**
@@ -492,6 +501,26 @@ export class TcpStreamTracker {
     const { dir } = this.locate(srcIp, srcPort, dstIp, dstPort);
     dir.tlsCursor ??= freshTlsCursor();
     return dir.tlsCursor;
+  }
+
+  /** This direction's BGP reassembly state, created on first use. */
+  public bgpDirection(srcIp: string, srcPort: number, dstIp: string, dstPort: number): BgpDirectionState {
+    const { dir } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    dir.bgp ??= freshBgpDirection();
+    return dir.bgp;
+  }
+
+  /**
+   * This direction's BGP state if it has one, without creating it.
+   *
+   * The dispatch needs this before it knows whether the stream is BGP: a
+   * segment in the middle of a long UPDATE carries no marker of its own, so
+   * "is there a message in flight here" is the only thing that identifies it.
+   */
+  public peekBgpDirection(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number,
+  ): BgpDirectionState | undefined {
+    return this.peek(srcIp, srcPort, dstIp, dstPort)?.dir.bgp;
   }
 
   /** The cursor if this direction has one, without creating it. */

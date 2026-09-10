@@ -25,6 +25,7 @@ import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
 import { dissectLdap, looksLikeLdap, freshLdapConversation, type LdapResult } from './ldap';
 import { dissectKerberos, looksLikeKerberos, KERBEROS_PORT, type KerberosResult } from './kerberos';
 import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2Result } from './smb2';
+import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
 
 /**
@@ -365,7 +366,26 @@ export function dissectTcpTransport(
     }
   }
 
+  // BGP, and the one of the five that keeps its state per DIRECTION. The other
+  // four decline a message split across segments; a BGP session's dominant
+  // traffic is the full-table UPDATE, which does not fit one - so this reads
+  // the stream, and a segment already inside a message is recognised by the
+  // state in flight rather than by a marker it does not carry.
+  let bgpResult: BgpResult | null = null;
   if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && payloadLength > 0
+    && !isKeepAlive && !isRetransmitted && tlsInOrder
+    && (srcPort === BGP_PORT || dstPort === BGP_PORT)) {
+    const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+    const pending = tcpTracker?.peekBgpDirection(srcIp, srcPort, dstIp, dstPort);
+    if (pending !== undefined || looksLikeBgp(rawBytes, tcpPayloadStart, payloadEnd)) {
+      const state = tcpTracker
+        ? tcpTracker.bgpDirection(srcIp, srcPort, dstIp, dstPort)
+        : freshBgpDirection();
+      bgpResult = dissectBgp(rawBytes, tcpPayloadStart, payloadEnd, state);
+    }
+  }
+
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && payloadLength > 0
     && !isKeepAlive && !isRetransmitted) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
@@ -439,6 +459,9 @@ export function dissectTcpTransport(
   } else if (smb2Result) {
     proto = 'SMB2';
     protocolLabel = 'SMB2';
+  } else if (bgpResult) {
+    proto = 'BGP';
+    protocolLabel = 'BGP';
   } else if (tlsResult) {
     proto = 'TLS';
     protocolLabel = tlsResult.appProtocolLabel ?? tlsResult.protocolLabel;
@@ -469,6 +492,8 @@ export function dissectTcpTransport(
   // segment rather than its contents.
   const infoParts = kerberosResult
     ? [kerberosResult.info]
+    : bgpResult
+    ? [bgpResult.info]
     : smb2Result
     ? [smb2Result.info]
     : ldapResult
@@ -493,7 +518,7 @@ export function dissectTcpTransport(
   // subdissector provided the Info, Wireshark's column joins the TCP expert
   // tags to it with " , " - the artefact of two dissectors each appending
   // to one column. Matched exactly, since the column text is the contract.
-  const info = (tlsResult || tcpDns || httpResult || ldapResult || smb2Result || kerberosResult)
+  const info = (tlsResult || tcpDns || httpResult || ldapResult || smb2Result || kerberosResult || bgpResult)
     && expertTags.length > 0
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
@@ -507,6 +532,8 @@ export function dissectTcpTransport(
     streamId,
     extraLayers: kerberosResult
       ? [kerberosResult.layer]
+      : bgpResult
+      ? [bgpResult.layer]
       : smb2Result
       ? [smb2Result.layer]
       : ldapResult
@@ -525,6 +552,7 @@ export function dissectTcpTransport(
     labelPatches,
     fields: {
       ...(kerberosResult ? kerberosResult.fields : {}),
+      ...(bgpResult ? bgpResult.fields : {}),
       ...(smb2Result ? smb2Result.fields : {}),
       ...(ldapResult ? ldapResult.fields : {}),
       ...(tlsResult ? tlsResult.fields : {}),

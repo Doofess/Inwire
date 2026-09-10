@@ -53,6 +53,11 @@ const HUE_BY_PROTOCOL: Record<ProtocolType, Hue> = {
   MQTT: 'yellow',
   LDAP: 'yellow',
   SMB2: 'yellow',
+  // BGP joins them, and the reason is the same one in reverse: a peering runs
+  // between two routers on the same fabric or across an exchange, so it is
+  // almost never the thing anybody is looking for on a world map. Its
+  // significance is entirely in the Protocol column and the tree.
+  BGP: 'yellow',
   // With LDAP and SMB2, the other two a Windows domain is made of.
   //
   // Reachable for the TCP half only, and worth stating rather than leaving to
