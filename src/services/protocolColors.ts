@@ -53,9 +53,16 @@ const HUE_BY_PROTOCOL: Record<ProtocolType, Hue> = {
   MQTT: 'yellow',
   LDAP: 'yellow',
   SMB2: 'yellow',
-  // With LDAP and SMB2: the three protocols a Windows domain is made of read
-  // as one family in the list, which is most of what makes that traffic
-  // legible at a glance.
+  // With LDAP and SMB2, the other two a Windows domain is made of.
+  //
+  // Reachable for the TCP half only, and worth stating rather than leaving to
+  // be discovered: a UDP subdissector sets `protocolLabel` and not `proto`
+  // (`udpDispatch.ts` has no room for the coarse type and twelve other entries
+  // would not want it), so a Kerberos datagram - routine on an AD network -
+  // keeps `protocol === 'UDP'` and is drawn as UDP here while the Protocol
+  // COLUMN correctly reads KRB5 either way. Not specific to Kerberos; it is
+  // how every leaf UDP protocol behaves, and Kerberos is simply the first that
+  // also has a coarse type to be inconsistent with.
   KRB5: 'yellow',
   // A GRE frame only reaches the map when its payload could not be read - a
   // readable tunnel reports the INNER protocol, so it is never coloured GRE.
