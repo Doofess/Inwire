@@ -241,10 +241,15 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
             // one the arrow keys cannot reach. The fill needs `!` to beat the
             // primitive's own `focus:bg-accent` - equal specificity otherwise,
             // decided by stylesheet order - so the highlight is carried by
-            // opacity, which nothing overrides.
+            // a ring, which the fill cannot swallow. Opacity alone was the
+            // first attempt and is not a focus indicator: a 10% shift on a
+            // saturated fill is invisible, so the arrow keys reached this
+            // control - the whole point of keeping it an item - and a keyboard
+            // user still could not see that they had.
             className={
               'mx-2 mb-1 justify-center rounded-sm !bg-primary !text-primary-foreground '
-              + 'font-mono text-xs font-semibold cursor-pointer transition-opacity focus:opacity-90'
+              + 'font-mono text-xs font-semibold cursor-pointer transition-opacity '
+              + 'focus:opacity-90 focus:ring-2 focus:ring-inset focus:ring-primary-foreground'
             }
           >
             Clear schedule

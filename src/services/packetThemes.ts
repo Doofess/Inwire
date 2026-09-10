@@ -421,6 +421,10 @@ export const PACKET_COLOR_SET_SPECS: Record<PacketColorSet, PacketColorSetSpec> 
 };
 
 /** The set for a stored value, falling back to `default` for anything else. */
+export function packetColorSet(raw: unknown): PacketColorSet {
+  return PACKET_COLOR_SETS.includes(raw as PacketColorSet) ? (raw as PacketColorSet) : 'default';
+}
+
 /**
  * How much of the row's own ink the Source column's program name keeps.
  *
@@ -445,10 +449,6 @@ export const SENDER_INK_ALPHA = 0.85;
 
 /** The floor that value is held to. Below this the annotation stops reading. */
 export const SENDER_INK_MIN_CONTRAST = 3;
-
-export function packetColorSet(raw: unknown): PacketColorSet {
-  return PACKET_COLOR_SETS.includes(raw as PacketColorSet) ? (raw as PacketColorSet) : 'default';
-}
 
 // WCAG AA for normal text. The list is small monospace, so this is a floor.
 const AA = AA_CONTRAST;

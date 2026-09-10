@@ -1185,7 +1185,12 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // and legible on almost none of them.
                     className={`cursor-pointer divide-x ${
                       isSelected
-                        ? '!bg-accent !text-primary dark:!text-primary ring-1 ring-inset ring-primary font-bold'
+                        // `--row-bg` has to follow, or the one row painted by a
+                        // CLASS rather than by the inline style would draw its
+                        // separators from the list's ground instead of from
+                        // itself - the single exception to the rule the grid is
+                        // built on, and on Day a line lighter than both.
+                        ? '[--row-bg:var(--accent)] !bg-accent !text-primary dark:!text-primary ring-1 ring-inset ring-primary font-bold'
                         : 'hover:brightness-95 dark:hover:brightness-125'
                     }`}
                     // The matched rule's foreground applies to the whole row,
