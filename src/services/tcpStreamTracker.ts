@@ -301,7 +301,41 @@ export class TcpStreamTracker {
    * rather than one per call.
    */
   private lastKey: string | undefined;
+  /**
+   * The whole result of the last lookup, keyed by the four values that produced
+   * it.
+   *
+   * `lastKey` above saved the delete-and-reinsert; it did not save **building
+   * the strings to find out**. Each call makes three - `srcIp:srcPort`,
+   * `dstIp:dstPort` and the key joining them - which for a pair of IPv6
+   * addresses is around 135 characters allocated and hashed, and one TCP frame
+   * makes several such calls (the sequence analysis, the TLS cursor, the TLS
+   * conversation, and whichever of LDAP/SMB2/BGP the port matched). A CPU
+   * profile put `locate` and `peek` together at **8.6%** of the pipeline.
+   *
+   * One entry is the right size for two reasons that compound: every call
+   * within a frame asks about the same connection, and consecutive frames
+   * usually do too - a bulk transfer is one connection for its whole length.
+   * The four-field comparison tests the ports first, so a miss is normally two
+   * integer compares rather than a string compare.
+   *
+   * Only ever holds a connection that EXISTS. A `peek` that found nothing
+   * stores nothing, or a later `locate` would hand back a memo of absence
+   * instead of creating the connection it is supposed to create.
+   */
+  private lastLookup: {
+    srcIp: string; srcPort: number; dstIp: string; dstPort: number;
+    found: { conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean };
+  } | undefined;
   private evicted = 0;
+
+  /** True when the memo describes exactly this direction of this connection. */
+  private memoHit(srcIp: string, srcPort: number, dstIp: string, dstPort: number): boolean {
+    const m = this.lastLookup;
+    return m !== undefined
+      && m.srcPort === srcPort && m.dstPort === dstPort
+      && m.srcIp === srcIp && m.dstIp === dstIp;
+  }
 
   /**
    * Finds one connection and the calling direction, creating both on first use.
@@ -314,6 +348,13 @@ export class TcpStreamTracker {
   private locate(srcIp: string, srcPort: number, dstIp: string, dstPort: number): {
     conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean;
   } {
+    if (this.memoHit(srcIp, srcPort, dstIp, dstPort)) {
+      // Nothing is skipped by returning here. The LRU reinsert below is already
+      // guarded on `key !== this.lastKey`, and a memo hit is by construction
+      // the key that set it - so the slow path would find the connection,
+      // decide it is already at the back of the queue, and return this.
+      return this.lastLookup!.found;
+    }
     const from = `${srcIp}:${srcPort}`;
     const to = `${dstIp}:${dstPort}`;
     const senderIsA = from <= to;
@@ -333,29 +374,36 @@ export class TcpStreamTracker {
     }
     this.lastKey = key;
 
-    return {
+    const found = {
       conn,
       dir: senderIsA ? conn.a : conn.b,
       peer: senderIsA ? conn.b : conn.a,
       senderIsA,
     };
+    this.lastLookup = { srcIp, srcPort, dstIp, dstPort, found };
+    return found;
   }
 
   /** The same lookup, without creating anything. */
   private peek(srcIp: string, srcPort: number, dstIp: string, dstPort: number): {
     conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean;
   } | undefined {
+    if (this.memoHit(srcIp, srcPort, dstIp, dstPort)) return this.lastLookup!.found;
     const from = `${srcIp}:${srcPort}`;
     const to = `${dstIp}:${dstPort}`;
     const senderIsA = from <= to;
     const conn = this.connections.get(senderIsA ? `${from}|${to}` : `${to}|${from}`);
+    // A miss is NOT memoised: this call creates nothing, so storing "absent"
+    // would let the next `locate` return it instead of creating the connection.
     if (conn === undefined) return undefined;
-    return {
+    const found = {
       conn,
       dir: senderIsA ? conn.a : conn.b,
       peer: senderIsA ? conn.b : conn.a,
       senderIsA,
     };
+    this.lastLookup = { srcIp, srcPort, dstIp, dstPort, found };
+    return found;
   }
 
   /** Forgets the least recently seen connections once the cap is exceeded. */
@@ -370,6 +418,15 @@ export class TcpStreamTracker {
       // only ever counts up - so nothing can collide with the one just freed.
       if (conn?.streamId !== undefined) this.byStreamId.delete(conn.streamId);
       if (this.lastKey === oldest.value) this.lastKey = undefined;
+      // Defensive, and knowingly so: this runs inside `locate`, after the new
+      // connection is created and BEFORE the memo is assigned at the end of
+      // that same call, so the memo cannot presently be holding a connection
+      // this loop just dropped. Removing this line fails no test, which was
+      // checked. It is here for the caller that one day evicts from somewhere
+      // else, where the failure would be a frame served another connection's
+      // state - silent, and not the kind of thing to leave to a future reader
+      // noticing the ordering.
+      this.lastLookup = undefined;
       this.evicted += 1;
     }
   }
@@ -597,7 +654,8 @@ export class TcpStreamTracker {
     this.connections.clear();
     this.byStreamId.clear();
     this.nextStreamId = 0;
-    this.lastKey = undefined;
+this.lastKey = undefined;
+    this.lastLookup = undefined;
     this.evicted = 0;
   }
 }

@@ -286,6 +286,69 @@ const TCP_CAP = findTcpCap();
     'proc49.exe');
 }
 
+// --- the lookup memo ------------------------------------------------------------
+//
+// `locate` and `peek` keep the last result, keyed on the four values that
+// produced it, because building the three strings a connection key needs was
+// 8.6% of the whole pipeline and one frame asks several times over. A memo on
+// a mutable structure has exactly three ways to be wrong, and none of them
+// would show up as a slow test - they would show up as one connection's state
+// being applied to another.
+{
+  const tracker = new TcpStreamTracker();
+
+  // 1. The reverse direction is a DIFFERENT direction of the same connection.
+  // Serving it from the memo would give a sender the peer's sequence state,
+  // which is the kind of wrong that looks like a plausible retransmission.
+  const out = tracker.tlsCursor('10.0.0.1', 1111, '10.0.0.2', 443);
+  const back = tracker.tlsCursor('10.0.0.2', 443, '10.0.0.1', 1111);
+  checkTrue('the memo does not serve the reverse direction', out !== back);
+  checkTrue('...and asking again returns the same cursor, not a third',
+    tracker.tlsCursor('10.0.0.1', 1111, '10.0.0.2', 443) === out);
+
+  // 2. A port change is a different connection even with both addresses equal,
+  // which is what makes comparing the ports first safe as well as fast.
+  checkTrue('a different source port is a different connection',
+    tracker.tlsCursor('10.0.0.1', 2222, '10.0.0.2', 443) !== out);
+  checkTrue('a different destination port is too',
+    tracker.tlsCursor('10.0.0.1', 1111, '10.0.0.2', 8443) !== out);
+
+  // 3. A `peek` that finds nothing must store nothing. If absence were
+  // memoised, the `locate` behind it would hand back the memo instead of
+  // creating the connection, and the stream would never get any state at all.
+  const fresh = new TcpStreamTracker();
+  check('peeking a connection that does not exist finds nothing',
+    fresh.peekTlsCursor('10.0.0.9', 5555, '10.0.0.8', 80), undefined);
+  const created = fresh.tlsCursor('10.0.0.9', 5555, '10.0.0.8', 80);
+  checkTrue('...and the lookup after it still creates one', created !== undefined);
+  checkTrue('...which peek then finds',
+    fresh.peekTlsCursor('10.0.0.9', 5555, '10.0.0.8', 80) === created);
+}
+
+// Eviction and the memo cannot currently collide, and it is worth writing down
+// WHY rather than leaving a test that looks like it proves they cannot.
+// `evictPastCap` runs inside `locate`, after the new connection is created and
+// **before** the memo is assigned at the end of the same call - so by the time
+// `locate` returns, the memo names the connection it just made, never one the
+// eviction dropped. The `lastLookup = undefined` in `evictPastCap` is therefore
+// insurance against a future caller that evicts from somewhere else; removing
+// it does not fail anything here, which was checked rather than assumed.
+//
+// What this does test is the eviction property itself, which is real: a
+// connection dropped and then seen again is a NEW one - a fresh stream index
+// and a mid-stream sequence base, exactly as a capture started mid-connection
+// looks.
+{
+  const tracker = new TcpStreamTracker();
+  const first = tracker.tlsCursor('10.1.0.1', 1000, '10.1.0.2', 443);
+  for (let i = 0; i < 40000; i++) {
+    tracker.tlsCursor('10.2.0.1', 1024 + (i % 60000), '10.2.0.2', 443);
+  }
+  checkTrue('eviction happened at all', tracker.evictedConnections > 0);
+  checkTrue('a connection evicted and seen again is a fresh one',
+    tracker.tlsCursor('10.1.0.1', 1000, '10.1.0.2', 443) !== first);
+}
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
