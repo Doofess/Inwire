@@ -17,19 +17,31 @@
  * Layout, little-endian, read with a DataView so nothing needs to be aligned:
  *
  *     magic    4 bytes   'IWP1'
- *     version  u8        1
+ *     version  u8        2
  *     flags    u8        reserved
  *     count    u16       records in this frame
  *
  *   then `count` records of:
  *
- *     seq      u32       per-capture sequence number (docs/decisions/0005)
- *     iface    u16       index into the interface list in hello/state
- *     _pad     u16       reserved
- *     tsUs     f64       capture time, epoch microseconds
- *     origLen  u32       length on the wire
- *     capLen   u32       bytes actually present
- *     bytes    capLen    the frame
+ *     seq        u32     per-capture sequence number (docs/decisions/0005)
+ *     iface      u16     index into the interface list in hello/state
+ *     capLen     u16     bytes actually present
+ *     origExtra  u16     wire length MINUS capLen; 0 unless truncated
+ *     tsUs       f64     capture time, epoch microseconds
+ *     bytes      capLen  the frame
+ *
+ * **The record is 18 bytes and was 24.** Two reserved bytes on a layout that
+ * needs no alignment; a u32 for a `capLen` that cannot exceed a snaplen; and a
+ * second u32 repeating, on every untruncated frame there is, what `capLen`
+ * already said. Measured on a real 300,228-frame capture that is 7.21 MB of
+ * framing down to 5.40 MB - **0.53% of the stream**, since a frame averaged
+ * 1,101 bytes and framing was never going to matter beside that; 6% of each
+ * record on the 78,480 frames at or under 100 bytes, which is where it shows.
+ * `seq` and `tsUs` could be batch-relative deltas for six bytes more and are
+ * not: a record is encoded on the agent's SNIFFER thread and does not know
+ * which batch it will land in, and a record whose meaning depended on its
+ * batch could not be dropped or re-batched freely - which is what the agent's
+ * queue does whenever a viewer falls behind.
  *
  * `local-agent/test_protocol.py` asserts the encoder's bytes and
  * `scripts/agent/binary.ts` asserts this decoder against the same fixed
@@ -38,9 +50,9 @@
 
 /** 'IWP1', as the u32 a DataView reads at offset 0 in little-endian order. */
 const MAGIC_LE = 0x31_50_57_49;
-export const BATCH_VERSION = 1;
+export const BATCH_VERSION = 2;
 export const BATCH_HEADER_BYTES = 8;
-export const BATCH_RECORD_BYTES = 24;
+export const BATCH_RECORD_BYTES = 18;
 
 export interface BinaryFrame {
   /** Per-capture sequence number; ties on `tsUs` resolve by it. */
@@ -104,9 +116,12 @@ export function decodePacketBatch(buffer: ArrayBuffer): BinaryFrame[] {
     }
     const seq = view.getUint32(offset, true);
     const iface = view.getUint16(offset + 4, true);
-    const tsUs = view.getFloat64(offset + 8, true);
-    const origLen = view.getUint32(offset + 16, true);
-    const capLen = view.getUint32(offset + 20, true);
+    const capLen = view.getUint16(offset + 6, true);
+    // The wire length as its excess over what was captured, so the common case
+    // - nothing truncated - is two zero bytes rather than a second copy of the
+    // number two fields up.
+    const origLen = capLen + view.getUint16(offset + 8, true);
+    const tsUs = view.getFloat64(offset + 10, true);
     offset += BATCH_RECORD_BYTES;
     if (offset + capLen > buffer.byteLength) {
       throw new BinaryFrameError(`record ${i + 1} claims ${capLen} bytes, past the end of the batch`);

@@ -928,6 +928,18 @@ check("the capture time survives to the microsecond", _decoded[0]["tsUs"], 17884
 check("a sequence number at the u32 ceiling round-trips", _decoded[1]["seq"], 4294967295)
 check("a zero-length capture is a record, not an error", _decoded[1]["data"], b"")
 check("the wire length is carried apart from the captured length", _decoded[2]["origLen"], 9000)
+# The wire length is sent as an EXCESS over the captured length since the
+# record shrank to 18 bytes, so the truncated frame is the one that proves the
+# sum: 64 bytes present, 1514 on the wire.
+check("a truncated frame still reports its length on the wire",
+      (_decoded[0]["origLen"], len(_decoded[0]["data"])), (1514, 64))
+check("a record is eighteen bytes of framing", packet_batch.RECORD.size, 18)
+# A frame captured so short that the excess will not fit is clamped rather than
+# wrapped: an understated length is recoverable, a wrapped one is noise.
+_clamped = packet_batch.decode_batch(packet_batch.encode_batch(
+    [packet_batch.encode_record(0, 0, 1.0, 200000, bytes(4))]))[0]
+check("an excess past the u16 ceiling clamps instead of wrapping",
+      _clamped["origLen"], 4 + 0xFFFF)
 check("the frame bytes are exact", _decoded[0]["data"], bytes(range(64)))
 check("the interface index is carried", _decoded[1]["iface"], 7)
 
@@ -935,7 +947,7 @@ for _bad, _why in (
     (b"NOPE" + _frame[4:], "refuses a frame that is not a batch"),
     (_frame[:-1], "refuses a truncated record"),
     (_frame + b"\x00", "refuses trailing bytes"),
-    (b"IWP1\x02\x00\x01\x00", "refuses a version it does not know"),
+    (b"IWP1\x63\x00\x01\x00", "refuses a version it does not know"),
 ):
     try:
         packet_batch.decode_batch(_bad)
@@ -1516,13 +1528,24 @@ import threading as _threading
 from scapy.supersocket import SuperSocket as _SuperSocket
 
 
-class _FakePcapSocket:
-    """A libpcap-style socket: recv_raw returns (cls, bytes, ts), and None on a
-    read timeout the way L2pcapListenSocket does when to_ms elapses."""
+class _FakeWrapper:
+    """scapy's `_PcapWrapper_libpcap`, as far as the agent looks at it: the one
+    thing it wants is the raw libpcap handle on `.pcap`."""
 
-    # Present so sniff_on_interface treats this as the non-polled path, which
-    # is what a libpcap socket is - it returns on its own 100 ms read timeout.
-    pcap_fd = object()
+    pcap = "HANDLE"
+
+
+class _FakePcapSocket:
+    """A libpcap-style socket.
+
+    Since 3.7.0 the loop does not call `recv_raw` on one of these at all - it
+    goes to `pcap_next_ex` itself, because scapy's wrapper around that call
+    builds one Python int object per captured byte (see agent.read_frame). What
+    identifies such a socket is a libpcap handle, so that is what this has;
+    `recv_raw` stays so the fallback paths below can still be exercised.
+    """
+
+    pcap_fd = _FakeWrapper()
 
     def __init__(self, script):
         self.script = list(script)
@@ -1543,13 +1566,19 @@ class _FakePcapSocket:
 
 
 class _FakeAfPacketSocket(_FakePcapSocket):
-    """AF_PACKET blocks in recv_raw forever, so its loop must poll select()."""
+    """AF_PACKET blocks in recv_raw forever, so its loop must poll select().
+
+    No libpcap handle, which is also what keeps it off the fast path: the
+    per-byte cost that path avoids is scapy's libpcap wrapper's, and AF_PACKET's
+    own recv_raw is a plain recvfrom that never had it.
+    """
     pcap_fd = None
 
 
 class _BaseRecvRawSocket(_FakePcapSocket):
     """A socket that never overrode recv_raw. SuperSocket's base returns no
     timestamp at all, so this one must NOT take the fast path."""
+    pcap_fd = None
     recv_raw = _SuperSocket.recv_raw
 
 
@@ -1568,15 +1597,34 @@ def _run_capture(sock, frames_before_stop):
         if len(queued) >= frames_before_stop:
             stop.set()
 
+    prev_read_frame = agent.read_frame
+    prev_set_buffer = agent.set_kernel_buffer
+
+    def _read_frame(handle, header, data):
+        """Stands in for the ctypes call, replaying the socket's script.
+
+        The loop's job is stop_event, read timeouts and picking a branch;
+        read_frame's own job - caplen against wire length - is checked directly
+        further down, against real memory.
+        """
+        if not sock.script:
+            return None
+        _cls, raw, ts = sock.script.pop(0)
+        return None if raw is None else (raw, ts, len(raw))
+
     agent.scapy_conf.L2listen = lambda **kw: sock
     agent.agent.queue_packet = _queue
     agent.sniff = lambda **kw: (sniff_calls.append(kw), stop.set())[0]
+    agent.read_frame = _read_frame
+    agent.set_kernel_buffer = lambda s, size=None: 1234
     try:
         agent.sniff_on_interface("eth0", "Ethernet 0", stop, iface_id=3)
     finally:
         agent.scapy_conf.L2listen = prev_l2listen
         agent.agent.queue_packet = prev_queue
         agent.sniff = prev_sniff
+        agent.read_frame = prev_read_frame
+        agent.set_kernel_buffer = prev_set_buffer
     return queued, sniff_calls
 
 
@@ -1604,6 +1652,101 @@ check("...and tagged with the adapter", [m["iface"] for m in _decoded], [3, 3])
 check_true("a read timeout is skipped rather than queued or fatal", len(_queued) == 2)
 check_true("the socket is closed on the way out", _sock.closed)
 check("a libpcap socket is not polled with select()", _sock.selects, 0)
+
+
+# --- 3.7.0: reading a frame without scapy's per-byte materialisation --------------
+#
+# `_PcapWrapper_libpcap.next()` ends with
+#
+#     pkt = bytes(bytearray(self.pkt_data[:self.header.contents.len]))
+#
+# and slicing a ctypes pointer builds a Python list holding one int object per
+# byte. Measured over a real 300,228-frame capture: 26.67 us a frame against
+# 2.22 for the single memcpy `string_at` does - 12x, and it scales with frame
+# size, so a bulk transfer is exactly the traffic it drowns. It is the same
+# class of waste 3.5.0 removed one layer up, left behind because that change
+# stopped at `recv_raw` and this is inside it.
+#
+# That line also reads `.len` - the length on the WIRE - out of a buffer that
+# only holds `.caplen`. The two are equal until something truncates a frame,
+# and then it reads past the captured data. The checks below are on that
+# distinction, against real memory rather than a fake, because getting it
+# wrong is a buffer over-read rather than a wrong number.
+import ctypes as _ctypes
+
+
+class _FakeTimeval(_ctypes.Structure):
+    _fields_ = [("tv_sec", _ctypes.c_long), ("tv_usec", _ctypes.c_long)]
+
+
+class _FakeHeader(_ctypes.Structure):
+    _fields_ = [("ts", _FakeTimeval), ("caplen", _ctypes.c_uint), ("len", _ctypes.c_uint)]
+
+
+def _read_one(payload, caplen, wire_len, result=1):
+    """Drives agent.read_frame over a real buffer with a stubbed pcap_next_ex."""
+    buf = _ctypes.create_string_buffer(payload, len(payload))
+    hdr = _FakeHeader()
+    hdr.ts.tv_sec, hdr.ts.tv_usec = 100, 1
+    hdr.caplen, hdr.len = caplen, wire_len
+    header_ptr = _ctypes.pointer(hdr)
+    data_ptr = _ctypes.cast(buf, _ctypes.POINTER(_ctypes.c_ubyte))
+
+    prev = agent.pcap_next_ex
+
+    def _next(handle, header_out, data_out):
+        # Nothing is written through the byref() arguments: read_frame is
+        # handed pointers that ALREADY point at the header and buffer below, so
+        # returning 1 leaves it reading exactly what libpcap would have left
+        # there. Assigning through a byref() object is not possible from Python
+        # anyway - `_obj` is read-only.
+        return result
+
+    agent.pcap_next_ex = _next
+    try:
+        return agent.read_frame("HANDLE", header_ptr, data_ptr)
+    finally:
+        agent.pcap_next_ex = prev
+
+
+_whole = _read_one(bytes([0xAB]) * 64, caplen=64, wire_len=64)
+check("a whole frame comes back with its bytes, time and length",
+      (_whole[0], _whole[1], _whole[2]), (bytes([0xAB]) * 64, 100.000001, 64))
+
+# The bug in scapy's line. 64 bytes were captured of a 1,514-byte frame: copy
+# 64, report 1,514. Reading `.len` bytes out of a `.caplen` buffer is an
+# over-read of 1,450 bytes of whatever follows it in memory.
+_short = _read_one(bytes([0xCD]) * 64, caplen=64, wire_len=1514)
+check("a truncated frame copies caplen and reports the wire length",
+      (len(_short[0]), _short[2]), (64, 1514))
+
+# libpcap opens with to_ms=100 and returns 0 when that elapses. It is a quiet
+# adapter, not an error, and treating it as one would end a capture the first
+# time the wire went silent.
+check("a read timeout is None rather than an empty frame",
+      _read_one(b"", caplen=0, wire_len=0, result=0), None)
+
+
+# --- 3.7.0: the capture driver's buffer ------------------------------------------
+#
+# scapy calls pcap_create, set_snaplen, set_promisc, set_timeout, activate -
+# and never pcap_set_buffer_size, so Npcap runs on libpcap's Windows default of
+# 1 MB. At a ~1,100-byte mean frame that is about 950 frames, or 67 ms of slack
+# on a busy adapter; a real capture lost 302,448 frames to it, with one gap of
+# 579 ms. `pcap_setbuff` rather than `pcap_set_buffer_size` because the latter
+# has to precede pcap_activate, which scapy has already done.
+check("a socket with no libpcap handle reports no buffer, rather than claiming one",
+      agent.set_kernel_buffer(_FakeAfPacketSocket([])), None)
+check("the handle is found on scapy's wrapper", agent.pcap_handle(_FakePcapSocket([])), "HANDLE")
+check("...and is None when there is none", agent.pcap_handle(_FakeAfPacketSocket([])), None)
+check_true("the buffer asked for is bigger than libpcap's 1 MB default",
+           agent.KERNEL_BUFFER_BYTES > 1024 * 1024)
+# The queue's two bounds are meant to be reached by different traffic, not for
+# one to make the other unreachable. At the ~1,100-byte mean of a real capture
+# the frame count now costs about as much as the byte cap allows; before, 8,192
+# frames was 9 MB of a 32 MB budget and the bytes were never the binding half.
+check_true("the queue's frame cap and byte cap are within reach of each other",
+           0.5 < (agent.MAX_QUEUED_PACKETS * 1100) / agent.MAX_QUEUED_BYTES < 2.0)
 
 # AF_PACKET has no read timeout: recv_raw blocks until a frame arrives, so
 # stop_event would never be re-tested without select() in front of it.

@@ -57,6 +57,7 @@ try:
     # Measured on this machine: 65.6 MB and 0.33 s of import time become 39.9 MB
     # and 0.17 s. That memory is resident for the life of a service that spends
     # almost all of it idle.
+    from ctypes import POINTER, byref, c_ubyte, string_at
     from scapy.config import conf as scapy_conf
     scapy_conf.load_layers = ["l2", "inet", "inet6"]
     from scapy.all import sniff  # noqa: E402  (must follow load_layers)
@@ -64,6 +65,11 @@ try:
     # Only to ask whether a socket has overridden recv_raw - see
     # sniff_on_interface. Importing it loads no protocol layers.
     from scapy.supersocket import SuperSocket
+    # The libpcap calls the agent makes directly, past scapy. Two of the three
+    # scapy does not expose at all (statistics, buffer sizing) and the third it
+    # exposes only through a wrapper that costs 12x what the call does - see
+    # read_frame. Importing this loads no protocol layers either.
+    from scapy.libs.winpcapy import pcap_next_ex, pcap_pkthdr
 except ImportError:
     _report_missing_dependency("scapy", "pip install scapy")
     sys.exit(1)
@@ -76,7 +82,7 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "3.6.0"
+AGENT_VERSION = "3.7.0"
 
 # How often per-interface traffic rates are sampled while a client has the
 # capture-interface picker open. 500ms is fast enough that the sparkline
@@ -106,8 +112,25 @@ MAX_BATCH_BYTES = 256 * 1024
 # app in capture_stats. ~8,000 frames is a second or two of a busy adapter -
 # enough to ride out a render hitch on the client, far too little to accumulate
 # into the gigabyte-scale backlog that once wedged the agent.
-MAX_QUEUED_PACKETS = 8192
+#
+# 8,192 was chosen against a frame count and the byte bound was never the one
+# that bound: at the ~1,100-byte mean of a real bulk capture, 8,192 frames is
+# 9 MB of the 32 MB allowed, so the agent began dropping with two thirds of its
+# own budget unused. Sized to the budget instead - 30,000 frames is 33 MB at
+# that mean, so whichever bound is reached first now depends on the traffic
+# rather than on one of them being set nine times tighter than the other. In
+# time it is 0.58 s of slack at the old count against ~2 s at this one.
+MAX_QUEUED_PACKETS = 30000
 MAX_QUEUED_BYTES = 32 * 1024 * 1024
+
+# What the capture driver is asked to hold before it starts dropping frames.
+#
+# libpcap's Windows default is 1 MB and scapy never raises it (see
+# set_kernel_buffer), which is ~67 ms of slack on a busy adapter. 32 MB is
+# about two seconds at the same rate - enough to ride out the bursts that
+# actually cause loss, and small enough to be uncontroversial as non-paged
+# kernel memory on any machine that can run a browser.
+KERNEL_BUFFER_BYTES = 32 * 1024 * 1024
 
 # How often the watchdog checks that capture is not running with nobody
 # watching (see watch_for_orphaned_capture).
@@ -482,7 +505,7 @@ def capture_time_us(stamp) -> int:
     return int(round(float(stamp) * 1_000_000))
 
 
-def packet_to_record(raw, ts, iface_id=0, seq=0) -> bytes:
+def packet_to_record(raw, ts, iface_id=0, seq=0, wire_len=None) -> bytes:
     """Encodes one captured frame for the binary batch (packet_batch.py).
 
     Until 3.2.0 this built a JSON object with source, destination, protocol,
@@ -503,8 +526,16 @@ def packet_to_record(raw, ts, iface_id=0, seq=0) -> bytes:
     27,640 frames of those captures before the dissection was removed, which is
     what made this a pure performance change rather than a wire change.)
     """
+    # `wire_len` is what the frame measured ON THE WIRE and `len(raw)` is what
+    # was captured of it. They differ only when a snaplen truncated the frame,
+    # and this agent sets none - but the two are kept apart rather than
+    # collapsed, because the browser shows the wire length in its Length column
+    # and a truncated capture that reported the short number would be quietly
+    # wrong about every frame it truncated. None means "the caller does not
+    # know", which is every path that is not the libpcap fast one.
     return packet_batch.encode_record(
-        seq, iface_id, capture_time_us(ts), len(raw), raw,
+        seq, iface_id, capture_time_us(ts),
+        len(raw) if wire_len is None else wire_len, raw,
     )
 
 
@@ -558,6 +589,94 @@ counters = CaptureCounters()
 profile = capture_profile.CaptureProfile()
 
 
+def pcap_handle(sock):
+    """The raw libpcap handle behind a scapy capture socket, or None.
+
+    scapy keeps its wrapper on `pcap_fd`; releases before 2.5 called it `ins`.
+    Looking only at `ins` is why read_pcap_stats silently returned None on
+    every capture and the app showed the driver's loss as "unknown" for the
+    life of the feature, so both names are tried in one place now rather than
+    in each caller.
+    """
+    wrapper = getattr(sock, "pcap_fd", None) or getattr(sock, "ins", None)
+    return getattr(wrapper, "pcap", None)
+
+
+def set_kernel_buffer(sock, size_bytes=KERNEL_BUFFER_BYTES):
+    """Asks the driver to hold `size_bytes` of frames before it starts dropping.
+
+    scapy never does this. `_PcapWrapper_libpcap.__init__` calls pcap_create,
+    then set_snaplen/set_promisc/set_timeout, then pcap_activate - and
+    `pcap_set_buffer_size` is not among them, so Npcap runs on libpcap's
+    Windows default of 1 MB. At a 1,100-byte mean frame that is about 950
+    frames: **67 ms of slack** at the rate one sniffer thread sustains, which
+    is why measured loss here is bursty and large. One 579 ms gap in a real
+    capture cost 302,448 frames.
+
+    `pcap_setbuff`, not `pcap_set_buffer_size`: the latter must be called
+    before pcap_activate, which scapy has already done by the time we are
+    handed the socket. The former is the WinPcap/Npcap call that resizes the
+    buffer of a handle that is already live, which is the only kind we have.
+
+    Returns the size set, or None when the call is unavailable or refused -
+    never a lie about having set it. Not fatal either way: a smaller buffer
+    drops more frames, it does not stop a capture.
+    """
+    handle = pcap_handle(sock)
+    if not handle:
+        return None
+    try:
+        from scapy.libs.winpcapy import pcap_setbuff
+    except Exception:
+        # Not built on this platform. Linux's AF_PACKET ring is sized by
+        # scapy/libpcap elsewhere and has no equivalent call here.
+        return None
+    try:
+        if pcap_setbuff(handle, size_bytes) != 0:
+            return None
+    except Exception:
+        return None
+    return size_bytes
+
+
+def read_frame(handle, header, data):
+    """One captured frame as (bytes, timestamp, wire length), or None.
+
+    **Not `sock.recv_raw()`**, and this is the same class of finding as 3.5.0's.
+    That change stopped scapy dissecting every frame into an object graph the
+    agent threw away. It left `recv_raw` in place, which calls
+    `_PcapWrapper_libpcap.next()`, whose last line is:
+
+        pkt = bytes(bytearray(self.pkt_data[:self.header.contents.len]))
+
+    Slicing a ctypes pointer builds **a Python list with one int object per
+    byte** - 1,514 of them for a full-size frame - and then copies that into a
+    bytearray and again into a bytes. Measured over a real 300,228-frame
+    capture on this machine: **26.67 us a frame against 2.22** for the single
+    memcpy `ctypes.string_at` does, a 12x difference that scales with frame
+    size. A bulk transfer, where two thirds of frames are over 1,400 bytes, is
+    therefore the exact workload it drowns.
+
+    It also fixes a bug in that line. It reads `.len` - the length the frame
+    had **on the wire** - where the buffer only holds `.caplen`. The two differ
+    the moment a snaplen truncates anything, and the read runs past the end of
+    the captured data. Here they are kept apart: `caplen` says how much to
+    copy, `len` is reported as the wire length so the browser still knows the
+    frame was longer than what it was given.
+
+    Returns None on the read timeout (libpcap opens with to_ms=100), which is
+    how a stop is honoured promptly on a silent adapter.
+    """
+    result = pcap_next_ex(handle, byref(header), byref(data))
+    if result != 1:
+        return None
+    contents = header.contents
+    caplen = contents.caplen
+    raw = string_at(data, caplen)
+    ts = contents.ts.tv_sec + contents.ts.tv_usec / 1e6
+    return raw, ts, contents.len
+
+
 def read_pcap_stats(sock):
     """(received, dropped) as the capture driver counts them, or None.
 
@@ -569,15 +688,8 @@ def read_pcap_stats(sock):
     shows "unknown" rather than a reassuring 0.
     """
     try:
-        from ctypes import byref
         from scapy.libs.winpcapy import pcap_stat, pcap_stats
-        # scapy keeps the libpcap wrapper on `pcap_fd`; older releases called
-        # it `ins`. Looking only at `ins` is why this silently returned None on
-        # every capture and the app showed the driver's loss as "unknown" for
-        # the life of the feature - the one number nothing downstream can
-        # infer, reported as unavailable because of an attribute name.
-        wrapper = getattr(sock, "pcap_fd", None) or getattr(sock, "ins", None)
-        handle = getattr(wrapper, "pcap", None)
+        handle = pcap_handle(sock)
         if not handle:
             return None
         stat = pcap_stat()
@@ -1400,7 +1512,7 @@ def make_process_request(on_reject=None):
 _captured_count = 0
 
 
-def sniff_callback(raw, ts, iface_id=0):
+def sniff_callback(raw, ts, iface_id=0, wire_len=None):
     global _captured_count
     # Wall time for this frame's own callback. The expensive half - the driver
     # read and scapy's dissection - already happened before we were called, so
@@ -1419,7 +1531,7 @@ def sniff_callback(raw, ts, iface_id=0):
 
     seq = counters.next_seq(iface_id)
     try:
-        record = packet_to_record(raw, ts, iface_id, seq)
+        record = packet_to_record(raw, ts, iface_id, seq, wire_len)
     except Exception as exc:
         log.warning("failed to process a captured packet: %s", exc)
         return
@@ -1585,6 +1697,9 @@ def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
         agent.report_capture_failure(iface_id, iface_name, iface_label, str(exc))
         return
     counters.register_socket(iface_id, sock)
+    buffered = set_kernel_buffer(sock)
+    log.info("%s: capture buffer %s", iface_label,
+             f"{buffered // (1024 * 1024)} MB" if buffered else "driver default (could not be set)")
     try:
         # No BPF filter: capture every frame on the wire, the way the reference
         # analyzer does by default. This used to be "ip or ip6", which silently
@@ -1605,20 +1720,38 @@ def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
         # A socket that has NOT overridden it inherits SuperSocket's base,
         # which reports no timestamp at all - so that case keeps sniff(),
         # rather than silently trading capture times for throughput.
-        if type(sock).recv_raw is SuperSocket.recv_raw:
+        handle = pcap_handle(sock)
+        if handle:
+            # The fast path, and the one almost every capture takes. Straight
+            # to pcap_next_ex, because scapy's own wrapper around it costs 12x
+            # what the call does - see read_frame for the measurement.
+            #
+            # The handle is opened with to_ms=100, so the read returns on its
+            # own timeout and a stop is honoured within 100 ms even on a silent
+            # adapter. Header and data pointers are allocated ONCE and reused:
+            # libpcap writes into its own buffer and hands back a pointer to
+            # it, so allocating a pair per frame would add two ctypes objects
+            # per frame to the path this exists to shorten.
+            header = POINTER(pcap_pkthdr)()
+            data = POINTER(c_ubyte)()
+            while not stop_event.is_set():
+                frame = read_frame(handle, header, data)
+                if frame is None:
+                    continue
+                raw, ts, wire_len = frame
+                sniff_callback(raw, ts, iface_id, wire_len)
+        elif type(sock).recv_raw is SuperSocket.recv_raw:
             log.info("%s: no raw receive on this socket type - using sniff()", iface_label)
             while not stop_event.is_set():
                 sniff(opened_socket=sock, prn=lambda pkt: sniff_callback(bytes(pkt), pkt.time, iface_id),
                       store=False, timeout=CAPTURE_POLL_SECONDS)
         else:
-            # A libpcap socket is opened with to_ms=100, so recv_raw returns on
-            # its own read timeout and a stop is honoured within 100 ms even on
-            # a silent adapter - tighter than the 0.5 s the sniff() loop gave.
-            # An AF_PACKET socket blocks indefinitely instead, so that one is
-            # polled with select() on the same cadence as before.
-            polled = getattr(sock, "pcap_fd", None) is None
+            # Linux's AF_PACKET socket, which has no libpcap handle. Its
+            # recv_raw is a plain recvfrom returning bytes, so it carries none
+            # of the per-byte cost the libpcap wrapper does and is left alone.
+            # It blocks indefinitely, so it is polled with select().
             while not stop_event.is_set():
-                if polled and not sock.select([sock], CAPTURE_POLL_SECONDS):
+                if not sock.select([sock], CAPTURE_POLL_SECONDS):
                     continue
                 _cls, raw, ts = sock.recv_raw()
                 # None is the read timeout expiring, not an error: loop round
