@@ -1201,11 +1201,46 @@ function arrivalFormatter(utc: boolean): Intl.DateTimeFormat {
   return localArrivalFormat;
 }
 
-function formatArrivalTime(tsUs: number, utc = false): string {
-  const parts = arrivalFormatter(utc).formatToParts(new Date(tsUs / 1000));
+/**
+ * The formatted text for one whole second, kept so the next frame in it is free.
+ *
+ * Caching the `Intl.DateTimeFormat` OBJECT (above) removed the cost of building
+ * one per frame. It did not remove the cost of USING one: `formatToParts` is an
+ * ICU call that allocates a part array, and a later profile still put this
+ * function at **15.2% of the entire pipeline** - the largest single item in it,
+ * ahead of the whole TCP transport decoder.
+ *
+ * Everything it produces except the fractional digits is a function of the
+ * whole second: the date, the wall clock to the second, and the zone name. A
+ * capture delivers thousands of frames inside one of those - the fixture
+ * averages ~3,300 a second and bursts past 9,000 - so a single-entry cache per
+ * formatter hits essentially always, and misses only on the second boundary.
+ *
+ * Keyed on the second rather than the day, which costs nothing extra and is
+ * what makes a DST transition come out right: the zone name is re-resolved
+ * whenever the second changes, so the frame either side of the change is
+ * formatted by ICU rather than by an assumption about how often zones move.
+ */
+interface ArrivalSecond {
+  second: number;
+  /** "Sep 11, 2026 00:13:50" - everything before the fractional part. */
+  head: string;
+  /** The zone name, which follows the fractional part. */
+  zone: string;
+}
+
+let localArrivalSecond: ArrivalSecond | undefined;
+let utcArrivalSecond: ArrivalSecond | undefined;
+
+function arrivalSecond(tsUs: number, utc: boolean): ArrivalSecond {
+  const second = Math.floor(tsUs / 1_000_000);
+  const cached = utc ? utcArrivalSecond : localArrivalSecond;
+  if (cached !== undefined && cached.second === second) return cached;
+
+  const parts = arrivalFormatter(utc).formatToParts(new Date(second * 1000));
   // One pass over the parts rather than a `find` per field: there are six
   // fields and about ten parts, so the old form was sixty scans a frame.
-  let month = '', day = '', year = '', hour = '', minute = '', second = '', zone = '';
+  let month = '', day = '', year = '', hour = '', minute = '', sec = '', zone = '';
   for (const p of parts) {
     switch (p.type) {
       case 'month': month = p.value; break;
@@ -1213,12 +1248,23 @@ function formatArrivalTime(tsUs: number, utc = false): string {
       case 'year': year = p.value; break;
       case 'hour': hour = p.value; break;
       case 'minute': minute = p.value; break;
-      case 'second': second = p.value; break;
+      case 'second': sec = p.value; break;
       case 'timeZoneName': zone = p.value; break;
     }
   }
+  const fresh: ArrivalSecond = {
+    second,
+    head: `${month} ${day}, ${year} ${hour}:${minute}:${sec}`,
+    zone,
+  };
+  if (utc) utcArrivalSecond = fresh; else localArrivalSecond = fresh;
+  return fresh;
+}
+
+function formatArrivalTime(tsUs: number, utc = false): string {
+  const { head, zone } = arrivalSecond(tsUs, utc);
   const fractional = String((tsUs % 1_000_000) * 1000).padStart(9, '0');
-  return `${month} ${day}, ${year} ${hour}:${minute}:${second}.${fractional} ${zone}`;
+  return `${head}.${fractional} ${zone}`;
 }
 
 
