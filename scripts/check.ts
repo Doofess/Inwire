@@ -42,6 +42,7 @@ const NOT_TESTS: Record<string, string> = {
   'perf/record-cost.ts': 'measurement; needs the fixtures and --expose-gc (docs/decisions/0016)',
   'perf/fields-split-cost.ts': 'measurement; needs the fixtures and --expose-gc (docs/decisions/0017)',
   'perf/wire-size.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0005)',
+  'perf/summary-codec.ts': 'measurement; needs the fixtures, and sizes a format rather than asserting one (the disk-backed buffer plan)',
 };
 
 function walk(dir: string): string[] {
