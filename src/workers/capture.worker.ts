@@ -40,6 +40,7 @@ import { inflateSync } from 'fflate';
 import { CaptureWriter, type CaptureFiles } from '../services/capture/captureWriter';
 import { CaptureReader } from '../services/capture/captureReader';
 import { recoverIndex } from '../services/capture/captureIndex';
+import { serialQueue } from '../services/capture/serialQueue';
 import { SyncAccessBlockFile, type BlockFile, type SyncAccessHandleLike } from '../services/capture/blockFile';
 import type { ToCapture, FromCapture } from '../services/capture/captureProtocol';
 import type { Packet } from '../types/packet';
@@ -160,16 +161,35 @@ function reportStats(): void {
   });
 }
 
+/**
+ * Messages are handled one at a time, in order - see `serialQueue.ts` for the
+ * 500 frames that bought that rule. An `append` must not overtake the `open`
+ * it depends on.
+ */
+const queue = serialQueue((error) => {
+  fail(error instanceof Error ? error.message : String(error), false);
+});
+
 ctx.onmessage = (event: MessageEvent<ToCapture>) => {
   const message = event.data;
-  void handle(message);
+  queue.run(() => handle(message));
 };
+
+/**
+ * Set once an append has arrived with no capture open, so it is said once.
+ *
+ * With the queue above this can only mean the app appended without starting,
+ * which is a wiring error rather than a race - but it was silent before and
+ * cost 500 frames, so it does not get to be silent again.
+ */
+let orphanedAppend = false;
 
 async function handle(message: ToCapture): Promise<void> {
   try {
     switch (message.type) {
       case 'open': {
         closeOpen();
+        orphanedAppend = false;
         if (typeof navigator === 'undefined' || navigator.storage?.getDirectory === undefined) {
           fail('this browser has no origin private file system', true);
           return;
@@ -197,7 +217,13 @@ async function handle(message: ToCapture): Promise<void> {
       }
 
       case 'append': {
-        if (open === null) return;
+        if (open === null) {
+          if (!orphanedAppend) {
+            orphanedAppend = true;
+            fail(`${message.packets.length} frames arrived before a capture was opened`, false);
+          }
+          return;
+        }
         open.writer.append(message.packets);
         return;
       }
