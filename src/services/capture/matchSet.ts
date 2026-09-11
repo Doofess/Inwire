@@ -32,9 +32,19 @@
  * rather than an error.
  */
 
-/** Frames per chunk of the bitmap. Matches `chunkCodec.CHUNK_FRAMES`. */
+/**
+ * Frames per block of the bitmap. The same number as `chunkCodec.CHUNK_FRAMES`
+ * and **not the same thing**: this blocks the ORDINAL space at a fixed stride,
+ * where a capture's chunks are whatever the writer sealed - usually 4,096, and
+ * short wherever a capture was paused and resumed. A caller filling this in
+ * bulk has to check that its chunk is a whole aligned block first; exported so
+ * it can.
+ */
 const BITS_PER_CHUNK = 4096;
 const WORDS_PER_CHUNK = BITS_PER_CHUNK / 32;
+
+export const MATCH_BLOCK_FRAMES = BITS_PER_CHUNK;
+export const MATCH_BLOCK_WORDS = WORDS_PER_CHUNK;
 
 /** Population count of a 32-bit word - the SWAR trick, no lookup table. */
 function popcount(v: number): number {
@@ -79,11 +89,14 @@ export class MatchSet {
   }
 
   /**
-   * Takes one chunk's bits wholesale, which is how the scan fills this.
+   * Takes one whole **aligned block** of bits, which is the scan's bulk path.
    *
-   * The scan decodes a chunk's prefix block, evaluates the matcher over it and
-   * hands back 4,096 bits; copying them in is one `set` per word rather than
-   * one per matching frame.
+   * `chunk` here is a block of the ordinal space, not a capture chunk - see
+   * `MATCH_BLOCK_FRAMES`. The scan uses this when its chunk happens to be one
+   * (which is every chunk of an ordinary capture) and falls back to `set` per
+   * ordinal when it is not; copying 128 words beats one call per matching
+   * frame, and being wrong about the alignment would mark the wrong frames
+   * rather than fail.
    */
   setChunk(chunk: number, bits: Uint32Array): void {
     if (this.sealed) throw new Error('MatchSet: setChunk() after seal()');
