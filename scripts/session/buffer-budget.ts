@@ -5,9 +5,11 @@
  *
  * The buffer is limited by memory rather than by a frame count
  * (`services/bufferBudget.ts`), and `planBufferTrim` is the part that decides
- * what to drop. It is pure and exported for the same reason `planBudgetEviction`
- * is: it removes a user's frames without being asked, so it is worth testing
- * directly rather than only through a running buffer.
+ * what to drop. It is pure and exported because it removes a user's frames
+ * without being asked, so it is worth testing directly rather than only through
+ * a running buffer - and it is the only thing left in the app that does. The
+ * disk budget that used to sit beside it, and its `planBudgetEviction`, went
+ * with the IndexedDB session.
  *
  * The property that costs the most if it is wrong is not the arithmetic, it is
  * the **hysteresis**. Trimming moves the head of the buffer, and that

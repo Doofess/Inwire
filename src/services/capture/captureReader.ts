@@ -1,5 +1,5 @@
 /**
- * Reading a capture back: frame bytes today, rows in the step after this.
+ * Reading a capture back: a chunk's rows, and any frame's bytes.
  *
  * ## What this replaces, and why it had to be replaced
  *
@@ -36,10 +36,11 @@
  * and lives in the storage Worker, outside the main thread's byte budget
  * entirely.
  */
-import { ChunkDirectory, prefixBlockBytes } from './chunkCodec';
+import { ChunkDirectory, applyPrefixes, decodeChunk, prefixBlockBytes } from './chunkCodec';
 import type { CaptureIndex } from './captureIndex';
 import { readExact, type BlockFile } from './blockFile';
 import type { CaptureFiles } from './captureWriter';
+import type { Packet } from '../../types/packet';
 
 /**
  * The most bytes one read may cover to satisfy the frames wanted from a chunk.
@@ -65,6 +66,36 @@ export class CaptureReader {
 
   /** Forgets every cached directory. For a capture that was discarded. */
   clear(): void { this.directories.clear(); }
+
+  /**
+   * One chunk's rows, exactly as they were written.
+   *
+   * This is what a restore reads, and it is why the summary is on disk at all:
+   * `sessionStore` persisted bytes alone and re-dissected them, and a frame's
+   * row is not a function of its own bytes - the TCP sequence base, the TLS
+   * record cursor, the DNS pairing are all state the frames before it built.
+   * Re-dissecting one from the middle of a capture produces a **different**
+   * Info line, not merely a slower one. These rows are the ones the reader saw,
+   * cross-references and all.
+   *
+   * No `rawBytes`: a restored frame reads them back through `packetBytes()`
+   * when something actually wants them, which is what that seam is for. Sending
+   * them would put ~770 MB of payload through a structured clone to fill a
+   * buffer that would drop it again on the first flush.
+   *
+   * Empty when the chunk cannot be read, which is a torn tail rather than an
+   * error - the caller has the rest of the capture and should show it.
+   */
+  readRows(chunk: number): Packet[] {
+    if (chunk < 0 || chunk >= this.index.chunkCount) return [];
+    const record = this.index.record(chunk);
+    const summaryRaw = this.readClamped(this.files.sum, record.sumOffset, record.sumLength);
+    const prefixRaw = this.readClamped(this.files.pfx, record.pfxOffset, record.pfxLength);
+    if (summaryRaw === null || prefixRaw === null) return [];
+    const packets = decodeChunk(this.inflate(summaryRaw));
+    applyPrefixes(packets, this.inflate(prefixRaw));
+    return packets;
+  }
 
   /**
    * The bytes of specific frames, keyed by id.

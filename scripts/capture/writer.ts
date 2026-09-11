@@ -271,6 +271,32 @@ console.log('\n--- the write path itself ---\n');
   const after = readAll(f).length;
   check('recovery costs exactly the torn chunk and nothing else',
     before - after, CHUNK_FRAMES);
+
+  // And the writer that picks the capture up afterwards. This is what a
+  // reopen does, and getting it wrong is not a crash: the ordinals would
+  // restart at zero and the second chunk of the resumed capture would claim
+  // to be the first chunk of the whole thing.
+  const { records: survived } = recoverIndex(f.index, f.pfx, f.sum, f.byt);
+  const resumed = new CaptureWriter(f, {
+    horizonUs: 0, resumeFrom: survived, deflate: (b) => new Uint8Array(deflateRawSync(b)),
+  });
+  check('a resumed writer counts what is already there',
+    [resumed.stats.framesWritten, resumed.stats.chunksWritten],
+    [CHUNK_FRAMES * 2, 2]);
+  resumed.append(Array.from({ length: 10 }, (_, i) => frame(CHUNK_FRAMES * 3 + i + 1)));
+  resumed.finish();
+  const grown = readAll(f);
+  check('...and continues the capture rather than restarting it',
+    grown.length, CHUNK_FRAMES * 2 + 10);
+  check('...with ordinals that follow on', (() => {
+    const bytes = new Uint8Array(f.index.size());
+    f.index.read(0, bytes);
+    const index = CaptureIndex.parse(bytes);
+    return index.record(index.chunkCount - 1).firstOrdinal;
+  })(), CHUNK_FRAMES * 2);
+  check('...and the new frames readable at the end',
+    [grown[grown.length - 1].id, grown[CHUNK_FRAMES * 2].id],
+    [CHUNK_FRAMES * 3 + 10, CHUNK_FRAMES * 3 + 1]);
 }
 
 console.log('\n--- against real frames, and how far patches really reach ---\n');

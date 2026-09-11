@@ -176,6 +176,16 @@ export class CaptureWriter {
     this.deflate = options.deflate ?? defaultDeflate;
     this.index = new CaptureIndex(options.resumeFrom ?? []);
     this.ordinal = this.index.frameCount;
+    // Seeded from what survived, not started at zero. These counters are what
+    // the panel reports as "N frames stored on disk", and a reopened capture
+    // that said 1 while holding 9,001 would be the storage layer lying about
+    // the one number a reader uses to decide whether it is working.
+    this.counters.framesWritten = this.index.frameCount;
+    this.counters.chunksWritten = this.index.chunkCount;
+    if (this.index.chunkCount > 0) {
+      const last = this.index.record(this.index.chunkCount - 1);
+      this.counters.bytesWritten = last.bytOffset + last.bytLength;
+    }
     if (files.index.size() === 0) {
       const header = new Uint8Array(INDEX_HEADER_BYTES);
       writeIndexHeader(header);

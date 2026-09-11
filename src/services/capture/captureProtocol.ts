@@ -11,8 +11,27 @@ import type { InfoPatch } from '../dissect/types';
 import type { WriterStats } from './captureWriter';
 
 export type ToCapture =
-  /** Opens (or creates) a capture directory and starts writing into it. */
-  | { type: 'open'; captureId: string }
+  /**
+   * Opens (or creates) a capture directory and starts writing into it.
+   *
+   * The same message reopens a capture from a previous run - recovery, the
+   * index and the writer's resume are the same three steps either way, and a
+   * second message that did two of them would be a second thing to keep in
+   * step. `requestId` is set only when the caller is waiting for the answer,
+   * which is the restore; a fresh Start sends none.
+   */
+  | { type: 'open'; captureId: string; requestId?: number }
+  /** One chunk's rows, for a restore. Answered with `rows`. */
+  | { type: 'chunk'; requestId: number; chunk: number }
+  /**
+   * Deletes every capture directory except these.
+   *
+   * The retention rule this build has: exactly one capture on disk, the one
+   * the stored session names. It is today's rule moved to the new backend, not
+   * a new one - `clearSession` already wiped the previous capture at Start -
+   * and it stays here, in one place, until the capture library replaces it.
+   */
+  | { type: 'prune'; keep: string[] }
   /**
    * Frames to store. Bytes are written at once; rows wait behind the patch
    * horizon - see `captureWriter.ts`.
@@ -37,7 +56,25 @@ export type ToCapture =
   | { type: 'stats' };
 
 export type FromCapture =
-  | { type: 'ready'; captureId: string; persisted: boolean; quotaBytes: number | null }
+  | {
+      type: 'ready';
+      captureId: string;
+      persisted: boolean;
+      quotaBytes: number | null;
+      /** What was already on disk: zero for a capture that has just started. */
+      frameCount: number;
+      chunkCount: number;
+      /** The highest id stored, so numbering resumes past it. Zero when empty. */
+      lastId: number;
+      requestId?: number;
+    }
+  /**
+   * A chunk's rows, decoded.
+   *
+   * Without `rawBytes` - see `CaptureReader.readRows`. Empty when the chunk
+   * could not be read, which is a torn tail and not an error.
+   */
+  | { type: 'rows'; requestId: number; packets: Packet[] }
   | {
       type: 'stats';
       stats: WriterStats;

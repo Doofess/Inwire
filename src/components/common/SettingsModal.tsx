@@ -67,22 +67,7 @@ interface SettingsModalProps {
   bufferResidentBytes: number;
   bufferAutoPaused: boolean;
   onClearPackets: () => void;
-  /**
-   * What is on disk, and what the disk is allowed to keep.
-   *
-   * `evictedForBudget` is the honest half: since the app stopped deleting
-   * captures on close (docs/decisions/0012), the storage budget is the only
-   * automatic deletion left, and it silently takes the *beginning* of a long
-   * capture. An app that promises to keep a capture until asked has to say
-   * when it could not.
-   */
-  storage: { storedBytes: number; storageBudgetBytes: number; evictedForBudget: number };
-  /**
-   * What the OPFS capture store has written, which for now runs BESIDE the
-   * IndexedDB session rather than instead of it. Shown apart for that reason:
-   * while the new path is a shadow, one number that merged the two would make
-   * it impossible to see whether it is working.
-   */
+  /** What the capture store holds. The capture on disk IS this now. */
   captureStorage: CaptureStorageState;
   /** Deletes the stored capture. The only thing in the app that does. */
   onDiscardCapture: () => void;
@@ -129,7 +114,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   bufferResidentBytes,
   bufferAutoPaused,
   onClearPackets,
-  storage,
   captureStorage,
   onDiscardCapture,
   filterPresetLibrary,
@@ -305,7 +289,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </button>
                       <button
                         onClick={onDiscardCapture}
-                        disabled={storage.storedBytes === 0 && totalPacketsCount === 0}
+                        disabled={captureStorage.bytesOnDisk === 0 && totalPacketsCount === 0}
                         className={DRIVER_ACTION_BUTTON_CLASS}
                       >
                         <TbTrash className="w-3.5 h-3.5" />
@@ -315,44 +299,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                     {/* Bytes that outlive the app should never be a surprise,
                         so the amount is stated next to the button that removes
-                        it rather than left to be inferred. */}
-                    <p className="text-[11px] text-muted-foreground">
-                      {storage.storedBytes > 0 ? (
-                        <>
-                          <span className="font-medium text-foreground">
-                            {(storage.storedBytes / 1_000_000).toFixed(1)} MB
-                          </span>
-                          {storage.storageBudgetBytes > 0 && (
-                            <> of {(storage.storageBudgetBytes / 1_000_000).toFixed(0)} MB</>
-                          )}
-                          {' stored on disk. This capture is kept until you discard it — '}
-                          closing Inwire no longer deletes it.
-                        </>
-                      ) : (
-                        'Nothing is stored on disk yet.'
-                      )}
-                    </p>
+                        it. There used to be a second figure here for the
+                        IndexedDB session, written beside this one while the
+                        capture store was a shadow; there is no second copy any
+                        more, and no 512 MB budget quietly deleting the oldest
+                        frames to stay under it.
 
-                    {/* The capture store. It is what a frame's bytes are read
-                        back FROM now, which is why the frame span is stated:
-                        the buffer may only drop a frame's bytes inside it, so
-                        a reader who wonders why memory is not coming down is
+                        The frame span is stated because it is load-bearing
+                        rather than decorative: the buffer may only drop a
+                        frame's bytes from memory once that frame is inside it,
+                        so a reader wondering why memory is not coming down is
                         looking for this number. */}
-                    {captureStorage.captureId !== null && (
+                    {captureStorage.captureId !== null && captureStorage.bytesOnDisk > 0 ? (
                       <p className="text-[11px] text-muted-foreground">
                         <span className="font-medium text-foreground">
                           {(captureStorage.bytesOnDisk / 1_000_000).toFixed(1)} MB
                         </span>
-                        {' in the capture store ('}
+                        {' stored on disk ('}
                         {captureStorage.framesWritten.toLocaleString()} frames
                         {captureStorage.stagedCount > 0
                           && `, ${captureStorage.stagedCount.toLocaleString()} waiting`}
-                        {'). '}
-                        {captureStorage.storedRange === null
-                          ? 'No frame is readable back from it yet.'
-                          : `Frames ${captureStorage.storedRange.first.toLocaleString()}`
-                            + `\u2013${captureStorage.storedRange.last.toLocaleString()} can have`
-                            + ' their bytes read back, so the buffer is free to stop holding them.'}
+                        {'). This capture is kept until you discard it \u2014 closing Inwire '}
+                        does not delete it.
+                        {captureStorage.storedRange !== null && (
+                          <>
+                            {' Frames '}
+                            {captureStorage.storedRange.first.toLocaleString()}
+                            {'\u2013'}
+                            {captureStorage.storedRange.last.toLocaleString()}
+                            {' can have their bytes read back, so the buffer is free to stop'}
+                            {' holding them.'}
+                          </>
+                        )}
                         {!captureStorage.persisted && (
                           <>
                             {' '}Storage is <span className="text-amber-600 dark:text-amber-400">
@@ -360,6 +338,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             </span>: the browser may reclaim it under disk pressure.
                           </>
                         )}
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground">
+                        Nothing is stored on disk yet.
                       </p>
                     )}
                     {captureStorage.error !== null && (
@@ -379,20 +361,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
                     )}
 
-                    {/* The one thing that still deletes without being asked.
-                        It takes the OLDEST frames, so a long capture quietly
-                        loses its beginning - which is the half a user is least
-                        likely to notice missing and most likely to want. */}
-                    {storage.evictedForBudget > 0 && (
-                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-600 dark:text-amber-400">
-                        The oldest {storage.evictedForBudget.toLocaleString()} frame
-                        {storage.evictedForBudget === 1 ? ' is' : 's are'} no longer stored on
-                        disk: this capture reached the{' '}
-                        {(storage.storageBudgetBytes / 1_000_000).toFixed(0)} MB storage limit.
-                        {' '}They are still in the buffer and still export, but a reload will
-                        start from the oldest frame that is still stored.
-                      </div>
-                    )}
                   </div>
                 }
               />

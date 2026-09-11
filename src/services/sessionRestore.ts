@@ -6,8 +6,54 @@ import { TcpStreamTracker } from './tcpStreamTracker';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 import { QuicFlowTracker } from './quicFlowTracker';
 import type { L3Tracker } from './l3Tracker';
-import { StoredFrame } from './sessionStore';
 import type { HostIdentity } from './direction';
+
+/**
+ * One frame in the smallest form `restoreBatch` can rebuild a Packet from.
+ *
+ * This was the shape a session was stored in, and it is now what the **tabular
+ * importer** builds: a spreadsheet row is not a frame, and turning one into a
+ * Packet is the same job as turning a stored frame into one, so the two share
+ * this type and the function below rather than growing a second path that
+ * decodes almost the same way.
+ *
+ * `raw` is absent when there are no bytes to dissect - the agent sent metadata
+ * only, or the spreadsheet had no hex column. In that case `fallback` carries
+ * the handful of display fields that packet ever had, so it comes back exactly
+ * as unhelpful as it originally was rather than being silently dropped or,
+ * worse, reconstructed with invented payload.
+ */
+export interface StoredFrame {
+  id: number;
+  /** Epoch milliseconds. Kept for frames stored before `tsUs` existed. */
+  timestamp: number;
+  /** Epoch microseconds; absent on frames stored by an older build. */
+  tsUs?: number;
+  relativeTime: number;
+  timeDelta: number;
+  length: number;
+  interfaceName?: string;
+  raw?: Uint8Array;
+  fallback?: {
+    source: string;
+    destination: string;
+    sourcePort?: number;
+    destPort?: number;
+    protocol: string;
+    /**
+     * The free-form protocol name, when it differs from the coarse `protocol`.
+     *
+     * A live agent frame never sets this - it has no dissector to name a layer.
+     * A frame reconstructed from a spreadsheet row does: the Protocol column
+     * holds what the packet list displayed ("TLSv1.2"), which is not a member
+     * of `ProtocolType`, so the two halves have to travel separately.
+     */
+    protocolLabel?: string;
+    info: string;
+    /** Absent means 'ok', which is what a frame with no bytes to judge gets. */
+    status?: PacketStatus;
+  };
+}
 
 /**
  * Rebuilding live Packets from the frames a previous session stored.

@@ -10,9 +10,11 @@ import type { Packet } from '../types/packet';
  * about 66 MB and the cap was leaving most of the machine unused. What a user
  * actually wants to say is how much memory the capture may have.
  *
- * This is the same shape as the disk budget that already exists -
- * `STORAGE_BUDGET_BYTES` and `planBudgetEviction` in `sessionStore.ts` - and
- * deliberately so: one idea, expressed twice, rather than two.
+ * There was a second budget of the same shape on disk - `STORAGE_BUDGET_BYTES`
+ * in `sessionStore.ts` - and it is gone. A disk budget that evicts is what a
+ * capture bounded by RAM needed; a capture that lives on disk is the point of
+ * the capture store, and its floor never rises. This is now the only budget in
+ * the app, and the only thing that forgets a frame.
  *
  * **What the budget governs, and what it does not.** Summaries are the dominant
  * term and the only unbounded one, so they are what it counts. Two other pools
@@ -116,7 +118,9 @@ export function estimateSummaryBytes(packet: Packet): number {
  * How many of the oldest frames to drop to get back under the budget.
  *
  * Pure, and separate from the buffer it describes, so the policy can be tested
- * without building one - the same reason `planBudgetEviction` is exported.
+ * without building one. It is the last such function in the app: the disk
+ * budget's `planBudgetEviction` was exported for the same reason and went with
+ * the budget it enforced.
  *
  * Nothing is dropped until the buffer is over budget by more than the slack,
  * and then it drops to the budget rather than to the edge of the slack, so the

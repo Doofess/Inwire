@@ -28,6 +28,15 @@ import type { InfoPatch } from '../dissect/types';
 import type { ToCapture, FromCapture, CaptureStorageState } from './captureProtocol';
 import { freshCaptureStorageState } from './captureProtocol';
 
+/** What a reopened capture turned out to hold. */
+export interface StoredCapture {
+  captureId: string;
+  frameCount: number;
+  chunkCount: number;
+  /** The highest stored id, so `packetGenerator` resumes past it. */
+  lastId: number;
+}
+
 /** True when this browser can host the capture store at all. */
 export function opfsAvailable(): boolean {
   return typeof navigator !== 'undefined'
@@ -45,6 +54,9 @@ class CaptureClient {
   private disabled = false;
   /** In-flight byte reads, by request id. The worker always answers. */
   private readonly pending = new Map<number, (frames: Map<number, Uint8Array>) => void>();
+  /** In-flight row reads and reopens, same rule. */
+  private readonly pendingRows = new Map<number, (packets: Packet[]) => void>();
+  private readonly pendingOpen = new Map<number, (ready: StoredCapture | null) => void>();
   private nextRequest = 1;
 
   onState: (state: CaptureStorageState) => void = () => {};
@@ -83,14 +95,25 @@ class CaptureClient {
 
   private receive(message: FromCapture): void {
     switch (message.type) {
-      case 'ready':
+      case 'ready': {
         this.update({
           captureId: message.captureId,
           persisted: message.persisted,
           quotaBytes: message.quotaBytes,
           error: null,
         });
+        if (message.requestId !== undefined) {
+          const settle = this.pendingOpen.get(message.requestId);
+          this.pendingOpen.delete(message.requestId);
+          settle?.({
+            captureId: message.captureId,
+            frameCount: message.frameCount,
+            chunkCount: message.chunkCount,
+            lastId: message.lastId,
+          });
+        }
         break;
+      }
       case 'stats':
         this.update({
           framesWritten: message.stats.framesWritten,
@@ -107,8 +130,21 @@ class CaptureClient {
         settle(new Map(message.frames));
         break;
       }
+      case 'rows': {
+        const settle = this.pendingRows.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingRows.delete(message.requestId);
+        settle(message.packets);
+        break;
+      }
       case 'failure':
-        if (message.fatal) this.disabled = true;
+        if (message.fatal) {
+          this.disabled = true;
+          // A store that will never work must not leave a restore waiting on
+          // it. Everything in flight is answered with nothing, which every
+          // caller here already treats as "this capture holds none of that".
+          this.settleAll();
+        }
         this.update({ error: message.message });
         break;
     }
@@ -177,6 +213,48 @@ class CaptureClient {
    */
   get storedRange(): { first: number; last: number } | null { return this.state.storedRange; }
 
+  /**
+   * Opens a capture that already exists and says what is in it.
+   *
+   * The same `open` a fresh Start sends: recovery runs, a torn tail is
+   * truncated, and the writer resumes past what survived - so a reopened
+   * capture is immediately appendable as well as readable, and there is one
+   * code path rather than two that have to agree.
+   *
+   * Null when the store is unavailable or the open failed, which the caller
+   * reads as "there is nothing to restore".
+   */
+  reopen(captureId: string): Promise<StoredCapture | null> {
+    const worker = this.ensureWorker();
+    if (worker === null) return Promise.resolve(null);
+    this.state = freshCaptureStorageState();
+    const requestId = this.nextRequest++;
+    return new Promise((resolve) => {
+      this.pendingOpen.set(requestId, resolve);
+      worker.postMessage({ type: 'open', captureId, requestId } satisfies ToCapture);
+    });
+  }
+
+  /**
+   * One chunk's rows, for a restore.
+   *
+   * Without `rawBytes`: a restored frame is inside the stored range, so
+   * `packetBytes()` reads them back when something wants them. See
+   * `CaptureReader.readRows`.
+   */
+  readRows(chunk: number): Promise<Packet[]> {
+    const worker = this.ensureWorker();
+    if (worker === null) return Promise.resolve([]);
+    const requestId = this.nextRequest++;
+    return new Promise((resolve) => {
+      this.pendingRows.set(requestId, resolve);
+      worker.postMessage({ type: 'chunk', requestId, chunk } satisfies ToCapture);
+    });
+  }
+
+  /** Deletes every capture directory but these. See the protocol's `prune`. */
+  prune(keep: readonly string[]): void { this.send({ type: 'prune', keep: [...keep] }); }
+
   /** Seals the staging ring and flushes. Pause, stop, and page hide. */
   finish(): void { this.send({ type: 'finish' }); }
 
@@ -192,6 +270,10 @@ class CaptureClient {
   private settleAll(): void {
     for (const settle of this.pending.values()) settle(NONE);
     this.pending.clear();
+    for (const settle of this.pendingRows.values()) settle([]);
+    this.pendingRows.clear();
+    for (const settle of this.pendingOpen.values()) settle(null);
+    this.pendingOpen.clear();
   }
 
   get snapshot(): CaptureStorageState { return this.state; }

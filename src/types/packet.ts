@@ -238,9 +238,11 @@ export interface Packet {
    * once dissected and the chain is deterministic, so the rule it matches can
    * never change while the chain does not.
    *
-   * Never persisted and never exported: `toStoredFrame` and the export writers
+   * Never persisted and never exported: the chunk codec and the export writers
    * both build explicit objects, so this is inert in both. A frame restored
-   * from disk simply arrives without it and is matched on first sight.
+   * from disk simply arrives without it and is matched on first sight - which
+   * is required rather than convenient, since the chain it was matched against
+   * is not necessarily the chain in force when it comes back.
    */
   colorSlot?: number;
   /**
@@ -264,9 +266,11 @@ export interface Packet {
    * the frame went nowhere. Read it through `services/direction.ts`; nothing
    * else should touch the bits.
    *
-   * Not persisted (`toStoredFrame` builds an explicit object) - a restored
-   * frame is re-dissected and decides again, which is right, because the host
-   * identity may have changed since.
+   * Persisted by the chunk codec, and re-derived after a restore anyway: a
+   * host override, or an identity the agent named this time and did not last
+   * time, has to reach frames that were decided before it. `redirect.ts` is
+   * that pass, and it is why storing the answer costs nothing to be wrong
+   * about.
    */
   direction?: number;
   /**
@@ -282,8 +286,10 @@ export interface Packet {
    * Nothing rebases, and nothing is keyed by position in the buffer - which is
    * what makes this survive trimming, filtering and sorting alike.
    *
-   * Never persisted and never exported, like `colorSlot`: `toStoredFrame` and
-   * the export writers both build explicit objects.
+   * Never persisted and never exported, like `colorSlot`: the chunk codec
+   * writes the field bag through `fieldEntries`, which is the one function that
+   * knows a value can be in either place, and rebuilds the block on the way
+   * back in.
    */
   cols?: FieldBlock;
   row?: number;

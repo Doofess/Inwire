@@ -4,7 +4,6 @@ import type { Packet } from '../types/packet';
 import type { InfoPatch } from '../services/dissect/types';
 import type { FrameBatch } from '../services/pipelineClient';
 import { FieldBlockWriter } from '../services/dissect/fieldSplit';
-import { appendFrames, trimFramesBelow } from '../services/sessionStore';
 import { captureStore } from '../services/capture/captureClient';
 import {
   adoptAccounting, commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
@@ -194,17 +193,10 @@ export function usePacketBuffer({
       // dense-field split, the byte count - outside the updater because React
       // runs that twice under StrictMode. See services/packetBuffer.ts.
       prepareBatch(incoming, accountingRef.current, {
-        persist: (frames) => {
-          appendFrames(frames as Packet[]);
-          // Shadow write to the capture store. Beside IndexedDB, not instead
-          // of it: nothing reads OPFS yet, so a refresh still restores the way
-          // it always has while the new path is watched on a real capture.
-          //
-          // Inside `persist` deliberately - that is the half of the flush that
-          // runs exactly once even under StrictMode's double invoke, and
-          // writing a frame twice is exactly what it exists to prevent.
-          captureStore.append(frames as Packet[]);
-        },
+        // Inside `persist` deliberately - that is the half of the flush that
+        // runs exactly once even under StrictMode's double invoke, and writing
+        // a frame twice is exactly what it exists to prevent.
+        persist: (frames) => captureStore.append(frames as Packet[]),
         absorb: (frames) => fieldWriter.current.absorb(frames),
       });
 
@@ -228,12 +220,11 @@ export function usePacketBuffer({
           residentBytesAtEntry,
         },
         {
-          trimFramesBelow,
-          // The capture store's range, not IndexedDB's. IndexedDB's floor
-          // rises with its own 512 MB budget, faster than the RAM window's,
-          // and `evictOldBytes` may only drop bytes it can read back - so
-          // every frame that budget had evicted kept its bytes in memory for
-          // the rest of the capture. See services/packetBytes.ts.
+          // The capture store's range. It only grows, so a frame that was ever
+          // readable stays readable and `evictOldBytes` can always proceed -
+          // where IndexedDB's floor rose with its own 512 MB budget, faster
+          // than the RAM window's, and pinned the bytes in between. See
+          // services/packetBytes.ts.
           storedIdRange: () => captureStore.storedRange,
           // Deferred: calling a setter from inside an updater is the impure
           // part, and the head-id guard is what keeps it to one call.

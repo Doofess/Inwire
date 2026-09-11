@@ -42,6 +42,7 @@ import { CaptureReader } from '../services/capture/captureReader';
 import { recoverIndex } from '../services/capture/captureIndex';
 import { SyncAccessBlockFile, type BlockFile, type SyncAccessHandleLike } from '../services/capture/blockFile';
 import type { ToCapture, FromCapture } from '../services/capture/captureProtocol';
+import type { Packet } from '../types/packet';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -181,7 +182,17 @@ async function handle(message: ToCapture): Promise<void> {
         try { persisted = await navigator.storage.persist(); } catch { persisted = false; }
         let quotaBytes: number | null = null;
         try { quotaBytes = (await navigator.storage.estimate()).quota ?? null; } catch { /* unavailable */ }
-        post({ type: 'ready', captureId: message.captureId, persisted, quotaBytes });
+        const range = open.writer.index.idRange();
+        post({
+          type: 'ready',
+          captureId: message.captureId,
+          persisted,
+          quotaBytes,
+          frameCount: open.writer.index.frameCount,
+          chunkCount: open.writer.index.chunkCount,
+          lastId: range === null ? 0 : range.last,
+          ...(message.requestId === undefined ? {} : { requestId: message.requestId }),
+        });
         return;
       }
 
@@ -218,6 +229,36 @@ async function handle(message: ToCapture): Promise<void> {
           fail(error instanceof Error ? error.message : String(error), false);
         }
         post({ type: 'bytes', requestId: message.requestId, frames: [...found] });
+        return;
+      }
+
+      case 'chunk': {
+        // Like `read`, always answered. A restore walks chunks one at a time
+        // and would stall on the first one that went unanswered.
+        let packets: Packet[] = [];
+        try {
+          if (open !== null) packets = open.reader.readRows(message.chunk);
+        } catch (error) {
+          fail(error instanceof Error ? error.message : String(error), false);
+        }
+        post({ type: 'rows', requestId: message.requestId, packets });
+        return;
+      }
+
+      case 'prune': {
+        const root = await navigator.storage.getDirectory();
+        const inwire = await root.getDirectoryHandle(ROOT_DIRECTORY, { create: true });
+        const keep = new Set(message.keep);
+        // Names collected before anything is removed: mutating a directory
+        // while iterating it is not something the spec promises anything
+        // about, and a half-enumerated prune would leave arbitrary captures.
+        const names: string[] = [];
+        for await (const name of (inwire as unknown as { keys(): AsyncIterable<string> }).keys()) {
+          if (!keep.has(name)) names.push(name);
+        }
+        for (const name of names) {
+          try { await inwire.removeEntry(name, { recursive: true }); } catch { /* held open elsewhere */ }
+        }
         return;
       }
 
