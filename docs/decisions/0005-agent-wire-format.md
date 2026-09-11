@@ -1,5 +1,15 @@
 # 0005 - Agent wire format: `seq`, `iface`, `ts_us`, `capture_stats`, ownership, token
 
+> **Superseded in part by [0029](0029-the-app-and-the-agent-talk-over-a-named-pipe.md).**
+> Everything here about the *messages* still stands and is untouched by the move
+> off the WebSocket. Everything about **authentication** - the pairing token, the
+> origin allowlist, and the peer verification this ADR anticipated - is gone on
+> Windows, where the agent's only transport is a named pipe whose security
+> descriptor names who may open it. Deleted rather than replaced: the kernel
+> answers the question those were asked to answer. They remain in force on macOS
+> and Linux, which still use the socket. This note is the one edit to an accepted
+> ADR the convention allows - a pointer, changing nothing it says.
+
 **Status:** Accepted 2026-09-04. Protocol version 3.1.0.
 
 ## Context
