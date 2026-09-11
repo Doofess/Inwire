@@ -35,11 +35,17 @@ export function opfsAvailable(): boolean {
     && typeof Worker !== 'undefined';
 }
 
+/** Bytes a request could not be answered with. Shared, never written to. */
+const NONE = new Map<number, Uint8Array>();
+
 class CaptureClient {
   private worker: Worker | null = null;
   private state: CaptureStorageState = freshCaptureStorageState();
   /** Set once a failure makes the store unusable, so nothing keeps trying. */
   private disabled = false;
+  /** In-flight byte reads, by request id. The worker always answers. */
+  private readonly pending = new Map<number, (frames: Map<number, Uint8Array>) => void>();
+  private nextRequest = 1;
 
   onState: (state: CaptureStorageState) => void = () => {};
 
@@ -57,6 +63,10 @@ class CaptureClient {
       // disables itself and says so rather than throwing into the flush.
       this.disabled = true;
       this.update({ error: event.message || 'the capture store failed to start' });
+      // Whoever was waiting on a read gets an empty answer rather than a
+      // promise that never settles: a frame whose bytes cannot be fetched is a
+      // thing to render, and the hex viewer already knows how to say so.
+      this.settleAll();
     };
     this.worker = worker;
     return worker;
@@ -87,8 +97,16 @@ class CaptureClient {
           patchesMissed: message.stats.patchesMissed,
           bytesOnDisk: message.bytesOnDisk,
           stagedCount: message.stagedCount,
+          storedRange: message.storedRange,
         });
         break;
+      case 'bytes': {
+        const settle = this.pending.get(message.requestId);
+        if (settle === undefined) break;
+        this.pending.delete(message.requestId);
+        settle(new Map(message.frames));
+        break;
+      }
       case 'failure':
         if (message.fatal) this.disabled = true;
         this.update({ error: message.message });
@@ -99,6 +117,7 @@ class CaptureClient {
   /** Starts a capture. One Start->Stop cycle is one capture directory. */
   begin(captureId: string): void {
     if (!opfsAvailable()) return;
+    this.settleAll();
     this.state = freshCaptureStorageState();
     this.send({ type: 'open', captureId });
   }
@@ -127,12 +146,53 @@ class CaptureClient {
     this.send({ type: 'patches', patches: patches as InfoPatch[] });
   }
 
+  /**
+   * The raw bytes of specific frames, keyed by id.
+   *
+   * The same contract `sessionStore.readFrameBytes` had, so `packetBytes.ts`
+   * changes its import and nothing else: ids the capture does not hold are
+   * absent from the map rather than an error.
+   */
+  readBytes(ids: readonly number[]): Promise<Map<number, Uint8Array>> {
+    if (ids.length === 0) return Promise.resolve(NONE);
+    const worker = this.ensureWorker();
+    if (worker === null) return Promise.resolve(NONE);
+    const requestId = this.nextRequest++;
+    return new Promise((resolve) => {
+      this.pending.set(requestId, resolve);
+      worker.postMessage({ type: 'read', requestId, ids: [...ids] } satisfies ToCapture);
+    });
+  }
+
+  /**
+   * The ids whose bytes are readable, or null.
+   *
+   * Synchronous on purpose. `bytesAreRecoverable` is asked while rendering a
+   * frame that has no bytes, to say whether they are gone or merely elsewhere,
+   * and an answer that arrived a promise later would make that a third state
+   * the detail pane has to draw. The worker pushes the range with its stats and
+   * this is the last one it sent, which lags a poll behind the truth in the
+   * safe direction: a frame just sealed keeps its bytes in RAM for another
+   * couple of seconds, and no frame is ever dropped before it is readable.
+   */
+  get storedRange(): { first: number; last: number } | null { return this.state.storedRange; }
+
   /** Seals the staging ring and flushes. Pause, stop, and page hide. */
   finish(): void { this.send({ type: 'finish' }); }
 
   askForStats(): void { this.send({ type: 'stats' }); }
 
-  discard(captureId: string): void { this.send({ type: 'discard', captureId }); }
+  discard(captureId: string): void {
+    this.send({ type: 'discard', captureId });
+    this.settleAll();
+    this.state = freshCaptureStorageState();
+    this.onState(this.state);
+  }
+
+  private settleAll(): void {
+    for (const settle of this.pending.values()) settle(NONE);
+    this.pending.clear();
+  }
 
   get snapshot(): CaptureStorageState { return this.state; }
 }

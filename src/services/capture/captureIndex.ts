@@ -138,52 +138,84 @@ export function recordsIn(fileSize: number): number {
  * of objects touches two and chases a pointer.
  */
 export class CaptureIndex {
-  private readonly firstId: Uint32Array;
-  private readonly lastId: Uint32Array;
-  private readonly counts: Uint32Array;
-  private readonly firstOrdinal: Float64Array;
-  private readonly pfxOffset: Float64Array;
-  private readonly sumOffset: Float64Array;
-  private readonly bytOffset: Float64Array;
-  private readonly pfxLength: Uint32Array;
-  private readonly sumLength: Uint32Array;
-  private readonly bytLength: Uint32Array;
-  private readonly firstTs: Float64Array;
+  private firstId: Uint32Array;
+  private lastId: Uint32Array;
+  private counts: Uint32Array;
+  private firstOrdinal: Float64Array;
+  private pfxOffset: Float64Array;
+  private sumOffset: Float64Array;
+  private bytOffset: Float64Array;
+  private pfxLength: Uint32Array;
+  private sumLength: Uint32Array;
+  private bytLength: Uint32Array;
+  private firstTs: Float64Array;
 
-  readonly chunkCount: number;
-  readonly frameCount: number;
+  private n = 0;
+  private frames = 0;
 
-  constructor(records: readonly ChunkRecord[]) {
-    const n = records.length;
-    this.chunkCount = n;
-    this.firstId = new Uint32Array(n);
-    this.lastId = new Uint32Array(n);
-    this.counts = new Uint32Array(n);
-    this.firstOrdinal = new Float64Array(n);
-    this.pfxOffset = new Float64Array(n);
-    this.sumOffset = new Float64Array(n);
-    this.bytOffset = new Float64Array(n);
-    this.pfxLength = new Uint32Array(n);
-    this.sumLength = new Uint32Array(n);
-    this.bytLength = new Uint32Array(n);
-    this.firstTs = new Float64Array(n);
-    let frames = 0;
-    for (let i = 0; i < n; i++) {
-      const r = records[i];
-      this.firstId[i] = r.firstId;
-      this.lastId[i] = r.lastId;
-      this.counts[i] = r.frameCount;
-      this.firstOrdinal[i] = r.firstOrdinal;
-      this.pfxOffset[i] = r.pfxOffset;
-      this.sumOffset[i] = r.sumOffset;
-      this.bytOffset[i] = r.bytOffset;
-      this.pfxLength[i] = r.pfxLength;
-      this.sumLength[i] = r.sumLength;
-      this.bytLength[i] = r.bytLength;
-      this.firstTs[i] = r.firstTsUs;
-      frames += r.frameCount;
-    }
-    this.frameCount = frames;
+  /**
+   * The index **grows**, because a running capture is the main thing that
+   * reads it.
+   *
+   * A reader that could only be built from a finished file would mean either
+   * rebuilding eleven typed arrays every time a chunk is sealed, or a second
+   * index type for the live case that has to answer the same three questions
+   * the same way. Appending doubles the arrays geometrically, so a whole
+   * capture's growth costs a handful of copies in total.
+   */
+  constructor(records: readonly ChunkRecord[] = []) {
+    const capacity = Math.max(64, records.length);
+    this.firstId = new Uint32Array(capacity);
+    this.lastId = new Uint32Array(capacity);
+    this.counts = new Uint32Array(capacity);
+    this.firstOrdinal = new Float64Array(capacity);
+    this.pfxOffset = new Float64Array(capacity);
+    this.sumOffset = new Float64Array(capacity);
+    this.bytOffset = new Float64Array(capacity);
+    this.pfxLength = new Uint32Array(capacity);
+    this.sumLength = new Uint32Array(capacity);
+    this.bytLength = new Uint32Array(capacity);
+    this.firstTs = new Float64Array(capacity);
+    for (const r of records) this.append(r);
+  }
+
+  get chunkCount(): number { return this.n; }
+  get frameCount(): number { return this.frames; }
+
+  /** Adds a sealed chunk. Records arrive in order and are never revised. */
+  append(r: ChunkRecord): void {
+    if (this.n === this.firstId.length) this.grow();
+    const i = this.n;
+    this.firstId[i] = r.firstId;
+    this.lastId[i] = r.lastId;
+    this.counts[i] = r.frameCount;
+    this.firstOrdinal[i] = r.firstOrdinal;
+    this.pfxOffset[i] = r.pfxOffset;
+    this.sumOffset[i] = r.sumOffset;
+    this.bytOffset[i] = r.bytOffset;
+    this.pfxLength[i] = r.pfxLength;
+    this.sumLength[i] = r.sumLength;
+    this.bytLength[i] = r.bytLength;
+    this.firstTs[i] = r.firstTsUs;
+    this.n += 1;
+    this.frames += r.frameCount;
+  }
+
+  private grow(): void {
+    const size = this.firstId.length * 2;
+    const u32 = (a: Uint32Array): Uint32Array => { const n = new Uint32Array(size); n.set(a); return n; };
+    const f64 = (a: Float64Array): Float64Array => { const n = new Float64Array(size); n.set(a); return n; };
+    this.firstId = u32(this.firstId);
+    this.lastId = u32(this.lastId);
+    this.counts = u32(this.counts);
+    this.pfxLength = u32(this.pfxLength);
+    this.sumLength = u32(this.sumLength);
+    this.bytLength = u32(this.bytLength);
+    this.firstOrdinal = f64(this.firstOrdinal);
+    this.pfxOffset = f64(this.pfxOffset);
+    this.sumOffset = f64(this.sumOffset);
+    this.bytOffset = f64(this.bytOffset);
+    this.firstTs = f64(this.firstTs);
   }
 
   /** Parses a whole `index.iwidx`, refusing a header it does not know. */
