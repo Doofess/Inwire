@@ -1923,3 +1923,94 @@ try:
 except ValueError:
     check("...and encoding one is refused too", "raised", "raised")
 
+# --- the pipe connection, which has to look like a WebSocket ------------------
+#
+# `AgentServer.register` does its whole job through two operations - `await
+# ws.send(data)` and `async for raw in ws` - so a connection that provides
+# exactly those needs no change anywhere else: ownership, subscriptions, the
+# hello handshake and the disconnect rules all keep working. These assert the
+# two, and the type-to-frame-kind rule the WebSocket used to give for free.
+#
+# Cross-platform on purpose: `PipeConnection` takes its write and close as
+# callables, so the half with the decisions in it runs on the CI machines that
+# have no named pipes at all.
+import pipe_server
+
+
+def _connection():
+    written = []
+    loop = asyncio.new_event_loop()
+    conn = pipe_server.PipeConnection(loop, written.append, lambda: None)
+    return loop, conn, written
+
+
+_loop, _conn, _written = _connection()
+_loop.run_until_complete(_conn.send('{"type":"state"}'))
+# A str is a control message and bytes are a batch, which is exactly how the
+# WebSocket told them apart.
+check("a string is sent as a JSON frame",
+      _written[-1].hex(" "),
+      "11 00 00 00 00 7b 22 74 79 70 65 22 3a 22 73 74 61 74 65 22 7d")
+_loop.run_until_complete(_conn.send(b"IWP1"))
+check("bytes are sent as a binary frame", _written[-1].hex(" "), "05 00 00 00 01 49 57 50 31")
+
+
+async def _drain(conn, expected):
+    seen = []
+    async for raw in conn:
+        seen.append(raw)
+        if len(seen) == expected:
+            break
+    return seen
+
+
+_loop, _conn, _written = _connection()
+_conn.deliver('{"type":"start_capture"}')
+_conn.deliver('{"type":"stop_capture"}')
+check("delivered messages arrive in order over the async iterator",
+      _loop.run_until_complete(_drain(_conn, 2)),
+      ['{"type":"start_capture"}', '{"type":"stop_capture"}'])
+
+# The half that matters for the disconnect rules: the iterator has to END when
+# the client goes, because `register`'s `finally` is what stops a capture whose
+# owner has left. An iterator that simply blocked for ever would leave the
+# sniffer running with nobody watching - the thing this agent is designed not
+# to do.
+_loop, _conn, _written = _connection()
+_conn.finish()
+check("a finished connection ends its iterator rather than hanging",
+      _loop.run_until_complete(_drain(_conn, 1)), [])
+
+# And once it has gone, sending must fail rather than queue into nothing.
+_sent_after_close = "no error"
+try:
+    _loop.run_until_complete(_conn.send("{}"))
+except ConnectionError:
+    _sent_after_close = "ConnectionError"
+check("sending to a client that has gone raises", _sent_after_close, "ConnectionError")
+_loop.close()
+
+# The descriptor is the whole security model now, so its shape is worth
+# pinning even where it cannot be applied. IU is the interactive user - the
+# app - and its absence is what would make the pipe unopenable by the very
+# process it exists for. WD/AN/NU are absent because a named pipe is reachable
+# over SMB unless the descriptor says otherwise.
+import inspect
+_sddl_source = inspect.getsource(pipe_server._security_attributes)
+check_true("the descriptor admits the interactive user", "(A;;GRGW;;;IU)" in _sddl_source)
+check_true("...and SYSTEM and administrators",
+           "(A;;GA;;;SY)" in _sddl_source and "(A;;GA;;;BA)" in _sddl_source)
+check_true("...and is protected, so nothing is inherited", "D:P" in _sddl_source)
+check_true("...and admits nobody else",
+           all(sid not in _sddl_source for sid in (";;;WD)", ";;;AN)", ";;;NU)")))
+
+
+# The one claim a pipe connection makes that a socket cannot: the descriptor
+# was checked before the handle existed, so `register` skips the pairing token
+# rather than answering it. Transitional - the attribute and the token both go
+# when the WebSocket does - but while both transports are live, this is what
+# stops the app being asked to paste a string the pipe made meaningless.
+check_true("a pipe connection is vouched for by the kernel",
+           pipe_server.PipeConnection.kernel_authenticated)
+check_true("...and the agent reads it off the connection, not off the transport",
+           'getattr(ws, "kernel_authenticated", False)' in inspect.getsource(agent.AgentServer.register))
