@@ -26,10 +26,10 @@ export type ToCapture =
   /**
    * Deletes every capture directory except these.
    *
-   * The retention rule this build has: exactly one capture on disk, the one
-   * the stored session names. It is today's rule moved to the new backend, not
-   * a new one - `clearSession` already wiped the previous capture at Start -
-   * and it stays here, in one place, until the capture library replaces it.
+   * This is the whole of retention: exactly one capture on disk, the one the
+   * stored session names (`docs/decisions/0026`). `keep` is a list rather than
+   * a single id because the shape costs nothing and a segmented capture - v2,
+   * where one capture is several directories - needs it.
    */
   | { type: 'prune'; keep: string[] }
   /**

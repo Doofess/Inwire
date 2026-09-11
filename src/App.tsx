@@ -816,12 +816,13 @@ export default function App() {
       // relative-time origin and the adapter table both belong to the run that
       // wrote them.
       const stored = meta?.captureId ? await captureStore.reopen(meta.captureId) : null;
-      // Everything else on disk goes. That is not a new retention policy - it
-      // is the one this build already had, moved to the new backend: Start
-      // wiped the previous capture from IndexedDB, so exactly one capture has
-      // ever survived a restart. The capture library is what raises that to
-      // three with a prompt, and it belongs in its own step rather than
-      // arriving as a side effect of moving the frames.
+      // Everything else on disk goes. One capture is the retention rule, and
+      // it is the whole of it (`docs/decisions/0026`): a capture on disk is
+      // 5 GB and twenty minutes at full rate, so wanting the previous one is
+      // mostly wanting a longer current one, and a capture worth keeping past
+      // a session is one to Export. Start wiped the previous capture out of
+      // IndexedDB before this, so nothing about that changed with the
+      // backend.
       captureStore.prune(stored === null ? [] : [stored.captureId]);
       captureIdRef.current = stored?.captureId ?? null;
 
