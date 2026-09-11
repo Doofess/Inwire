@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Packet } from '../../types/packet';
 import { virtualWindow } from '../../lib/virtualWindow';
+import { arrayRowSource, packetAt, rowSlice } from '../../lib/rowSource';
 import {
   Direction, DirectionSignal, DIRECTION_GLYPH, DIRECTION_LABEL, SIGNAL_LABEL,
   directionOf, signalOf,
@@ -9,6 +10,7 @@ import { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
 import { SENDER_INK_ALPHA } from '../../services/packetThemes';
 import { PacketListMinimap } from './PacketListMinimap';
+import { PlaceholderRow } from './PlaceholderRow';
 import {
   TbArrowsSort,
   TbArrowUp,
@@ -608,10 +610,25 @@ export const PacketList: React.FC<PacketListProps> = ({
   // The arithmetic lives in `lib/virtualWindow.ts` so it can be asserted:
   // a slice computed past the end leaves the list blank with no error
   // anywhere, which is exactly what happened here (see that file's header).
-  const totalRows = sortedPackets.length;
+  //
+  // The list renders from a `RowSource`, not from the array. Today that source
+  // is `arrayRowSource(sortedPackets)` and every row it hands back is `ready`,
+  // so nothing about this behaves differently - which is the point of landing
+  // the seam before anything reads from disk. What it makes possible is a
+  // source whose `count` is the whole capture rather than the RAM window,
+  // answering `loading` for a row it has to fetch.
+  const rowSource = React.useMemo(() => arrayRowSource(sortedPackets), [sortedPackets]);
+  const totalRows = rowSource.count;
   const { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight } =
     virtualWindow(totalRows, scrollTop, viewportHeight, rowHeight, OVERSCAN_ROWS);
-  const visiblePackets = sortedPackets.slice(startIndex, endIndex);
+  const visibleRows = rowSlice(rowSource, startIndex, endIndex);
+
+  // Told from an effect, never from render: a source that fetches will set
+  // state when the rows arrive, and doing that during a render of the rows it
+  // is about to replace is the one thing React will not have.
+  useEffect(() => {
+    rowSource.request(startIndex, endIndex);
+  }, [rowSource, startIndex, endIndex]);
 
   // Auto scroll to bottom
   const shouldAutoScrollRef = useRef(true);
@@ -1145,7 +1162,19 @@ export const PacketList: React.FC<PacketListProps> = ({
                     <td colSpan={visibleColumnCount} style={{ height: topSpacerHeight, padding: 0, border: 'none' }} />
                   </tr>
                 )}
-                {visiblePackets.map((packet, i) => {
+                {visibleRows.map((row, i) => {
+                if (row.state !== 'ready') {
+                  return (
+                    <PlaceholderRow
+                      key={`row-${startIndex + i}`}
+                      row={row}
+                      columnCount={visibleColumnCount}
+                      rowIndex={startIndex + i}
+                      height={rowHeight}
+                    />
+                  );
+                }
+                const packet = row.packet;
                 const isSelected = selectedPacket?.id === packet.id;
                 const style = colorEngine.getPacketStyle(packet, packetTheme);
 
@@ -1266,7 +1295,12 @@ export const PacketList: React.FC<PacketListProps> = ({
                         // sorted, not the previous packet in the buffer: a
                         // delta against a frame a filter has hidden is a number
                         // with nothing on screen to relate it to.
-                        startIndex + i > 0 ? sortedPackets[startIndex + i - 1] : null,
+                        // Null when the row above is a placeholder as well
+                        // as when there is none: a delta against a frame that
+                        // has not arrived yet would be a number computed from
+                        // nothing, and it would change under the reader when
+                        // it did arrive.
+                        packetAt(rowSource, startIndex + i - 1),
                       )}
                     </td>
                     )}
