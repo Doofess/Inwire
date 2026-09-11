@@ -680,89 +680,27 @@ export default function App() {
   }, []);
 
   /**
-   * The last time the user asked for a reload with the keyboard.
+   * Whether quitting would cost the reader anything.
    *
-   * `beforeunload` cannot tell a refresh from a close - the event is identical
-   * for both, and the platform exposes nothing that distinguishes them, which
-   * is the same limitation the cleanup service worker is built around. What CAN
-   * be observed is the gesture: F5 and Ctrl/Cmd+R arrive as a keydown a moment
-   * before the navigation starts, so a reload asked for that way can be
-   * recognised in advance and left unprompted.
+   * Reported to the main process, which owns the confirmation. It used to be a
+   * `beforeunload` handler here, and in Electron that is not merely the wrong
+   * place - it is **broken**: a `beforeunload` that calls `preventDefault()`
+   * refuses to close the window and shows **no dialog at all**, and
+   * `WARN_BEFORE_LEAVING` was `!import.meta.env.DEV`, so a packaged build would
+   * have been unclosable with a capture in the buffer.
    *
-   * The browser's own reload button is not detectable by any means, so it still
-   * prompts. That is a partial fix rather than a complete one, and worth
-   * knowing: the keyboard covers the common case, the toolbar does not.
-   *
-   * A timestamp rather than a boolean so the intent expires. If a keystroke
-   * ever fails to produce a navigation, a boolean would leave the warning
-   * disabled for the rest of the session.
-   */
-  const reloadIntentAt = useRef(0);
-  useEffect(() => {
-    const noteReloadIntent = (event: KeyboardEvent) => {
-      const isReload =
-        event.key === 'F5' ||
-        ((event.ctrlKey || event.metaKey) && (event.key === 'r' || event.key === 'R'));
-      if (isReload) reloadIntentAt.current = Date.now();
-    };
-    // Capture phase: an input with its own Ctrl+R handling must not be able to
-    // swallow this before it is seen.
-    window.addEventListener('keydown', noteReloadIntent, true);
-    return () => window.removeEventListener('keydown', noteReloadIntent, true);
-  }, []);
-
-  /** How long a reload keystroke suppresses the warning for. */
-  const RELOAD_INTENT_WINDOW_MS = 2000;
-
-  /**
-   * Warns before leaving while a capture is held, and stays silent otherwise.
-   *
-   * This is the counterpart to the cleanup above: closing the app deletes the
-   * stored session, so leaving with packets in the buffer really does throw
-   * them away. An empty buffer has nothing to lose, so prompting then would be
-   * pure friction - which is why this is gated rather than always on.
-   *
-   * A REFRESH does not throw anything away: frames are written to IndexedDB as
-   * they arrive, the service worker holds the store open across the gap, and
-   * the startup guard restores the buffer on the way back in - which is what
-   * the "Restoring n/m" pill in the header is reporting. So a recognised reload
-   * gesture skips the prompt entirely; there is nothing to warn about.
-   *
-   * Keyed on the boolean, not on packets.length. The buffer changes on every
-   * flush during capture, and depending on the count would tear down and
-   * re-add this listener several times a second; the boolean only flips when
-   * the buffer goes empty or stops being empty.
-   *
-   * The browser decides the wording - a page cannot supply its own text any
-   * more - so the only choice available here is whether to ask at all.
+   * Everything that made the old version complicated goes with it. It kept a
+   * capture-phase keydown listener recording F5 and Ctrl+R so a deliberate
+   * reload could skip the prompt, because `beforeunload` cannot tell a refresh
+   * from a close and the platform exposes nothing that distinguishes them. A
+   * desktop app does not offer a reload in a packaged build (see
+   * `electron/menu.ts`), so there is no second gesture to tell apart - and the
+   * browser's untailorable wording, which that comment complained about, is
+   * now ours to write.
    */
   const hasCapturedPackets = packets.length > 0;
-
-  /**
-   * TEMPORARILY OFF, at the user's request, to make reloading during
-   * development bearable - every refresh with a non-empty buffer was a modal.
-   *
-   * Flip back to `true` to restore the warning. Everything below is intact and
-   * unreferenced by anything else; this flag is the whole of the change.
-   */
-  // Off in development only, where every refresh with a non-empty buffer was
-  // a modal. It used to be a hardcoded `false`, which shipped: a user with a
-  // 50,000-frame capture lost it to a stray Ctrl-W with nothing asked.
-  const WARN_BEFORE_LEAVING = !import.meta.env.DEV;
-
   useEffect(() => {
-    if (!WARN_BEFORE_LEAVING || !hasCapturedPackets) return;
-    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
-      // A refresh the user just asked for. The session survives it, so asking
-      // them to confirm is a prompt about nothing.
-      if (Date.now() - reloadIntentAt.current < RELOAD_INTENT_WINDOW_MS) return;
-      event.preventDefault();
-      // Still required by older browsers, which show the prompt only when
-      // returnValue has been assigned.
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warnBeforeLeaving);
-    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+    window.inwire?.setUnsavedCapture?.(hasCapturedPackets);
   }, [hasCapturedPackets]);
 
   /**

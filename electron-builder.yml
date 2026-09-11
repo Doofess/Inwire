@@ -1,0 +1,40 @@
+# Packaging. Windows first; the installer that wraps this is Inno Setup's.
+#
+# Two of electron-builder's defaults collide with directories this repository
+# already uses, and both collisions are silent:
+#
+#   buildResources defaults to `build/`  — which here holds PyInstaller's
+#                                          intermediate output (build/inwire_agent/)
+#   output         defaults to `dist/`   — which here is Vite's renderer build
+#
+# So both are set explicitly. Getting either wrong means electron-builder
+# quietly picks up or overwrites the wrong tree.
+appId: com.inwire.app
+productName: Inwire
+
+directories:
+  buildResources: electron/resources
+  output: release
+
+# Only what the app actually loads. Every renderer dependency — react, three,
+# maplibre-gl, d3, exceljs, jspdf, pdfjs-dist — is already bundled into
+# dist/assets by Vite, and electron-builder's default is to pack `dependencies`
+# as well, which would ship all of them a second time as node_modules.
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+
+# `dir` only, for now. The real installer is Inno Setup wrapping this output:
+# `local-agent/installer/setup.iss` already contains the Npcap
+# download-at-install-time logic (which exists for licensing reasons, not
+# technical ones), the service registration with its failure-recovery policy,
+# the exe-unlock sequence for a service that can starve under load and miss an
+# SCM stop, and the legacy-name cleanup. Re-deriving that in NSIS is the
+# highest-risk rewrite available in this migration for no user-visible gain.
+#
+# The cost, accepted deliberately: electron-updater cannot drive an Inno
+# installer, so updates are hand-rolled.
+win:
+  target:
+    - dir
