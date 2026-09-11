@@ -18,6 +18,7 @@ import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/p
 import type { PacketTheme } from '../../services/packetThemes';
 import { formatBytes } from '../../lib/formatBytes';
 import { AUTO_PAUSE_AT } from '../../services/bufferBudget';
+import type { CaptureStorageState } from '../../services/capture/captureProtocol';
 
 // Read from the constant capture actually stops at, not restated: this number
 // only appears in explanatory copy, and copy that drifts from the behaviour it
@@ -76,6 +77,13 @@ interface SettingsModalProps {
    * when it could not.
    */
   storage: { storedBytes: number; storageBudgetBytes: number; evictedForBudget: number };
+  /**
+   * What the OPFS capture store has written, which for now runs BESIDE the
+   * IndexedDB session rather than instead of it. Shown apart for that reason:
+   * while the new path is a shadow, one number that merged the two would make
+   * it impossible to see whether it is working.
+   */
+  captureStorage: CaptureStorageState;
   /** Deletes the stored capture. The only thing in the app that does. */
   onDiscardCapture: () => void;
   /** The agent pairing block, rendered at the top of Driver Info. */
@@ -122,6 +130,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   bufferAutoPaused,
   onClearPackets,
   storage,
+  captureStorage,
   onDiscardCapture,
   filterPresetLibrary,
   onFilterPresetLibraryChange,
@@ -323,6 +332,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         'Nothing is stored on disk yet.'
                       )}
                     </p>
+
+                    {/* The capture store, written in shadow. Stated plainly
+                        as what it is - a second copy that nothing reads yet -
+                        because a size on a settings panel that the app does
+                        not use would otherwise read as waste. */}
+                    {captureStorage.captureId !== null && (
+                      <p className="text-[11px] text-muted-foreground">
+                        <span className="font-medium text-foreground">
+                          {(captureStorage.bytesOnDisk / 1_000_000).toFixed(1)} MB
+                        </span>
+                        {' in the capture store ('}
+                        {captureStorage.framesWritten.toLocaleString()} frames
+                        {captureStorage.stagedCount > 0
+                          && `, ${captureStorage.stagedCount.toLocaleString()} waiting`}
+                        {'). Written alongside the session above and not yet read from.'}
+                        {!captureStorage.persisted && (
+                          <>
+                            {' '}Storage is <span className="text-amber-600 dark:text-amber-400">
+                              best-effort
+                            </span>: the browser may reclaim it under disk pressure.
+                          </>
+                        )}
+                      </p>
+                    )}
+                    {captureStorage.error !== null && (
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-600 dark:text-amber-400">
+                        The capture store reported: {captureStorage.error}
+                      </div>
+                    )}
+                    {/* Frames whose row was sealed before a patch could reach
+                        it. Zero on both fixtures at the default horizon, so a
+                        non-zero number here is the signal that the horizon is
+                        too short - not something to leave unsaid. */}
+                    {captureStorage.patchesMissed > 0 && (
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-600 dark:text-amber-400">
+                        {captureStorage.patchesMissed.toLocaleString()} cross-reference
+                        {captureStorage.patchesMissed === 1 ? '' : 's'} arrived after the row had
+                        been written, so the stored copy is missing them.
+                      </div>
+                    )}
 
                     {/* The one thing that still deletes without being asked.
                         It takes the OLDEST frames, so a long capture quietly

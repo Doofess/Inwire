@@ -5,6 +5,7 @@ import type { InfoPatch } from '../services/dissect/types';
 import type { FrameBatch } from '../services/pipelineClient';
 import { FieldBlockWriter } from '../services/dissect/fieldSplit';
 import { appendFrames, storedIdRange, trimFramesBelow } from '../services/sessionStore';
+import { captureStore } from '../services/capture/captureClient';
 import {
   adoptAccounting, commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
 } from '../services/packetBuffer';
@@ -193,9 +194,26 @@ export function usePacketBuffer({
       // dense-field split, the byte count - outside the updater because React
       // runs that twice under StrictMode. See services/packetBuffer.ts.
       prepareBatch(incoming, accountingRef.current, {
-        persist: (frames) => appendFrames(frames as Packet[]),
+        persist: (frames) => {
+          appendFrames(frames as Packet[]);
+          // Shadow write to the capture store. Beside IndexedDB, not instead
+          // of it: nothing reads OPFS yet, so a refresh still restores the way
+          // it always has while the new path is watched on a real capture.
+          //
+          // Inside `persist` deliberately - that is the half of the flush that
+          // runs exactly once even under StrictMode's double invoke, and
+          // writing a frame twice is exactly what it exists to prevent.
+          captureStore.append(frames as Packet[]);
+        },
         absorb: (frames) => fieldWriter.current.absorb(frames),
       });
+
+      // Patches go over immediately after the frames, and separately, because
+      // one almost always targets a frame from an EARLIER flush - a TLS record
+      // reassembled across a dozen segments, an ICMP reply seconds later. The
+      // writer's staging ring is what holds those rows back long enough to
+      // receive them; see services/capture/captureWriter.ts.
+      if (patches.length > 0) captureStore.patch(patches);
 
       // Snapshotted here, outside the updater, because React may run that twice
       // and the trim plan must not be computed from a number the first run

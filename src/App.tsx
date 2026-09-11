@@ -125,6 +125,8 @@ import {
 } from "react-icons/tb";
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
 import { estimateSummaryBytes, planBufferTrim } from './services/bufferBudget';
+import { captureStore, newCaptureId } from './services/capture/captureClient';
+import { freshCaptureStorageState, type CaptureStorageState } from './services/capture/captureProtocol';
 
 /**
  * How far back a socket-table DELTA is allowed to re-annotate.
@@ -439,6 +441,17 @@ export default function App() {
   const [storage, setStorage] = useState({
     storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0,
   });
+
+  /**
+   * What the capture store has written, for Driver Info.
+   *
+   * Kept apart from `storage` above, which describes the IndexedDB session:
+   * the two run side by side while the new path is a shadow, and merging them
+   * would make it impossible to see that one of them is working.
+   */
+  const [captureStorage, setCaptureStorage] = useState<CaptureStorageState>(freshCaptureStorageState);
+  /** The capture directory this Start->Stop cycle is writing into. */
+  const captureIdRef = useRef<string | null>(null);
   /**
    * The same number on a ref, plus the head id it was last counted at,
    * because the state can only be advanced from inside a `setPackets` updater
@@ -660,6 +673,19 @@ export default function App() {
   /** Whether the one restore this page load gets has been kicked off yet. */
   const restoreStartedRef = useRef(false);
   /** The highest packet id already written to disk, so a flush only appends. */
+
+  // The capture store pushes its state, and is also asked on the same tick as
+  // the session store below - pushed for the events (opened, failed) and polled
+  // for the counters, because the counters move on every flush and a message
+  // per flush would be a message ten times a second saying almost nothing.
+  useEffect(() => {
+    captureStore.onState = setCaptureStorage;
+    const tick = window.setInterval(() => captureStore.askForStats(), 2000);
+    return () => {
+      captureStore.onState = () => {};
+      window.clearInterval(tick);
+    };
+  }, []);
 
   // The stored size, sampled rather than pushed: the store writes in batches
   // off the critical path, and a number that updates twice a second is as
@@ -1500,6 +1526,12 @@ export default function App() {
     // the capture was asked for, or "capture for 5 minutes" on an idle link
     // would never end.
     captureStartedAtRef.current = Date.now();
+    // One Start->Stop cycle is one capture on disk. Started here rather than on
+    // the first frame so that an adapter that stays silent still produces a
+    // capture directory - "you captured nothing" and "the store never opened"
+    // are different facts and the panel has to be able to tell them apart.
+    captureIdRef.current = newCaptureId();
+    captureStore.begin(captureIdRef.current);
     sendAgentCommand({ type: 'start_capture' });
     setIsCapturing(true);
   };
@@ -1508,6 +1540,10 @@ export default function App() {
     sendAgentCommand({ type: 'stop_capture' });
     setIsCapturing(false);
     captureStartedAtRef.current = null;
+    // Seals the staging ring and flushes. Pause is one of the two moments the
+    // whole capture is guaranteed to be on disk, and the user asked for that
+    // explicitly - the other is stop.
+    captureStore.finish();
   };
 
   /**
@@ -1579,6 +1615,14 @@ export default function App() {
     accountingRef.current.persistedThroughId = 0;
     flowAnnotations.clear();
     setStorage({ storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0 });
+    // The capture on disk goes with it. Discard is still the only thing in the
+    // app that deletes stored frames, which is ADR 0012's rule and survives
+    // this work unchanged.
+    if (captureIdRef.current !== null) {
+      captureStore.discard(captureIdRef.current);
+      captureIdRef.current = null;
+    }
+    setCaptureStorage(freshCaptureStorageState());
   }, []);
 
   // The dashboard's callbacks are memoized, and the three below are the ones
@@ -2249,6 +2293,7 @@ export default function App() {
             bufferAutoPaused={bufferAutoPaused}
             onClearPackets={handleClearPackets}
             storage={storage}
+            captureStorage={captureStorage}
             onDiscardCapture={handleDiscardCapture}
             colorRules={colorRules}
             onColorRulesChange={setColorRules}
