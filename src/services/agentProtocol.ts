@@ -1,8 +1,14 @@
 /**
- * The typed WebSocket protocol spoken with the local capture agent
- * (ws://localhost:8999) - message parsing, version comparison, and command
- * encoding. Kept dependency-free and pure so it's testable without a real
- * WebSocket (see scripts/agent-protocol/).
+ * The typed protocol spoken with the local capture agent - message parsing,
+ * version comparison, and command encoding. Kept dependency-free and pure so
+ * it is testable without a connection at all (see scripts/agent-protocol/).
+ *
+ * **Transport-agnostic, and that is what made the move to a named pipe cheap.**
+ * This file described `ws://localhost:8999` for most of its life; not one
+ * message in it changed when the socket went. What the WebSocket supplied
+ * underneath - message boundaries, and a text/binary distinction - is now
+ * `services/agentFraming.ts`, and who may connect is now the pipe's security
+ * descriptor rather than a token named in this file.
  *
  * Wire format decisions are recorded in docs/decisions/0005-agent-wire-format.md.
  */
@@ -32,13 +38,6 @@ export interface AgentHelloMessage {
   clientId?: string;
   /** The connection that owns the running capture, or null when idle. */
   owner?: string | null;
-  /**
-   * Whether this agent has a pairing token configured. Announced rather than
-   * discovered: a handshake refused at the HTTP level reaches the browser as
-   * an opaque WebSocket error, which is exactly what "the agent is not
-   * running" looks like. This is what lets the app tell the two apart.
-   */
-  authRequired?: boolean;
 }
 
 export interface AgentStateMessage {
@@ -67,8 +66,6 @@ export type AgentErrorCode =
   | 'restart_unavailable'
   | 'capture_failed'
   | 'capture_busy'
-  | 'auth_required'
-  | 'auth_failed'
   | 'unknown_command';
 
 export interface AgentErrorMessage {
@@ -443,17 +440,6 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
 }
 
 /**
- * Where the local capture agent listens.
- *
- * Loopback and a fixed port, which is the whole of the discovery story: the
- * agent binds `127.0.0.1:8999` and the browser has no way to scan for it. It
- * lived as a string literal in `App.tsx` while this module's own header
- * documented the address in prose - so the one place that describes the
- * protocol was not the place that dialled it.
- */
-export const AGENT_WS_URL = 'ws://localhost:8999';
-
-/**
  * Bumped alongside AGENT_VERSION in local-agent/agent.py. Compared against
  * whatever the connected agent reports in its hello message to flag a
  * stale build in the UI.
@@ -521,15 +507,7 @@ export type AgentCommand =
    * was cleared, answers with `error` and stays up rather than exiting into a
    * state nothing can recover from. See agent.py's restart_agent handling.
    */
-  | { type: 'restart_agent' }
-  /**
-   * Presents the pairing token from `%ProgramData%\Inwire\config.json`.
-   *
-   * Sent in answer to a `hello` with `authRequired`, and before anything else:
-   * an agent with a token configured answers every other command with
-   * `auth_required` and sends no packets at all.
-   */
-  | { type: 'authenticate'; token: string };
+  | { type: 'restart_agent' };
 
 export function encodeAgentCommand(command: AgentCommand): string {
   return JSON.stringify(command);

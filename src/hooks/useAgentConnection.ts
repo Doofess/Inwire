@@ -31,7 +31,6 @@ import {
 } from '../services/agentProtocol';
 import { filterCapturableInterfaces } from '../services/captureInterfaces';
 import { hostFromAdapters } from '../services/hostIdentity';
-import { loadAgentToken, saveAgentToken } from '../services/interfacePrefs';
 import type { HostIdentity } from '../services/direction';
 import type { NetworkFacts } from '../services/networkFacts';
 import type { FrameBatch } from '../services/pipelineClient';
@@ -85,39 +84,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
    */
   const [agentClientId, setAgentClientId] = useState<string | null>(null);
   const [captureOwner, setCaptureOwner] = useState<string | null>(null);
-  /**
-   * Whether this agent wants a pairing token, and whether the one we hold was
-   * accepted. `needsToken` is the state Driver Info asks about: the agent is
-   * there and answering, and will do nothing until it is paired.
-   */
-  const [agentNeedsToken, setAgentNeedsToken] = useState(false);
-  const [agentToken, setAgentTokenState] = useState<string>(() => loadAgentToken());
-  const agentTokenRef = useRef(agentToken);
-  useEffect(() => { agentTokenRef.current = agentToken; }, [agentToken]);
-  /**
-   * A token pasted into Driver Info. Stored and offered immediately, so the
-   * pairing takes effect on the connection that is already open rather than
-   * waiting for a reconnect.
-   */
-  const setAgentToken = (token: string) => {
-    const trimmed = token.trim();
-    saveAgentToken(trimmed);
-    setAgentTokenState(trimmed);
-    setAgentError(null);
-    if (trimmed) sendAgentCommand({ type: 'authenticate', token: trimmed });
-  };
-  /**
-   * Whether the app should be holding a link to the agent at all.
-   *
-   * Distinct from agentStatus, which reports what the socket is actually
-   * doing: "disconnected" covers both "you pressed Disconnect" and "the agent
-   * is not running", and Driver Info has to tell those apart to say anything
-   * useful. This is the intent; agentStatus is the outcome.
-   *
-   * Not persisted, on purpose. A reload reconnects - an app that comes back
-   * permanently dead with no visible cause reads as broken, and everything
-   * else about a reload here is built to look like continuity.
-   */
   const [agentLinkEnabled, setAgentLinkEnabled] = useState(true);
   const [agentVersion, setAgentVersion] = useState<string | null>(null);
   // Set when a connection's socket opened but no `hello` arrived within the
@@ -273,19 +239,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
         setAgentClientId(message.clientId ?? null);
         setCaptureOwner(message.owner ?? null);
 
-        // Pairing comes before anything else: an agent with a token
-        // configured answers every other command with `auth_required`.
-        const needsToken = message.authRequired === true;
-        setAgentNeedsToken(needsToken);
-        if (needsToken) {
-          if (agentTokenRef.current) {
-            pipeline.command({ type: 'authenticate', token: agentTokenRef.current });
-          } else {
-            // Nothing else is sent. The resync below would only collect
-            // refusals, and Driver Info is where the token goes in.
-            return;
-          }
-        }
         setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
 
         // Deliberately does NOT default to every interface. Capture is
@@ -329,15 +282,11 @@ export function useAgentConnection(host: AgentConnectionHost) {
 
         // Who owns which socket, for process attribution.
         //
-        // Here rather than when the WebSocket opens, and the difference is not
-        // cosmetic: an agent with a pairing token answers every command with
-        // `auth_required` until `authenticate` has been accepted, and the
-        // socket is open well before that. Sent from this handler it queues
-        // behind the `authenticate` above on the same connection, which
-        // delivers in order.
+        // Sent from the `hello` handler rather than when the link opens, so it
+        // cannot race the handshake.
         //
         // Unconditional, like the log resync: a subscription lives on the
-        // agent's socket and dies with it, so a reconnect has to ask again.
+        // connection and dies with it, so a reconnect has to ask again.
         // The opening snapshot is the valuable half - it describes connections
         // that were already open, which are exactly the long-lived ones a
         // capture catches mid-stream.
@@ -345,8 +294,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
         // How this machine's adapters are configured. The Network panel shows
         // it, and the packet list needs one field out of it - the adapter's
         // own MAC - to say which way each frame went. Subscribed here for the
-        // same ordering reason as the socket table: it queues behind
-        // `authenticate` on a connection that may still be unpaired.
+        // same ordering reason as the socket table.
         pipeline.command({ type: 'subscribe_adapters' });
         return;
       }
@@ -354,9 +302,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
       if (message.type === 'state') {
         setAgentCaptureState(message.state);
         setCaptureOwner(message.owner ?? null);
-        // A `state` arriving on a connection that was waiting to be paired is
-        // the agent saying the token was accepted.
-        setAgentNeedsToken(false);
         setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
         // The agent is the authority on whether capture is running. It says
         // idle while this tab believes otherwise when every selected adapter
@@ -372,9 +317,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
       if (message.type === 'error') {
         console.warn('[Inwire] Agent error:', message.code ?? '', message.message);
         setAgentError(message.message);
-        // A rejected token is worth more than an error line: the field has to
-        // come back so it can be corrected, and the stored one is wrong.
-        if (message.code === 'auth_failed') setAgentNeedsToken(true);
         return;
       }
 
@@ -505,7 +447,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
 
   return {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
-    agentNeedsToken, agentToken, setAgentToken,
     agentLinkEnabled, setAgentLinkEnabled,
     agentVersion, agentIncompatible, agentInterfaces,
     captureStats, adapters, agentLog, agentError, interfaceRates,

@@ -51,14 +51,6 @@ interface DriverInfoPanelProps {
    * keeps knowing only about the driver.
    */
   captureSection?: React.ReactNode;
-  /**
-   * The pairing block, when the agent has a token configured.
-   *
-   * Rendered above everything else in this panel: an agent waiting to be
-   * paired reports no interfaces, no log and no capture, so every row below is
-   * empty until this is dealt with.
-   */
-  pairingSection?: React.ReactNode;
 }
 
 /**
@@ -147,7 +139,6 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   onUnsubscribe,
   onClearLog,
   captureSection,
-  pairingSection,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -199,7 +190,6 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
 
   return (
     <div className="flex flex-col gap-4 min-h-0">
-      {pairingSection}
       <div>
         <div className="text-xs font-semibold text-foreground mb-2">Driver</div>
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">

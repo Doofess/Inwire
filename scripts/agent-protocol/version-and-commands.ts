@@ -32,18 +32,19 @@ check('start_capture encodes', encodeAgentCommand({ type: 'start_capture' }), '{
 check('stop_capture encodes', encodeAgentCommand({ type: 'stop_capture' }), '{"type":"stop_capture"}');
 check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', interfaces: ['eth0', 'eth1'] }), '{"type":"set_interfaces","interfaces":["eth0","eth1"]}');
 
-// 3.0.0 is the rename: the service, its data directory and its URI scheme all
+// 3.0.0 was the rename: the service, its data directory and its URI scheme all
 // changed name, so an older agent is not merely missing a command - it is a
 // different install. Major, not minor. This constant has to move with
-// AGENT_VERSION in agent.py and MyAppVersion in setup.iss;
-// local-agent/test_protocol.py is what enforces that all three agree.
-check('required agent version is 3.7.0', REQUIRED_AGENT_VERSION, '3.8.0');
+// AGENT_VERSION in agent.py and MyAgentVersion in setup.iss;
+// local-agent/test_protocol.py is what enforces that all three agree - and
+// that this number is never RESET, because it is the left-hand side of an
+// ordering comparison.
+check('required agent version is 3.8.0', REQUIRED_AGENT_VERSION, '3.8.0');
 
-// Pairing. The token goes on the wire as an ordinary command rather than in
-// the handshake, because a handshake this agent refuses reaches the browser as
-// an opaque error indistinguishable from "the agent is not running".
-check('authenticate encodes', encodeAgentCommand({ type: 'authenticate', token: 'abc' }),
-  '{"type":"authenticate","token":"abc"}');
+// `authenticate` was here, and is gone with the pairing token. The kernel
+// answers the question it was asked to answer: on Windows the agent's only
+// transport is a named pipe whose security descriptor names who may open it,
+// so there is nothing to present and nothing to paste.
 
 // The command exists so Driver Info can ask the agent to restart itself. The
 // agent refuses it unless it can prove something would start it again - see

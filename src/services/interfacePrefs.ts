@@ -378,39 +378,6 @@ export function resetInterfacePreferences(): void {
   layoutStore.set({ ...LAYOUT_DEFAULTS, bottomPaneHeight, detailsPaneRatio });
 }
 
-// --- the agent's pairing token ---------------------------------------------------
-
-const AGENT_TOKEN_KEY = 'inwire.agentToken';
-
-/**
- * The pairing token for the agent on this machine.
- *
- * Kept in localStorage, which is the same trust boundary the token is already
- * inside: a process running as this user can read the browser's profile
- * anyway. What the token buys is the distinction between this user's browser
- * and *another user's* processes, or a sandboxed one - the case the origin
- * check cannot see at all, because `Origin` is a header the client writes.
- */
-export function loadAgentToken(): string {
-  try {
-    return window.localStorage.getItem(AGENT_TOKEN_KEY) ?? '';
-  } catch {
-    // Private mode, or storage disabled. An agent that needs a token will say
-    // so and the field is one paste away; failing to read is not worth an error.
-    return '';
-  }
-}
-
-export function saveAgentToken(token: string): void {
-  try {
-    const trimmed = token.trim();
-    if (trimmed) window.localStorage.setItem(AGENT_TOKEN_KEY, trimmed);
-    else window.localStorage.removeItem(AGENT_TOKEN_KEY);
-  } catch {
-    /* nothing to do; the user can paste it again */
-  }
-}
-
 // ---------------------------------------------------------------------------
 // The Network panel
 // ---------------------------------------------------------------------------

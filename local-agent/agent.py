@@ -1865,25 +1865,39 @@ async def main(to_stderr=True):
     def log_rejection(origin):
         log.warning("rejected connection from disallowed origin: %r", origin)
 
-    # The named pipe is how the desktop app connects: the kernel decides who
-    # may open it, so there is no token to paste and no origin to check. It
-    # runs alongside the WebSocket while the app is being moved over, and the
-    # socket goes when nothing speaks it any more.
+    # One transport, and which one is decided by the platform.
+    #
+    # On Windows the app connects over a named pipe: the kernel decides who may
+    # open it, so there is no token to paste and no origin to check, and the
+    # loopback port is not opened AT ALL. Leaving it listening beside the pipe
+    # would keep the whole attack surface the pipe exists to remove - a port
+    # every process on the machine can reach, defended by a bearer token any
+    # process running as that user could read.
+    #
+    # Elsewhere the WebSocket stays, and the pairing token with it. Those
+    # platforms install from the tarball and have no bundled app yet; see
+    # `pipe_server.start` for why a socket file is not simply the same thing
+    # with a different name.
     pipes = pipe_server.PipeServer(agent.loop, agent.register)
     pipes.start()
 
-    try:
-        async with websockets.serve(
-            agent.register,
-            HOST,
-            PORT,
-            process_request=make_process_request(on_reject=log_rejection),
-        ):
-            log.info("WebSocket server listening on ws://%s:%d", HOST, PORT)
+    if pipes.serving:
+        try:
             asyncio.create_task(watch_for_orphaned_capture())
             await asyncio.Future()  # run forever
-    finally:
-        pipes.stop()
+        finally:
+            pipes.stop()
+        return True
+
+    async with websockets.serve(
+        agent.register,
+        HOST,
+        PORT,
+        process_request=make_process_request(on_reject=log_rejection),
+    ):
+        log.info("WebSocket server listening on ws://%s:%d", HOST, PORT)
+        asyncio.create_task(watch_for_orphaned_capture())
+        await asyncio.Future()  # run forever
 
     return True
 
