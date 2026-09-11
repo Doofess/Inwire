@@ -40,6 +40,7 @@ import { inflateSync } from 'fflate';
 import { CaptureWriter, type CaptureFiles } from '../services/capture/captureWriter';
 import { CaptureReader } from '../services/capture/captureReader';
 import { recoverIndex } from '../services/capture/captureIndex';
+import { planPrune } from '../services/capture/captureDirectory';
 import { serialQueue } from '../services/capture/serialQueue';
 import { SyncAccessBlockFile, type BlockFile, type SyncAccessHandleLike } from '../services/capture/blockFile';
 import type { ToCapture, FromCapture } from '../services/capture/captureProtocol';
@@ -296,16 +297,25 @@ async function handle(message: ToCapture): Promise<void> {
       case 'prune': {
         const root = await navigator.storage.getDirectory();
         const inwire = await root.getDirectoryHandle(ROOT_DIRECTORY, { create: true });
-        const keep = new Set(message.keep);
         // Names collected before anything is removed: mutating a directory
         // while iterating it is not something the spec promises anything
         // about, and a half-enumerated prune would leave arbitrary captures.
-        const names: string[] = [];
+        const present: string[] = [];
         for await (const name of (inwire as unknown as { keys(): AsyncIterable<string> }).keys()) {
-          if (!keep.has(name)) names.push(name);
+          present.push(name);
         }
-        for (const name of names) {
+        // `planPrune` decides, and it refuses anything this app did not name.
+        // On OPFS that guard is belt and braces - nothing else can write here.
+        // On a real filesystem it is the whole difference between removing a
+        // capture and removing whatever the user put in the folder, and this
+        // runs at startup with an EMPTY keep list whenever the stored session
+        // names no capture.
+        const plan = planPrune(present, message.keep);
+        for (const name of plan.remove) {
           try { await inwire.removeEntry(name, { recursive: true }); } catch { /* held open elsewhere */ }
+        }
+        if (plan.foreign.length > 0) {
+          fail(`${plan.foreign.length} entries in the capture directory were left alone`, false);
         }
         return;
       }
