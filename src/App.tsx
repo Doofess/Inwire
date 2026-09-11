@@ -78,7 +78,6 @@ import {
 
 // UI Components
 import { Header } from "./components/common/Header";
-import { AgentPairingPanel } from "./components/common/AgentPairingPanel";
 import { FilterBar } from "./components/common/FilterBar";
 import { PacketList } from "./components/packet-list/PacketList";
 import { PacketDetailsTree } from "./components/packet-details/PacketDetailsTree";
@@ -572,12 +571,12 @@ export default function App() {
   });
   const {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
-    agentNeedsToken, agentToken, agentLinkEnabled, setAgentLinkEnabled,
+    agentLinkEnabled, setAgentLinkEnabled,
     agentVersion, agentIncompatible, agentInterfaces, captureStats, adapters,
     agentLog, agentError, interfaceRates, selectedInterfaces,
     setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
-    clearAgentLog, clearInterfaceRates, clearCaptureStats, setAgentToken,
+    clearAgentLog, clearInterfaceRates, clearCaptureStats,
   } = agent;
   // The other half of auto-pause. The buffer hook owns the flag and cannot own
   // this, because stopping a capture needs the agent - and the agent needs the
@@ -2186,13 +2185,6 @@ export default function App() {
             onConnectAgent={handleConnectAgent}
             onDisconnectAgent={handleDisconnectAgent}
             onRestartAgent={handleRestartAgent}
-            pairingSection={
-              <AgentPairingPanel
-                needsToken={agentNeedsToken}
-                token={agentToken}
-                onTokenChange={setAgentToken}
-              />
-            }
             agentStatus={agentStatus}
             agentVersion={agentVersion}
             agentOutdated={agentOutdated}

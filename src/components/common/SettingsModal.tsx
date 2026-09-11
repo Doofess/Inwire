@@ -69,8 +69,6 @@ interface SettingsModalProps {
   captureStorage: CaptureStorageState;
   /** Deletes the stored capture. The only thing in the app that does. */
   onDiscardCapture: () => void;
-  /** The agent pairing block, rendered at the top of Driver Info. */
-  pairingSection?: React.ReactNode;
   /** The display-filter presets, shared with the header's Presets dropdown. */
   filterPresetLibrary: FilterPresetLibrary;
   onFilterPresetLibraryChange: (library: FilterPresetLibrary) => void;
@@ -119,7 +117,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   colorRules,
   onColorRulesChange,
   packetTheme,
-  pairingSection,
   permissions,
   agentStatus,
   agentVersion,
@@ -236,7 +233,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onSubscribe={onSubscribeAgentLog}
                 onUnsubscribe={onUnsubscribeAgentLog}
                 onClearLog={onClearAgentLog}
-                pairingSection={pairingSection}
                 captureSection={
                   <div className="flex flex-col gap-4">
                     <div>

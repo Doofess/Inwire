@@ -29,7 +29,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { decideServe, MAPLIBRE_RUNTIME_ASSETS, MIME_TYPES } from '../../electron/appPaths';
-import { AGENT_WS_ORIGINS, developmentCsp, OUTBOUND_HOSTS, productionCsp } from '../../electron/csp';
+import { developmentCsp, OUTBOUND_HOSTS, productionCsp } from '../../electron/csp';
 import { menuTemplate } from '../../electron/menu';
 import {
   APP_ORIGIN, COMMAND_LINE_SWITCHES, SCHEME_PRIVILEGES, WEB_PREFERENCES,
@@ -148,9 +148,10 @@ console.log('\n--- the policy, and the list it has to keep up with ---\n');
   for (const host of Object.values(OUTBOUND_HOSTS)) {
     checkTrue(`connect-src covers ${host}`, production.includes(host));
   }
-  for (const origin of AGENT_WS_ORIGINS) {
-    checkTrue(`connect-src covers the agent at ${origin}`, production.includes(origin));
-  }
+  // The agent is a named pipe, which no policy governs because no page can
+  // open one - so the port it used to listen on must NOT be allowed. A
+  // `connect-src` entry nothing dials is a hole with no user.
+  checkTrue('the old agent socket is not allowed', !production.includes('8999'));
   // The shaper is bundled now, so the CDN that served it must not be allowed.
   checkTrue('unpkg is not allowed to serve this app code', !production.includes('unpkg.com'));
 
@@ -163,14 +164,13 @@ console.log('\n--- the policy, and the list it has to keep up with ---\n');
     'src/components/analytics/GeoMap.tsx',
     'src/services/agentProtocol.ts',
   ];
-  // Compared on scheme+host, not on the full origin: the literal in
-  // `agentProtocol.ts` carries a port and the ones in `geoIpService.ts` carry
-  // a path, and a policy entry covers a whole host either way.
+  // Compared on scheme+host, not on the full origin: the literals in
+  // `geoIpService.ts` carry a path, and a policy entry covers a whole host.
   const hostOf = (origin: string): string => {
     const m = /^([a-z]+:\/\/[a-z0-9.-]+)/i.exec(origin);
     return m ? m[1].toLowerCase() : origin.toLowerCase();
   };
-  const known = new Set([...Object.values(OUTBOUND_HOSTS), ...AGENT_WS_ORIGINS].map(hostOf));
+  const known = new Set(Object.values(OUTBOUND_HOSTS).map(hostOf));
   const unlisted: string[] = [];
   for (const file of sources) {
     // Comments stripped first. A URL in a comment is documentation, not a

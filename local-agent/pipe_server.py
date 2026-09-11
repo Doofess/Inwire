@@ -204,17 +204,26 @@ class PipeServer:
         self._name = name
         self._stopping = threading.Event()
         self._accept_thread: Optional[threading.Thread] = None
+        #: Whether this is the agent's transport. See `start`.
+        self.serving = False
 
     def start(self) -> None:
         if sys.platform != "win32":
-            # macOS and Linux keep the WebSocket for now; their agent is
-            # installed from the tarball and is not bundled with the app yet.
+            # macOS and Linux keep the WebSocket, and keep the pairing token
+            # with it. A named pipe is a Windows object; the Unix equivalent
+            # would be a socket file, and deciding who may open one is a
+            # genuinely different question - there is no interactive-user SID
+            # to name, so it would come down to a mode, a group, or reading the
+            # peer's credentials and having a policy about them. That is worth
+            # designing rather than approximating, and until it is designed the
+            # honest thing is to leave those platforms exactly as they were.
             log.info("named pipe not started: this platform uses the socket")
             return
         self._accept_thread = threading.Thread(
             target=self._accept_loop, name="inwire-pipe-accept", daemon=True,
         )
         self._accept_thread.start()
+        self.serving = True
         log.info("listening on %s", self._name)
 
     def stop(self) -> None:

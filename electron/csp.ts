@@ -43,14 +43,10 @@ export const OUTBOUND_HOSTS = {
 // fetched from there at runtime; `vite.config.ts` now ships it, so the CSP does
 // not have to allow a CDN to serve this app executable code.
 
-/**
- * The agent, on both spellings.
- *
- * Kept as a constant because it outlives the WebSocket: while the transport is
- * being moved to a named pipe the agent serves both, and a packaged build that
- * cannot reach either is indistinguishable from an agent that is not running.
- */
-export const AGENT_WS_ORIGINS = ['ws://localhost:8999', 'ws://127.0.0.1:8999'] as const;
+// Also deliberately absent: `ws://localhost:8999`. The agent was reached over
+// a WebSocket and the policy had to allow it; it is reached over a named pipe
+// now, which no policy governs because no page can open one. A `connect-src`
+// entry for a port nothing dials is a hole with no user.
 
 function join(parts: readonly string[]): string {
   return parts.join('; ') + ';';
@@ -76,7 +72,7 @@ export function productionCsp(): string {
     // `blob:` is maplibre's own worker construction, which it does from a blob
     // when it cannot resolve a URL. `'self'` covers the two module workers.
     "worker-src 'self' blob:",
-    `connect-src 'self' data: blob: ${[...AGENT_WS_ORIGINS, ...hosts].join(' ')}`,
+    `connect-src 'self' data: blob: ${hosts.join(' ')}`,
     "frame-src 'none'",
     "object-src 'none'",
     "base-uri 'none'",
@@ -100,7 +96,7 @@ export function developmentCsp(devOrigin: string): string {
     `img-src 'self' data: blob: ${devOrigin} ${OUTBOUND_HOSTS.tiles}`,
     `font-src 'self' data: ${devOrigin}`,
     "worker-src 'self' blob:",
-    `connect-src 'self' data: blob: ${devOrigin} ${ws} ${[...AGENT_WS_ORIGINS, ...hosts].join(' ')}`,
+    `connect-src 'self' data: blob: ${devOrigin} ${ws} ${hosts.join(' ')}`,
     "frame-src 'none'",
     "object-src 'none'",
     "base-uri 'none'",
