@@ -1851,3 +1851,75 @@ check("only the adapters the capture list names are reported",
       ["eth0"])
 check("no filter means everything, which is what a direct read wants",
       len(adapters.read_adapters(provider=lambda: _all)), 2)
+
+# --- pipe framing -------------------------------------------------------------
+#
+# The one new thing on the wire in the move off the WebSocket. Everything above
+# it - packet_batch's 18-byte record, every control message - is
+# transport-agnostic and unchanged.
+#
+# The vectors below are written out by hand and are byte-identical to the ones
+# in scripts/agent/pipe-framing.ts. That is the same rule the packet batch
+# follows: a format with two implementations agrees with itself only if
+# something outside both of them says what it is.
+import pipe_frame
+
+check("a control message frames exactly",
+      pipe_frame.encode_json({"type": "stop_capture"}).hex(" "),
+      "18 00 00 00 00 7b 22 74 79 70 65 22 3a 22 73 74 6f 70 5f 63 61 70 74 75 72 65 22 7d")
+check("a binary frame carries its payload untouched",
+      pipe_frame.encode_frame(pipe_frame.FRAME_BINARY, b"IWP1").hex(" "),
+      "05 00 00 00 01 49 57 50 31")
+# The degenerate frame: the length field is 1, for the kind byte, never 0 -
+# which is why the reader refuses a declared 0.
+check("an empty payload still declares one byte",
+      pipe_frame.encode_frame(pipe_frame.FRAME_JSON, b"").hex(" "),
+      "01 00 00 00 00")
+
+# A pipe read boundary has nothing to do with a message boundary. Both of these
+# happen under load and neither could happen on a WebSocket.
+_reader = pipe_frame.FrameReader()
+_stream = (pipe_frame.encode_json({"a": 1}) + pipe_frame.encode_json({"b": 2}))
+check("two frames in one read come back as two",
+      [f.json() for f in _reader.push(_stream)], [{"a": 1}, {"b": 2}])
+check("...leaving nothing behind", _reader.pending, 0)
+
+_reader = pipe_frame.FrameReader()
+_collected = []
+for _byte in _stream:
+    _collected.extend(f.json() for f in _reader.push(bytes([_byte])))
+check("a stream delivered one byte at a time still frames",
+      _collected, [{"a": 1}, {"b": 2}])
+
+_reader = pipe_frame.FrameReader()
+_frame = pipe_frame.encode_json({"type": "refresh_adapters"})
+check("half a header yields nothing", list(_reader.push(_frame[:3])), [])
+check("...and is remembered", _reader.pending, 3)
+check("the rest completes it",
+      [f.json() for f in _reader.push(_frame[3:])], [{"type": "refresh_adapters"}])
+
+
+def _framing_refused(chunk):
+    try:
+        list(pipe_frame.FrameReader().push(chunk))
+        return False
+    except pipe_frame.FramingError:
+        return True
+
+
+# Checked on the declared length, before anything is allocated. This process is
+# a privileged service; a five-byte header must never be able to ask for four
+# gigabytes.
+import struct as _struct
+check_true("a frame past the ceiling is refused on its header alone",
+           _framing_refused(_struct.pack("<IB", pipe_frame.MAX_FRAME_BYTES + 1, 0)))
+check_true("a zero-length frame is refused",
+           _framing_refused(_struct.pack("<IB", 0, 0)))
+check_true("an unknown kind is refused rather than guessed",
+           _framing_refused(_struct.pack("<IB", 2, 9) + b"x"))
+try:
+    pipe_frame.encode_frame(9, b"")
+    check("...and encoding one is refused too", "did not raise", "raised")
+except ValueError:
+    check("...and encoding one is refused too", "raised", "raised")
+
