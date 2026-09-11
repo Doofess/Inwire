@@ -55,6 +55,16 @@ const MAX_SPAN = 8 * 1024 * 1024;
 /** Chunks whose directory is kept inflated. ~48 kB each. */
 const DIRECTORY_CACHE = 32;
 
+/**
+ * Chunks one `readRowsAt` may decode.
+ *
+ * The caller asks for what a viewport needs - forty rows plus overscan - so
+ * one chunk answers it and two answer a request straddling a boundary. This is
+ * the bound that stops a caller with a bad range decoding the whole capture
+ * into a single structured clone.
+ */
+const MAX_ROW_CHUNKS = 4;
+
 export class CaptureReader {
   private readonly directories = new Map<number, ChunkDirectory>();
 
@@ -95,6 +105,48 @@ export class CaptureReader {
     const packets = decodeChunk(this.inflate(summaryRaw));
     applyPrefixes(packets, this.inflate(prefixRaw));
     return packets;
+  }
+
+  /**
+   * Where a frame sits in the capture, or -1.
+   *
+   * A **position**, not an id: ids have holes and positions do not, and the
+   * list scrolls positions. This is what tells the app how much of the capture
+   * sits below the RAM window - the window's first frame is at this ordinal,
+   * so everything before it is a row the list can reach and memory cannot.
+   *
+   * -1 for a frame in a hole between chunks, and for one still staged behind
+   * the patch horizon. Both mean "not addressable yet", and the caller reads
+   * that as "show the window alone", which is what it did before any of this.
+   */
+  ordinalOf(id: number): number {
+    const chunk = this.index.chunkForId(id);
+    if (chunk < 0) return -1;
+    const directory = this.directory(chunk);
+    if (directory === null) return -1;
+    const within = directory.indexOfId(id);
+    return within < 0 ? -1 : this.index.record(chunk).firstOrdinal + within;
+  }
+
+  /**
+   * The rows covering capture positions `[from, to)`, chunk by chunk.
+   *
+   * Whole chunks, not the exact range: a chunk is one inflate and one decode
+   * whichever part of it was asked for, and the caller caches what comes back,
+   * so trimming it to the viewport would throw away the rows it is about to
+   * scroll into.
+   */
+  readRowsAt(from: number, to: number): { firstOrdinal: number; packets: Packet[] }[] {
+    const out: { firstOrdinal: number; packets: Packet[] }[] = [];
+    let at = Math.max(0, from);
+    while (at < to && out.length < MAX_ROW_CHUNKS) {
+      const chunk = this.index.chunkForOrdinal(at);
+      if (chunk < 0) break;
+      const record = this.index.record(chunk);
+      out.push({ firstOrdinal: record.firstOrdinal, packets: this.readRows(chunk) });
+      at = record.firstOrdinal + record.frameCount;
+    }
+    return out;
   }
 
   /**

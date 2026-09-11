@@ -28,6 +28,12 @@ import type { InfoPatch } from '../dissect/types';
 import type { ToCapture, FromCapture, CaptureStorageState } from './captureProtocol';
 import { freshCaptureStorageState } from './captureProtocol';
 
+/** One decoded chunk, and where it starts in the capture. */
+export interface RowBlock {
+  firstOrdinal: number;
+  packets: Packet[];
+}
+
 /** What a reopened capture turned out to hold. */
 export interface StoredCapture {
   captureId: string;
@@ -57,6 +63,8 @@ class CaptureClient {
   /** In-flight row reads and reopens, same rule. */
   private readonly pendingRows = new Map<number, (packets: Packet[]) => void>();
   private readonly pendingOpen = new Map<number, (ready: StoredCapture | null) => void>();
+  private readonly pendingBlocks = new Map<number, (blocks: RowBlock[]) => void>();
+  private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
   private nextRequest = 1;
 
   onState: (state: CaptureStorageState) => void = () => {};
@@ -135,6 +143,20 @@ class CaptureClient {
         if (settle === undefined) break;
         this.pendingRows.delete(message.requestId);
         settle(message.packets);
+        break;
+      }
+      case 'blocks': {
+        const settle = this.pendingBlocks.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingBlocks.delete(message.requestId);
+        settle(message.blocks);
+        break;
+      }
+      case 'located': {
+        const settle = this.pendingLocate.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingLocate.delete(message.requestId);
+        settle(message.ordinal);
         break;
       }
       case 'failure':
@@ -252,6 +274,41 @@ class CaptureClient {
     });
   }
 
+  /**
+   * The rows covering capture positions `[from, to)`.
+   *
+   * Whole chunks come back, so a caller that asks for forty rows is handed the
+   * four thousand around them and should cache what it gets - which is what
+   * `useCaptureRows` does.
+   */
+  readRowsAt(from: number, to: number): Promise<RowBlock[]> {
+    const worker = this.ensureWorker();
+    if (worker === null || to <= from) return Promise.resolve([]);
+    const requestId = this.nextRequest++;
+    return new Promise((resolve) => {
+      this.pendingBlocks.set(requestId, resolve);
+      worker.postMessage({ type: 'rowsAt', requestId, from, to } satisfies ToCapture);
+    });
+  }
+
+  /**
+   * Where a frame sits in the capture, or -1.
+   *
+   * -1 means "not addressable yet" - a frame in a hole, one still staged
+   * behind the patch horizon, or no capture open - and every caller reads it
+   * as "show the RAM window alone", which is what the list did before any of
+   * this existed.
+   */
+  ordinalOf(id: number): Promise<number> {
+    const worker = this.ensureWorker();
+    if (worker === null) return Promise.resolve(-1);
+    const requestId = this.nextRequest++;
+    return new Promise((resolve) => {
+      this.pendingLocate.set(requestId, resolve);
+      worker.postMessage({ type: 'locate', requestId, id } satisfies ToCapture);
+    });
+  }
+
   /** Deletes every capture directory but these. See the protocol's `prune`. */
   prune(keep: readonly string[]): void { this.send({ type: 'prune', keep: [...keep] }); }
 
@@ -274,6 +331,10 @@ class CaptureClient {
     this.pendingRows.clear();
     for (const settle of this.pendingOpen.values()) settle(null);
     this.pendingOpen.clear();
+    for (const settle of this.pendingBlocks.values()) settle([]);
+    this.pendingBlocks.clear();
+    for (const settle of this.pendingLocate.values()) settle(-1);
+    this.pendingLocate.clear();
   }
 
   get snapshot(): CaptureStorageState { return this.state; }

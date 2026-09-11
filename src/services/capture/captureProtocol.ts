@@ -24,6 +24,21 @@ export type ToCapture =
   /** One chunk's rows, for a restore. Answered with `rows`. */
   | { type: 'chunk'; requestId: number; chunk: number }
   /**
+   * The rows covering capture positions `[from, to)`. Answered with `blocks`.
+   *
+   * Positions, not ids: the list scrolls positions, and ids have holes. Whole
+   * chunks come back, because a chunk is one inflate whichever part of it was
+   * asked for and the caller caches what it gets.
+   */
+  | { type: 'rowsAt'; requestId: number; from: number; to: number }
+  /**
+   * Where a frame sits in the capture. Answered with `located`.
+   *
+   * Asked of the RAM window's first frame, which is what says how much of the
+   * capture is below the window and therefore how many rows the list has.
+   */
+  | { type: 'locate'; requestId: number; id: number }
+  /**
    * Deletes every capture directory except these.
    *
    * This is the whole of retention: exactly one capture on disk, the one the
@@ -91,6 +106,10 @@ export type FromCapture =
     }
   /** Frames asked for by a `read`. Absent ids are frames the capture lacks. */
   | { type: 'bytes'; requestId: number; frames: [number, Uint8Array][] }
+  /** Decoded chunks answering a `rowsAt`, each with where it starts. */
+  | { type: 'blocks'; requestId: number; blocks: { firstOrdinal: number; packets: Packet[] }[] }
+  /** Where a `locate`'s frame sits, or -1 when it is not addressable yet. */
+  | { type: 'located'; requestId: number; ordinal: number }
   /**
    * The capture worker could not do something, and said so.
    *

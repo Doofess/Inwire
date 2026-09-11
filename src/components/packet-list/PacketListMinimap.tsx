@@ -12,6 +12,24 @@ import type { PacketTheme } from '../../services/packetThemes';
 
 interface PacketListMinimapProps {
   packets: Packet[];
+  /**
+   * Rows of the capture the list can scroll to that are not in `packets`.
+   *
+   * The strip has to span what the LIST spans or it is lying about where the
+   * viewport is: the scroll indicator is computed from the container's own
+   * `scrollTop / scrollHeight`, so it already covers the whole capture, and a
+   * strip painted only from the RAM window would put the indicator over the
+   * wrong part of it.
+   *
+   * Those rows are painted as a flat band in the theme's ground with a
+   * boundary marker at the join, not in their real colours. That is a
+   * deliberate reduction and it follows this file's own rule: colouring them
+   * means reading every chunk of the capture off disk and matching each frame
+   * against a chain the user can edit, and **a wrong colour is worse than a
+   * late one**. The band says "there is capture here"; the list says what it
+   * is.
+   */
+  leadingRows?: number;
   selectedPacket: Packet | null;
   colorEngine: ColorRulesEngine;
   /** Colors for the bands, which are packet data. The selection marker
@@ -168,6 +186,7 @@ function knownStyle(
 
 export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   packets,
+  leadingRows = 0,
   selectedPacket,
   colorEngine,
   packetTheme,
@@ -257,7 +276,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
     // buffer hits its cap, length stops changing on new packets even
     // though the underlying data (and scroll geometry) keeps shifting.
     updateViewport();
-  }, [packets, updateViewport]);
+  }, [packets, leadingRows, updateViewport]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -270,8 +289,12 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.width, size.height);
 
-    const total = paintedPackets.length;
+    // The whole scrollable range, not the buffer: see `leadingRows`.
+    const total = leadingRows + paintedPackets.length;
     if (total === 0) return;
+    /** The frame at a strip position, or null for one that is only on disk. */
+    const frameAt = (i: number): Packet | null =>
+      i < leadingRows ? null : (paintedPackets[i - leadingRows] ?? null);
 
     // A packet matching no rule is painted with the theme's own ground.
     const fallback = packetTheme.surface.background;
@@ -293,10 +316,16 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
       if (total <= size.height) {
         const bandHeight = size.height / total;
         for (let i = from; i < to && i < total; i++) {
-          const packet = paintedPackets[i];
-          const style = resolve
-            ? colorEngine.getPacketStyle(packet, packetTheme)
-            : knownStyle(colorEngine, packet, packetTheme);
+          const packet = frameAt(i);
+          // A row that is only on disk is painted in the theme's ground, the
+          // same as one matching no rule. It is not undecided - nobody is
+          // going to decide it - so it must not count towards the slice pass
+          // below or the strip would never stop working.
+          const style = packet === null
+            ? {}
+            : resolve
+              ? colorEngine.getPacketStyle(packet, packetTheme)
+              : knownStyle(colorEngine, packet, packetTheme);
           if (style === undefined) undecided++;
           ctx.fillStyle = style?.background || fallback;
           ctx.fillRect(0, i * bandHeight, size.width, Math.ceil(bandHeight));
@@ -309,9 +338,12 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         const endIdx = Math.max(startIdx + 1, Math.floor((row + 1) * packetsPerRow));
         let r = 0, g = 0, b = 0, a = 0, count = 0;
         for (let i = startIdx; i < endIdx && i < total; i++) {
-          const style = resolve
-            ? colorEngine.getPacketStyle(paintedPackets[i], packetTheme)
-            : knownStyle(colorEngine, paintedPackets[i], packetTheme);
+          const packet = frameAt(i);
+          const style = packet === null
+            ? {}
+            : resolve
+              ? colorEngine.getPacketStyle(packet, packetTheme)
+              : knownStyle(colorEngine, packet, packetTheme);
           if (style === undefined) undecided++;
           const [pr, pg, pb, pa] = resolveColorBytes(style?.background || fallback);
           r += pr; g += pg; b += pb; a += pa;
@@ -354,11 +386,33 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         if (paintedPackets[i].id === selectedPacket.id) { idx = i; break; }
       }
       if (idx === -1) return;
-      const y = (idx / total) * size.height;
+      // Offset into the strip's row space, not the buffer's: the marker sits
+      // where the LIST puts that row, and the list counts from the oldest
+      // frame on disk.
+      const y = ((idx + leadingRows) / total) * size.height;
       // The selected-packet marker, in the theme's accent.
       ctx.fillStyle = accent;
       ctx.fillRect(0, Math.max(0, y - 1), size.width, 2);
     };
+    /**
+     * Where the disk ends and memory begins.
+     *
+     * Drawn because the band above it is flat by choice rather than because
+     * the capture was quiet there, and an unbroken expanse of the theme's
+     * ground says the second thing. One pixel, in the muted foreground, and
+     * only when there is actually something above it.
+     */
+    const paintBoundary = () => {
+      if (leadingRows === 0) return;
+      const y = (leadingRows / total) * size.height;
+      ctx.fillStyle = fallback === packetTheme.surface.background
+        ? packetTheme.surface.foreground
+        : fallback;
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(0, Math.max(0, y - 0.5), size.width, 1);
+      ctx.globalAlpha = 1;
+    };
+    paintBoundary();
     paintMarker();
 
     // Nothing left to decide - every frame was already matched, which is the
@@ -379,6 +433,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         cursor = next;
         if (performance.now() >= deadline) break;
       }
+      paintBoundary();
       paintMarker();
       if (cursor < rowCount) { raf = requestAnimationFrame(step); return; }
       raf = 0;
@@ -389,7 +444,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
       if (raf !== 0) cancelAnimationFrame(raf);
       setFilling(false);
     };
-  }, [paintedPackets, colorEngine, packetTheme, themeKey, size, selectedPacket, accent]);
+  }, [paintedPackets, leadingRows, colorEngine, packetTheme, themeKey, size, selectedPacket, accent]);
 
   const scrollToClientY = useCallback((clientY: number) => {
     const wrapper = wrapperRef.current;
