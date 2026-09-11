@@ -28,7 +28,7 @@
  */
 import type { Packet } from '../types/packet';
 import type { InfoPatch } from './dissect/types';
-import { AUTO_PAUSE_AT, estimateSummaryBytes, planBufferTrim } from './bufferBudget';
+import { estimateSummaryBytes, planBufferTrim, shouldStopForDisk } from './bufferBudget';
 import { evictOldBytes } from './packetBytes';
 import { applyIcmpRepliesInPlace } from './sessionRestore';
 import { applyInfoPatchesInPlace } from './pcapParser';
@@ -130,7 +130,7 @@ export interface CommitEffects {
   storedIdRange(): { first: number; last: number } | null;
   /** The new running total of frames the buffer has pushed out. */
   reportDropped(total: number): void;
-  /** The buffer reached `AUTO_PAUSE_AT` of its budget. */
+  /** The disk the capture is being written to is nearly full. */
   autoPause(): void;
 }
 
@@ -139,6 +139,13 @@ export interface CommitOptions {
   capturing: boolean;
   /** Frames whose bytes stay resident; the rest are evicted once stored. */
   residentFrames: number;
+  /**
+   * Free space where the capture is being written, or null when unknown.
+   *
+   * Sampled from the store's stats rather than measured here: it changes on
+   * the order of seconds and this runs ten times a second.
+   */
+  freeDiskBytes: number | null;
   /**
    * `accounting.residentBytes` as it stood when the flush began, snapshotted by
    * the caller and NOT read from the accounting here.
@@ -207,7 +214,10 @@ export function commitBatch(
   // packet's identity - which is why it is allowed inside an updater at all.
   evictOldBytes(next, options.residentFrames, effects.storedIdRange());
 
-  if (options.capturing && accounting.residentBytes >= options.budgetBytes * AUTO_PAUSE_AT) {
+  // Not the memory budget. A full RAM window loses nothing now - the frames
+  // leaving it are on disk and still in the list - and stopping for it was
+  // what kept `planBufferTrim` from ever running. See `bufferBudget.ts`.
+  if (options.capturing && shouldStopForDisk(options.freeDiskBytes)) {
     effects.autoPause();
   }
   return next;

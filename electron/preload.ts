@@ -21,7 +21,22 @@
  * exposed function that would silently fail.
  */
 import { contextBridge, ipcRenderer } from 'electron';
-import { UNSAVED_CAPTURE_CHANNEL } from './channels';
+import {
+  STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
+} from './channels';
+
+/**
+ * The one line of DOM in the Electron half of this app.
+ *
+ * `tsconfig.electron.json` has no DOM lib on purpose - it is what makes a
+ * reference to `window` in the main process a build failure rather than a
+ * runtime one. The preload is the single legitimate exception, because it runs
+ * beside a page, and declaring exactly the one call it needs keeps the
+ * exception visible instead of reopening the whole DOM to `main.ts`.
+ */
+declare const window: {
+  postMessage(message: unknown, targetOrigin: string, transfer?: unknown[]): void;
+};
 
 /**
  * What the renderer is told about its host.
@@ -50,7 +65,32 @@ const api = {
   setUnsavedCapture(hasFrames: boolean): void {
     ipcRenderer.send(UNSAVED_CAPTURE_CHANNEL, hasFrames === true);
   },
+
+  /**
+   * Asks main for the capture store's port, and returns nothing.
+   *
+   * It cannot return the port. `contextBridge` serialises everything it
+   * passes through a proxy layer that does not support a `MessagePort`, and a
+   * function that tried would fail rather than transfer. The documented way
+   * out of the isolated world is `window.postMessage` with a transfer list,
+   * which is what the listener below does - so the renderer asks here and
+   * receives on `window`.
+   */
+  requestCaptureStorePort(): void {
+    void ipcRenderer.invoke(STORE_PORT_REQUEST);
+  },
+
+  onCaptureStoreExit(listener: (reason: string) => void): void {
+    ipcRenderer.on(STORE_EXIT_CHANNEL, (_event, reason: string) => listener(reason));
+  },
 } as const;
+
+// Main sends the port here; this forwards it into the page. `'*'` as the
+// target origin because the page's own origin is what it is - the message
+// never leaves this window, and the listener checks `event.source === window`.
+ipcRenderer.on(STORE_PORT_CHANNEL, (event) => {
+  window.postMessage({ channel: STORE_PORT_CHANNEL }, '*', event.ports);
+});
 
 export type InwireBridge = typeof api;
 

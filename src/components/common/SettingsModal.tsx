@@ -17,13 +17,11 @@ import type { AgentLogEntry } from '../../services/agentProtocol';
 import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/packet';
 import type { PacketTheme } from '../../services/packetThemes';
 import { formatBytes } from '../../lib/formatBytes';
-import { AUTO_PAUSE_AT } from '../../services/bufferBudget';
 import type { CaptureStorageState } from '../../services/capture/captureProtocol';
 
 // Read from the constant capture actually stops at, not restated: this number
 // only appears in explanatory copy, and copy that drifts from the behaviour it
 // describes is worse than no copy.
-const AUTO_PAUSE_PERCENT = Math.round(AUTO_PAUSE_AT * 100);
 
 /**
  * Capture folded into Driver Info rather than standing beside it.
@@ -262,8 +260,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                     {bufferAutoPaused && (
                       <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-600 dark:text-amber-400">
-                        Capture stopped automatically: the buffer reached {(AUTO_PAUSE_PERCENT).toFixed(0)}% and
-                        older packets would have started falling off the back. Clear the buffer to start again.
+                        Capture stopped automatically: the disk holding the capture is
+                        nearly full. Free some space, or discard this capture, and start again.
                       </div>
                     )}
 
@@ -319,7 +317,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         {captureStorage.framesWritten.toLocaleString()} frames
                         {captureStorage.stagedCount > 0
                           && `, ${captureStorage.stagedCount.toLocaleString()} waiting`}
-                        {'). This capture is kept until you discard it \u2014 closing Inwire '}
+                                                {'). This capture is kept until you discard it — closing Inwire '}
                         does not delete it.
                         {captureStorage.storedRange !== null && (
                           <>
@@ -331,11 +329,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             {' holding them.'}
                           </>
                         )}
-                        {!captureStorage.persisted && (
+                        {captureStorage.freeBytes !== null && (
                           <>
-                            {' '}Storage is <span className="text-amber-600 dark:text-amber-400">
-                              best-effort
-                            </span>: the browser may reclaim it under disk pressure.
+                            {' '}
+                            {(captureStorage.freeBytes / 1_000_000_000).toFixed(1)} GB free
+                            {' where they are kept.'}
                           </>
                         )}
                       </p>

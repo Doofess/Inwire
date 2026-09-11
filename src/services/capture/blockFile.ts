@@ -6,28 +6,32 @@
  *
  * The capture format's hardest parts are its **recovery rule** and its offset
  * arithmetic - what a reader does when a crash left the index describing bytes
- * the data file does not have. Those are exactly the parts that cannot be
- * tested through the real backend, because **OPFS does not exist in Node**, and
- * a browser cannot be crashed on demand from a test.
+ * the data file does not have. Nothing above this line knows what it is
+ * writing to, so those parts can be driven from a test against a real file on
+ * a real disk, truncated at chosen offsets - which is what
+ * `scripts/capture/recovery-on-disk.ts` does.
  *
- * So nothing above this line knows what it is writing to. `scripts/` supplies a
- * `node:fs` implementation and drives the format against a real multi-gigabyte
- * file on the local disk, killing and truncating it at chosen offsets; the app
- * supplies an OPFS `FileSystemSyncAccessHandle`. Only the thin adapter needs a
- * browser to exercise, and the adapter is the part with no logic in it.
+ * That was written as a promise before it was true. The seam originally had
+ * two implementations, `MemoryBlockFile` and an OPFS
+ * `FileSystemSyncAccessHandle` wrapper, and the promise could not be kept
+ * because **OPFS does not exist in Node** and a browser cannot be crashed on
+ * demand. `NodeBlockFile` is what made it true, and the OPFS adapter went with
+ * the browser build.
  *
- * The shape is deliberately the sync-access-handle's own - `read(into, {at})`
- * flattened to `read(at, into)` - so the OPFS implementation is a forwarding
- * call and cannot drift from the thing it wraps.
+ * The shape is still the sync-access-handle's own - `read(into, {at})`
+ * flattened to `read(at, into)` - because it was a good shape and because the
+ * format's on-disk layout is unchanged by the move.
  *
  * ## Sync, and why that is not a problem here
  *
- * Every method is synchronous. That is what `createSyncAccessHandle()` gives,
- * and it is available **only inside a Worker** - which is where the capture
- * writer lives, for the separate and measured reason that encoding a summary
- * costs 8.91 us against the dissection Worker's whole 28.6 us budget
- * (`scripts/perf/summary-codec.ts`). A storage Worker doing synchronous I/O
- * blocks nothing anyone is looking at.
+ * Every method is synchronous, and the store runs somewhere that can afford
+ * it. In the browser that had two reasons and one of them has expired:
+ * `createSyncAccessHandle()` was available only inside a Worker, which is no
+ * longer true of anything because it is no longer used. The reason that
+ * survives is the measured one - encoding a summary costs 8.91 us against the
+ * dissection thread's whole 28.6 us budget (`scripts/perf/summary-codec.ts`) -
+ * so the store is a process of its own, and synchronous I/O there blocks
+ * nothing anyone is looking at.
  */
 
 export interface BlockFile {
@@ -116,33 +120,6 @@ export class MemoryBlockFile implements BlockFile {
 
   /** The bytes as written, for a test that wants to inspect or corrupt them. */
   snapshot(): Uint8Array { return this.buf.slice(0, this.length); }
-}
-
-/**
- * Wraps an OPFS `FileSystemSyncAccessHandle`.
- *
- * Typed structurally rather than against `FileSystemSyncAccessHandle`, because
- * that type is not in every TypeScript lib this project builds against and a
- * missing DOM type should not decide whether the storage layer compiles.
- */
-export interface SyncAccessHandleLike {
-  read(into: BufferSource, options?: { at?: number }): number;
-  write(from: BufferSource, options?: { at?: number }): number;
-  truncate(size: number): void;
-  flush(): void;
-  getSize(): number;
-  close(): void;
-}
-
-export class SyncAccessBlockFile implements BlockFile {
-  constructor(private readonly handle: SyncAccessHandleLike) {}
-
-  read(offset: number, into: Uint8Array): number { return this.handle.read(into, { at: offset }); }
-  write(offset: number, from: Uint8Array): void { this.handle.write(from, { at: offset }); }
-  truncate(length: number): void { this.handle.truncate(length); }
-  flush(): void { this.handle.flush(); }
-  size(): number { return this.handle.getSize(); }
-  close(): void { this.handle.close(); }
 }
 
 /**

@@ -74,8 +74,21 @@ export type FromCapture =
   | {
       type: 'ready';
       captureId: string;
-      persisted: boolean;
-      quotaBytes: number | null;
+      /**
+       * Free space on the volume the captures are on, or null.
+       *
+       * Replaces `quotaBytes`, and is a better number than the one it
+       * replaces. `estimate().quota` was roughly a share of *total* disk - an
+       * upper bound and never a promise - and it capped this app at a measured
+       * 10.8 GB. This is what is actually available.
+       *
+       * `persisted` went with it and has no replacement, because it has no
+       * meaning any more: it existed because a browser could evict the whole
+       * origin under disk pressure, and nothing evicts a file.
+       */
+      freeBytes: number | null;
+      /** Where the captures are, so the panel can show it and open it. */
+      captureDir: string;
       /** What was already on disk: zero for a capture that has just started. */
       frameCount: number;
       chunkCount: number;
@@ -95,6 +108,7 @@ export type FromCapture =
       stats: WriterStats;
       stagedCount: number;
       bytesOnDisk: number;
+      freeBytes: number | null;
       /**
        * The ids the capture can supply bytes for, or null.
        *
@@ -129,17 +143,17 @@ export interface CaptureStorageState {
   patchesMissed: number;
   /** The span of frame ids whose bytes are readable, or null. */
   storedRange: { first: number; last: number } | null;
-  /** Null until asked, then whatever `navigator.storage.estimate()` said. */
-  quotaBytes: number | null;
-  /** False is the ordinary answer in Chrome, not an error. See the worker. */
-  persisted: boolean;
+  /** Free space where the captures live. Null when it cannot be read. */
+  freeBytes: number | null;
+  /** The capture directory, shown in Settings and openable from there. */
+  captureDir: string;
   error: string | null;
 }
 
 export function freshCaptureStorageState(): CaptureStorageState {
   return {
     captureId: null, framesWritten: 0, bytesOnDisk: 0, stagedCount: 0,
-    patchesMissed: 0, storedRange: null, quotaBytes: null, persisted: false,
+    patchesMissed: 0, storedRange: null, freeBytes: null, captureDir: '',
     error: null,
   };
 }

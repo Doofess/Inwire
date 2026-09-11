@@ -32,6 +32,25 @@ declare global {
        * site in `App.tsx`.
        */
       setUnsavedCapture?(hasFrames: boolean): void;
+      /**
+       * Asks for the capture store's port. Returns nothing on purpose.
+       *
+       * A `MessagePort` cannot cross `contextBridge` - the bridge's proxy
+       * layer does not support one, and a function that tried to return one
+       * would fail rather than transfer. The preload hands it into the page
+       * with `window.postMessage(msg, '*', [port])` instead, so the caller
+       * asks here and listens on `window` for `CAPTURE_PORT_MESSAGE`.
+       */
+      requestCaptureStorePort?(): void;
+      /**
+       * Called if the store process dies.
+       *
+       * A `MessagePort` has no error event and no reliable close event, so a
+       * dead store is a channel that simply goes quiet - and every pending
+       * read would hang for the life of the window. Main watches the process
+       * and reports over its own channel.
+       */
+      onCaptureStoreExit?(listener: (reason: string) => void): void;
     };
   }
 }

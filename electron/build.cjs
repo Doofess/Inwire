@@ -33,6 +33,9 @@ async function main() {
     entryPoints: {
       main: path.join(root, 'electron/main.ts'),
       preload: path.join(root, 'electron/preload.ts'),
+      // The capture store's utilityProcess entry. Bundled like the others so
+      // it carries its `src/services/capture` imports with it.
+      'store/store': path.join(root, 'electron/store/entry.ts'),
     },
     outdir: path.join(root, 'dist-electron'),
     outExtension: { '.js': '.cjs' },

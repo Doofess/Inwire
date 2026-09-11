@@ -173,7 +173,12 @@ console.log('\n--- the policy, and the list it has to keep up with ---\n');
   const known = new Set([...Object.values(OUTBOUND_HOSTS), ...AGENT_WS_ORIGINS].map(hostOf));
   const unlisted: string[] = [];
   for (const file of sources) {
-    const text = readFileSync(file, 'utf8');
+    // Comments stripped first. A URL in a comment is documentation, not a
+    // request - and this check flagged one the moment a comment explained why
+    // maplibre's worker URL differs between dev and a packaged build.
+    const text = readFileSync(file, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
     for (const match of text.matchAll(/['"`]((?:https?|wss?):\/\/[a-z0-9.-]+)/gi)) {
       const host = hostOf(match[1]);
       if (known.has(host)) continue;

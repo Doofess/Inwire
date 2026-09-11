@@ -43,18 +43,68 @@ export interface StoredCapture {
   lastId: number;
 }
 
-/** True when this browser can host the capture store at all. */
-export function opfsAvailable(): boolean {
-  return typeof navigator !== 'undefined'
-    && typeof navigator.storage?.getDirectory === 'function'
-    && typeof Worker !== 'undefined';
+/**
+ * True when a capture store can be reached at all.
+ *
+ * It was `opfsAvailable()`, testing for `navigator.storage.getDirectory`. The
+ * question is the same one - is there somewhere to put a capture - and the
+ * answer now comes from the preload bridge, which is absent in every one of
+ * the assertion scripts and must therefore be optional rather than assumed.
+ */
+export function captureStoreAvailable(): boolean {
+  return typeof window !== 'undefined' && window.inwire?.isDesktop === true;
+}
+
+/**
+ * The window message the preload uses to hand the store's port into the page.
+ *
+ * It has to arrive this way: `contextBridge` cannot pass a `MessagePort`, so
+ * there is no version of this where the bridge simply returns one.
+ */
+const CAPTURE_PORT_MESSAGE = 'inwire:capture-port';
+
+/** How long to wait for main to answer before giving up on the store. */
+const PORT_TIMEOUT_MS = 15_000;
+
+function requestStorePort(): Promise<MessagePort> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (event: MessageEvent) => {
+      // `event.source === window` is the check that makes `'*'` safe on the
+      // preload's side: only this window can post to itself.
+      if (event.source !== window) return;
+      if ((event.data as { channel?: string } | null)?.channel !== CAPTURE_PORT_MESSAGE) return;
+      const [port] = event.ports;
+      if (!port) return;
+      window.removeEventListener('message', onMessage);
+      clearTimeout(timer);
+      resolve(port);
+    };
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', onMessage);
+      reject(new Error('the capture store did not answer'));
+    }, PORT_TIMEOUT_MS);
+    window.addEventListener('message', onMessage);
+    window.inwire?.requestCaptureStorePort?.();
+  });
 }
 
 /** Bytes a request could not be answered with. Shared, never written to. */
 const NONE = new Map<number, Uint8Array>();
 
 class CaptureClient {
-  private worker: Worker | null = null;
+  /**
+   * The channel to the store process, once main has handed it over.
+   *
+   * A promise, and every method awaits it - which is not a style choice. The
+   * port arrives asynchronously where `new Worker(...)` returned an object
+   * synchronously, and `App.tsx`'s startup is
+   * `reopen(...)` followed immediately by
+   * `prune(stored === null ? [] : [stored.captureId])`. A `reopen` that
+   * answered `null` for "no transport yet" would therefore **delete every
+   * capture on disk** on a slow start. Null means the store said no; it never
+   * means "not connected".
+   */
+  private connection: Promise<MessagePort | null> | null = null;
   private state: CaptureStorageState = freshCaptureStorageState();
   /** Set once a failure makes the store unusable, so nothing keeps trying. */
   private disabled = false;
@@ -69,31 +119,46 @@ class CaptureClient {
 
   onState: (state: CaptureStorageState) => void = () => {};
 
-  private ensureWorker(): Worker | null {
-    if (this.disabled || !opfsAvailable()) return null;
-    if (this.worker) return this.worker;
-    const worker = new Worker(new URL('../../workers/capture.worker.ts', import.meta.url), {
-      type: 'module',
-      name: 'inwire-capture',
-    });
-    worker.onmessage = (event: MessageEvent<FromCapture>) => this.receive(event.data);
-    worker.onerror = (event) => {
-      // A worker that failed to start is not a reason to stop capturing - the
-      // in-memory buffer and IndexedDB are both untouched by this - so it
-      // disables itself and says so rather than throwing into the flush.
-      this.disabled = true;
-      this.update({ error: event.message || 'the capture store failed to start' });
-      // Whoever was waiting on a read gets an empty answer rather than a
-      // promise that never settles: a frame whose bytes cannot be fetched is a
-      // thing to render, and the hex viewer already knows how to say so.
-      this.settleAll();
-    };
-    this.worker = worker;
-    return worker;
+  private ensurePort(): Promise<MessagePort | null> {
+    if (this.connection) return this.connection;
+    if (this.disabled || !captureStoreAvailable()) return Promise.resolve(null);
+
+    this.connection = (async () => {
+      try {
+        const port = await requestStorePort();
+        port.onmessage = (event: MessageEvent<FromCapture>) => this.receive(event.data);
+        // A `MessagePort` obtained this way delivers nothing until it is
+        // started. Assigning `onmessage` starts it implicitly in the DOM, but
+        // saying so is cheaper than remembering which of the two port types
+        // this is.
+        port.start();
+        // The store is a separate process, and a `MessagePort` has no error
+        // event and no reliable close event - so when it dies the port simply
+        // goes quiet and every pending read would hang for the life of the
+        // window. Main watches the process and tells us over its own channel.
+        window.inwire!.onCaptureStoreExit?.((reason) => this.die(reason));
+        return port;
+      } catch (error) {
+        this.die(error instanceof Error ? error.message : String(error));
+        return null;
+      }
+    })();
+    return this.connection;
+  }
+
+  /** The store is gone. Nothing waits on it, and nothing tries again. */
+  private die(reason: string): void {
+    this.disabled = true;
+    this.connection = Promise.resolve(null);
+    this.update({ error: reason || 'the capture store stopped' });
+    // Whoever was waiting gets an empty answer rather than a promise that
+    // never settles: a frame whose bytes cannot be fetched is a thing to
+    // render, and the hex viewer already knows how to say so.
+    this.settleAll();
   }
 
   private send(message: ToCapture): void {
-    this.ensureWorker()?.postMessage(message);
+    void this.ensurePort().then((port) => port?.postMessage(message));
   }
 
   private update(patch: Partial<CaptureStorageState>): void {
@@ -106,8 +171,8 @@ class CaptureClient {
       case 'ready': {
         this.update({
           captureId: message.captureId,
-          persisted: message.persisted,
-          quotaBytes: message.quotaBytes,
+          freeBytes: message.freeBytes,
+          captureDir: message.captureDir,
           error: null,
         });
         if (message.requestId !== undefined) {
@@ -128,6 +193,7 @@ class CaptureClient {
           patchesMissed: message.stats.patchesMissed,
           bytesOnDisk: message.bytesOnDisk,
           stagedCount: message.stagedCount,
+          freeBytes: message.freeBytes,
           storedRange: message.storedRange,
         });
         break;
@@ -174,7 +240,7 @@ class CaptureClient {
 
   /** Starts a capture. One Start->Stop cycle is one capture directory. */
   begin(captureId: string): void {
-    if (!opfsAvailable()) return;
+    if (!captureStoreAvailable()) return;
     this.settleAll();
     this.state = freshCaptureStorageState();
     this.send({ type: 'open', captureId });
@@ -205,6 +271,28 @@ class CaptureClient {
   }
 
   /**
+   * Sends a request and waits for the answer the store always sends.
+   *
+   * `settle` is registered **before** the message goes out, so an answer that
+   * arrives in the same turn cannot find an empty map. `fallback` is what the
+   * caller gets when there is no store at all - never when there is one that
+   * has not connected yet, because every path here awaits the port first.
+   */
+  private async request<T>(
+    pendingMap: Map<number, (value: never) => void>,
+    build: (requestId: number) => ToCapture,
+    fallback: T,
+  ): Promise<T> {
+    const port = await this.ensurePort();
+    if (port === null) return fallback;
+    const requestId = this.nextRequest++;
+    return new Promise<T>((resolve) => {
+      (pendingMap as Map<number, (value: T) => void>).set(requestId, resolve);
+      port.postMessage(build(requestId));
+    });
+  }
+
+  /**
    * The raw bytes of specific frames, keyed by id.
    *
    * The same contract `sessionStore.readFrameBytes` had, so `packetBytes.ts`
@@ -213,13 +301,11 @@ class CaptureClient {
    */
   readBytes(ids: readonly number[]): Promise<Map<number, Uint8Array>> {
     if (ids.length === 0) return Promise.resolve(NONE);
-    const worker = this.ensureWorker();
-    if (worker === null) return Promise.resolve(NONE);
-    const requestId = this.nextRequest++;
-    return new Promise((resolve) => {
-      this.pending.set(requestId, resolve);
-      worker.postMessage({ type: 'read', requestId, ids: [...ids] } satisfies ToCapture);
-    });
+    return this.request(
+      this.pending as never,
+      (requestId) => ({ type: 'read', requestId, ids: [...ids] }),
+      NONE,
+    );
   }
 
   /**
@@ -247,14 +333,12 @@ class CaptureClient {
    * reads as "there is nothing to restore".
    */
   reopen(captureId: string): Promise<StoredCapture | null> {
-    const worker = this.ensureWorker();
-    if (worker === null) return Promise.resolve(null);
     this.state = freshCaptureStorageState();
-    const requestId = this.nextRequest++;
-    return new Promise((resolve) => {
-      this.pendingOpen.set(requestId, resolve);
-      worker.postMessage({ type: 'open', captureId, requestId } satisfies ToCapture);
-    });
+    return this.request(
+      this.pendingOpen as never,
+      (requestId) => ({ type: 'open', captureId, requestId }),
+      null,
+    );
   }
 
   /**
@@ -265,13 +349,11 @@ class CaptureClient {
    * `CaptureReader.readRows`.
    */
   readRows(chunk: number): Promise<Packet[]> {
-    const worker = this.ensureWorker();
-    if (worker === null) return Promise.resolve([]);
-    const requestId = this.nextRequest++;
-    return new Promise((resolve) => {
-      this.pendingRows.set(requestId, resolve);
-      worker.postMessage({ type: 'chunk', requestId, chunk } satisfies ToCapture);
-    });
+    return this.request(
+      this.pendingRows as never,
+      (requestId) => ({ type: 'chunk', requestId, chunk }),
+      [] as Packet[],
+    );
   }
 
   /**
@@ -282,13 +364,12 @@ class CaptureClient {
    * `useCaptureRows` does.
    */
   readRowsAt(from: number, to: number): Promise<RowBlock[]> {
-    const worker = this.ensureWorker();
-    if (worker === null || to <= from) return Promise.resolve([]);
-    const requestId = this.nextRequest++;
-    return new Promise((resolve) => {
-      this.pendingBlocks.set(requestId, resolve);
-      worker.postMessage({ type: 'rowsAt', requestId, from, to } satisfies ToCapture);
-    });
+    if (to <= from) return Promise.resolve([]);
+    return this.request(
+      this.pendingBlocks as never,
+      (requestId) => ({ type: 'rowsAt', requestId, from, to }),
+      [] as RowBlock[],
+    );
   }
 
   /**
@@ -300,13 +381,11 @@ class CaptureClient {
    * this existed.
    */
   ordinalOf(id: number): Promise<number> {
-    const worker = this.ensureWorker();
-    if (worker === null) return Promise.resolve(-1);
-    const requestId = this.nextRequest++;
-    return new Promise((resolve) => {
-      this.pendingLocate.set(requestId, resolve);
-      worker.postMessage({ type: 'locate', requestId, id } satisfies ToCapture);
-    });
+    return this.request(
+      this.pendingLocate as never,
+      (requestId) => ({ type: 'locate', requestId, id }),
+      -1,
+    );
   }
 
   /** Deletes every capture directory but these. See the protocol's `prune`. */

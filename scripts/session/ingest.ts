@@ -108,6 +108,7 @@ function flush(
   prev: Packet[], incoming: Packet[], accounting: BufferAccounting,
   rec: ReturnType<typeof recorder>, budgetBytes: number, capturing = true,
   invocations = 2,
+  freeDiskBytes: number | null = 500 * 1024 * 1024 * 1024,
 ): Packet[] {
   prepareBatch(incoming, accounting, rec.prepare);
   // Snapshotted once per flush, exactly as App.tsx does it - see the note on
@@ -117,7 +118,7 @@ function flush(
   let result = prev;
   for (let i = 0; i < invocations; i++) {
     result = commitBatch(prev, incoming, [], [], accounting, {
-      budgetBytes, capturing, residentFrames: 25000, residentBytesAtEntry,
+      budgetBytes, capturing, residentFrames: 25000, residentBytesAtEntry, freeDiskBytes,
     }, rec.commit);
   }
   return result;
@@ -214,7 +215,14 @@ function flush(
   check('...and absorbs the same number of times', twice.absorbs, once.absorbs);
 }
 
-// --- 5. auto-pause ------------------------------------------------------------
+// --- 5. what a capture stops for -----------------------------------------------
+//
+// It used to stop for a full buffer, and that was not merely obsolete once the
+// frames went to disk - it cancelled the feature. `AUTO_PAUSE_AT` was 0.99 of
+// the budget and `planBufferTrim` only acts above 1.05, so the capture always
+// stopped BEFORE the trim had ever run. The window's head never moved, so
+// nothing ever asked where the window sat in the capture, so every row on disk
+// was unreachable while capturing.
 {
   const rec = recorder();
   const accounting = freshAccounting();
@@ -224,7 +232,28 @@ function flush(
     packets = flush(packets, Array.from({ length: 20 }, () => frame()),
       accounting, rec, budget, true);
   }
-  check('a buffer at its budget asks for capture to stop', rec.autoPauses > 0, true);
+  // The inversion. A full window loses nothing now: the frames leaving it are
+  // on disk and still in the list.
+  check('a full buffer no longer stops the capture', rec.autoPauses, 0);
+  check('...it trims instead, which it never used to reach', accounting.droppedTotal > 0, true);
+
+  const lowDisk = recorder();
+  const lowAccounting = freshAccounting();
+  let lowPackets: Packet[] = [];
+  for (let i = 0; i < 4; i++) {
+    lowPackets = flush(lowPackets, Array.from({ length: 20 }, () => frame()),
+      lowAccounting, lowDisk, budget, true, 2, 64 * 1024 * 1024);
+  }
+  check('a nearly full disk does stop it', lowDisk.autoPauses > 0, true);
+  void lowPackets;
+
+  const unknown = recorder();
+  const unknownAccounting = freshAccounting();
+  flush([], Array.from({ length: 20 }, () => frame()),
+    unknownAccounting, unknown, budget, true, 2, null);
+  // A filesystem that does not answer `statfs` is not a reason to refuse to
+  // capture on it; an ENOSPC from the store is the honest fallback.
+  check('an unknown free-space figure stops nothing', unknown.autoPauses, 0);
 
   const quiet = recorder();
   const roomy = freshAccounting();

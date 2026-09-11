@@ -49,7 +49,7 @@
 import { deflateSync } from 'fflate';
 import type { Packet } from '../../types/packet';
 import type { InfoPatch } from '../dissect/types';
-import { applyInfoPatch } from '../pcapParser';
+import { applyInfoPatch } from '../dissect/infoPatch';
 import { encodeChunk, CHUNK_FRAMES } from './chunkCodec';
 import {
   encodeChunkRecord, writeIndexHeader, CaptureIndex, INDEX_HEADER_BYTES, INDEX_RECORD_BYTES,

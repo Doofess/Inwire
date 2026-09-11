@@ -24,6 +24,7 @@
  */
 import {
   BUDGET_SLACK, estimateSummaryBytes, framesForBudget, planBufferTrim,
+  DISK_RESERVE_BYTES, shouldStopForDisk,
 } from '../../src/services/bufferBudget';
 import type { Packet } from '../../src/types/packet';
 
@@ -149,6 +150,29 @@ const buffer = (n: number) => Array.from({ length: n }, (_, i) => plain(i + 1));
   // a usable number rather than Infinity.
   checkTrue('no average yet still gives a finite count',
     Number.isFinite(framesForBudget(512 * 1024 * 1024, 0)));
+}
+
+console.log('\n--- when a capture stops itself ---\n');
+
+{
+  // It used to stop at 99% of the MEMORY budget, and `planBufferTrim` only
+  // acts above 105% - so the capture always stopped before the trim had ever
+  // run, the window's head never moved, and every row on disk was unreachable
+  // during a live capture. The rule watches the disk now, because a full
+  // window loses nothing and a full disk does.
+  check('a roomy disk does not stop a capture',
+    shouldStopForDisk(DISK_RESERVE_BYTES * 4), false);
+  check('exactly at the reserve is still fine', shouldStopForDisk(DISK_RESERVE_BYTES), false);
+  check('below it stops', shouldStopForDisk(DISK_RESERVE_BYTES - 1), true);
+  check('an empty disk stops', shouldStopForDisk(0), true);
+  // Unknown is not a reason to stop. Some filesystems do not answer `statfs`,
+  // and the honest fallback is the store reporting an ENOSPC that the panel
+  // shows - not refusing to capture on a volume that simply stays quiet.
+  check('an unknown figure does not stop anything', shouldStopForDisk(null), false);
+  // Named in seconds rather than bytes: at the measured 1,156 B a frame and
+  // 35,000 frames a second, the reserve is the warning time it buys.
+  check('the reserve is about fifty seconds at full rate',
+    Math.round(DISK_RESERVE_BYTES / (1156 * 35000)), 53);
 }
 
 console.log();
