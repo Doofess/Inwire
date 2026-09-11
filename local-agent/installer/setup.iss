@@ -13,7 +13,31 @@
 ; licence, and downloading it on the user's machine is not redistribution.
 
 #define MyAppName "Inwire Agent"
-#define MyAppVersion "3.8.0"
+; Two numbers, because they are two different things and only ever looked like
+; one while this installer shipped the agent and nothing else.
+;
+; MyAgentVersion is a WIRE PROTOCOL version. Its whole job is the comparison in
+; `isAgentOutdated(agentVersion, REQUIRED_AGENT_VERSION)`, so it is an ordering
+; and it only ever climbs - reset it and an agent left behind by an earlier
+; install reads as NEWER than required, which shows as "not connected" rather
+; than "update your agent". It is locked to `AGENT_VERSION` in agent.py and
+; `REQUIRED_AGENT_VERSION` in agentProtocol.ts; `test_protocol.py` fails if the
+; three drift.
+;
+; MyAppVersion is the PRODUCT, and it is what Windows compares to decide
+; whether an install is an upgrade. Under one installer carrying the app and
+; the agent together the two stop moving in step - a UI release ships an
+; installer and no new agent at all - so a single number would have to lie
+; about one of them.
+;
+; This file is still the AGENT'S installer, under the AppId 3.7.0 already
+; occupies, so every AppVersion below is MyAgentVersion. MyAppVersion is
+; declared here and locked to package.json (test_protocol.py) so the product
+; has one number from the moment it has one, and is used by the unified
+; installer - which needs its own AppId, because a product resetting to 1.0.0
+; under this one would read as a downgrade on every machine that has the agent.
+#define MyAgentVersion "3.8.0"
+#define MyAppVersion "1.0.0"
 #define MyAppExeName "inwire-agent-windows.exe"
 #define MyAppPublisher "Inwire"
 #define NpcapUrl "https://npcap.com/dist/npcap-1.79.exe"
@@ -30,7 +54,7 @@
 [Setup]
 AppId={{4C2F8E1A-6B3D-4E9F-8A2C-1D5E7F9A3B6C}}
 AppName={#MyAppName}
-AppVersion={#MyAppVersion}
+AppVersion={#MyAgentVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
@@ -46,9 +70,9 @@ SetupIconFile=..\icon.ico
 ; only brands the installer itself. Confirmed blank on an installed 2.6.0.
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; The setup exe's own file-version resource; blank (0.0.0.0) unless set here.
-VersionInfoVersion={#MyAppVersion}.0
+VersionInfoVersion={#MyAgentVersion}.0
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAgentVersion}
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin

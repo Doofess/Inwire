@@ -67,13 +67,41 @@ _ts_text = _read_required_text(_AGENT_PROTOCOL_TS)
 _iss_text = _read_required_text(_SETUP_ISS)
 
 _ts_version = _extract(r"REQUIRED_AGENT_VERSION\s*=\s*'([^']+)'", _ts_text, _AGENT_PROTOCOL_TS)
-_iss_version = _extract(r'#define\s+MyAppVersion\s+"([^"]+)"', _iss_text, _SETUP_ISS)
+# MyAgentVersion, not MyAppVersion. The installer carries two numbers since the
+# app and the agent started shipping in one: the agent's is a wire-protocol
+# ordering that only climbs, and the product's is what Windows compares to
+# decide whether an install is an upgrade. They no longer move together - a UI
+# release ships an installer and no new agent - and this lock is the protocol
+# one, which is the one a mismatch actually breaks.
+_iss_version = _extract(r'#define\s+MyAgentVersion\s+"([^"]+)"', _iss_text, _SETUP_ISS)
 
 check("agentProtocol.ts REQUIRED_AGENT_VERSION matches agent.py AGENT_VERSION", _ts_version, agent.AGENT_VERSION)
-check("setup.iss MyAppVersion matches agent.py AGENT_VERSION", _iss_version, agent.AGENT_VERSION)
+check("setup.iss MyAgentVersion matches agent.py AGENT_VERSION", _iss_version, agent.AGENT_VERSION)
 check_true(
     "agent.py AGENT_VERSION is MAJOR.MINOR.PATCH",
     re.fullmatch(r"\d+\.\d+\.\d+", agent.AGENT_VERSION) is not None,
+)
+
+# The product's own number, which nothing above this line constrains. Asserted
+# because the failure it prevents is the quiet one: package.json is what
+# electron-builder stamps into the exe and what the About box reads, and an
+# installer whose AppVersion disagrees with the binary it installs makes every
+# later upgrade decision unreadable.
+_PACKAGE_JSON = os.path.join(_REPO_ROOT, "package.json")
+_product_version = json.loads(_read_required_text(_PACKAGE_JSON))["version"]
+_iss_product = _extract(r'#define\s+MyAppVersion\s+"([^"]+)"', _iss_text, _SETUP_ISS)
+check("setup.iss MyAppVersion matches package.json", _iss_product, _product_version)
+check_true(
+    "the product version is MAJOR.MINOR.PATCH",
+    re.fullmatch(r"\d+\.\d+\.\d+", _product_version) is not None,
+)
+# The two are independent, and the protocol one must never be reset to sit
+# under an agent that is already installed. Stated as an assertion rather than
+# a comment because "only ever climbs" is exactly the rule a release under time
+# pressure breaks.
+check_true(
+    "the agent's protocol version has not been reset below what has shipped",
+    tuple(int(part) for part in agent.AGENT_VERSION.split(".")) >= (3, 8, 0),
 )
 
 # --- build_hello_message ---
