@@ -458,7 +458,7 @@ export const AGENT_WS_URL = 'ws://localhost:8999';
  * whatever the connected agent reports in its hello message to flag a
  * stale build in the UI.
  */
-export const REQUIRED_AGENT_VERSION = '3.7.0';
+export const REQUIRED_AGENT_VERSION = '3.8.0';
 
 /**
  * Simple major.minor.patch comparison - good enough for this agent's

@@ -24,6 +24,7 @@ import time
 from http import HTTPStatus
 
 import config
+import pipe_server
 import packet_batch
 import capture_profile
 
@@ -82,7 +83,7 @@ except ImportError:
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "3.7.0"
+AGENT_VERSION = "3.8.0"
 
 # How often per-interface traffic rates are sampled while a client has the
 # capture-interface picker open. 500ms is fast enough that the sparkline
@@ -814,6 +815,15 @@ class AgentServer:
             # should not need a service restart on a machine with no console.
             settings = config.load_config(on_warning=lambda msg: log.warning("config: %s", msg))
             expected_token = settings.get("token")
+            # A connection the OPERATING SYSTEM vouched for needs no token of
+            # ours. The pipe's descriptor already decided who may open it, and
+            # a token is only worth anything where anyone could connect and
+            # claim to be the app - which is what a loopback TCP port is and a
+            # pipe is not. So the pairing question is not merely answered for a
+            # pipe client, it is never asked: `hello` says `authRequired:
+            # false` and there is nothing to paste.
+            if getattr(ws, "kernel_authenticated", False):
+                expected_token = None
             if expected_token is None:
                 self.authenticated.add(ws)
             # Re-read the adapters here rather than trusting the list built at
@@ -1855,15 +1865,25 @@ async def main(to_stderr=True):
     def log_rejection(origin):
         log.warning("rejected connection from disallowed origin: %r", origin)
 
-    async with websockets.serve(
-        agent.register,
-        HOST,
-        PORT,
-        process_request=make_process_request(on_reject=log_rejection),
-    ):
-        log.info("WebSocket server listening on ws://%s:%d", HOST, PORT)
-        asyncio.create_task(watch_for_orphaned_capture())
-        await asyncio.Future()  # run forever
+    # The named pipe is how the desktop app connects: the kernel decides who
+    # may open it, so there is no token to paste and no origin to check. It
+    # runs alongside the WebSocket while the app is being moved over, and the
+    # socket goes when nothing speaks it any more.
+    pipes = pipe_server.PipeServer(agent.loop, agent.register)
+    pipes.start()
+
+    try:
+        async with websockets.serve(
+            agent.register,
+            HOST,
+            PORT,
+            process_request=make_process_request(on_reject=log_rejection),
+        ):
+            log.info("WebSocket server listening on ws://%s:%d", HOST, PORT)
+            asyncio.create_task(watch_for_orphaned_capture())
+            await asyncio.Future()  # run forever
+    finally:
+        pipes.stop()
 
     return True
 
