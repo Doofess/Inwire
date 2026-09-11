@@ -25,17 +25,48 @@ ownership, subscriptions, the hello handshake, the disconnect rules, all of it.
 Threads, not IOCP
 -----------------
 
-Reading and writing use blocking pywin32 calls on dedicated threads, which
-hand off to the event loop with ``call_soon_threadsafe``. The alternative,
-``loop.start_serving_pipe``, integrates with the proactor properly but creates
-its pipe instances itself - with the creating process's default DACL, which for
-a LocalSystem service admits SYSTEM and administrators and therefore **not the
-unelevated app this exists to serve**. Passing our own security descriptor
-means creating the instances ourselves, and once we are doing that the
-threads are the simpler half.
+Reading and writing happen on dedicated threads, which hand off to the event
+loop with ``call_soon_threadsafe``. The alternative, ``loop.start_serving_pipe``,
+integrates with the proactor properly but creates its pipe instances itself -
+with the creating process's default DACL, which for a LocalSystem service
+admits SYSTEM and administrators and therefore **not the unelevated app this
+exists to serve**. Passing our own security descriptor means creating the
+instances ourselves, and once we are doing that the threads are the simpler
+half.
 
 It is also the pattern the agent already uses everywhere else: the sniffer is
 threads feeding the loop, for the same reason.
+
+Overlapped, though - and this is not an optimisation
+----------------------------------------------------
+
+The threads are ours; the I/O has to be asynchronous anyway. A handle opened
+without ``FILE_FLAG_OVERLAPPED`` is a **synchronous** handle, and Windows
+serialises every operation on one: while the reader thread sits in
+``ReadFile`` waiting for the client's next command, a ``WriteFile`` from the
+writer thread does not fail and does not block visibly - it simply waits its
+turn behind a read that may not complete for minutes.
+
+That is not a hypothesis. Driven against the real client, ``hello`` and the
+first reply arrived and everything after them did not: writes landed only when
+one happened to fall in the gap between the reader returning and blocking
+again. Which is the worst possible shape for a bug - it works on the handshake,
+which is what anyone tests, and stops on the traffic, which is what the pipe is
+for.
+
+So the pipe is created ``FILE_FLAG_OVERLAPPED`` and every operation carries its
+own ``OVERLAPPED`` with its own event. Its own, not a shared one: two
+concurrent operations signalling one event is the same bug wearing a different
+hat. The waits are bounded rather than infinite so that ``stop()`` is observed
+- an ``INFINITE`` wait on a client that never speaks again would leave a thread
+pinned for the life of the process.
+
+The writer waits for each frame to complete before starting the next, because
+two outstanding writes on one handle have no defined order and a packet batch
+delivered out of order is a capture that lies about the wire. Measured against
+the real client, that costs nothing worth having: **4,000 batches of 64 kB -
+262 MB - in 539 ms, or 487 MB/s**. A saturated gigabit adapter is 125 MB/s and
+this agent's own stream is a 256 kB batch about thirty times a second.
 """
 
 from __future__ import annotations
@@ -193,15 +224,20 @@ class PipeServer:
 
     def _accept_loop(self) -> None:
         import pywintypes  # noqa: PLC0415
+        import win32event  # noqa: PLC0415
         import win32file  # noqa: PLC0415
         import win32pipe  # noqa: PLC0415
+        import winerror  # noqa: PLC0415
 
         while not self._stopping.is_set():
             handle = None
             try:
                 handle = win32pipe.CreateNamedPipe(
                     self._name,
-                    win32pipe.PIPE_ACCESS_DUPLEX,
+                    # OVERLAPPED because the reader and the writer are two
+                    # threads on one handle; see the header. Without it a write
+                    # queues behind whatever read is outstanding.
+                    win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_OVERLAPPED,
                     # BYTE mode both ways: the framing is ours, and message
                     # mode would add a second, redundant idea of a boundary
                     # that the two ends would then have to agree about twice.
@@ -212,7 +248,9 @@ class PipeServer:
                     0,
                     _security_attributes(),
                 )
-                win32pipe.ConnectNamedPipe(handle, None)
+                if not self._await_client(handle):
+                    win32file.CloseHandle(handle)
+                    return
             except pywintypes.error as error:
                 if self._stopping.is_set():
                     return
@@ -228,6 +266,39 @@ class PipeServer:
                 target=self._serve, args=(handle,),
                 name="inwire-pipe-client", daemon=True,
             ).start()
+
+    def _await_client(self, handle) -> bool:
+        """Waits for one client, or for ``stop()``. False means stop."""
+        import pywintypes  # noqa: PLC0415
+        import win32event  # noqa: PLC0415
+        import win32file  # noqa: PLC0415
+        import win32pipe  # noqa: PLC0415
+        import winerror  # noqa: PLC0415
+
+        overlapped = pywintypes.OVERLAPPED()
+        overlapped.hEvent = win32event.CreateEvent(None, True, False, None)
+        try:
+            try:
+                win32pipe.ConnectNamedPipe(handle, overlapped)
+            except pywintypes.error as error:
+                # The client can win the race between CreateNamedPipe and this
+                # call, and Windows reports that as a failure. It is a success:
+                # there is a client on the other end, which is all we asked.
+                if error.winerror != winerror.ERROR_PIPE_CONNECTED:
+                    raise
+                return True
+
+            while True:
+                if win32event.WaitForSingleObject(overlapped.hEvent, 250) == win32event.WAIT_OBJECT_0:
+                    return True
+                if self._stopping.is_set():
+                    # Bounded waits rather than INFINITE exist for this line:
+                    # a pipe instance nobody ever connects to would otherwise
+                    # pin this thread for the life of the process.
+                    win32file.CancelIo(handle)
+                    return False
+        finally:
+            win32file.CloseHandle(overlapped.hEvent)
 
     def _serve(self, handle) -> None:
         import pywintypes  # noqa: PLC0415
@@ -252,47 +323,22 @@ class PipeServer:
 
         connection = PipeConnection(self._loop, write, close)
 
-        def writer() -> None:
-            while not closed.is_set():
-                try:
-                    frame = outbound.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                try:
-                    win32file.WriteFile(handle, frame)
-                except pywintypes.error:
-                    closed.set()
-                    return
-
-        writer_thread = threading.Thread(target=writer, name="inwire-pipe-write", daemon=True)
+        writer_thread = threading.Thread(
+            target=self._write_loop, args=(handle, outbound, closed),
+            name="inwire-pipe-write", daemon=True,
+        )
         writer_thread.start()
 
         registration = asyncio.run_coroutine_threadsafe(self._register(connection), self._loop)
-        reader = pipe_frame.FrameReader()
         try:
-            while not closed.is_set():
-                try:
-                    result, data = win32file.ReadFile(handle, READ_CHUNK)
-                except pywintypes.error:
-                    break
-                if result != 0 or not data:
-                    break
-                try:
-                    for frame in reader.push(bytes(data)):
-                        if frame.kind == pipe_frame.FRAME_JSON:
-                            connection.deliver(frame.text())
-                        # A client has no reason to send a binary frame, and
-                        # guessing at one would be inventing a message.
-                        else:
-                            log.warning("pipe client sent a binary frame - ignoring")
-                except pipe_frame.FramingError as error:
-                    # Unrecoverable by construction: the stream position is no
-                    # longer known, so there is nothing to resynchronise to.
-                    log.warning("pipe framing error, dropping the client: %s", error)
-                    break
+            self._read_loop(handle, connection, closed)
         finally:
             closed.set()
             connection.finish()
+            # Wake the writer out of its wait so the handle is not closed under
+            # an operation still referencing it.
+            outbound.put(_SHUTDOWN)
+            writer_thread.join(timeout=1.0)
             # `register`'s `finally` runs `handle_disconnect`, which is what
             # stops a capture whose owner has gone.
             registration.cancel()
@@ -304,3 +350,75 @@ class PipeServer:
                 win32file.CloseHandle(handle)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _read_loop(self, handle, connection: PipeConnection, closed: threading.Event) -> None:
+        import pywintypes  # noqa: PLC0415
+        import win32event  # noqa: PLC0415
+        import win32file  # noqa: PLC0415
+
+        overlapped = pywintypes.OVERLAPPED()
+        overlapped.hEvent = win32event.CreateEvent(None, True, False, None)
+        buffer = win32file.AllocateReadBuffer(READ_CHUNK)
+        reader = pipe_frame.FrameReader()
+        try:
+            while not closed.is_set():
+                win32event.ResetEvent(overlapped.hEvent)
+                try:
+                    win32file.ReadFile(handle, buffer, overlapped)
+                except pywintypes.error:
+                    return
+                # Bounded, so `closed` is observed on a connection that has
+                # gone quiet rather than only when bytes next arrive.
+                while win32event.WaitForSingleObject(
+                    overlapped.hEvent, 250,
+                ) != win32event.WAIT_OBJECT_0:
+                    if closed.is_set():
+                        win32file.CancelIo(handle)
+                        return
+                try:
+                    read = win32file.GetOverlappedResult(handle, overlapped, False)
+                except pywintypes.error:
+                    return
+                if read == 0:
+                    return
+                try:
+                    for frame in reader.push(bytes(buffer[:read])):
+                        if frame.kind == pipe_frame.FRAME_JSON:
+                            connection.deliver(frame.text())
+                        # A client has no reason to send a binary frame, and
+                        # guessing at one would be inventing a message.
+                        else:
+                            log.warning("pipe client sent a binary frame - ignoring")
+                except pipe_frame.FramingError as error:
+                    # Unrecoverable by construction: the stream position is no
+                    # longer known, so there is nothing to resynchronise to.
+                    log.warning("pipe framing error, dropping the client: %s", error)
+                    return
+        finally:
+            win32file.CloseHandle(overlapped.hEvent)
+
+    def _write_loop(self, handle, outbound: "queue.Queue", closed: threading.Event) -> None:
+        import pywintypes  # noqa: PLC0415
+        import win32event  # noqa: PLC0415
+        import win32file  # noqa: PLC0415
+
+        overlapped = pywintypes.OVERLAPPED()
+        overlapped.hEvent = win32event.CreateEvent(None, True, False, None)
+        try:
+            while True:
+                frame = outbound.get()
+                if frame is _SHUTDOWN or closed.is_set():
+                    return
+                win32event.ResetEvent(overlapped.hEvent)
+                try:
+                    win32file.WriteFile(handle, frame, overlapped)
+                    # Waited to completion before the next frame is written:
+                    # two outstanding writes on one handle have no defined
+                    # order, and a packet batch delivered out of order is a
+                    # capture that lies about the wire.
+                    win32file.GetOverlappedResult(handle, overlapped, True)
+                except pywintypes.error:
+                    closed.set()
+                    return
+        finally:
+            win32file.CloseHandle(overlapped.hEvent)

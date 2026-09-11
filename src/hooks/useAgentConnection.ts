@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { pipeline } from '../services/pipelineClient';
 import {
-  AGENT_WS_URL, summarizeCaptureStats,
+  summarizeCaptureStats,
   type AgentCommand, type AgentInterface, type AgentAdapter, type AgentLogEntry,
   type AgentMessage, type CaptureDropStats,
 } from '../services/agentProtocol';
@@ -439,7 +439,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
     // on its way to the screen.
     pipeline.onNetworkFacts = (facts) => callbacks.current.onNetworkFacts(facts);
 
-    pipeline.connect(AGENT_WS_URL);
+    pipeline.connect();
 
     return () => {
       if (connectedDelay) clearTimeout(connectedDelay);

@@ -22,6 +22,7 @@
  */
 import { contextBridge, ipcRenderer } from 'electron';
 import {
+  AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST,
   STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
 } from './channels';
 
@@ -83,6 +84,18 @@ const api = {
   onCaptureStoreExit(listener: (reason: string) => void): void {
     ipcRenderer.on(STORE_EXIT_CHANNEL, (_event, reason: string) => listener(reason));
   },
+
+  /**
+   * Asks main to open a link to the capture agent. Returns nothing, same rule.
+   *
+   * The agent is a named pipe now, and neither a renderer nor a Web Worker can
+   * open one - `net.connect` is Node. So the handle lives in main and what
+   * comes back is a port, which travels the same way the store's does and for
+   * the same reason.
+   */
+  requestAgentPort(): void {
+    void ipcRenderer.invoke(AGENT_PORT_REQUEST);
+  },
 } as const;
 
 // Main sends the port here; this forwards it into the page. `'*'` as the
@@ -90,6 +103,13 @@ const api = {
 // never leaves this window, and the listener checks `event.source === window`.
 ipcRenderer.on(STORE_PORT_CHANNEL, (event) => {
   window.postMessage({ channel: STORE_PORT_CHANNEL }, '*', event.ports);
+});
+
+// The agent's port takes the identical route. It does not stop in the page,
+// though: `pipelineClient` transfers it straight into the pipeline Worker, so
+// the renderer's main thread carries it once and never sees a frame.
+ipcRenderer.on(AGENT_PORT_CHANNEL, (event) => {
+  window.postMessage({ channel: AGENT_PORT_CHANNEL }, '*', event.ports);
 });
 
 export type InwireBridge = typeof api;

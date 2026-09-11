@@ -27,7 +27,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
-import { STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL } from './channels';
+import { AGENT_PORT_REQUEST, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL } from './channels';
+import { AgentPipeLink } from './agentPipe';
 import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
@@ -98,6 +99,16 @@ let unsavedCapture = false;
 let quitConfirmed = false;
 /** The capture store, forked on the renderer's first request for its port. */
 const store = new CaptureStoreHost(captureDirectory());
+/**
+ * The link to the capture agent.
+ *
+ * Here rather than in the pipeline Worker because it is a named pipe, and
+ * neither a renderer nor a Web Worker can open one. That inverts the old
+ * constraint exactly: while the transport was a WebSocket the socket *had* to
+ * be in the renderer, because `is_origin_allowed` refused a connection with no
+ * `Origin` and only a renderer sends one.
+ */
+const agent = new AgentPipeLink();
 
 async function start(): Promise<void> {
   ipcMain.on(UNSAVED_CAPTURE_CHANNEL, (_event, hasFrames: unknown) => {
@@ -107,10 +118,20 @@ async function start(): Promise<void> {
     store.watch(event.sender);
     await store.connect(event.sender);
   });
+  ipcMain.handle(AGENT_PORT_REQUEST, (event) => {
+    agent.attach(event.sender);
+  });
   // The store seals whatever is open when it goes; killing it here rather than
   // leaving it to be orphaned is what keeps a clean quit from looking like a
   // crash to the next launch's recovery pass.
-  app.on('will-quit', () => store.stop());
+  app.on('will-quit', () => {
+    store.stop();
+    // The pipe holds a handle the agent counts as a live client, and a client
+    // going away is what stops a capture nobody is watching. Dropping it here
+    // rather than leaving it to process teardown is what makes a clean quit
+    // stop the sniffer promptly instead of on the agent's own timeout.
+    agent.detach();
+  });
   registerAppProtocol();
   hardenSession(session.defaultSession);
   Menu.setApplicationMenu(buildMenu({ packaged: app.isPackaged }));
