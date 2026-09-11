@@ -136,6 +136,10 @@ console.log('\n--- what a source that has to fetch looks like ---\n');
         : { state: 'loading', ordinal: index };
     },
     request(from, to) { asked.push([from, to]); },
+    indexOfId(id) {
+      for (const [index, packet] of held) if (packet.id === id) return index;
+      return -1;
+    },
   };
 
   check('the three states come back distinguishable',
@@ -150,6 +154,33 @@ console.log('\n--- what a source that has to fetch looks like ---\n');
 
   source.request(2, 5);
   check('the source is told what is about to be asked for', asked, [[2, 5]]);
+
+  // The keyboard's question. A frame it cannot place is -1, which the caller
+  // treats the same way it treats nothing selected - it must never be a guess.
+  check('a frame it holds is placed', [source.indexOfId(1), source.indexOfId(4)], [0, 3]);
+  check('a frame it cannot place is -1, not the nearest row',
+    [source.indexOfId(999), source.indexOfId(2)], [-1, -1]);
+}
+
+console.log('\n--- placing a frame, which is what the keyboard moves from ---\n');
+
+{
+  const packets = [frame(10), frame(11), frame(14), frame(15)];
+  const source = arrayRowSource(packets);
+  check('a frame is placed by id, not by subtracting the first one',
+    [source.indexOfId(10), source.indexOfId(14), source.indexOfId(15)], [0, 2, 3]);
+  // The trap: ids have holes, so `id - firstId` answers 2 for id 12 - which is
+  // frame 14's row, and the selection would step onto a frame nobody asked for.
+  check('an id in a hole is -1 rather than its neighbour',
+    [source.indexOfId(12), source.indexOfId(13)], [-1, -1]);
+  check('an id outside the array is -1 at both ends',
+    [source.indexOfId(9), source.indexOfId(16)], [-1, -1]);
+
+  // A sorted view is not in id order, so the answer is a position in THIS
+  // array and never an arithmetic on the id.
+  const descending = arrayRowSource([...packets].reverse());
+  check('a reordered source places by position in itself',
+    [descending.indexOfId(15), descending.indexOfId(10)], [0, 3]);
 }
 
 console.log(failures === 0

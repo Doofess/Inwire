@@ -73,6 +73,21 @@ export interface RowSource {
    * that holds everything ignores it.
    */
   request(from: number, to: number): void;
+  /**
+   * Which row a frame is at, or -1.
+   *
+   * The keyboard needs it: "move down one" is a row away from the selected
+   * frame, and the selected frame is an id. On the source rather than as a
+   * free function because only the source can answer it cheaply - an array
+   * scans itself, and a capture answers from the window's offset without
+   * touching the millions of rows below it.
+   *
+   * -1 for a frame the source cannot place, which is not the same as one it
+   * does not have: a frame on disk that no cached chunk covers is real and
+   * unlocatable, and the caller treats it the same way it treats nothing
+   * selected.
+   */
+  indexOfId(id: number): number;
 }
 
 /** The one row every out-of-range read gets. Shared, so it is not allocated. */
@@ -95,6 +110,10 @@ export function arrayRowSource(packets: readonly Packet[]): RowSource {
       return packet === undefined ? OUT_OF_RANGE : { state: 'ready', packet };
     },
     request(): void { /* it is all here */ },
+    // A scan, which is what the list did before the seam existed and costs the
+    // same. Not a binary search on id: this array may be sorted by any column,
+    // or filtered, so its ids are not necessarily ascending.
+    indexOfId(id: number): number { return packets.findIndex((p) => p.id === id); },
   };
 }
 

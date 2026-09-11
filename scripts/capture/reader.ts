@@ -223,6 +223,60 @@ console.log('\n--- the rows a restore reads ---\n');
   check('...and so is a negative one', reader.readRows(-1).length, 0);
 }
 
+console.log('\n--- positions, which is what the list scrolls ---\n');
+
+{
+  const { writer, reader } = store();
+  const total = CHUNK_FRAMES * 2 + 300;
+  const packets: Packet[] = [];
+  // Every third id burned, as a frame that failed to dissect does. A position
+  // is dense where an id is not, and the two must never be confused.
+  for (let i = 1; i <= total; i++) packets.push(frame(i * 3, 90));
+  writer.append(packets);
+  writer.finish();
+
+  check('the first frame is at position zero', reader.ordinalOf(3), 0);
+  check('...and positions are dense where ids are not',
+    [reader.ordinalOf(6), reader.ordinalOf(30), reader.ordinalOf(total * 3)],
+    [1, 9, total - 1]);
+  check('a position is found across a chunk boundary',
+    [reader.ordinalOf(CHUNK_FRAMES * 3), reader.ordinalOf((CHUNK_FRAMES + 1) * 3)],
+    [CHUNK_FRAMES - 1, CHUNK_FRAMES]);
+  // The trap: 4 is not a frame. Answering with frame 3's or frame 6's position
+  // would put the list's whole row space off by one for the rest of the
+  // capture.
+  check('an id that is not a frame is -1, never its neighbour position',
+    [reader.ordinalOf(4), reader.ordinalOf(5)], [-1, -1]);
+  check('an id outside the capture is -1 at both ends',
+    [reader.ordinalOf(1), reader.ordinalOf(total * 3 + 3)], [-1, -1]);
+
+  const blocks = reader.readRowsAt(0, 10);
+  check('a range answers with whole chunks, not the range',
+    [blocks.length, blocks[0].firstOrdinal, blocks[0].packets.length],
+    [1, 0, CHUNK_FRAMES]);
+  check('...and the rows in it are the capture in order',
+    [blocks[0].packets[0].id, blocks[0].packets[9].id], [3, 30]);
+
+  const across = reader.readRowsAt(CHUNK_FRAMES - 2, CHUNK_FRAMES + 2);
+  check('a range straddling a boundary answers with both chunks',
+    across.map((b) => [b.firstOrdinal, b.packets.length]),
+    [[0, CHUNK_FRAMES], [CHUNK_FRAMES, CHUNK_FRAMES]]);
+
+  const tail = reader.readRowsAt(CHUNK_FRAMES * 2, total);
+  check('the short last chunk comes back at its own length',
+    [tail.length, tail[0].firstOrdinal, tail[0].packets.length],
+    [1, CHUNK_FRAMES * 2, 300]);
+
+  check('a range past the end answers with nothing rather than the last chunk',
+    reader.readRowsAt(total + 10, total + 50).length, 0);
+  check('an inverted range answers with nothing', reader.readRowsAt(50, 10).length, 0);
+
+  // The bound that stops a caller with a bad range decoding the whole capture
+  // into one structured clone.
+  check('a request spanning the capture stops at MAX_ROW_CHUNKS',
+    reader.readRowsAt(0, total).length, 3);
+}
+
 console.log('\n--- what a torn tail does ---\n');
 
 {

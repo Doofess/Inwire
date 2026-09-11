@@ -35,6 +35,7 @@ import { Capabilities, Packet } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
 import { pipeline } from "./services/pipelineClient";
 import { usePacketDetail } from "./lib/usePacketDetail";
+import { bytesAreRecoverable } from './services/packetBytes';
 import { flowAnnotations } from './services/flowAnnotations';
 import { NO_HOST, type HostIdentity } from './services/direction';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
@@ -1379,10 +1380,24 @@ export default function App() {
   // and ids only ever leave from the head, so "still present" is an id-range
   // check; with a filter the selection is almost always near the tail, so the
   // scan runs from the end and usually stops within a few steps.
+  //
+  // **Leaving the RAM window is no longer leaving the list.** With no filter
+  // the list addresses the whole capture, so a frame below the window is a row
+  // the reader can scroll to, click, and read the bytes of - and this effect
+  // used to drag the selection back to the newest frame the moment they did.
+  // The id range is still the right test for a frame the CAPTURE no longer
+  // holds; what changed is that the window's range is not the capture's.
   useEffect(() => {
     if (!selectedPacket) return;
     let visible: boolean;
     if (filteredPackets === packets) {
+      // Below the window, and readable from disk. `bytesAreRecoverable` is the
+      // capture store's own id range, which only grows - so this says "the
+      // capture still has this frame", where the test below says "memory does".
+      if (packets.length > 0 && selectedPacket.id < packets[0].id
+        && bytesAreRecoverable(selectedPacket.id)) {
+        return;
+      }
       // Both ends. The head test alone assumes ids only ever leave from the
       // front, which holds for live trimming and not for a buffer replaced
       // wholesale - an import, a restore - where a stale selection numbered
@@ -1942,6 +1957,12 @@ export default function App() {
                 resolveNames={nameResolution.network}
                 sourceProcess={sourceProcessFor}
                 packets={filteredPackets}
+                // Whether the list may address the whole capture. A display
+                // filter runs over the RAM window and only the window, so the
+                // rows below it are not this list's rows while one is applied.
+                // `filteredPackets === packets` is the same identity check the
+                // selection-visibility effect above uses.
+                unfiltered={filteredPackets === packets}
                 themeKey={resolvedTheme}
                 selectedPacket={selectedPacket}
                 onSelectPacket={(pkt) => {

@@ -271,6 +271,28 @@ async function handle(message: ToCapture): Promise<void> {
         return;
       }
 
+      case 'rowsAt': {
+        let blocks: { firstOrdinal: number; packets: Packet[] }[] = [];
+        try {
+          if (open !== null) blocks = open.reader.readRowsAt(message.from, message.to);
+        } catch (error) {
+          fail(error instanceof Error ? error.message : String(error), false);
+        }
+        post({ type: 'blocks', requestId: message.requestId, blocks });
+        return;
+      }
+
+      case 'locate': {
+        let ordinal = -1;
+        try {
+          if (open !== null) ordinal = open.reader.ordinalOf(message.id);
+        } catch (error) {
+          fail(error instanceof Error ? error.message : String(error), false);
+        }
+        post({ type: 'located', requestId: message.requestId, ordinal });
+        return;
+      }
+
       case 'prune': {
         const root = await navigator.storage.getDirectory();
         const inwire = await root.getDirectoryHandle(ROOT_DIRECTORY, { create: true });

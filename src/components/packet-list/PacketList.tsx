@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Packet } from '../../types/packet';
 import { virtualWindow } from '../../lib/virtualWindow';
 import { arrayRowSource, packetAt, rowSlice } from '../../lib/rowSource';
+import { useCaptureRows } from '../../lib/useCaptureRows';
 import {
   Direction, DirectionSignal, DIRECTION_GLYPH, DIRECTION_LABEL, SIGNAL_LABEL,
   directionOf, signalOf,
@@ -81,6 +82,16 @@ interface PacketListProps {
    */
   sourceProcess?: (packet: Packet) => string | null;
   packets: Packet[];
+  /**
+   * True when `packets` is the buffer itself rather than a filtered view.
+   *
+   * It decides whether the list may address the whole capture. A display
+   * filter runs over the window and only the window, so a source claiming the
+   * rows below it would put unfiltered frames in a filtered list - the same
+   * reason a quick-find search or a sort by any other column falls back to the
+   * window. Whole-capture filtering is its own mechanism.
+   */
+  unfiltered: boolean;
   selectedPacket: Packet | null;
   onSelectPacket: (packet: Packet) => void;
   /** Double-clicking a row opens the full-window view of that frame. */
@@ -238,6 +249,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   resolveNames = false,
   sourceProcess,
   packets,
+  unfiltered,
   selectedPacket,
   onSelectPacket,
   onInspectPacket,
@@ -611,13 +623,15 @@ export const PacketList: React.FC<PacketListProps> = ({
   // a slice computed past the end leaves the list blank with no error
   // anywhere, which is exactly what happened here (see that file's header).
   //
-  // The list renders from a `RowSource`, not from the array. Today that source
-  // is `arrayRowSource(sortedPackets)` and every row it hands back is `ready`,
-  // so nothing about this behaves differently - which is the point of landing
-  // the seam before anything reads from disk. What it makes possible is a
-  // source whose `count` is the whole capture rather than the RAM window,
-  // answering `loading` for a row it has to fetch.
-  const rowSource = React.useMemo(() => arrayRowSource(sortedPackets), [sortedPackets]);
+  // The list renders from a `RowSource`, and which one depends on whether it is
+  // showing the capture in order. Filtered, searched or sorted by any other
+  // column, it shows what is in memory and says so; otherwise it addresses the
+  // whole capture and reads the rows below the RAM window back from disk.
+  const capturedInOrder = unfiltered && activeSearch === ''
+    && (!effectiveSortField || (effectiveSortField === 'id' && sortOrder === 'asc'));
+  const captureRows = useCaptureRows(packets, capturedInOrder);
+  const windowSource = React.useMemo(() => arrayRowSource(sortedPackets), [sortedPackets]);
+  const rowSource = capturedInOrder ? captureRows.source : windowSource;
   const totalRows = rowSource.count;
   const { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight } =
     virtualWindow(totalRows, scrollTop, viewportHeight, rowHeight, OVERSCAN_ROWS);
@@ -732,21 +746,27 @@ export const PacketList: React.FC<PacketListProps> = ({
    * arrowing upwards fights the capture and loses.
    */
   const moveSelection = (delta: number | 'first' | 'last') => {
-    if (sortedPackets.length === 0) return;
-    const current = selectedPacket
-      ? sortedPackets.findIndex(p => p.id === selectedPacket.id)
-      : -1;
+    if (totalRows === 0) return;
+    // Found against the ROW SOURCE, not the array. With the capture addressed,
+    // row 0 is the oldest frame on disk and the array's index 0 is the oldest
+    // frame in memory - they are the same row only while the window is the
+    // whole capture, and using the array's index would step the selection to a
+    // row `below` positions away from the one the reader is looking at.
+    const current = selectedPacket ? rowSource.indexOfId(selectedPacket.id) : -1;
 
     let next: number;
     if (delta === 'first') next = 0;
-    else if (delta === 'last') next = sortedPackets.length - 1;
+    else if (delta === 'last') next = totalRows - 1;
     // With nothing selected, the first key press selects an end rather than
     // jumping into the middle: down starts at the top, up starts at the bottom.
-    else if (current === -1) next = delta > 0 ? 0 : sortedPackets.length - 1;
+    else if (current === -1) next = delta > 0 ? 0 : totalRows - 1;
     else next = current + delta;
 
-    next = Math.max(0, Math.min(sortedPackets.length - 1, next));
-    const target = sortedPackets[next];
+    next = Math.max(0, Math.min(totalRows - 1, next));
+    const target = packetAt(rowSource, next);
+    // A row still coming off disk cannot be selected: there is no packet to
+    // hand the detail pane. The row is requested by the render that follows,
+    // so pressing the key again a moment later works.
     if (!target) return;
 
     // Jumping to the end means "show me the newest", so following resumes.
@@ -755,7 +775,7 @@ export const PacketList: React.FC<PacketListProps> = ({
     // want the tail, in which case moving the selection is not a request to
     // stop following.
     if (followRef.current === 'reading') {
-      shouldAutoScrollRef.current = next === sortedPackets.length - 1;
+      shouldAutoScrollRef.current = next === totalRows - 1;
     }
     // Left disarmed deliberately: the scroll assignment below is ours, not the
     // user's, and handleScroll must not reinterpret it as a gesture.
@@ -899,6 +919,25 @@ export const PacketList: React.FC<PacketListProps> = ({
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden select-none relative">
+      {/* Rows the capture holds and this list cannot reach.
+
+          Outside the scroll container on purpose: it describes the container
+          rather than sitting in it, and a notice occupying a row would put the
+          virtualiser'"'"'s `index * rowHeight` arithmetic off by one row for the
+          whole capture.
+
+          Only ever shown past ~1.5 million rows, which is where Chrome'"'"'s
+          33.5-million-pixel element cap stops a spacer being tall enough to
+          address the rest. The frames are stored, exportable and readable -
+          they are unreachable by SCROLLING, and saying so is the difference
+          between a known limit and a list that quietly stops. */}
+      {captureRows.unaddressable > 0 && (
+        <div className="px-3 py-1 text-[11px] font-mono text-amber-600 dark:text-amber-400 border-b border-border/60">
+          Showing the newest {totalRows.toLocaleString()} frames.{" "}
+          {captureRows.unaddressable.toLocaleString()} earlier frames are stored and
+          exportable, but past what this list can scroll to.
+        </div>
+      )}
       {/* Table Container + Minimap */}
       <div className="flex-1 flex overflow-hidden min-h-0">
       <div
@@ -1131,7 +1170,7 @@ export const PacketList: React.FC<PacketListProps> = ({
 
           {/* Table Body */}
           <tbody className={density.body}>
-            {sortedPackets.length === 0 ? (
+            {totalRows === 0 ? (
               <tr>
                 <td colSpan={visibleColumnCount} className="text-center py-16 text-muted-foreground">
                   <div className="flex flex-col items-center justify-center gap-1">
@@ -1404,6 +1443,7 @@ export const PacketList: React.FC<PacketListProps> = ({
       {showMinimap && (
       <PacketListMinimap
         packets={sortedPackets}
+        leadingRows={capturedInOrder ? captureRows.below : 0}
         selectedPacket={selectedPacket}
         colorEngine={colorEngine}
         packetTheme={packetTheme}
