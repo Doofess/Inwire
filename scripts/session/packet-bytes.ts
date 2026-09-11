@@ -5,20 +5,19 @@
  *
  * A million-frame buffer cannot hold every frame's bytes (0013), and it does not
  * have to: they are already on disk, keyed by frame id. What makes dropping them
- * safe is knowing exactly which frames the store can still supply - because
- * `toStoredFrame` writes a byte-less packet as a `fallback` block, so a frame
- * whose bytes were dropped one moment too early loses them from both places at
- * once and there is no way back.
+ * safe is knowing exactly which frames the store can still supply - a frame
+ * whose bytes were dropped one moment too early has them nowhere.
  *
- * `ledgerRange` is that rule. The write ledger holds one entry per frame the
- * store has confirmed written, oldest first; the buffer's trimming and the
- * storage budget both slice from its front. So the ledger is the answer to "what
- * could be read back", and these tests hold its ends to that.
- *
- * There is no IndexedDB in Node and no fake in this repo, so the IO itself is
- * kept small enough to read; what is tested here is the decision.
+ * `CaptureIndex.idRange` is that rule, and it replaced `sessionStore`'s write
+ * ledger. The two answer the same question with the same shape and the same
+ * null-when-empty, which is why `packetBytes.ts` did not change - but they
+ * answer it differently in one way that matters: the ledger's front was sliced
+ * by a 512 MB budget that **evicted**, so its first id rose faster than the RAM
+ * window's and pinned bytes in memory between the two. A capture index only
+ * grows, so the cases below are the ends of a capture rather than the ends of
+ * whatever a budget left.
  */
-import { ledgerRange } from '../../src/services/sessionStore';
+import { CaptureIndex, type ChunkRecord } from '../../src/services/capture/captureIndex';
 import { evictOldBytes, hasBytes, NO_BYTES, packetsBytes } from '../../src/services/packetBytes';
 import type { Packet } from '../../src/types/packet';
 
@@ -34,28 +33,47 @@ function check(name: string, actual: unknown, expected: unknown) {
 }
 function checkTrue(name: string, condition: boolean) { check(name, condition, true); }
 
-const entry = (id: number) => ({ id, bytes: 100 });
+/** One sealed chunk, described the way the index holds it. */
+function chunk(firstId: number, lastId: number, ordinal = 0): ChunkRecord {
+  return {
+    firstId, lastId, frameCount: lastId - firstId + 1, firstOrdinal: ordinal,
+    pfxOffset: 0, pfxLength: 0, sumOffset: 0, sumLength: 0,
+    bytOffset: 0, bytLength: 0, firstTsUs: 0,
+  };
+}
+const range = (...records: ChunkRecord[]) => new CaptureIndex(records).idRange();
 function pkt(id: number, bytes: Uint8Array): Packet {
   return { id, rawBytes: bytes, info: '', layers: [], fields: {} } as unknown as Packet;
 }
 
 // --- What the store can still supply ------------------------------------------
 {
-  check('an empty ledger can supply nothing', ledgerRange([]), null);
-  check('one frame is a range of one', ledgerRange([entry(7)]), { first: 7, last: 7 });
+  check('a capture with no sealed chunk can supply nothing', range(), null);
+  check('one frame is a range of one', range(chunk(7, 7)), { first: 7, last: 7 });
   check('the ends are the ends',
-    ledgerRange([entry(5), entry(6), entry(7), entry(8)]), { first: 5, last: 8 });
+    range(chunk(5, 8), chunk(9, 12, 4)), { first: 5, last: 12 });
 
-  // The front is sliced by the buffer's own trimming and by the storage budget,
-  // so the first id is not 1 and is not a count - it is whatever survived.
-  check('a ledger trimmed from the front starts where it starts',
-    ledgerRange([entry(40_001), entry(40_002)]), { first: 40_001, last: 40_002 });
+  // A capture that resumed after a restore does not start at 1: the frames
+  // before it are in an earlier capture directory, and this one begins where
+  // the numbering had got to.
+  check('a capture that resumed numbering starts where it starts',
+    range(chunk(40_001, 44_096)), { first: 40_001, last: 44_096 });
 
-  // Holes are allowed: a frame that failed to dissect burns an id, so the
-  // ledger skips. The range is still the ends, and a caller asking for a
-  // missing id inside it simply gets nothing back.
-  check('a ledger with holes still reports its ends',
-    ledgerRange([entry(1), entry(2), entry(4), entry(9)]), { first: 1, last: 9 });
+  // Holes are allowed: a frame that failed to dissect burns an id, so the ids
+  // skip. The range is still the ends, and a caller asking for a missing id
+  // inside it simply gets nothing back.
+  check('holes inside and between chunks do not move the ends',
+    range(chunk(1, 2), chunk(4, 9, 2)), { first: 1, last: 9 });
+
+  // The property the ledger did NOT have, and the reason for the change: an
+  // index is append-only, so the floor never rises and a frame that was ever
+  // readable stays readable for the life of the capture.
+  const index = new CaptureIndex([chunk(1, 4096)]);
+  const before = index.idRange();
+  index.append(chunk(4097, 8192, 4096));
+  check('appending a chunk never moves the first id',
+    [before?.first, index.idRange()?.first], [1, 1]);
+  check('...and extends the last', index.idRange()?.last, 8192);
 }
 
 // --- The seam is synchronous while packets still carry their bytes ------------
@@ -85,9 +103,9 @@ function pkt(id: number, bytes: Uint8Array): Packet {
 // --- Eviction: the destructive half -------------------------------------------
 //
 // The rules that keep this from losing a capture. A frame whose bytes are
-// dropped while the store cannot supply them again has lost them outright:
-// `toStoredFrame` writes a byte-less packet as a `fallback` block, so there is
-// no second chance.
+// dropped while the store cannot supply them again has lost them outright -
+// there is no second copy anywhere - so the range is a precondition and not a
+// hint.
 {
   const buffer = Array.from({ length: 10 }, (_, i) => pkt(i + 1, new Uint8Array([i + 1])));
   const all = { first: 1, last: 10 };

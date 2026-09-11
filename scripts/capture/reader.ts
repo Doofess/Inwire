@@ -188,6 +188,41 @@ console.log('\n--- across chunk boundaries, which is where the offsets are ---\n
   checkTrue('...byte for byte', exact);
 }
 
+console.log('\n--- the rows a restore reads ---\n');
+
+{
+  const { writer, reader } = store();
+  const packets: Packet[] = [];
+  for (let i = 1; i <= CHUNK_FRAMES + 500; i++) {
+    packets.push(frame(i, 80, { info: `line ${i}`, protocol: i % 2 === 0 ? 'UDP' : 'TCP' }));
+  }
+  writer.append(packets);
+  writer.finish();
+
+  const first = reader.readRows(0);
+  const second = reader.readRows(1);
+  check('a chunk comes back whole', [first.length, second.length], [CHUNK_FRAMES, 500]);
+  check('...in order, with the ids it was written with',
+    [first[0].id, first[CHUNK_FRAMES - 1].id, second[0].id, second[499].id],
+    [1, CHUNK_FRAMES, CHUNK_FRAMES + 1, CHUNK_FRAMES + 500]);
+  check('...carrying the row the reader saw, not a re-dissection',
+    [first[0].info, second[499].info],
+    ['line 1', `line ${CHUNK_FRAMES + 500}`]);
+  check('...and the prefix block\'s half of it', [first[0].tsUs, first[0].length],
+    [packets[0].tsUs, 80]);
+
+  // No bytes: a restored frame is inside the stored range, so `packetBytes()`
+  // fetches them when something actually wants them. Sending them with every
+  // row would put the whole capture's payload through a structured clone to
+  // fill a buffer that drops it again on the first flush.
+  check('a row carries no bytes', first[0].rawBytes.length, 0);
+  check('...but the same frame\'s bytes are still readable',
+    reader.readBytes([1]).get(1)?.length, 80);
+
+  check('a chunk past the end is empty rather than an error', reader.readRows(2).length, 0);
+  check('...and so is a negative one', reader.readRows(-1).length, 0);
+}
+
 console.log('\n--- what a torn tail does ---\n');
 
 {
@@ -209,6 +244,16 @@ console.log('\n--- what a torn tail does ---\n');
   // Both at once is the case that matters: a Follow Stream spanning the tear.
   check('...and asking for both answers with the one that survived',
     [...reread.readBytes([1, CHUNK_FRAMES * 2]).keys()], [1]);
+
+  // Rows are separate files from bytes, so a byte file cut short costs no rows
+  // at all. That is the point of the split: scrolling wants summaries and
+  // export wants bytes, and neither drags the other.
+  check('a truncated byte file costs no rows', reread.readRows(1).length, CHUNK_FRAMES);
+  f.sum.truncate(f.sum.size() - 10);
+  check('...while a truncated summary costs that chunk\'s rows and no others',
+    [new CaptureReader(f, writer.index, inflate).readRows(1).length,
+      new CaptureReader(f, writer.index, inflate).readRows(0).length],
+    [0, CHUNK_FRAMES]);
   void reader;
 }
 

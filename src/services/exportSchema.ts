@@ -1,5 +1,5 @@
 import { Packet, ProtocolType, PacketStatus } from '../types/packet';
-import type { StoredFrame } from './sessionStore';
+import type { StoredFrame } from './sessionRestore';
 import { expertItemsFor } from './expertInfo';
 
 /**

@@ -118,8 +118,15 @@ export function adoptAccounting(
 }
 
 export interface CommitEffects {
-  /** The stored session mirrors the live buffer, including its forgetting. */
-  trimFramesBelow(id: number): void;
+  /**
+   * The frame ids whose bytes can be read back, or null.
+   *
+   * There is no counterpart that tells the store the buffer forgot something.
+   * There used to be - the stored session mirrored the live buffer, trimming
+   * as it trimmed - and the capture store deliberately does not: a frame
+   * leaving the RAM window is not a frame leaving the capture, which is the
+   * whole point of putting the capture on disk.
+   */
   storedIdRange(): { first: number; last: number } | null;
   /** The new running total of frames the buffer has pushed out. */
   reportDropped(total: number): void;
@@ -194,7 +201,6 @@ export function commitBatch(
       accounting.residentBytes -= plan.freedBytes;
     }
     next = trimmed;
-    effects.trimFramesBelow(next[0].id);
   }
 
   // Idempotent, so running it twice does the work once, and it changes no

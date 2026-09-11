@@ -78,18 +78,16 @@ function frame(bytes = 1400): Packet {
 function recorder() {
   const persisted: number[][] = [];
   const absorbed: number[][] = [];
-  const trimmedBelow: number[] = [];
   const droppedReports: number[] = [];
   let autoPauses = 0;
   return {
-    persisted, absorbed, trimmedBelow, droppedReports,
+    persisted, absorbed, droppedReports,
     get autoPauses() { return autoPauses; },
     prepare: {
       persist: (f: readonly Packet[]) => persisted.push(f.map((p) => p.id)),
       absorb: (f: readonly Packet[]) => absorbed.push(f.map((p) => p.id)),
     },
     commit: {
-      trimFramesBelow: (id: number) => trimmedBelow.push(id),
       storedIdRange: () => null,
       reportDropped: (total: number) => droppedReports.push(total),
       autoPause: () => { autoPauses++; },
@@ -176,8 +174,13 @@ function flush(
   // The byte-accounting bug: the running total must not have drifted.
   check('...resident bytes still match the frames actually held',
     accounting.residentBytes, recomputeBytes(packets));
-  check('...and the store was told to forget as often as the buffer did',
-    rec.trimmedBelow.length > 0, true);
+  // What used to be here: "the store was told to forget as often as the buffer
+  // did". It is not told any more and must not be - the capture store is
+  // append-only, and a frame leaving the RAM window is not a frame leaving the
+  // capture. The check that replaced it is that trimming reports a drop and
+  // touches nothing else.
+  check('...and trimming is the only thing the buffer told anyone about',
+    rec.droppedReports.length > 0, true);
 }
 
 // --- 4. one invocation and two must agree ------------------------------------

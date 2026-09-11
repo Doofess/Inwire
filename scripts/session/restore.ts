@@ -1,14 +1,23 @@
 /**
- * Assertion tests for rebuilding a session from stored frames.
+ * Assertion tests for rebuilding Packets from frames reduced to bytes.
  *
  *   npx tsx scripts/session/restore.ts
  *
- * The contract is that a restored packet is indistinguishable from the one
+ * The contract is that a rebuilt packet is indistinguishable from the one
  * originally captured. So the central check here decodes the same frames twice
- * - once as "live capture", once as "restored from disk" - and diffs the
- * results field by field. Anything the round trip loses shows up there.
+ * - once as "live capture", once as "rebuilt from a stored frame" - and diffs
+ * the results field by field. Anything the round trip loses shows up there.
  *
- * The rest cover what a naive restore gets wrong: packet numbers restarting at
+ * **This is the tabular importer's path now, not the session restore's.** A
+ * session comes back through the capture store, which writes the row itself
+ * and never re-dissects - `scripts/capture/chunk-codec.ts` holds that round
+ * trip to exact equality on every frame of both fixtures, and it has to,
+ * because a frame's row is a function of the frames before it and re-dissecting
+ * one from the middle of a capture can produce a *different* Info line. What
+ * remains here is the path a spreadsheet row takes, where there is no stored
+ * row to read and the bytes are all there is.
+ *
+ * The rest cover what a naive rebuild gets wrong: packet numbers restarting at
  * 1, stateful trackers being fed out of order, metadata-only frames being
  * dropped, and ICMP reply pairings that point at a packet in an earlier chunk.
  */
@@ -18,8 +27,9 @@ import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
 import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
 import { PacketGenerator } from '../../src/services/packetGenerator';
-import { toStoredFrame, type StoredFrame } from '../../src/services/sessionStore';
-import { applyIcmpReplies, buildFallbackPacket, restoreBatch } from '../../src/services/sessionRestore';
+import {
+  applyIcmpReplies, buildFallbackPacket, restoreBatch, type StoredFrame,
+} from '../../src/services/sessionRestore';
 import { Direction, directionOf, type HostIdentity } from '../../src/services/direction';
 import { fieldValue } from '../../src/services/dissect/fieldAccess';
 import { expertItemsFor } from '../../src/services/expertInfo';
@@ -34,6 +44,43 @@ function check(name: string, actual: unknown, expected: unknown) {
     console.log(`        expected ${JSON.stringify(expected)}`);
     console.log(`        actual   ${JSON.stringify(actual)}`);
   }
+}
+
+/**
+ * A live Packet reduced to the bytes worth keeping.
+ *
+ * This lived in `sessionStore` while a session was stored frame by frame. It is
+ * here now because this script is its only caller: the tabular importer builds
+ * `StoredFrame`s from spreadsheet columns rather than from Packets, so nothing
+ * in the app reduces one any more. Keeping it as an exported function with no
+ * production caller would be worse than keeping it as the fixture builder it
+ * actually is.
+ */
+function toStoredFrame(packet: Packet): StoredFrame {
+  const frame: StoredFrame = {
+    id: packet.id,
+    timestamp: packet.tsUs / 1000,
+    tsUs: packet.tsUs,
+    relativeTime: packet.relativeTime,
+    timeDelta: packet.timeDelta,
+    length: packet.length,
+    interfaceName: packet.interfaceName,
+  };
+  if (packet.rawBytes && packet.rawBytes.length > 0) {
+    frame.raw = new Uint8Array(packet.rawBytes);
+  } else {
+    frame.fallback = {
+      source: packet.source,
+      destination: packet.destination,
+      sourcePort: packet.sourcePort,
+      destPort: packet.destPort,
+      protocol: packet.protocol,
+      protocolLabel: packet.protocolLabel,
+      info: packet.info,
+      status: packet.status,
+    };
+  }
+  return frame;
 }
 
 const freshTrackers = () => ({

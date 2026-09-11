@@ -4,8 +4,6 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { DnsTracker } from './services/dnsTracker';
-import { L3Tracker } from './services/l3Tracker';
 import { AnimatePresence } from "motion/react";
 import { useTheme } from "next-themes";
 import { useMediaQuery } from "./lib/useMediaQuery";
@@ -37,7 +35,6 @@ import { Capabilities, Packet } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
 import { pipeline } from "./services/pipelineClient";
 import { usePacketDetail } from "./lib/usePacketDetail";
-import { applyInfoPatchesInPlace } from './services/pcapParser';
 import { flowAnnotations } from './services/flowAnnotations';
 import { NO_HOST, type HostIdentity } from './services/direction';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
@@ -56,19 +53,12 @@ import {
 } from './services/linkContext';
 import { processForPacket, sendingProcessName, writeProcessFields } from './services/dissect/processFields';
 import { fieldValue } from './services/dissect/fieldAccess';
-import { TcpStreamTracker } from "./services/tcpStreamTracker";
-import { IcmpEchoTracker } from "./services/icmpEchoTracker";
-import { QuicFlowTracker } from "./services/quicFlowTracker";
 import { filterIncrementally, type FilterCache } from "./services/incrementalFilter";
 import {
   clearSession,
-  countFrames,
   loadSessionMeta,
-  pendingWriteBacklog,
-  readFrames,
   saveSessionMeta,
 } from "./services/sessionStore";
-import { applyIcmpRepliesInPlace, restoreBatch } from "./services/sessionRestore";
 import {
   answerLivenessPings,
   prepareStoredSession,
@@ -124,7 +114,7 @@ import {
   TbAlertTriangle,
 } from "react-icons/tb";
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
-import { estimateSummaryBytes, planBufferTrim } from './services/bufferBudget';
+import { estimateSummaryBytes } from './services/bufferBudget';
 import { captureStore, newCaptureId } from './services/capture/captureClient';
 import { freshCaptureStorageState, type CaptureStorageState } from './services/capture/captureProtocol';
 
@@ -149,16 +139,11 @@ const SOCKET_RETRO_WINDOW_US = 3_000_000;
 // caches take an O(buffer) fallback each time it moves.
 
 
-/**
- * How many stored frames are decoded per chunk when restoring a session.
- *
- * Dissection is the expensive half of a restore - 115us per packet measured -
- * so a full 50,000-packet buffer is about 5.8 seconds of work. Doing it in
- * chunks that each take roughly 30ms, yielding to the browser between them,
- * is what turns that into a list filling in front of the user rather than a
- * locked-up tab.
- */
-const RESTORE_CHUNK_SIZE = 250;
+// A restore used to need a chunk size, four stateful trackers and a
+// re-dissection of every stored frame - 115us each, 5.8 seconds for a full
+// buffer - because the disk held bytes and nothing else. It reads the rows the
+// capture store wrote instead, so the chunk it yields between is the format's
+// own 4,096-frame chunk and the trackers are gone from this file entirely.
 
 
 /**
@@ -427,27 +412,14 @@ export default function App() {
   /** What the capture itself revealed, derived in the Worker and only read here. */
   const [networkFacts, setNetworkFacts] = useState<NetworkFacts>(() => emptyNetworkFacts());
 
-
-
-
   /**
-   * How much of this capture is on disk.
+   * How much of this capture is on disk, from the capture store itself.
    *
-   * Shown because the stored capture now outlives the app
+   * Shown because the stored capture outlives the app
    * (docs/decisions/0012-stored-captures-persist.md): bytes that persist
    * unasked and unseen would be the wrong trade, so the size is on screen
-   * beside the one button that removes them.
-   */
-  const [storage, setStorage] = useState({
-    storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0,
-  });
-
-  /**
-   * What the capture store has written, for Driver Info.
-   *
-   * Kept apart from `storage` above, which describes the IndexedDB session:
-   * the two run side by side while the new path is a shadow, and merging them
-   * would make it impossible to see that one of them is working.
+   * beside the one button that removes them. There used to be a second figure
+   * beside it for the IndexedDB session; there is no second copy any more.
    */
   const [captureStorage, setCaptureStorage] = useState<CaptureStorageState>(freshCaptureStorageState);
   /** The capture directory this Start->Stop cycle is writing into. */
@@ -687,24 +659,6 @@ export default function App() {
     };
   }, []);
 
-  // The stored size, sampled rather than pushed: the store writes in batches
-  // off the critical path, and a number that updates twice a second is as
-  // current as anyone reading it needs.
-  useEffect(() => {
-    const tick = () => {
-      const { storedBytes, storageBudgetBytes, evictedForBudget } = pendingWriteBacklog();
-      setStorage((prev) =>
-        prev.storedBytes === storedBytes
-          && prev.storageBudgetBytes === storageBudgetBytes
-          && prev.evictedForBudget === evictedForBudget
-          ? prev
-          : { storedBytes, storageBudgetBytes, evictedForBudget });
-    };
-    tick();
-    const timer = window.setInterval(tick, 2000);
-    return () => window.clearInterval(timer);
-  }, []);
-
 
   /**
    * Stored frames live exactly as long as the app is open.
@@ -855,34 +809,26 @@ export default function App() {
       await prepareStoredSession();
 
       const meta = await loadSessionMeta();
-      const total = await countFrames();
 
-      if (total > 0) {
-        setRestoreProgress({ done: 0, total });
-        // Built here, not at component scope, so they are collected when this
-        // restore finishes. Held as `useMemo(..., [])` they lived for the tab's
-        // lifetime and kept the restored capture's entire TCP/QUIC/DNS/L3 state
-        // for ever - tens of megabytes on a busy session - and survived Clear,
-        // which only resets the Worker's set. Nothing else reads them: a live
-        // frame is dissected in the Worker, which keeps its own.
-        const trackers = {
-          tcpTracker: new TcpStreamTracker(),
-          icmpTracker: new IcmpEchoTracker(),
-          quicTracker: new QuicFlowTracker(),
-          dnsTracker: new DnsTracker(),
-          l3Tracker: new L3Tracker(),
-        };
-        // Rebuilt from the session's own interface table, so restored frames
-        // name the adapter they were captured on rather than reporting
-        // themselves as an imported capture.
-        const interfaceIdByLabel = new Map(
-          (meta?.interfaces ?? []).map((iface) => [iface.label, iface.name]),
-        );
-        // Whose machine this was, read back rather than re-inferred. It has to
-        // be in hand BEFORE the first frame is dissected - see
-        // `SessionMeta.host` - which is why it is not left to `deriveForBuffer`
-        // below like everything else about direction. A session written before
-        // this was saved has none, and restores the way it always did.
+      // The session's frames are in the capture directory the metadata names,
+      // and only that one. Pairing this metadata with a different capture's
+      // frames would shift every timestamp in the list, because the
+      // relative-time origin and the adapter table both belong to the run that
+      // wrote them.
+      const stored = meta?.captureId ? await captureStore.reopen(meta.captureId) : null;
+      // Everything else on disk goes. That is not a new retention policy - it
+      // is the one this build already had, moved to the new backend: Start
+      // wiped the previous capture from IndexedDB, so exactly one capture has
+      // ever survived a restart. The capture library is what raises that to
+      // three with a prompt, and it belongs in its own step rather than
+      // arriving as a side effect of moving the frames.
+      captureStore.prune(stored === null ? [] : [stored.captureId]);
+      captureIdRef.current = stored?.captureId ?? null;
+
+      if (stored !== null && stored.frameCount > 0) {
+        // Whose machine this was, read back rather than re-inferred. A session
+        // written before this was saved has none, and restores the way it
+        // always did.
         const storedHost: HostIdentity | undefined = meta?.host && {
           macs: new Set(meta.host.macs),
           addresses: new Set(meta.host.addresses),
@@ -897,79 +843,80 @@ export default function App() {
           // will contradict the row that opened it.
           pipeline.setHost(storedHost);
         }
+
+        // --- what to bring back ---------------------------------------------
+        //
+        // The newest chunks that fit the budget, read from the END backwards.
+        // The old restore read the whole store forwards and trimmed the front
+        // as it went, which on a capture larger than the buffer meant decoding
+        // every frame in order to throw most of them away. A chunk is
+        // self-contained, so the tail can be read first - and the tail is what
+        // the reader was looking at.
+        //
+        // The rest of the capture is not lost. It is on disk and inside the
+        // stored id range; what it is not yet is *reachable*, which is what
+        // the row source in a later step is for.
+        const chunks: Packet[][] = [];
+        let restoring = 0;
+        let bytes = 0;
+        for (let c = stored.chunkCount - 1; c >= 0; c--) {
+          const rows = await captureStore.readRows(c);
+          if (rows.length === 0) continue;      // a torn tail; the rest still reads
+          let chunkBytes = 0;
+          for (const packet of rows) chunkBytes += estimateSummaryBytes(packet);
+          // Always at least one chunk, whatever the budget says: a buffer that
+          // restored nothing because the first chunk it looked at was large
+          // would be worse than one slightly over.
+          if (chunks.length > 0 && bytes + chunkBytes > budgetBytes()) break;
+          chunks.unshift(rows);
+          bytes += chunkBytes;
+          restoring += rows.length;
+        }
+
+        setRestoreProgress({ done: 0, total: restoring });
         let done = 0;
-        let lastId = 0;
-
-        await readFrames(RESTORE_CHUNK_SIZE, async (frames) => {
-          // Same trackers across every chunk, in id order - see restoreBatch.
-          const { packets: batch, icmpReplies, infoPatches } = restoreBatch(frames, trackers, interfaceIdByLabel, undefined, false, storedHost);
+        for (const rows of chunks) {
           // A restored session fills the buffer as full as a live capture ever
-          // does - fuller, since it arrives all at once - so its frames get the
-          // same treatment. `restoreBatch` returns them undivided because the
-          // bag is the contract and it has no business knowing about blocks;
-          // the split belongs here, where the frames join the buffer.
-          fieldWriter.current.absorb(batch);
-          for (const packet of batch) accountingRef.current.residentBytes += estimateSummaryBytes(packet);
-          lastId = frames[frames.length - 1].id;
-          done += frames.length;
-
-          setPackets((prev) => {
-            // Concat first, then patch in place - the same order the live
-            // flush uses, and for the same reason. Applying the patches to
-            // `prev` before appending this chunk dropped every patch that
-            // targeted a frame *inside* the chunk, which is where a TLS record
-            // reassembled across a few hundred frames lands: a restored session
-            // was quietly missing "[TCP PDU reassembled in N]" annotations that
-            // the same capture showed on import. It is also two whole-buffer
-            // copies per 250-frame chunk cheaper.
-            const next = prev.concat(batch);
-            applyIcmpRepliesInPlace(next, icmpReplies);
-            applyInfoPatchesInPlace(next, infoPatches);
-            // A stored session can be larger than the budget - it was written
-            // under whatever budget was set then, and the storage budget is
-            // its own 512 MB - so a restore trims on the way in exactly as the
-            // live flush does. Without this the buffer would come back over
-            // budget and stay there until the next captured frame.
-            const plan = planBufferTrim(next, accountingRef.current.residentBytes, budgetBytes());
-            if (plan.dropCount === 0) return next;
-            accountingRef.current.residentBytes -= plan.freedBytes;
-            return next.slice(plan.dropCount);
-          });
-          setRestoreProgress({ done, total });
+          // does, so its frames get the same treatment. The chunk codec hands
+          // back the field bag, because the bag is the contract; the split into
+          // columns belongs here, where the frames join the buffer.
+          fieldWriter.current.absorb(rows);
+          for (const packet of rows) accountingRef.current.residentBytes += estimateSummaryBytes(packet);
+          done += rows.length;
+          // No ICMP or Info patches to apply: the writer held each row behind
+          // the patch horizon until no open reassembly could still reach it, so
+          // what comes back is the row the reader actually saw. That is the
+          // whole reason the summary is on disk - re-dissecting a frame from
+          // the middle of a capture can produce a DIFFERENT Info line, and the
+          // old restore did exactly that.
+          setPackets((prev) => prev.concat(rows));
+          setRestoreProgress({ done, total: restoring });
           // Yield so React can commit and the browser can paint this chunk.
           await new Promise((resolve) => setTimeout(resolve, 0));
-        });
+        }
 
-        // A restored session takes the same second pass an import does, and
-        // needs it for the same reason: `restoreBatch` runs on the main thread
-        // and never sees the Worker, so no frame in it was given a direction
-        // and nothing collected what the capture revealed. Without this a
-        // reloaded tab came back with a column of dots over frames whose host
-        // the agent had already named.
+        // The direction pass an import takes. A restored row carries the
+        // direction it was written with, but the host override, the resolved
+        // names and the network facts are all rebuilt from the buffer, and
+        // this is the pass that does it.
         //
-        // After the loop rather than per chunk: the host inference wants the
-        // whole capture, and re-running it 400 times would be 400 scoring
-        // passes to reach the same answer.
         // Read through the ref rather than from inside a state updater. An
         // updater must be pure - StrictMode double-invokes it - and this one
         // would have started the derive pass twice.
         deriveForBuffer(packetsRef.current);
 
-        // Numbering continues from the restored session rather than restarting
-        // at 1 and colliding with packets already in the list.
-        packetGenerator.resumeAfter(lastId);
-        accountingRef.current.persistedThroughId = lastId;
+        // Numbering continues from the stored capture rather than restarting
+        // at 1 and colliding with packets already in the list. `stored.lastId`
+        // is the whole capture's last id, not the window's - the frames below
+        // the window are still on disk and their ids are still taken.
+        packetGenerator.resumeAfter(stored.lastId);
+        accountingRef.current.persistedThroughId = stored.lastId;
         // The relative-time clock is restored too, so a resumed capture's
         // timestamps continue the original timeline instead of jumping to 0.
         // The clock refs are microseconds; the stored meta stays in
         // milliseconds so an older session file still reads.
         captureStartRef.current = meta?.captureStartMs != null ? meta.captureStartMs * 1000 : null;
         lastPacketTimeRef.current = meta?.lastPacketMs != null ? meta.lastPacketMs * 1000 : null;
-        // The Worker numbers live frames and keeps the relative-time clock, so
-        // a restored session has to tell it both: otherwise the first live
-        // frame after a restore is numbered 1, colliding with everything
-        // already in the list, and its Time column restarts at zero halfway
-        // down a capture.
         // A fresh column block, so live frames start one of their own rather
         // than extending the restored capture's - but NOT a fresh byte count.
         // The loop above added every restored frame to it, and those frames
@@ -978,7 +925,7 @@ export default function App() {
         // a restored session never trimmed until enough live frames had
         // arrived to rebuild a total from nothing.
         fieldWriter.current = new FieldBlockWriter();
-        pipeline.reset(Math.floor(lastId) + 1, captureStartRef.current, lastPacketTimeRef.current);
+        pipeline.reset(Math.floor(stored.lastId) + 1, captureStartRef.current, lastPacketTimeRef.current);
       }
 
       setRestoreProgress(null);
@@ -1009,6 +956,15 @@ export default function App() {
   const persistedPacketTick = useThrottledValue(packets.length, 2000);
 
   /**
+   * The capture directory the stored session belongs to.
+   *
+   * Read off the store's state rather than the ref, and pulled out on its own
+   * so the metadata write below re-runs when it changes without depending on
+   * the whole `captureStorage` object - which changes on every stats poll.
+   */
+  const storedCaptureId = captureStorage.captureId;
+
+  /**
    * Keeps the stored session's non-frame half current.
    *
    * The time refs are read at write time rather than being dependencies: they
@@ -1026,6 +982,12 @@ export default function App() {
       captureStartMs: captureStartRef.current === null ? null : captureStartRef.current / 1000,
       lastPacketMs: lastPacketTimeRef.current === null ? null : lastPacketTimeRef.current / 1000,
       updatedAt: Date.now(),
+      // Which capture directory these frames are in. Taken from the store's
+      // own state rather than the ref beside it, because the store is what
+      // knows the directory was actually opened - a captureId written here for
+      // a capture the store failed to open would send the next startup looking
+      // for frames that were never on disk.
+      captureId: storedCaptureId,
       // Written from the ref rather than the state beside it: the identity
       // settles when the adapter list arrives or a buffer is scored, neither
       // of which is in this effect's dependency list, and the throttled
@@ -1039,7 +1001,7 @@ export default function App() {
         ...(hostIdentityRef.current.basis ? { basis: hostIdentityRef.current.basis } : {}),
       },
     });
-  }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick]);
+  }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick, storedCaptureId]);
 
 
   // Resizable Bottom Pane
@@ -1519,7 +1481,6 @@ export default function App() {
     setBufferAutoPaused(false);
     clearCaptureStats();
     await clearSession();
-    setStorage({ storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0 });
     // Wall-clock, and NOT `captureStartRef`: that one holds the first packet's
     // capture time, so on a quiet adapter it stays null for as long as the
     // network is silent. A scheduled duration has to measure from the moment
@@ -1532,6 +1493,12 @@ export default function App() {
     // are different facts and the panel has to be able to tell them apart.
     captureIdRef.current = newCaptureId();
     captureStore.begin(captureIdRef.current);
+    // The previous capture's directory goes here, once the new one exists.
+    // `clearSession` above has just forgotten the metadata that pointed at it,
+    // so nothing could reach it again - and this is the same rule Start has
+    // always had, which used to be spelled `clearSession` wiping the frames
+    // out of IndexedDB.
+    captureStore.prune([captureIdRef.current]);
     sendAgentCommand({ type: 'start_capture' });
     setIsCapturing(true);
   };
@@ -1614,7 +1581,6 @@ export default function App() {
     lastPacketTimeRef.current = null;
     accountingRef.current.persistedThroughId = 0;
     flowAnnotations.clear();
-    setStorage({ storedBytes: 0, storageBudgetBytes: 0, evictedForBudget: 0 });
     // The capture on disk goes with it. Discard is still the only thing in the
     // app that deletes stored frames, which is ADR 0012's rule and survives
     // this work unchanged.
@@ -2292,7 +2258,6 @@ export default function App() {
             bufferResidentBytes={residentBytes()}
             bufferAutoPaused={bufferAutoPaused}
             onClearPackets={handleClearPackets}
-            storage={storage}
             captureStorage={captureStorage}
             onDiscardCapture={handleDiscardCapture}
             colorRules={colorRules}

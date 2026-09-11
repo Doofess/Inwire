@@ -8,10 +8,10 @@
  *
  * The way out is not to move them somewhere else - a dedicated Worker shares the
  * page's process, so that relocates the cost rather than removing it - but to
- * stop holding them at all. **They are already on disk.** `toStoredFrame` writes
- * `raw` for every frame and the store is keyed by frame id, so a frame whose
- * bytes have been dropped from memory can have them back for the price of a
- * read.
+ * stop holding them at all. **They are already on disk.** The capture store
+ * writes every frame's bytes as they arrive and indexes them by frame id, so a
+ * frame whose bytes have been dropped from memory can have them back for the
+ * price of a read.
  *
  * This module is the seam that makes that possible. Every main-thread consumer
  * of `Packet.rawBytes` goes through here instead, so the day the buffer starts
