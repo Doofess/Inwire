@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Packet } from '../../types/packet';
 import { TbMessage, TbX, TbCopy, TbCheck, TbDownload, TbAlertTriangle, TbLoader2 } from 'react-icons/tb';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
-import { downloadBlob } from '../../lib/download';
+import { saveGeneratedBlob } from '../../lib/saveFile';
 import {
   clientEnd, isFromClient, streamPackets as framesOnStream,
   type StreamTarget,
@@ -168,7 +168,13 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
       .join('\n');
 
     const blob = new Blob([fullDialogue], { type: 'text/plain;charset=utf-8' });
-    downloadBlob(blob, `${target.kind}_stream_${target.streamId ?? `${target.portA}-${target.portB}`}_conversation.txt`);
+    // Fire and forget: the dialog IS the feedback, and the only other outcomes
+    // are a cancel (which needs no comment) and a write error (which the
+    // dialog's own failure already put in front of the person).
+    void saveGeneratedBlob(
+      blob,
+      `${target.kind}_stream_${target.streamId ?? `${target.portA}-${target.portB}`}_conversation.txt`,
+    );
   };
 
   return (

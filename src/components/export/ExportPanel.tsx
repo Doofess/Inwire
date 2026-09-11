@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
-  TbAlertCircle,
+  TbAlertCircle, TbCheck,
   TbDownload,
   TbFileCode,
   TbFileSpreadsheet,
@@ -21,7 +21,7 @@ import { buildNameMap } from '../../services/nameResolution';
 import type { CaptureDropStats } from '../../services/agentProtocol';
 import type { PcapngInterface } from '../../services/pcapngWriter';
 import { buildCsv, buildXlsx, zipSingleFile } from '../../services/tabularWriters';
-import { downloadBlob, exportStem } from '../../lib/download';
+import { saveGeneratedBlob, exportStem } from '../../lib/saveFile';
 import { FilterBar } from '../common/FilterBar';
 import { Switch } from '../ui/switch';
 import { buildPdfReport } from './pdfReport';
@@ -88,6 +88,14 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
   const keyLogStats = keyLog.stats();
   const [busy, setBusy] = useState<FormatId | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Where the last export went.
+   *
+   * Worth its own state because it is the whole point of the save dialog:
+   * a download could only say "done", and "done" is what somebody stares at
+   * while wondering which folder to look in.
+   */
+  const [savedTo, setSavedTo] = useState<string | null>(null);
 
   const validation = useMemo(() => FilterEngine.validateFilter(appliedFilter), [appliedFilter]);
 
@@ -206,15 +214,19 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
     if (!canExport || busy) return;
     setBusy(id);
     setError(null);
+    setSavedTo(null);
     try {
       const stem = exportStem(stemPrefix);
       const filename = `${stem}.${extension}`;
       const blob = await produce();
-      if (compress) {
-        downloadBlob(await zipSingleFile(blob, filename), `${stem}.zip`);
-      } else {
-        downloadBlob(blob, filename);
-      }
+      const outcome = compress
+        ? await saveGeneratedBlob(await zipSingleFile(blob, filename), `${stem}.zip`)
+        : await saveGeneratedBlob(blob, filename);
+      // Three outcomes, and cancelled is not one of the other two. Somebody who
+      // pressed Cancel meant to, and showing them an error for it would be the
+      // app arguing with a decision it just asked them to make.
+      if (outcome.saved) setSavedTo(outcome.path);
+      else if (!outcome.canceled) setError(outcome.error);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The export failed.');
     } finally {
@@ -484,6 +496,16 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
         <div className="flex items-center gap-1.5 text-rose-500 font-medium">
           <TbAlertCircle className="w-4 h-4 shrink-0" />
           <span>{error}</span>
+        </div>
+      )}
+
+      {savedTo && !error && (
+        // `dir="rtl"` with the text reversed back by `unicode-bidi` is the
+        // usual trick for ellipsising a path at the FRONT, which is the half
+        // nobody needs - the filename is what identifies the file.
+        <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium min-w-0">
+          <TbCheck className="w-4 h-4 shrink-0" />
+          <span className="truncate" dir="rtl" title={savedTo}>{savedTo}</span>
         </div>
       )}
     </div>
