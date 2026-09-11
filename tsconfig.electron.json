@@ -1,0 +1,37 @@
+{
+  // The main process, the preload and (later) the capture-store host.
+  //
+  // Separate from the root config for a reason the root config would hide:
+  // `tsconfig.json` sets `lib: ["DOM"]` and `types: ["vite/client"]`, so under
+  // it `electron/main.ts` could reference `window`, `localStorage` and
+  // `import.meta.env` and compile perfectly clean. This config has no DOM at
+  // all, which is what makes a mistake in main a build failure rather than a
+  // runtime one.
+  //
+  // The four strictness flags are copied deliberately rather than extended
+  // from the root, so that `scripts/electron/tsconfigs.ts` can assert the two
+  // programs stay equally strict. The ratchet `CLAUDE.md` opens with must not
+  // loosen in exactly the new code nothing else checks.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    // CommonJS, and emitted into a directory with its own `package.json`
+    // declaring `"type": "commonjs"` - the repository root says `"module"`,
+    // and a sandboxed preload cannot be an ES module.
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "types": ["node", "electron"],
+    "outDir": "dist-electron",
+    "rootDir": "electron",
+    "sourceMap": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["electron/**/*.ts"]
+}

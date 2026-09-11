@@ -41,5 +41,15 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  /* The renderer and the assertion scripts. `electron/` is deliberately NOT
+     here: it is compiled by `tsconfig.electron.json`, which has no DOM lib, so
+     that a reference to `window` or `localStorage` in the main process is a
+     build failure rather than something that compiles clean under this config
+     and throws at runtime. `dist-electron/` is emitted output.
+
+     `scripts/` stays in this program on purpose - every assertion script
+     imports `src/` modules directly and must keep type-checking against the
+     same lib the renderer uses. */
+  "exclude": ["node_modules", "dist", "dist-electron", "release", "electron"]
 }

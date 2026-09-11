@@ -47,6 +47,45 @@ import type { WidgetVariant } from './dashboardWidgets';
 import { ZoomControls } from './ZoomControls';
 import { ProjectionSwitcher } from './ProjectionSwitcher';
 
+/**
+ * Where maplibre's tile worker actually is.
+ *
+ * Without this the map renders **nothing at all** under the desktop app's
+ * `app://` scheme, and says nothing about it. MapLibre's `defaultWorkerUrl()`
+ * is:
+ *
+ *     const moduleUrl = import.meta.url;
+ *     if (!/^https?:/.test(moduleUrl)) return "";
+ *
+ * Under `app://inwire/assets/index-*.js` that test fails, the worker URL comes
+ * back as the empty string, and `new Worker("")` resolves against the document
+ * base - so the browser loads **index.html as an ES module worker**, which
+ * dies before registering a message handler. Every tile then sits in `loading`
+ * for ever with no error beyond one strict-MIME line in a console nobody reads
+ * in a packaged build.
+ *
+ * This is the *third* time the same failure has arrived from a different
+ * direction: Vite's dependency pre-bundler mangled the worker's URL (fixed by
+ * `optimizeDeps.exclude`), the Express SPA fallback answered the worker request
+ * with HTML (fixed by the `maplibreWorker` build plugin), and now a
+ * non-http scheme defeats the library's own URL detection. The comments in
+ * `vite.config.ts` describe the first two at length.
+ *
+ * The path is the one `maplibreWorker()` emits, **unhashed on purpose**: the
+ * worker imports `./maplibre-gl-shared.mjs` by literal specifier, so the pair
+ * has to keep its names and stay adjacent.
+ *
+ * **This must come before `setRTLTextPlugin`, and that ordering is the whole
+ * fix.** Setting the plugin broadcasts to the workers, which builds the global
+ * dispatcher, which acquires the worker pool - so the pool is already running
+ * by the time the next statement executes. Written the other way round it
+ * still compiles, the call still appears in the bundle, and the worker is
+ * still constructed with an empty URL: measured, with `Worker` instrumented in
+ * a packaged build, the construction came from `setRTLTextPlugin` one line
+ * earlier.
+ */
+maplibregl.setWorkerUrl('/assets/maplibre-gl-worker.mjs');
+
 // MapLibre's glyph renderer doesn't shape or bidi-reorder Arabic/Hebrew
 // script on its own - without this plugin, place labels in RTL languages
 // (Saudi Arabia, Egypt, Israel, etc.) render as disconnected, wrongly-
@@ -58,14 +97,21 @@ import { ProjectionSwitcher } from './ProjectionSwitcher';
 // bundle until a tile actually contains RTL text. Must be called at most
 // once per page load, so this sits at module scope, not inside the
 /**
- * MapLibre's right-to-left text shaper, loaded from a CDN at first use.
+ * MapLibre's right-to-left text shaper, shipped with the app.
  *
- * The one host this component contacts that is not the basemap. Named for the
- * same reason the lookup endpoints are: it fetches and runs a script, and that
- * should be visible without reading the call.
+ * It used to be fetched from unpkg at first use, which is what every example
+ * does and what the plugin's own `exports` map pushes you toward. That is a CDN
+ * dependency in a web page and something worse in a signed desktop installer:
+ * unsigned third-party JavaScript, downloaded and executed on launch, showing
+ * up as an unexplained outbound request in the capture of the very person
+ * running a packet analyzer.
+ *
+ * `vite.config.ts`'s `bundledMapAssets()` copies the real file out of
+ * `node_modules` at build time, the same way it does maplibre's own worker.
+ * `lazy: true` still defers *running* it until a tile actually contains RTL
+ * text; what changed is where the 133 kB comes from.
  */
-const RTL_TEXT_PLUGIN_URL =
-  'https://unpkg.com/@mapbox/mapbox-gl-rtl-text@0.4.0/dist/mapbox-gl-rtl-text.js';
+const RTL_TEXT_PLUGIN_URL = '/assets/mapbox-gl-rtl-text.js';
 
 // component. Guarded by status check because Vite HMR re-executes module
 // top-level code on every edit-triggered reload in dev, and MapLibre throws

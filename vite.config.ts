@@ -30,14 +30,33 @@ import {defineConfig, type Plugin} from 'vite';
  * by that literal specifier. Hashing either would break the pair. The cost is
  * that these two are not cache-busted across a maplibre upgrade.
  */
-function maplibreWorker(): Plugin {
-  const files = ['maplibre-gl-worker.mjs', 'maplibre-gl-shared.mjs'];
+/**
+ * The right-to-left text shaper, copied in rather than fetched from a CDN.
+ *
+ * maplibre cannot shape or bidi-reorder Arabic or Hebrew on its own, and the
+ * plugin's own npm package restricts its `exports` to an ES module entry that
+ * is not a loadable script URL - which is why every example, and this app until
+ * now, points `setRTLTextPlugin` at unpkg.
+ *
+ * That was a CDN dependency in a web page. In a signed desktop installer it is
+ * **unsigned third-party JavaScript fetched and executed on launch**, and in a
+ * packet analyzer it is an unexplained outbound request appearing in the user's
+ * own capture. Neither is defensible, and the file is 133 kB, so it ships with
+ * the app.
+ *
+ * Same mechanism as the worker below: read the real file out of `node_modules`
+ * at build time and emit it at a fixed path, failing loudly if it moves.
+ */
+const RTL_TEXT_ASSET = 'assets/mapbox-gl-rtl-text.js';
+
+function bundledMapAssets(): Plugin {
+  const maplibre = ['maplibre-gl-worker.mjs', 'maplibre-gl-shared.mjs'];
   return {
-    name: 'inwire:maplibre-worker',
+    name: 'inwire:map-assets',
     apply: 'build',
     generateBundle() {
       const dir = path.resolve(__dirname, 'node_modules/maplibre-gl/dist');
-      for (const file of files) {
+      for (const file of maplibre) {
         const from = path.join(dir, file);
         if (!fs.existsSync(from)) {
           // Loud rather than silent: a missing worker is a map that renders no
@@ -46,13 +65,21 @@ function maplibreWorker(): Plugin {
         }
         this.emitFile({ type: 'asset', fileName: `assets/${file}`, source: fs.readFileSync(from) });
       }
+
+      const rtl = path.resolve(
+        __dirname, 'node_modules/@mapbox/mapbox-gl-rtl-text/dist/mapbox-gl-rtl-text.js',
+      );
+      if (!fs.existsSync(rtl)) {
+        this.error(`mapbox-gl-rtl-text missing: ${rtl}`);
+      }
+      this.emitFile({ type: 'asset', fileName: RTL_TEXT_ASSET, source: fs.readFileSync(rtl) });
     },
   };
 }
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss(), maplibreWorker()],
+    plugins: [react(), tailwindcss(), bundledMapAssets()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

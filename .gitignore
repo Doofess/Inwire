@@ -1,6 +1,10 @@
 node_modules/
 build/
 dist/
+# The compiled main process, and electron-builder's output. `release/`
+# rather than the default `dist/`, which is Vite's.
+dist-electron/
+release/
 coverage/
 .DS_Store
 *.log
