@@ -22,7 +22,7 @@
  */
 import { contextBridge, ipcRenderer } from 'electron';
 import {
-  AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST,
+  AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
 } from './channels';
 
@@ -95,6 +95,23 @@ const api = {
    */
   requestAgentPort(): void {
     void ipcRenderer.invoke(AGENT_PORT_REQUEST);
+  },
+
+  /**
+   * Shows a save dialog and writes the bytes where the person says.
+   *
+   * Unlike the two port requests above this one CAN return its answer: a path
+   * and a success flag are ordinary cloneable values, and the caller needs
+   * both - an export that cannot say where the file went is barely better than
+   * the download it replaced.
+   */
+  saveFile(request: {
+    suggestedName: string;
+    extensions?: string[];
+    description?: string;
+    bytes: Uint8Array;
+  }): Promise<unknown> {
+    return ipcRenderer.invoke(SAVE_FILE_CHANNEL, request);
   },
 } as const;
 

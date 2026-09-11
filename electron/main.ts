@@ -27,7 +27,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
-import { AGENT_PORT_REQUEST, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL } from './channels';
+import {
+  AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
+} from './channels';
+import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
 import { AgentPipeLink } from './agentPipe';
 import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
@@ -121,6 +124,8 @@ async function start(): Promise<void> {
   ipcMain.handle(AGENT_PORT_REQUEST, (event) => {
     agent.attach(event.sender);
   });
+  ipcMain.handle(SAVE_FILE_CHANNEL, (event, request: SaveFileRequest) =>
+    saveGeneratedFile(event, request));
   // The store seals whatever is open when it goes; killing it here rather than
   // leaving it to be orphaned is what keeps a clean quit from looking like a
   // crash to the next launch's recovery pass.

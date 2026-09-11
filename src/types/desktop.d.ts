@@ -61,6 +61,20 @@ declare global {
        * no part in the frame path (docs/decisions/0007).
        */
       requestAgentPort?(): void;
+      /**
+       * Shows a save dialog and writes the bytes where the person chooses.
+       *
+       * Returns the outcome, unlike the port requests: a path is an ordinary
+       * cloneable value and the caller needs it, because an export that cannot
+       * say where the file went is barely better than the download it
+       * replaced. `src/lib/saveFile.ts` narrows the result.
+       */
+      saveFile?(request: {
+        suggestedName: string;
+        extensions?: string[];
+        description?: string;
+        bytes: Uint8Array;
+      }): Promise<unknown>;
     };
   }
 }

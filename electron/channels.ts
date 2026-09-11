@@ -31,3 +31,12 @@ export const AGENT_PORT_CHANNEL = 'inwire:agent-port';
 
 /** Renderer -> main: please open a link to the agent and send me its port. */
 export const AGENT_PORT_REQUEST = 'inwire:agent-port-request';
+
+/**
+ * Renderer -> main: show a save dialog and write these bytes.
+ *
+ * One round trip rather than "give me a path" followed by a write, because
+ * the renderer cannot write and a path it was handed but could not use would
+ * be a filesystem location leaked into a page for no purpose.
+ */
+export const SAVE_FILE_CHANNEL = 'inwire:save-file';
