@@ -571,6 +571,7 @@ export default function App() {
   });
   const {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
+    agentHealth, startAgentService,
     agentLinkEnabled, setAgentLinkEnabled,
     agentVersion, agentIncompatible, agentInterfaces, captureStats, adapters,
     agentLog, agentError, interfaceRates, selectedInterfaces,
@@ -2181,6 +2182,8 @@ export default function App() {
             key="settings-modal"
             onClose={() => setShowSettingsModal(false)}
             agentLinkEnabled={agentLinkEnabled}
+            agentHealth={agentHealth}
+            onStartAgentService={startAgentService}
             agentError={agentError}
             onConnectAgent={handleConnectAgent}
             onDisconnectAgent={handleDisconnectAgent}

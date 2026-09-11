@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import type { AgentHealth } from '../../services/agentHealth';
 import type { CaptureDropStats } from '../../services/agentProtocol';
 import type { LinkChange, LinkContext } from '../../services/linkContext';
 import { motion } from 'motion/react';
@@ -93,6 +94,9 @@ interface SettingsModalProps {
   selectedInterfaces: string[];
   agentLog: AgentLogEntry[];
   agentLinkEnabled: boolean;
+  /** Why the agent link is down, and whether the app can offer to fix it. */
+  agentHealth: AgentHealth;
+  onStartAgentService: () => void;
   agentError: string | null;
   onConnectAgent: () => void;
   onDisconnectAgent: () => void;
@@ -130,6 +134,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   selectedInterfaces,
   agentLog,
   agentLinkEnabled,
+  agentHealth,
+  onStartAgentService,
   agentError,
   onConnectAgent,
   onDisconnectAgent,
@@ -230,6 +236,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onConnect={onConnectAgent}
                 onDisconnect={onDisconnectAgent}
                 onRestartAgent={onRestartAgent}
+                agentHealth={agentHealth}
+                onStartAgentService={onStartAgentService}
                 onSubscribe={onSubscribeAgentLog}
                 onUnsubscribe={onUnsubscribeAgentLog}
                 onClearLog={onClearAgentLog}

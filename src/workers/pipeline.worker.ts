@@ -344,6 +344,13 @@ function receiveFromAgent(message: FromAgentLink): void {
       // socket's `onopen`/`onerror`/`onclose` did, so the header is unchanged.
       post({ type: 'status', status: message.status });
       return;
+    case 'service':
+      post({
+        type: 'agentService',
+        facts: message.facts,
+        shortConnections: message.shortConnections,
+      });
+      return;
     case 'binary':
       receiveBatch(message.bytes);
       return;
@@ -496,6 +503,12 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       // Dropped if the link is not up, exactly as a closed socket dropped it.
       // Main knows whether the pipe is writable; this end does not need to.
       tellAgent({ type: 'send', text: encodeAgentCommand(command.command) });
+      break;
+
+    case 'startAgentService':
+      // Not an agent command - the agent is by definition not there to receive
+      // one. This asks MAIN to raise a UAC prompt.
+      tellAgent({ type: 'startService' });
       break;
 
     case 'capturing':

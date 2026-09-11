@@ -19,6 +19,7 @@
  * those and a pipeline for packets.
  */
 import type { AgentCommand, AgentMessage } from '../agentProtocol';
+import type { AgentServiceFacts } from '../agentLink';
 import type { Packet } from '../../types/packet';
 import type { NetworkFacts } from '../networkFacts';
 import type { InfoPatch } from '../pcapParser';
@@ -47,6 +48,8 @@ export type ToPipeline =
    * if it has not arrived yet.
    */
   | { type: 'agentPort' }
+  /** Ask Windows to start the agent's service. Raises a UAC prompt in main. */
+  | { type: 'startAgentService' }
   /** Ask main to connect, and to keep retrying on the usual cadence. */
   | { type: 'connect' }
   /** Ask it to disconnect and stop retrying. */
@@ -125,6 +128,14 @@ export interface ReplayFrame {
 
 export type FromPipeline =
   | { type: 'status'; status: PipelineStatus }
+  /**
+   * Why the link is down, forwarded verbatim from main.
+   *
+   * Facts, not a conclusion - `services/agentHealth.ts` draws that, and does
+   * it on the main thread where it is pure. The Worker is a pipe for this in
+   * exactly the way it is for every other control message.
+   */
+  | { type: 'agentService'; facts: AgentServiceFacts; shortConnections: number }
   /** A control message from the agent, exactly as it arrived. */
   | { type: 'agent'; message: AgentMessage }
   /**
