@@ -333,10 +333,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       )}
                     </p>
 
-                    {/* The capture store, written in shadow. Stated plainly
-                        as what it is - a second copy that nothing reads yet -
-                        because a size on a settings panel that the app does
-                        not use would otherwise read as waste. */}
+                    {/* The capture store. It is what a frame's bytes are read
+                        back FROM now, which is why the frame span is stated:
+                        the buffer may only drop a frame's bytes inside it, so
+                        a reader who wonders why memory is not coming down is
+                        looking for this number. */}
                     {captureStorage.captureId !== null && (
                       <p className="text-[11px] text-muted-foreground">
                         <span className="font-medium text-foreground">
@@ -346,7 +347,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         {captureStorage.framesWritten.toLocaleString()} frames
                         {captureStorage.stagedCount > 0
                           && `, ${captureStorage.stagedCount.toLocaleString()} waiting`}
-                        {'). Written alongside the session above and not yet read from.'}
+                        {'). '}
+                        {captureStorage.storedRange === null
+                          ? 'No frame is readable back from it yet.'
+                          : `Frames ${captureStorage.storedRange.first.toLocaleString()}`
+                            + `\u2013${captureStorage.storedRange.last.toLocaleString()} can have`
+                            + ' their bytes read back, so the buffer is free to stop holding them.'}
                         {!captureStorage.persisted && (
                           <>
                             {' '}Storage is <span className="text-amber-600 dark:text-amber-400">

@@ -27,7 +27,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import {
-  encodeChunk, decodeChunk, applyPrefixes, PrefixBlock,
+  encodeChunk, decodeChunk, applyPrefixes, PrefixBlock, ChunkDirectory,
+  DIRECTORY_BYTES, prefixBlockBytes,
   CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND,
 } from '../../src/services/capture/chunkCodec';
 import { PcapService } from '../../src/services/pcapParser';
@@ -103,9 +104,21 @@ function shapeOf(p: Packet): Record<string, unknown> {
   return out;
 }
 
+/**
+ * The captured lengths a writer would have recorded.
+ *
+ * Passed explicitly everywhere, exactly as `CaptureWriter` passes them: a
+ * packet's own `rawBytes` can be emptied in place by `evictOldBytes` after the
+ * writer appended it, so the codec is never allowed to read the length off the
+ * packet.
+ */
+function capLengths(packets: readonly Packet[]): number[] {
+  return packets.map((p) => p.rawBytes.byteLength);
+}
+
 /** Encode, decode, rejoin the two blocks - the whole path a reader takes. */
 function roundTrip(packets: Packet[]): Packet[] {
-  const encoded = encodeChunk(packets);
+  const encoded = encodeChunk(packets, capLengths(packets));
   const back = decodeChunk(encoded.summary);
   applyPrefixes(back, encoded.prefix);
   return back;
@@ -211,8 +224,8 @@ console.log('\n--- chunk shapes ---\n');
   check('...in order, with ids intact', [back[0].id, back[CHUNK_FRAMES - 1].id], [1, CHUNK_FRAMES]);
 
   checkThrows('a chunk past CHUNK_FRAMES is refused rather than silently split',
-    () => encodeChunk([...full, frame({ id: CHUNK_FRAMES + 1 })]));
-  checkThrows('an empty chunk is refused', () => encodeChunk([]));
+    () => encodeChunk([...full, frame({ id: CHUNK_FRAMES + 1 })], new Array(CHUNK_FRAMES + 1).fill(0)));
+  checkThrows('an empty chunk is refused', () => encodeChunk([], []));
 }
 
 {
@@ -243,10 +256,13 @@ console.log('\n--- the prefix block, which filters read on its own ---\n');
     frame({ id: 3, source: '00:1a:2b:3c:4d:5e', destination: 'Broadcast', protocol: 'ARP',
       frameProtocols: ['frame', 'eth', 'arp'] }),
   ];
-  const encoded = encodeChunk(packets);
-  check('the prefix block is fixed width', encoded.prefix.length, packets.length * PREFIX_BYTES);
+  const encoded = encodeChunk(packets, capLengths(packets));
+  check('the prefix block is records then directory, both fixed width',
+    encoded.prefix.length, prefixBlockBytes(packets.length));
+  check('...which is the records plus DIRECTORY_BYTES a frame',
+    encoded.prefix.length, packets.length * (PREFIX_BYTES + DIRECTORY_BYTES));
 
-  const block = new PrefixBlock(encoded.prefix);
+  const block = new PrefixBlock(encoded.prefix, packets.length);
   check('it reports its own frame count', block.frameCount, 3);
   check('ports read straight out of it', [block.srcPort(0), block.dstPort(0)], [52372, 443]);
   check('so does the status', block.status(0), 'warning');
@@ -280,10 +296,59 @@ console.log('\n--- the prefix block, which filters read on its own ---\n');
     block.dstKind(2), ADDRESS_KIND.TEXT);
 }
 
+console.log('\n--- the byte directory, which is how a byte read finds a frame ---\n');
+
+{
+  // Real-ish lengths: an ACK, a full segment, an offloaded frame, and a frame
+  // the agent sent with no bytes at all.
+  const packets = [
+    frame({ id: 10 }), frame({ id: 11 }), frame({ id: 14 }), frame({ id: 15 }),
+  ];
+  const lengths = [66, 1514, 24_000, 0];
+  const encoded = encodeChunk(packets, lengths);
+  const dir = new ChunkDirectory(encoded.prefix, packets.length);
+
+  check('every captured length comes back',
+    [dir.capLength(0), dir.capLength(1), dir.capLength(2), dir.capLength(3)], lengths);
+  check('offsets are the running sum, because the writer appended contiguously',
+    [dir.offset(0), dir.offset(1), dir.offset(2), dir.offset(3)], [0, 66, 1580, 25_580]);
+  check('the extent is the whole chunk, which the index record must agree with',
+    dir.totalBytes, 25_580);
+  check('a frame with no bytes takes no space and does not shift the next one',
+    dir.offset(3) + dir.capLength(3), dir.totalBytes);
+
+  check('the gap lane sums back to the ids it was made from',
+    [dir.id(0), dir.id(1), dir.id(2), dir.id(3)], [10, 11, 14, 15]);
+  check('a frame is found by id, not by position',
+    [dir.indexOfId(10), dir.indexOfId(14), dir.indexOfId(15)], [0, 2, 3]);
+  // The trap the id lane exists for: `id - firstId` answers 2 for id 12, which
+  // is not a frame at all, and hands back frame 14's bytes.
+  check('an id in a hole is refused rather than answered with its neighbour',
+    [dir.indexOfId(12), dir.indexOfId(13)], [-1, -1]);
+  check('an id outside the chunk is refused at both ends',
+    [dir.indexOfId(9), dir.indexOfId(16)], [-1, -1]);
+}
+
+{
+  // A full chunk, which is where a u16 count or a 16-bit offset would break.
+  const full = Array.from({ length: CHUNK_FRAMES }, (_, i) => frame({ id: i * 2 + 1 }));
+  const lengths = full.map((_, i) => 60 + (i % 1400));
+  const dir = new ChunkDirectory(encodeChunk(full, lengths).prefix, CHUNK_FRAMES);
+  const expected = lengths.reduce((a, b) => a + b, 0);
+  check("a full chunk's extent is exact past 64 kB", dir.totalBytes, expected);
+  check('...and its last frame is where the running sum says',
+    dir.offset(CHUNK_FRAMES - 1), expected - lengths[CHUNK_FRAMES - 1]);
+  check('...and every id in it is findable',
+    [dir.indexOfId(1), dir.indexOfId(4095), dir.indexOfId(CHUNK_FRAMES * 2 - 1)],
+    [0, 2047, CHUNK_FRAMES - 1]);
+  check('...while every even id is a hole', dir.indexOfId(4096), -1);
+}
+
+
 console.log('\n--- refusals ---\n');
 
 {
-  const encoded = encodeChunk([frame()]);
+  const encoded = encodeChunk([frame()], [0]);
   checkThrows('a summary with the wrong magic is refused',
     () => { const bad = encoded.summary.slice(); bad[0] ^= 0xff; return decodeChunk(bad); });
   checkThrows('a version this build does not read is refused',
@@ -338,7 +403,7 @@ async function realFrames(): Promise<void> {
     // The two blocks deflate independently, which is the measured reason they
     // are two. Asserted here so a future change that merges them fails.
     const sample = packets.slice(0, Math.min(CHUNK_FRAMES, packets.length));
-    const encoded = encodeChunk(sample);
+    const encoded = encodeChunk(sample, capLengths(sample));
     const prefixDeflated = deflateRawSync(encoded.prefix, { level: 6 });
     const summaryDeflated = deflateRawSync(encoded.summary, { level: 6 });
     checkTrue(`${name}: the prefix block survives a deflate round trip`,

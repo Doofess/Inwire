@@ -4,7 +4,7 @@ import type { Packet } from '../types/packet';
 import type { InfoPatch } from '../services/dissect/types';
 import type { FrameBatch } from '../services/pipelineClient';
 import { FieldBlockWriter } from '../services/dissect/fieldSplit';
-import { appendFrames, storedIdRange, trimFramesBelow } from '../services/sessionStore';
+import { appendFrames, trimFramesBelow } from '../services/sessionStore';
 import { captureStore } from '../services/capture/captureClient';
 import {
   adoptAccounting, commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
@@ -229,7 +229,12 @@ export function usePacketBuffer({
         },
         {
           trimFramesBelow,
-          storedIdRange,
+          // The capture store's range, not IndexedDB's. IndexedDB's floor
+          // rises with its own 512 MB budget, faster than the RAM window's,
+          // and `evictOldBytes` may only drop bytes it can read back - so
+          // every frame that budget had evicted kept its bytes in memory for
+          // the rest of the capture. See services/packetBytes.ts.
+          storedIdRange: () => captureStore.storedRange,
           // Deferred: calling a setter from inside an updater is the impure
           // part, and the head-id guard is what keeps it to one call.
           reportDropped: (total) => queueMicrotask(() => setDroppedBuffer(total)),

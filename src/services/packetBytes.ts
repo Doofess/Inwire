@@ -21,8 +21,19 @@
  * packet still carries its bytes, so every call takes the synchronous path and
  * the disk is never touched. Introducing the seam and introducing the eviction
  * in one step would mean debugging both at once.
+ *
+ * ## The disk under it moved, and this module did not
+ *
+ * It reads from the **capture store** now (OPFS) rather than from IndexedDB,
+ * and the seam is why that was three lines. The reason it had to move is not
+ * that OPFS is faster: `sessionStore`'s 512 MB budget **evicts the oldest
+ * frames**, and `evictOldBytes` may only drop the bytes of a frame the store
+ * can supply again - so every frame the budget had evicted kept its bytes in
+ * RAM for the rest of the capture, squeezed between a floor that rose faster
+ * than the window's and a window that could not pass it. The capture store
+ * evicts nothing, so its range only grows and eviction can always proceed.
  */
-import { readFrameBytes, storedIdRange } from './sessionStore';
+import { captureStore } from './capture/captureClient';
 import type { Packet } from '../types/packet';
 
 /** Bytes a frame no longer has and the store cannot supply. */
@@ -42,7 +53,7 @@ export function hasBytes(packet: Packet): boolean {
  * "this capture outgrew its storage limit".
  */
 export function bytesAreRecoverable(id: number): boolean {
-  const range = storedIdRange();
+  const range = captureStore.storedRange;
   return range !== null && id >= range.first && id <= range.last;
 }
 
@@ -56,7 +67,7 @@ export function bytesAreRecoverable(id: number): boolean {
  */
 export async function packetBytes(packet: Packet): Promise<Uint8Array> {
   if (hasBytes(packet)) return packet.rawBytes;
-  const found = await readFrameBytes([packet.id]);
+  const found = await captureStore.readBytes([packet.id]);
   return found.get(packet.id) ?? NO_BYTES;
 }
 
@@ -76,7 +87,7 @@ export async function packetsBytes(packets: readonly Packet[]): Promise<Map<numb
     else missing.push(packet.id);
   }
   if (missing.length === 0) return out;
-  for (const [id, bytes] of await readFrameBytes(missing)) out.set(id, bytes);
+  for (const [id, bytes] of await captureStore.readBytes(missing)) out.set(id, bytes);
   return out;
 }
 
@@ -97,9 +108,10 @@ export async function packetsBytes(packets: readonly Packet[]): Promise<Map<numb
  *
  * Three rules, and the first two are what keep it from destroying anything:
  *
- *  - **Only frames the store can supply again.** `storedIdRange` is the ids
- *    actually on disk; a frame outside it has been trimmed or evicted by the
- *    storage budget, and dropping its bytes would lose them outright.
+ *  - **Only frames the store can supply again.** The stored range is the ids
+ *    actually on disk; a frame outside it - one from a restored session, an
+ *    import, or a chunk still waiting behind the patch horizon - would lose
+ *    its bytes outright.
  *  - **Only frames outside the resident window**, so the recent frames anyone
  *    is likely to click still answer without a read.
  *  - **Oldest first, stopping at the first frame already done**, so a flush

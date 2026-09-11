@@ -78,6 +78,46 @@ export const CHUNK_FRAMES = 4096;
  */
 export const PREFIX_BYTES = 72;
 
+/**
+ * The byte directory: which frame is where in the `byt` stream.
+ *
+ * Two u32 lanes per frame - the frame **id** and its **captured length** -
+ * written after the prefix records in the same block, and columnar rather than
+ * interleaved into the record. Both halves of that are deliberate.
+ *
+ * *In the same block*, because a byte read needs the directory and nothing
+ * else, and a block of its own would be a fifth file, two more index fields and
+ * a second thing the recovery rule has to keep consistent. The block's split is
+ * arithmetic - `frameCount * PREFIX_BYTES` - and `frameCount` is in the index
+ * record every reader already has.
+ *
+ * *Columnar*, because these two lanes are the most compressible thing in the
+ * capture and interleaving them into a 72-byte stride would waste that: ids
+ * ascend by one and captured lengths repeat a handful of values (1514, 66, 54)
+ * thousands of times. Deflate finds that in a run of 16 kB and cannot find it
+ * across a 72-byte gap.
+ *
+ * The id lane holds **gaps, not ids**, for the same reason. Measured on both
+ * fixtures, absolute ids cost 3.1-3.5 B/frame deflated - nearly half of the
+ * eight raw bytes - because an ascending u32 changes its low byte on every
+ * frame and deflate sees no repeat. The gap between consecutive ids is 1 on
+ * every frame that dissected, so the lane becomes one four-byte pattern
+ * repeated 4,096 times and costs **0.4-0.5 B/frame** instead. The first entry
+ * is the chunk's first id in full, so the lane needs nothing from outside
+ * itself.
+ *
+ * The id lane is what makes the directory work at all. Ids have holes, so a
+ * frame's position inside its chunk is not `id - firstId`; and the ids live in
+ * the **summary** block, which a byte read must not have to inflate - it is
+ * fourteen times the size and holds nothing this needs.
+ */
+export const DIRECTORY_BYTES = 8;
+
+/** The length of a whole prefix block, records and directory together. */
+export function prefixBlockBytes(frameCount: number): number {
+  return frameCount * (PREFIX_BYTES + DIRECTORY_BYTES);
+}
+
 const OFF_TS_US = 0;          // f64  - epoch microseconds
 const OFF_LENGTH = 8;         // u32
 const OFF_STREAM_ID = 12;     // u32  - 0xffffffff means "none"
@@ -258,14 +298,24 @@ export interface EncodedChunk {
  * frame that failed to dissect burns one - so the decoder never assumes
  * `firstId + n`.
  */
-export function encodeChunk(packets: readonly Packet[]): EncodedChunk {
+export function encodeChunk(packets: readonly Packet[], capLengths: readonly number[]): EncodedChunk {
   if (packets.length === 0) throw new Error('encodeChunk: empty chunk');
   if (packets.length > CHUNK_FRAMES) {
     throw new Error(`encodeChunk: ${packets.length} frames exceeds CHUNK_FRAMES (${CHUNK_FRAMES})`);
   }
+  // Passed in rather than read off `packet.rawBytes`, and this is not
+  // defensive. `evictOldBytes` sets `rawBytes` to an empty array **in place**
+  // on frames it can read back, so a packet's own view of how long its bytes
+  // are is true when the writer appended them and can be false by the time the
+  // chunk is sealed. The writer recorded the real length at append time; that
+  // is the only number that describes the `byt` stream.
+  if (capLengths.length !== packets.length) {
+    throw new Error(`encodeChunk: ${capLengths.length} lengths for ${packets.length} frames`);
+  }
 
-  const prefix = new Uint8Array(packets.length * PREFIX_BYTES);
+  const prefix = new Uint8Array(prefixBlockBytes(packets.length));
   const prefixView = new DataView(prefix.buffer);
+  const directoryAt = packets.length * PREFIX_BYTES;
 
   // One string table for the chunk. This is where the compression comes from:
   // inside 4,096 frames an address, a protocol label or an expert sentence
@@ -318,6 +368,10 @@ export function encodeChunk(packets: readonly Packet[]): EncodedChunk {
     prefixView.setUint16(at + OFF_DIRECTION, (p.direction ?? 0) & 0xffff, true);
     prefix[at + OFF_STATUS] = Math.max(0, STATUS_ORDER.indexOf(p.status));
     prefix[at + OFF_ADDR_KIND] = (srcKind & 0x0f) | ((dstKind & 0x0f) << 4);
+
+    // --- the byte directory: two columnar lanes, not part of the record -----
+    prefixView.setUint32(directoryAt + i * 4, (i === 0 ? p.id : p.id - packets[i - 1].id) >>> 0, true);
+    prefixView.setUint32(directoryAt + packets.length * 4 + i * 4, capLengths[i] >>> 0, true);
 
     // --- the summary: exact, and what actually round-trips ------------------
     body.u32(p.id >>> 0);
@@ -574,14 +628,20 @@ export function applyPrefixes(packets: Packet[], prefix: Uint8Array): void {
   }
 }
 
-/** A read-only view over one chunk's prefix block, for the scan path. */
+/**
+ * A read-only view over one chunk's prefix records, for the scan path.
+ *
+ * `frameCount` is passed rather than divided out of the block's length,
+ * because the block does not end where the records do - the byte directory
+ * follows them. The count is in the index record every reader already holds,
+ * so asking for it costs nothing and guessing it would be wrong by
+ * `DIRECTORY_BYTES / PREFIX_BYTES` of a chunk.
+ */
 export class PrefixBlock {
   private readonly view: DataView;
-  readonly frameCount: number;
 
-  constructor(private readonly buf: Uint8Array) {
+  constructor(private readonly buf: Uint8Array, readonly frameCount: number) {
     this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-    this.frameCount = Math.floor(buf.byteLength / PREFIX_BYTES);
   }
 
   tsUs(i: number): number { return this.view.getFloat64(i * PREFIX_BYTES + OFF_TS_US, true); }
@@ -617,6 +677,81 @@ export class PrefixBlock {
   address(i: number, which: 'src' | 'dst'): Uint8Array {
     const at = i * PREFIX_BYTES + (which === 'src' ? OFF_SRC_ADDR : OFF_DST_ADDR);
     return this.buf.subarray(at, at + 16);
+  }
+}
+
+/**
+ * The byte directory of one chunk: which frame is where in the `byt` stream.
+ *
+ * Constructed over the same inflated prefix block a filter scan reads, so a
+ * reader that already has the block for one purpose pays nothing for the
+ * other.
+ *
+ * Frame offsets are a prefix sum rather than a stored lane. The writer appends
+ * every frame's bytes in order and contiguously - that is the property that
+ * lets bytes go to disk immediately while their rows wait behind the patch
+ * horizon - so a chunk's byte extent is exactly the sum of its captured
+ * lengths, and storing the offsets as well would be four more bytes a frame
+ * saying something already known.
+ */
+export class ChunkDirectory {
+  /** Ids, summed back out of the gap lane. */
+  private readonly ids: Uint32Array;
+  private readonly lens: Uint32Array;
+  /** Offset of each frame's bytes from the start of the chunk's byte extent. */
+  private readonly offsets: Uint32Array;
+  /** The chunk's whole byte extent, which the index record must agree with. */
+  readonly totalBytes: number;
+
+  /**
+   * Both lanes are expanded into typed arrays here rather than read from the
+   * block on demand: the gaps have to be summed to be searchable at all, and
+   * the offsets are a running sum whichever way round it is done. 48 kB a
+   * chunk, in the storage Worker, for the last `DIRECTORY_CACHE` chunks.
+   */
+  constructor(block: Uint8Array, readonly frameCount: number) {
+    const at = block.byteOffset + frameCount * PREFIX_BYTES;
+    const gaps = new DataView(block.buffer, at, frameCount * 4);
+    const lens = new DataView(block.buffer, at + frameCount * 4, frameCount * 4);
+    this.ids = new Uint32Array(frameCount);
+    this.lens = new Uint32Array(frameCount);
+    this.offsets = new Uint32Array(frameCount);
+    let id = 0;
+    let running = 0;
+    for (let i = 0; i < frameCount; i++) {
+      id = i === 0 ? gaps.getUint32(0, true) : id + gaps.getUint32(i * 4, true);
+      this.ids[i] = id;
+      const length = lens.getUint32(i * 4, true);
+      this.lens[i] = length;
+      this.offsets[i] = running;
+      running += length;
+    }
+    this.totalBytes = running;
+  }
+
+  id(i: number): number { return this.ids[i]; }
+  capLength(i: number): number { return this.lens[i]; }
+  /** Where frame `i`'s bytes start, relative to the chunk's `bytOffset`. */
+  offset(i: number): number { return this.offsets[i]; }
+
+  /**
+   * The position of a frame id inside this chunk, or -1.
+   *
+   * A search, never `id - firstId`: a frame that failed to dissect burns an id,
+   * so the lane ascends without being contiguous. -1 for an id in one of those
+   * holes, because "that frame does not exist" and "here is its neighbour" are
+   * different answers and only one of them is true.
+   */
+  indexOfId(id: number): number {
+    let lo = 0, hi = this.frameCount - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const at = this.ids[mid];
+      if (id < at) hi = mid - 1;
+      else if (id > at) lo = mid + 1;
+      else return mid;
+    }
+    return -1;
   }
 }
 

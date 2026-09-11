@@ -36,7 +36,10 @@
  */
 /// <reference lib="webworker" />
 
+import { inflateSync } from 'fflate';
 import { CaptureWriter, type CaptureFiles } from '../services/capture/captureWriter';
+import { CaptureReader } from '../services/capture/captureReader';
+import { recoverIndex } from '../services/capture/captureIndex';
 import { SyncAccessBlockFile, type BlockFile, type SyncAccessHandleLike } from '../services/capture/blockFile';
 import type { ToCapture, FromCapture } from '../services/capture/captureProtocol';
 
@@ -50,6 +53,7 @@ interface OpenCapture {
   files: CaptureFiles;
   handles: SyncAccessHandleLike[];
   writer: CaptureWriter;
+  reader: CaptureReader;
 }
 
 let open: OpenCapture | null = null;
@@ -112,7 +116,22 @@ async function openFiles(captureId: string): Promise<OpenCapture> {
     sum: await openOne('summary.iwsum'),
     byt: await openOne('frames.iwbyt'),
   };
-  return { id: captureId, files, handles, writer: new CaptureWriter(files) };
+
+  // Recovery before the writer, not after. A crash can leave data past the
+  // last index record, and a writer that appended to it would put the new
+  // chunk's bytes where nothing can find them and every offset after it wrong.
+  // `planRecovery` is the rule; this is the four lines that apply it.
+  const { records, plan } = recoverIndex(files.index, files.pfx, files.sum, files.byt);
+  files.pfx.truncate(plan.pfxLength);
+  files.sum.truncate(plan.sumLength);
+  files.byt.truncate(plan.bytLength);
+  files.index.truncate(plan.indexLength);
+
+  const writer = new CaptureWriter(files, { resumeFrom: records.slice(0, plan.keepRecords) });
+  // The reader shares the writer's index, so a chunk is readable the moment
+  // its record is appended rather than only after the file is re-read.
+  const reader = new CaptureReader(files, writer.index, inflateSync);
+  return { id: captureId, files, handles, writer, reader };
 }
 
 function closeOpen(): void {
@@ -136,6 +155,7 @@ function reportStats(): void {
     stats: { ...open.writer.stats },
     stagedCount: open.writer.stagedCount,
     bytesOnDisk: bytesOnDisk(open),
+    storedRange: open.writer.index.idRange(),
   });
 }
 
@@ -181,6 +201,23 @@ async function handle(message: ToCapture): Promise<void> {
         if (open === null) return;
         open.writer.finish();
         reportStats();
+        return;
+      }
+
+      case 'read': {
+        // An answer always goes back, empty or not: the main thread holds a
+        // promise per request and a silent drop would leave the hex viewer
+        // spinning for the life of the page.
+        let found = new Map<number, Uint8Array>();
+        try {
+          if (open !== null) found = open.reader.readBytes(message.ids);
+        } catch (error) {
+          // Reported, and the request still answered. Letting this reach the
+          // handler's own catch would post a failure and no `bytes`, and the
+          // caller would wait for ever for frames that are never coming.
+          fail(error instanceof Error ? error.message : String(error), false);
+        }
+        post({ type: 'bytes', requestId: message.requestId, frames: [...found] });
         return;
       }
 
