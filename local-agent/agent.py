@@ -75,11 +75,31 @@ except ImportError:
     _report_missing_dependency("scapy", "pip install scapy")
     sys.exit(1)
 
-try:
-    import websockets
-except ImportError:
-    _report_missing_dependency("websockets", "pip install websockets")
-    sys.exit(1)
+# The WebSocket is the transport on macOS and Linux and nowhere else. On
+# Windows the app reaches the agent over a named pipe, so requiring this here
+# would make the service depend on a library it never loads a line of - and
+# would ship it inside a signed installer for no reason. Missing is fatal only
+# where it is needed.
+if sys.platform == "win32":
+    websockets = None
+else:
+    try:
+        import websockets
+    except ImportError:
+        _report_missing_dependency("websockets", "pip install websockets")
+        sys.exit(1)
+
+#: What "the client has gone" is, whichever transport it went from.
+#:
+#: A dead WebSocket raises `websockets.ConnectionClosed`; a dead pipe raises
+#: the builtin `ConnectionError`. Only one place needs to tell that apart from
+#: a real fault, and it must not be spelled as one transport's exception -
+#: which it was, and which on Windows would have raised `AttributeError` on the
+#: `except` clause itself the first time a log subscriber's pipe closed.
+CLIENT_GONE = (
+    (ConnectionError,) if websockets is None
+    else (ConnectionError, websockets.ConnectionClosed)
+)
 
 HOST = "localhost"
 PORT = 8999
@@ -1488,7 +1508,7 @@ class AgentServer:
         for ws in list(self.log_subscribers):
             try:
                 await ws.send(data)
-            except websockets.ConnectionClosed:
+            except CLIENT_GONE:
                 self.log_subscribers.discard(ws)
                 self.connections.discard(ws)
 
