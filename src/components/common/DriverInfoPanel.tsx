@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { AgentHealth } from '../../services/agentHealth';
 import { TbTrash, TbPlugConnected, TbPlugConnectedX, TbRefresh } from 'react-icons/tb';
 import type { AgentLogEntry, CaptureDropStats } from '../../services/agentProtocol';
 import { detectOS } from '../../services/platformDetect';
@@ -32,6 +33,16 @@ interface DriverInfoPanelProps {
    *  Distinguishes "you disconnected" from "the agent is not running", which
    *  agentStatus alone reports as the same 'disconnected'. */
   agentLinkEnabled: boolean;
+  /**
+   * Why the link is down, when anything outside the pipe can say.
+   *
+   * A refused pipe and a missing service look identical from the pipe, so this
+   * is the only thing that turns "Not reachable" into a sentence with a next
+   * step in it. See `services/agentHealth.ts`.
+   */
+  agentHealth: AgentHealth;
+  /** Raises the UAC prompt that starts the service. Offered only when it helps. */
+  onStartAgentService: () => void;
   /** The agent's most recent rejection, or null. */
   agentError: string | null;
   onConnect: () => void;
@@ -131,6 +142,8 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   selectedInterfaces,
   agentLog,
   agentLinkEnabled,
+  agentHealth,
+  onStartAgentService,
   agentError,
   onConnect,
   onDisconnect,
@@ -188,8 +201,34 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
 
   const listening = agentInterfaces.filter((i) => selectedInterfaces.includes(i.name));
 
+  // Shown only when it says something the Status row does not. "Connected" and
+  // "Connecting" are already legible; a banner repeating them would be noise
+  // in the one panel somebody opens when something is wrong.
+  const diagnosis = agentHealth.kind === 'connected' || agentHealth.kind === 'connecting'
+    ? null
+    : agentHealth;
+
   return (
     <div className="flex flex-col gap-4 min-h-0">
+      {agentLinkEnabled && diagnosis && (
+        <div className={`rounded-md border px-3 py-2.5 text-xs ${
+          diagnosis.kind === 'crashing' || diagnosis.kind === 'missing'
+            ? 'border-rose-500/30 bg-rose-500/5'
+            : 'border-amber-500/30 bg-amber-500/5'
+        }`}>
+          <div className="font-semibold text-foreground">{diagnosis.summary}</div>
+          <p className="mt-1 text-muted-foreground leading-relaxed">{diagnosis.detail}</p>
+          {diagnosis.canStart && (
+            <button
+              type="button"
+              onClick={onStartAgentService}
+              className="mt-2 rounded border border-border px-2 py-1 font-medium text-foreground hover:bg-muted"
+            >
+              Start the agent
+            </button>
+          )}
+        </div>
+      )}
       <div>
         <div className="text-xs font-semibold text-foreground mb-2">Driver</div>
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">

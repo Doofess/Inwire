@@ -35,9 +35,21 @@
  * against a real pipe under plain `tsx`.
  */
 import { MessageChannelMain, type MessagePortMain, type WebContents } from 'electron';
+import { execFile } from 'node:child_process';
 import type { FromAgentLink, ToAgentLink } from '../src/services/agentLink';
+import { readAgentService } from './agentService';
 import { AGENT_PIPE_PATH, PipeTransport } from './pipeTransport';
 import { AGENT_PORT_CHANNEL } from './channels';
+
+/**
+ * How often the service's registry key is re-read while the link is down.
+ *
+ * The retry runs every 3s and spawning `reg` that often would be a process a
+ * second for as long as the agent is missing - which, for somebody who
+ * uninstalled it, is for ever. The answer changes when a person changes it, so
+ * a slower cadence loses nothing.
+ */
+const SERVICE_POLL_MS = 20_000;
 
 export { AGENT_PIPE_PATH };
 
@@ -50,10 +62,18 @@ export { AGENT_PIPE_PATH };
 export class AgentPipeLink {
   private port: MessagePortMain | null = null;
   private readonly pipe: PipeTransport;
+  /** When the registry was last read, so a 3s retry does not spawn `reg`. */
+  private serviceCheckedAt = 0;
 
   constructor(pipePath: string = AGENT_PIPE_PATH) {
     this.pipe = new PipeTransport({
-      status: (status) => this.tell({ type: 'status', status }),
+      status: (status) => {
+        this.tell({ type: 'status', status });
+        // Only while it is down. A connected link needs no diagnosis, and
+        // asking anyway would be a second source of truth that can disagree
+        // with the pipe about whether the agent is there.
+        if (status !== 'connected') void this.reportService();
+      },
       text: (text) => this.tell({ type: 'text', text }),
       // A copy across the port, not a transfer: `MessagePortMain`'s transfer
       // list accepts only ports. One memcpy per ~256 kB batch at ~30 batches a
@@ -92,10 +112,57 @@ export class AgentPipeLink {
       case 'open': this.pipe.open(); break;
       case 'close': this.pipe.close(); break;
       case 'send': this.pipe.send(message.text); break;
+      case 'startService': this.startService(); break;
     }
   }
 
   private tell(message: FromAgentLink): void {
     this.port?.postMessage(message);
+  }
+
+  /**
+   * Answers "why is it not there", with facts and no conclusion.
+   *
+   * `services/agentHealth.ts` draws the conclusion, in the renderer, where it
+   * is pure and drivable from a script. This half is here because both inputs
+   * are things only main can reach.
+   */
+  private async reportService(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - this.serviceCheckedAt < SERVICE_POLL_MS) return;
+    this.serviceCheckedAt = now;
+    const facts = await readAgentService();
+    this.tell({ type: 'service', facts, shortConnections: this.pipe.shortConnections });
+  }
+
+  /**
+   * Raises the UAC prompt that starts the service.
+   *
+   * The app is unelevated on purpose - the dissector must never parse hostile
+   * bytes as an administrator - so it cannot start a LocalSystem service, and
+   * no amount of arranging makes it able to. What it can do is ask Windows to,
+   * which is a prompt the person sees and refuses if they did not expect it.
+   *
+   * The arguments are constants. Nothing the renderer sends reaches this
+   * command line, because a privileged command built from a message is a
+   * privileged command an injected script can write.
+   */
+  private startService(): void {
+    if (process.platform !== 'win32') return;
+    execFile(
+      'powershell.exe',
+      [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "Start-Process -FilePath 'sc.exe' -ArgumentList 'start','InwireAgent' -Verb RunAs -WindowStyle Hidden",
+      ],
+      { windowsHide: true },
+      (error) => {
+        // A refused UAC prompt lands here and is not an error worth reporting:
+        // the person said no, and the link's own state already says the agent
+        // is not running. Re-checking is what turns a yes into a connection.
+        if (error) console.warn('[agent-pipe] start service:', error.message);
+        this.serviceCheckedAt = 0;
+      },
+    );
   }
 }

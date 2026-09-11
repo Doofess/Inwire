@@ -30,6 +30,7 @@ import {
   type AgentMessage, type CaptureDropStats,
 } from '../services/agentProtocol';
 import { filterCapturableInterfaces } from '../services/captureInterfaces';
+import { diagnoseAgent, type AgentServiceFacts } from '../services/agentHealth';
 import { hostFromAdapters } from '../services/hostIdentity';
 import type { HostIdentity } from '../services/direction';
 import type { NetworkFacts } from '../services/networkFacts';
@@ -84,6 +85,15 @@ export function useAgentConnection(host: AgentConnectionHost) {
    */
   const [agentClientId, setAgentClientId] = useState<string | null>(null);
   const [captureOwner, setCaptureOwner] = useState<string | null>(null);
+  /**
+   * What main could learn about the service while the link was down.
+   *
+   * Null until it answers, and that is not the same as "nothing is wrong":
+   * `diagnoseAgent` treats the two apart, so a panel opened in the first
+   * second says it is still checking rather than naming a cause.
+   */
+  const [agentService, setAgentService] = useState<AgentServiceFacts | null>(null);
+  const [agentShortConnections, setAgentShortConnections] = useState(0);
   const [agentLinkEnabled, setAgentLinkEnabled] = useState(true);
   const [agentVersion, setAgentVersion] = useState<string | null>(null);
   // Set when a connection's socket opened but no `hello` arrived within the
@@ -381,6 +391,11 @@ export function useAgentConnection(host: AgentConnectionHost) {
     // on its way to the screen.
     pipeline.onNetworkFacts = (facts) => callbacks.current.onNetworkFacts(facts);
 
+    pipeline.onAgentService = (facts, shortConnections) => {
+      setAgentService(facts);
+      setAgentShortConnections(shortConnections);
+    };
+
     pipeline.connect();
 
     return () => {
@@ -391,6 +406,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
       pipeline.onFrames = () => {};
       pipeline.onFailure = () => {};
       pipeline.onNetworkFacts = () => {};
+      pipeline.onAgentService = () => {};
       pipeline.disconnect();
       setAgentStatus("disconnected");
     };
@@ -405,6 +421,24 @@ export function useAgentConnection(host: AgentConnectionHost) {
       label: iface.label ?? iface.name,
     })));
   }, [agentInterfaces]);
+
+  /**
+   * Why the agent is not there, in a sentence somebody can act on.
+   *
+   * Derived rather than stored: every input is already state, and a fifth
+   * piece of state holding a conclusion drawn from four others is a fifth
+   * thing that can be stale.
+   */
+  const agentHealth = diagnoseAgent({
+    status: agentStatus,
+    service: agentService,
+    shortConnections: agentShortConnections,
+  });
+
+  /** Asks main to raise the UAC prompt that starts the service. */
+  const startAgentService = () => {
+    pipeline.startAgentService();
+  };
 
   const sendAgentCommand = (command: AgentCommand) => {
     pipeline.command(command);
@@ -447,6 +481,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
 
   return {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
+    agentHealth, startAgentService,
     agentLinkEnabled, setAgentLinkEnabled,
     agentVersion, agentIncompatible, agentInterfaces,
     captureStats, adapters, agentLog, agentError, interfaceRates,

@@ -35,6 +35,12 @@
 /** Exactly `PipelineStatus`, because it is forwarded as one. */
 export type AgentLinkStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
+/** What the SCM's registry key said. Mirrors `electron/agentService.ts`. */
+export interface AgentServiceFacts {
+  installed: boolean;
+  startType: 'auto' | 'manual' | 'disabled' | 'unknown';
+}
+
 /** Main -> Worker. */
 export type FromAgentLink =
   /** Where the connection stands. Main is the authority; the Worker forwards. */
@@ -50,7 +56,16 @@ export type FromAgentLink =
    * one memcpy per ~256 kB batch at ~30 batches a second is not the cost worth
    * optimising.
    */
-  | { type: 'binary'; bytes: Uint8Array };
+  | { type: 'binary'; bytes: Uint8Array }
+  /**
+   * Why the link is down, as far as anything outside the pipe can tell.
+   *
+   * Sent only while it IS down, and only from main, because both halves are
+   * things a renderer cannot reach: the service's registry key, and how long
+   * each of the last few connections lasted. See `services/agentHealth.ts` for
+   * what is made of them - this message carries facts and no conclusion.
+   */
+  | { type: 'service'; facts: AgentServiceFacts; shortConnections: number };
 
 /** Worker -> main. */
 export type ToAgentLink =
@@ -66,4 +81,13 @@ export type ToAgentLink =
    * Everything that decides what to say still lives with the code that knows
    * what the answers mean.
    */
-  | { type: 'send'; text: string };
+  | { type: 'send'; text: string }
+  /**
+   * Ask Windows to start the agent's service.
+   *
+   * Elevation is unavoidable and is the point: the app runs unelevated so that
+   * the dissector never parses hostile bytes as an administrator, which means
+   * it cannot start a LocalSystem service either. Main raises the UAC prompt
+   * rather than the app holding a privilege it wanted once.
+   */
+  | { type: 'startService' };

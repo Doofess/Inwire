@@ -14,6 +14,7 @@ import type { Packet, ProtocolLayer } from '../types/packet';
 import type { InfoPatch } from './pcapParser';
 import type { HostIdentity } from './direction';
 import type { NetworkFacts } from './networkFacts';
+import type { AgentServiceFacts } from './agentLink';
 import type {
   FromPipeline, PipelineInterface, PipelineStatus, ReplayFrame, ToPipeline,
 } from './pipeline/protocol';
@@ -98,6 +99,11 @@ export class PipelineClient {
    * acquire a new resolver ten times a second.
    */
   onNetworkFacts: (facts: NetworkFacts) => void = () => {};
+  /**
+   * Why the link is down, when main can say. Facts only; `agentHealth.ts`
+   * decides what they mean.
+   */
+  onAgentService: (facts: AgentServiceFacts, shortConnections: number) => void = () => {};
 
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
@@ -133,6 +139,9 @@ export class PipelineClient {
         break;
       case 'networkFacts':
         this.onNetworkFacts(message.facts);
+        break;
+      case 'agentService':
+        this.onAgentService(message.facts, message.shortConnections);
         break;
       case 'detail': {
         const waiting = this.pendingDetail.get(message.id);
@@ -219,6 +228,11 @@ export class PipelineClient {
 
   disconnect() {
     this.send({ type: 'disconnect' });
+  }
+
+  /** Ask Windows to start the agent's service. Raises a UAC prompt in main. */
+  startAgentService() {
+    this.send({ type: 'startAgentService' });
   }
 
   command(command: AgentCommand) {

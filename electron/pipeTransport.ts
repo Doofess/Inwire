@@ -42,6 +42,20 @@ export const AGENT_PIPE_PATH = '\\\\.\\pipe\\inwire-agent';
  */
 export const RECONNECT_MS = 3000;
 
+/**
+ * A connection this short did not do any work.
+ *
+ * The agent sends `hello` the moment it accepts, so a connection that lived
+ * under a second either found the service mid-exit or found it exiting. Two
+ * seconds would also catch a slow machine's healthy start; one is chosen to
+ * under-report rather than to accuse the agent of crashing when it is merely
+ * busy.
+ */
+const SHORT_CONNECTION_MS = 1000;
+
+/** How far back short connections are counted. Three retries at 3s, plus slack. */
+const CRASH_WINDOW_MS = 30_000;
+
 /** What the transport tells its owner. Nothing else leaves this file. */
 export interface PipeEvents {
   status(status: AgentLinkStatus): void;
@@ -61,6 +75,10 @@ export class PipeTransport {
   private retry: ReturnType<typeof setTimeout> | null = null;
   /** Set while a socket is opening, so a second `open` cannot race the first. */
   private opening = false;
+  /** When the current socket connected, for the short-connection count. */
+  private connectedAt = 0;
+  /** Timestamps of recent connections that died almost immediately. */
+  private shortLived: number[] = [];
 
   constructor(
     private readonly events: PipeEvents,
@@ -95,6 +113,18 @@ export class PipeTransport {
     socket.write(encodeFrame(FRAME_JSON, encoder.encode(text)));
   }
 
+  /**
+   * Connections that opened and died within a second, in the recent past.
+   *
+   * The one symptom of a crash loop that only this end can see: every value in
+   * the service's registry key is exactly what it should be while it happens.
+   */
+  get shortConnections(): number {
+    const since = Date.now() - CRASH_WINDOW_MS;
+    this.shortLived = this.shortLived.filter((at) => at >= since);
+    return this.shortLived.length;
+  }
+
   // -- the socket -------------------------------------------------------------
 
   private openSocket(): void {
@@ -110,6 +140,7 @@ export class PipeTransport {
 
     socket.on('connect', () => {
       this.opening = false;
+      this.connectedAt = Date.now();
       this.events.status('connected');
     });
 
@@ -124,6 +155,13 @@ export class PipeTransport {
 
     socket.once('close', () => {
       this.opening = false;
+      // A connection that never connected is not a short connection - it is a
+      // service that is not there, which the registry answers and this must
+      // not also answer, differently.
+      if (this.connectedAt !== 0 && Date.now() - this.connectedAt < SHORT_CONNECTION_MS) {
+        this.shortLived.push(Date.now());
+      }
+      this.connectedAt = 0;
       if (this.socket === socket) this.socket = null;
       this.events.status('disconnected');
       this.scheduleRetry();
