@@ -32,6 +32,7 @@ file that supersedes the old one.
 | [0023](0023-decomposing-the-parser.md) | Decomposing the parser — **unblocks 0020's tunnels** | Accepted 2026-09-07 |
 | [0024](0024-carrying-a-message-across-segments.md) | Carrying a message across segments — **closes 0020's fourth protocol**, and why DCERPC is not next | Accepted 2026-09-10 |
 | [0025](0025-the-capture-lives-on-disk.md) | The capture lives on disk — **supersedes 0012's mechanism and 0013's storage**, and nothing deletes a frame to make room any more | Accepted 2026-09-11 |
+| [0026](0026-one-capture-on-disk.md) | One capture on disk — **closes 0025 §4**: no library, no launch prompt, and why a 5 GB capture makes the previous one worth less | Accepted 2026-09-11 |
 
 ## Review outcome: amendments to the spec's execution order
 
