@@ -8,12 +8,15 @@
  * What it receives is a batch of finished `Packet`s once per flush, with the
  * raw bytes attached and the protocol tree left behind.
  *
- * The socket is here rather than on the main thread because the packets arrive
- * on it: a message handler on the main thread would have to at least look at
- * every frame before it could hand it anywhere, at wire rate, which is the
- * cost this whole phase exists to remove. Control messages are forwarded up
- * untouched - there are a handful a second and every one of them lands in
- * React state.
+ * The connection is not here any more, and that is a change of owner rather
+ * than of design. The agent is reached over a named pipe, which neither a
+ * renderer nor a Web Worker can open - `net.connect` is Node. So the main
+ * process holds the handle and pumps it into one end of a channel; this Worker
+ * holds the other (`services/agentLink.ts`). What must not change with it is
+ * that the renderer's MAIN THREAD never sees a frame: it carries the port
+ * across once and then plays no part, so the property ADR 0007 bought is
+ * intact. Control messages are forwarded up untouched - there are a handful a
+ * second and every one of them lands in React state.
  */
 /// <reference lib="webworker" />
 
@@ -21,6 +24,7 @@ import { OrderingWindow, type Orderable } from '../services/dissect/orderingWind
 import { keyLog } from '../services/tls/keyLog';
 import { decodePacketBatch, isPacketBatch, retain } from '../services/agentBinary';
 import { encodeAgentCommand, parseAgentMessage } from '../services/agentProtocol';
+import type { FromAgentLink, ToAgentLink } from '../services/agentLink';
 import { decodeRawEthernetPacket, type InfoPatch } from '../services/pcapParser';
 import { flowAnnotations } from '../services/flowAnnotations';
 import { addProcessRow, annotatePacket } from '../services/dissect/processFields';
@@ -44,9 +48,6 @@ import type { Packet, ProtocolLayer } from '../types/packet';
 const FLUSH_MS = 100;
 /** See services/dissect/orderingWindow.ts. */
 const ORDERING_HOLD_MS = 100;
-/** Reconnect cadence, unchanged from the main-thread client it replaces. */
-const RECONNECT_MS = 3000;
-
 /**
  * How many frames' trees are kept for the detail pane.
  *
@@ -71,10 +72,10 @@ function post(message: FromPipeline, transfer?: Transferable[]) {
 
 // --- capture state -----------------------------------------------------------
 
-let socket: WebSocket | null = null;
-let socketUrl = '';
+/** The channel to the agent, handed over by main. See `services/agentLink.ts`. */
+let agentPort: MessagePort | null = null;
+/** Whether the app wants a connection, held here because the port may be late. */
 let wantConnection = false;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 let capturing = false;
 let interfaces: PipelineInterface[] = [];
@@ -325,127 +326,129 @@ function flush(): void {
 
 setInterval(flush, FLUSH_MS);
 
-// --- the agent socket --------------------------------------------------------
+// --- the agent link ----------------------------------------------------------
+//
+// Main owns the pipe and the retry timer; this end owns what the messages
+// mean. The three cases below are exactly what `ws.onmessage` and the socket's
+// own events used to deliver, which is why everything downstream of them is
+// unchanged.
 
-function scheduleReconnect() {
-  if (!wantConnection || reconnectTimer !== null) return;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    openSocket();
-  }, RECONNECT_MS);
+function tellAgent(message: ToAgentLink): void {
+  agentPort?.postMessage(message);
 }
 
-function openSocket() {
-  if (!wantConnection) return;
-  post({ type: 'status', status: 'connecting' });
-  let ws: WebSocket;
+function receiveFromAgent(message: FromAgentLink): void {
+  switch (message.type) {
+    case 'status':
+      // Main is the authority on this now. It reports the same four states the
+      // socket's `onopen`/`onerror`/`onclose` did, so the header is unchanged.
+      post({ type: 'status', status: message.status });
+      return;
+    case 'binary':
+      receiveBatch(message.bytes);
+      return;
+    case 'text':
+      receiveControl(message.text);
+      return;
+  }
+}
+
+/**
+ * The batch's bytes as an `ArrayBuffer`, copying only if it has to.
+ *
+ * A structured clone of an exactly-sized `Uint8Array` produces another one, so
+ * the fast path is the one that always runs; the copy is there because
+ * `decodePacketBatch` takes a buffer and a view into a larger one would decode
+ * from the wrong offset in silence.
+ */
+function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? (bytes.buffer as ArrayBuffer)
+    : (bytes.slice().buffer as ArrayBuffer);
+}
+
+function receiveBatch(bytes: Uint8Array): void {
+  if (!capturing) return; // agent detected, capture not started
+  const buffer = asArrayBuffer(bytes);
+  let frames;
   try {
-    ws = new WebSocket(socketUrl);
-  } catch {
-    post({ type: 'status', status: 'error' });
-    scheduleReconnect();
+    frames = isPacketBatch(buffer) ? decodePacketBatch(buffer) : null;
+  } catch (err) {
+    post({ type: 'failure', message: String(err) });
     return;
   }
-  // Packets arrive as binary batches; without this they would be delivered as
-  // Blobs, which can only be read asynchronously - and an async hop per batch
-  // would put the frames back out of order relative to the control messages.
-  ws.binaryType = 'arraybuffer';
-  socket = ws;
+  if (!frames) return;
+  const arrivedAt = performance.now();
+  for (const frame of frames) {
+    // Not dissected here: frames wait in the ordering window and are dissected
+    // by the flush, in capture order. `retain` copies the bytes out of the
+    // batch, which one held frame would otherwise keep alive in full.
+    ordering.push({
+      tsUs: frame.tsUs,
+      seq: frame.seq,
+      arrivedAt,
+      bytes: retain(frame),
+      origLen: frame.origLen,
+      iface: frame.iface,
+    });
+  }
+}
 
-  ws.onopen = () => post({ type: 'status', status: 'connected' });
+function receiveControl(text: string): void {
+  const message = parseAgentMessage(text);
+  if (!message) return;
 
-  ws.onmessage = (event) => {
-    if (typeof event.data !== 'string') {
-      if (!capturing) return; // agent detected, capture not started
-      let frames;
-      try {
-        frames = isPacketBatch(event.data) ? decodePacketBatch(event.data) : null;
-      } catch (err) {
-        post({ type: 'failure', message: String(err) });
-        return;
-      }
-      if (!frames) return;
-      const arrivedAt = performance.now();
-      for (const frame of frames) {
-        // Not dissected here: frames wait in the ordering window and are
-        // dissected by the flush, in capture order. `retain` copies the bytes
-        // out of the batch, which one held frame would otherwise keep alive
-        // in full.
-        ordering.push({
-          tsUs: frame.tsUs,
-          seq: frame.seq,
-          arrivedAt,
-          bytes: retain(frame),
-          origLen: frame.origLen,
-          iface: frame.iface,
-        });
-      }
-      return;
-    }
+  if (message.type === 'socket_table') {
+    // Applied here because this is where dissection happens, so every frame
+    // from now on is annotated as it is built. It is forwarded as well: the
+    // main thread keeps its own copy of the store to re-annotate frames that
+    // were already dissected before this table arrived - the same split
+    // `keyLog` has, for the same reason.
+    flowAnnotations.apply(message, Date.now() * 1000);
+    post({ type: 'agent', message });
+    return;
+  }
 
-    const message = parseAgentMessage(event.data);
-    if (!message) return;
+  if (message.type !== 'packet') {
+    post({ type: 'agent', message });
+    return;
+  }
 
-    if (message.type === 'socket_table') {
-      // Applied here because this is where dissection happens, so every frame
-      // from now on is annotated as it is built. It is forwarded as well: the
-      // main thread keeps its own copy of the store to re-annotate frames that
-      // were already dissected before this table arrived - the same split
-      // `keyLog` has, for the same reason.
-      flowAnnotations.apply(message, Date.now() * 1000);
-      post({ type: 'agent', message });
-      return;
-    }
-
-    if (message.type !== 'packet') {
-      post({ type: 'agent', message });
-      return;
-    }
-
-    // A pre-3.2 agent, which still sends one JSON message per frame. Kept
-    // working so an agent that has not been updated yet streams while it nags,
-    // rather than showing an empty list next to an "Update" pill.
-    if (!capturing) return;
-    const raw = message as unknown as Record<string, unknown>;
-    const tsUs = typeof raw.tsUs === 'number'
-      ? raw.tsUs
-      : typeof raw.timestamp === 'number' ? Math.round(raw.timestamp * 1000) : Date.now() * 1000;
-    const bytes = typeof raw.raw === 'string' && raw.raw.length > 0 ? base64Bytes(raw.raw) : null;
-    if (bytes) {
-      ordering.push({
-        tsUs,
-        seq: typeof raw.seq === 'number' ? raw.seq : arrivalSeq++,
-        arrivedAt: performance.now(),
-        bytes,
-        origLen: typeof raw.origLen === 'number' ? raw.origLen : bytes.length,
-        iface: typeof raw.iface === 'number' ? raw.iface : 0,
-      });
-    } else {
-      // Metadata only, from an agent that sent no bytes. Nothing is
-      // fabricated: the frame is what the agent said it was and no more.
-      pendingPackets.push(buildFallbackPacket({
-        id: nextId++,
-        tsUs,
-        relativeTime: captureStartUs === null ? 0 : (tsUs - captureStartUs) / 1_000_000,
-        timeDelta: 0,
-        length: Number(raw.length) || 0,
-        source: String(raw.source ?? ''),
-        destination: String(raw.destination ?? ''),
-        sourcePort: raw.sourcePort as number | undefined,
-        destPort: raw.destPort as number | undefined,
-        protocol: raw.protocol as string | undefined,
-        info: raw.info as string | undefined,
-      }));
-    }
-  };
-
-  ws.onerror = () => post({ type: 'status', status: 'error' });
-
-  ws.onclose = () => {
-    if (socket === ws) socket = null;
-    post({ type: 'status', status: 'disconnected' });
-    scheduleReconnect();
-  };
+  // A pre-3.2 agent, which still sends one JSON message per frame. Kept
+  // working so an agent that has not been updated yet streams while it nags,
+  // rather than showing an empty list next to an "Update" pill.
+  if (!capturing) return;
+  const raw = message as unknown as Record<string, unknown>;
+  const tsUs = typeof raw.tsUs === 'number'
+    ? raw.tsUs
+    : typeof raw.timestamp === 'number' ? Math.round(raw.timestamp * 1000) : Date.now() * 1000;
+  const bytes = typeof raw.raw === 'string' && raw.raw.length > 0 ? base64Bytes(raw.raw) : null;
+  if (bytes) {
+    ordering.push({
+      tsUs,
+      seq: typeof raw.seq === 'number' ? raw.seq : arrivalSeq++,
+      arrivedAt: performance.now(),
+      bytes,
+      origLen: typeof raw.origLen === 'number' ? raw.origLen : bytes.length,
+      iface: typeof raw.iface === 'number' ? raw.iface : 0,
+    });
+  } else {
+    // Metadata only, from an agent that sent no bytes. Nothing is fabricated:
+    // the frame is what the agent said it was and no more.
+    pendingPackets.push(buildFallbackPacket({
+      id: nextId++,
+      tsUs,
+      relativeTime: captureStartUs === null ? 0 : (tsUs - captureStartUs) / 1_000_000,
+      timeDelta: 0,
+      length: Number(raw.length) || 0,
+      source: String(raw.source ?? ''),
+      destination: String(raw.destination ?? ''),
+      sourcePort: raw.sourcePort as number | undefined,
+      destPort: raw.destPort as number | undefined,
+      protocol: raw.protocol as string | undefined,
+      info: raw.info as string | undefined,
+    }));
+  }
 }
 
 function base64Bytes(text: string): Uint8Array {
@@ -455,44 +458,44 @@ function base64Bytes(text: string): Uint8Array {
   return out;
 }
 
-function closeSocket() {
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  const ws = socket;
-  socket = null;
-  if (ws) {
-    // Nulled first, so the teardown does not read as the agent going away and
-    // re-arm the retry that disconnecting exists to stop.
-    ws.onclose = null;
-    ws.onerror = null;
-    ws.onmessage = null;
-    try { ws.close(); } catch { /* already closing */ }
-  }
-}
-
 // --- commands from the main thread -------------------------------------------
 
 ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
   const command = event.data;
   switch (command.type) {
+    case 'agentPort': {
+      const [port] = event.ports;
+      if (!port) break;
+      agentPort = port;
+      port.onmessage = (message: MessageEvent<FromAgentLink>) => receiveFromAgent(message.data);
+      // A transferred port delivers nothing until it is started. Assigning
+      // `onmessage` starts it implicitly, but saying so costs one line and the
+      // failure it prevents is a Worker that connects and never hears back.
+      port.start();
+      // `connect` may have arrived first - it is sent in the same tick, and
+      // the port is not - so the wish is honoured now rather than lost.
+      if (wantConnection) tellAgent({ type: 'open' });
+      break;
+    }
+
     case 'connect':
-      socketUrl = command.url;
       wantConnection = true;
-      if (socket === null) openSocket();
+      // Nothing to do if the port is still in flight; its arrival above
+      // catches up. Said here rather than queued, because a queue for one
+      // possible message is a queue nobody will remember to drain.
+      if (agentPort) tellAgent({ type: 'open' });
       break;
 
     case 'disconnect':
       wantConnection = false;
-      closeSocket();
+      tellAgent({ type: 'close' });
       post({ type: 'status', status: 'disconnected' });
       break;
 
     case 'command':
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(encodeAgentCommand(command.command));
-      }
+      // Dropped if the link is not up, exactly as a closed socket dropped it.
+      // Main knows whether the pipe is writable; this end does not need to.
+      tellAgent({ type: 'send', text: encodeAgentCommand(command.command) });
       break;
 
     case 'capturing':

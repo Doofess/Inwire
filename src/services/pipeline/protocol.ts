@@ -1,8 +1,12 @@
 /**
  * What the main thread and the pipeline Worker say to each other.
  *
- * The Worker owns the agent's WebSocket, the ordering window, the trackers and
- * dissection (docs/decisions/0003). The main thread owns the packet buffer,
+ * The Worker owns the ordering window, the trackers and dissection
+ * (docs/decisions/0003). It no longer owns the connection: the agent is a
+ * named pipe, which only the main process can open, so what the Worker holds
+ * is a port main pumps that pipe into (`services/agentLink.ts`). The port is
+ * transferred through here rather than opened here, and the renderer's main
+ * thread never sees a frame either way. The main thread owns the packet buffer,
  * every view over it, and the raw bytes - which ride along on each frame
  * because carrying them costs 1.1us per frame and leaving them behind would
  * cost export, Follow Stream, the hex view and session persistence a rewrite
@@ -33,9 +37,19 @@ export interface PipelineInterface {
 // --- main thread -> worker ---------------------------------------------------
 
 export type ToPipeline =
-  /** Open the agent socket and keep it open, retrying on the usual cadence. */
-  | { type: 'connect'; url: string }
-  /** Close it and stop retrying. */
+  /**
+   * The channel to the agent, transferred in the message's transfer list.
+   *
+   * The Worker no longer opens anything. The agent is a named pipe, which only
+   * the main process can open, so what arrives here is one end of a
+   * `MessageChannelMain` that main pumps the pipe into - see
+   * `services/agentLink.ts`. Sent before `connect`, and `connect` waits for it
+   * if it has not arrived yet.
+   */
+  | { type: 'agentPort' }
+  /** Ask main to connect, and to keep retrying on the usual cadence. */
+  | { type: 'connect' }
+  /** Ask it to disconnect and stop retrying. */
   | { type: 'disconnect' }
   /** Forward a command to the agent. Dropped if the socket is not open. */
   | { type: 'command'; command: AgentCommand }

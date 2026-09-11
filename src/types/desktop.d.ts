@@ -51,6 +51,16 @@ declare global {
        * and reports over its own channel.
        */
       onCaptureStoreExit?(listener: (reason: string) => void): void;
+      /**
+       * Asks for a port to the capture agent. Returns nothing, same reason.
+       *
+       * The agent is reached over a named pipe, which neither a renderer nor a
+       * Web Worker can open - `net.connect` is Node. Main holds the handle and
+       * hands over a port, which `pipelineClient` transfers straight into the
+       * pipeline Worker so that the main thread carries it once and then plays
+       * no part in the frame path (docs/decisions/0007).
+       */
+      requestAgentPort?(): void;
     };
   }
 }

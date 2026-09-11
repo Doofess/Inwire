@@ -45,6 +45,40 @@ export interface ReplayBundle {
   process?: { pid: number; name: string; exe: string };
 }
 
+/**
+ * The window message the preload uses to hand the agent's port into the page.
+ *
+ * Identical mechanism to the capture store's, and for the identical reason: a
+ * `MessagePort` cannot cross `contextBridge`, so there is no version of this
+ * where an exposed function simply returns one.
+ */
+const AGENT_PORT_MESSAGE = 'inwire:agent-port';
+
+/** How long to wait for main before saying the agent link failed. */
+const AGENT_PORT_TIMEOUT_MS = 15_000;
+
+function requestAgentPort(): Promise<MessagePort> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (event: MessageEvent) => {
+      // `event.source === window` is what makes the preload's `'*'` safe: only
+      // this window can post to itself.
+      if (event.source !== window) return;
+      if ((event.data as { channel?: string } | null)?.channel !== AGENT_PORT_MESSAGE) return;
+      const [port] = event.ports;
+      if (!port) return;
+      window.removeEventListener('message', onMessage);
+      clearTimeout(timer);
+      resolve(port);
+    };
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', onMessage);
+      reject(new Error('the agent link did not answer'));
+    }, AGENT_PORT_TIMEOUT_MS);
+    window.addEventListener('message', onMessage);
+    window.inwire?.requestAgentPort?.();
+  });
+}
+
 export class PipelineClient {
   private worker: Worker | null = null;
   /** Detail requests waiting on the Worker, by frame number. */
@@ -151,8 +185,36 @@ export class PipelineClient {
     }
   }
 
-  connect(url: string) {
-    this.send({ type: 'connect', url });
+  /**
+   * Ask the agent link to come up, and keep it up.
+   *
+   * No URL any more. The agent is a named pipe and main owns the handle, so
+   * what this does is hand the Worker its end of the channel - once, on the
+   * first call - and then say `connect`. The retry cadence moved to main with
+   * the handle; the header's "connecting…" is unchanged, because main reports
+   * the same four states the socket's events used to.
+   */
+  connect() {
+    void this.attachAgentPort();
+    this.send({ type: 'connect' });
+  }
+
+  /** The port, requested once and remembered, so a reconnect does not re-ask. */
+  private agentPort: Promise<void> | null = null;
+
+  private attachAgentPort(): Promise<void> {
+    if (this.agentPort) return this.agentPort;
+    this.agentPort = (async () => {
+      const port = await requestAgentPort();
+      // Transferred straight through. The renderer's main thread has now
+      // carried this port exactly once and will not appear in the frame path
+      // again - which is the property ADR 0007 bought and moving the
+      // connection into main must not hand back.
+      this.send({ type: 'agentPort' }, [port]);
+    })().catch((error: unknown) => {
+      this.onFailure(String(error));
+    });
+    return this.agentPort;
   }
 
   disconnect() {
