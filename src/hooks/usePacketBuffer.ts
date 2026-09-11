@@ -217,6 +217,11 @@ export function usePacketBuffer({
           budgetBytes: packetBufferBytesRef.current,
           capturing: isCapturingRef.current,
           residentFrames: BYTES_RESIDENT_FRAMES,
+          // From the store's own stats, sampled every couple of seconds. The
+          // capture stops for a filling disk now, not for a full RAM window -
+          // a full window loses nothing, and stopping for it was what kept the
+          // trim from ever running.
+          freeDiskBytes: captureStore.snapshot.freeBytes,
           residentBytesAtEntry,
         },
         {

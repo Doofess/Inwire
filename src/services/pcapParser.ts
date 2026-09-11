@@ -1,4 +1,5 @@
 import { Packet, ProtocolLayer, ProtocolField, ExpertCategory, ExpertInfo } from '../types/packet';
+import { applyInfoPatch } from './dissect/infoPatch';
 import { CATEGORY_RANK, expertItemsFor } from './expertInfo';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacName } from './macVendors';
@@ -1082,21 +1083,14 @@ export function decodeRawEthernetPacket(
 
 
 
-/** Applies one patch to a packet, in place. */
-export function applyInfoPatch(packet: Packet, patch: InfoPatch): void {
-  if (patch.suffix) packet.info += patch.suffix;
-  if (patch.protocolLabel) packet.protocolLabel = patch.protocolLabel;
-  if (patch.responseInFrame !== undefined) {
-    packet.fields = { ...(packet.fields ?? {}), 'dns.response_in': patch.responseInFrame };
-    for (const layer of packet.layers ?? []) {
-      if (layer.name !== 'Domain Name System') continue;
-      layer.fields.push({
-        name: '[Response In]', value: patch.responseInFrame, generated: true,
-        linkToFrame: patch.responseInFrame, abbrev: 'dns.response_in',
-      });
-    }
-  }
-}
+/**
+ * Applies one patch to a packet, in place.
+ *
+ * Moved to `dissect/infoPatch.ts` and re-exported here so every caller is
+ * unchanged. It left because `captureWriter.ts` needs it, and importing it
+ * from this file pulled the entire parser into the capture store process.
+ */
+export { applyInfoPatch };
 
 /**
  * Where frame `id` sits in a buffer, or -1.

@@ -21,8 +21,11 @@
     "module": "CommonJS",
     "moduleResolution": "Node",
     "types": ["node", "electron"],
-    "outDir": "dist-electron",
-    "rootDir": "electron",
+    // No `outDir`/`rootDir`: this program only type-checks. `electron/build.cjs`
+    // does the emit with esbuild, because a sandboxed preload cannot `require`
+    // a relative module and therefore has to be a single bundled file - and
+    // the store's entry imports `src/services/capture/`, which no `rootDir`
+    // under `electron/` could contain.
     "sourceMap": false,
     "esModuleInterop": true,
     "skipLibCheck": true,

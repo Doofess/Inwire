@@ -53,15 +53,42 @@ export const BUDGET_CHOICES = [
  * full pass costs far more.
  */
 /**
- * Capture stops on its own at this fraction of the budget, so a full buffer is
- * a deliberate stop rather than packets silently falling off the back while
- * the user believes they are still recording everything.
+ * How much free disk a capture stops itself at.
  *
- * `SettingsModal` prints it as a percentage, and used to keep its own `99`
- * beside a comment admitting the mirror. A number the UI explains has to be
- * the number the code enforces, or the explanation is just confident.
+ * This replaces `AUTO_PAUSE_AT = 0.99`, which stopped a capture at 99% of the
+ * **memory** budget - and that number was not merely obsolete, it was
+ * cancelling the feature it sat next to. `planBufferTrim` only acts above
+ * `1 + BUDGET_SLACK` = 105%, so the capture always stopped *before* the trim
+ * had ever run: the window's head never moved, so `useCaptureRows` never asked
+ * where the window sat in the capture, so `below` was always 0 and the rows on
+ * disk were unreachable during a live capture. The whole disk-backed buffer
+ * was only ever exercised after a restore.
+ *
+ * With write-through there is nothing to stop for in memory: a full window
+ * loses nothing, because the frames leaving it are on disk and in the list.
+ * What can still be lost is the disk filling underneath the writer, so that is
+ * what the check watches.
+ *
+ * Two gigabytes, and the reserve is a time rather than a fraction: a capture
+ * writes about 1,156 B a frame (`scripts/capture/recovery-on-disk.ts`), so at
+ * the measured 35,000 frames a second this is roughly **fifty seconds** of
+ * warning - enough to notice and stop, and enough that the machine does not
+ * hit zero free space, which is a far worse day than a stopped capture.
  */
-export const AUTO_PAUSE_AT = 0.99;
+export const DISK_RESERVE_BYTES = 2 * 1024 * 1024 * 1024;
+
+/**
+ * Whether a capture should stop itself because the disk is nearly full.
+ *
+ * `null` is "the volume did not say", and the answer is then **no**. An
+ * unknown free-space figure is not a reason to stop a capture: the store
+ * reports an `ENOSPC` as a failure the panel shows, which is the honest
+ * fallback, where guessing would stop captures on filesystems that simply do
+ * not answer `statfs`.
+ */
+export function shouldStopForDisk(freeBytes: number | null): boolean {
+  return freeBytes !== null && freeBytes < DISK_RESERVE_BYTES;
+}
 
 export const BUDGET_SLACK = 0.05;
 

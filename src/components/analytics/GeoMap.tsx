@@ -75,6 +75,13 @@ import { ProjectionSwitcher } from './ProjectionSwitcher';
  * worker imports `./maplibre-gl-shared.mjs` by literal specifier, so the pair
  * has to keep its names and stay adjacent.
  *
+ * The guard is maplibre's own test, inverted: under the Vite dev server
+ * `import.meta.url` **is** `http://127.0.0.1:3000/node_modules/...`, so the
+ * library resolves its worker correctly out of `node_modules` and a hardcoded
+ * `/assets/` path - which the dev server does not serve - would break dev to
+ * fix production. Measured: it did, and the symptom was the same silent
+ * strict-MIME line.
+ *
  * **This must come before `setRTLTextPlugin`, and that ordering is the whole
  * fix.** Setting the plugin broadcasts to the workers, which builds the global
  * dispatcher, which acquires the worker pool - so the pool is already running
@@ -84,7 +91,9 @@ import { ProjectionSwitcher } from './ProjectionSwitcher';
  * a packaged build, the construction came from `setRTLTextPlugin` one line
  * earlier.
  */
-maplibregl.setWorkerUrl('/assets/maplibre-gl-worker.mjs');
+if (!/^https?:/.test(import.meta.url)) {
+  maplibregl.setWorkerUrl('/assets/maplibre-gl-worker.mjs');
+}
 
 // MapLibre's glyph renderer doesn't shape or bidi-reorder Arabic/Hebrew
 // script on its own - without this plugin, place labels in RTL languages

@@ -27,7 +27,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
-import { UNSAVED_CAPTURE_CHANNEL } from './channels';
+import { STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL } from './channels';
+import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
 import { loadWindowState, trackWindowState } from './windowState';
@@ -95,11 +96,21 @@ if (!app.requestSingleInstanceLock()) {
 let unsavedCapture = false;
 /** Set once the reader has said yes, so the guard does not ask twice. */
 let quitConfirmed = false;
+/** The capture store, forked on the renderer's first request for its port. */
+const store = new CaptureStoreHost(captureDirectory());
 
 async function start(): Promise<void> {
   ipcMain.on(UNSAVED_CAPTURE_CHANNEL, (_event, hasFrames: unknown) => {
     unsavedCapture = hasFrames === true;
   });
+  ipcMain.handle(STORE_PORT_REQUEST, async (event) => {
+    store.watch(event.sender);
+    await store.connect(event.sender);
+  });
+  // The store seals whatever is open when it goes; killing it here rather than
+  // leaving it to be orphaned is what keeps a clean quit from looking like a
+  // crash to the next launch's recovery pass.
+  app.on('will-quit', () => store.stop());
   registerAppProtocol();
   hardenSession(session.defaultSession);
   Menu.setApplicationMenu(buildMenu({ packaged: app.isPackaged }));
