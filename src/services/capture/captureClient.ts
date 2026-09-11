@@ -349,11 +349,11 @@ class CaptureClient {
  */
 export const captureStore = new CaptureClient();
 
-/** A capture's directory name: sortable, unique, and readable in a listing. */
-export function newCaptureId(at: Date = new Date()): string {
-  const pad = (n: number, width = 2) => String(n).padStart(width, '0');
-  const stamp = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}`
-    + `-${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`;
-  const suffix = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
-  return `cap-${stamp}-${suffix}`;
-}
+/**
+ * Re-exported from `captureDirectory.ts`, which is where it now lives.
+ *
+ * The generator moved to sit beside the pattern that validates it: `prune`
+ * refuses to delete a directory whose name this app did not choose, and a
+ * guard that can drift from the generator is not a guard.
+ */
+export { newCaptureId } from './captureDirectory';
