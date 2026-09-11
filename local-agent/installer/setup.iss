@@ -87,7 +87,16 @@ Type: filesandordirs; Name: "{autopf}\{#LegacyAppName}"
 Type: filesandordirs; Name: "{commonprograms}\{#LegacyAppName}"
 
 [Files]
-Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; A DIRECTORY since 3.8.0, because the PyInstaller build is --onedir. A onefile
+; build extracts its DLLs to %TEMP%\_MEI<random> and runs them from there,
+; which Defender's prevalence ASR rule blocks outright and which no amount of
+; signing the wrapper makes signed. See the reasoning in inwire_agent.spec.
+;
+; recursesubdirs and createallsubdirs are both required: PyInstaller puts
+; almost everything under `_internal`, and without them the exe installs alone
+; and fails to start with no message anywhere.
+Source: "..\dist\inwire-agent-windows\*"; DestDir: "{app}"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
 ; Config and log live here, present before anyone logs in - which a
@@ -136,10 +145,11 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "remove"; \
     Flags: runhidden waituntilterminated; RunOnceId: "RemoveInwireAgent"
 
 [UninstallDelete]
-; The rotating log and its backups are litter once the agent is gone. The
-; config (origin allowlist; the token from 3.2 on) is deliberately kept so a
-; reinstall finds the origins someone added - it is small and named in the
-; README as the one thing uninstall leaves behind.
+; The rotating log and its backups are litter once the agent is gone. Any
+; `config.json` left by an install before 3.8.0 is kept rather than removed:
+; the Windows agent no longer reads it, so deleting it would be tidying up
+; somebody's file for no benefit, and an uninstall that removes more than it
+; installed is the wrong kind of surprise.
 Type: files; Name: "{commonappdata}\Inwire\agent.log"
 Type: files; Name: "{commonappdata}\Inwire\agent.log.*"
 
@@ -257,54 +267,15 @@ begin
   Sleep(2000);
 end;
 
-// The pairing token this install will use, captured so the finished page can
-// show it. Empty when the config already existed, which is the upgrade case.
-var
-  PairingToken: String;
-
-function NewLine: String;
-begin
-  Result := Chr(13) + Chr(10);
-end;
-
-// Seeds config.json, with a pairing token, by running the agent's own
-// --init-config.
+// A token used to be minted here, and a `NewLine` helper existed to show it on
+// the finished page. Both are gone with it (3.8.0).
 //
-// Not written here in Pascal: Inno Setup's Random is seeded from the clock,
-// and a token whose value narrows down to "whenever this machine was set up"
-// is not a token. The agent uses Python's `secrets`, and being the only
-// implementation is what keeps Windows and Unix from drifting apart.
-//
-// The origin check keeps an ordinary web page out of the agent and stops
-// nothing that can set a header, which is any process on this machine. This is
-// the control that tells the user's browser from another program running as
-// the user, and it works because it lands in ProgramData, which an ordinary
-// process cannot read.
-procedure WriteDefaultConfig;
-var
-  ExePath, OutPath: String;
-  // LoadStringFromFile wants an AnsiString, not a String.
-  Existing: AnsiString;
-  ResultCode: Integer;
-begin
-  PairingToken := '';
-  ExePath := ExpandConstant('{app}\{#MyAppExeName}');
-  OutPath := ExpandConstant('{tmp}\pairing-token.txt');
-
-  // The exe is built console=False, so its stdout has to be redirected
-  // through cmd to be captured at all.
-  if not Exec(ExpandConstant('{cmd}'), '/C ""' + ExePath + '" --init-config > "' + OutPath + '""',
-              '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-  begin
-    SuppressibleMsgBox('Could not create the agent configuration.' + #13#10#13#10 +
-      SysErrorMessage(ResultCode), mbError, MB_OK, IDOK);
-    Exit;
-  end;
-
-  if LoadStringFromFile(OutPath, Existing) then
-    PairingToken := Trim(Existing);
-  DeleteFile(OutPath);
-end;
+// The agent's transport on Windows is a named pipe whose security descriptor
+// says who may open it, so there is no secret to generate, no `--init-config`
+// to run, and nothing for the person installing to copy down. `config.json` is
+// no longer seeded at all: the Windows agent reads no origin allowlist and no
+// token, and a file written only to be ignored is a file someone will later
+// try to configure.
 
 procedure RegisterAgentService;
 var
@@ -365,28 +336,5 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
-  begin
-    // Config first: the service reads it on every connection, and seeding it
-    // before the service starts avoids a first-run window with no allowlist.
-    WriteDefaultConfig;
     RegisterAgentService;
-  end;
-end;
-
-// The token has to reach a person. It is written to a file only an
-// administrator can read - which is the point of it - so the one moment it can
-// be shown to the person installing is here.
-procedure CurPageChanged(CurPageID: Integer);
-begin
-  if (CurPageID = wpFinished) and (PairingToken <> '') then
-  begin
-    // NewLine rather than #13#10 written out: the preprocessor reads a '#'
-    // at the start of a line as a directive, so a continuation line may not
-    // begin with one.
-    WizardForm.FinishedLabel.Caption :=
-      'Inwire Agent is installed and running.' + NewLine + NewLine +
-      'Paste this pairing token into Inwire once, under Settings -> Driver Info:'
-      + NewLine + NewLine + '    ' + PairingToken + NewLine + NewLine +
-      'It is also in %ProgramData%\Inwire\config.json, readable by administrators.';
-  end;
 end;
