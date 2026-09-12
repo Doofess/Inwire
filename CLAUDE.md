@@ -252,7 +252,7 @@ Rows come from `src/lib/rowSource.ts` over `captureClient.ts`; bytes come from
 **A display filter has one answer, and the store computes it over the whole
 capture.** The expression is sent to the store, which compiles it with the
 renderer's own `filter/compile.ts` and returns a bitmap over capture ordinals
-(`captureScan.ts`, `matchSet.ts`, ADR pending). There is deliberately no second
+(`captureScan.ts`, `matchSet.ts`, ADR 0031). There is deliberately no second
 evaluator: a prefix-block accelerator would answer differently from the
 in-memory filter on exactly the frames nobody can see to check. Enforced by
 `scripts/capture/store-protocol.ts`, which compares the scan's ordinals against
@@ -509,9 +509,9 @@ run, kept.
 Getting there turned up the bug that had made the entire disk path inert since
 the store became a process — see **The bug that hid the whole disk path**.
 
-**Owed:** ADR 0027 (the app is a desktop app), 0028 (where the store runs, with
-the measured IPC cost), 0030 (one installer), and one for the whole-capture
-filter. ADR 0029 is written.
+**The ADRs the migration owed are written**: 0027 (the app is a desktop app),
+0028 (where the store runs, with the boundary measured), 0030 (one installer),
+0031 (the whole-capture filter). 0029 was already there.
 
 ### The bug that hid the whole disk path
 
@@ -692,7 +692,11 @@ plan a bump roughly every other release.
 | 0024 | Carrying a message across segments | accepted |
 | 0025 | The capture lives on disk | accepted |
 | 0026 | One capture on disk | accepted; its quota arithmetic is void on a real disk |
+| 0027 | The app is a desktop app | accepted |
+| 0028 | Where the capture store runs, and what the boundary costs | accepted |
 | 0029 | The app and the agent talk over a named pipe | accepted |
+| 0030 | One installer, two destinations, the app never elevates | accepted |
+| 0031 | A display filter answers over the whole capture | accepted |
 
 **ADR 0008 weakened and it is not written down there yet.** Its argument was
 that key material "is exactly as old as the tab"; a desktop app open for days

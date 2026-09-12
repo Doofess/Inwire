@@ -33,7 +33,11 @@ file that supersedes the old one.
 | [0024](0024-carrying-a-message-across-segments.md) | Carrying a message across segments — **closes 0020's fourth protocol**, and why DCERPC is not next | Accepted 2026-09-10 |
 | [0025](0025-the-capture-lives-on-disk.md) | The capture lives on disk — **supersedes 0012's mechanism and 0013's storage**, and nothing deletes a frame to make room any more | Accepted 2026-09-11 |
 | [0026](0026-one-capture-on-disk.md) | One capture on disk — **closes 0025 §4**: no library, no launch prompt, and why a 5 GB capture makes the previous one worth less | Accepted 2026-09-11 |
+| [0027](0027-the-app-is-a-desktop-app.md) | The app is a desktop app — **supersedes 0025 Decision 1's mechanism** and dissolves the quota 0026 reasons from | Accepted 2026-09-12 |
+| [0028](0028-where-the-capture-store-runs.md) | Where the capture store runs, and what the boundary costs — the measurement 0025 asked for: **the crossing is 16%** | Accepted 2026-09-12 |
 | [0029](0029-the-app-and-the-agent-talk-over-a-named-pipe.md) | The app and the agent talk over a named pipe — **supersedes 0005's authentication half and deletes it**: the kernel answers the question the token was asked to answer | Accepted 2026-09-11 |
+| [0030](0030-one-installer-two-destinations.md) | One installer, two destinations, and the app never elevates — signing and updates deliberately **not** decided | Accepted 2026-09-12 |
+| [0031](0031-a-filter-answers-over-the-whole-capture.md) | A display filter answers over the whole capture — **completes 0025**: one evaluator, a bitmap, and the boundary is the window | Accepted 2026-09-12 |
 
 ## Review outcome: amendments to the spec's execution order
 
