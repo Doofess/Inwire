@@ -138,10 +138,12 @@ nowhere. A dead store is a handled state: `child.on('exit')` tells the renderer
 over a separate channel, because a `MessagePort` that goes quiet would hang
 every pending read for the life of the window.
 
-`execArgv: ['--max-old-space-size=2048']` is there and **does not work**. Under
-sustained load the store's heap was measured at 4,060 MB before V8 killed it,
-which is V8's own 64-bit default — so the ceiling the comment beside it claims
-is not in effect. See **What blocks watching the disk filter work**.
+`execArgv: ['--max-old-space-size=2048']` is there and **does not work** — the
+flag arrives and V8's limit stays at its 4192 MB default, because the isolate
+already exists by the time Electron looks at it. `store/heapGuard.ts` enforces
+the ceiling instead, by sampling the heap and standing down deliberately with a
+message a V8 abort cannot give. See **What blocks watching the disk filter
+work**.
 
 ### The renderer
 
@@ -473,32 +475,56 @@ filter. ADR 0029 is written.
 
 ### What blocks watching the disk filter work
 
-Found while trying to drive it, and recorded because every number here was
-measured rather than reasoned about.
+Found while trying to drive it. Every number here was measured; the one
+conclusion that was not is called out as such.
 
-**The store falls a long way behind a live capture, and `below` stays 0 while
-it does.** Driven by `serveStub.ts --burst` at 3,000–20,000 frames a second,
-the buffer trims correctly at ~112,000 frames (its 128 MB budget), but
-`ordinalOf(window[0].id)` keeps answering -1 — the window's oldest frame is not
-in the index yet — so the list never addresses the capture and the filter never
-has disk to scan. Whole-capture filtering therefore cannot engage during a fast
-capture at all, only after it stops and the store drains.
+**The list never addresses the capture during a fast capture, so the filter
+has no disk to scan.** Driven by `serveStub.ts --burst` at 3,000-20,000 frames
+a second, the buffer trims correctly at ~112,000 frames (its 128 MB budget),
+but `ordinalOf(window[0].id)` keeps answering -1 — the window's oldest frame
+is not addressable — so `below` stays 0. **Why is not established.** The first
+guess was that the store had fallen behind, and the measurement below says it
+had not; the frames were flushed to it at a small fraction of what it can take.
+So this is an open question, not a diagnosed one.
 
-**It is not the store's own work.** `CaptureWriter` over `NodeBlockFile`
-appends **121,157 frames a second** in a plain Node process — 8.25 µs a frame,
-of which the per-frame `writeSync` for raw bytes is 1.97 µs (24%, and batching
-those into one write per append would recover it). So the backlog is upstream
-of the writer: the `append` message's structured clone across the
-`utilityProcess` boundary, which is precisely the number ADR 0028 is waiting
-on and still the one nobody has measured.
+**The boundary is not the cost, and this is the number ADR 0028 was waiting
+for.** `npx tsx scripts/perf/store-boundary.ts`, over 100,000 realistic frames
+in batches of 300:
 
-**Under sustained overload the store dies rather than shedding.** At 20,000
-frames a second its heap reached **4,060 MB** and V8 killed it
-(`MarkCompactCollector: young object promotion failed`). Two things follow.
-The queue in `CaptureHost` is unbounded, and each pending `append` holds its
-frames. And `execArgv: ['--max-old-space-size=2048']` in `electron/store/host.ts`
-is **not taking effect** — 4 GB is V8's own 64-bit default, so the ceiling that
-comment claims to set is not set. Both are unfixed.
+| | |
+|---|---|
+| `CaptureWriter` + `NodeBlockFile`, no boundary | 26.68 µs a frame — **37,477 f/s** |
+| serialize + deserialize (`v8`) | 5.27 µs a frame |
+| the whole hop over a real `MessagePort` | 5.26 µs a frame — 190,213 f/s |
+| **both together** | 31.94 µs a frame — **31,308 f/s** |
+
+The crossing is **16%** of it, and 1,955 B a frame on the wire. So the store
+sustains ~31,000 frames a second including the hop, and moving the store back
+in-process would buy 16% — which is not the argument for engine-side
+dissection, and the Direction entry should not be read as if it were. What
+looked worth having and is not: the writer's per-frame `writeSync` costs
+3.40 µs where the same bytes in one write a batch cost 0.28, which reads as
+12% of the writer — and batching the writer for real measured **3% slower**,
+because copying 1,100 bytes a frame into a coalescing buffer costs more than a
+`writeSync` to a file the OS has cached. Tried, measured, reverted. The
+comparison is still in the script, labelled as the trap it is.
+
+**The store still died once, at 4,060 MB, and its ceiling was a fiction.**
+Under `--burst 4000` V8 killed it with `MarkCompactCollector: young object
+promotion failed`. `execArgv: ['--max-old-space-size=2048']` in
+`electron/store/host.ts` **does not apply**: the flag arrives — the store's own
+`process.execArgv` reads it back — and `heap_size_limit` is 4192 MB, V8's
+64-bit default, because V8 fixes the limit when it creates the isolate.
+`v8.setFlagsFromString` at the top of the entry point does not move it either.
+Both measured against the running app.
+
+`electron/store/heapGuard.ts` now enforces it for real: the heap is sampled
+every two seconds, warned about once at 80%, and the process seals and stands
+down at the ceiling with a message saying so — which a V8 abort cannot do.
+`scripts/capture/heap-guard.ts` holds it. What is still unfixed is *why* the
+heap got there: the store's inbound queue is unbounded and each pending
+`append` holds its frames, but at the rates involved it should not have been
+queueing at all, so that explanation is unconfirmed too.
 
 ## 9. Direction
 
@@ -521,11 +547,11 @@ that asks for rows. The store protocol was built so this is a relocation rather
 than a rewrite. **Trigger:** a profile showing the cross-process copy on the
 frame path, or a sustained rate above ~100 MB/s. Not before — and the first
 step is measuring `append` and `readBytes` **across the boundary**, which has
-still not been done. What *has* been measured is the same work with no boundary
-at all: `CaptureWriter` over `NodeBlockFile` in a plain Node process appends
-121,157 frames a second. The store falls behind at a small fraction of that, so
-the boundary is where the cost is, and the number is worth having before 0028
-is written.
+**now been done** — `scripts/perf/store-boundary.ts`, and it does not say what
+this entry assumed. The hop is **5.26 µs a frame** against the writer's
+**26.68 µs**: 16% of the cost, 31,308 frames a second for the two together.
+Moving the store back in-process would buy that 16%, which is not an argument
+for anything. The trigger above still stands; the boundary is not it.
 
 **Offline by default, as a product invariant.** No outbound connection the user
 did not ask for. A packet analyzer that makes requests visible in the user's own

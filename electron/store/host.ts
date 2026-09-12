@@ -41,16 +41,25 @@ export class CaptureStoreHost {
           // Windows GUI app has no console to inherit - so every `fail()`
           // message the protocol calls "never silent" would go nowhere.
           stdio: 'pipe',
-          // A ceiling, so a runaway index fails THIS process rather than the
-          // machine. The store holds the capture index and a bounded directory
-          // cache; at the measured ~16 B a frame an index would have to reach
-          // well past a hundred million frames to approach this, so hitting it
-          // means something is wrong rather than something is large.
+          // **This does not set a heap ceiling, and it looks exactly as
+          // though it does.** The flag arrives - `process.execArgv` in the
+          // store reads it back - and `heap_size_limit` is 4192 MB, V8's own
+          // default, because V8 fixes the limit when it creates the isolate
+          // and Electron creates the isolate before it looks at this.
+          // Measured against the running app after the store was seen to die
+          // at 4,060 MB with the flag in place.
           //
-          // Crashing is a handled state: `child.on('exit')` tells the renderer
+          // Kept anyway: it is harmless, it is what the intent would be if
+          // Electron ever honoured it, and removing it would leave nothing
+          // here pointing at `store/heapGuard.ts`, which enforces the ceiling
+          // for real by sampling the heap and standing down deliberately.
+          //
+          // Either ending is handled: `child.on('exit')` tells the renderer
           // over its own channel, because a dead `MessagePort` just goes quiet
-          // and every pending read would hang for the life of the window.
-          // Swapping a workstation to death is not handled and cannot be.
+          // and every pending read would hang for the life of the window. The
+          // difference the guard makes is that somebody can tell what
+          // happened. Swapping a workstation to death is not handled and
+          // cannot be.
           execArgv: ['--max-old-space-size=2048'],
         },
       );
