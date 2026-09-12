@@ -27,6 +27,7 @@
  * main would have to be told a number in order to tell it back. The row is
  * added by `withAgentRow` instead.
  */
+import type { DriverAccess } from './npcapAccess';
 
 export type UpdateComponentId = 'inwire' | 'agent' | 'npcap' | 'oui' | 'geoip';
 
@@ -255,6 +256,33 @@ export function canApply(component: UpdateComponent): boolean {
 export function canReinstall(component: UpdateComponent): boolean {
   if (component.available === null) return false;
   return component.state.kind === 'up-to-date';
+}
+
+/**
+ * Whether the notice beside the Npcap row names its admin-only checkbox.
+ *
+ * Here, beside `canReinstall`, because it is a **different question** and was
+ * once read off that one - and the two answers differ in exactly the cases
+ * that matter. `canReinstall` is `up-to-date` only, correctly: it governs a
+ * button. This governs wording about a wizard that is about to open, and a
+ * wizard opens on every install path.
+ *
+ * Read off `canReinstall`, the one instruction Inwire cannot carry out itself
+ * went missing twice over: on an all-users machine with an update waiting, the
+ * advice paragraph rendered and then the notice said nothing about the box; and
+ * on a first install - the one moment the checkbox is certainly on screen -
+ * there is no driver to describe, so nothing was said at all.
+ *
+ * `undefined` access means no driver to describe, which is why the second
+ * clause reads `installed` rather than the access mode. It is deliberately not
+ * the same as `unknown`: having failed to read a descriptor is not a reason to
+ * recommend anything, and `driverAccessAdvice` already refuses to.
+ */
+export function namesAdminOnlyCheckbox(
+  component: UpdateComponent, access: DriverAccess | undefined,
+): boolean {
+  if (component.id !== 'npcap') return false;
+  return access === 'all-users' || component.installed === null;
 }
 
 /** The word on the button, when there is one. */

@@ -237,8 +237,20 @@ export function useAgentConnection(host: AgentConnectionHost) {
         // Facts about a connection that no longer exists. Driver Info kept
         // showing the version and the last rejection of an agent that was
         // gone, which read as "still there, still refusing".
+        //
+        // `agentNpcapAccess` is in here for a sharper reason than tidiness:
+        // `decideDriverAccess` gives the DACL priority over the registry, so a
+        // DACL left behind by a dead link outranks every later registry read
+        // for the life of the window. The direction that must not happen is a
+        // stale `admin-only` describing a driver that has since been
+        // reinstalled open - `npcapAccess.ts` says the answer must never be
+        // wrong that way round, and keeping it would be exactly that.
+        //
+        // Only here, not in the `error` branch above: `close` always follows an
+        // `error` on the pipe (`pipeTransport.ts`), so this runs either way.
         setAgentVersion(null);
         setAgentError(null);
+        setAgentNpcapAccess(null);
       }
       isFirstAttempt = false;
     };

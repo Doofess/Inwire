@@ -6,7 +6,8 @@ import { DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
 import { usePreferenceStore } from '../../services/preferenceStore';
 import { updateStore, shouldPrompt, type UpdatePrefs } from '../../services/updatePrefs';
 import {
-  actionLabel, canApply, canReinstall, EMPTY_SNAPSHOT, installedLabel, isBusy, normalizeSnapshot,
+  actionLabel, canApply, canReinstall, EMPTY_SNAPSHOT, installedLabel, isBusy,
+  namesAdminOnlyCheckbox, normalizeSnapshot,
   stateLabel, withAgentRow,
   type UpdateComponent, type UpdateSnapshot,
 } from '../../services/updateCenter';
@@ -105,6 +106,14 @@ const Row: React.FC<{
   const advice = driverAccess === undefined ? null : driverAccessAdvice(driverAccess);
   const offerReinstall = advice !== null && canReinstall(component);
 
+  // Not `offerReinstall`, which is a button's question and was once wrongly
+  // read as this one - `namesAdminOnlyCheckbox` says why, and is in `services/`
+  // so the wording is held by the fast suite rather than only by the drive
+  // script. The advice paragraph above is unchanged: its text says Npcap "is
+  // installed with its capture devices open", which is not true of a row with
+  // no driver, whereas a notice about a window that is about to appear is.
+  const nameCheckbox = namesAdminOnlyCheckbox(component, driverAccess);
+
   return (
     <div className="flex items-start justify-between gap-6 py-2.5">
       <div className="min-w-0">
@@ -128,7 +137,7 @@ const Row: React.FC<{
         )}
         {component.id === 'npcap' && (actionable || offerReinstall) && (
           <p className="text-[11px] text-muted-foreground mt-1 leading-snug">
-            {offerReinstall ? NPCAP_ADMIN_ONLY_NOTICE : NPCAP_NOTICE}
+            {nameCheckbox ? NPCAP_ADMIN_ONLY_NOTICE : NPCAP_NOTICE}
           </p>
         )}
       </div>
