@@ -16,14 +16,26 @@ directories:
   buildResources: electron/resources
   output: release
 
-# Only what the app actually loads. Every renderer dependency — react, three,
-# maplibre-gl, d3, exceljs, jspdf, pdfjs-dist — is already bundled into
-# dist/assets by Vite, and electron-builder's default is to pack `dependencies`
-# as well, which would ship all of them a second time as node_modules.
+# Only what the app actually loads.
+#
+# The `!node_modules` line is the one that matters, and it is not what an
+# include list looks like it should need. electron-builder packs every
+# production dependency **regardless** of the patterns above it: `files` filters
+# the app's own tree, and node_modules is handled separately. Measured before
+# the exclusion: app.asar was **273 MB** and the unpacked app 667 MB, for a
+# renderer that is 9.7 MB.
+#
+# Nothing in there is reachable at runtime. Vite bundles every renderer
+# dependency into dist/assets, and `electron/build.cjs` bundles main, the
+# preload and the store entry with `electron` as the ONLY external - so the
+# packaged app resolves no module from disk at all. If that ever stops being
+# true, this line is what will make it fail loudly at start rather than
+# silently ship 250 MB nobody loads.
 files:
   - dist/**
   - dist-electron/**
   - package.json
+  - '!node_modules/**/*'
 
 # `dir` only, for now. The real installer is Inno Setup wrapping this output:
 # `local-agent/installer/setup.iss` already contains the Npcap
