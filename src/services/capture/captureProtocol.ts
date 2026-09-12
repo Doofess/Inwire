@@ -59,6 +59,27 @@ export type ToCapture =
   /** Deletes the capture's directory outright. */
   | { type: 'discard'; captureId: string }
   /**
+   * Runs a display filter over the whole capture. Answered with `scanDone`.
+   *
+   * The **expression**, not a predicate: a compiled filter is a closure and a
+   * closure does not cross a process boundary. So the store compiles it with
+   * the same `filter/compile.ts` the renderer uses, which is what keeps one
+   * filter from having two answers - see `captureScan.ts`.
+   *
+   * At most one runs at a time. A second `scan` cancels the first, because the
+   * only caller is a filter bar and the filter it typed a moment ago is not
+   * an answer anybody wants.
+   */
+  | { type: 'scan'; requestId: number; filter: string }
+  /**
+   * Abandons a scan. Answered with `scanDone`, like every request here.
+   *
+   * Carries the `requestId` it means, and is ignored when that is not the scan
+   * currently running - a cancel arriving after its own scan finished must not
+   * abandon the next one.
+   */
+  | { type: 'scanCancel'; requestId: number }
+  /**
    * The raw bytes of specific frames.
    *
    * Answered with a `bytes` message carrying the same `requestId`. Ids the
@@ -124,6 +145,40 @@ export type FromCapture =
   | { type: 'blocks'; requestId: number; blocks: { firstOrdinal: number; packets: Packet[] }[] }
   /** Where a `locate`'s frame sits, or -1 when it is not addressable yet. */
   | { type: 'located'; requestId: number; ordinal: number }
+  /**
+   * How far a scan has got. Sent every `SCAN_PROGRESS_FRAMES`, not per slice.
+   *
+   * A slice is 12 ms, so a per-slice message would be 83 a second carrying a
+   * number a person reads twice.
+   */
+  | {
+      type: 'scanProgress';
+      requestId: number;
+      framesDone: number;
+      frameCount: number;
+      matches: number;
+    }
+  /**
+   * A scan finished, was cancelled, or could not run. Always exactly one.
+   *
+   * `bits` is the sealed bitmap, one bit per capture ordinal, which the caller
+   * rebuilds with `MatchSet.fromBytes(frameCount, bits)`. Null for a scan that
+   * did not complete: a half-built `MatchSet` answers `count()` and refuses
+   * `ordinalAt`, so handing one over would give a confidently wrong row.
+   *
+   * `frameCount` is the **snapshot** the scan covered, fixed when it started.
+   * A capture still running has grown since, and the caller has to say so
+   * rather than present a prefix as the whole answer.
+   */
+  | {
+      type: 'scanDone';
+      requestId: number;
+      frameCount: number;
+      bits: Uint8Array | null;
+      cancelled: boolean;
+      /** Why it could not run - a filter that does not compile, or no capture. */
+      message: string | null;
+    }
   /**
    * The capture worker could not do something, and said so.
    *

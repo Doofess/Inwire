@@ -27,11 +27,48 @@ import type { Packet } from '../../types/packet';
 import type { InfoPatch } from '../dissect/types';
 import type { ToCapture, FromCapture, CaptureStorageState } from './captureProtocol';
 import { freshCaptureStorageState } from './captureProtocol';
+import { MatchSet } from './matchSet';
 
 /** One decoded chunk, and where it starts in the capture. */
 export interface RowBlock {
   firstOrdinal: number;
   packets: Packet[];
+}
+
+/** How far a scan has got, for the progress the filter bar shows. */
+export interface ScanProgressUpdate {
+  framesDone: number;
+  frameCount: number;
+  matches: number;
+}
+
+/**
+ * How a scan ended. Exactly one of these, always.
+ *
+ * `cancelled` and `failed` are separate because they mean different things to
+ * the caller: one is the user's own doing - a newer filter, or Escape - and
+ * the other is something to say out loud.
+ */
+export type ScanOutcome =
+  | {
+      status: 'done';
+      matches: MatchSet;
+      /**
+       * The ordinals the scan covered, fixed when it started.
+       *
+       * A live capture has grown since, and the frames past this are simply
+       * not in the answer. The caller states that rather than presenting a
+       * prefix as the whole of it.
+       */
+      frameCount: number;
+    }
+  | { status: 'cancelled' }
+  | { status: 'failed'; message: string };
+
+/** A scan in flight. `cancel` is safe at any point, including twice. */
+export interface ScanHandle {
+  readonly result: Promise<ScanOutcome>;
+  cancel(): void;
 }
 
 /** What a reopened capture turned out to hold. */
@@ -115,6 +152,11 @@ class CaptureClient {
   private readonly pendingOpen = new Map<number, (ready: StoredCapture | null) => void>();
   private readonly pendingBlocks = new Map<number, (blocks: RowBlock[]) => void>();
   private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
+  /** The scan in flight. At most one - the store enforces the same. */
+  private readonly pendingScan = new Map<number, {
+    onProgress?: (progress: ScanProgressUpdate) => void;
+    settle: (outcome: ScanOutcome) => void;
+  }>();
   private nextRequest = 1;
 
   onState: (state: CaptureStorageState) => void = () => {};
@@ -223,6 +265,43 @@ class CaptureClient {
         if (settle === undefined) break;
         this.pendingLocate.delete(message.requestId);
         settle(message.ordinal);
+        break;
+      }
+      case 'scanProgress': {
+        this.pendingScan.get(message.requestId)?.onProgress?.({
+          framesDone: message.framesDone,
+          frameCount: message.frameCount,
+          matches: message.matches,
+        });
+        break;
+      }
+      case 'scanDone': {
+        const waiting = this.pendingScan.get(message.requestId);
+        if (waiting === undefined) break;
+        this.pendingScan.delete(message.requestId);
+        if (message.cancelled) { waiting.settle({ status: 'cancelled' }); break; }
+        if (message.message !== null || message.bits === null) {
+          waiting.settle({
+            status: 'failed',
+            message: message.message ?? 'the scan produced no result',
+          });
+          break;
+        }
+        // `fromBytes` seals, and throws if the bitmap is the wrong size for
+        // the frame count - which would be the two ends disagreeing about the
+        // layout rather than anything the user did.
+        try {
+          waiting.settle({
+            status: 'done',
+            matches: MatchSet.fromBytes(message.frameCount, message.bits),
+            frameCount: message.frameCount,
+          });
+        } catch (error) {
+          waiting.settle({
+            status: 'failed',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
         break;
       }
       case 'failure':
@@ -388,6 +467,51 @@ class CaptureClient {
     );
   }
 
+  /**
+   * Runs a display filter over the whole capture on disk.
+   *
+   * The expression travels, not a predicate - a compiled filter is a closure.
+   * The store compiles it with the same `filter/compile.ts` this process would
+   * have used, which is the whole reason there is one answer rather than two.
+   *
+   * Returns immediately with a handle. `cancel()` is safe before the port has
+   * even resolved: the scan is simply never started, and `result` settles
+   * `cancelled`.
+   */
+  scanCapture(
+    filter: string,
+    onProgress?: (progress: ScanProgressUpdate) => void,
+  ): ScanHandle {
+    let cancelled = false;
+    let requestId: number | null = null;
+
+    const result = (async (): Promise<ScanOutcome> => {
+      const port = await this.ensurePort();
+      if (port === null) {
+        return { status: 'failed', message: 'there is no capture store to scan' };
+      }
+      // Checked after the await as well as before sending: a cancel that
+      // arrived while the port was still coming has nothing to cancel, and
+      // starting the scan anyway would leave it running with no reader.
+      if (cancelled) return { status: 'cancelled' };
+      const id = this.nextRequest++;
+      requestId = id;
+      return new Promise<ScanOutcome>((settle) => {
+        this.pendingScan.set(id, { onProgress, settle });
+        port.postMessage({ type: 'scan', requestId: id, filter });
+      });
+    })();
+
+    return {
+      result,
+      cancel: () => {
+        if (cancelled) return;
+        cancelled = true;
+        if (requestId !== null) this.send({ type: 'scanCancel', requestId });
+      },
+    };
+  }
+
   /** Deletes every capture directory but these. See the protocol's `prune`. */
   prune(keep: readonly string[]): void { this.send({ type: 'prune', keep: [...keep] }); }
 
@@ -414,6 +538,12 @@ class CaptureClient {
     this.pendingBlocks.clear();
     for (const settle of this.pendingLocate.values()) settle(-1);
     this.pendingLocate.clear();
+    // `failed` rather than `cancelled`: the store went away, which is not the
+    // user's doing and is worth saying.
+    for (const waiting of this.pendingScan.values()) {
+      waiting.settle({ status: 'failed', message: 'the capture store stopped' });
+    }
+    this.pendingScan.clear();
   }
 
   get snapshot(): CaptureStorageState { return this.state; }
