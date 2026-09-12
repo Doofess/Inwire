@@ -224,9 +224,13 @@ console.log('\n--- the feed URL, and its dev override ---\n');
     resolveFeedUrl({ [UPDATE_FEED_ENV]: '   ' }), DEFAULT_UPDATE_FEED_URL);
   check('an override wins', resolveFeedUrl({ [UPDATE_FEED_ENV]: FEED }), FEED);
 
-  // `.invalid` is reserved by RFC 2606 and can never resolve, so a build that
-  // ships the placeholder reaches nothing rather than reaching somebody else.
-  checkTrue('the placeholder cannot resolve', DEFAULT_UPDATE_FEED_URL.includes('.invalid/'));
+  // Not a check that it resolves - it does not yet, and a test that reached
+  // the network would fail on an aeroplane. What is worth pinning is that the
+  // built-in is https and ours: an http feed would let a network attacker
+  // rewrite the URL of something this app runs elevated.
+  checkTrue('the built-in feed is https', DEFAULT_UPDATE_FEED_URL.startsWith('https://'));
+  check('...and points at our own host',
+    new URL(DEFAULT_UPDATE_FEED_URL).hostname, 'updates.inwire.app');
 
   checkTrue('a 64-hex string is a digest', isSha256Hex('0'.repeat(64)));
   checkTrue('...and mixed case is too', isSha256Hex('aF'.repeat(32)));
@@ -272,7 +276,7 @@ console.log('\n--- the elevated command line, byte for byte ---\n');
     '-NoProfile',
     '-NonInteractive',
     '-EncodedCommand',
-    'JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAiAFMAdABvAHAAIgAKAHQAcgB5ACAAewAKACAAIAAkAHAAIAA9ACAAUwB0AGEAcgB0AC0AUAByAG8AYwBlAHMAcwAgAC0ARgBpAGwAZQBQAGEAdABoACAAJABlAG4AdgA6AEkATgBXAEkAUgBFAF8ASQBOAFMAVABBAEwATABFAFIAIAAtAEEAcgBnAHUAbQBlAG4AdABMAGkAcwB0ACAAJABlAG4AdgA6AEkATgBXAEkAUgBFAF8AQQBSAEcAUwAgAC0AVgBlAHIAYgAgAFIAdQBuAEEAcwAgAC0AVwBhAGkAdAAgAC0AUABhAHMAcwBUAGgAcgB1AAoAIAAgAFcAcgBpAHQAZQAtAE8AdQB0AHAAdQB0ACAAKAAiAEkATgBXAEkAUgBFAF8AUgBFAFMAVQBMAFQAPQBvAGsAOgAiACAAKwAgACQAcAAuAEUAeABpAHQAQwBvAGQAZQApAAoAfQAgAGMAYQB0AGMAaAAgAFsAUwB5AHMAdABlAG0ALgBDAG8AbQBwAG8AbgBlAG4AdABNAG8AZABlAGwALgBXAGkAbgAzADIARQB4AGMAZQBwAHQAaQBvAG4AXQAgAHsACgAgACAAVwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAoACIASQBOAFcASQBSAEUAXwBSAEUAUwBVAEwAVAA9AHcAaQBuADMAMgA6ACIAIAArACAAJABfAC4ARQB4AGMAZQBwAHQAaQBvAG4ALgBOAGEAdABpAHYAZQBFAHIAcgBvAHIAQwBvAGQAZQApAAoAfQAgAGMAYQB0AGMAaAAgAHsACgAgACAAVwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAiAEkATgBXAEkAUgBFAF8AUgBFAFMAVQBMAFQAPQBlAHIAcgBvAHIAIgAKAH0A',
+    'JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAiAFMAdABvAHAAIgAKAHQAcgB5ACAAewAKACAAIAAkAGcAbwAgAD0AIABAAHsAIABGAGkAbABlAFAAYQB0AGgAIAA9ACAAJABlAG4AdgA6AEkATgBXAEkAUgBFAF8ASQBOAFMAVABBAEwATABFAFIAOwAgAFYAZQByAGIAIAA9ACAAIgBSAHUAbgBBAHMAIgA7ACAAVwBhAGkAdAAgAD0AIAAkAHQAcgB1AGUAOwAgAFAAYQBzAHMAVABoAHIAdQAgAD0AIAAkAHQAcgB1AGUAIAB9AAoAIAAgAGkAZgAgACgAJABlAG4AdgA6AEkATgBXAEkAUgBFAF8AQQBSAEcAUwApACAAewAgACQAZwBvAFsAIgBBAHIAZwB1AG0AZQBuAHQATABpAHMAdAAiAF0AIAA9ACAAJABlAG4AdgA6AEkATgBXAEkAUgBFAF8AQQBSAEcAUwAgAH0ACgAgACAAJABwACAAPQAgAFMAdABhAHIAdAAtAFAAcgBvAGMAZQBzAHMAIABAAGcAbwAKACAAIABXAHIAaQB0AGUALQBPAHUAdABwAHUAdAAgACgAIgBJAE4AVwBJAFIARQBfAFIARQBTAFUATABUAD0AbwBrADoAIgAgACsAIAAkAHAALgBFAHgAaQB0AEMAbwBkAGUAKQAKAH0AIABjAGEAdABjAGgAIABbAFMAeQBzAHQAZQBtAC4AQwBvAG0AcABvAG4AZQBuAHQATQBvAGQAZQBsAC4AVwBpAG4AMwAyAEUAeABjAGUAcAB0AGkAbwBuAF0AIAB7AAoAIAAgAFcAcgBpAHQAZQAtAE8AdQB0AHAAdQB0ACAAKAAiAEkATgBXAEkAUgBFAF8AUgBFAFMAVQBMAFQAPQB3AGkAbgAzADIAOgAiACAAKwAgACQAXwAuAEUAeABjAGUAcAB0AGkAbwBuAC4ATgBhAHQAaQB2AGUARQByAHIAbwByAEMAbwBkAGUAKQAKAH0AIABjAGEAdABjAGgAIAB7AAoAIAAgAFcAcgBpAHQAZQAtAE8AdQB0AHAAdQB0ACAAIgBJAE4AVwBJAFIARQBfAFIARQBTAFUATABUAD0AZQByAHIAbwByACIACgB9AA==',
   ];
   check('the argv is exactly this', [...ELEVATE_ARGV], expected);
 
@@ -287,9 +291,21 @@ console.log('\n--- the elevated command line, byte for byte ---\n');
   // missing -PassThru means there is no exit code to lose.
   checkTrue('no argument is ever a filesystem path',
     ELEVATE_ARGV.every((arg) => !arg.includes('\\') && !arg.includes('/')));
-  checkTrue('the script waits', ELEVATE_SCRIPT.includes('-Wait'));
-  checkTrue('...and asks for the process back', ELEVATE_SCRIPT.includes('-PassThru'));
-  checkTrue('it elevates', ELEVATE_SCRIPT.includes('-Verb RunAs'));
+  checkTrue('the script waits', ELEVATE_SCRIPT.includes('Wait = $true'));
+  checkTrue('...and asks for the process back', ELEVATE_SCRIPT.includes('PassThru = $true'));
+
+  // The bug that firing it found. `Start-Process -ArgumentList ''` does not
+  // run a program with no arguments - it throws, and the component that takes
+  // no arguments is Npcap, which is the one install this feature exists for.
+  // So the arguments are splatted and omitted when empty.
+  checkTrue('the arguments are splatted', ELEVATE_SCRIPT.includes('Start-Process @go'));
+  checkTrue('...and omitted entirely when there are none',
+    ELEVATE_SCRIPT.includes('if ($env:INWIRE_ARGS) {'));
+  checkTrue('no bare -ArgumentList survives, in either script',
+    !ELEVATE_SCRIPT.includes('-ArgumentList') && !LAUNCH_SCRIPT.includes('-ArgumentList'));
+  // Npcap is exactly that case, so the two facts belong next to each other.
+  check('...which is the case Npcap takes', INSTALLER_ARGS['vendor-installer'], '');
+  checkTrue('it elevates', ELEVATE_SCRIPT.includes('Verb = "RunAs"'));
   checkTrue('it never prompts on its own', ELEVATE_ARGV.includes('-NonInteractive'));
   checkTrue('it reads the path from the environment',
     ELEVATE_SCRIPT.includes('$env:INWIRE_INSTALLER'));
@@ -316,10 +332,10 @@ console.log('\n--- the installer that closes us, which must not be awaited ---\n
   checkTrue('Npcap is', awaitsInstaller('vendor-installer'));
   checkTrue('a database download is too', awaitsInstaller('database'));
 
-  checkTrue('the launch script does not wait', !LAUNCH_SCRIPT.includes('-Wait'));
+  checkTrue('the launch script does not wait', !LAUNCH_SCRIPT.includes('Wait = $true'));
   checkTrue('...and asks for no exit code it cannot read',
-    !LAUNCH_SCRIPT.includes('-PassThru'));
-  checkTrue('it still elevates', LAUNCH_SCRIPT.includes('-Verb RunAs'));
+    !LAUNCH_SCRIPT.includes('PassThru = $true'));
+  checkTrue('it still elevates', LAUNCH_SCRIPT.includes('Verb = "RunAs"'));
   checkTrue('it still reads the path from the environment',
     LAUNCH_SCRIPT.includes('$env:INWIRE_INSTALLER'));
 
@@ -327,7 +343,7 @@ console.log('\n--- the installer that closes us, which must not be awaited ---\n
   // deadlock; a missing `-Wait` in the elevate script silently reports every
   // install as an instant success.
   checkTrue('the waiting script waits and the launching one does not',
-    ELEVATE_SCRIPT.includes('-Wait') && !LAUNCH_SCRIPT.includes('-Wait'));
+    ELEVATE_SCRIPT.includes('Wait = $true') && !LAUNCH_SCRIPT.includes('Wait = $true'));
 
   const decoded = Buffer.from(LAUNCH_ARGV[3], 'base64').toString('utf16le');
   check('the launch argv decodes to its script', decoded, LAUNCH_SCRIPT);

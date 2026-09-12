@@ -66,10 +66,10 @@ export const OUTBOUND_HOSTS = {
 export const MAIN_OUTBOUND_HOSTS = {
   /**
    * `updateCenter/host.ts` - the update manifest, behind `inwire.updates`,
-   * which is off until somebody turns it on. A placeholder host until the
-   * domain exists; `.invalid` is reserved by RFC 2606 and cannot resolve.
+   * which is off until somebody turns it on. The domain does not resolve
+   * yet, so today every check is a quiet no-op.
    */
-  updateFeed: 'https://updates.inwire.invalid',
+  updateFeed: 'https://updates.inwire.app',
   /**
    * `updateCenter/host.ts` - the Npcap installer, on an explicit click and
    * never otherwise. The vendor's own host: the free licence forbids

@@ -59,13 +59,32 @@ export const INSTALLER_ARGS_ENV = 'INWIRE_ARGS';
  * `${` can appear by accident, and so the byte-for-byte assertion in
  * `scripts/electron/update-center.ts` reads the way the script does.
  *
- * `-Wait -PassThru` together are what make `$p.ExitCode` exist. Without both,
- * the exit code is lost and every install reports success.
+ * `Wait` and `PassThru` together are what make `$p.ExitCode` exist. Without
+ * both, the exit code is lost and every install reports success.
+ *
+ * ## The arguments are splatted, and omitted entirely when there are none
+ *
+ * `Start-Process -ArgumentList ''` does not run the program with no arguments.
+ * It throws: *"Cannot validate argument on parameter 'ArgumentList'. The
+ * argument is null or empty."* And the component that takes no arguments is
+ * **Npcap** - deliberately, because the alternative is `/S` - so the naive
+ * version failed on the one install this feature exists to perform, one second
+ * after the click, with "the installer could not be started" and no prompt.
+ *
+ * Found by firing it at a real machine. Nothing in the pure suite could have
+ * caught it: the argument list was correct, the marker parsing was correct, and
+ * PowerShell's own parser accepts the line - it is the cmdlet's parameter
+ * validation that rejects it, at run time, only when the variable is empty.
+ *
+ * A hashtable keeps the fix inside the constant. The command line is still
+ * fixed and the path still travels in the environment.
  */
 export const ELEVATE_SCRIPT_LINES: readonly string[] = [
   '$ErrorActionPreference = "Stop"',
   'try {',
-  '  $p = Start-Process -FilePath $env:INWIRE_INSTALLER -ArgumentList $env:INWIRE_ARGS -Verb RunAs -Wait -PassThru',
+  '  $go = @{ FilePath = $env:INWIRE_INSTALLER; Verb = "RunAs"; Wait = $true; PassThru = $true }',
+  '  if ($env:INWIRE_ARGS) { $go["ArgumentList"] = $env:INWIRE_ARGS }',
+  '  $p = Start-Process @go',
   '  Write-Output ("INWIRE_RESULT=ok:" + $p.ExitCode)',
   '} catch [System.ComponentModel.Win32Exception] {',
   '  Write-Output ("INWIRE_RESULT=win32:" + $_.Exception.NativeErrorCode)',
@@ -96,7 +115,9 @@ export const ELEVATE_SCRIPT_LINES: readonly string[] = [
 export const LAUNCH_SCRIPT_LINES: readonly string[] = [
   '$ErrorActionPreference = "Stop"',
   'try {',
-  '  Start-Process -FilePath $env:INWIRE_INSTALLER -ArgumentList $env:INWIRE_ARGS -Verb RunAs',
+  '  $go = @{ FilePath = $env:INWIRE_INSTALLER; Verb = "RunAs" }',
+  '  if ($env:INWIRE_ARGS) { $go["ArgumentList"] = $env:INWIRE_ARGS }',
+  '  Start-Process @go',
   '  Write-Output "INWIRE_RESULT=ok:0"',
   '} catch [System.ComponentModel.Win32Exception] {',
   '  Write-Output ("INWIRE_RESULT=win32:" + $_.Exception.NativeErrorCode)',

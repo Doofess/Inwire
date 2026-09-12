@@ -35,11 +35,20 @@ import type { Available, ComponentId, ComponentKind } from './components';
 import { isVersion } from './components';
 
 /**
- * Where the feed lives. A placeholder until the domain exists - `.invalid` is
- * reserved by RFC 2606 and can never resolve, so a build that ships this by
- * accident fails to reach anything rather than reaching somebody else.
+ * Where the feed lives.
+ *
+ * The domain does not resolve yet, and until it does every check is a quiet
+ * no-op - which is a state the pipeline already handles as its ordinary case
+ * rather than as an error, so pointing at the real name costs nothing and is
+ * one fewer thing to remember on the day it exists.
+ *
+ * It replaced an RFC 2606 `.invalid` placeholder. The reason to move off that
+ * is not tidiness: a name that CANNOT resolve and a name that DOES NOT YET
+ * resolve exercise the same path, but only the second one ever starts
+ * working, and a build shipped with the first would fail silently and for
+ * ever with nothing to notice.
  */
-export const DEFAULT_UPDATE_FEED_URL = 'https://updates.inwire.invalid/manifest.json';
+export const DEFAULT_UPDATE_FEED_URL = 'https://updates.inwire.app/manifest.json';
 
 /** The dev override. One variable, read once, never baked into a build. */
 export const UPDATE_FEED_ENV = 'INWIRE_UPDATE_FEED';
