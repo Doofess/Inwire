@@ -7,14 +7,38 @@
 ; ## Why Inno and not electron-builder's NSIS target
 ;
 ; Everything hard about installing this product is in the parts NSIS would have
-; to re-derive: downloading Npcap at install time (a licensing constraint, not a
-; technical one), registering a LocalSystem service with a failure-recovery
+; to re-derive: registering a LocalSystem service with a failure-recovery
 ; policy, stopping a service that can starve its own event loop and miss an SCM
 ; stop, and cleaning up two earlier products by name. That is the
 ; highest-risk rewrite available in this migration for no user-visible gain.
 ;
 ; The cost, accepted: electron-updater cannot drive an Inno installer, so
 ; updates are hand-rolled.
+;
+; ## This installer does not install Npcap, and that is deliberate
+;
+; It used to. It downloaded npcap-1.79.exe at install time and ran it with
+; `/S` - and `/S` is Npcap's **OEM silent-install feature**, used here against
+; the free installer, whose licence does not grant it. That is gone, along with
+; the download, the pinned SHA256, the DownloadPage and the three helpers that
+; drove them.
+;
+; Two more things were wrong with it beyond the licence. The version was a
+; compile-time `#define`, so correcting a stale pin meant shipping a new
+; installer - the constant's own comment predicted the fix: "a version+hash
+; pair served from a feed we control rather than a literal here". And `[Run]`
+; ignores exit codes, so a failed driver install produced a "successful"
+; product install with no capture capability and nothing on screen.
+;
+; Npcap is now the app's Update Center (Settings -> Updates), which reads the
+; installed version, fetches from npcap.com on a click, verifies a hash from a
+; feed that can be corrected without a release, and runs Npcap's own installer
+; **visibly**, so its licence is shown to the person accepting it. A first
+; launch with no driver lands on the "no capture interfaces" banner, which
+; links there. See electron/updateCenter/ and docs/decisions/0032.
+;
+; What has not changed: uninstalling Inwire still leaves Npcap alone. Other
+; tools on the machine may be using it, and it was never ours to remove.
 ;
 ; ## Two payloads, two directories
 ;
@@ -44,24 +68,6 @@
 
 #define AgentExeName "inwire-agent-windows.exe"
 #define ServiceName "InwireAgent"
-#define NpcapUrl "https://npcap.com/dist/npcap-1.79.exe"
-; The expected SHA256, and it is not decoration: this installer runs elevated
-; and hands whatever arrives at that URL to the user's machine as a kernel
-; driver. `DownloadPage.Add`'s third argument was an empty string, which means
-; "do not check", so an install over a hostile network installed whatever it
-; was given.
-;
-; Provenance: downloaded 2026-09-12 and verified to carry a VALID Authenticode
-; signature from `CN=Nmap Software LLC, O=Nmap Software LLC` before the hash was
-; taken. So this pins an artifact whose publisher was checked, rather than
-; whichever bytes happened to arrive first.
-;
-; **This constant and NpcapUrl move together.** A version bump with a stale
-; hash fails the download with an integrity error, which is the correct and
-; visible failure - but the URL will eventually 404 as Npcap ages releases out,
-; and the fix for that is a version+hash pair served from a feed we control
-; rather than a literal here.
-#define NpcapSha256 "a95577ebbc67fc45b319e2ef3a55f4e9b211fe82ed4cb9d8be6b1a9e2425ce53"
 
 ; Where the payloads come from, relative to this file.
 #define AppSource "..\release\win-unpacked"
@@ -140,9 +146,6 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
 
 [Run]
-Filename: "{tmp}\npcap-installer.exe"; Parameters: "/S /winpcap_mode=no"; \
-    StatusMsg: "Installing the Npcap capture driver..."; \
-    Check: NeedsNpcap; Flags: waituntilterminated
 ; Service registration is NOT here. [Run] entries ignore exit codes, and a
 ; failed registration would leave a "successful" install with no service and
 ; nothing on screen to say so. RegisterAgentService checks the result.
@@ -164,68 +167,6 @@ Type: files; Name: "{commonappdata}\Inwire\agent.log"
 Type: files; Name: "{commonappdata}\Inwire\agent.log.*"
 
 [Code]
-var
-  DownloadPage: TDownloadWizardPage;
-
-function IsNpcapInstalled: Boolean;
-begin
-  Result :=
-    RegKeyExists(HKLM, 'SOFTWARE\WOW6432Node\Npcap') or
-    RegKeyExists(HKLM, 'SOFTWARE\Npcap') or
-    FileExists(ExpandConstant('{sys}\Npcap\npcap.sys'));
-end;
-
-function NeedsNpcap: Boolean;
-begin
-  Result := not IsNpcapInstalled;
-end;
-
-function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
-begin
-  Result := True;
-end;
-
-procedure InitializeWizard;
-begin
-  DownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing),
-                                     SetupMessage(msgPreparingDesc),
-                                     @OnDownloadProgress);
-end;
-
-// Npcap is fetched at install time rather than bundled, and that is a
-// LICENSING constraint rather than a technical one: redistributing and
-// silently installing the Npcap installer inside a packaged product needs an
-// Npcap OEM licence, and downloading it on the user's own machine is not
-// redistribution.
-//
-// Aborts rather than continues on failure. Finishing would leave a registered
-// service that can never capture anything, which presents to the user as an
-// app that installed cleanly and does not work.
-function NextButtonClick(CurPageID: Integer): Boolean;
-begin
-  Result := True;
-  if (CurPageID = wpReady) and NeedsNpcap then
-  begin
-    DownloadPage.Clear;
-    DownloadPage.Add('{#NpcapUrl}', 'npcap-installer.exe', '{#NpcapSha256}');
-    DownloadPage.Show;
-    try
-      try
-        DownloadPage.Download;
-      except
-        SuppressibleMsgBox(
-          'Could not download the Npcap capture driver.'#13#10#13#10 +
-          AddPeriod(GetExceptionMessage) + #13#10#13#10 +
-          'Install it manually from https://npcap.com/#download and run this setup again.',
-          mbCriticalError, MB_OK, IDOK);
-        Result := False;
-      end;
-    finally
-      DownloadPage.Hide;
-    end;
-  end;
-end;
-
 // --- version comparison -------------------------------------------------------
 
 // Returns <0, 0 or >0. Written out rather than compared as strings, because
