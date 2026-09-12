@@ -1818,7 +1818,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     <div className="w-full h-full flex bg-card text-card-foreground">
       <aside
         aria-label="Map details"
-        className="hidden md:flex w-[300px] shrink-0 flex-col border-r border-border overflow-y-auto custom-scrollbar"
+        className="flex w-[300px] shrink-0 flex-col border-r border-border overflow-y-auto custom-scrollbar"
       >
         <div className="px-4 py-3 border-b border-border">
           <div className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">

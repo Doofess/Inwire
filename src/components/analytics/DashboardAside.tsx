@@ -42,14 +42,20 @@ import { Popover, PopoverContent, PopoverTrigger, PopoverArrow } from '../ui/pop
 interface DashboardAsideProps {
   context: DashboardWidgetContext;
   /**
-   * Whether the mobile Analytics tab is the one showing.
+   * Whether the full column would be visible - the `lg:` breakpoint, measured.
    *
-   * This element is that tab below `lg` - see the `!flex !w-full` override on
-   * its className. It is why `mode` cannot simply gate the whole thing: a
-   * desktop setting of "hidden" would silently remove a tab on a phone, with no
-   * control anywhere on a phone to bring it back.
+   * `hidden lg:flex` below hides it in paint, and paint is not where the cost
+   * is: every widget in the column aggregates the whole packet buffer twice a
+   * second whether or not anything shows the result. This is what lets that be
+   * declined rather than merely hidden.
+   *
+   * Where this prop used to be `isMobileTabActive`: this element doubled as the
+   * mobile Analytics tab below `lg`, which is why `mode` could not gate the
+   * whole thing - a desktop setting of "hidden" would have removed a tab on a
+   * phone with no control there to bring it back. There is no phone layout any
+   * more, so `mode === 'hidden'` gates it outright.
    */
-  isMobileTabActive: boolean;
+  columnVisible: boolean;
 }
 
 /** A hairline between two kinds of thing in the rail. */
@@ -57,7 +63,7 @@ const RailDivider: React.FC<{ className?: string }> = ({ className }) => (
   <span aria-hidden className={`w-5 h-px bg-border my-1 shrink-0 ${className ?? ''}`} />
 );
 
-const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTabActive }) => {
+const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, columnVisible }) => {
   const [dashboard, patchDashboard] = usePreferenceStore(dashboardStore);
   usePreferenceSync(dashboardStore.key, dashboardStore.normalize, dashboardStore.accept);
 
@@ -150,7 +156,7 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
    */
   const [dragRail, setDragRail] = useState<boolean | null>(null);
 
-  const railMode = (dragRail ?? mode === 'icons') && !isMobileTabActive;
+  const railMode = dragRail ?? mode === 'icons';
 
   /**
    * The one place the width reaches the DOM.
@@ -269,7 +275,12 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
     [context, patchConfig],
   );
 
-  if (mode === 'hidden' && !isMobileTabActive) return null;
+  if (mode === 'hidden') return null;
+  // Nothing would be painted: not the rail, because this is not rail mode, and
+  // not the column, because `hidden lg:flex` withholds it below 1024. Rendering
+  // it anyway is what the old mount gate in App.tsx was supposed to prevent and
+  // had stopped preventing.
+  if (!railMode && !columnVisible) return null;
 
   /**
    * The map's window - the only expanded widget left.
@@ -488,7 +499,6 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
           `lg` and up only: below that the full column is hidden anyway, so a
           handle there would offer to drag the dashboard into a width at which
           it disappears. The rail's own button is the way back at those sizes. */}
-      {!isMobileTabActive && (
         <div
           role="separator"
           aria-orientation="vertical"
@@ -523,7 +533,6 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
             }
           }}
         />
-      )}
 
       <aside
         ref={asideRef}
@@ -531,11 +540,13 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, isMobileTa
         // because it is dragged: see the layout effect above.
         className={`nv-morph w-[var(--dashboard-width)] shrink-0 flex-col border-l border-border bg-background ${
           railMode
-            ? 'hidden md:flex items-center py-2 overflow-hidden z-[45] relative'
+            // The rail is always shown when it is the mode. `lg:` below is
+            // not dead and must stay: the window minimum is 1024 and the
+            // viewport is a few pixels under it, so the full column really is
+            // hidden at the smallest allowed size and the rail is the way back.
+            ? 'flex items-center py-2 overflow-hidden z-[45] relative'
             : 'hidden lg:flex p-4 space-y-4 overflow-y-auto custom-scrollbar'
-        } transition-[width,background-color,border-color] duration-200 ease-out ${
-          isMobileTabActive ? '!flex !w-full !border-l-0' : ''
-        }`}
+        } transition-[width,background-color,border-color] duration-200 ease-out`}
       >
         {railMode ? rail : column}
       </aside>

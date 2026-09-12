@@ -102,10 +102,6 @@ import { useThrottledValue } from "./lib/useThrottledValue";
 import type { ColorRule, FilterPresetLibrary } from "./types/packet";
 
 import {
-  TbActivity,
-  TbList,
-  TbStack2,
-  TbBinary,
   TbAlertTriangle,
 } from "react-icons/tb";
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
@@ -222,9 +218,6 @@ export default function App() {
     () => getPacketThemeForApp(resolvedTheme, packetColorSet),
     [resolvedTheme, packetColorSet],
   );
-  const [mobileTab, setMobileTab] = useState<
-    "packets" | "tree" | "hex" | "graphs" | "alerts"
-  >("packets");
 
   /**
    * Whether the analytics column has room to exist.
@@ -235,6 +228,9 @@ export default function App() {
    * CSS because the difference between "hidden" and "not rendered" is, for
    * these five widgets, a full pass over the packet buffer twice a second.
    */
+  // `lg:` in CSS, and the one breakpoint that is NOT dead: the window's minimum
+  // is 1024 and the viewport is a few pixels short of it, so at the smallest
+  // allowed size the full column is hidden and the rail shows instead.
   const dashboardVisible = useMediaQuery("(min-width: 1024px)");
   /**
    * Whether the icon rail has room, which is a lower bar than the column.
@@ -244,7 +240,6 @@ export default function App() {
    * fits from `md`, which turns "minimize" from a way to hide the dashboard
    * into the only way some users will ever see it.
    */
-  const railFits = useMediaQuery("(min-width: 768px)");
 
   // Stream & Capturing State
   const [isCapturing, setIsCapturing] = useState(false);
@@ -1566,11 +1561,9 @@ export default function App() {
     });
   }, []);
 
-  // Hoisted out of the aside's JSX for the same reason. The width check is the
-  // one the mobile layout uses to follow a selection into the detail tab.
+  // Hoisted out of the aside's JSX for the same reason.
   const handleInspectFromDashboard = useCallback((pkt: Packet) => {
     setSelectedPacket(pkt);
-    if (window.innerWidth < 768) setMobileTab("tree");
   }, []);
 
 
@@ -1798,57 +1791,6 @@ export default function App() {
         />
 
 
-        {/* Mobile Tab Switcher */}
-        <div className="flex md:hidden border-b border-border bg-card text-xs overflow-x-auto shrink-0">
-          <button
-            onClick={() => setMobileTab("packets")}
-            className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
-              mobileTab === "packets"
-                ? "border-b-2 border-primary text-primary bg-primary/15"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <TbList className="w-3.5 h-3.5" />
-            <span>Packets ({filteredPackets.length})</span>
-          </button>
-
-          <button
-            onClick={() => setMobileTab("tree")}
-            className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
-              mobileTab === "tree"
-                ? "border-b-2 border-primary text-primary bg-primary/15"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <TbStack2 className="w-3.5 h-3.5" />
-            <span>Protocol Tree</span>
-          </button>
-
-          <button
-            onClick={() => setMobileTab("hex")}
-            className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
-              mobileTab === "hex"
-                ? "border-b-2 border-primary text-primary bg-primary/15"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <TbBinary className="w-3.5 h-3.5" />
-            <span>Hex View</span>
-          </button>
-
-          <button
-            onClick={() => setMobileTab("graphs")}
-            className={`flex-1 py-2 px-3 flex items-center justify-center gap-1 font-bold tracking-tight whitespace-nowrap ${
-              mobileTab === "graphs"
-                ? "border-b-2 border-primary text-primary bg-primary/15"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <TbActivity className="w-3.5 h-3.5" />
-            <span>Analytics</span>
-          </button>
-        </div>
-
         {/* Central Inspection + Analytics Split Grid */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
           {/* Main Packet Inspection Core */}
@@ -1858,9 +1800,7 @@ export default function App() {
               // The tour highlights the pane rather than a row: it runs before
               // there are any rows. See components/tour/tourSteps.
               data-tour="list"
-              className={`flex-1 flex flex-col min-h-0 overflow-hidden ${
-                mobileTab === "packets" ? "block" : "hidden md:flex"
-              }`}
+              className="flex-1 flex flex-col min-h-0 overflow-hidden"
             >
               <PacketList
                 names={nameMap}
@@ -1875,12 +1815,7 @@ export default function App() {
                 unfiltered={filteredPackets === packets}
                 themeKey={resolvedTheme}
                 selectedPacket={selectedPacket}
-                onSelectPacket={(pkt) => {
-                  setSelectedPacket(pkt);
-                  if (window.innerWidth < 768) {
-                    setMobileTab("tree");
-                  }
-                }}
+                onSelectPacket={(pkt) => setSelectedPacket(pkt)}
                 onInspectPacket={(pkt) => setDetailPacketId(pkt.id)}
                 onFollowStream={handleFollowStream}
                 onQuickFilter={handleQuickFilter}
@@ -1904,7 +1839,7 @@ export default function App() {
               aria-valuemax={Math.max(100, window.innerHeight - 200)}
               tabIndex={0}
               title="Drag to resize - right-click to reset, Enter to hide the panes"
-              className="hidden md:block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50"
+              className="block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50"
               onPointerDown={() => beginDrag("height")}
               // Right-click restores the default, on every draggable bar in the
               // app. A drag is easy to overshoot and there is nothing to undo
@@ -1942,7 +1877,7 @@ export default function App() {
                   "--details-pane-size": `${detailsPaneRatio * 100}%`,
                 } as React.CSSProperties
               }
-              className={`h-56 md:h-[var(--bottom-pane-height)] border-t border-border flex flex-col ${stacked ? "md:flex-col" : "md:flex-row"} overflow-hidden transition-colors shrink-0 bg-card ${mobileTab !== "packets" && mobileTab !== "graphs" ? "block" : "hidden md:flex"}`}
+              className={`h-[var(--bottom-pane-height)] border-t border-border flex ${stacked ? "flex-col" : "flex-row"} overflow-hidden transition-colors shrink-0 bg-card`}
             >
               {/* Protocol Layers Inspection Tree */}
               <div
@@ -1950,11 +1885,11 @@ export default function App() {
                 // two different trees for "a packet" and "no packet", and the
                 // tour needs one anchor that exists in both states.
                 data-tour="detail"
-                className={`w-full min-w-0 overflow-hidden md:shrink-0 ${
+                className={`block min-w-0 overflow-hidden shrink-0 ${
                   stacked
-                    ? "md:w-full md:h-[var(--details-pane-size)]"
-                    : "md:w-[var(--details-pane-size)] h-full"
-                } ${mobileTab === "tree" ? "block" : "hidden md:block"}`}
+                    ? "w-full h-[var(--details-pane-size)]"
+                    : "w-[var(--details-pane-size)] h-full"
+                }`}
               >
                 <PacketDetailsTree
                   packet={selectedPacketDetail}
@@ -1977,7 +1912,7 @@ export default function App() {
                 aria-valuemin={10}
                 aria-valuemax={90}
                 tabIndex={0}
-                className={`hidden md:block transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50 ${
+                className={`block transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50 ${
                   stacked ? "h-1.5 w-full cursor-row-resize" : "w-1.5 h-full cursor-col-resize"
                 }`}
                 title="Drag to resize - right-click, double-click or Enter to even out"
@@ -2003,9 +1938,7 @@ export default function App() {
 
               {/* Raw Hex & ASCII Dump View */}
               <div
-                className={`w-full md:flex-1 h-full min-w-0 overflow-hidden ${
-                  mobileTab === "hex" ? "block" : "hidden md:block"
-                }`}
+                className="block w-full flex-1 h-full min-w-0 overflow-hidden"
               >
                 <HexViewer
                   packet={selectedPacketDetail}
@@ -2025,17 +1958,19 @@ export default function App() {
           </section>
 
           {/* The analytics column, or the icon rail it collapses to.
-              Mounted only when it can actually be seen: `hidden lg:flex` is
-              CSS, and CSS does not stop React, so under 1024px every widget in
-              here went on aggregating the whole packet buffer twice a second
-              for a column nobody could look at. The rail is the exception - it
-              fits from `md`, which is the point of it. */}
-          {(dashboardVisible || railFits || mobileTab === "graphs") && (
-            <DashboardAside
-              context={dashboardContext}
-              isMobileTabActive={mobileTab === "graphs"}
-            />
-          )}
+              The gate here was `dashboardVisible || railFits`, and `railFits`
+              was a media query on **768** - which the window's own 1024
+              minimum makes permanently true, so the gate read "yes" always and
+              the protection its comment described had not worked for some
+              time: `hidden lg:flex` is CSS, CSS does not stop React, and every
+              widget in the column went on aggregating the whole buffer twice a
+              second for something nobody could see.
+              `columnVisible` is that same `lg:` breakpoint, handed to the
+              aside so it can decline in JS what CSS was declining in paint.
+              It is not dead - the viewport is a few pixels under 1024 at the
+              smallest allowed window - and it is the only breakpoint here that
+              is still reachable. */}
+          <DashboardAside context={dashboardContext} columnVisible={dashboardVisible} />
         </div>
       </main>
 
