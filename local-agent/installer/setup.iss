@@ -3,14 +3,27 @@
 ;
 ; 6.3.0 is the floor because [Setup] uses ArchitecturesInstallIn64BitMode=
 ; x64compatible, an identifier introduced in 6.3.0 that replaced the older
-; bare `x64`. CreateDownloadPage (used in [Code]) needs only 6.1, so the
-; architecture identifier is what sets the requirement.
+; bare `x64`.
 ;
 ; Installs the agent as a Windows service that starts at boot and shows no
-; UI of any kind. Npcap is downloaded from the official distribution at
-; install time rather than bundled: redistributing and silently installing
-; the Npcap installer inside a packaged product requires an Npcap OEM
-; licence, and downloading it on the user's machine is not redistribution.
+; UI of any kind.
+;
+; ## Superseded, and no longer installs Npcap
+;
+; The product now ships as one installer at the repository root, which lays
+; down the app and the agent together and uninstalls this one by AppId. This
+; file is kept because that removal reads its AppId, and because macOS and
+; Linux still install an agent on its own.
+;
+; Its Npcap handling is gone. It was worse than the unified installer's: the
+; same `/S` - Npcap's OEM silent-install switch, which the free licence does
+; not grant - and `DownloadPage.Add`'s third argument was `''`, meaning **no
+; integrity check at all**, so an elevated install over a hostile network ran
+; whatever arrived as a kernel driver.
+;
+; Npcap is the app's business now: Settings -> Updates fetches it from
+; npcap.com on a click, verifies a published hash, and runs Npcap's own
+; installer visibly so its licence is shown. See docs/decisions/0032.
 
 #define MyAppName "Inwire Agent"
 ; Two numbers, because they are two different things and only ever looked like
@@ -40,7 +53,6 @@
 #define MyAppVersion "1.0.0"
 #define MyAppExeName "inwire-agent-windows.exe"
 #define MyAppPublisher "Inwire"
-#define NpcapUrl "https://npcap.com/dist/npcap-1.79.exe"
 
 ; What this product was called before it was renamed. Retained ONLY so an
 ; existing install can be cleaned up - nothing new is ever written under these
@@ -130,9 +142,6 @@ Root: HKCR; Subkey: "inwire\shell\open\command"; ValueType: string; ValueName: "
     ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
-Filename: "{tmp}\npcap-installer.exe"; Parameters: "/S /winpcap_mode=no"; \
-    StatusMsg: "Installing the Npcap capture driver..."; \
-    Check: NeedsNpcap; Flags: waituntilterminated
 ; Service registration is NOT done here. [Run] entries ignore exit codes, and
 ; a failed registration would leave a "successful" install with no service and
 ; nothing on screen to say so. RegisterAgentService (in [Code]) runs it with
@@ -154,60 +163,6 @@ Type: files; Name: "{commonappdata}\Inwire\agent.log"
 Type: files; Name: "{commonappdata}\Inwire\agent.log.*"
 
 [Code]
-var
-  DownloadPage: TDownloadWizardPage;
-
-function IsNpcapInstalled: Boolean;
-begin
-  Result :=
-    RegKeyExists(HKLM, 'SOFTWARE\WOW6432Node\Npcap') or
-    RegKeyExists(HKLM, 'SOFTWARE\Npcap') or
-    FileExists(ExpandConstant('{sys}\Npcap\npcap.sys'));
-end;
-
-function NeedsNpcap: Boolean;
-begin
-  Result := not IsNpcapInstalled;
-end;
-
-function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
-begin
-  Result := True;
-end;
-
-procedure InitializeWizard;
-begin
-  DownloadPage := CreateDownloadPage(
-    SetupMessage(msgWizardPreparing), SetupMessage(msgPreparingDesc), @OnDownloadProgress);
-end;
-
-function NextButtonClick(CurPageID: Integer): Boolean;
-begin
-  Result := True;
-  if (CurPageID = wpReady) and NeedsNpcap then
-  begin
-    DownloadPage.Clear;
-    DownloadPage.Add('{#NpcapUrl}', 'npcap-installer.exe', '');
-    DownloadPage.Show;
-    try
-      try
-        DownloadPage.Download;
-      except
-        // Abort rather than continue: finishing the install would leave a
-        // registered service that can never capture anything.
-        SuppressibleMsgBox(
-          'Could not download the Npcap capture driver.'#13#10#13#10 +
-          AddPeriod(GetExceptionMessage) + #13#10#13#10 +
-          'Install it manually from https://npcap.com/#download and run this setup again.',
-          mbCriticalError, MB_OK, IDOK);
-        Result := False;
-      end;
-    finally
-      DownloadPage.Hide;
-    end;
-  end;
-end;
-
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
