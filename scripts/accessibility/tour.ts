@@ -72,8 +72,19 @@ check('...and every data-tour anchor is claimed by a step',
 
 // --- The steps themselves ----------------------------------------------------
 
-check('the tour starts on the capture driver - nothing else works without it',
-  TOUR_STEPS[0]?.anchor, 'menu');
+// It used to start on the menu, because installing the driver from there was
+// the thing nothing else worked without. The agent ships with the app now, so
+// a first-run user has nothing to do before capturing and the tour opens on
+// their first actual decision instead.
+check('the tour starts where the first action is - choosing an adapter',
+  TOUR_STEPS[0]?.anchor, 'interfaces');
+
+// The step that told people to download a driver is gone, and its wording must
+// not come back by way of a copy edit: there is nothing to download and no menu
+// entry to choose.
+check('no step tells anybody to install or download anything',
+  TOUR_STEPS.filter((s) => /download|install/i.test(`${s.title} ${s.body}`)).map((s) => s.anchor),
+  []);
 
 check('no step is listed twice', wanted.length, new Set(wanted).size);
 
