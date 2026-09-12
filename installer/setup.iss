@@ -474,6 +474,40 @@ begin
        'failure {#ServiceName} reset= 86400 actions= restart/5000/restart/5000/restart/5000',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
+  // Start after Npcap's driver, but ONLY if Npcap is here to start after.
+  //
+  // What this fixes: as an auto-start service the agent can beat Npcap's NDIS
+  // binding at boot and enumerate nothing. Observed on a development machine -
+  // the log read "detected 1 network interface(s): Loopback Pseudo-Interface 1"
+  // and stayed that way, because the list is only re-read when a client
+  // connects and nothing could connect.
+  //
+  // Why it is CONDITIONAL, and must stay so: a service whose dependency does
+  // not exist does not start at all. Windows reports "the dependency service
+  // does not exist", the agent never runs, and the app says "the capture agent
+  // is not running" - a worse failure than the one this prevents, and one with
+  // no visible cause. Npcap is no longer installed by this installer (0032), so
+  // "not installed yet" is an ordinary first-run state rather than an error:
+  // the Update Center fetches it later, on a click.
+  //
+  // The residual case is deliberate and small: install without Npcap, add it
+  // from the Update Center, and no dependency is ever set. The boot race is
+  // then still possible - and still covered in software, because `register()`
+  // re-reads the interface list on every client connection, which is why that
+  // code exists. This only removes the race, it is not what handles it.
+  if RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\npcap') then
+  begin
+    // Exit code ignored on purpose. Failing to order two services is not a
+    // reason to fail an install that is otherwise complete and will work.
+    Exec(ExpandConstant('{sys}\sc.exe'), 'config {#ServiceName} depend= npcap',
+         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if ResultCode <> 0 then
+      Log('could not set the npcap dependency (' + IntToStr(ResultCode) +
+          '); the agent may enumerate nothing if it wins the boot race');
+  end
+  else
+    Log('npcap is not installed; leaving the agent with no dependency, or it could never start');
+
   GrantServiceStartToInteractiveUsers;
 
   if not Exec(ExePath, 'start', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
