@@ -537,9 +537,11 @@ the manifest from **this machine's own installed Npcap version**, which is
 what lets the central assertion be exact: told the version it has, the row
 must read `up-to-date`; told one digit more, it must offer it. That pair is
 the `wpcap.dll` trap, and a build that read the libpcap number fails the
-first half on any machine with Npcap on it. In `NOT_TESTS`; run it by hand
-after anything on the update path. It installs nothing - the UAC prompt is
-the one step that stays with a person.
+first half on any machine with Npcap on it. It also drives the **driver-access
+row**, against whichever mode this machine is in: the label, the
+recommendation and the reinstall control appear together or not at all. In
+`NOT_TESTS`; run it by hand after anything on the update path. It installs
+nothing - the UAC prompt is the one step that stays with a person.
 
 **To drive the app by hand**, `npx tsx scripts/electron/serveStub.ts` serves the
 same stub until Ctrl+C (`--burst n` for n frames per 100 ms tick); launch the app beside it and pick "Ethernet (stub)".
