@@ -212,6 +212,14 @@ export class CaptureHost {
         case 'stats': return this.reportStats();
       }
     } catch (error) {
+      // The stack goes to stderr as well as the message to the app, and that
+      // is not belt and braces - it is the difference between an afternoon and
+      // five minutes. `encodeChunk` threw on every `append` for the life of
+      // every capture, and all anyone could see was `state.error` reading
+      // "block.read is not a function" in a panel nobody had open. Main pipes
+      // this into a log a person can be asked for.
+      console.error(`[inwire] the capture store failed to handle ${message.type}: `
+        + `${error instanceof Error ? `${error.message}\n${error.stack}` : String(error)}`);
       this.fail(describe(error), message.type === 'open');
     }
   }

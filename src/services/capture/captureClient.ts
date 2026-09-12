@@ -28,6 +28,7 @@ import type { InfoPatch } from '../dissect/types';
 import type { ToCapture, FromCapture, CaptureStorageState } from './captureProtocol';
 import { freshCaptureStorageState } from './captureProtocol';
 import { MatchSet } from './matchSet';
+import { plainForStore } from './storePacket';
 
 /** One decoded chunk, and where it starts in the capture. */
 export interface RowBlock {
@@ -344,7 +345,11 @@ class CaptureClient {
    */
   append(packets: readonly Packet[]): void {
     if (packets.length === 0) return;
-    this.send({ type: 'append', packets: packets as Packet[] });
+    // Flattened here, at the boundary, and not before: the buffer wants its
+    // dense columns and the store cannot have them, because a class instance
+    // does not survive a structured clone. `storePacket.ts` says what that
+    // cost when it was not done.
+    this.send({ type: 'append', packets: packets.map(plainForStore) });
   }
 
   /**

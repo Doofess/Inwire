@@ -135,7 +135,20 @@ let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
 let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof electron.launch>>['firstWindow']>> | null = null;
 
 try {
-  agent = await startStubAgent();
+  try {
+    agent = await startStubAgent();
+  } catch (error) {
+    // Almost always a `serveStub.ts` left running from driving the app by
+    // hand. The raw `EADDRINUSE` stack out of `node:net` says none of that,
+    // and inside `npm run check` it appears as a bare FAIL with a page of
+    // Playwright-adjacent noise - which cost an afternoon of thinking a real
+    // regression had landed.
+    if ((error as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
+      skip('something else is already serving \\\\.\\pipe\\inwire-agent - '
+        + 'stop `serveStub.ts`, or the InwireAgent service, and run this again');
+    }
+    throw error;
+  }
   console.log('--- launching ---\n');
 
   // A profile of its own, and this is load-bearing rather than tidy. The app
