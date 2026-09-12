@@ -14,8 +14,17 @@
  * is closed, what happens to an append that arrives with no capture open,
  * whether a failed read still answers its request, and which directories a
  * prune is allowed to touch - and every one of those has a silent failure
- * behind it. `scripts/electron/store-protocol.ts` drives the whole message
+ * behind it. `scripts/capture/store-protocol.ts` drives the whole message
  * union through this class under plain Node.
+ *
+ * ## The scan is the one long-running message
+ *
+ * Everything else here is one request and one reply. A `scan` runs for
+ * seconds, in slices, so that the byte reads and row reads the reader is still
+ * issuing get served in between - see `captureScan.ts` for why the slice is a
+ * whole chunk. The state that makes that safe is `running`, and the rule it
+ * enforces is that a scan settles exactly once: superseded, cancelled, its
+ * capture closed underneath it, or finished.
  *
  * So `electron/store/entry.ts` is the adapter: it supplies a `CaptureVolume`
  * over `node:fs` and a `post` that writes to a `MessagePort`, and holds no
@@ -38,6 +47,8 @@ import { CaptureReader } from './captureReader';
 import { recoverIndex } from './captureIndex';
 import { planPrune } from './captureDirectory';
 import { serialQueue } from './serialQueue';
+import { CaptureScan, DEFAULT_SLICE_MS } from './captureScan';
+import { compile } from '../filter/compile';
 import { inflateSync } from 'fflate';
 import type { FromCapture, ToCapture } from './captureProtocol';
 import type { Packet } from '../../types/packet';
@@ -74,16 +85,55 @@ interface OpenCapture {
   reader: CaptureReader;
 }
 
+/**
+ * Frames between progress messages.
+ *
+ * A slice is 12 ms, so reporting per slice is 83 messages a second describing
+ * a bar nobody can read at that rate. A chunk is 4,096 frames and the scan
+ * runs at ~0.6M frames a second, so this is roughly four a second.
+ */
+export const SCAN_PROGRESS_FRAMES = 150_000;
+
+interface RunningScan {
+  requestId: number;
+  scan: CaptureScan;
+  /**
+   * Which capture it is scanning.
+   *
+   * Checked before every slice. A scan holds a `CaptureReader` over files the
+   * host may close underneath it - a prune, a discard, or simply starting the
+   * next capture - and a slice that ran afterwards would read a closed handle.
+   */
+  captureId: string;
+  /** `framesDone` when progress was last posted. */
+  reported: number;
+}
+
 export class CaptureHost {
   private open: OpenCapture | null = null;
   /** Said once, so a wiring error is reported without becoming a stream. */
   private orphanedAppend = false;
+  private running: RunningScan | null = null;
   private readonly queue = serialQueue((error) => this.fail(describe(error), false));
+
+  /**
+   * How long one scan slice may run. `0` is one chunk a slice.
+   *
+   * Settable for the same reason `CaptureWriter` takes `horizonUs`: the
+   * interleaving this exists to provide - a read answered while a scan is
+   * still going - is only assertable when the slices are countable. On a
+   * synthetic capture a default slice swallows the whole scan and the test
+   * would pass whether or not the yield happened.
+   */
+  private readonly scanSliceMs: number;
 
   constructor(
     private readonly volume: CaptureVolume,
     private readonly post: (message: FromCapture) => void,
-  ) {}
+    options: { scanSliceMs?: number } = {},
+  ) {
+    this.scanSliceMs = options.scanSliceMs ?? DEFAULT_SLICE_MS;
+  }
 
   /** Queues a message. Handling is serialised; see the module header. */
   receive(message: ToCapture): void {
@@ -108,6 +158,10 @@ export class CaptureHost {
   }
 
   private closeOpen(): void {
+    // Before the handles go, not after: a scan slice scheduled behind this
+    // would otherwise read from a closed file - and when the SAME capture is
+    // reopened, the slice loop's id check sees a match and carries on.
+    this.abandonScan();
     if (this.open === null) return;
     try { this.open.writer.finish(); } catch { /* a failed finish must not leak handles */ }
     try { this.open.volume.close(); } catch { /* already gone */ }
@@ -150,6 +204,8 @@ export class CaptureHost {
         case 'chunk': return this.onChunk(message);
         case 'rowsAt': return this.onRowsAt(message);
         case 'locate': return this.onLocate(message);
+        case 'scan': return this.onScan(message);
+        case 'scanCancel': return this.onScanCancel(message);
         case 'prune': return this.onPrune(message);
         case 'discard': return this.onDiscard(message);
         case 'stats': return this.reportStats();
@@ -255,6 +311,126 @@ export class CaptureHost {
       this.fail(describe(error), false);
     }
     this.post({ type: 'located', requestId: message.requestId, ordinal });
+  }
+
+  /**
+   * Starts a filter scan over the whole capture.
+   *
+   * The expression is compiled **here**, with the renderer's own compiler, for
+   * the reason `captureScan.ts` opens with: a second evaluator would be a
+   * second answer, silently disagreeing on exactly the frames nobody can see
+   * to check.
+   *
+   * Every exit answers. A filter that does not compile, a capture that is not
+   * open, a read that throws mid-scan - each posts `scanDone` with a message,
+   * because the caller is holding a promise and a filter bar that spins
+   * forever is worse than one that says why.
+   */
+  private onScan(message: Extract<ToCapture, { type: 'scan' }>): void {
+    // A newer filter supersedes the one in flight. Answered as cancelled, so
+    // its caller settles rather than waiting on a scan nobody wants.
+    this.abandonScan();
+
+    if (this.open === null) {
+      this.endScan(message.requestId, 0, null, false, 'no capture is open');
+      return;
+    }
+
+    let predicate;
+    try {
+      predicate = compile(message.filter);
+    } catch (error) {
+      this.endScan(message.requestId, 0, null, false, describe(error));
+      return;
+    }
+
+    // The writer's index, not one re-read from the file: a chunk is scannable
+    // the moment its record is appended, which is the same sharing the reader
+    // relies on.
+    const scan = new CaptureScan(this.open.reader, this.open.writer.index, predicate);
+    this.running = {
+      requestId: message.requestId, scan, captureId: this.open.id, reported: 0,
+    };
+    this.stepScan();
+  }
+
+  private onScanCancel(message: Extract<ToCapture, { type: 'scanCancel' }>): void {
+    // Only the scan it names. A cancel that arrives after its own scan
+    // finished must not abandon the one that replaced it.
+    if (this.running?.requestId !== message.requestId) return;
+    this.abandonScan();
+  }
+
+  /**
+   * One slice, then back through the queue.
+   *
+   * `setTimeout` rather than a loop, and the queue rather than a direct call:
+   * between two slices the store serves the byte reads and row reads the
+   * reader is still asking for. A scan that ran to completion in one message
+   * would freeze the detail pane and the scrollback for as long as it took.
+   *
+   * Not `requestAnimationFrame`, which `redirect.ts` measured firing **zero**
+   * times over 3.8 s in a background tab - and this process has no frames at
+   * all.
+   */
+  private stepScan(): void {
+    const running = this.running;
+    if (running === null) return;
+
+    // The capture closed or was replaced while this slice was queued.
+    if (this.open === null || this.open.id !== running.captureId) {
+      this.abandonScan();
+      return;
+    }
+
+    let more: boolean;
+    try {
+      more = running.scan.step(this.scanSliceMs);
+    } catch (error) {
+      this.running = null;
+      this.endScan(running.requestId, running.scan.frameCount, null, false, describe(error));
+      return;
+    }
+
+    const progress = running.scan.progress;
+    if (more) {
+      if (progress.framesDone - running.reported >= SCAN_PROGRESS_FRAMES) {
+        running.reported = progress.framesDone;
+        this.post({
+          type: 'scanProgress',
+          requestId: running.requestId,
+          framesDone: progress.framesDone,
+          frameCount: progress.frameCount,
+          matches: progress.matches,
+        });
+      }
+      setTimeout(() => this.queue.run(() => this.stepScan()), 0);
+      return;
+    }
+
+    const matches = running.scan.matches;
+    this.running = null;
+    this.endScan(
+      running.requestId, running.scan.frameCount,
+      matches === null ? null : matches.toBytes(),
+      progress.cancelled, null,
+    );
+  }
+
+  /** Stops whatever is running and answers its caller. Safe when nothing is. */
+  private abandonScan(): void {
+    const running = this.running;
+    if (running === null) return;
+    this.running = null;
+    running.scan.cancel();
+    this.endScan(running.requestId, running.scan.frameCount, null, true, null);
+  }
+
+  private endScan(
+    requestId: number, frameCount: number, bits: Uint8Array | null,
+    cancelled: boolean, message: string | null,
+  ): void {
+    this.post({ type: 'scanDone', requestId, frameCount, bits, cancelled, message });
   }
 
   /**
