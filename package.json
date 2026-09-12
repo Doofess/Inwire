@@ -61,6 +61,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "electron": "^44.3.0",
     "electron-builder": "^26.15.3",
+    "playwright": "^1.63.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

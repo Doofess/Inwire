@@ -87,7 +87,18 @@ const RENDERER_ROOT = path.join(__dirname, '..', 'dist');
 app.setName('Inwire');
 app.setAppUserModelId('com.inwire.app');
 // Before anything touches userData. Local, not Roaming - see the header.
-app.setPath('userData', path.join(app.getPath('appData'), '..', 'Local', 'Inwire'));
+//
+// `INWIRE_USER_DATA` overrides it, and that is not a debugging nicety: this
+// profile holds the stored capture, and startup PRUNES it - so anything that
+// launches the app writes into a real person's captures and deletes what was
+// there. `scripts/electron/smoke.ts` runs on every `npm run check` and would
+// otherwise destroy a developer's work every time.
+//
+// Chromium's own `--user-data-dir` cannot do this job: the `setPath` below
+// overrides it unconditionally, which is exactly what makes the Local-not-
+// Roaming decision reliable. So the escape hatch has to be here.
+app.setPath('userData', process.env.INWIRE_USER_DATA
+  || path.join(app.getPath('appData'), '..', 'Local', 'Inwire'));
 
 for (const flag of COMMAND_LINE_SWITCHES) app.commandLine.appendSwitch(flag);
 
