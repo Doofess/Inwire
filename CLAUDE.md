@@ -132,12 +132,16 @@ the same renderer that parses hostile bytes. `entry.ts` is the process,
 `host.ts` forks it and brokers the channel, `volume.ts` is the `node:fs`
 implementation of the four capture files.
 
-Forked with `stdio: 'pipe'` (a packaged GUI app has no console to inherit, so
-`fail()` messages would go nowhere) and `--max-old-space-size=2048`, so a
-runaway index kills the store rather than the machine — and a dead store is a
-handled state, because `child.on('exit')` tells the renderer over a separate
-channel. A `MessagePort` that goes quiet would otherwise hang every pending
-read for the life of the window.
+Forked with `stdio: 'pipe'`, because a packaged GUI app has no console to
+inherit and every `fail()` message the protocol calls "never silent" would go
+nowhere. A dead store is a handled state: `child.on('exit')` tells the renderer
+over a separate channel, because a `MessagePort` that goes quiet would hang
+every pending read for the life of the window.
+
+`execArgv: ['--max-old-space-size=2048']` is there and **does not work**. Under
+sustained load the store's heap was measured at 4,060 MB before V8 killed it,
+which is V8's own 64-bit default — so the ceiling the comment beside it claims
+is not in effect. See **What blocks watching the disk filter work**.
 
 ### The renderer
 
@@ -242,6 +246,16 @@ already dissected.
 Rows come from `src/lib/rowSource.ts` over `captureClient.ts`; bytes come from
 `src/services/packetBytes.ts`. *Partially enforced* —
 `scripts/session/row-source.ts` covers the row path.
+
+**A display filter has one answer, and the store computes it over the whole
+capture.** The expression is sent to the store, which compiles it with the
+renderer's own `filter/compile.ts` and returns a bitmap over capture ordinals
+(`captureScan.ts`, `matchSet.ts`, ADR pending). There is deliberately no second
+evaluator: a prefix-block accelerator would answer differently from the
+in-memory filter on exactly the frames nobody can see to check. Enforced by
+`scripts/capture/store-protocol.ts`, which compares the scan's ordinals against
+the same expression run in memory, and by `scripts/session/capture-row-space.ts`
+for the arithmetic that splits disk rows from window rows.
 
 **No Node in the renderer, and the preload imports only `electron`.** Enforced
 by `scripts/electron/preload-sandbox.ts`, which reads the **built** bundle: what
@@ -374,6 +388,18 @@ catches anything assuming a capture opens with a handshake). They assert
 per-column mismatch floors and the expert-category counts in
 `scripts/expert/categories.ts`.
 
+**`scripts/capture/store-protocol.ts`** drives the store's whole message union
+through `CaptureHost` against a memory volume. It proves the protocol, not
+Electron's IPC — there is no `MessagePort` and no second process — and it opens
+with the rule that has a hanging UI behind it: every request answers, even when
+it fails. The scan's state machine is four of its assertions, each checked by
+putting the bug back.
+
+**`scripts/session/capture-row-space.ts`** drives the arithmetic that decides
+what row *i* of the list is. Getting that wrong shows the wrong frame at the
+right row height, so the check is a count computed two ways: the list has
+exactly as many rows as the filter has matches over the whole capture.
+
 `scripts/parity/synthetic.ts` covers protocols the fixtures do not contain:
 frames built byte by byte from an RFC, written to a real `.pcap`, handed to
 tshark, compared as exact strings.
@@ -392,11 +418,18 @@ reintroducing two of them: the preload one reports the bridge `undefined`, and
 the COEP one reports the agent never connecting, because the Worker never
 loaded.
 
-Two things about running it. It uses a **temporary profile** via
+Four things about running it. It uses a **temporary profile** via
 `INWIRE_USER_DATA`, because the app prunes its capture directory at startup and
 would otherwise delete a developer's stored capture on every `npm run check`.
-And it tests whatever is in `dist/` — `npm run check` does not build, so it
-prints the build's age and says so when that is over two hours.
+It tests whatever is in `dist/` — `npm run check` does not build, so it prints
+the build's age and says so when that is over two hours. Every locator carries
+a 30-second timeout, because Playwright's default is **none** and a control
+that never renders would hang the whole suite with no output rather than fail.
+And it clears `setUnsavedCapture` before closing: closing with frames in the
+buffer opens `guardClose`'s native "Quit Inwire?" box, which is not in the page
+and which no test can answer. Killing the process instead was tried and is
+worse — `kill()` reaches main and orphans the GPU, renderer, store and crashpad
+children.
 
 **To drive the app by hand**, `npx tsx scripts/electron/serveStub.ts` serves the
 same stub until Ctrl+C; launch the app beside it and pick "Ethernet (stub)".
@@ -421,14 +454,51 @@ Phases 1–5 of the Electron migration are done. The plan is
 | 5 | The web page deleted | `6d97c46`…`4010d7b` |
 | 6 | Installer, signing, updates | **in progress** — `d2423f2` |
 | 7 | Rebuild what the browser forced | planned |
-| 8 | Import-to-disk; `captureScan` wired to the filter bar | planned |
+| 8 | Import-to-disk; `captureScan` wired to the filter bar | **in progress** — `1bfcbf9` |
 
 Phase 6 is blocked on things outside this repository: a code-signing
 certificate (EV or Azure Trusted Signing), and whether Npcap's silent install
 needs an OEM licence. The installer compiles and the fuses are still to flip.
 
+**Phase 8's filter is wired and has not been watched working.** The store half
+and the row arithmetic are both asserted, and the app builds, captures and
+dissects with the new code in place — but the path from a typed filter to a row
+read off disk has never been observed end to end, because reaching it needs a
+capture larger than the RAM buffer and this machine could not build one. See
+**What blocks watching the disk filter work** below.
+
 **Owed:** ADR 0027 (the app is a desktop app), 0028 (where the store runs, with
-the measured IPC cost), 0030 (one installer). ADR 0029 is written.
+the measured IPC cost), 0030 (one installer), and one for the whole-capture
+filter. ADR 0029 is written.
+
+### What blocks watching the disk filter work
+
+Found while trying to drive it, and recorded because every number here was
+measured rather than reasoned about.
+
+**The store falls a long way behind a live capture, and `below` stays 0 while
+it does.** Driven by `serveStub.ts --burst` at 3,000–20,000 frames a second,
+the buffer trims correctly at ~112,000 frames (its 128 MB budget), but
+`ordinalOf(window[0].id)` keeps answering -1 — the window's oldest frame is not
+in the index yet — so the list never addresses the capture and the filter never
+has disk to scan. Whole-capture filtering therefore cannot engage during a fast
+capture at all, only after it stops and the store drains.
+
+**It is not the store's own work.** `CaptureWriter` over `NodeBlockFile`
+appends **121,157 frames a second** in a plain Node process — 8.25 µs a frame,
+of which the per-frame `writeSync` for raw bytes is 1.97 µs (24%, and batching
+those into one write per append would recover it). So the backlog is upstream
+of the writer: the `append` message's structured clone across the
+`utilityProcess` boundary, which is precisely the number ADR 0028 is waiting
+on and still the one nobody has measured.
+
+**Under sustained overload the store dies rather than shedding.** At 20,000
+frames a second its heap reached **4,060 MB** and V8 killed it
+(`MarkCompactCollector: young object promotion failed`). Two things follow.
+The queue in `CaptureHost` is unbounded, and each pending `append` holds its
+frames. And `execArgv: ['--max-old-space-size=2048']` in `electron/store/host.ts`
+is **not taking effect** — 4 GB is V8's own 64-bit default, so the ceiling that
+comment claims to set is not set. Both are unfixed.
 
 ## 9. Direction
 
@@ -450,8 +520,12 @@ by stream and merged back into timestamp order; the renderer becomes a viewer
 that asks for rows. The store protocol was built so this is a relocation rather
 than a rewrite. **Trigger:** a profile showing the cross-process copy on the
 frame path, or a sustained rate above ~100 MB/s. Not before — and the first
-step is measuring `append` and `readBytes` across the boundary, which has still
-not been done.
+step is measuring `append` and `readBytes` **across the boundary**, which has
+still not been done. What *has* been measured is the same work with no boundary
+at all: `CaptureWriter` over `NodeBlockFile` in a plain Node process appends
+121,157 frames a second. The store falls behind at a small fraction of that, so
+the boundary is where the cost is, and the number is worth having before 0028
+is written.
 
 **Offline by default, as a product invariant.** No outbound connection the user
 did not ask for. A packet analyzer that makes requests visible in the user's own

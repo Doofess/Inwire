@@ -24,6 +24,9 @@ import { NameResolutionMap, snapshot as nameSnapshot } from "./services/nameReso
 import type { StreamTarget } from "./services/followStream";
 import { ExpertLog, expertSnapshot } from "./services/expertInfo";
 import { useIncrementalAggregate } from "./lib/useIncrementalAggregate";
+import { useWindowOrdinal } from "./lib/useWindowOrdinal";
+import { useCaptureFilter, uncoveredRows } from "./lib/useCaptureFilter";
+import { matchesBeforeWindow } from "./lib/useCaptureRows";
 import { MAX_CUSTOM_COLUMNS } from "./lib/packetColumns";
 import { usePreferenceStore, usePreferenceValue } from "./services/preferenceStore";
 import { packetColorSetStore } from "./services/themePrefs";
@@ -1198,6 +1201,40 @@ export default function App() {
   }, [packets, appliedFilter]);
 
   /**
+   * Where the RAM window sits in the capture, and the filter run over the rest.
+   *
+   * Both live here rather than in `PacketList` because two things need them:
+   * the list, which addresses rows through them, and the filter bar, which
+   * says how far the scan has got and how much of the capture it covered. Two
+   * hooks asking the store the same question could disagree for a frame.
+   */
+  const belowWindow = useWindowOrdinal(packets);
+  // Gated on there being disk under the window at all. Every capture that fits
+  // in memory - which is up to ~700k frames - is answered completely by
+  // `filteredPackets` above, and a scan would be a pass over frames this
+  // process is already holding.
+  const captureFilter = useCaptureFilter(appliedFilter, belowWindow > 0);
+  const filterUncovered = uncoveredRows(captureFilter.state, belowWindow);
+
+  /**
+   * The two numbers the filter bar states, over the CAPTURE rather than the
+   * buffer.
+   *
+   * They used to be `filteredPackets.length` and `packets.length`, which on a
+   * capture larger than memory answer a question nobody asked - "of the frames
+   * that happen to still be in RAM, how many match" - and answer it without
+   * saying so. With the scan's bitmap in hand the honest numbers are cheap:
+   * `rank` is a binary search.
+   *
+   * Unchanged for every capture that fits in memory, because `belowWindow` is
+   * then zero and both terms collapse to what they were.
+   */
+  const captureRowCount = belowWindow + packets.length;
+  const shownRowCount = (captureFilter.state.status === 'ready'
+    ? matchesBeforeWindow(captureFilter.state.matches, belowWindow)
+    : 0) + filteredPackets.length;
+
+  /**
    * What the capture says its addresses are called.
    *
    * Built from the WHOLE buffer, not the filtered view: a name a DNS answer
@@ -1775,8 +1812,11 @@ export default function App() {
             onApplyFilter={(newFilter?: string) =>
               setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
             }
-            totalPackets={packets.length}
-            filteredPackets={filteredPackets.length}
+            totalPackets={captureRowCount}
+            filteredPackets={shownRowCount}
+            filterScan={captureFilter.state}
+            scanUncovered={filterUncovered}
+            onRescan={captureFilter.rescan}
             packetSearchText={packetSearchText}
             onPacketSearchChange={setPacketSearchText}
             filterPresetLibrary={filterPresetLibrary}
@@ -1808,12 +1848,14 @@ export default function App() {
                 resolveNames={nameResolution.network}
                 sourceProcess={sourceProcessFor}
                 packets={filteredPackets}
-                // Whether the list may address the whole capture. A display
-                // filter runs over the RAM window and only the window, so the
-                // rows below it are not this list's rows while one is applied.
-                // `filteredPackets === packets` is the same identity check the
-                // selection-visibility effect above uses.
-                unfiltered={filteredPackets === packets}
+                // Both arrays, because they mean different things to the row
+                // space: `packets` is what `belowWindow` was measured against
+                // and therefore indexes the capture, `filteredPackets` is what
+                // to show. Their identity is also how "no filter" is known -
+                // the same check the selection-visibility effect above uses.
+                allPackets={packets}
+                below={belowWindow}
+                filterScan={captureFilter.state}
                 themeKey={resolvedTheme}
                 selectedPacket={selectedPacket}
                 onSelectPacket={(pkt) => setSelectedPacket(pkt)}

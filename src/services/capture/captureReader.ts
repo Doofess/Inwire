@@ -65,6 +65,17 @@ const DIRECTORY_CACHE = 32;
  */
 const MAX_ROW_CHUNKS = 4;
 
+/**
+ * Positions one `readRowsFor` may answer.
+ *
+ * The caller is a viewport plus overscan - forty rows and change - so this is
+ * several times what anything asks for, and it is a bound on the ANSWER
+ * rather than on the work: a maximally sparse filter can put every one of
+ * these in a different chunk, and inflating that many is the honest cost of
+ * showing them. What it stops is a caller passing an unbounded list.
+ */
+const MAX_SCATTERED_ROWS = 256;
+
 export class CaptureReader {
   private readonly directories = new Map<number, ChunkDirectory>();
 
@@ -145,6 +156,52 @@ export class CaptureReader {
       const record = this.index.record(chunk);
       out.push({ firstOrdinal: record.firstOrdinal, packets: this.readRows(chunk) });
       at = record.firstOrdinal + record.frameCount;
+    }
+    return out;
+  }
+
+  /**
+   * The rows at specific positions, keyed by position.
+   *
+   * `readRowsAt` is the wrong shape for a filtered list. It walks forward from
+   * `from` returning whole chunks, which is right when the rows wanted are
+   * contiguous and wrong when they are the matches of `dns` in a browsing
+   * capture: fifty visible rows can span fifty thousand ordinals, and whole
+   * chunks would be fifty megabytes of rows to show fifty of them - and
+   * `MAX_ROW_CHUNKS` would cut it off after four, so the list would simply
+   * stop.
+   *
+   * So this takes the positions themselves, groups them by chunk the way
+   * `readBytes` groups ids, and inflates each chunk once. The answer carries
+   * only the rows asked for.
+   *
+   * Positions the capture cannot place are absent rather than an error - a
+   * torn tail, or a scan whose bitmap outlived the chunk it names.
+   */
+  readRowsFor(ordinals: readonly number[]): Map<number, Packet> {
+    const out = new Map<number, Packet>();
+    if (ordinals.length === 0) return out;
+
+    const byChunk = new Map<number, number[]>();
+    // Capped at the caller's viewport rather than at a chunk count. A cap on
+    // chunks would silently drop rows a sparse filter genuinely needs, and a
+    // row that never arrives is a placeholder that never resolves.
+    for (const ordinal of new Set(ordinals.slice(0, MAX_SCATTERED_ROWS))) {
+      const chunk = this.index.chunkForOrdinal(ordinal);
+      if (chunk < 0) continue;
+      const list = byChunk.get(chunk);
+      if (list === undefined) byChunk.set(chunk, [ordinal]);
+      else list.push(ordinal);
+    }
+
+    for (const [chunk, wanted] of byChunk) {
+      const packets = this.readRows(chunk);
+      if (packets.length === 0) continue;      // a torn tail
+      const first = this.index.record(chunk).firstOrdinal;
+      for (const ordinal of wanted) {
+        const packet = packets[ordinal - first];
+        if (packet !== undefined) out.set(ordinal, packet);
+      }
     }
     return out;
   }
