@@ -12,7 +12,7 @@ interface DriverInfoPanelProps {
   /** This capture's frame counts from the agent, or null before its first report. */
   captureStats?: CaptureDropStats | null;
   /**
-   * Frames pushed out of the browser's own buffer because it filled.
+   * Frames pushed out of the app's own buffer because it filled.
    *
    * The third of the three places a frame goes missing, and the only one the
    * app itself is responsible for. Counted and worded apart from the other two
@@ -21,7 +21,7 @@ interface DriverInfoPanelProps {
    * the list.
    */
   droppedBuffer?: number;
-  /** What the browser says about the link, or null where it says nothing. */
+  /** What the engine says about the link, or null where it says nothing. */
   linkContext?: LinkContext | null;
   /** Network transitions observed this session, oldest first. */
   linkChanges?: LinkChange[];
@@ -291,17 +291,16 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
             </>
           )}
 
-          {/* What the BROWSER believes about the link, kept visibly apart from
-              the counts above, which the capture measured. The estimates are
-              the browser's own and are rounded by it to resist fingerprinting;
-              they are context for reading a capture, never a measurement of
-              one. Absent entirely on Firefox and Safari, which have no
-              Network Information API - saying nothing beats deriving a number
-              from timings and presenting it as though the browser had said
-              it. */}
+          {/* What the ENGINE believes about the link, kept visibly apart from
+              the counts above, which the capture measured. These are estimates
+              Chromium derives from its own recent requests and rounds to resist
+              fingerprinting: context for reading a capture, never a measurement
+              of one, which is what the label has to keep saying. The agent
+              could report the adapter's negotiated speed instead, and that
+              would be a measurement - it does not yet. */}
           {linkContext && describeLink(linkContext) && (
             <>
-              <dt className="text-muted-foreground">Link (browser estimate)</dt>
+              <dt className="text-muted-foreground">Link (estimated)</dt>
               <dd className="font-mono">{describeLink(linkContext)}</dd>
             </>
           )}

@@ -1,12 +1,12 @@
 /**
- * What the browser knows about the link this capture is being taken over.
+ * What the renderer knows about the link this capture is being taken over.
  *
  * The Network Information API, and it is worth exactly one thing: **it fires an
- * event when the network changes.** The numbers it carries are estimates the
- * browser derives from its own recent requests - useful as context, never as
+ * event when the network changes.** The numbers it carries are estimates
+ * Chromium derives from its own recent requests - useful as context, never as
  * measurement, and never to be shown beside the capture's own timings as though
- * they were the same kind of number. The capture measures; this reports what the
- * browser believes.
+ * they were the same kind of number. The capture measures; this reports what
+ * the engine believes.
  *
  * The event is the valuable half because a network transition is the thing that
  * explains what a capture otherwise cannot: a gap with no frames in it, a sudden
@@ -14,19 +14,24 @@
  * that stops dead and never recovers. Those all look like faults and are all
  * just the machine changing networks.
  *
- * **Chromium only.** Firefox and Safari ship no `navigator.connection` at all,
- * and the honest response is to report nothing rather than to guess from
- * timings - the same choice `platformDetect` makes by returning null on iOS and
- * Android instead of offering a download that cannot work.
+ * This used to carry a "Chromium only, and Firefox and Safari report nothing"
+ * caveat. The renderer is always Chromium now, so the API is always there - but
+ * the absence handling below stays, because a field within it is still optional
+ * per platform (`type` is absent on desktop Chromium, which is most of the
+ * time) and an absent field must read as "not said" rather than as zero.
+ *
+ * There is a better answer available and it is not built: the agent runs on the
+ * machine and could report the adapter's negotiated link speed, which is a
+ * measurement rather than an inference. `adapter_config` is where it would go.
  */
 
-/** A link as the browser describes it. Every field may be absent. */
+/** A link as the engine describes it. Every field may be absent. */
 export interface LinkContext {
   /** 'wifi' | 'ethernet' | 'cellular' | ... Only some platforms report it. */
   type?: string;
-  /** The browser's bucket: 'slow-2g' | '2g' | '3g' | '4g'. */
+  /** Chromium's bucket: 'slow-2g' | '2g' | '3g' | '4g'. */
   effectiveType?: string;
-  /** Estimated Mbit/s, rounded by the browser to resist fingerprinting. */
+  /** Estimated Mbit/s, rounded by the engine to resist fingerprinting. */
   downlinkMbps?: number;
   /** Estimated round trip in ms, rounded to 25ms for the same reason. */
   rttMs?: number;

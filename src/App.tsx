@@ -423,11 +423,12 @@ export default function App() {
    * See the trim in the packet-flush effect.
    */
   /**
-   * What the browser says about the link, and every time it changed.
+   * What the engine estimates about the link, and every time it changed.
    *
-   * Null on Firefox and Safari, which have no Network Information API - and
-   * null is what is shown there, rather than numbers derived from timings and
-   * presented as though the browser had reported them.
+   * Null where a field is not reported rather than zero, which is the whole
+   * discipline here: these are Chromium's inferences from its own recent
+   * requests, and an absent one must read as "not said" and never as a
+   * measurement the capture made. See `services/linkContext.ts`.
    */
   const [linkContext, setLinkContext] = useState<LinkContext | null>(() => readLinkContext());
   const [linkChanges, setLinkChanges] = useState<LinkChange[]>([]);
