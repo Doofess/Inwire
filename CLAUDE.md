@@ -294,16 +294,24 @@ depends on it yet. *Unenforced* — an assertion must exist before anything does
 against a real pipe. Neither can tell you the descriptor took **effect**; that
 needs a second Windows user account and is on the verification matrix.
 
-**The two TypeScript programs share their strictness flags.** `tsconfig.json`
-(renderer plus scripts) and `tsconfig.electron.json`. *Unenforced, and there are
-two, not three* — the migration plan called for a third for `scripts/`, and it
-was not split. Nothing asserts the flags match.
+**The two TypeScript programs share their strictness flags, and stay
+separate.** `tsconfig.json` (renderer plus scripts) and
+`tsconfig.electron.json`. There are **two, not three** — the migration plan
+called for a third for `scripts/` and it was not split, deliberately: an
+assertion script imports `src/` directly and must type-check against the same
+lib the renderer uses. Enforced by `scripts/electron/tsconfigs.ts`, which
+checks both halves — the four flags matching, *and* that `electron/` is
+excluded from the root program and has no DOM. Either alone is worthless: a
+lost `exclude` puts main back under the config where `window` compiles.
 
 **`src/services/` and `src/lib/` import no Electron and no `node:*`.** This is
-what keeps 127 assertion scripts runnable under plain `tsx`.
-**Unenforced** — `scripts/capture/node-safe.ts` was planned and does not exist.
-`nodeBlockFile.ts` is the live hazard: it imports `node:fs` and must never be
-reachable from `src/main.tsx`.
+what keeps the assertion scripts runnable under plain `tsx`. Enforced by
+`scripts/capture/node-safe.ts`, with one recorded exception —
+`nodeBlockFile.ts`, which imports `node:fs` because that is its whole job. The
+rule with teeth is the third one there: that module must not be **reachable**
+from `src/main.tsx`, which is a walk of the import graph rather than a grep,
+because the hazard is transitive. `captureClient.ts` sits one import away from
+it and is reached from `App.tsx`.
 
 **Dissection matches tshark.** `test/fixtures/` holds two real captures
 (untracked; ADR 0004) and tshark ground truth.
@@ -376,12 +384,16 @@ the directory; a handful are listed there as SKIP with a reason each
 (measurements with no right answer, or things needing the untracked fixtures). Plain `tsx`, no runner, no Electron, no browser. A script
 prints `PASS`/`FAIL` lines and exits non-zero.
 
-Three rules that keep it that way, and only one of them is currently enforced:
+Three rules keep it that way, and all three are now checked:
 
-1. `src/services/` and `src/lib/` must import no Electron and no `node:*`.
-   **Unenforced** — see Invariants.
-2. `nodeBlockFile.ts` must not be reachable from `src/main.tsx`. **Unenforced.**
-3. Both tsconfigs carry the same strictness flags. **Unenforced.**
+1. `src/services/` and `src/lib/` must import no Electron and no `node:*` —
+   `scripts/capture/node-safe.ts`.
+2. `nodeBlockFile.ts` must not be reachable from `src/main.tsx` — the same
+   script, by walking the import graph from the renderer's entry point. The
+   failure names the chain, because "something reaches it" is not actionable
+   and "App.tsx -> captureClient.ts -> nodeBlockFile.ts" is.
+3. Both tsconfigs carry the same strictness flags —
+   `scripts/electron/tsconfigs.ts`.
 
 The fixtures are two real captures, untracked because they contain personal
 addresses (ADR 0004): `inwire` (general browsing) and `bulk` (a long TLS
