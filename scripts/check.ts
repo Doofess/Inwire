@@ -30,6 +30,7 @@ const repoRoot = join(here, '..');
  */
 const NOT_TESTS: Record<string, string> = {
   'gen-oui.ts': 'generator; downloads ~5MB from IEEE',
+  'electron/serveStub.ts': 'tool; serves the stub agent until Ctrl+C, for driving the app by hand',
   'parity/parity-check.ts': 'needs the untracked fixture captures and tshark ground truth (test/fixtures/README.md)',
   'tcp/reassembly.ts': 'diagnostic; needs the fixtures, and reports rather than asserts (docs/decisions/0020)',
   'perf/clone-cost.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0007)',
