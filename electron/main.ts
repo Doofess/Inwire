@@ -29,9 +29,12 @@ import { pathToFileURL } from 'node:url';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
 import {
   AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
+  UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL, UPDATE_STATE_REQUEST,
 } from './channels';
 import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
 import { AgentPipeLink } from './agentPipe';
+import { isComponentId } from './updateCenter/components';
+import { UpdateCenter } from './updateCenter/host';
 import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
@@ -150,6 +153,25 @@ const store = new CaptureStoreHost(captureDirectory());
  */
 const agent = new AgentPipeLink();
 
+/**
+ * Everything that updates, in one place.
+ *
+ * In main because it fetches, writes a file and raises a UAC prompt, none of
+ * which a sandboxed renderer can do - and deliberately so, since the file it
+ * writes is the file that gets run elevated.
+ */
+const updates = new UpdateCenter({
+  onChange: (snapshot) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(UPDATE_STATE_CHANNEL, snapshot);
+    }
+  },
+  // A new driver means new adapters, and the picker is showing the list from
+  // before it existed. See `AgentPipeLink.recycle` for why this is a
+  // reconnect and not `refresh_adapters`.
+  onDriverInstalled: () => agent.recycle(),
+});
+
 async function start(): Promise<void> {
   ipcMain.on(UNSAVED_CAPTURE_CHANNEL, (_event, hasFrames: unknown) => {
     unsavedCapture = hasFrames === true;
@@ -163,6 +185,17 @@ async function start(): Promise<void> {
   });
   ipcMain.handle(SAVE_FILE_CHANNEL, (event, request: SaveFileRequest) =>
     saveGeneratedFile(event, request));
+  ipcMain.handle(UPDATE_STATE_REQUEST, () => updates.snapshot());
+  ipcMain.handle(UPDATE_CHECK_CHANNEL, () => updates.check());
+  ipcMain.handle(UPDATE_APPLY_CHANNEL, (_event, id: unknown) => {
+    // The only message here that ends in an elevated process. A renderer
+    // string stops being a renderer string on this line.
+    if (!isComponentId(id)) return undefined;
+    return updates.apply(id);
+  });
+  // So the rows carry installed versions before anybody presses Check. Not
+  // awaited: it spawns `reg`, and the window should not wait for that.
+  void updates.detect();
   // The store seals whatever is open when it goes; killing it here rather than
   // leaving it to be orphaned is what keeps a clean quit from looking like a
   // crash to the next launch's recovery pass.

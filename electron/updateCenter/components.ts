@@ -26,6 +26,20 @@ export type ComponentKind = 'inwire-installer' | 'vendor-installer' | 'database'
 
 export type ComponentId = 'inwire' | 'agent' | 'npcap' | 'oui' | 'geoip';
 
+export const COMPONENT_IDS: readonly ComponentId[] = ['inwire', 'agent', 'npcap', 'oui', 'geoip'];
+
+/**
+ * Whether a string names a component.
+ *
+ * Used on the one message that ends in a UAC prompt. The pipeline would refuse
+ * an unknown id anyway - there would be no manifest row for it - but "refuses
+ * by accident, two layers down" is not the same as "refuses", and this is the
+ * boundary where a renderer's string stops being a renderer's string.
+ */
+export function isComponentId(value: unknown): value is ComponentId {
+  return typeof value === 'string' && (COMPONENT_IDS as readonly string[]).includes(value);
+}
+
 /** One component's row in the manifest, after validation. */
 export interface Available {
   version: string;

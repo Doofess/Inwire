@@ -40,3 +40,27 @@ export const AGENT_PORT_REQUEST = 'inwire:agent-port-request';
  * be a filesystem location leaked into a page for no purpose.
  */
 export const SAVE_FILE_CHANNEL = 'inwire:save-file';
+
+/**
+ * Main -> renderer: the Update Center's whole state, whenever it changes.
+ *
+ * A snapshot rather than a delta, for the same reason the agent's
+ * `adapter_config` is one: there are five rows, the whole thing is smaller
+ * than a delta's bookkeeping, and a renderer that missed one message would
+ * otherwise be wrong until the next install.
+ */
+export const UPDATE_STATE_CHANNEL = 'inwire:update-state';
+
+/** Renderer -> main: what is the state now? Answers directly, unlike the ports. */
+export const UPDATE_STATE_REQUEST = 'inwire:update-state-request';
+
+/** Renderer -> main: ask the feed. Quiet on failure; see `updateCenter/host.ts`. */
+export const UPDATE_CHECK_CHANNEL = 'inwire:update-check';
+
+/**
+ * Renderer -> main: download, verify and install one component.
+ *
+ * The only message in the application that ends in a UAC prompt, so the id it
+ * carries is checked against `isComponentId` before anything acts on it.
+ */
+export const UPDATE_APPLY_CHANNEL = 'inwire:update-apply';

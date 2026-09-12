@@ -100,6 +100,29 @@ export class AgentPipeLink {
     contents.postMessage(AGENT_PORT_CHANNEL, null, [port1]);
   }
 
+  /**
+   * Drops the pipe and immediately reconnects, keeping the port.
+   *
+   * What this is for: a capture driver was just installed, and the interface
+   * picker is showing the list from before it existed. `refresh_adapters` does
+   * **not** fix that - it re-reads adapter *configuration* and never touches
+   * `AVAILABLE_INTERFACES`, and it is filtered by that same stale list, so a
+   * brand-new adapter is excluded from its own snapshot. The agent re-reads
+   * the interface list in `register()`, once per client connection, so a new
+   * connection is what re-enumerates.
+   *
+   * Preferred over `restart_agent`, which also works: that kills a LocalSystem
+   * service the app deliberately has no rights to stop, and only when the
+   * agent's `RESTART_SUPPORTED` says it may. This needs neither.
+   *
+   * The renderer sees a `disconnected` then a fresh `hello`, which is the same
+   * sequence an agent restart already produces and which it already handles.
+   */
+  recycle(): void {
+    this.pipe.close();
+    this.pipe.open();
+  }
+
   /** Drops the connection and the channel. Called on reload and on quit. */
   detach(): void {
     this.pipe.close();
