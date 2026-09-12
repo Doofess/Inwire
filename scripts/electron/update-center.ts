@@ -42,10 +42,14 @@ import {
   LAUNCH_ARGV, LAUNCH_SCRIPT, readElevationResult,
 } from '../../electron/updateCenter/elevate';
 import { parseDisplayVersion, readNpcap } from '../../electron/updateCenter/npcap';
+import { parseAdminOnly, readAdminOnly } from '../../electron/updateCenter/npcapAdminOnly';
 import {
-  actionLabel, canApply as canApplyInRenderer, EMPTY_SNAPSHOT, installedLabel, isBusy,
-  normalizeSnapshot, stateLabel, withAgentRow, type UpdateComponent,
+  actionLabel, canApply as canApplyInRenderer, canReinstall, EMPTY_SNAPSHOT, installedLabel,
+  isBusy, normalizeSnapshot, stateLabel, withAgentRow, type UpdateComponent,
 } from '../../src/services/updateCenter';
+import {
+  accessFromSddl, decideDriverAccess, driverAccessAdvice, driverAccessLabel,
+} from '../../src/services/npcapAccess';
 import {
   normalizeUpdatePrefs, shouldCheckOnLaunch, shouldPrompt, UPDATE_DEFAULTS,
 } from '../../src/services/updatePrefs';
@@ -601,6 +605,187 @@ console.log('\n--- consent, and what silence is not ---\n');
   check('a non-object is refused outright', normalizeUpdatePrefs('on'), null);
 }
 
+console.log('\n--- the driver access mode, which is a security answer ---\n');
+
+/**
+ * Npcap's installer leaves the capture devices open to Everyone unless the box
+ * is ticked, so this decides whether any local account can capture this
+ * machine's traffic and inject raw frames. Both wrong answers are harmful and
+ * neither is loud: "administrators only" tells somebody they are safe when
+ * nothing checked, and "all users" nags somebody who already ticked it.
+ *
+ * ADR 0033. The registry half is `electron/updateCenter/npcapAdminOnly.ts`,
+ * the DACL half arrives from the agent, and `src/services/npcapAccess.ts`
+ * combines them.
+ */
+{
+  // Captured verbatim from
+  //   reg query HKLM\SOFTWARE\Npcap /v AdminOnly /reg:32
+  // on Windows 11 26200 with Npcap 1.88 installed and the box NOT ticked -
+  // which is the default install, and is the state this feature exists to
+  // notice.
+  const allUsers = '\r\n'
+    + 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Npcap\r\n'
+    + '    AdminOnly    REG_DWORD    0x0\r\n\r\n';
+  check('the default install reads as not admin-only', parseAdminOnly(allUsers), false);
+  check('...and 0x1 reads as admin-only', parseAdminOnly(allUsers.replace('0x0', '0x1')), true);
+  check('tabs work as well as spaces', parseAdminOnly(allUsers.replace(/ {4}/g, '\t')), false);
+
+  // Anything non-zero. Npcap writes 0x1, but a value another tool or a person
+  // has edited must not read as "off" for failing to be exactly 1.
+  check('any non-zero value is admin-only', parseAdminOnly(allUsers.replace('0x0', '0x2')), true);
+
+  // The two shapes that must NOT default. Empty stdout is what the 64-bit view
+  // of this key produces on an x64 machine - the same shape `provesAbsent`
+  // reads as proof of absence.
+  check('nothing found is null, never false', parseAdminOnly(''), null);
+  check('...and so is the key without the value', parseAdminOnly(
+    '\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Npcap\r\n'
+    + '    WinPcapCompatible    REG_DWORD    0x0\r\n'), null);
+  check('a REG_SZ where a DWORD was expected is not read',
+    parseAdminOnly('    AdminOnly    REG_SZ    1\r\n'), null);
+}
+
+{
+  // Captured verbatim from GetNamedSecurityInfo on \\.\NPCAP, same machine,
+  // same default install. `WD` is Everyone, and 0x12019F is read+write+sync.
+  const open = 'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12019f;;;WD)';
+  check('the default install is open to everyone', accessFromSddl(open), 'all-users');
+
+  // The same descriptor with the box ticked: SY and BA, nobody else.
+  check('SY and BA alone is admin-only',
+    accessFromSddl('D:P(A;;FA;;;SY)(A;;FA;;;BA)'), 'admin-only');
+  check('...and the raw SIDs mean the same thing',
+    accessFromSddl('D:P(A;;FA;;;S-1-5-18)(A;;FA;;;S-1-5-32-544)'), 'admin-only');
+
+  // The trap: a NULL DACL grants everyone everything and contains no ACEs at
+  // all, so a reader that only counted non-admin ACEs would call the most open
+  // descriptor Windows can express the most restrictive one.
+  check('NO_ACCESS_CONTROL is the most open answer, not the most closed',
+    accessFromSddl('D:NO_ACCESS_CONTROL'), 'all-users');
+
+  // Everything that is not a plain allow ACE refuses to answer. A deny ACE
+  // makes a descriptor MORE restrictive than its allow ACEs suggest, so
+  // reading past one could report `all-users` over a driver nobody but an
+  // administrator can open.
+  check('a deny ACE is not reasoned about',
+    accessFromSddl('D:P(D;;FA;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)'), 'unknown');
+
+  // An ACE that grants no rights grants nothing, and must not count as access
+  // for the trustee it names.
+  check('an empty rights field grants nothing',
+    accessFromSddl('D:P(A;;;;;WD)(A;;FA;;;SY)'), 'admin-only');
+
+  // A full descriptor: the owner and group prefix must not confuse the DACL,
+  // and the SACL after it must not be read as part of it - an audit ACE for
+  // Everyone is not access for Everyone.
+  check('a full descriptor finds its own DACL',
+    accessFromSddl('O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)S:(AU;FA;FA;;;WD)'), 'admin-only');
+
+  // Every shape of "we do not know", each of which the panel says out loud.
+  check('no string is unknown', accessFromSddl(null), 'unknown');
+  check('an empty string is unknown', accessFromSddl(''), 'unknown');
+  check('a string with no DACL is unknown', accessFromSddl('O:BAG:BA'), 'unknown');
+  check('an empty DACL is unknown, not admin-only', accessFromSddl('D:P'), 'unknown');
+  check('unbalanced parentheses are unknown', accessFromSddl('D:P(A;;FA;;;SY'), 'unknown');
+  check('a truncated ACE is unknown', accessFromSddl('D:P(A;;FA;;SY)'), 'unknown');
+}
+
+{
+  // The disagreement, and which half wins. The registry is what the installer
+  // RECORDED; the DACL is what the kernel ENFORCES, and only one of them
+  // decides whether a process gets in.
+  check('the DACL outranks a registry value that disagrees',
+    decideDriverAccess(true, 'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12019f;;;WD)'), 'all-users');
+  check('...in the other direction too',
+    decideDriverAccess(false, 'D:P(A;;FA;;;SY)(A;;FA;;;BA)'), 'admin-only');
+
+  // With no agent connected there is no DACL, and the registry is the whole
+  // answer - which is the state the Update Center is usually opened in.
+  check('the registry answers when no DACL was readable',
+    decideDriverAccess(true, null), 'admin-only');
+  check('...and says so when the box was not ticked',
+    decideDriverAccess(false, null), 'all-users');
+
+  // Four shapes of nothing, and none of them is a verdict.
+  check('neither half is unknown', decideDriverAccess(null, null), 'unknown');
+  check('an absent field is unknown', decideDriverAccess(undefined, undefined), 'unknown');
+  check('an unreadable DACL falls back rather than answering',
+    decideDriverAccess(null, 'not an sddl'), 'unknown');
+  check('a non-boolean registry value is not truthy',
+    decideDriverAccess(undefined, ''), 'unknown');
+}
+
+{
+  // The wording. Each state is named, and only one of them carries advice -
+  // recommending a kernel-driver reinstall on the strength of having failed to
+  // read anything would be advice about a state nobody established.
+  check('each mode has its own words', [
+    driverAccessLabel('admin-only'), driverAccessLabel('all-users'), driverAccessLabel('unknown'),
+  ], [
+    'Driver access: administrators only',
+    'Driver access: all users',
+    'Driver access: not known',
+  ]);
+  checkTrue('only the open driver is advised about', driverAccessAdvice('all-users') !== null);
+  check('an admin-only driver is advised about nothing', driverAccessAdvice('admin-only'), null);
+  check('...and so is one nothing could read', driverAccessAdvice('unknown'), null);
+
+  // The advice has to state the fact, not just the remedy: what is wrong is
+  // that any local account can capture, and that is the sentence.
+  const advice = driverAccessAdvice('all-users') ?? '';
+  checkTrue('the advice says who can capture', /any user of this machine can capture/.test(advice));
+  checkTrue('...and that Inwire loses nothing by it', /costs you nothing/.test(advice));
+}
+
+{
+  // The reinstall control. It exists for exactly one row in exactly one state,
+  // and it must never appear beside the Update button - "Update" against an
+  // up-to-date component is the confident wrong answer this tab is built to
+  // avoid.
+  const row = (over: Partial<UpdateComponent> = {}): UpdateComponent => ({
+    id: 'npcap', displayName: 'Npcap capture driver', installed: '1.88',
+    available: { ...available(), kind: 'vendor-installer' },
+    state: { kind: 'up-to-date' }, ...over,
+  });
+
+  checkTrue('an up-to-date component can be reinstalled', canReinstall(row()));
+  checkTrue('...and offers no update at the same time', !canApplyInRenderer(row()));
+  checkTrue('nothing to download means nothing to reinstall',
+    !canReinstall(row({ available: null })));
+  checkTrue('an out-of-date component is updated, not reinstalled',
+    !canReinstall(row({ state: { kind: 'update-available', version: '1.90' } })));
+  checkTrue('an absent one is installed, not reinstalled',
+    !canReinstall(row({ installed: null, state: { kind: 'not-installed' } })));
+  checkTrue('and nothing mid-flight is either',
+    !canReinstall(row({ state: { kind: 'downloading', received: 1, total: 2 } })));
+}
+
+{
+  // The field crossing the bridge. Three values, read as three values: a
+  // missing key is what every row but Npcap's sends, and must not become
+  // `false`.
+  const snapshot = (adminOnly: unknown) => normalizeSnapshot({
+    checking: false, lastChecked: null,
+    components: [{
+      id: 'npcap', displayName: 'Npcap capture driver', installed: '1.88',
+      available: null, state: { kind: 'up-to-date' }, adminOnly,
+    }],
+  })?.components[0];
+
+  check('true crosses as true', snapshot(true)?.adminOnly, true);
+  check('false crosses as false', snapshot(false)?.adminOnly, false);
+  check('null crosses as null', snapshot(null)?.adminOnly, null);
+  check('a string does not become a boolean', snapshot('1')?.adminOnly, undefined);
+  check('a missing field stays missing', normalizeSnapshot({
+    checking: false, lastChecked: null,
+    components: [{
+      id: 'inwire', displayName: 'Inwire', installed: '1.0.0',
+      available: null, state: { kind: 'up-to-date' },
+    }],
+  })?.components[0].adminOnly, undefined);
+}
+
 console.log('\n--- this machine ---\n');
 
 {
@@ -618,6 +803,18 @@ console.log('\n--- this machine ---\n');
   // installation. The reverse does not hold, which is why they are two fields.
   checkTrue('a version means it is installed', facts.version === null || facts.installed);
   checkTrue('a reported version is parseable', facts.version === null || isVersion(facts.version));
+
+  // Likewise printed rather than asserted: whether the box was ticked on this
+  // machine is a property of the machine. What IS asserted is that the two
+  // reads agree, because they are the same value through two code paths and a
+  // disagreement would mean one of them is looking at the wrong key.
+  const adminOnly = await readAdminOnly();
+  console.log(`      driver access says: ${JSON.stringify(adminOnly)}`);
+  check('readNpcap and readAdminOnly read the same value', facts.adminOnly, adminOnly);
+  checkTrue('...and it is three-valued', adminOnly === null || typeof adminOnly === 'boolean');
+
+  // A driver that is not installed has no access mode, and must not report one.
+  checkTrue('an absent driver reports no mode', facts.installed || facts.adminOnly === null);
 }
 
 console.log(failures === 0

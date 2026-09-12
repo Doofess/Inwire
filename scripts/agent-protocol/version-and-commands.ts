@@ -39,7 +39,7 @@ check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', int
 // local-agent/test_protocol.py is what enforces that all three agree - and
 // that this number is never RESET, because it is the left-hand side of an
 // ordering comparison.
-check('required agent version is 3.8.0', REQUIRED_AGENT_VERSION, '3.8.0');
+check('required agent version is 3.9.0', REQUIRED_AGENT_VERSION, '3.9.0');
 
 // `authenticate` was here, and is gone with the pairing token. The kernel
 // answers the question it was asked to answer: on Windows the agent's only

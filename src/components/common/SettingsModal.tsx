@@ -89,6 +89,8 @@ interface SettingsModalProps {
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   agentVersion: string | null;
   agentOutdated: boolean;
+  /** The Npcap device object's DACL from `hello`, for the Update Center's row. */
+  agentNpcapAccess?: string | null;
   agentCaptureState: 'idle' | 'sniffing';
   captureStats?: CaptureDropStats | null;
   /** Frames pushed out of the browser's buffer because it filled. */
@@ -132,6 +134,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   agentStatus,
   agentVersion,
   agentOutdated,
+  agentNpcapAccess,
   agentCaptureState,
   captureStats,
   droppedBuffer,
@@ -227,6 +230,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <UpdateCenterPanel
                 agentVersion={agentVersion}
                 agentOutdated={agentOutdated}
+                agentNpcapAccess={agentNpcapAccess}
                 onShowDriverInfo={() => setSection('driver')}
               />
             )}

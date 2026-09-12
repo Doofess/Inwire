@@ -22,9 +22,16 @@
  * a machine with no Npcap at all it can only check the failure direction. Run
  * it by hand after anything on the update path.
  *
+ * It also proves the driver-access row (ADR 0033): that main's registry read
+ * reaches the renderer as a three-valued field, and that the panel states the
+ * mode this machine is actually in. On a default Npcap install that is "all
+ * users", and the reinstall control has to be on screen; on an admin-only one
+ * it must not be. Which of those runs is a property of the machine, so every
+ * assertion is written against the mode rather than pinned to one of them.
+ *
  * It never installs anything. Nothing here raises a UAC prompt - pressing
- * Update is the one step that stays with a person, and it is the last item on
- * the verification list in CLAUDE.md.
+ * Update, or Reinstall, is the one step that stays with a person, and it is
+ * the last item on the verification list in CLAUDE.md.
  */
 import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -32,6 +39,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright';
 import { normalizeSnapshot, type UpdateSnapshot } from '../../src/services/updateCenter';
+import { decideDriverAccess, driverAccessLabel } from '../../src/services/npcapAccess';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -128,6 +136,26 @@ try {
   check('nothing is claimed before a check has happened', initial.lastChecked, null);
   check('...and no row pretends to be up to date', npcap(initial)?.state.kind, 'unknown');
 
+  // Three-valued, and only on the row it describes. `undefined` here would
+  // mean main dropped it or the renderer refused it, and the panel would show
+  // "not known" on a machine whose registry answers perfectly well.
+  const adminOnly = npcap(initial)?.adminOnly;
+  console.log(`      the registry says AdminOnly is ${JSON.stringify(adminOnly)}`);
+  if (installed === null) {
+    check('an absent driver carries no access mode', adminOnly, undefined);
+  } else {
+    checkTrue('the installed driver carries its access mode across IPC',
+      adminOnly === null || typeof adminOnly === 'boolean');
+  }
+  check('no other row carries one',
+    initial.components.filter((component) => component.id !== 'npcap')
+      .every((component) => component.adminOnly === undefined), true);
+
+  // The agent is not connected in this run, so the DACL half is absent and the
+  // registry is the whole answer - which is the state the Update Center is
+  // usually opened in, and the one that has to work with no pipe at all.
+  const access = decideDriverAccess(adminOnly, null);
+
   if (installed === null) {
     console.log('\n      Npcap is not installed here, so the version pair cannot be driven.');
   } else {
@@ -171,6 +199,21 @@ try {
     const offline = await state();
     check('an unreachable feed changes nothing', npcap(offline)?.state.kind, 'update-available');
     check('...and does not move "last checked"', offline.lastChecked, before);
+
+    // Back on the same port, telling the truth again. The reinstall control is
+    // `up-to-date` only - it exists to change the driver's access mode, not
+    // its version - so the row has to be settled there before the panel below
+    // can say anything about it.
+    server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(body);
+    });
+    const reopened = server;
+    await new Promise<void>((resolve) => reopened.listen(port, '127.0.0.1', resolve));
+    body = manifest(installed);
+    await recheck();
+    check('...and the row settles on up-to-date again',
+      npcap(await state())?.state.kind, 'up-to-date');
   }
 
   console.log('\n--- and the panel renders it ---\n');
@@ -195,6 +238,28 @@ try {
 
   const text = await driven.locator('body').innerText();
   checkTrue('the driver row names Npcap', text.includes('Npcap capture driver'));
+
+  if (installed !== null) {
+    console.log(`      expecting the row to read: ${driverAccessLabel(access)}`);
+    checkTrue('the row states the driver access mode', text.includes(driverAccessLabel(access)));
+    checkTrue('...and states only that one',
+      (['admin-only', 'all-users', 'unknown'] as const)
+        .filter((mode) => text.includes(driverAccessLabel(mode))).length === 1);
+
+    // The recommendation and its control are one decision, so they appear and
+    // disappear together. An open driver must be advised about; a restricted
+    // one must be left alone, because a warning nobody can act on and a
+    // warning about nothing are the same mistake.
+    check('only an open driver is advised about',
+      text.includes('any user of this machine can capture'), access === 'all-users');
+    check('...and only an open driver is offered a reinstall',
+      labels.includes('Reinstall with admin-only'), access === 'all-users');
+    checkTrue('a reinstall is never offered beside an update',
+      !(labels.includes('Reinstall with admin-only') && labels.includes('Update')));
+    checkTrue('...and the checkbox is named before the prompt',
+      access !== 'all-users'
+      || text.includes('Restrict Npcap driver\u2019s access to Administrators only'));
+  }
 
   // The bug a screenshot found: the agent reports its version over the pipe,
   // so before it connects there is no version - and the row said "Not

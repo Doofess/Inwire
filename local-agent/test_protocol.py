@@ -17,6 +17,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent
+import npcap_access
 
 failures = 0
 
@@ -101,7 +102,7 @@ check_true(
 # pressure breaks.
 check_true(
     "the agent's protocol version has not been reset below what has shipped",
-    tuple(int(part) for part in agent.AGENT_VERSION.split(".")) >= (3, 8, 0),
+    tuple(int(part) for part in agent.AGENT_VERSION.split(".")) >= (3, 9, 0),
 )
 
 # --- build_hello_message ---
@@ -124,6 +125,43 @@ check(
     "...and says so when one is",
     agent.build_hello_message("3.3.0", "idle", [], auth_required=True)["authRequired"],
     True,
+)
+
+# The Npcap device object's DACL, which only a SYSTEM process can be relied on
+# to read. A STRING and not a verdict: the agent states facts and the app
+# decides what they mean (docs/decisions/0010, 0033). Null rather than absent,
+# so a client can tell "this agent looked and found nothing" from "this agent
+# does not report it" - a machine with no driver installed is the first.
+check("hello carries the driver's access descriptor as null by default",
+      hello["npcapAccess"], None)
+check(
+    "...and passes the string through untouched when there is one",
+    agent.build_hello_message(
+        "3.9.0", "idle", [],
+        npcap_access_sddl="D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+    )["npcapAccess"],
+    "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+)
+check_true(
+    "the agent computes no verdict of its own about the driver's access",
+    not any(
+        hasattr(npcap_access, name)
+        for name in ("is_admin_only", "admin_only", "decide_access")
+    ),
+)
+
+# Nothing here may raise. A driver that is not installed, a pywin32 that is
+# not present and a platform that is not Windows all have to answer None, or a
+# failure to read a descriptor takes down the hello that carries it.
+check_true(
+    "an unreadable device answers None rather than raising",
+    npcap_access.read_driver_sddl(r"\\.\INWIRE_NO_SUCH_DEVICE") is None,
+)
+_sddl = npcap_access.read_driver_sddl()
+print(f"      this machine's Npcap DACL: {_sddl!r}")
+check_true(
+    "...and a real read is either None or an SDDL string",
+    _sddl is None or (isinstance(_sddl, str) and "D:" in _sddl),
 )
 
 hello_no_ifaces = agent.build_hello_message(version="2.0.0", state="sniffing", interfaces=[])

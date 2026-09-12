@@ -582,7 +582,7 @@ export default function App() {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
     agentHealth, startAgentService,
     agentLinkEnabled, setAgentLinkEnabled,
-    agentVersion, agentIncompatible, agentInterfaces, captureStats, adapters,
+    agentVersion, agentNpcapAccess, agentIncompatible, agentInterfaces, captureStats, adapters,
     agentLog, agentError, interfaceRates, selectedInterfaces,
     setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
@@ -2193,6 +2193,7 @@ export default function App() {
             agentStatus={agentStatus}
             agentVersion={agentVersion}
             agentOutdated={agentOutdated}
+            agentNpcapAccess={agentNpcapAccess}
             agentCaptureState={agentCaptureState}
             agentInterfaces={agentInterfaces}
             captureStats={captureStats}

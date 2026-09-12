@@ -38,6 +38,19 @@ export interface AgentHelloMessage {
   clientId?: string;
   /** The connection that owns the running capture, or null when idle. */
   owner?: string | null;
+  /**
+   * The Npcap device object's DACL, as an SDDL string.
+   *
+   * Null where the agent looked and found nothing - no driver, no pywin32, not
+   * Windows - and **absent** on an agent before 3.9.0, which is a different
+   * thing and reads the same here only because both end in "not known".
+   *
+   * A string rather than a verdict: the agent runs as SYSTEM and is what can
+   * read the descriptor, and the app is what decides whether it means the
+   * capture devices are open to every local account. `services/npcapAccess.ts`
+   * does the deciding; ADR 0033 says why the question is worth asking.
+   */
+  npcapAccess?: string | null;
 }
 
 export interface AgentStateMessage {
@@ -444,7 +457,7 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
  * whatever the connected agent reports in its hello message to flag a
  * stale build in the UI.
  */
-export const REQUIRED_AGENT_VERSION = '3.8.0';
+export const REQUIRED_AGENT_VERSION = '3.9.0';
 
 /**
  * Simple major.minor.patch comparison - good enough for this agent's
