@@ -398,6 +398,13 @@ would otherwise delete a developer's stored capture on every `npm run check`.
 And it tests whatever is in `dist/` — `npm run check` does not build, so it
 prints the build's age and says so when that is over two hours.
 
+**To drive the app by hand**, `npx tsx scripts/electron/serveStub.ts` serves the
+same stub until Ctrl+C; launch the app beside it and pick "Ethernet (stub)".
+Otherwise testing by hand needs the real service, which needs Administrator,
+Npcap and traffic — and a development machine that still has a pre-3.8.0 agent
+installed has no pipe at all, so the app shows "not connected" and there is
+nothing to click.
+
 ## 8. Migration status
 
 *As of 2026-09-12.*
