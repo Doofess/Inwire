@@ -61,7 +61,7 @@ const OPT_COMMENT = 1;
  * squeezed into whichever of the two is less wrong.
  */
 const OPT_EPB_FLAGS = 2;
-const SHB_HARDWARE = 2;
+// 2 is `shb_hardware`, deliberately not written - see the SHB builder below.
 const SHB_OS = 3;
 const SHB_USERAPPL = 4;
 const IF_NAME = 2;
@@ -212,10 +212,18 @@ function sectionHeader(options: PcapngOptions): Uint8Array {
   // form because a live capture cannot know it either.
   w.u64(0xffffffffffffffffn);
   if (options.comment) stringOption(w, OPT_COMMENT, options.comment);
-  stringOption(w, SHB_HARDWARE, 'Inwire');
-  if (typeof navigator !== 'undefined' && navigator.userAgent) {
-    stringOption(w, SHB_OS, navigator.userAgent);
-  }
+  // `shb_hardware` is "the hardware used to create this section", and this
+  // build does not know it. It used to say `Inwire`, which is not hardware -
+  // that is `shb_userappl`, where it also appears and where it belongs. An
+  // absent option is the format's way of saying nothing is known; a wrong one
+  // is read by every tool as a fact.
+  //
+  // `shb_os` used to be `navigator.userAgent`, which names a Chrome build.
+  // Wireshark shows it under "Operating System" in the capture file
+  // properties, so it was answering a question about the capturing machine
+  // with a string about a browser. The main process simply knows.
+  const os = typeof window !== 'undefined' ? window.inwire?.osDescription : undefined;
+  if (os) stringOption(w, SHB_OS, os);
   stringOption(w, SHB_USERAPPL, options.application ?? 'Inwire');
   w.u16(OPT_ENDOFOPT); w.u16(0);
   return block(BLOCK_SHB, w.concat());

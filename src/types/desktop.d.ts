@@ -19,6 +19,8 @@ declare global {
     inwire?: {
       readonly isDesktop: true;
       readonly platform: string;
+      /** The OS as a person would name it, e.g. "Windows 11 Pro (10.0.26200)". */
+      readonly osDescription?: string;
       readonly versions: {
         readonly electron: string;
         readonly chrome: string;

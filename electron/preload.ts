@@ -21,6 +21,7 @@
  * exposed function that would silently fail.
  */
 import { contextBridge, ipcRenderer } from 'electron';
+import { release, version as osVersion } from 'node:os';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
@@ -51,6 +52,16 @@ declare const window: {
 const api = {
   isDesktop: true,
   platform: process.platform,
+  /**
+   * The OS, as a person would name it. For `shb_os` in a pcapng export.
+   *
+   * `os.version()` gives "Windows 11 Pro" and `os.release()` the build, and
+   * the pair is what a reader opening the file in Wireshark wants to see
+   * under "Operating System". It used to write `navigator.userAgent`, which
+   * named a Chrome build and an operating system that was not necessarily the
+   * one the capture came from.
+   */
+  osDescription: `${osVersion()} (${release()})`,
   versions: {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
