@@ -21,7 +21,6 @@
  * exposed function that would silently fail.
  */
 import { contextBridge, ipcRenderer } from 'electron';
-import { release, version as osVersion } from 'node:os';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
@@ -49,19 +48,32 @@ declare const window: {
  * remains is the handful of places that legitimately want to know which OS
  * this is, and the main process simply knows.
  */
+/** `process.platform` is a build target; this is what a person calls it. */
+const OS_NAMES: Record<string, string> = {
+  win32: 'Windows',
+  darwin: 'macOS',
+  linux: 'Linux',
+};
+
 const api = {
   isDesktop: true,
   platform: process.platform,
   /**
-   * The OS, as a person would name it. For `shb_os` in a pcapng export.
+   * The OS, for `shb_os` in a pcapng export.
    *
-   * `os.version()` gives "Windows 11 Pro" and `os.release()` the build, and
-   * the pair is what a reader opening the file in Wireshark wants to see
-   * under "Operating System". It used to write `navigator.userAgent`, which
-   * named a Chrome build and an operating system that was not necessarily the
-   * one the capture came from.
+   * Built from `process`, not from `node:os`. **A sandboxed preload cannot
+   * require an arbitrary Node module** - it gets `electron` and a small
+   * polyfill set, and importing `node:os` here does not throw a useful error:
+   * the preload fails to load, `contextBridge.exposeInMainWorld` never runs,
+   * and `window.inwire` is simply undefined. The app then has no store, no
+   * agent and no save dialog, and nothing in the console says why.
+   *
+   * `process.getSystemVersion()` is in Electron's sandboxed `process` shim and
+   * gives the build - 10.0.26200 - which with the platform name is what a
+   * reader opening the file wants under "Operating System". It replaced
+   * `navigator.userAgent`, which named a Chrome build.
    */
-  osDescription: `${osVersion()} (${release()})`,
+  osDescription: `${OS_NAMES[process.platform] ?? process.platform} ${process.getSystemVersion()}`,
   versions: {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
