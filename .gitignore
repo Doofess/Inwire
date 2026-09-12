@@ -12,9 +12,14 @@ coverage/
 
 # Compiled local-agent build artifacts (~19-21MB Windows binaries). Regenerate
 # rather than tracking them:
-#   pyinstaller local-agent/inwire_agent.spec   -> local-agent/dist/ (ignored by dist/ above)
-#   iscc local-agent/installer/setup.iss         -> local-agent/installer/output/
-#   copy the installer into release-artifacts/    -> served by the web app
+#   pyinstaller local-agent/inwire_agent.spec  -> local-agent/dist/ (ignored by dist/ above)
+#   npm run pack                                -> release/win-unpacked/
+#   iscc installer/setup.iss                    -> installer/output/Inwire-Setup.exe
+#
+# The Unix tarball goes to release-artifacts/, which is NOT under public/:
+# Vite copies public/** into dist/ verbatim, so an artifact left there is
+# packaged inside the desktop app.
+installer/output/
 local-agent/installer/output/
 public/downloads/
 
