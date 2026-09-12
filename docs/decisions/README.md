@@ -38,6 +38,7 @@ file that supersedes the old one.
 | [0029](0029-the-app-and-the-agent-talk-over-a-named-pipe.md) | The app and the agent talk over a named pipe — **supersedes 0005's authentication half and deletes it**: the kernel answers the question the token was asked to answer | Accepted 2026-09-11 |
 | [0030](0030-one-installer-two-destinations.md) | One installer, two destinations, and the app never elevates — signing and updates deliberately **not** decided | Accepted 2026-09-12 |
 | [0031](0031-a-filter-answers-over-the-whole-capture.md) | A display filter answers over the whole capture — **completes 0025**: one evaluator, a bitmap, and the boundary is the window | Accepted 2026-09-12 |
+| [0032](0032-the-update-center.md) | Npcap is a prerequisite the app manages, not a payload the installer ships — **corrects 0030**: no silent install, a feed instead of a `#define`, and the version is not in `wpcap.dll` | Accepted 2026-09-12 |
 
 ## Review outcome: amendments to the spec's execution order
 
