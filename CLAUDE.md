@@ -13,6 +13,10 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 >   under `public/` that is not a static asset the app itself loads
 > - a **phone layout** — the window minimum is 1024 and `md:` is 768
 > - **`nodeIntegration`** in the renderer, in any form, for any convenience
+> - **`/S` on Npcap's installer**, anywhere, for any reason — it is the OEM
+>   silent-install feature and the free licence does not grant it (ADR 0032).
+>   Npcap's wizard is shown, because its licence is shown with it
+> - **a mirrored copy of Npcap.** It is fetched from npcap.com or not at all
 
 ## 1. What this is
 
@@ -25,7 +29,9 @@ pcapng import and export all happen client-side in TypeScript.
 
 Everything is local. There is no account, no backend, no telemetry, and no
 server of any kind in this repository. The only outbound requests are four
-optional lookups listed under **Invariants**.
+optional lookups from the renderer and two from main - the update feed and
+npcap.com - all listed under **Invariants**, and every one of them behind a
+switch or a click.
 
 What it is **not**, any more: a web app. There is no browser build, no
 `server.ts`, no Express, no hosted deployment. macOS and Linux still have a
@@ -283,6 +289,18 @@ entry nothing dials is a hole with no user. Every one of the four is behind the
 `nameResolution.geoIp` consent switch *except* the basemap tiles, which load
 whenever the map is shown; see **Direction**.
 
+**Main reaches two more hosts, and they are deliberately not in the policy.**
+The update feed and `npcap.com` are dialled by `net.fetch` in the main process,
+which is not a page and which no CSP governs — so a `connect-src` entry for
+either would grant the *renderer* permission to reach a host it never touches,
+which is the same hole with no user as `8999`. What is kept is the list:
+`MAIN_OUTBOUND_HOSTS` in `electron/csp.ts` records both with their purposes,
+and `shell.ts` asserts they are **absent** from the policy, that the recorded
+feed host is the one `updateCenter/manifest.ts` actually dials, and that the
+recorded Npcap host is the one its download allowlist admits. Both are behind
+an explicit action: the feed behind `inwire.updates`, which is off until asked,
+and Npcap behind a click.
+
 **Cross-origin isolation is on.** `ISOLATION_HEADERS` in `electron/main.ts`
 sets COOP/COEP on every `app://` response, so `crossOriginIsolated` is true and
 `SharedArrayBuffer` exists. Verified by hand against the packaged app; nothing
@@ -471,6 +489,17 @@ minutes each, so both are in `NOT_TESTS` and run by hand — after anything on
 the store path. They are what prove the half of the app that `smoke.ts`
 structurally cannot.
 
+**`scripts/electron/update-center-drive.ts` reaches the network and the
+registry.** It stands up an HTTP feed on a loopback port, points
+`INWIRE_UPDATE_FEED` at it and drives the real app against it - and it builds
+the manifest from **this machine's own installed Npcap version**, which is
+what lets the central assertion be exact: told the version it has, the row
+must read `up-to-date`; told one digit more, it must offer it. That pair is
+the `wpcap.dll` trap, and a build that read the libpcap number fails the
+first half on any machine with Npcap on it. In `NOT_TESTS`; run it by hand
+after anything on the update path. It installs nothing - the UAC prompt is
+the one step that stays with a person.
+
 **To drive the app by hand**, `npx tsx scripts/electron/serveStub.ts` serves the
 same stub until Ctrl+C (`--burst n` for n frames per 100 ms tick); launch the app beside it and pick "Ethernet (stub)".
 Otherwise testing by hand needs the real service, which needs Administrator,
@@ -496,9 +525,13 @@ Phases 1–5 of the Electron migration are done. The plan is
 | 7 | Rebuild what the browser forced | planned |
 | 8 | Import-to-disk; `captureScan` wired to the filter bar | **in progress** — `1bfcbf9`; scaled scrolling is what is left |
 
-Phase 6 is blocked on things outside this repository: a code-signing
-certificate (EV or Azure Trusted Signing), and whether Npcap's silent install
-needs an OEM licence. The installer compiles and the fuses are still to flip.
+Phase 6 is blocked on one thing outside this repository: a code-signing
+certificate (EV or Azure Trusted Signing). The installer compiles and the
+fuses are still to flip.
+
+**The Npcap question is answered rather than blocking.** It was "does the
+silent install need an OEM licence", and the answer is yes - so the installer
+stopped installing it. See **The Update Center** and ADR 0032.
 
 **Phase 8's filter works end to end**, watched: a 178,200-frame capture with a
 115,476-frame window, `udp.srcport == 49152` matching 44 frames across the
@@ -511,7 +544,8 @@ the store became a process — see **The bug that hid the whole disk path**.
 
 **The ADRs the migration owed are written**: 0027 (the app is a desktop app),
 0028 (where the store runs, with the boundary measured), 0030 (one installer),
-0031 (the whole-capture filter). 0029 was already there.
+0031 (the whole-capture filter). 0029 was already there. 0032 followed, for
+the update path.
 
 ### The bug that hid the whole disk path
 
@@ -607,7 +641,149 @@ Still unfixed: the store's inbound queue is unbounded, and each pending
 was measured — the store takes 31,000 frames a second and the app feeds it far
 less — so the 4 GB heap remains unexplained rather than diagnosed.
 
-## 9. Direction
+## 9. The Update Center
+
+*The only place this app updates anything.* ADR 0032.
+
+One Settings section (`Settings → Updates`) listing every updatable component:
+the app, the capture agent, the Npcap driver, and two databases that are
+declared and have no consumer yet. `electron/updateCenter/` is the pipeline,
+`src/services/updateCenter.ts` is what the renderer accepts and calls things,
+`UpdateCenterPanel.tsx` arranges it and decides nothing.
+
+**The installer no longer installs Npcap.** It used to download it and run it
+with `/S` — Npcap's **OEM silent-install feature**, used against the free
+installer, whose licence does not grant it. The pin was also a compile-time
+`#define` (1.79, against a current 1.88), so correcting it meant shipping a new
+installer; and `[Run]` ignores exit codes, so a failed driver install produced a
+"successful" product install with no capture capability and nothing on screen.
+
+### The pipeline
+
+```
+detect  → the installed version (registry / hello / app.getVersion)
+fetch   → net.fetch, in MAIN, streamed to a fresh random temp directory
+verify  → sha256, and the size must match exactly
+elevate → powershell -EncodedCommand <constant>, path in the environment
+confirm → re-read the installed version; the row proves itself
+notify  → for Npcap: cycle the agent link so interfaces re-enumerate
+```
+
+The fetch is in main because **the renderer must never learn the path** — the
+path is what gets run elevated. It also gets Chromium's network stack, so a
+proxy works without this code knowing what a proxy is.
+
+Elevation could not live anywhere else either. The renderer has no rights; the
+agent is LocalSystem but runs in **session 0, which has no visible desktop**, so
+an installer wizard launched from there draws where nobody can see it and blocks
+for ever on a click that cannot happen.
+
+### Three things about Npcap that are all traps
+
+Each produces a confident wrong answer rather than an error.
+
+| Source | ProductName | Version on a machine running Npcap 1.88 |
+|---|---|---|
+| `System32\Npcap\wpcap.dll` | **libpcap** | **1.10.6** |
+| `System32\Npcap\Packet.dll` | Npcap | 1.88 |
+| `Uninstall\NpcapInst\DisplayVersion` | — | 1.88 |
+
+**Nothing reads `wpcap.dll`.** It carries the libpcap API version it
+implements. Compared against a feed advertising 1.88 it says "update available"
+for ever — including immediately after a successful install.
+
+**`/reg:32` is asked first.** Npcap's installer is 32-bit, so `NpcapInst` lands
+under `WOW6432Node`, and a plain `reg query` of the 64-bit view exits **1 with
+empty stdout** — exactly the shape `agentService.ts`'s `provesAbsent` reads as
+*proof of absence*. That helper reused unchanged reports "not installed" on a
+machine where the driver is running.
+
+**`installed` and `version` are two answers.** `HKLM\SOFTWARE\Npcap` holds no
+version and on x64 does not exist at all, so a driver present with an
+unreadable version says so rather than being rounded to either.
+
+### The elevated command line is a constant
+
+`ELEVATE_ARGV` is the same array on every call — a fixed base64 blob — and the
+installer path travels in the child's **environment**, read back from `$env:`.
+Nothing interpolates and nothing is quoted, so a path with a space cannot become
+two arguments. That keeps `agentPipe.ts`'s invariant literally: *"the arguments
+are constants."* The failure mode of the alternative is not a crash; it is
+running a different file, elevated.
+
+`Start-Process -Verb RunAs` reports a **declined UAC prompt by throwing**, and
+its message is localised, so the result comes back as one machine-readable
+marker line on stdout — same reasoning as `reg` over `sc query`. A decline is
+`cancelled`, never `failed`: the row goes back to what it was and shows nothing.
+
+**Awaiting our own installer deadlocks.** `setup.iss` sets
+`CloseApplications=yes`, so Inno asks Inwire to exit before replacing the
+payload; blocked in `-Wait`, each waits for the other and nothing is on screen.
+So there are two scripts — `ELEVATE_ARGV` waits, `LAUNCH_ARGV` does not — and
+`awaitsInstaller(kind)` is the single predicate that chooses, so a third caller
+cannot reintroduce it. Our installer's exit code is unobservable as a result,
+which is the right trade against a hang.
+
+### After Npcap installs, the link is cycled
+
+`AgentPipeLink.recycle()` — not `refresh_adapters`. That command re-reads
+adapter *configuration* and never touches `AVAILABLE_INTERFACES`, the
+capture-interface list the picker is built from, **and is itself filtered by
+that stale list**, so a brand-new adapter is excluded from its own snapshot. The
+agent re-reads the list in `register()`, once per client connection, so a
+reconnect is what re-enumerates. Preferred over `restart_agent`, which also
+works but kills a service the app deliberately has no rights to stop.
+
+### The feed
+
+One JSON document at `UPDATE_FEED_URL` — an RFC 2606 `.invalid` placeholder
+until the domain exists, overridable by `INWIRE_UPDATE_FEED` in dev. It is the
+only remote input in this repository that can nominate an executable to be run
+elevated, so it is validated strictly and **rejected whole** — the opposite of
+how preferences are read, because a defaulted field here could mean "download
+this URL with no hash".
+
+The hash is not the interesting defence: whoever controls the feed writes the
+hash too. What stops a compromised feed nominating an arbitrary binary is the
+**download-host allowlist** — Npcap from npcap.com, our own artifacts from the
+host the feed came from — matched **exactly**, never by suffix, because
+`endsWith('npcap.com')` also accepts `evilnpcap.com`.
+
+**Unreachable is quiet**: no dialog, one info line, nothing cleared, and "last
+checked" does not move. A *malformed* feed takes the identical path, because a
+document we cannot read is one we have no answer from, and rendering that as
+"no updates available" would be a confident lie.
+
+**The check is opt-in and off by default**, which is the product invariant
+rather than a cautious default: a request Inwire makes unbidden appears in the
+user's own capture. `inwire.updates` keeps `asked` separate from `automatic`,
+because "no" and "not yet asked" are different and collapsing them turns a
+one-time prompt into a recurring one.
+
+### What it does not prove
+
+A sha256 says the bytes are the ones the feed named. It says nothing about the
+feed being honest and nothing about the publisher — **Authenticode verification
+is owed and not built**. The freshly-created random temp directory stops a file
+being *pre-planted* at the path and cannot stop the same user swapping it
+afterwards, since that user can already rewrite the app's own payload. Both are
+written down because a hash check next to a UAC prompt looks like more assurance
+than it is.
+
+The **Inwire row cannot be exercised yet**: there is no feed host and no
+signature, so it reads "Not checked". The Npcap row works today.
+
+### The state that had been a tooltip
+
+`agentHealth` cannot express "driver missing" and still cannot, because it is a
+*link* diagnosis and the link is fine: `diagnoseAgent` short-circuits on
+`status === 'connected'`, and a driverless agent **is** connected — it answers,
+it is healthy, it has nothing to listen on. `DriverInfoPanel` now describes that
+directly from the two facts it already has, and links to the tab that fixes it.
+Before this, the entire signal for the state a fresh install lands in was a
+hover tooltip on a header button.
+
+## 10. Direction
 
 Validated sequencing, recorded so a future session inherits the reasoning.
 These are **not** work in progress and get an ADR when each is started.
@@ -660,7 +836,7 @@ channel is the trap — installed fleets only move forward on the updater they
 shipped with). Electron gets security fixes for three majors; this is on 44, so
 plan a bump roughly every other release.
 
-## 10. Decisions ledger
+## 11. Decisions ledger
 
 `docs/decisions/README.md` is the index. One line each:
 
@@ -697,6 +873,7 @@ plan a bump roughly every other release.
 | 0029 | The app and the agent talk over a named pipe | accepted |
 | 0030 | One installer, two destinations, the app never elevates | accepted |
 | 0031 | A display filter answers over the whole capture | accepted |
+| 0032 | Npcap is managed by the app, not shipped by the installer | accepted; **voids 0030's Npcap paragraph** |
 
 **ADR 0008 weakened and it is not written down there yet.** Its argument was
 that key material "is exactly as old as the tab"; a desktop app open for days

@@ -29,7 +29,12 @@
  */
 import { readFileSync } from 'node:fs';
 import { decideServe, MAPLIBRE_RUNTIME_ASSETS, MIME_TYPES } from '../../electron/appPaths';
-import { developmentCsp, OUTBOUND_HOSTS, productionCsp } from '../../electron/csp';
+import {
+  developmentCsp, MAIN_OUTBOUND_HOSTS, OUTBOUND_HOSTS, productionCsp,
+} from '../../electron/csp';
+import {
+  DEFAULT_UPDATE_FEED_URL, isAllowedDownload,
+} from '../../electron/updateCenter/manifest';
 import { menuTemplate } from '../../electron/menu';
 import {
   APP_ORIGIN, COMMAND_LINE_SWITCHES, SCHEME_PRIVILEGES, WEB_PREFERENCES,
@@ -186,6 +191,31 @@ console.log('\n--- the policy, and the list it has to keep up with ---\n');
     }
   }
   check('no outbound host in src/ is missing from the policy', unlisted, []);
+
+  // The same rule for the other process. `net.fetch` in main is not a page and
+  // no CSP governs it, so these must NOT be in the policy - a `connect-src`
+  // entry the renderer never dials is the hole with no user, again. What is
+  // asserted instead is that the list exists and matches what the code
+  // actually reaches, because a host that escaped the record by being dialled
+  // from main would defeat the point of keeping the record.
+  for (const host of Object.values(MAIN_OUTBOUND_HOSTS)) {
+    checkTrue(`${host} is main's to reach, not the renderer's`, !production.includes(host));
+  }
+
+  // The one that would drift. Change the feed URL and this fails until the
+  // list is corrected.
+  check('the recorded feed host is the one the updater dials',
+    hostOf(MAIN_OUTBOUND_HOSTS.updateFeed),
+    hostOf(DEFAULT_UPDATE_FEED_URL));
+
+  // Npcap comes from the vendor and nowhere else, and `manifest.ts` is what
+  // enforces it at runtime. Asserting the pair keeps the documented host and
+  // the enforced one from parting company.
+  checkTrue('the recorded Npcap host is the one the allowlist admits',
+    isAllowedDownload('npcap', `${MAIN_OUTBOUND_HOSTS.npcap}/dist/npcap-1.88.exe`,
+      DEFAULT_UPDATE_FEED_URL));
+  checkTrue('...and it admits nowhere else',
+    !isAllowedDownload('npcap', 'https://mirror.example/npcap-1.88.exe', DEFAULT_UPDATE_FEED_URL));
 }
 
 console.log('\n--- the menu, which is neither the default nor absent ---\n');

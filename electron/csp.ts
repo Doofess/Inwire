@@ -48,6 +48,36 @@ export const OUTBOUND_HOSTS = {
 // now, which no policy governs because no page can open one. A `connect-src`
 // entry for a port nothing dials is a hole with no user.
 
+/**
+ * Where the MAIN process connects, which this policy does not govern.
+ *
+ * A CSP constrains a page. `net.fetch` in the main process is not a page and
+ * is not subject to one, so adding these to `connect-src` would grant the
+ * renderer permission to reach hosts it never dials - which is exactly the
+ * "hole with no user" the note above refuses for port 8999.
+ *
+ * They are listed anyway, because the thing worth keeping is not the CSP entry
+ * but **the list**: `CLAUDE.md`'s standing direction is that every outbound
+ * host has a recorded purpose, and a host that escaped the record by being
+ * dialled from a different process would defeat that entirely. Held to
+ * `updateCenter/manifest.ts` by `scripts/electron/shell.ts`, so the two cannot
+ * drift, and asserted to be **absent** from the renderer's policy.
+ */
+export const MAIN_OUTBOUND_HOSTS = {
+  /**
+   * `updateCenter/host.ts` - the update manifest, behind `inwire.updates`,
+   * which is off until somebody turns it on. A placeholder host until the
+   * domain exists; `.invalid` is reserved by RFC 2606 and cannot resolve.
+   */
+  updateFeed: 'https://updates.inwire.invalid',
+  /**
+   * `updateCenter/host.ts` - the Npcap installer, on an explicit click and
+   * never otherwise. The vendor's own host: the free licence forbids
+   * redistribution, so a copy we served would be a copy we had no right to.
+   */
+  npcap: 'https://npcap.com',
+} as const;
+
 function join(parts: readonly string[]): string {
   return parts.join('; ') + ';';
 }
