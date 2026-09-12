@@ -1820,7 +1820,7 @@ export default function App() {
           onOpenSettingsModal={() => setShowSettingsModal(true)}
           agentStatus={agentStatus}
           agentLinkEnabled={agentLinkEnabled}
-          agentOutdated={agentOutdated}
+          agentHealth={agentHealth}
           totalPacketsCount={packets.length}
           restoreProgress={restoreProgress}
         />

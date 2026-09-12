@@ -24,7 +24,11 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const agentDir = join(root, 'local-agent');
 const unixDir = join(agentDir, 'unix');
-const downloads = join(root, 'public', 'downloads');
+// NOT under `public/`. Vite copies that directory into `dist/` verbatim, so
+// an artifact left there is packaged inside the desktop app - which for the
+// Windows installer meant 21 MB of a 30 MB renderer bundle, an installer for
+// the agent the app already ships, and a stale one at that.
+const downloads = join(root, 'release-artifacts');
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {

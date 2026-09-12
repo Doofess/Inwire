@@ -1,4 +1,5 @@
 import React from 'react';
+import type { AgentHealth } from '../../services/agentHealth';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   TbPlayerPlay,
@@ -66,7 +67,8 @@ interface HeaderProps {
    *  is the difference between "the driver is not there" and "you closed the
    *  link", which agentStatus reports as the same 'disconnected'. */
   agentLinkEnabled: boolean;
-  agentOutdated: boolean;
+  /** Why the agent link is down, for the interface button's label. */
+  agentHealth: AgentHealth;
   /** The display-filter controls, rendered inline in this bar rather than in
    *  a row of their own. Passed in rather than imported so the header stays
    *  a layout component with no opinion about what the filter UI is. */
@@ -76,6 +78,21 @@ interface HeaderProps {
   /** Set while a stored session is being decoded back in; null otherwise. */
   restoreProgress?: { done: number; total: number } | null;
 }
+
+/**
+ * The headline for each way the agent can be silent.
+ *
+ * Short because the button is narrow, and distinct because the whole point of
+ * `agentHealth` is that these are four different problems - "Install Drivers"
+ * covered all of them and was the wrong instruction for three.
+ */
+const AGENT_SILENT_LABEL: Partial<Record<AgentHealth['kind'], string>> = {
+  missing: 'Agent missing',
+  disabled: 'Agent disabled',
+  crashing: 'Agent crashing',
+  stopped: 'Agent not running',
+  unknown: 'Agent not reachable',
+};
 
 export const Header: React.FC<HeaderProps> = ({
   isCapturing,
@@ -104,7 +121,7 @@ export const Header: React.FC<HeaderProps> = ({
   onNameResolutionChange,
   agentStatus,
   agentLinkEnabled,
-  agentOutdated,
+  agentHealth,
   filterSlot,
   onOpenSettingsModal,
   totalPacketsCount,
@@ -127,16 +144,19 @@ export const Header: React.FC<HeaderProps> = ({
   // answers, and reporting both as "No interfaces detected" told the largest
   // group of people the least useful thing.
   //
-  // No socket at all means the driver is not on this machine - it ships as a
-  // service that is installed once and then always running, so a first-run user
-  // sees exactly this, and what they need is the installer. Adapters missing
-  // while the socket is up is a different failure (Npcap broken, no
-  // permissions) that the installer would not fix.
+  // No connection at all means the agent is not answering, and the button says
+  // WHICH of the reasons it is rather than one word covering four. Adapters
+  // missing while the link is up is a different failure (Npcap broken, no
+  // permissions) that none of those sentences would fix.
+  //
+  // This used to say "Install Drivers" and point at a Download Driver menu
+  // entry. The agent ships inside the app now, so there is nothing to download
+  // and that instruction had become impossible to follow.
   //
   // Gated on agentLinkEnabled as well, because a link the user closed
-  // themselves reports the same 'disconnected' - and telling someone to install
-  // software they just disconnected from would be the app calling them wrong.
-  const driverMissing = agentInterfaces.length === 0
+  // themselves reports the same 'disconnected' - and diagnosing a connection
+  // somebody deliberately closed would be the app calling them wrong.
+  const agentSilent = agentInterfaces.length === 0
     && adapterStateKnown
     && agentLinkEnabled
     && (agentStatus === 'disconnected' || agentStatus === 'error');
@@ -199,14 +219,18 @@ export const Header: React.FC<HeaderProps> = ({
 
   const interfaceButton = agentInterfaces.length === 0
     ? adapterStateKnown
-      ? driverMissing
+      ? agentSilent
         ? {
-            label: 'Install Drivers',
-            title: 'The capture driver is not running on this machine. Install it from Menu > Download Driver, then it starts on its own.',
+            // The full sentence is in Settings -> Driver Info, which is where
+            // the Start button is; the header has room for the headline only.
+            label: AGENT_SILENT_LABEL[agentHealth.kind] ?? 'Agent not reachable',
+            title: 'summary' in agentHealth
+              ? `${agentHealth.summary}. Settings > Driver Info has the detail.`
+              : 'The capture agent is not answering. Settings > Driver Info has the detail.',
           }
         : {
             label: 'No interfaces detected',
-            title: 'The driver is running but reported no capture interfaces. Check that Npcap is installed.',
+            title: 'The agent is running but reported no capture interfaces. Check that Npcap is installed.',
           }
       : {
           label: 'Interfaces',
@@ -248,7 +272,6 @@ export const Header: React.FC<HeaderProps> = ({
           nameResolution={nameResolution}
           onNameResolutionChange={onNameResolutionChange}
           onOpenSettingsModal={onOpenSettingsModal}
-          agentOutdated={agentOutdated}
         />
 
         {/* The lockup: mark, then the wordmark, on one line.
