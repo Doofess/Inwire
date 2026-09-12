@@ -2,7 +2,6 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AgentHealth } from '../../services/agentHealth';
 import { TbTrash, TbPlugConnected, TbPlugConnectedX, TbRefresh } from 'react-icons/tb';
 import type { AgentLogEntry, CaptureDropStats } from '../../services/agentProtocol';
-import { detectOS } from '../../services/platformDetect';
 import { describeLink, type LinkChange, type LinkContext } from '../../services/linkContext';
 
 interface DriverInfoPanelProps {
@@ -90,8 +89,13 @@ const AGENT_STATUS_COLOR: Record<DriverInfoPanelProps['agentStatus'], string> = 
 // so a machine with a relocated ProgramData would differ. Showing the
 // standard path is enough to find the file; the agent is not asked for its
 // real one, which would mean another protocol field for a rare case.
+//
+// The OS comes from the preload rather than from `navigator`. `platformDetect`
+// inferred it from the user agent in order to pick an installer to download,
+// and both the inference and the download are gone: the main process simply
+// knows which OS it is running on.
 function logFilePath(): string {
-  return detectOS() === 'windows'
+  return window.inwire?.platform === 'win32'
     ? '%ProgramData%\\Inwire\\agent.log'
     : '~/.inwire/agent.log';
 }

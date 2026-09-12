@@ -6,7 +6,6 @@ import { HamburgerIcon } from './HamburgerIcon';
 import { headerIconButtonClass } from './headerButton';
 import {
   TbDownload,
-  TbCloudDownload,
   TbCode,
   TbNetwork,
   TbSettings,
@@ -15,7 +14,6 @@ import {
   TbTag,
   TbX,
 } from 'react-icons/tb';
-import { getAgentDownloadForCurrentOS } from '../../services/platformDetect';
 import type { NameResolutionPrefs } from '../../services/interfacePrefs';
 
 /**
@@ -40,7 +38,6 @@ interface AppMenuProps {
   nameResolution: NameResolutionPrefs;
   onNameResolutionChange: (patch: Partial<NameResolutionPrefs>) => void;
   onOpenSettingsModal: () => void;
-  agentOutdated: boolean;
 }
 
 /**
@@ -61,21 +58,6 @@ const itemClass =
 /** Icons follow their row. */
 const itemIconClass = 'w-3.5 h-3.5 shrink-0 text-chrome-foreground';
 
-function downloadAgentInstaller() {
-  const download = getAgentDownloadForCurrentOS();
-  // Null on a phone and on a platform this build does not recognise. The menu
-  // entry is hidden in that case, so this is belt and braces rather than a
-  // path anyone reaches.
-  if (!download) return;
-  const { url, filename } = download;
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
 export const AppMenu: React.FC<AppMenuProps> = ({
   onOpenDissectorModal,
   onOpenExportModal,
@@ -84,11 +66,9 @@ export const AppMenu: React.FC<AppMenuProps> = ({
   nameResolution,
   onNameResolutionChange,
   onOpenSettingsModal,
-  agentOutdated,
 }) => {
   const [open, setOpen] = useState(false);
   const commandRef = useRef<HTMLDivElement | null>(null);
-  const agentDownload = getAgentDownloadForCurrentOS();
 
   useEffect(() => {
     if (open) {
@@ -234,29 +214,6 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                   >
                     <TbDownload className={itemIconClass} />
                     <span>Export / Import PCAP</span>
-                  </Command.Item>
-                  {/* Was its own always-visible header button; folded in here
-                      now that the header has nothing right of the trigger
-                      for it to sit next to. */}
-                  {/* Hidden where the agent cannot run at all. Offering an
-                      iPad a shell script it has no way to execute is worse
-                      than offering it nothing. */}
-                  <Command.Item
-                    value="download-driver"
-                    onSelect={() => run(downloadAgentInstaller)}
-                    className={itemClass}
-                    style={agentDownload ? undefined : { display: 'none' }}
-                  >
-                    <TbCloudDownload className={itemIconClass} />
-                    <span className="flex-1">Download Driver ({agentDownload?.label ?? 'unavailable'})</span>
-                    {agentOutdated && (
-                      <span
-                        className="shrink-0 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-chrome-foreground/15 border border-chrome-foreground/30 text-chrome-foreground"
-                        title="A newer driver build is available"
-                      >
-                        Update
-                      </span>
-                    )}
                   </Command.Item>
                   <Command.Item
                     value="capture-statistics"

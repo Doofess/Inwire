@@ -14,7 +14,7 @@ coverage/
 # rather than tracking them:
 #   pyinstaller local-agent/inwire_agent.spec   -> local-agent/dist/ (ignored by dist/ above)
 #   iscc local-agent/installer/setup.iss         -> local-agent/installer/output/
-#   copy the installer into public/downloads/    -> served by the web app
+#   copy the installer into release-artifacts/    -> served by the web app
 local-agent/installer/output/
 public/downloads/
 
