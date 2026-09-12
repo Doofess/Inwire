@@ -45,6 +45,7 @@ import { parseDisplayVersion, readNpcap } from '../../electron/updateCenter/npca
 import { parseAdminOnly, readAdminOnly } from '../../electron/updateCenter/npcapAdminOnly';
 import {
   actionLabel, canApply as canApplyInRenderer, canReinstall, EMPTY_SNAPSHOT, installedLabel,
+  namesAdminOnlyCheckbox,
   isBusy, normalizeSnapshot, stateLabel, withAgentRow, type UpdateComponent,
 } from '../../src/services/updateCenter';
 import {
@@ -759,6 +760,26 @@ console.log('\n--- the driver access mode, which is a security answer ---\n');
     !canReinstall(row({ installed: null, state: { kind: 'not-installed' } })));
   checkTrue('and nothing mid-flight is either',
     !canReinstall(row({ state: { kind: 'downloading', received: 1, total: 2 } })));
+
+  // And the notice is NOT that question, which is the bug these four put back.
+  // The panel read the wording off `canReinstall`, so the one instruction
+  // Inwire cannot carry out itself - tick Npcap's own checkbox - was withheld
+  // in both cases where the wizard opens on a driver that is open.
+  checkTrue('an open driver up to date is told to tick the box',
+    namesAdminOnlyCheckbox(row(), 'all-users'));
+  checkTrue('...and so is an open driver with an update waiting',
+    namesAdminOnlyCheckbox(
+      row({ state: { kind: 'update-available', version: '1.90' } }), 'all-users'));
+  checkTrue('...and a first install, which has no driver to describe',
+    namesAdminOnlyCheckbox(row({ installed: null, state: { kind: 'not-installed' } }), undefined));
+  checkTrue('a restricted driver is told nothing about it',
+    !namesAdminOnlyCheckbox(row(), 'admin-only'));
+  // Same rule as `driverAccessAdvice`: a descriptor nothing could read is not a
+  // reason to tell somebody to change it.
+  checkTrue('...and neither is one nothing could read',
+    !namesAdminOnlyCheckbox(row(), 'unknown'));
+  checkTrue('no other row is ever told about it',
+    !namesAdminOnlyCheckbox(row({ id: 'inwire', installed: null }), 'all-users'));
 }
 
 {

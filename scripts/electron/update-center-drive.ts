@@ -19,15 +19,17 @@
  * on any machine with Npcap on it.
  *
  * In `NOT_TESTS`: it needs `dist/`, a loopback port and about a minute, and on
- * a machine with no Npcap at all it can only check the failure direction. Run
- * it by hand after anything on the update path.
+ * a machine with no Npcap at all it can only check the failure direction and
+ * the first-install notice. Run it by hand after anything on the update path.
  *
  * It also proves the driver-access row (ADR 0033): that main's registry read
  * reaches the renderer as a three-valued field, and that the panel states the
  * mode this machine is actually in. On a default Npcap install that is "all
  * users", and the reinstall control has to be on screen; on an admin-only one
  * it must not be. Which of those runs is a property of the machine, so every
- * assertion is written against the mode rather than pinned to one of them.
+ * assertion is written against the mode rather than pinned to one of them - and
+ * the run first checks that no agent connected, because a DACL outranks the
+ * registry the expectation is built from.
  *
  * It never installs anything. Nothing here raises a UAC prompt - pressing
  * Update, or Reinstall, is the one step that stays with a person, and it is
@@ -151,9 +153,16 @@ try {
     initial.components.filter((component) => component.id !== 'npcap')
       .every((component) => component.adminOnly === undefined), true);
 
-  // The agent is not connected in this run, so the DACL half is absent and the
-  // registry is the whole answer - which is the state the Update Center is
-  // usually opened in, and the one that has to work with no pipe at all.
+  // Registry-only, because the DACL half needs an agent and this run does not
+  // start one - which is the state the Update Center is usually opened in, and
+  // the one that has to work with no pipe at all.
+  //
+  // That used to be asserted by comment. It is not safe to assume: this script
+  // launches the real app against the real named pipe, and a development
+  // machine with the service installed is an ordinary state, in which the agent
+  // connects and `hello` carries a DACL that `decideDriverAccess` then prefers.
+  // The label assertions below check first, because the failure otherwise names
+  // the label and not the cause.
   const access = decideDriverAccess(adminOnly, null);
 
   if (installed === null) {
@@ -239,7 +248,23 @@ try {
   const text = await driven.locator('body').innerText();
   checkTrue('the driver row names Npcap', text.includes('Npcap capture driver'));
 
-  if (installed !== null) {
+  // `not-connected` is only ever the agent row's state (`withAgentRow`), so its
+  // label is the one thing on this page that says whether a DACL reached the
+  // renderer.
+  const agentConnected = !text.includes('Not connected');
+
+  if (installed === null) {
+    // The one moment Npcap's checkbox is certainly on screen, and the path that
+    // had no coverage at all: with no driver there is no access mode to state,
+    // but the notice still has to name the box. Gating that wording on the
+    // reinstall control - which is `up-to-date` only - hid it here.
+    checkTrue('a first install is told to tick the box',
+      text.includes("Restrict Npcap driver's access to Administrators only"));
+  } else if (agentConnected) {
+    console.log('      an agent is connected, so the DACL it sent outranks the registry');
+    console.log('      and the registry-only expectation above cannot be asserted. Stop');
+    console.log('      the InwireAgent service and run this again to cover the row.');
+  } else {
     console.log(`      expecting the row to read: ${driverAccessLabel(access)}`);
     checkTrue('the row states the driver access mode', text.includes(driverAccessLabel(access)));
     checkTrue('...and states only that one',
@@ -259,9 +284,15 @@ try {
     // Spelled exactly as Npcap's own wizard spells it. A paraphrase here would
     // pass while sending somebody looking for a checkbox that is not there, so
     // the assertion is the literal words and not a substring of them.
-    checkTrue('...and the checkbox is named before the prompt',
-      access !== 'all-users'
-      || text.includes("Restrict Npcap driver's access to Administrators only"));
+    //
+    // Both directions, and deliberately not conditioned on the row's state: the
+    // wording follows the driver being open, not the button beside it. Written
+    // one-directionally it passed only because the block above settles the row
+    // on `up-to-date`, and said nothing about the all-users machine with an
+    // update waiting - which is where the box went unnamed.
+    check('...and the checkbox is named exactly when the driver is open',
+      text.includes("Restrict Npcap driver's access to Administrators only"),
+      access === 'all-users');
   }
 
   // The bug a screenshot found: the agent reports its version over the pipe,
