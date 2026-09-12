@@ -119,7 +119,18 @@ export default defineConfig(() => {
         // are gone: the installers no longer live under `public/` (they were
         // being packaged into the app), and there is no SPA fallback to fall
         // through to.
-        ignored: ['**/local-agent/**', '**/release-artifacts/**'],
+        // `release/` and `dist-electron/` are build output the dev server has
+        // no interest in, and watching them is not merely wasteful: chokidar
+        // holds directory handles, and electron-builder finishes a pack by
+        // RENAMING `release/win-unpacked.tmp`. A watcher on it makes that fail
+        // with EPERM - which reads as a permissions problem and is a live dev
+        // server two days old in another terminal.
+        ignored: [
+          '**/local-agent/**',
+          '**/release-artifacts/**',
+          '**/release/**',
+          '**/dist-electron/**',
+        ],
       },
     },
   };
