@@ -27,9 +27,28 @@ import {
 import {
   FRAME_BINARY, FRAME_JSON, FrameReader, encodeFrame, encodeJsonFrame, frameText,
 } from '../../src/services/agentFraming';
+import { REQUIRED_AGENT_VERSION } from '../../src/services/agentProtocol';
 
 /** The name the app dials. Must match `AGENT_PIPE_PATH`. */
 export const STUB_PIPE = '\\\\.\\pipe\\inwire-agent';
+
+/**
+ * What the stub says it is.
+ *
+ * Read from the app's own requirement rather than written out, because a
+ * literal here goes stale on the next protocol bump and the failure it
+ * produces is "the stub agent is out of date" in front of somebody debugging
+ * something else entirely.
+ */
+const AGENT_VERSION = REQUIRED_AGENT_VERSION;
+
+/**
+ * The admin-only shape of `\\.\NPCAP`'s DACL - SY and BA, nobody else.
+ *
+ * A default Npcap install carries a third ACE, `(A;;0x12019f;;;WD)`, which is
+ * Everyone. Swap this for that one to drive the other half of the row.
+ */
+const STUB_NPCAP_SDDL = 'D:P(A;;FA;;;SY)(A;;FA;;;BA)';
 
 /** What the app is told it can capture on. */
 const INTERFACES = [
@@ -138,8 +157,16 @@ export async function startStubAgent(
     const tell = (message: unknown) => send(encodeJsonFrame(message));
 
     tell({
-      type: 'hello', version: '3.8.0', state: 'idle', interfaces: INTERFACES,
+      type: 'hello', version: AGENT_VERSION, state: 'idle', interfaces: INTERFACES,
       clientId: 'stub-1', owner: null,
+      // The Npcap device object's DACL, as a real SYSTEM agent reads it. The
+      // shape below is the **admin-only** one, which is deliberately not the
+      // shape this machine is in: the whole point of the field is that it
+      // outranks the registry, so a stub that echoed the registry's answer
+      // would prove nothing. Drive the app against this and the Update
+      // Center's driver row must flip to "administrators only" the moment the
+      // link comes up. ADR 0033.
+      npcapAccess: STUB_NPCAP_SDDL,
     });
 
     socket.on('data', (chunk: Buffer) => {
