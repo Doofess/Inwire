@@ -42,6 +42,13 @@ interface DriverInfoPanelProps {
   agentHealth: AgentHealth;
   /** Raises the UAC prompt that starts the service. Offered only when it helps. */
   onStartAgentService: () => void;
+  /**
+   * Opens the Updates section, where the capture driver is installed.
+   *
+   * Offered only for the one failure `agentHealth` structurally cannot
+   * describe - see `noInterfaces` below.
+   */
+  onShowUpdates?: () => void;
   /** The agent's most recent rejection, or null. */
   agentError: string | null;
   onConnect: () => void;
@@ -148,6 +155,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   agentLinkEnabled,
   agentHealth,
   onStartAgentService,
+  onShowUpdates,
   agentError,
   onConnect,
   onDisconnect,
@@ -212,6 +220,19 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
     ? null
     : agentHealth;
 
+  // The failure `agentHealth` cannot express, and the reason it cannot is
+  // structural rather than an oversight: `diagnoseAgent` short-circuits on
+  // `status === 'connected'`, and this IS connected. The agent answered, it
+  // is healthy, and it has nothing to capture on - which on Windows means
+  // Npcap almost every time.
+  //
+  // Until now the entire signal for it was a hover tooltip on a header
+  // button. It is the state a new install lands in, so it is the one that
+  // least deserves to be a tooltip.
+  const noInterfaces = agentLinkEnabled
+    && agentStatus === 'connected'
+    && agentInterfaces.length === 0;
+
   return (
     <div className="flex flex-col gap-4 min-h-0">
       {agentLinkEnabled && diagnosis && (
@@ -229,6 +250,25 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
               className="mt-2 rounded border border-border px-2 py-1 font-medium text-foreground hover:bg-muted"
             >
               Start the agent
+            </button>
+          )}
+        </div>
+      )}
+      {noInterfaces && (
+        <div className="rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2.5 text-xs">
+          <div className="font-semibold text-foreground">No capture interfaces</div>
+          <p className="mt-1 text-muted-foreground leading-relaxed">
+            The agent is running and answering, and it has nothing to listen on. That almost
+            always means the Npcap capture driver is missing - Windows itself does not let a
+            program read raw frames.
+          </p>
+          {onShowUpdates && (
+            <button
+              type="button"
+              onClick={onShowUpdates}
+              className="mt-2 rounded border border-border px-2 py-1 font-medium text-foreground hover:bg-muted cursor-pointer"
+            >
+              Install it from Updates
             </button>
           )}
         </div>

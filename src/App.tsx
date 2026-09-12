@@ -111,6 +111,7 @@ import { FieldBlockWriter } from './services/dissect/fieldSplit';
 import { estimateSummaryBytes } from './services/bufferBudget';
 import { captureStore, newCaptureId } from './services/capture/captureClient';
 import { freshCaptureStorageState, type CaptureStorageState } from './services/capture/captureProtocol';
+import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
 
 /**
  * How far back a socket-table DELTA is allowed to re-annotate.
@@ -263,6 +264,20 @@ export default function App() {
   useEffect(() => {
     isCapturingRef.current = isCapturing;
   }, [isCapturing]);
+
+  /**
+   * The one update check the app makes without being asked - and only if it
+   * was asked once, in advance, and told yes.
+   *
+   * Read straight from storage rather than through a hook, because this must
+   * run once and a subscribed value would re-run it when the switch is
+   * flipped. `shouldCheckOnLaunch` is what decides; note it requires `asked`,
+   * so silence is never consent.
+   */
+  useEffect(() => {
+    if (!shouldCheckOnLaunch(updateStore.get())) return;
+    void window.inwire?.checkForUpdates?.().catch(() => {});
+  }, []);
 
   // Live-capture relative-time clock (reference-analyzer style): resets whenever the
   // packet buffer is emptied and a fresh capture begins.
