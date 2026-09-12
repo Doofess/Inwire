@@ -765,6 +765,41 @@ So there are two scripts — `ELEVATE_ARGV` waits, `LAUNCH_ARGV` does not — an
 cannot reintroduce it. Our installer's exit code is unobservable as a result,
 which is the right trade against a hang.
 
+### The driver's access mode, which is the fourth trap
+
+Npcap's installer has a checkbox — *"Restrict Npcap driver's access to
+Administrators only"* — and it is **not ticked by default**. Unticked, the
+capture devices are open to `WD`; measured here, `\\.\NPCAP` carries
+`D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12019f;;;WD)`, so any local account can read
+this machine's traffic and inject raw frames. Inwire captures through the
+agent, so the restriction costs its users nothing and is what the Npcap row
+recommends. ADR 0033.
+
+**Two facts answer it and they can disagree.** `AdminOnly` under
+`HKLM\SOFTWARE\Npcap` is what the installer *recorded* — 32-bit view first,
+same two traps as the version read, `electron/updateCenter/npcapAdminOnly.ts`.
+The DACL on the device object is what the kernel *enforces*, read by the agent
+because it is the SYSTEM process, and carried in `hello` as `npcapAccess`. The
+**DACL wins**: the registry can be edited without the driver being restarted,
+and "administrators only" over a device still granting `WD` is the one
+direction a wrong answer must not go.
+
+The agent sends the **SDDL string and not a verdict**, the same rule ADR 0010
+sets for frames. `src/services/npcapAccess.ts` decides, and
+`scripts/electron/update-center.ts` holds that decision to captured registry
+output and captured descriptors — including `D:NO_ACCESS_CONTROL`, which is a
+NULL DACL and therefore the *most* open answer while containing no ACEs at all.
+
+`unknown` is a third answer and never rounded to either, and it carries no
+recommendation: advising a kernel-driver reinstall on the strength of having
+failed to read anything would be advice about a state nobody established.
+
+**Changing the mode is a reinstall**, so the row grows a second button —
+`canReinstall`, which is `up-to-date` only and therefore mutually exclusive
+with `canApply`. It runs the identical download → verify → elevate path and
+names the checkbox in the notice above it, because ticking it is the one step
+Inwire cannot do: the alternative is a flag, and the flag is `/S`.
+
 ### After Npcap installs, the link is cycled
 
 `AgentPipeLink.recycle()` — not `refresh_adapters`. That command re-reads

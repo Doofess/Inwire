@@ -24,6 +24,7 @@ import time
 from http import HTTPStatus
 
 import config
+import npcap_access
 import pipe_server
 import packet_batch
 import capture_profile
@@ -103,7 +104,7 @@ CLIENT_GONE = (
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "3.8.0"
+AGENT_VERSION = "3.9.0"
 
 # How often per-interface traffic rates are sampled while a client has the
 # capture-interface picker open. 500ms is fast enough that the sparkline
@@ -395,7 +396,8 @@ def exit_for_restart() -> None:
 
 
 def build_hello_message(version: str, state: str, interfaces, client_id: str = "",
-                        owner=None, auth_required: bool = False) -> dict:
+                        owner=None, auth_required: bool = False,
+                        npcap_access_sddl=None) -> dict:
     """The first message sent on every new connection, before anything else.
 
     `authRequired` says whether this agent has a pairing token configured. It
@@ -408,6 +410,13 @@ def build_hello_message(version: str, state: str, interfaces, client_id: str = "
     Nothing else is sent until the token arrives - no interfaces beyond the
     list, no log, no packets - so announcing the requirement gives away only
     that there is one.
+
+    `npcapAccess` is the Npcap device object's DACL as an SDDL string, or null
+    where it could not be read - which is every non-Windows agent, and every
+    Windows machine with no driver installed. It is a **string and not a
+    verdict** on purpose: the agent runs as LocalSystem and is the part of the
+    system that can read the descriptor, and the app is the part that decides
+    what it means. docs/decisions/0033; npcap_access.py has the rest.
     """
     return {
         "type": "hello",
@@ -420,6 +429,10 @@ def build_hello_message(version: str, state: str, interfaces, client_id: str = "
         "clientId": client_id,
         "owner": owner,
         "authRequired": auth_required,
+        # Null rather than absent, so a client can tell "this agent does not
+        # report it" from "this agent looked and found nothing" - the first is
+        # a missing key, the second is this.
+        "npcapAccess": npcap_access_sddl,
     }
 
 
@@ -856,6 +869,11 @@ class AgentServer:
                 client_id=self.client_ids.get(ws, ""),
                 owner=self.owner_id(),
                 auth_required=expected_token is not None,
+                # Read per connection rather than once at startup, for the
+                # same reason the interface list is: Npcap can be reinstalled
+                # while the service keeps running, and a reconnect is exactly
+                # what the Update Center triggers afterwards.
+                npcap_access_sddl=npcap_access.read_driver_sddl(),
             )))
             async for raw in ws:
                 await self._handle_message(ws, raw)

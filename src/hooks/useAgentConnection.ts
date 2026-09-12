@@ -96,6 +96,13 @@ export function useAgentConnection(host: AgentConnectionHost) {
   const [agentShortConnections, setAgentShortConnections] = useState(0);
   const [agentLinkEnabled, setAgentLinkEnabled] = useState(true);
   const [agentVersion, setAgentVersion] = useState<string | null>(null);
+  /**
+   * The Npcap device object's DACL, as the agent read it - the SYSTEM half of
+   * the driver-access answer the Update Center shows. Null until an agent that
+   * reports it says hello, which is also what it stays on a machine with no
+   * driver installed. ADR 0033.
+   */
+  const [agentNpcapAccess, setAgentNpcapAccess] = useState<string | null>(null);
   // Set when a connection's socket opened but no `hello` arrived within the
   // grace period below - the only signal available for a pre-Task-4 agent,
   // which never sends `hello` at all (see final review finding #5).
@@ -245,6 +252,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
         setAgentIncompatible(false);
         setAgentError(null);
         setAgentVersion(message.version);
+        setAgentNpcapAccess(message.npcapAccess ?? null);
         setAgentCaptureState(message.state);
         setAgentClientId(message.clientId ?? null);
         setCaptureOwner(message.owner ?? null);
@@ -483,7 +491,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
     agentHealth, startAgentService,
     agentLinkEnabled, setAgentLinkEnabled,
-    agentVersion, agentIncompatible, agentInterfaces,
+    agentVersion, agentNpcapAccess, agentIncompatible, agentInterfaces,
     captureStats, adapters, agentLog, agentError, interfaceRates,
     selectedInterfaces, setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,

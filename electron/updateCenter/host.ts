@@ -96,6 +96,8 @@ export class UpdateCenter {
   private lastChecked: number | null = null;
   private checking = false;
   private installed = new Map<ComponentId, string | null>();
+  /** The Npcap row's registry-recorded access mode. Null until `detect` runs. */
+  private npcapAdminOnly: boolean | null = null;
   /** Set while a row is mid-pipeline, so its transient state wins over the resting one. */
   private busy = new Map<ComponentId, ComponentState>();
 
@@ -108,7 +110,12 @@ export class UpdateCenter {
       const installed = this.installed.get(id) ?? null;
       const state = this.busy.get(id)
         ?? (PLANNED.has(id) ? { kind: 'planned' as const } : decideState(installed, available, appVersion));
-      return { id, displayName, installed, available, state };
+      const row: Component = { id, displayName, installed, available, state };
+      // Only the Npcap row, and only when there is a driver for it to describe.
+      // A mode reported beside "Not installed" would be an answer about
+      // something that is not there.
+      if (id === 'npcap' && installed !== null) row.adminOnly = this.npcapAdminOnly;
+      return row;
     });
     return { checking: this.checking, lastChecked: this.lastChecked, components };
   }
@@ -131,6 +138,7 @@ export class UpdateCenter {
     this.installed.set('inwire', app.getVersion());
     const npcap = await readNpcap();
     this.installed.set('npcap', npcap.installed ? npcap.version : null);
+    this.npcapAdminOnly = npcap.adminOnly;
     this.publish();
   }
 

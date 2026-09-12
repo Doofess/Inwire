@@ -64,7 +64,7 @@
 ; AGENT_VERSION in agent.py and REQUIRED_AGENT_VERSION in agentProtocol.ts.
 ; They stopped moving in step the moment one installer carried both.
 #define MyAppVersion "1.0.0"
-#define MyAgentVersion "3.8.0"
+#define MyAgentVersion "3.9.0"
 
 #define AgentExeName "inwire-agent-windows.exe"
 #define ServiceName "InwireAgent"

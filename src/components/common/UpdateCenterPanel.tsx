@@ -6,10 +6,13 @@ import { DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
 import { usePreferenceStore } from '../../services/preferenceStore';
 import { updateStore, shouldPrompt, type UpdatePrefs } from '../../services/updatePrefs';
 import {
-  actionLabel, canApply, EMPTY_SNAPSHOT, installedLabel, isBusy, normalizeSnapshot, stateLabel,
-  withAgentRow,
+  actionLabel, canApply, canReinstall, EMPTY_SNAPSHOT, installedLabel, isBusy, normalizeSnapshot,
+  stateLabel, withAgentRow,
   type UpdateComponent, type UpdateSnapshot,
 } from '../../services/updateCenter';
+import {
+  decideDriverAccess, driverAccessAdvice, driverAccessLabel, type DriverAccess,
+} from '../../services/npcapAccess';
 
 /**
  * Everything that updates, in one list.
@@ -37,6 +40,13 @@ interface UpdateCenterPanelProps {
   /** From `hello`. The agent's row is composed here because its version is here. */
   agentVersion: string | null;
   agentOutdated: boolean;
+  /**
+   * The Npcap device object's DACL, from `hello` - the half of the
+   * driver-access answer only a SYSTEM process can read. Null on an older
+   * agent, on a machine with no driver, and while nothing is connected; the
+   * registry half arrives on the Npcap row and covers all three. ADR 0033.
+   */
+  agentNpcapAccess?: string | null;
   /** Opens Driver Info, for the row that says capture will not work without it. */
   onShowDriverInfo?: () => void;
 }
@@ -63,14 +73,37 @@ const NPCAP_NOTICE =
   "Npcap's installer will open and ask you to accept its licence. "
   + 'Windows will ask for permission first.';
 
+/**
+ * The same warning, plus the one instruction Inwire cannot carry out itself.
+ *
+ * The checkbox is Npcap's, on Npcap's page, and the only way to reach it is
+ * for a person to tick it: passing a flag instead would mean `/S`, which is
+ * the OEM silent-install feature the free licence does not grant (ADR 0032).
+ * So the option is named exactly as its own wizard spells it - anything
+ * paraphrased sends somebody looking for a checkbox that is not there.
+ */
+const NPCAP_ADMIN_ONLY_NOTICE =
+  "In Npcap's installer, tick “Restrict Npcap driver's access to Administrators only” "
+  + 'and finish the install as usual. Windows will ask for permission first, and Npcap '
+  + 'will show its own licence.';
+
 const Row: React.FC<{
   component: UpdateComponent;
   busy: boolean;
   onApply: (id: string) => void;
-}> = ({ component, busy, onApply }) => {
+  /** The Npcap row only, and only once there is a driver to describe. */
+  driverAccess?: DriverAccess;
+}> = ({ component, busy, onApply, driverAccess }) => {
   const actionable = canApply(component);
   const failed = component.state.kind === 'failed';
   const reboot = component.state.kind === 'reboot-required';
+
+  // Only ever non-null for `all-users`. `unknown` gets the plain statement of
+  // fact above and no advice: recommending a kernel-driver reinstall on the
+  // strength of having failed to read anything would be advice about a state
+  // nobody established.
+  const advice = driverAccess === undefined ? null : driverAccessAdvice(driverAccess);
+  const offerReinstall = advice !== null && canReinstall(component);
 
   return (
     <div className="flex items-start justify-between gap-6 py-2.5">
@@ -83,8 +116,20 @@ const Row: React.FC<{
             {stateLabel(component.state)}
           </span>
         </p>
-        {component.id === 'npcap' && actionable && (
-          <p className="text-[11px] text-muted-foreground mt-1 leading-snug">{NPCAP_NOTICE}</p>
+        {driverAccess !== undefined && (
+          <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+            <span className={driverAccess === 'all-users' ? 'text-amber-500' : undefined}>
+              {driverAccessLabel(driverAccess)}
+            </span>
+          </p>
+        )}
+        {advice !== null && (
+          <p className="text-[11px] text-muted-foreground mt-1 leading-snug">{advice}</p>
+        )}
+        {component.id === 'npcap' && (actionable || offerReinstall) && (
+          <p className="text-[11px] text-muted-foreground mt-1 leading-snug">
+            {offerReinstall ? NPCAP_ADMIN_ONLY_NOTICE : NPCAP_NOTICE}
+          </p>
         )}
       </div>
       <div className="shrink-0 pt-0.5">
@@ -98,6 +143,19 @@ const Row: React.FC<{
             <span>{actionLabel(component)}</span>
           </button>
         )}
+        {/* Not shown beside the Update button: `canApply` and `canReinstall`
+            are mutually exclusive by construction, because a reinstall is only
+            offered against a component that is already up to date. */}
+        {offerReinstall && (
+          <button
+            type="button"
+            onClick={() => onApply(component.id)}
+            disabled={busy}
+            className={DRIVER_ACTION_BUTTON_CLASS}
+          >
+            <span>Reinstall with admin-only</span>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -106,6 +164,7 @@ const Row: React.FC<{
 export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
   agentVersion,
   agentOutdated,
+  agentNpcapAccess,
   onShowDriverInfo,
 }) => {
   const [prefs, patchPrefs] = usePreferenceStore<UpdatePrefs>(updateStore);
@@ -135,6 +194,18 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
 
   const snapshot = withAgentRow(raw, agentVersion, agentOutdated);
   const busy = isBusy(snapshot);
+
+  /**
+   * The two halves, combined once for the whole panel.
+   *
+   * The registry value comes down on the Npcap row from main; the DACL comes
+   * up from the agent over the pipe. `decideDriverAccess` prefers the DACL
+   * because it is what the kernel enforces - the registry can say
+   * "administrators only" about a device whose descriptor still grants
+   * Everyone, and that is the one direction a wrong answer must not go.
+   */
+  const npcapRow = snapshot.components.find((component) => component.id === 'npcap');
+  const driverAccess = decideDriverAccess(npcapRow?.adminOnly, agentNpcapAccess);
   const driverMissing = snapshot.components.some(
     (component) => component.id === 'npcap' && component.installed === null,
   );
@@ -202,7 +273,15 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
           </p>
         ) : (
           snapshot.components.map((component) => (
-            <Row key={component.id} component={component} busy={busy} onApply={apply} />
+            <Row
+              key={component.id}
+              component={component}
+              busy={busy}
+              onApply={apply}
+              driverAccess={component.id === 'npcap' && component.installed !== null
+                ? driverAccess
+                : undefined}
+            />
           ))
         )}
       </Section>

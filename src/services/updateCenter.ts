@@ -72,6 +72,14 @@ export interface UpdateComponent {
   installed: string | null;
   available: UpdateAvailable | null;
   state: UpdateComponentState;
+  /**
+   * The Npcap row only: `AdminOnly` as the registry records it, `null` where
+   * nothing readable does, and absent on every other row.
+   *
+   * Half an answer on its own - `services/npcapAccess.ts` combines it with the
+   * DACL the agent reports, which outranks it. ADR 0033.
+   */
+  adminOnly?: boolean | null;
 }
 
 export interface UpdateSnapshot {
@@ -102,13 +110,19 @@ function readComponent(raw: unknown): UpdateComponent | null {
   if (!isRecord(state) || typeof state.kind !== 'string' || !STATE_KINDS.includes(state.kind)) {
     return null;
   }
-  return {
+  const component: UpdateComponent = {
     id: id as UpdateComponentId,
     displayName,
     installed,
     available: isRecord(available) ? (available as unknown as UpdateAvailable) : null,
     state: state as unknown as UpdateComponentState,
   };
+  // Three-valued and read as three values. Anything that is not a boolean or
+  // an explicit null - including a missing key, which is what every other row
+  // sends - leaves the field absent, and the panel shows "not known".
+  const { adminOnly } = raw;
+  if (typeof adminOnly === 'boolean' || adminOnly === null) component.adminOnly = adminOnly;
+  return component;
 }
 
 /**
@@ -220,6 +234,27 @@ export function installedLabel(component: UpdateComponent): string {
 export function canApply(component: UpdateComponent): boolean {
   if (component.available === null) return false;
   return component.state.kind === 'update-available' || component.state.kind === 'not-installed';
+}
+
+/**
+ * Whether the row can be run through the install path again without anything
+ * being out of date.
+ *
+ * This exists for exactly one case: Npcap is current, and is installed with
+ * its capture devices open to every local account. The only way to change that
+ * is to run the wizard again and tick the box, so the row needs a control
+ * `canApply` deliberately does not give it - a reinstall is not an update, and
+ * offering "Update" against an up-to-date component would be the confident
+ * wrong answer the rest of this module is built to avoid.
+ *
+ * `up-to-date` only. A row that is mid-download, elevating, failed or
+ * not-installed already has the right control or no business having one, and a
+ * reinstall offered beside "Not installed" is just an install under a worse
+ * name.
+ */
+export function canReinstall(component: UpdateComponent): boolean {
+  if (component.available === null) return false;
+  return component.state.kind === 'up-to-date';
 }
 
 /** The word on the button, when there is one. */

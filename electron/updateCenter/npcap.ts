@@ -38,7 +38,8 @@
  * a 64-bit machine it does not exist at all - only `WOW6432Node\Npcap` does.
  * The installer's own `IsNpcapInstalled` gets away with three presence probes
  * because it only asks "any Npcap at all?". A version has to come from the
- * uninstall entry or from `Packet.dll`.
+ * uninstall entry or from `Packet.dll`. (`AdminOnly` *is* in that key, and is
+ * read by `npcapAdminOnly.ts` - a different question, with the same two traps.)
  *
  * So `installed` and `version` are **separate answers**: the driver can be
  * present with its version unreadable, and that is shown as "installed,
@@ -46,6 +47,7 @@
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { readAdminOnly } from './npcapAdminOnly';
 
 /** Npcap's own uninstall entry. The key name, not the display name. */
 const UNINSTALL_KEY =
@@ -61,9 +63,19 @@ export interface NpcapFacts {
   installed: boolean;
   /** Null means "installed, and we could not read a version" - never a guess. */
   version: string | null;
+  /**
+   * `AdminOnly` as the registry records it, or null where nothing readable
+   * does. A **third** separate answer, for the same reason `version` is a
+   * second one: the driver can be installed with its access mode unreadable,
+   * and rounding that to either verdict is what `npcapAdminOnly.ts` refuses.
+   *
+   * It is only half the answer. The device object's DACL is the other half and
+   * outranks it; they are combined in `src/services/npcapAccess.ts`. ADR 0033.
+   */
+  adminOnly: boolean | null;
 }
 
-export const NPCAP_ABSENT: NpcapFacts = { installed: false, version: null };
+export const NPCAP_ABSENT: NpcapFacts = { installed: false, version: null, adminOnly: null };
 
 /**
  * Reads `DisplayVersion` out of `reg query` output.
@@ -160,11 +172,17 @@ export async function readNpcap(): Promise<NpcapFacts> {
   if (process.platform !== 'win32') return NPCAP_ABSENT;
 
   const registryVersion = await versionFromRegistry();
-  if (registryVersion !== null) return { installed: true, version: registryVersion };
+  if (registryVersion !== null) {
+    return { installed: true, version: registryVersion, adminOnly: await readAdminOnly() };
+  }
 
   const driverPresent = existsSync(driverPath());
   const present = driverPresent || await anyPresenceKey();
   if (!present) return NPCAP_ABSENT;
 
-  return { installed: true, version: await versionFromDriverFile() };
+  return {
+    installed: true,
+    version: await versionFromDriverFile(),
+    adminOnly: await readAdminOnly(),
+  };
 }

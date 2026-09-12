@@ -78,6 +78,16 @@ export interface Component {
   installed: string | null;
   available: Available | null;
   state: ComponentState;
+  /**
+   * The Npcap row only: `AdminOnly` as the registry records it, null where
+   * nothing readable does, and absent on every other row.
+   *
+   * Sent as the raw fact rather than as a verdict because it is only half of
+   * one - the device object's DACL is the other half, it arrives over the
+   * pipe, and it outranks this. The renderer holds both and decides; see
+   * `src/services/npcapAccess.ts` and ADR 0033.
+   */
+  adminOnly?: boolean | null;
 }
 
 /**

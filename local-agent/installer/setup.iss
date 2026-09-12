@@ -49,7 +49,7 @@
 ; has one number from the moment it has one, and is used by the unified
 ; installer - which needs its own AppId, because a product resetting to 1.0.0
 ; under this one would read as a downgrade on every machine that has the agent.
-#define MyAgentVersion "3.8.0"
+#define MyAgentVersion "3.9.0"
 #define MyAppVersion "1.0.0"
 #define MyAppExeName "inwire-agent-windows.exe"
 #define MyAppPublisher "Inwire"
