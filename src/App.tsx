@@ -1619,6 +1619,32 @@ export default function App() {
     setStreamView(view);
   };
 
+  /**
+   * The capture directory an import is writing into, while it writes.
+   *
+   * Opened on the first batch rather than before the file is read: a file that
+   * turns out not to be a capture, or that fails to parse, must not leave an
+   * empty directory behind for the next startup to find and restore from.
+   */
+  const importCaptureIdRef = useRef<string | null>(null);
+
+  /**
+   * Every frame an import produced, on its way to disk.
+   *
+   * This is what makes an import of a capture larger than memory possible at
+   * all: the importer used to build `maxFrames` frames and say the rest had
+   * been thrown away. Now the whole file goes to the store and `maxFrames` is
+   * only what stays resident, so the list scrolls into the rest the same way
+   * it scrolls into a live capture's history.
+   */
+  const handleImportBatch = useCallback((batch: Packet[]) => {
+    if (importCaptureIdRef.current === null) {
+      importCaptureIdRef.current = newCaptureId();
+      captureStore.begin(importCaptureIdRef.current);
+    }
+    captureStore.append(batch);
+  }, []);
+
   const handleImportPackets = (imported: Packet[]) => {
     setIsCapturing(false);
     // The same reset Clear does, and for the same reasons. Imported frames are
@@ -1635,10 +1661,20 @@ export default function App() {
     // full buffer as empty and stopped it trimming: `planBufferTrim` reads that
     // number, so an import of a million frames sat over budget until enough
     // live frames had arrived to rebuild a total from scratch.
-    //
-    // `null` keeps `persistedThroughId` where it was, which is what this call
-    // site has always done - unlike Clear and Discard, which reset it to 0.
-    adoptBuffer(imported, null);
+    // An import that reached the store owns a capture directory now, so the
+    // frames it wrote are persisted through the last of them - and the
+    // previous capture's directory goes, the same rule Start follows.
+    const storedImport = importCaptureIdRef.current;
+    if (storedImport !== null) {
+      captureStore.finish();
+      captureIdRef.current = storedImport;
+      captureStore.prune([storedImport]);
+      importCaptureIdRef.current = null;
+    }
+    // `null` keeps `persistedThroughId` where it was, which is right when the
+    // import went nowhere; when it went to disk, everything up to `lastId` is
+    // there and a later flush must not write it a second time.
+    adoptBuffer(imported, storedImport === null ? null : Math.floor(lastId));
     pipeline.reset(Math.floor(lastId) + 1);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
@@ -2070,6 +2106,7 @@ export default function App() {
             key="export-modal"
             packets={packets}
             onImportPackets={handleImportPackets}
+            onImportBatch={handleImportBatch}
             onClose={() => setShowExportModal(false)}
             permissions={permissions}
             isDark={isDark}

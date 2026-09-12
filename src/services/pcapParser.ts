@@ -42,6 +42,31 @@ import { poolExpert, poolTokens } from './dissect/tokenPool';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 
 /**
+ * Frames handed over at a time while an import streams.
+ *
+ * Matched to what a live flush carries rather than to a chunk on disk: the
+ * store batches into 4,096-frame chunks itself, and the caller wants batches
+ * small enough that it can yield to the UI between them.
+ */
+export const IMPORT_BATCH_FRAMES = 2048;
+
+/**
+ * Frames kept in reach of a patch before they are handed over.
+ *
+ * The same bound `captureWriter.ts` puts on its staging ring, and for the same
+ * reason: a patch chases a protocol event, so an ICMP reply seconds later or a
+ * TCP PDU reassembled across a stalled stream can reach a long way back. Here
+ * it is a frame count alone, not a time - an import replays a whole capture's
+ * timestamps as fast as it can dissect, so a clock horizon would be met
+ * instantly and hold nothing.
+ *
+ * 100,000 frames of held summaries is roughly 66 MB, which is the price of an
+ * import not losing cross-references the same file would keep if it were
+ * captured live.
+ */
+export const IMPORT_PATCH_WINDOW = 100_000;
+
+/**
  * One decoder, not one per call. Constructing a TextDecoder is not free, and
  * the ASCII-line reader below runs on every frame with a payload - a CPU
  * profile put TextDecoder construction at 8% of a dissection run, the same
@@ -246,6 +271,58 @@ export class PcapService {
     if (frames.length === 0) return undefined;
     const prefix = frames.length > SCORING_FRAMES ? frames.slice(0, SCORING_FRAMES) : frames;
     return inferHostIdentity(PcapService.buildPacketsFromFrames(prefix)) ?? undefined;
+  }
+
+  /**
+   * A capture file, handed over in batches rather than all at once.
+   *
+   * What `parseCaptureFile` is for a file that fits in the buffer, this is for
+   * one that does not: the caller writes each batch to the capture store and
+   * keeps only the tail, so the import is bounded by the store rather than by
+   * memory.
+   *
+   * `onBatch` is **synchronous**, and that is deliberate rather than
+   * unfinished. The dissection pass owns five trackers whose state is the
+   * whole reason a frame's row is not a function of its own bytes; an `await`
+   * in the middle of it would let a second import interleave with them. So the
+   * batches arrive during the pass, and the caller drops each one as it goes -
+   * which is what bounds the memory.
+   *
+   * What that does **not** do is yield to the UI. An import of a million
+   * frames blocks the main thread for the whole dissection, exactly as it did
+   * before this existed; streaming changed where the frames end up, not who is
+   * doing the work. Moving the pass off the main thread is its own step.
+   *
+   * Frames are numbered 1..N over the file, exactly as `parseCaptureFile`
+   * numbers them, so nothing downstream can tell which route a frame took.
+   */
+  public static async streamCaptureFile(
+    file: File,
+    onBatch: (packets: Packet[]) => void,
+    /**
+     * `patchWindow` is settable for the same reason `CaptureHost` takes
+     * `scanSliceMs`: what has to be asserted is the behaviour at the window's
+     * edge, and reaching it honestly would mean a test that dissects several
+     * hundred thousand frames.
+     */
+    options: { keepTrees?: boolean; patchWindow?: number; batchFrames?: number } = {},
+  ): Promise<{ totalFrames: number; built: number; missedPatches: number }> {
+    // No cap: the point is the frames the cap used to throw away. What bounds
+    // this is the patch window above, and whatever the caller does with each
+    // batch.
+    const extracted = await PcapService.extractFrames(file, Number.POSITIVE_INFINITY);
+    const host = PcapService.inferHostFromFrames(extracted.frames);
+
+    let built = 0;
+    const { missedPatches } = PcapService.buildPacketsInBatches(
+      extracted.frames,
+      (batch) => { built += batch.length; onBatch(batch); },
+      options.keepTrees ?? false,
+      host,
+      options.batchFrames ?? IMPORT_BATCH_FRAMES,
+      options.patchWindow ?? IMPORT_PATCH_WINDOW,
+    );
+    return { totalFrames: extracted.totalFrames, built, missedPatches };
   }
 
   /** Every frame in the file, as a plain array. */
@@ -488,7 +565,86 @@ export class PcapService {
     /** See `inferHostFromFrames`. Absent means every frame reads as Unknown. */
     host?: HostIdentity,
   ): Packet[] {
+    const all: Packet[] = [];
+    PcapService.buildPacketsInBatches(
+      frames, (batch) => { all.push(...batch); }, keepTrees, host,
+    );
+    return all;
+  }
+
+  /**
+   * The same pass, handing frames over as it goes instead of at the end.
+   *
+   * ## Why the array cannot simply be returned
+   *
+   * A capture file bigger than the RAM buffer used to be **truncated**: the
+   * importer built `maxFrames` frames and said so in a note. The store can hold
+   * the rest, but only if the frames reach it, and they cannot all be in one
+   * array on the way - that array is the thing the cap existed to bound.
+   *
+   * ## The patch window is why this is not just a loop with a callback
+   *
+   * Dissection amends frames it has already emitted: `[TCP PDU reassembled in
+   * N]` on every segment of a multi-segment PDU, `[Reassembled in N]` for IP
+   * fragments, `dns.response_in` written onto the query by its answer, and
+   * ICMP `(reply in N)` where the round trip can be seconds. This pass applies
+   * all of those by **indexing straight into the array it is building** -
+   * `parsedPackets[patch.frameId - 1]` - which stops working the moment a
+   * frame has been handed over and dropped.
+   *
+   * So frames are held until no open patch can still reach them, exactly the
+   * way `captureWriter.ts` holds rows behind its horizon, and only then handed
+   * over. A patch that reaches back further than the window is counted rather
+   * than applied to the wrong frame - which is what an unchecked index would
+   * do, silently, to whichever frame happened to be there.
+   *
+   * The dense-field split runs on the way out rather than at the end, for the
+   * same reason: a frame is only finished once it is out of patch range.
+   */
+  private static buildPacketsInBatches(
+    frames: ExtractedFrame[],
+    onBatch: (packets: Packet[]) => void,
+    keepTrees = false,
+    host?: HostIdentity,
+    batchFrames = IMPORT_BATCH_FRAMES,
+    patchWindow = IMPORT_PATCH_WINDOW,
+  ): { missedPatches: number } {
+    /** The window: frames built and not yet handed over, oldest first. */
     const parsedPackets: Packet[] = [];
+    /** How many have left it, so an id still maps to a position. */
+    let shipped = 0;
+    let missedPatches = 0;
+    const fieldWriter = new FieldBlockWriter();
+
+    /**
+     * The frame with this id, or undefined if it is out of the window.
+     *
+     * `- shipped` is the load-bearing part: without it every patch after the
+     * first hand-over lands on the wrong offset, and `scripts/capture/
+     * import-stream.ts` fails three ways. The `id` check after it is
+     * belt-and-braces - nothing reachable makes the array and the counter
+     * disagree, and removing it fails nothing - kept because the cost of being
+     * wrong here is a cross-reference written onto an unrelated frame.
+     */
+    const held = (frameId: number): Packet | undefined => {
+      const at = frameId - 1 - shipped;
+      if (at < 0 || at >= parsedPackets.length) return undefined;
+      const packet = parsedPackets[at];
+      return packet !== undefined && packet.id === frameId ? packet : undefined;
+    };
+
+    /** Hands over everything past `keep`, splitting its dense fields first. */
+    const drain = (keep: number): void => {
+      while (parsedPackets.length > keep) {
+        const batch = parsedPackets.splice(0, Math.min(batchFrames, parsedPackets.length - keep));
+        // After the patches, never before: a frame leaves the window only once
+        // nothing can still amend it, and this is that moment.
+        fieldWriter.absorb(batch);
+        shipped += batch.length;
+        onBatch(batch);
+      }
+    };
+
     let packetIndex = 1;
     let baseNanos: bigint | null = null;
     let prevNanos: bigint | null = null;
@@ -528,26 +684,26 @@ export class PcapService {
         // growing array once per ICMP reply, so importing a ping-heavy capture
         // of N frames with k replies cost O(N*k); the guard on `id` is what
         // makes the index safe if that invariant ever stops holding.
-        const requestPacket = parsedPackets[icmpMatchedRequestFrameId - 1];
-        if (requestPacket && requestPacket.id === icmpMatchedRequestFrameId) {
-          requestPacket.info += ` (reply in ${packet.id})`;
-        }
+        const requestPacket = held(icmpMatchedRequestFrameId);
+        if (requestPacket) requestPacket.info += ` (reply in ${packet.id})`;
+        else missedPatches += 1;
       }
       if (infoPatches) {
-        // Frame ids are 1-based positions in this array, so no search is needed.
+        // Frame ids are 1-based positions in the window, so no search is needed.
         for (const patch of infoPatches) {
-          const target = parsedPackets[patch.frameId - 1];
-          if (target && target.id === patch.frameId) applyInfoPatch(target, patch);
+          const target = held(patch.frameId);
+          if (target) applyInfoPatch(target, patch);
+          else missedPatches += 1;
         }
       }
+
+      // Everything past the window is finished, and goes.
+      if (parsedPackets.length > patchWindow + batchFrames) drain(patchWindow);
     }
 
-    // The dense fields move into columns once the frames are built - at the one
-    // moment a finished frame joins a buffer, rather than inside the dissector,
-    // which has no single write to intercept (`dissect/fieldSplit.ts`).
-    new FieldBlockWriter().absorb(parsedPackets);
-
-    return parsedPackets;
+    // Whatever is left has nothing else coming for it.
+    drain(0);
+    return { missedPatches };
   }
 
   /**

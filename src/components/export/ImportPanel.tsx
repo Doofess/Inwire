@@ -18,7 +18,20 @@ import { AVERAGE_FRAME_BYTES, framesForBudget } from '../../services/bufferBudge
  */
 
 interface ImportPanelProps {
+  /**
+   * The frames to put in the buffer: everything for a small file, the newest
+   * `maxFrames` when the import streamed to disk.
+   */
   onImportPackets: (packets: Packet[]) => void;
+  /**
+   * Where every frame goes as it is dissected, if anywhere.
+   *
+   * With it, a capture file is imported whole and the buffer size stops being
+   * a ceiling on what the file may contribute. Without it - which is what a
+   * test or a caller with no store gets - the old cap applies and the note
+   * below says so.
+   */
+  onImportBatch?: (batch: Packet[]) => void;
   onFailure: (filename: string, failure: ImportFailure) => void;
   /** Set when the error dialog's "Choose another file" reopens the picker. */
   retryToken: number;
@@ -26,6 +39,7 @@ interface ImportPanelProps {
 
 export const ImportPanel: React.FC<ImportPanelProps> = ({
   onImportPackets,
+  onImportBatch,
   onFailure,
   retryToken,
 }) => {
@@ -51,12 +65,13 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
     setNotes([]);
 
     try {
-      // The importer caps by frame count, so the budget is turned into one at
-      // the measured average. An import that overshoots is trimmed by the same
-      // planner as a live capture on its way into the buffer; this only stops
-      // the importer building frames the buffer would immediately drop.
+      // The budget is turned into a frame count at the measured average. With
+      // a sink that is what stays RESIDENT - the file is imported whole and
+      // the rest is on disk. Without one it is still a cap on the import, and
+      // `importAnyFile` says so in a note.
       const outcome = await importAnyFile(file, {
         maxFrames: framesForBudget(perf.packetBufferBytes, AVERAGE_FRAME_BYTES),
+        onBatch: onImportBatch,
       });
       if (outcome.ok === false) {
         setStatus(null);
