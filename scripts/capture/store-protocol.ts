@@ -39,6 +39,10 @@ import { MemoryBlockFile } from '../../src/services/capture/blockFile';
 import { MatchSet } from '../../src/services/capture/matchSet';
 import { CHUNK_FRAMES } from '../../src/services/capture/chunkCodec';
 import { compile } from '../../src/services/filter/compile';
+import { plainForStore } from '../../src/services/capture/storePacket';
+import { FieldBlock } from '../../src/services/dissect/fieldBlock';
+import { DENSE_FIELDS } from '../../src/services/dissect/denseFields';
+import { serialize, deserialize } from 'node:v8';
 import type { CaptureFiles } from '../../src/services/capture/captureWriter';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { Packet } from '../../src/types/packet';
@@ -173,11 +177,34 @@ function traffic(count: number): Packet[] {
   return out;
 }
 
+/**
+ * Frames as the store actually receives them: through a structured clone.
+ *
+ * Not a detail. Every test here used to hand `CaptureHost` the very objects it
+ * built, in one JavaScript context, and that is not the shape of the real
+ * thing - the store is a `utilityProcess` and every frame arrives cloned. A
+ * clone carries Maps and typed arrays and **drops prototypes**, so a `Packet`
+ * carrying a `FieldBlock` in `cols` arrives as data with no `read` on it.
+ *
+ * That shipped. `encodeChunk` threw `block.read is not a function` on every
+ * chunk, the throw was caught and reported as a non-fatal failure, and the
+ * store wrote raw bytes and no rows at all - for the life of every capture,
+ * with `ordinalOf` answering -1 and the app reading that as "the window is the
+ * whole capture". Nothing here could see it, because nothing here cloned.
+ *
+ * `v8.serialize`/`deserialize` rather than `structuredClone`: it is the same
+ * serialiser a `postMessage` across a process boundary uses, and it is
+ * unambiguously a copy.
+ */
+function crossed(packets: readonly Packet[]): Packet[] {
+  return deserialize(serialize(packets)) as Packet[];
+}
+
 /** Appends and seals, so the frames are in chunks rather than staged. */
 async function fill(h: ReturnType<typeof host>, captureId: string, packets: Packet[]) {
   h.send({ type: 'open', captureId });
   for (let i = 0; i < packets.length; i += 1000) {
-    h.send({ type: 'append', packets: packets.slice(i, i + 1000) });
+    h.send({ type: 'append', packets: crossed(packets.slice(i, i + 1000)) });
   }
   h.send({ type: 'finish' });
   await h.store.drain();
@@ -292,6 +319,117 @@ const packets = traffic(CHUNK_FRAMES * 3 + 700);
 
   h.store.close();
   check('close releases the handles', h.volume.outstanding, 0);
+}
+
+console.log('\n--- a frame carrying its dense columns ---\n');
+
+{
+  // The shape the app actually sends, before `plainForStore` folds it flat: a
+  // `Packet` whose 33 commonest fields live in a `FieldBlock` the buffer owns
+  // (ADRs 0017, 0018). This is the case that shipped broken.
+  const block = new FieldBlock(DENSE_FIELDS, 4096);
+  const withColumns: Packet[] = [];
+  for (let i = 1; i <= 5000; i++) {
+    const row = block.claimRow();
+    block.write(row, 'ip.src', '10.0.0.4');
+    block.write(row, 'tcp.srcport', 50000 + (i % 3));
+    const packet = frame(i);
+    withColumns.push({ ...packet, cols: block, row, fields: { 'tcp.seq': i } });
+  }
+
+  // Unflattened, it does not survive the crossing - and now says why rather
+  // than throwing `read is not a function` from three frames down.
+  const h = host();
+  h.send({ type: 'open', captureId: 'cap-20260912-220000-0005' });
+  h.send({ type: 'append', packets: crossed(withColumns) });
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  const complaint = h.of('failure')[0]?.message ?? '';
+  checkTrue('a frame that crossed with its field block is refused, loudly',
+    complaint.includes('structured clone'));
+  checkTrue('...and the message names the fix',
+    complaint.includes('storePacket'));
+  h.store.close();
+
+  // The route that actually shipped, and the reason `plainForStore` copies
+  // even when there is nothing to fold: the app calls it BEFORE the buffer's
+  // field writer attaches the block, and `send` posts a microtask later. A
+  // pass-through would hand the clone a packet that grew a `FieldBlock` in
+  // between.
+  const later = frame(99_001);
+  const snapshot = plainForStore(later);
+  const claimed = block.claimRow();
+  Object.assign(later, { cols: block, row: claimed });
+  checkTrue('a snapshot taken before the block was attached does not grow one',
+    (snapshot as { cols?: unknown }).cols === undefined);
+  checkTrue('...and is not the same object', snapshot !== later);
+
+  // Flattened, everything the block held is on disk and readable.
+  const g = host();
+  await fill(g, 'cap-20260912-220000-0006', withColumns.map(plainForStore));
+  g.send({ type: 'chunk', requestId: 900, chunk: 0 });
+  g.send({ type: 'locate', requestId: 901, id: 4000 });
+  await g.store.drain();
+
+  const rows = g.of('rows').find((m) => m.requestId === 900)?.packets ?? [];
+  check('flattened, the rows are stored', rows.length, 4096);
+  check('...with the sparse field', rows[10]?.fields?.['tcp.seq'], 11);
+  // The point of the whole exercise: a value that lived in a dense column is
+  // on disk under its own name. Losing these silently is what "no rows at all"
+  // was hiding.
+  check('...and the dense ones, under their own names',
+    [rows[10]?.fields?.['ip.src'], rows[10]?.fields?.['tcp.srcport']],
+    ['10.0.0.4', 50002]);
+  check('and the capture is addressable', g.of('located')[0]?.ordinal, 3999);
+  g.store.close();
+}
+
+console.log('\n--- a live capture, which never calls finish ---\n');
+
+{
+  // The case the app is actually in, and the one every test above skips: a
+  // capture still running. `fill` seals everything with `finish()`; a live
+  // capture seals only what `drainReady` has aged out, so the newest frames
+  // are staged and not addressable.
+  //
+  // This exists because the app answers `below = 0` for a capture of a million
+  // frames - `ordinalOf(window[0].id)` keeps returning -1 - and the RAM
+  // window's oldest frame ought to be long sealed. Either that is reproducible
+  // here, or the cause is somewhere this harness does not reach, and knowing
+  // which is worth one section.
+  const LIVE = 200_000;
+  /** What the buffer holds at the smallest budget, which is where it showed. */
+  const WINDOW = 112_000;
+
+  const h = host();
+  h.send({ type: 'open', captureId: 'cap-20260912-210000-0004' });
+  for (let i = 0; i < LIVE; i += 300) {
+    const batch: Packet[] = [];
+    for (let j = 0; j < 300 && i + j < LIVE; j++) {
+      const id = i + j + 1;
+      // 300 µs apart, which is 3,300 frames a second - the rate the app was
+      // driven at. The horizon is two seconds OR 100,000 frames.
+      batch.push(frame(id, { tsUs: 1_788_000_000_000_000 + id * 300 }));
+    }
+    h.send({ type: 'append', packets: batch });
+  }
+  await h.store.drain();
+
+  const oldestInWindow = LIVE - WINDOW + 1;
+  h.send({ type: 'locate', requestId: 800, id: oldestInWindow });
+  h.send({ type: 'locate', requestId: 801, id: 1 });
+  h.send({ type: 'locate', requestId: 802, id: LIVE });
+  await h.store.drain();
+
+  const at = (requestId: number) => h.of('located').find((m) => m.requestId === requestId)?.ordinal;
+  check('the capture\'s first frame is addressable', at(801), 0);
+  check('the window\'s oldest frame is addressable, without a finish',
+    at(800), oldestInWindow - 1);
+  // The newest frame is inside the staging ring, and -1 there is correct:
+  // "not addressable yet" is exactly what it is.
+  check('the newest frame is not, and says so', at(802), -1);
+
+  h.store.close();
 }
 
 console.log('\n--- prune touches only what this app named ---\n');

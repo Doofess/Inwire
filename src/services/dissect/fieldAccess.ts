@@ -85,10 +85,34 @@ export function fieldEntries(packet: Packet): [string, string | number][] {
   const out: [string, string | number][] = Object.entries(packet.fields ?? {});
   const block = packet.cols;
   if (block !== undefined && packet.row !== undefined) {
+    assertLiveBlock(block);
     for (const key of DENSE_FIELDS) {
       const value = block.read(packet.row, key.abbrev);
       if (value !== undefined) out.push([key.abbrev, value]);
     }
   }
   return out;
+}
+
+/**
+ * A `FieldBlock` that lost its methods, which means it crossed a boundary.
+ *
+ * A structured clone carries the Maps and the typed arrays and drops the
+ * prototype, so a cloned block is data with no `read` on it. That happened for
+ * real: every frame the capture store was sent arrived this way, `encodeChunk`
+ * threw `block.read is not a function`, the throw was caught and reported as a
+ * non-fatal failure, and the capture stored raw bytes and **no rows at all**
+ * for the life of the process.
+ *
+ * Named here rather than left as a `TypeError`, because the useful thing to
+ * say is not "read is not a function" - it is which rule was broken and where
+ * the fix lives.
+ */
+function assertLiveBlock(block: Packet['cols'] & object): void {
+  if (typeof (block as { read?: unknown }).read === 'function') return;
+  throw new TypeError(
+    'this Packet\'s field block has no methods, so it has been through a '
+    + 'structured clone. Anything sending frames across a process or worker '
+    + 'boundary must flatten them first - see services/capture/storePacket.ts',
+  );
 }

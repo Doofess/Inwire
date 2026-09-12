@@ -433,8 +433,16 @@ and which no test can answer. Killing the process instead was tried and is
 worse — `kill()` reaches main and orphans the GPU, renderer, store and crashpad
 children.
 
+**`scripts/electron/disk-drive.ts` reaches the disk.** `smoke.ts` captures a
+few thousand frames, which fit in the RAM buffer, so it never touches a stored
+row; this drives a capture past the 128 MB budget until the window trims, then
+filters the whole capture and reads the top of the result back off disk. About
+two minutes, so it is in `NOT_TESTS` and run by hand — after anything on the
+store path. It is what proves the half of the app that `smoke.ts` structurally
+cannot.
+
 **To drive the app by hand**, `npx tsx scripts/electron/serveStub.ts` serves the
-same stub until Ctrl+C; launch the app beside it and pick "Ethernet (stub)".
+same stub until Ctrl+C (`--burst n` for n frames per 100 ms tick); launch the app beside it and pick "Ethernet (stub)".
 Otherwise testing by hand needs the real service, which needs Administrator,
 Npcap and traffic — and a development machine that still has a pre-3.8.0 agent
 installed has no pipe at all, so the app shows "not connected" and there is
@@ -462,69 +470,112 @@ Phase 6 is blocked on things outside this repository: a code-signing
 certificate (EV or Azure Trusted Signing), and whether Npcap's silent install
 needs an OEM licence. The installer compiles and the fuses are still to flip.
 
-**Phase 8's filter is wired and has not been watched working.** The store half
-and the row arithmetic are both asserted, and the app builds, captures and
-dissects with the new code in place — but the path from a typed filter to a row
-read off disk has never been observed end to end, because reaching it needs a
-capture larger than the RAM buffer and this machine could not build one. See
-**What blocks watching the disk filter work** below.
+**Phase 8's filter works end to end**, watched: a 178,200-frame capture with a
+115,476-frame window, `udp.srcport == 49152` matching 44 frames across the
+whole capture where the window alone holds 28, and the top of the filtered list
+reading frames 4,096 apart off disk. `scripts/electron/disk-drive.ts` is that
+run, kept.
+
+Getting there turned up the bug that had made the entire disk path inert since
+the store became a process — see **The bug that hid the whole disk path**.
 
 **Owed:** ADR 0027 (the app is a desktop app), 0028 (where the store runs, with
 the measured IPC cost), 0030 (one installer), and one for the whole-capture
 filter. ADR 0029 is written.
 
-### What blocks watching the disk filter work
+### The bug that hid the whole disk path
 
-Found while trying to drive it. Every number here was measured; the one
-conclusion that was not is called out as such.
+Recorded because it shipped, it was reported thousands of times, and nobody
+could see it.
 
-**The list never addresses the capture during a fast capture, so the filter
-has no disk to scan.** Driven by `serveStub.ts --burst` at 3,000-20,000 frames
-a second, the buffer trims correctly at ~112,000 frames (its 128 MB budget),
-but `ordinalOf(window[0].id)` keeps answering -1 — the window's oldest frame
-is not addressable — so `below` stays 0. **Why is not established.** The first
-guess was that the store had fallen behind, and the measurement below says it
-had not; the frames were flushed to it at a small fraction of what it can take.
-So this is an open question, not a diagnosed one.
+**The store stored no rows at all.** A buffered `Packet` carries its 33
+commonest fields in a `FieldBlock` — a **class instance** — and a structured
+clone drops prototypes. The moment the store became a `utilityProcess` rather
+than a Worker in the same context, every frame arrived with a `cols` object
+that had no `read` on it, `encodeChunk` threw `block.read is not a function`,
+`CaptureHost` caught it and posted a non-fatal `failure`, and the next append
+did the same. For the life of every capture.
 
-**The boundary is not the cost, and this is the number ADR 0028 was waiting
-for.** `npx tsx scripts/perf/store-boundary.ts`, over 100,000 realistic frames
-in batches of 300:
+What that looked like: a capture directory whose `frames.iwbyt` grew and whose
+`index.iwidx` stayed empty. `chunkCount` 0. `ordinalOf` answering **-1** for
+every frame, which the app reads as "not addressable yet" and turns into
+`below = 0` — so the list showed the RAM window, said the window was the whole
+capture, and looked entirely normal. The restore, the scrollback below the
+window and the whole-capture filter were all inert.
+
+Two things had to be true for it to hide:
+
+- **Nothing crossed a boundary in a test.** Every assertion script handed
+  `CaptureHost` the objects it had just built, in one JavaScript context, where
+  the prototype survives. `scripts/capture/store-protocol.ts` now puts every
+  appended frame through `v8.serialize`/`deserialize` first, which is the same
+  serialiser a `postMessage` uses — and that reproduces it in a second.
+- **Nothing reached the disk path in the app.** `smoke.ts` captures a few
+  thousand frames, which fit in the buffer. `scripts/electron/disk-drive.ts`
+  now drives a capture past the RAM budget and asserts the two counts diverge,
+  which is the one thing that cannot be faked.
+
+The fix is `src/services/capture/storePacket.ts`: frames are flattened at the
+boundary, dense columns folded back into `fields`. Flattened rather than
+rehydrated because the block holds 4,096 rows and a batch is ~300 frames, so
+the same half-megabyte would cross fourteen times as it fills.
+
+**It has a second half, which is the part worth remembering.** `prepareBatch`
+calls `persist` *before* `absorb`, and `CaptureClient.send` awaits the port —
+so the store is handed frames that do not yet have a block, and the
+`postMessage` serialises them a microtask later, after the field writer has
+attached one. A `plainForStore` that returned the packet unchanged when there
+was nothing to fold therefore fixed nothing. **A message is a snapshot**: it
+always copies.
+
+`fieldAccess.ts` now throws a named error for a block with no methods, naming
+the rule and the fix rather than `read is not a function`, and `CaptureHost`
+logs the stack to stderr — which main pipes to a log — as well as the message
+to the app. The original was visible only as `state.error` in a panel nobody
+had open.
+
+### What the store actually costs
+
+`npx tsx scripts/perf/store-boundary.ts`, over 100,000 realistic frames in
+batches of 300:
 
 | | |
 |---|---|
 | `CaptureWriter` + `NodeBlockFile`, no boundary | 26.68 µs a frame — **37,477 f/s** |
 | serialize + deserialize (`v8`) | 5.27 µs a frame |
-| the whole hop over a real `MessagePort` | 5.26 µs a frame — 190,213 f/s |
+| the whole hop over a real `MessagePort` | 5.26 µs a frame |
 | **both together** | 31.94 µs a frame — **31,308 f/s** |
 
-The crossing is **16%** of it, and 1,955 B a frame on the wire. So the store
-sustains ~31,000 frames a second including the hop, and moving the store back
-in-process would buy 16% — which is not the argument for engine-side
-dissection, and the Direction entry should not be read as if it were. What
-looked worth having and is not: the writer's per-frame `writeSync` costs
-3.40 µs where the same bytes in one write a batch cost 0.28, which reads as
-12% of the writer — and batching the writer for real measured **3% slower**,
-because copying 1,100 bytes a frame into a coalescing buffer costs more than a
-`writeSync` to a file the OS has cached. Tried, measured, reverted. The
-comparison is still in the script, labelled as the trap it is.
+The crossing is **16%**, and 1,955 B a frame on the wire. This is the number
+ADR 0028 was waiting for, and it says the opposite of what was assumed: moving
+the store back in-process would buy 16%.
 
-**The store still died once, at 4,060 MB, and its ceiling was a fiction.**
-Under `--burst 4000` V8 killed it with `MarkCompactCollector: young object
-promotion failed`. `execArgv: ['--max-old-space-size=2048']` in
-`electron/store/host.ts` **does not apply**: the flag arrives — the store's own
-`process.execArgv` reads it back — and `heap_size_limit` is 4192 MB, V8's
-64-bit default, because V8 fixes the limit when it creates the isolate.
-`v8.setFlagsFromString` at the top of the entry point does not move it either.
-Both measured against the running app.
+One thing that looked worth having and is not: the writer's per-frame
+`writeSync` costs 3.40 µs where the same bytes in one write a batch cost 0.28,
+which reads as 12% of the writer — and batching the writer for real measured
+**3% slower**, twice, because copying 1,100 bytes a frame into a coalescing
+buffer costs more than a `writeSync` to a file the OS has cached. Tried,
+measured, reverted; the comparison is still in the script, labelled as the trap
+it is.
 
-`electron/store/heapGuard.ts` now enforces it for real: the heap is sampled
-every two seconds, warned about once at 80%, and the process seals and stands
-down at the ceiling with a message saying so — which a V8 abort cannot do.
-`scripts/capture/heap-guard.ts` holds it. What is still unfixed is *why* the
-heap got there: the store's inbound queue is unbounded and each pending
-`append` holds its frames, but at the rates involved it should not have been
-queueing at all, so that explanation is unconfirmed too.
+### The store's memory ceiling is enforced by us
+
+`execArgv: ['--max-old-space-size=2048']` in `electron/store/host.ts` **does
+not work**. The flag arrives — the store's own `process.execArgv` reads it
+back — and `heap_size_limit` is 4192 MB, V8's 64-bit default, because V8 fixes
+the limit when it creates the isolate. `v8.setFlagsFromString` at the top of
+the entry point does not move it either. Both measured against the running app,
+after the store was seen to die at 4,060 MB.
+
+`electron/store/heapGuard.ts` samples the heap every two seconds, warns once at
+80% while the capture can still be stopped whole, and seals and stands down at
+the ceiling with a message — which a V8 abort cannot give. The wall is the
+lower of our 2 GB and 90% of V8's own limit. `scripts/capture/heap-guard.ts`.
+
+Still unfixed: the store's inbound queue is unbounded, and each pending
+`append` holds its frames. It has not been seen to matter since the throughput
+was measured — the store takes 31,000 frames a second and the app feeds it far
+less — so the 4 GB heap remains unexplained rather than diagnosed.
 
 ## 9. Direction
 
