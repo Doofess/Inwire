@@ -41,6 +41,17 @@ export class CaptureStoreHost {
           // Windows GUI app has no console to inherit - so every `fail()`
           // message the protocol calls "never silent" would go nowhere.
           stdio: 'pipe',
+          // A ceiling, so a runaway index fails THIS process rather than the
+          // machine. The store holds the capture index and a bounded directory
+          // cache; at the measured ~16 B a frame an index would have to reach
+          // well past a hundred million frames to approach this, so hitting it
+          // means something is wrong rather than something is large.
+          //
+          // Crashing is a handled state: `child.on('exit')` tells the renderer
+          // over its own channel, because a dead `MessagePort` just goes quiet
+          // and every pending read would hang for the life of the window.
+          // Swapping a workstation to death is not handled and cannot be.
+          execArgv: ['--max-old-space-size=2048'],
         },
       );
       this.child = child;

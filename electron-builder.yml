@@ -47,6 +47,11 @@ files:
 #
 # The cost, accepted deliberately: electron-updater cannot drive an Inno
 # installer, so updates are hand-rolled.
+# Drops the Chromium locale packs - 49 MB of 378, none of which this app can
+# display. `electronLanguages` is the documented option and is macOS-only; see
+# the header of the hook for why this is a hook.
+afterPack: electron/afterPack.cjs
+
 win:
   target:
     - dir

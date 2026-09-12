@@ -55,6 +55,32 @@ import {
  */
 const DEV_SERVER_URL = process.env.INWIRE_DEV_SERVER ?? '';
 
+/**
+ * Cross-origin isolation, on every `app://` response.
+ *
+ * Together these make `crossOriginIsolated` true, which gates
+ * `SharedArrayBuffer` and `Atomics.wait` between the renderer and its own
+ * Workers - so the pipeline Worker can eventually share the frame index with
+ * the UI rather than posting copies of it.
+ *
+ * **Every** response, not just the document, and that is the whole lesson
+ * here: a dedicated worker's script must carry the header itself even when it
+ * is same-origin. Set only on the document, this blocks
+ * `pipeline.worker-*.js` with `coep-frame-resource-needs-coep-header` - which
+ * is no dissection at all, and maplibre's worker with it, which is the tiles
+ * silently never arriving.
+ *
+ * The outbound hosts are unaffected. `require-corp` is satisfied either by a
+ * CORP header or by a successful CORS check, and every one of geojs,
+ * openfreemap, cloudflare-dns and ipapi is reached by a CORS `fetch`.
+ * Verified against the running app: 200 from geojs and from openfreemap with
+ * isolation on.
+ */
+const ISOLATION_HEADERS = {
+  'cross-origin-opener-policy': 'same-origin',
+  'cross-origin-embedder-policy': 'require-corp',
+} as const;
+
 /** The built renderer, beside the compiled main process. */
 const RENDERER_ROOT = path.join(__dirname, '..', 'dist');
 
@@ -177,7 +203,7 @@ function registerAppProtocol(): void {
     // through an asar archive and `file://` does not.
     try {
       const body = await readFile(absolute);
-      return new Response(body, { headers: { 'content-type': mime } });
+      return new Response(body, { headers: { 'content-type': mime, ...ISOLATION_HEADERS } });
     } catch {
       return new Response(null, { status: 404 });
     }
@@ -209,11 +235,16 @@ function hardenSession(target: Electron.Session): void {
 
   const csp = DEV_SERVER_URL ? developmentCsp(DEV_SERVER_URL) : productionCsp();
   target.webRequest.onHeadersReceived((details, callback) => {
+    // The isolation headers are NOT set here. `onHeadersReceived` does not
+    // fire for `protocol.handle` responses, so setting them here reached the
+    // document (which Chromium synthesises differently) and not the worker
+    // scripts - and a worker script under COEP must carry the header itself,
+    // same-origin or not. Measured: `pipeline.worker` and maplibre's worker
+    // both failed with `coep-frame-resource-needs-coep-header`, which for the
+    // pipeline worker means no dissection at all. They live on the Response in
+    // `registerAppProtocol` instead.
     callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [csp],
-      },
+      responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] },
     });
   });
 
