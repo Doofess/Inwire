@@ -23,7 +23,6 @@ Three processes, and the split is deliberate. **Main** owns what the OS owns: th
 - `npm run build` — Vite builds the renderer into `dist/`, then `electron/build.cjs` esbuilds `main`, `preload` and the store entry into `dist-electron/` as **`.cjs`** (the root is `"type": "module"` and a `sandbox: true` preload cannot be ESM).
 - `npm run start:app` — build and launch Electron against `app://` **without packaging**. This is the only way short of a packaged build to exercise the protocol handler, the MIME table, the 404 rule, the CSP and maplibre's worker URL; `npm run dev` runs the renderer under Vite instead, where all five behave differently.
 - `npm run dev` — Vite plus Electron, for iterating on the UI.
-- `server.ts`, `express` and `npm run start` are still present and are **dead** — they served the browser build. They go in phase 5.
 - There is no test suite/runner configured in this repo.
 
 ### Local capture agent (`local-agent/`)
@@ -191,5 +190,5 @@ Theming is **four themes**, not a light/dark pair: `light` (Day), `paper`, `dark
 - `local-agent/**` is excluded from the file watcher so that rebuilding the Python agent doesn't trigger a full page reload (which would tear down the live agent WebSocket and look like a connect/disconnect loop). `public/downloads/**` is deliberately **not** excluded, even though it belongs to the same build chain - read the inline comment before "fixing" that, because an excluded path falls through to the SPA fallback and the browser silently downloads `index.html` renamed to `Inwire-Agent-Setup.exe`.
 
 ### Env vars
-The app itself needs none. `server.ts` reads `PORT`, and `vite.config.ts` reads `DISABLE_HMR`; both have working defaults.
+The app itself needs none. `vite.config.ts` reads `DISABLE_HMR`, and `electron/main.ts` reads `INWIRE_DEV_SERVER` (set by `npm run dev`); both have working defaults. `server.ts` and its `PORT` are gone - it served the browser build.
 - There is no `.env.local.example` and no `VITE_FIREBASE_*` anywhere in the source — the file the `.gitignore` used to make an exception for is gone, and so is the exception. `security_spec.md` still describes Firestore rules and a threat model (roles, admin bootstrap email, shared-capture ownership invariants) for a Firebase backend that **does not exist under `src/`**: treat it as a spec for something unbuilt, not a description of this code.

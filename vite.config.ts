@@ -13,13 +13,17 @@ import {defineConfig, type Plugin} from 'vite';
  * loaded from. In a production build that resolves to `/assets/`, where Rollup
  * has inlined the library and emitted no worker at all.
  *
- * The request then falls through `server.ts`'s SPA fallback and comes back as
- * `index.html` with a 200 - the browser parses HTML as an ES module, the worker
- * dies before it registers a message handler, and **maplibre reports nothing**.
- * The map loads its style, its sprites and its tile JSON, and then sits with
- * every tile in state `loading` for ever. This is the exact hazard the comment
- * on `public/downloads/**` in `server.ts` describes, arrived at from the other
- * direction.
+ * A server that answers an unknown path with `index.html` then returns that
+ * with a 200 - the browser parses HTML as an ES module, the worker dies before
+ * it registers a message handler, and **maplibre reports nothing**. The map
+ * loads its style, its sprites and its tile JSON, and then sits with every tile
+ * in state `loading` for ever.
+ *
+ * That fallback lived in `server.ts`, which is gone; `electron/appPaths.ts`
+ * deliberately 404s instead, and `scripts/electron/shell.ts` holds it to that.
+ * The hazard is written down here because the fix below - emitting the worker
+ * at a name maplibre can find - is what stops the request being unknown in the
+ * first place, and is still required.
  *
  * `optimizeDeps.exclude` below fixes the same area in DEV, where native ESM
  * lets maplibre resolve the worker inside `node_modules`. It does nothing for a
@@ -108,15 +112,14 @@ export default defineConfig(() => {
         // and reopens the live WebSocket and reads as a connect/disconnect
         // loop.
         //
-        // public/downloads/ is deliberately NOT ignored, despite belonging to
-        // the same build chain. Vite keeps a Set of public file paths built at
-        // startup and refreshes it from this watcher; a path the watcher never
-        // reports is treated as absent, so requests for it fall through to the
-        // SPA fallback and the browser silently downloads index.html renamed
-        // to Inwire-Agent-Setup.exe - a ~1 KB "corrupted installer" with no
-        // error anywhere to explain it. One page reload when a new installer
-        // is copied in is the cheaper failure.
-        ignored: ['**/local-agent/**'],
+        // `public/downloads/` used to be a deliberate exception here, because
+        // Vite treats a public path its watcher never reports as absent and the
+        // request then fell through to the SPA fallback - the browser silently
+        // downloaded index.html renamed to Inwire-Agent-Setup.exe. Both halves
+        // are gone: the installers no longer live under `public/` (they were
+        // being packaged into the app), and there is no SPA fallback to fall
+        // through to.
+        ignored: ['**/local-agent/**', '**/release-artifacts/**'],
       },
     },
   };

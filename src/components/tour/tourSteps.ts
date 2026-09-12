@@ -38,16 +38,16 @@ export interface TourStep {
   side: 'top' | 'right' | 'bottom' | 'left';
 }
 
+// The tour used to open on "Install the capture driver - open this menu and
+// choose Download Driver, it installs once, needs admin rights the one time".
+// Every clause of that is now false: the agent ships inside the app, installs
+// with it, and there is no menu entry to choose. A first-run user has nothing
+// to do before capturing, so the tour starts where their first ACTION is.
+//
+// The menu keeps a step - it is where everything that is not capture lives, and
+// that is worth pointing at - but it is no longer the thing standing between
+// somebody and their first packet.
 export const TOUR_STEPS: TourStep[] = [
-  {
-    anchor: 'menu',
-    title: 'Install the capture driver',
-    body:
-      'A browser cannot see raw network traffic, so Inwire reads it through a small '
-      + 'local agent instead. Open this menu and choose Download Driver - it installs '
-      + 'once, needs admin rights the one time, and runs quietly from then on.',
-    side: 'bottom',
-  },
   {
     anchor: 'interfaces',
     title: 'Choose what to listen on',
@@ -83,6 +83,15 @@ export const TOUR_STEPS: TourStep[] = [
       'Each row is one packet, newest at the bottom. Colours come from the rules in '
       + 'Settings, and the filter bar above narrows this to what you are looking for.',
     side: 'top',
+  },
+  {
+    anchor: 'menu',
+    title: 'Everything else lives here',
+    body:
+      'Capture statistics, what this capture revealed about your network, name '
+      + 'resolution, and settings - including Driver Info, which says what the '
+      + 'capture agent is doing and is the first place to look if nothing arrives.',
+    side: 'bottom',
   },
   {
     anchor: 'detail',
