@@ -105,7 +105,19 @@ export interface StubAgent {
  * the app's 100 ms flush and ordering window are exercised rather than
  * bypassed by one giant message.
  */
-export async function startStubAgent(pipePath = STUB_PIPE): Promise<StubAgent> {
+export async function startStubAgent(
+  pipePath = STUB_PIPE,
+  /**
+   * Frames per 100 ms tick.
+   *
+   * 40 is a plausible trickle, which is what the smoke test wants: it
+   * exercises the ordering window and the 100 ms flush rather than bypassing
+   * them with one enormous message. Cranking it is how a capture is driven
+   * past the RAM buffer's budget by hand, which needs ~180,000 frames and
+   * would otherwise take seven minutes - see `serveStub.ts --burst`.
+   */
+  perTick = 40,
+): Promise<StubAgent> {
   const received: string[] = [];
   let seq = 0;
   let pump: ReturnType<typeof setInterval> | null = null;
@@ -144,7 +156,7 @@ export async function startStubAgent(pipePath = STUB_PIPE): Promise<StubAgent> {
           stop();
           pump = setInterval(() => {
             const batch = [];
-            for (let i = 0; i < 40; i++) {
+            for (let i = 0; i < perTick; i++) {
               seq++;
               batch.push({ seq, tsUs: Date.now() * 1000, bytes: dnsQuery(seq & 0xffff) });
             }

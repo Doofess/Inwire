@@ -203,6 +203,7 @@ export class CaptureHost {
         case 'read': return this.onRead(message);
         case 'chunk': return this.onChunk(message);
         case 'rowsAt': return this.onRowsAt(message);
+        case 'rowsForOrdinals': return this.onRowsForOrdinals(message);
         case 'locate': return this.onLocate(message);
         case 'scan': return this.onScan(message);
         case 'scanCancel': return this.onScanCancel(message);
@@ -301,6 +302,20 @@ export class CaptureHost {
       this.fail(describe(error), false);
     }
     this.post({ type: 'blocks', requestId: message.requestId, blocks });
+  }
+
+  private onRowsForOrdinals(
+    message: Extract<ToCapture, { type: 'rowsForOrdinals' }>,
+  ): void {
+    let rows: [number, Packet][] = [];
+    try {
+      if (this.open !== null) {
+        rows = [...this.open.reader.readRowsFor(message.ordinals)];
+      }
+    } catch (error) {
+      this.fail(describe(error), false);
+    }
+    this.post({ type: 'rowsByOrdinal', requestId: message.requestId, rows });
   }
 
   private onLocate(message: Extract<ToCapture, { type: 'locate' }>): void {

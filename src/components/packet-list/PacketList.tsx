@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Packet } from '../../types/packet';
 import { virtualWindow } from '../../lib/virtualWindow';
 import { arrayRowSource, packetAt, rowSlice } from '../../lib/rowSource';
-import { useCaptureRows } from '../../lib/useCaptureRows';
+import { useCaptureRows, type CaptureFilterView } from '../../lib/useCaptureRows';
+import type { CaptureFilterState } from '../../lib/useCaptureFilter';
 import {
   Direction, DirectionSignal, DIRECTION_GLYPH, DIRECTION_LABEL, SIGNAL_LABEL,
   directionOf, signalOf,
@@ -81,17 +82,38 @@ interface PacketListProps {
    * row and the filter that selects it cannot disagree.
    */
   sourceProcess?: (packet: Packet) => string | null;
+  /** What the list shows: the RAM window with the display filter applied. */
   packets: Packet[];
   /**
-   * True when `packets` is the buffer itself rather than a filtered view.
+   * The same window with no filter applied - the buffer itself.
    *
-   * It decides whether the list may address the whole capture. A display
-   * filter runs over the window and only the window, so a source claiming the
-   * rows below it would put unfiltered frames in a filtered list - the same
-   * reason a quick-find search or a sort by any other column falls back to the
-   * window. Whole-capture filtering is its own mechanism.
+   * Both are needed, and which is which matters. `below` was measured against
+   * the buffer's first frame, so the capture's row space is indexed by the
+   * unfiltered window; the filtered one is the rows to SHOW from `below`
+   * upward. Passing one for the other shifts every row by the number of
+   * frames the filter hid.
+   *
+   * `packets === allPackets` is how "no filter is applied" is known, which is
+   * the same identity check `App.tsx`'s selection-visibility effect uses.
    */
-  unfiltered: boolean;
+  allPackets: Packet[];
+  /**
+   * Rows of the capture below the RAM window. `useWindowOrdinal.ts`.
+   *
+   * Passed in rather than asked for here because the filter scan is gated on
+   * the same number, and two hooks asking the store the same question can
+   * disagree with each other for a frame.
+   */
+  below: number;
+  /**
+   * The display filter run over the whole capture, or `off`.
+   *
+   * Only `ready` lets the list address the disk while a filter is applied.
+   * Scanning, failed, or a capture that fits in memory all fall back to the
+   * window - which is what the list did before any of this, and is still the
+   * right answer for the ~700k frames the buffer holds.
+   */
+  filterScan: CaptureFilterState;
   selectedPacket: Packet | null;
   onSelectPacket: (packet: Packet) => void;
   /** Double-clicking a row opens the full-window view of that frame. */
@@ -249,7 +271,9 @@ export const PacketList: React.FC<PacketListProps> = ({
   resolveNames = false,
   sourceProcess,
   packets,
-  unfiltered,
+  allPackets,
+  below,
+  filterScan,
   selectedPacket,
   onSelectPacket,
   onInspectPacket,
@@ -627,11 +651,30 @@ export const PacketList: React.FC<PacketListProps> = ({
   // showing the capture in order. Filtered, searched or sorted by any other
   // column, it shows what is in memory and says so; otherwise it addresses the
   // whole capture and reads the rows below the RAM window back from disk.
-  const capturedInOrder = unfiltered && activeSearch === ''
+  const unfiltered = packets === allPackets;
+  // The capture in order: no quick-find, and either unsorted or sorted the way
+  // it was captured. A search or a sort by any other column is a view of what
+  // is in memory, and a source claiming the rows below it would put unsorted
+  // rows in a sorted list.
+  //
+  // A display filter used to disqualify it too, and no longer does - that is
+  // what `filterScan` is. It still disqualifies it while the scan is running
+  // or if it failed, because until the bitmap lands the only frames this list
+  // can honestly show are the ones in hand.
+  const capturedInOrder = activeSearch === ''
     && (!effectiveSortField || (effectiveSortField === 'id' && sortOrder === 'asc'));
-  const captureRows = useCaptureRows(packets, capturedInOrder);
+  const filterView = React.useMemo<CaptureFilterView | null>(
+    () => (unfiltered || filterScan.status !== 'ready'
+      ? null
+      // `packets` rather than `sortedPackets`: they are the same array under
+      // `capturedInOrder`, and this one is unambiguously capture order.
+      : { matches: filterScan.matches, window: packets }),
+    [unfiltered, filterScan, packets],
+  );
+  const addressingCapture = capturedInOrder && (unfiltered || filterView !== null);
+  const captureRows = useCaptureRows(allPackets, below, addressingCapture, filterView);
   const windowSource = React.useMemo(() => arrayRowSource(sortedPackets), [sortedPackets]);
-  const rowSource = capturedInOrder ? captureRows.source : windowSource;
+  const rowSource = addressingCapture ? captureRows.source : windowSource;
   const totalRows = rowSource.count;
   const { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight } =
     virtualWindow(totalRows, scrollTop, viewportHeight, rowHeight, OVERSCAN_ROWS);
@@ -1176,17 +1219,30 @@ export const PacketList: React.FC<PacketListProps> = ({
                   <div className="flex flex-col items-center justify-center gap-1">
                     <TbFilter className="w-6 h-6 text-muted-foreground/70 mb-1" />
                     <span>
-                      {packets.length === 0
+                      {/* Against the BUFFER, not the filtered view. `packets`
+                          is empty in both cases and they are not the same
+                          case: a filter that matched nothing used to report
+                          the buffer as empty, which is the wrong answer in the
+                          one situation a reader most needs the right one. */}
+                      {allPackets.length === 0
                         ? 'The capture buffer is empty.'
                         : 'No packets match the current display filter.'}
                     </span>
-                    {/* Scoped rather than absolute, and only when it is true.
-                        The filter ran over what is held, and what is held is
-                        not the capture once the buffer has trimmed. */}
-                    {packets.length > 0 && droppedBuffer > 0 && (
+                    {/* What was actually searched. A filter that finds nothing
+                        is exactly when the reader wonders whether it is the
+                        filter or the traffic, so the scope is stated rather
+                        than left to be assumed - and the scope is now one of
+                        two things rather than always the buffer. */}
+                    {allPackets.length > 0 && filterView !== null && (
+                      <span className="text-[11px] font-mono text-muted-foreground mt-0.5">
+                        Searched the whole stored capture —{' '}
+                        {(below + allPackets.length).toLocaleString()} frames.
+                      </span>
+                    )}
+                    {allPackets.length > 0 && filterView === null && droppedBuffer > 0 && (
                       <span className="text-[11px] font-mono text-amber-600 dark:text-amber-400 mt-0.5">
-                        Searched frames {packets[0].id.toLocaleString()}–
-                        {packets[packets.length - 1].id.toLocaleString()};{' '}
+                        Searched frames {allPackets[0].id.toLocaleString()}–
+                        {allPackets[allPackets.length - 1].id.toLocaleString()};{' '}
                         {droppedBuffer.toLocaleString()} earlier frames have left the buffer.
                       </span>
                     )}
@@ -1443,7 +1499,7 @@ export const PacketList: React.FC<PacketListProps> = ({
       {showMinimap && (
       <PacketListMinimap
         packets={sortedPackets}
-        leadingRows={capturedInOrder ? captureRows.below : 0}
+        leadingRows={addressingCapture ? captureRows.leadingRows : 0}
         selectedPacket={selectedPacket}
         colorEngine={colorEngine}
         packetTheme={packetTheme}

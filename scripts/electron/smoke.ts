@@ -94,6 +94,24 @@ try {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Clicks something, and says whether it was there rather than throwing.
+ *
+ * A locator that times out throws a Playwright error out of the whole script,
+ * which prints a stack trace from inside Playwright and no `FAIL` line. The
+ * useful output is "this control was not there", named.
+ */
+async function clicks(what: string, act: () => Promise<void>): Promise<boolean> {
+  try {
+    await act();
+    return true;
+  } catch (error) {
+    console.log(`        could not click ${what}: `
+      + `${error instanceof Error ? error.message.split('\n')[0] : String(error)}`);
+    return false;
+  }
+}
+
 /** Polls until true or the budget runs out. Returns whether it got there. */
 async function until(condition: () => Promise<boolean>, ms = 20_000): Promise<boolean> {
   const deadline = Date.now() + ms;
@@ -107,6 +125,14 @@ async function until(condition: () => Promise<boolean>, ms = 20_000): Promise<bo
 let agent: StubAgent | null = null;
 let profile: string | null = null;
 let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
+/**
+ * Hoisted out of the try, because the cleanup below has to talk to it.
+ *
+ * Not called `window`: that shadows the global the `page.evaluate` callbacks
+ * below are written against, and every one of them silently starts reading
+ * this Playwright handle instead of the page's own `window`.
+ */
+let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof electron.launch>>['firstWindow']>> | null = null;
 
 try {
   agent = await startStubAgent();
@@ -124,6 +150,17 @@ try {
   });
 
   const page = await app.firstWindow();
+  mainWindow = page;
+
+  // Playwright's default action timeout is **none**, and `_electron.launch`
+  // has no config file to set one. So a locator that never matches - a button
+  // that did not render, an adapter list that stayed empty - waits for ever,
+  // and `npm run check` stops rather than failing. This ran clean, then hung
+  // twice on a slower boot with no output at all, which is the worst possible
+  // shape for a test: a suite that never finishes tells you less than one that
+  // fails.
+  page.setDefaultTimeout(30_000);
+
   await page.waitForLoadState('domcontentloaded');
 
   // Collected from here on. A page error is a thrown exception the app did not
@@ -169,12 +206,21 @@ try {
 
   // Pick an adapter. The label is shortened by `shortInterfaceLabel`, which
   // splits on the first " (" - so "Ethernet (stub)" is offered as "Ethernet".
-  await page.getByRole('button', { name: 'Interfaces' }).click();
-  await page.getByText('Ethernet', { exact: true }).first().click();
+  //
+  // Each click is reported rather than thrown, so a control that never appears
+  // names itself instead of taking the suite down with a stack trace from
+  // inside Playwright.
+  checkTrue('the interface picker opens',
+    await clicks('the Interfaces button',
+      () => page.getByRole('button', { name: 'Interfaces' }).click()));
+  checkTrue('an adapter can be chosen',
+    await clicks('the stub adapter',
+      () => page.getByText('Ethernet', { exact: true }).first().click()));
   checkTrue('choosing an adapter reaches the agent',
     await until(async () => agent!.received.some((m) => m.includes('set_interfaces'))));
 
-  await page.getByLabel('Start capture').click();
+  checkTrue('Start can be pressed',
+    await clicks('Start capture', () => page.getByLabel('Start capture').click()));
   checkTrue('Start reaches the agent',
     await until(async () => agent!.received.some((m) => m.includes('start_capture'))));
 
@@ -208,11 +254,40 @@ try {
     console.log('      no console errors');
   }
 } finally {
-  await app?.close().catch(() => { /* it may already be gone */ });
+  // Killed, not closed, and this is the whole reason the script used to hang.
+  //
+  // `app.close()` closes the window, and closing the window with frames in the
+  // buffer is exactly what `guardClose` in `electron/main.ts` exists to catch:
+  // it opens a native "Quit Inwire?" message box. A native modal is not in the
+  // page, so Playwright cannot see it, cannot answer it, and waits for ever -
+  // and because the output is buffered the script looks like it is still
+  // working when it has already finished every assertion.
+  //
+  // What killing gives up is the graceful shutdown path. That is the right
+  // thing to give up here: the graceful path IS a dialog, and a dialog is a
+  // person's job.
+  // Closing with frames in the buffer opens `guardClose`'s native "Quit
+  // Inwire?" message box, and a native modal is not in the page: Playwright
+  // cannot see it, cannot answer it, and `app.close()` waits for ever - with
+  // the output buffered, so the script looks busy long after its last
+  // assertion. That is what used to hang this.
+  //
+  // So the test says what is true - this capture is about to be deleted with
+  // its temporary profile - through the same bridge the app uses, and then
+  // closes properly. Killing the process instead was tried and is worse:
+  // `kill()` reaches the main process and leaves the GPU, renderer, store and
+  // crashpad children running, five orphans per run.
+  await mainWindow?.evaluate(() => window.inwire?.setUnsavedCapture?.(false))
+    .catch(() => { /* the app may already be gone */ });
+  await app?.close().catch(() => { /* likewise */ });
   await agent?.close();
-  // The store holds file handles until the process is gone, so this runs after
-  // the close above rather than beside it.
-  if (profile) rmSync(profile, { recursive: true, force: true });
+  // A temp directory that outlives the run is untidy, not a failure - and
+  // throwing here would replace a clean pass with a stack trace.
+  try {
+    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  } catch {
+    console.log(`      note: could not remove the temporary profile at ${profile}`);
+  }
 }
 
 console.log(failures === 0

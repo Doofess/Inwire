@@ -4,6 +4,11 @@
  *   npx tsx scripts/electron/serveStub.ts
  *   npm run start:app          (in a second terminal)
  *
+ * `--burst <n>` sends n frames per 100 ms tick instead of 40. That is how a
+ * capture is driven past the RAM buffer's smallest budget - 128 MB, about
+ * 180,000 frames - so the window trims, rows go under it, and the disk-backed
+ * half of the list can be looked at. At 4,000 it takes about five seconds.
+ *
  * `stubAgent.ts` exists for `smoke.ts`, which starts and stops it inside one
  * process. This is the same server with nobody driving it: start it, launch
  * the app, and pick "Ethernet (stub)" - synthetic DNS queries arrive at the
@@ -25,8 +30,16 @@ import { startStubAgent, STUB_PIPE } from './stubAgent';
 if (process.platform !== 'win32') {
   console.log('The app dials a named pipe and is Windows-only; nothing here to serve.');
 } else {
-  const agent = await startStubAgent();
-  console.log(`Serving the stub agent on ${STUB_PIPE}`);
+  const burst = process.argv.indexOf('--burst');
+  const perTick = burst >= 0 ? Number(process.argv[burst + 1]) : undefined;
+  if (perTick !== undefined && !Number.isFinite(perTick)) {
+    console.log('--burst needs a number of frames per 100 ms tick');
+    process.exit(1);
+  }
+
+  const agent = await startStubAgent(STUB_PIPE, perTick);
+  console.log(`Serving the stub agent on ${STUB_PIPE}`
+    + (perTick === undefined ? '' : ` at ${(perTick * 10).toLocaleString()} frames/s`));
   console.log('Launch the app (`npm run start:app`), choose "Ethernet (stub)", press Start.');
   console.log('Ctrl+C to stop.\n');
 

@@ -32,6 +32,16 @@ export type ToCapture =
    */
   | { type: 'rowsAt'; requestId: number; from: number; to: number }
   /**
+   * The rows at scattered positions. Answered with `rowsByOrdinal`.
+   *
+   * `rowsAt` is a range and returns whole chunks, which is right for a list
+   * scrolling the capture in order and wrong for a filtered one: the matches
+   * of `dns` in a browsing capture put fifty visible rows across fifty
+   * thousand ordinals, and whole chunks would be megabytes of rows to show
+   * fifty of them - then stop at `MAX_ROW_CHUNKS`.
+   */
+  | { type: 'rowsForOrdinals'; requestId: number; ordinals: number[] }
+  /**
    * Where a frame sits in the capture. Answered with `located`.
    *
    * Asked of the RAM window's first frame, which is what says how much of the
@@ -143,6 +153,13 @@ export type FromCapture =
   | { type: 'bytes'; requestId: number; frames: [number, Uint8Array][] }
   /** Decoded chunks answering a `rowsAt`, each with where it starts. */
   | { type: 'blocks'; requestId: number; blocks: { firstOrdinal: number; packets: Packet[] }[] }
+  /**
+   * The rows a `rowsForOrdinals` asked for, each paired with its position.
+   *
+   * Positions the capture cannot place are simply absent, the same contract
+   * `bytes` has: a row that is gone is a thing to render, not an error.
+   */
+  | { type: 'rowsByOrdinal'; requestId: number; rows: [number, Packet][] }
   /** Where a `locate`'s frame sits, or -1 when it is not addressable yet. */
   | { type: 'located'; requestId: number; ordinal: number }
   /**

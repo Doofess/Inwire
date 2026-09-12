@@ -127,6 +127,8 @@ function requestStorePort(): Promise<MessagePort> {
 
 /** Bytes a request could not be answered with. Shared, never written to. */
 const NONE = new Map<number, Uint8Array>();
+/** The same, for rows. */
+const NO_ROWS = new Map<number, Packet>();
 
 class CaptureClient {
   /**
@@ -151,6 +153,7 @@ class CaptureClient {
   private readonly pendingRows = new Map<number, (packets: Packet[]) => void>();
   private readonly pendingOpen = new Map<number, (ready: StoredCapture | null) => void>();
   private readonly pendingBlocks = new Map<number, (blocks: RowBlock[]) => void>();
+  private readonly pendingScattered = new Map<number, (rows: Map<number, Packet>) => void>();
   private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
   /** The scan in flight. At most one - the store enforces the same. */
   private readonly pendingScan = new Map<number, {
@@ -258,6 +261,13 @@ class CaptureClient {
         if (settle === undefined) break;
         this.pendingBlocks.delete(message.requestId);
         settle(message.blocks);
+        break;
+      }
+      case 'rowsByOrdinal': {
+        const settle = this.pendingScattered.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingScattered.delete(message.requestId);
+        settle(new Map(message.rows));
         break;
       }
       case 'located': {
@@ -452,6 +462,26 @@ class CaptureClient {
   }
 
   /**
+   * The rows at scattered positions, keyed by position.
+   *
+   * What a **filtered** list reads. `readRowsAt` walks forward returning whole
+   * chunks, which is the wrong shape once the rows on screen are the matches
+   * of a filter rather than a run of the capture - see the protocol's
+   * `rowsForOrdinals`.
+   *
+   * Positions the capture cannot place are absent from the map rather than an
+   * error, the same contract `readBytes` has.
+   */
+  readRowsFor(ordinals: readonly number[]): Promise<Map<number, Packet>> {
+    if (ordinals.length === 0) return Promise.resolve(NO_ROWS);
+    return this.request(
+      this.pendingScattered as never,
+      (requestId) => ({ type: 'rowsForOrdinals', requestId, ordinals: [...ordinals] }),
+      NO_ROWS,
+    );
+  }
+
+  /**
    * Where a frame sits in the capture, or -1.
    *
    * -1 means "not addressable yet" - a frame in a hole, one still staged
@@ -536,6 +566,8 @@ class CaptureClient {
     this.pendingOpen.clear();
     for (const settle of this.pendingBlocks.values()) settle([]);
     this.pendingBlocks.clear();
+    for (const settle of this.pendingScattered.values()) settle(NO_ROWS);
+    this.pendingScattered.clear();
     for (const settle of this.pendingLocate.values()) settle(-1);
     this.pendingLocate.clear();
     // `failed` rather than `cancelled`: the store went away, which is not the

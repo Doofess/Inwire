@@ -200,6 +200,7 @@ console.log('--- every request answers, especially when it fails ---\n');
   h.send({ type: 'rowsAt', requestId: 3, from: 0, to: 10 });
   h.send({ type: 'locate', requestId: 4, id: 1 });
   h.send({ type: 'scan', requestId: 5, filter: 'tcp' });
+  h.send({ type: 'rowsForOrdinals', requestId: 6, ordinals: [0, 5] });
   await h.store.drain();
 
   check('a read with no capture open answers empty', h.of('bytes'), [
@@ -213,6 +214,9 @@ console.log('--- every request answers, especially when it fails ---\n');
   ]);
   check('a locate answers -1', h.of('located'), [
     { type: 'located', requestId: 4, ordinal: -1 },
+  ]);
+  check('a scattered row read answers empty', h.of('rowsByOrdinal'), [
+    { type: 'rowsByOrdinal', requestId: 6, rows: [] },
   ]);
   const done = h.of('scanDone');
   check('a scan answers, and says why', done.length === 1 && done[0].message, 'no capture is open');
@@ -259,6 +263,25 @@ const packets = traffic(CHUNK_FRAMES * 3 + 700);
   checkTrue('rowsAt answers whole chunks around the range', blocks.length >= 1);
   checkTrue('...covering the position asked for',
     blocks.some((b) => 5000 >= b.firstOrdinal && 5000 < b.firstOrdinal + b.packets.length));
+
+  // Scattered positions, which is what a filtered list asks for. Chosen to
+  // land in four different chunks and in no order, plus a duplicate and one
+  // past the end - because the failure being guarded against is a row paired
+  // with the WRONG position, which looks like a working list showing the
+  // wrong frames.
+  const wanted = [9000, 12, 12, 4096, 8191, 4095, packets.length + 5, packets.length - 1];
+  h.send({ type: 'rowsForOrdinals', requestId: 14, ordinals: wanted });
+  await h.store.drain();
+
+  const got = new Map(h.of('rowsByOrdinal').find((m) => m.requestId === 14)?.rows ?? []);
+  check('every position that exists comes back',
+    [...got.keys()].sort((a, b) => a - b),
+    [12, 4095, 4096, 8191, 9000, packets.length - 1]);
+  check('...paired with the row that is actually there',
+    [...got].map(([ordinal, packet]) => packet.id === packets[ordinal].id),
+    [true, true, true, true, true, true]);
+  checkTrue('a position past the end is absent rather than an error',
+    !got.has(packets.length + 5));
 
   // Reopening finds it. This is the restore, and the same message.
   h.send({ type: 'open', captureId: 'cap-20260912-120000-aaaa', requestId: 13 });
