@@ -5,9 +5,11 @@ import type { LinkChange, LinkContext } from '../../services/linkContext';
 import { motion } from 'motion/react';
 import {
   TbSettings, TbX, TbPalette, TbActivity, TbFilter, TbTrash, TbEraser, TbLayoutBoard, TbAccessible, TbKey,
+  TbDownload,
 } from 'react-icons/tb';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
+import { UpdateCenterPanel } from './UpdateCenterPanel';
 import { AppearanceSettingsPanel } from './AppearanceSettingsPanel';
 import { InterfaceSettingsPanel } from './InterfaceSettingsPanel';
 import { AccessibilitySettingsPanel } from './AccessibilitySettingsPanel';
@@ -34,7 +36,7 @@ import type { CaptureStorageState } from '../../services/capture/captureProtocol
  * Reading "the driver is capturing" and "the buffer is 99% full" as two
  * separate visits made a single story into two.
  */
-type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters' | 'colors' | 'decryption' | 'driver';
+type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters' | 'colors' | 'decryption' | 'driver' | 'updates';
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'appearance', label: 'Appearance', icon: TbPalette },
@@ -56,6 +58,11 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // that changes what is shown - and nothing to do with the driver.
   { id: 'decryption', label: 'Decryption', icon: TbKey },
   { id: 'driver', label: 'Driver Info', icon: TbActivity },
+  // Last, directly after Driver Info, because the two answer halves of one
+  // question. Driver Info says what the capture driver is doing; this says
+  // which version of it you have and where a newer one comes from - and the
+  // banner for "there is no driver" points from one to the other.
+  { id: 'updates', label: 'Updates', icon: TbDownload },
 ];
 
 interface SettingsModalProps {
@@ -216,6 +223,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {section === 'decryption' && <DecryptionSettingsPanel />}
 
+            {section === 'updates' && (
+              <UpdateCenterPanel
+                agentVersion={agentVersion}
+                agentOutdated={agentOutdated}
+                onShowDriverInfo={() => setSection('driver')}
+              />
+            )}
+
             {/* Mounted only while selected, so the log subscription starts
                 and stops with the section rather than with the modal. */}
             {section === 'driver' && (
@@ -238,6 +253,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onRestartAgent={onRestartAgent}
                 agentHealth={agentHealth}
                 onStartAgentService={onStartAgentService}
+                onShowUpdates={() => setSection('updates')}
                 onSubscribe={onSubscribeAgentLog}
                 onUnsubscribe={onUnsubscribeAgentLog}
                 onClearLog={onClearAgentLog}

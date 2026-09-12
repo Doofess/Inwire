@@ -43,9 +43,12 @@ import {
 } from '../../electron/updateCenter/elevate';
 import { parseDisplayVersion, readNpcap } from '../../electron/updateCenter/npcap';
 import {
-  actionLabel, canApply as canApplyInRenderer, EMPTY_SNAPSHOT, isBusy, normalizeSnapshot,
-  stateLabel, withAgentRow, type UpdateComponent,
+  actionLabel, canApply as canApplyInRenderer, EMPTY_SNAPSHOT, installedLabel, isBusy,
+  normalizeSnapshot, stateLabel, withAgentRow, type UpdateComponent,
 } from '../../src/services/updateCenter';
+import {
+  normalizeUpdatePrefs, shouldCheckOnLaunch, shouldPrompt, UPDATE_DEFAULTS,
+} from '../../src/services/updatePrefs';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -484,8 +487,10 @@ console.log('\n--- what the renderer accepts, and what it adds ---\n');
 
   check('an outdated agent says so',
     withAgentRow(read ?? EMPTY_SNAPSHOT, '3.7.0', true).components[1].state.kind, 'update-available');
-  check('an agent that has not spoken is unknown',
-    withAgentRow(read ?? EMPTY_SNAPSHOT, null, false).components[1].state.kind, 'unknown');
+  // Not `unknown`, which reads as "Not checked" - the agent is not something
+  // we failed to check, it is something that has not spoken.
+  check('an agent that has not spoken is not-connected',
+    withAgentRow(read ?? EMPTY_SNAPSHOT, null, false).components[1].state.kind, 'not-connected');
 
   // Added twice must not appear twice - the panel re-derives on every render.
   check('adding it twice adds it once',
@@ -524,6 +529,19 @@ console.log('\n--- the words in each row ---\n');
     available: { version: '1.88', url: 'https://npcap.com/x', sha256: 'a'.repeat(64), size: 1, kind: 'vendor-installer', minAppVersion: '1.0.0' },
     state: { kind: 'update-available', version: '1.88' }, ...over,
   });
+  // The bug a screenshot found. The agent reports its version over the pipe,
+  // so before it connects there is no version - and the row said "Not
+  // installed" about a service that was installed and running.
+  check('a component with no version and no answer does not claim to be absent',
+    installedLabel(row({ installed: null, state: { kind: 'not-connected' } })),
+    'Version not known');
+  check('...nor does one that has not been checked',
+    installedLabel(row({ installed: null, state: { kind: 'unknown' } })), 'Version not known');
+  check('but a genuinely absent one says so',
+    installedLabel(row({ installed: null, state: { kind: 'not-installed' } })), 'Not installed');
+  check('and a present one names its version',
+    installedLabel(row({ installed: '1.88' })), 'Version 1.88');
+
   check('an absent component says Install',
     actionLabel(row({ installed: null })), 'Install');
   check('...and a present one says Update', actionLabel(row({})), 'Update');
@@ -535,6 +553,36 @@ console.log('\n--- the words in each row ---\n');
     isBusy({ ...EMPTY_SNAPSHOT, components: [row({ state: { kind: 'elevating' } })] }));
   checkTrue('a settled tab is not',
     !isBusy({ ...EMPTY_SNAPSHOT, components: [row({ state: { kind: 'up-to-date' } })] }));
+}
+
+console.log('\n--- consent, and what silence is not ---\n');
+
+{
+  // The default. CLAUDE.md's standing direction is "no outbound connection the
+  // user did not ask for", and in a packet analyzer that is sharper than
+  // usual: a request the app makes unbidden shows up in the user's own
+  // capture, on the screen they are already looking at.
+  checkTrue('a fresh install does not check on launch', !shouldCheckOnLaunch(UPDATE_DEFAULTS));
+  checkTrue('...and is asked once', shouldPrompt(UPDATE_DEFAULTS));
+
+  // The property the two fields exist for. Collapsing "no" and "not yet
+  // asked" is how a one-time prompt becomes a recurring one, and how an
+  // unanswered prompt quietly becomes a yes.
+  checkTrue('an unanswered prompt is not consent',
+    !shouldCheckOnLaunch({ automatic: true, asked: false }));
+  checkTrue('a declined prompt is never asked again',
+    !shouldPrompt({ automatic: false, asked: true }));
+  checkTrue('...and does not check',
+    !shouldCheckOnLaunch({ automatic: false, asked: true }));
+  checkTrue('an accepted prompt checks',
+    shouldCheckOnLaunch({ automatic: true, asked: true }));
+
+  // Unreadable storage must never come back as "yes, keep making requests".
+  check('junk reads as the default', normalizeUpdatePrefs({ automatic: 'yes', asked: 1 }),
+    UPDATE_DEFAULTS);
+  check('a missing field defaults on its own',
+    normalizeUpdatePrefs({ asked: true }), { automatic: false, asked: true });
+  check('a non-object is refused outright', normalizeUpdatePrefs('on'), null);
 }
 
 console.log('\n--- this machine ---\n');

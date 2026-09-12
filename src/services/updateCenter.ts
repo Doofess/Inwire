@@ -54,7 +54,17 @@ export type UpdateComponentState =
   | { kind: 'installing' }
   | { kind: 'reboot-required' }
   | { kind: 'failed'; reason: string }
-  | { kind: 'planned' };
+  | { kind: 'planned' }
+  /**
+   * The agent has not said hello yet.
+   *
+   * Composed here and never sent - main has no such state, because main has no
+   * agent row. It exists because `unknown` reads as "Not checked", and the
+   * agent is not something we failed to check: it is something that has not
+   * spoken. Told apart, one of them is a reason to press Check and the other
+   * is not.
+   */
+  | { kind: 'not-connected' };
 
 export interface UpdateComponent {
   id: UpdateComponentId;
@@ -77,7 +87,7 @@ export const EMPTY_SNAPSHOT: UpdateSnapshot = {
 const STATE_KINDS: readonly string[] = [
   'checking', 'unknown', 'up-to-date', 'not-installed', 'update-available',
   'needs-newer-app', 'downloading', 'verifying', 'elevating', 'installing',
-  'reboot-required', 'failed', 'planned',
+  'reboot-required', 'failed', 'planned', 'not-connected',
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -138,7 +148,7 @@ export function withAgentRow(
   snapshot: UpdateSnapshot, version: string | null, outdated: boolean,
 ): UpdateSnapshot {
   const state: UpdateComponentState = version === null
-    ? { kind: 'unknown' }
+    ? { kind: 'not-connected' }
     : outdated
       ? { kind: 'update-available', version: 'in the Inwire installer' }
       : { kind: 'up-to-date' };
@@ -181,12 +191,29 @@ export function stateLabel(state: UpdateComponentState): string {
     case 'reboot-required': return 'Installed - restart Windows to finish';
     case 'failed': return state.reason;
     case 'planned': return 'Planned';
+    case 'not-connected': return 'Not connected';
   }
 }
 
 function percent(received: number, total: number): string {
   if (total <= 0) return '';
   return `${Math.min(100, Math.floor((received / total) * 100))}%`;
+}
+
+/**
+ * The left half of a row: what is on this machine.
+ *
+ * Not simply `installed === null ? 'Not installed'`, and the difference is a
+ * bug this had until somebody looked at a screenshot: the capture agent
+ * reports its version over the pipe, so before it connects there is no
+ * version - and the row said **"Not installed"** about a service that was
+ * installed and running. A row that states a falsehood confidently is worse
+ * than one that admits it does not know.
+ */
+export function installedLabel(component: UpdateComponent): string {
+  if (component.installed !== null) return `Version ${component.installed}`;
+  const unknown = component.state.kind === 'unknown' || component.state.kind === 'not-connected';
+  return unknown ? 'Version not known' : 'Not installed';
 }
 
 /** Whether the row's button does anything, mirroring main's own `canApply`. */
