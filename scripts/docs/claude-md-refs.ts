@@ -1,5 +1,5 @@
 /**
- * Every path CLAUDE.md names must exist.
+ * Every path the guidance documents and the README name must exist.
  *
  *   npx tsx scripts/docs/claude-md-refs.ts
  *
@@ -11,6 +11,14 @@
  * each was deleted, and `local-agent/CLAUDE.md` still pointed at a directory
  * that had been removed when this check was written, which is how it was
  * found.
+ *
+ * README.md is in here for the same reason pointed outwards. It is the public
+ * face on GitHub, and it described the browser app for the whole of phases 3-5
+ * after the browser app was deleted - a pairing token to paste, a port to
+ * dial, an Express server to start, none of which existed. So beyond the path
+ * check it gets two of its own: the terms that went with the browser must not
+ * come back (`README_BANNED` below), and the CI badge must name the repository
+ * this clone actually points at.
  *
  * This does NOT check that the prose is true; nothing can. It checks the half
  * that is mechanically checkable, which is the half that rots silently.
@@ -28,6 +36,7 @@
  * matters, which is a file DELETED or RENAMED, and it lets the prose stay
  * readable.
  */
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -42,7 +51,7 @@ function check(name: string, actual: unknown, expected: unknown): void {
   }
 }
 
-const DOCS = ['CLAUDE.md', 'local-agent/CLAUDE.md'];
+const DOCS = ['CLAUDE.md', 'local-agent/CLAUDE.md', 'README.md'];
 
 /** Extensions that make a backticked token a path even without a slash. */
 const EXTENSIONS = /\.(ts|tsx|py|md|json|css|cjs|mjs|iss|spec|sh|yml|html|ico)$/;
@@ -64,6 +73,7 @@ const NOT_PATHS = new Set([
  */
 const DELIBERATELY_ABSENT = new Map<string, string>([
   ['server.ts', 'deleted with the browser build; named under "what it is not"'],
+  ['security_spec.md', 'deleted; what was worth keeping is docs/ideas/sharing-threat-model.md'],
 ]);
 
 /**
@@ -77,6 +87,10 @@ const DELIBERATELY_ABSENT = new Map<string, string>([
 const GENERATED = new Map<string, string>([
   ['maplibre-gl-worker.mjs', 'emitted into dist/assets by the vite plugin'],
   ['release-artifacts/', 'written by scripts/agent/package-unix.ts --build'],
+  // Asserting this one would fail on a clean clone, and `npm run check` runs
+  // before `npm run build` in CI - so it exists on a developer's machine and
+  // not on the runner, which is the worst shape an assertion can have.
+  ['dist-electron/', 'written by electron/build.cjs during `npm run build`'],
 ]);
 
 /** Where the prose's relative paths are rooted. */
@@ -205,7 +219,80 @@ const EXEMPT = new Set(['dev:web', 'build:electron', 'clean']);
 check('every script worth naming is named',
   scripts.filter((s) => !EXEMPT.has(s) && !named.includes(s)), []);
 
+console.log('\n--- what the README promises about itself ---\n');
+
+const readme = readFileSync('README.md', 'utf8');
+
+/**
+ * Terms that went with the browser build and must not come back.
+ *
+ * Each named a real thing and every one of them is now a wrong answer: the
+ * port is not opened, the token and the allowlist were deleted because the
+ * pipe's ACL replaced them (ADR 0029), the session lives in files rather than
+ * in a browser database, and there is no server to start.
+ *
+ * README-only. CLAUDE.md must keep saying these words, because its banner is
+ * the only place recording that the deletions were decisions - the check above
+ * asserts exactly that.
+ */
+const README_BANNED = [
+  'ws://', 'token', 'allowlist', 'IndexedDB', 'Express', '8999', 'config.json',
+];
+check('the README says nothing the browser build left behind',
+  README_BANNED.filter((term) => readme.toLowerCase().includes(term.toLowerCase())), []);
+
+// `npm run start` served the built bundle over Express and is gone. The README
+// lists its commands inside fences rather than in backticks, so this reads the
+// plain lines; `npm run start:app` is a different, real script.
+const readmeScripts = [...readme.matchAll(/\bnpm run ([a-z][a-z:]*)/g)].map((m) => m[1]);
+check('every `npm run` the README names is a real script',
+  [...new Set(readmeScripts)].filter((s) => !scripts.includes(s)), []);
+
+// Commands the README tells a person to type. A path inside a fence is not
+// backticked, so the walk above never sees it - and these are the lines most
+// likely to be copied verbatim.
+const FENCE = /```[^\n]*\n([\s\S]*?)```/g;
+const fenced = [...readme.matchAll(FENCE)].map((m) => m[1]).join('\n');
+const commandPaths = new Set(
+  [...fenced.matchAll(/[\w.\-/]+\.(?:ts|tsx|py|spec|iss|txt|json|cjs|mjs|md)\b/g)]
+    .map((m) => m[0])
+    .filter((token) => token.includes('/')),
+);
+check('every path in a README command exists',
+  [...commandPaths].filter((p) => !existsSync(p)).sort(), []);
+
+/**
+ * The CI badge has to name the repository this clone points at.
+ *
+ * The repository is still called `NetView` on GitHub while the product is
+ * called Inwire, so the badge's owner/repo is exactly the kind of detail that
+ * gets "corrected" to the product name and then serves a 404 image. Read from
+ * the remote rather than from `package.json`, whose `repository.url` says
+ * `Inwire` and works only because GitHub redirects a rename.
+ *
+ * Reported rather than asserted when there is no remote to ask: a clone with no
+ * origin is a legitimate state and this check has nothing to say about it.
+ */
+const badge = readme.match(/!\[CI\]\(https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/workflows\/([^/]+)\/badge\.svg\)/);
+if (badge === null) {
+  check('the README carries a CI badge this check can read', false, true);
+} else {
+  check('the badge names a workflow that exists', existsSync(`.github/workflows/${badge[2]}`), true);
+  let remote: string | null = null;
+  try {
+    remote = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim();
+  } catch {
+    remote = null;
+  }
+  if (remote === null) {
+    console.log('      no git remote to compare the badge against; not asserted');
+  } else {
+    const slug = remote.replace(/^.*github\.com[:/]/, '').replace(/\.git$/, '');
+    check("the badge's owner/repo matches the origin remote", badge[1], slug);
+  }
+}
+
 console.log(failures === 0
-  ? '\nAll CLAUDE.md reference checks passed.'
-  : `\n${failures} CLAUDE.md reference check(s) failed.`);
+  ? '\nAll documentation reference checks passed.'
+  : `\n${failures} documentation reference check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

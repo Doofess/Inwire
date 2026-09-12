@@ -1072,5 +1072,7 @@ directory handles and electron-builder finishes a pack by **renaming**
 
 `vite.config.ts` reads `DISABLE_HMR`; `electron/main.ts` reads
 `INWIRE_DEV_SERVER`, set by `npm run dev`. Both have working defaults. There is
-no `.env` of any kind. `security_spec.md` describes a Firebase backend that
-does not exist under `src/`; treat it as a spec for something unbuilt.
+no `.env` of any kind. The root-level `security_spec.md` that described a
+Firebase backend is gone; what was worth keeping - the twelve denial tests any
+future sharing feature would have to pass - is
+`docs/ideas/sharing-threat-model.md`, under a banner saying none of it exists.
