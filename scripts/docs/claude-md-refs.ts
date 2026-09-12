@@ -64,7 +64,6 @@ const NOT_PATHS = new Set([
  */
 const DELIBERATELY_ABSENT = new Map<string, string>([
   ['server.ts', 'deleted with the browser build; named under "what it is not"'],
-  ['scripts/capture/node-safe.ts', 'planned, not written; named as unenforced'],
 ]);
 
 /**
