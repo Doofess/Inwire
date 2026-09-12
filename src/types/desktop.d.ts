@@ -77,6 +77,39 @@ declare global {
         description?: string;
         bytes: Uint8Array;
       }): Promise<unknown>;
+      /**
+       * The Update Center's state, for a panel that has just mounted.
+       *
+       * `unknown` like `saveFile`, and narrowed by
+       * `src/services/updateCenter.ts` - the same division the agent's
+       * messages already use, where the sender's types are in another program
+       * and the receiver is the one that says what it will accept.
+       */
+      getUpdateState?(): Promise<unknown>;
+      /**
+       * Asks the update feed.
+       *
+       * Never rejects and reports no failure. An unreachable feed is the
+       * ordinary case on an offline machine, and whatever it learned arrives
+       * through `onUpdateState` like every other change.
+       */
+      checkForUpdates?(): Promise<unknown>;
+      /**
+       * Downloads, verifies and installs one component. Raises a UAC prompt.
+       *
+       * Main checks the id against its own list before acting on it, because
+       * this is the one message from the renderer that ends in an elevated
+       * process.
+       */
+      applyUpdate?(id: string): Promise<unknown>;
+      /**
+       * Subscribes to state changes, and returns the unsubscribe.
+       *
+       * Unlike `onCaptureStoreExit`, which returns nothing because it is
+       * registered once for the life of the window. This one is registered by
+       * a Settings panel that mounts and unmounts on every visit.
+       */
+      onUpdateState?(listener: (state: unknown) => void): () => void;
     };
   }
 }

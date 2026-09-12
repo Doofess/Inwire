@@ -38,9 +38,14 @@ import {
   createDigest, digestMatches, overSize, verifyDownload,
 } from '../../electron/updateCenter/verify';
 import {
-  ELEVATE_ARGV, ELEVATE_SCRIPT, elevationEnv, INSTALLER_ARGS, readElevationResult,
+  awaitsInstaller, ELEVATE_ARGV, ELEVATE_SCRIPT, elevationEnv, INSTALLER_ARGS,
+  LAUNCH_ARGV, LAUNCH_SCRIPT, readElevationResult,
 } from '../../electron/updateCenter/elevate';
 import { parseDisplayVersion, readNpcap } from '../../electron/updateCenter/npcap';
+import {
+  actionLabel, canApply as canApplyInRenderer, EMPTY_SNAPSHOT, isBusy, normalizeSnapshot,
+  stateLabel, withAgentRow, type UpdateComponent,
+} from '../../src/services/updateCenter';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -297,6 +302,46 @@ console.log('\n--- the elevated command line, byte for byte ---\n');
     { INWIRE_INSTALLER: 'C:\\Program Files\\x\\a b.exe', INWIRE_ARGS: '/S' });
 }
 
+console.log('\n--- the installer that closes us, which must not be awaited ---\n');
+
+{
+  // `setup.iss` sets CloseApplications=yes, so our own installer asks Inwire
+  // to exit before it replaces the payload. Await it and both sides wait for
+  // the other for ever, with nothing on screen. This is the whole reason
+  // there are two scripts.
+  checkTrue('ours is not awaited', !awaitsInstaller('inwire-installer'));
+  checkTrue('Npcap is', awaitsInstaller('vendor-installer'));
+  checkTrue('a database download is too', awaitsInstaller('database'));
+
+  checkTrue('the launch script does not wait', !LAUNCH_SCRIPT.includes('-Wait'));
+  checkTrue('...and asks for no exit code it cannot read',
+    !LAUNCH_SCRIPT.includes('-PassThru'));
+  checkTrue('it still elevates', LAUNCH_SCRIPT.includes('-Verb RunAs'));
+  checkTrue('it still reads the path from the environment',
+    LAUNCH_SCRIPT.includes('$env:INWIRE_INSTALLER'));
+
+  // The pairing that must never cross. `-Wait` in the launch script is the
+  // deadlock; a missing `-Wait` in the elevate script silently reports every
+  // install as an instant success.
+  checkTrue('the waiting script waits and the launching one does not',
+    ELEVATE_SCRIPT.includes('-Wait') && !LAUNCH_SCRIPT.includes('-Wait'));
+
+  const decoded = Buffer.from(LAUNCH_ARGV[3], 'base64').toString('utf16le');
+  check('the launch argv decodes to its script', decoded, LAUNCH_SCRIPT);
+  check('...and has the same fixed shape',
+    [...LAUNCH_ARGV].slice(0, 3), ['-NoProfile', '-NonInteractive', '-EncodedCommand']);
+  checkTrue('...carrying no path either',
+    LAUNCH_ARGV.every((arg) => !arg.includes('\\') && !arg.includes('/')));
+  checkTrue('the two commands are not the same', LAUNCH_ARGV[3] !== ELEVATE_ARGV[3]);
+
+  // A launch reports only whether the elevated process started, so the same
+  // reader has to serve both - including telling a decline from a start.
+  check('a launch that started reads as ok',
+    readElevationResult('INWIRE_RESULT=ok:0', 'inwire-installer'), { kind: 'ok' });
+  check('a launch that was declined reads as cancelled',
+    readElevationResult('INWIRE_RESULT=win32:1223', 'inwire-installer'), { kind: 'cancelled' });
+}
+
 console.log('\n--- reading what the installer said ---\n');
 
 {
@@ -393,6 +438,103 @@ console.log('\n--- what each row settles on ---\n');
   checkTrue('a row mid-download is not',
     !canApply(row({ state: { kind: 'downloading', received: 1, total: 2 } })));
   checkTrue('a planned row is not', !canApply(row({ state: { kind: 'planned' } })));
+}
+
+console.log('\n--- what the renderer accepts, and what it adds ---\n');
+
+{
+  const snapshot = {
+    checking: false,
+    lastChecked: 1_757_000_000_000,
+    components: [
+      { id: 'inwire', displayName: 'Inwire', installed: '1.0.0', available: null, state: { kind: 'unknown' } },
+      { id: 'npcap', displayName: 'Npcap', installed: '1.88', available: null, state: { kind: 'up-to-date' } },
+    ],
+  };
+
+  const read = normalizeSnapshot(snapshot);
+  check('a snapshot reads back', read?.components.length, 2);
+  check('...keeping lastChecked', read?.lastChecked, 1_757_000_000_000);
+
+  check('a non-object is refused', normalizeSnapshot('nope'), null);
+  check('null is refused', normalizeSnapshot(null), null);
+  check('a missing components array is refused',
+    normalizeSnapshot({ checking: false, lastChecked: null }), null);
+  check('a non-boolean checking is refused',
+    normalizeSnapshot({ checking: 'yes', lastChecked: null, components: [] }), null);
+
+  // A row that does not parse is dropped rather than rendered, because a row
+  // built from half-understood data shows a button beside a state nobody can
+  // name. The document survives - one bad row must not blank the tab.
+  const withJunk = { ...snapshot, components: [...snapshot.components, { id: 'x' }, null] };
+  check('unreadable rows are dropped, not fatal', normalizeSnapshot(withJunk)?.components.length, 2);
+  check('...and so is a row with an invented state',
+    normalizeSnapshot({
+      ...snapshot,
+      components: [{ id: 'npcap', displayName: 'N', installed: null, available: null, state: { kind: 'exploding' } }],
+    })?.components.length, 0);
+
+  // The agent's row is composed here because its version lives here.
+  const withAgent = withAgentRow(read ?? EMPTY_SNAPSHOT, '3.8.0', false);
+  check('the agent sits directly after Inwire',
+    withAgent.components.map((c) => c.id), ['inwire', 'agent', 'npcap']);
+  check('...carrying its version', withAgent.components[1].installed, '3.8.0');
+  check('...and nothing to apply', withAgent.components[1].available, null);
+  checkTrue('so its row has no button', !canApplyInRenderer(withAgent.components[1]));
+
+  check('an outdated agent says so',
+    withAgentRow(read ?? EMPTY_SNAPSHOT, '3.7.0', true).components[1].state.kind, 'update-available');
+  check('an agent that has not spoken is unknown',
+    withAgentRow(read ?? EMPTY_SNAPSHOT, null, false).components[1].state.kind, 'unknown');
+
+  // Added twice must not appear twice - the panel re-derives on every render.
+  check('adding it twice adds it once',
+    withAgentRow(withAgent, '3.8.0', false).components.map((c) => c.id),
+    ['inwire', 'agent', 'npcap']);
+
+  check('with no Inwire row it still appears',
+    withAgentRow({ ...EMPTY_SNAPSHOT }, '3.8.0', false).components.map((c) => c.id), ['agent']);
+}
+
+console.log('\n--- the words in each row ---\n');
+
+{
+  check('up to date', stateLabel({ kind: 'up-to-date' }), 'Up to date');
+  check('an offer names the version',
+    stateLabel({ kind: 'update-available', version: '1.88' }), '1.88 available');
+  check('progress is a percentage',
+    stateLabel({ kind: 'downloading', received: 660212, total: 1320424 }), 'Downloading 50%');
+  check('a zero total does not divide by it',
+    stateLabel({ kind: 'downloading', received: 0, total: 0 }), 'Downloading ');
+  check('the UAC wait says what it is waiting for',
+    stateLabel({ kind: 'elevating' }), 'Waiting for Windows');
+  check('a reboot is stated once', stateLabel({ kind: 'reboot-required' }),
+    'Installed - restart Windows to finish');
+  check('a failure shows its own reason',
+    stateLabel({ kind: 'failed', reason: 'the installer exited with code 1603' }),
+    'the installer exited with code 1603');
+
+  // "Not checked" and "Up to date" must never be the same words. Saying the
+  // second when we have not asked is the lie the state union exists to avoid.
+  checkTrue('not-checked does not read as up to date',
+    stateLabel({ kind: 'unknown' }) !== stateLabel({ kind: 'up-to-date' }));
+
+  const row = (over: Partial<UpdateComponent>): UpdateComponent => ({
+    id: 'npcap', displayName: 'Npcap', installed: '1.79',
+    available: { version: '1.88', url: 'https://npcap.com/x', sha256: 'a'.repeat(64), size: 1, kind: 'vendor-installer', minAppVersion: '1.0.0' },
+    state: { kind: 'update-available', version: '1.88' }, ...over,
+  });
+  check('an absent component says Install',
+    actionLabel(row({ installed: null })), 'Install');
+  check('...and a present one says Update', actionLabel(row({})), 'Update');
+
+  checkTrue('a check in flight is busy', isBusy({ ...EMPTY_SNAPSHOT, checking: true }));
+  checkTrue('so is a download',
+    isBusy({ ...EMPTY_SNAPSHOT, components: [row({ state: { kind: 'downloading', received: 1, total: 2 } })] }));
+  checkTrue('so is a UAC prompt on screen',
+    isBusy({ ...EMPTY_SNAPSHOT, components: [row({ state: { kind: 'elevating' } })] }));
+  checkTrue('a settled tab is not',
+    !isBusy({ ...EMPTY_SNAPSHOT, components: [row({ state: { kind: 'up-to-date' } })] }));
 }
 
 console.log('\n--- this machine ---\n');

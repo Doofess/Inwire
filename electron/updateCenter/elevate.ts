@@ -74,20 +74,65 @@ export const ELEVATE_SCRIPT_LINES: readonly string[] = [
   '}',
 ];
 
+/**
+ * The same thing, without waiting - and this exists because waiting for our
+ * own installer **deadlocks**.
+ *
+ * `installer/setup.iss` sets `CloseApplications=yes`, so the Inno installer
+ * uses the Restart Manager to ask Inwire's window to close before it replaces
+ * the payload. If we are blocked in `-Wait` at the time, the installer is
+ * waiting for us to exit and we are waiting for the installer to exit, and
+ * neither ever does. Nothing about that is visible: the app simply stops.
+ *
+ * So our own installer is **launched and not awaited**, and the app quits
+ * immediately afterwards. The trade is that its exit code is unobservable -
+ * the installer outlives the process that would have read it - and that is
+ * the correct trade, because the alternative is a hang. What comes back here
+ * is only whether the elevated process **started**, which is still enough to
+ * tell a declined UAC prompt from a launch.
+ *
+ * Npcap does not close us and is awaited normally.
+ */
+export const LAUNCH_SCRIPT_LINES: readonly string[] = [
+  '$ErrorActionPreference = "Stop"',
+  'try {',
+  '  Start-Process -FilePath $env:INWIRE_INSTALLER -ArgumentList $env:INWIRE_ARGS -Verb RunAs',
+  '  Write-Output "INWIRE_RESULT=ok:0"',
+  '} catch [System.ComponentModel.Win32Exception] {',
+  '  Write-Output ("INWIRE_RESULT=win32:" + $_.Exception.NativeErrorCode)',
+  '} catch {',
+  '  Write-Output "INWIRE_RESULT=error"',
+  '}',
+];
+
 export const ELEVATE_SCRIPT = ELEVATE_SCRIPT_LINES.join('\n');
+export const LAUNCH_SCRIPT = LAUNCH_SCRIPT_LINES.join('\n');
+
+function encodedCommand(script: string): readonly string[] {
+  // `-NonInteractive` matters: this PowerShell must never prompt. The only
+  // prompt in the flow is the UAC one, which Windows raises itself.
+  return [
+    '-NoProfile',
+    '-NonInteractive',
+    '-EncodedCommand',
+    Buffer.from(script, 'utf16le').toString('base64'),
+  ];
+}
+
+/** The whole command line, and it never varies. */
+export const ELEVATE_ARGV: readonly string[] = encodedCommand(ELEVATE_SCRIPT);
+
+/** Likewise, for the installer that will close us. */
+export const LAUNCH_ARGV: readonly string[] = encodedCommand(LAUNCH_SCRIPT);
 
 /**
- * The whole command line, and it never varies.
- *
- * `-NonInteractive` matters: this PowerShell must never prompt. The only
- * prompt in the flow is the UAC one, which Windows raises itself.
+ * Whether this kind of installer will close Inwire, and therefore must not be
+ * awaited. One predicate rather than a check at each call site, so the
+ * deadlock above cannot be reintroduced by adding a third caller.
  */
-export const ELEVATE_ARGV: readonly string[] = [
-  '-NoProfile',
-  '-NonInteractive',
-  '-EncodedCommand',
-  Buffer.from(ELEVATE_SCRIPT, 'utf16le').toString('base64'),
-];
+export function awaitsInstaller(kind: ComponentKind): boolean {
+  return kind !== 'inwire-installer';
+}
 
 /**
  * What each kind of installer is run with.

@@ -24,6 +24,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
+  UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL, UPDATE_STATE_REQUEST,
 } from './channels';
 
 /**
@@ -135,6 +136,42 @@ const api = {
     bytes: Uint8Array;
   }): Promise<unknown> {
     return ipcRenderer.invoke(SAVE_FILE_CHANNEL, request);
+  },
+
+  /** The Update Center's state right now, for a panel that has just mounted. */
+  getUpdateState(): Promise<unknown> {
+    return ipcRenderer.invoke(UPDATE_STATE_REQUEST);
+  },
+
+  /**
+   * Asks the feed. Resolves when the check is over, however it ended.
+   *
+   * It does not reject and does not report failure: an unreachable feed is the
+   * ordinary case on an offline machine, and the answer arrives through
+   * `onUpdateState` like every other change.
+   */
+  checkForUpdates(): Promise<unknown> {
+    return ipcRenderer.invoke(UPDATE_CHECK_CHANNEL);
+  },
+
+  /** Downloads, verifies and installs one component. Raises a UAC prompt. */
+  applyUpdate(id: string): Promise<unknown> {
+    return ipcRenderer.invoke(UPDATE_APPLY_CHANNEL, id);
+  },
+
+  /**
+   * Subscribes to state changes, and **returns the unsubscribe**.
+   *
+   * `onCaptureStoreExit` above returns nothing, which is fine for a listener
+   * registered once for the life of the window. This one is registered by a
+   * Settings panel that mounts and unmounts every time somebody opens the
+   * modal, so without a disposer the listeners accumulate and every state
+   * change runs a render for each visit made this session.
+   */
+  onUpdateState(listener: (state: unknown) => void): () => void {
+    const handler = (_event: unknown, state: unknown): void => listener(state);
+    ipcRenderer.on(UPDATE_STATE_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(UPDATE_STATE_CHANNEL, handler); };
   },
 } as const;
 
