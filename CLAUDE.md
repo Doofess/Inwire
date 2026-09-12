@@ -433,13 +433,31 @@ and which no test can answer. Killing the process instead was tried and is
 worse — `kill()` reaches main and orphans the GPU, renderer, store and crashpad
 children.
 
-**`scripts/electron/disk-drive.ts` reaches the disk.** `smoke.ts` captures a
+**An import is no longer capped by memory.** `PcapService.streamCaptureFile`
+hands frames over as it dissects them; `App` writes each batch to the capture
+store and keeps the newest `framesForBudget(...)` in the buffer. A 400,000-frame
+file imports whole where it used to stop at ~181,000 and say the rest had not
+been loaded. What bounds the pass is `IMPORT_PATCH_WINDOW` - frames stay in
+reach of a patch for 100,000 frames, the same rule `captureWriter.ts` follows,
+because dissection amends frames it has already emitted by indexing into the
+array it is building. `scripts/capture/import-stream.ts` compares the streamed
+result field for field against the whole-array one, with the window forced
+small enough that frames actually leave it - at the real 100,000 a test capture
+never fills it, and the first version of that comparison passed with the offset
+arithmetic removed entirely.
+
+Still true of an import: the file is read with one `arrayBuffer()`, and the
+dissection blocks the main thread. Streaming changed where the frames end up,
+not who does the work.
+
+**`scripts/electron/disk-drive.ts` and `import-drive.ts` reach the disk.** `smoke.ts` captures a
 few thousand frames, which fit in the RAM buffer, so it never touches a stored
-row; this drives a capture past the 128 MB budget until the window trims, then
-filters the whole capture and reads the top of the result back off disk. About
-two minutes, so it is in `NOT_TESTS` and run by hand — after anything on the
-store path. It is what proves the half of the app that `smoke.ts` structurally
-cannot.
+row; one drives a capture past the 128 MB budget until the window trims, then
+filters the whole capture and reads the top of the result back off disk; the
+other imports a 400,000-frame file and scrolls back to frame 1. One to two
+minutes each, so both are in `NOT_TESTS` and run by hand — after anything on
+the store path. They are what prove the half of the app that `smoke.ts`
+structurally cannot.
 
 **To drive the app by hand**, `npx tsx scripts/electron/serveStub.ts` serves the
 same stub until Ctrl+C (`--burst n` for n frames per 100 ms tick); launch the app beside it and pick "Ethernet (stub)".
@@ -464,7 +482,7 @@ Phases 1–5 of the Electron migration are done. The plan is
 | 5 | The web page deleted | `6d97c46`…`4010d7b` |
 | 6 | Installer, signing, updates | **in progress** — `d2423f2` |
 | 7 | Rebuild what the browser forced | planned |
-| 8 | Import-to-disk; `captureScan` wired to the filter bar | **in progress** — `1bfcbf9` |
+| 8 | Import-to-disk; `captureScan` wired to the filter bar | **in progress** — `1bfcbf9`; scaled scrolling is what is left |
 
 Phase 6 is blocked on things outside this repository: a code-signing
 certificate (EV or Azure Trusted Signing), and whether Npcap's silent install

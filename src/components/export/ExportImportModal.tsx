@@ -23,6 +23,12 @@ interface ExportImportModalProps {
   /** The full live buffer; the export panel derives its own filtered view. */
   packets: Packet[];
   onImportPackets: (imported: Packet[]) => void;
+  /**
+   * Every frame the import produced, in order, on its way to the capture
+   * store. Passed straight through: this modal decides nothing about where
+   * frames are kept.
+   */
+  onImportBatch?: (batch: Packet[]) => void;
   onClose: () => void;
   permissions: Capabilities;
   isDark: boolean;
@@ -38,6 +44,7 @@ type Tab = 'export' | 'import';
 export const ExportImportModal: React.FC<ExportImportModalProps> = ({
   packets,
   onImportPackets,
+  onImportBatch,
   onClose,
   permissions,
   isDark,
@@ -119,6 +126,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
           ) : (
             <ImportPanel
               onImportPackets={handleImport}
+              onImportBatch={onImportBatch}
               onFailure={(filename, failure) => setRejected({ filename, failure })}
               retryToken={retryToken}
             />

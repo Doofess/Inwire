@@ -257,15 +257,29 @@ async function importZip(file: File, maxFrames: number): Promise<ImportOutcome> 
   return outcome;
 }
 
-async function importCapture(file: File, maxFrames: number): Promise<ImportOutcome> {
+async function importCapture(
+  file: File, maxFrames: number, onBatch?: (packets: Packet[]) => void,
+): Promise<ImportOutcome> {
   try {
     const notes: string[] = [];
-    const { packets, totalFrames } = await PcapService.parseCaptureFile(file, maxFrames);
-    if (totalFrames > packets.length) {
+    const { packets, totalFrames, stored } = onBatch === undefined
+      ? await readWholeCapture(file, maxFrames)
+      : await readStreamedCapture(file, maxFrames, onBatch);
+
+    if (stored === null && totalFrames > packets.length) {
+      // Only when there is nowhere to put the rest. With a sink the frames are
+      // on disk and reachable, so the honest note is about where they are, not
+      // about what was thrown away.
       notes.push(
         `The file holds ${totalFrames.toLocaleString()} frames; the first `
         + `${packets.length.toLocaleString()} were loaded, which is the buffer size set `
         + 'under Settings > Interface. Raise it and import again to see the rest.',
+      );
+    } else if (stored !== null && stored > packets.length) {
+      notes.push(
+        `All ${stored.toLocaleString()} frames were imported. The newest `
+        + `${packets.length.toLocaleString()} are in memory; the rest are on disk and the `
+        + 'list scrolls into them.',
       );
     }
     if (packets.length === 0) {
@@ -290,6 +304,44 @@ async function importCapture(file: File, maxFrames: number): Promise<ImportOutco
   }
 }
 
+/** What an import produced, and how many frames reached the store. */
+interface CaptureRead {
+  /** The frames to put in the RAM buffer - the newest, when streaming. */
+  packets: Packet[];
+  totalFrames: number;
+  /** Frames handed to the sink, or null when there was none. */
+  stored: number | null;
+}
+
+/** The old route: everything in one array, capped at the buffer's size. */
+async function readWholeCapture(file: File, maxFrames: number): Promise<CaptureRead> {
+  const { packets, totalFrames } = await PcapService.parseCaptureFile(file, maxFrames);
+  return { packets, totalFrames, stored: null };
+}
+
+/**
+ * The streaming route: every frame to the sink, the newest kept for the buffer.
+ *
+ * The tail rather than the head, which is the opposite of what the cap used to
+ * keep and is the right way round now. Truncating had to keep the beginning -
+ * it was all there would ever be. With the rest on disk the buffer is a
+ * **window**, and the window a reader wants first is the end of the capture,
+ * the same one a live capture leaves them at.
+ */
+async function readStreamedCapture(
+  file: File, maxFrames: number, onBatch: (packets: Packet[]) => void,
+): Promise<CaptureRead> {
+  const tail: Packet[] = [];
+  const outcome = await PcapService.streamCaptureFile(file, (batch) => {
+    onBatch(batch);
+    tail.push(...batch);
+    // Trimmed as it goes, not at the end: holding the whole capture to slice
+    // the last slab off it is the memory this route exists to avoid.
+    if (tail.length > maxFrames) tail.splice(0, tail.length - maxFrames);
+  });
+  return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built };
+}
+
 export interface ImportOptions {
   /**
    * How many frames a capture file may contribute - the packet buffer's size,
@@ -297,6 +349,16 @@ export interface ImportOptions {
    * capture beyond the cap loads its first `maxFrames` frames and says so.
    */
   maxFrames?: number;
+  /**
+   * Where every frame goes, in the order it was dissected.
+   *
+   * Supplied by the app, which writes each batch to the capture store. With
+   * one, a capture file is imported **whole** and `maxFrames` becomes what the
+   * RAM buffer keeps rather than what the file may contribute. Without one -
+   * every script, and every format that is not a capture file - nothing
+   * changes.
+   */
+  onBatch?: (packets: Packet[]) => void;
 }
 
 export async function importAnyFile(file: File, options: ImportOptions = {}): Promise<ImportOutcome> {
@@ -304,7 +366,9 @@ export async function importAnyFile(file: File, options: ImportOptions = {}): Pr
   const extension = extensionOf(file.name);
 
   if (extension === '.zip') return importZip(file, maxFrames);
-  if (CAPTURE_EXTENSIONS.includes(extension)) return importCapture(file, maxFrames);
+  if (CAPTURE_EXTENSIONS.includes(extension)) {
+    return importCapture(file, maxFrames, options.onBatch);
+  }
   if (extension === '.json') return importJson(file);
 
   if (TABULAR_EXTENSIONS.includes(extension)) {
