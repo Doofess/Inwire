@@ -378,10 +378,25 @@ per-column mismatch floors and the expert-category counts in
 frames built byte by byte from an RFC, written to a real `.pcap`, handed to
 tshark, compared as exact strings.
 
-**Playwright is not installed.** The layer above these scripts — driving the
-real packaged app, clicking Start, waiting for rows — does not exist, and both
-the maplibre-worker bug and the preload-sandbox bug were found by hand in a
-running app. `_electron.launch` is where that gap closes.
+**`scripts/electron/smoke.ts` drives the real app.** Playwright's
+`_electron.launch`, a real Electron process over a real named pipe against
+`scripts/electron/stubAgent.ts`, which speaks the production protocol: pick an
+adapter, Start, wait for rows, read the Info column. A pass means bytes went
+from a socket through main, a `MessagePort`, the Worker, the dissector and
+React onto the screen.
+
+It exists because three of the worst bugs in the migration were invisible to
+every other script here and were all found by hand — the maplibre worker URL,
+`node:os` in the preload, and COEP blocking `pipeline.worker`. Verified by
+reintroducing two of them: the preload one reports the bridge `undefined`, and
+the COEP one reports the agent never connecting, because the Worker never
+loaded.
+
+Two things about running it. It uses a **temporary profile** via
+`INWIRE_USER_DATA`, because the app prunes its capture directory at startup and
+would otherwise delete a developer's stored capture on every `npm run check`.
+And it tests whatever is in `dist/` — `npm run check` does not build, so it
+prints the build's age and says so when that is over two hours.
 
 ## 8. Migration status
 
