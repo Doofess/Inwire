@@ -17,6 +17,10 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 >   silent-install feature and the free licence does not grant it (ADR 0032).
 >   Npcap's wizard is shown, because its licence is shown with it
 > - **a mirrored copy of Npcap.** It is fetched from npcap.com or not at all
+> - **in-process capture in the app** — a native capture addon in main or in a
+>   `utilityProcess`, or any capture handle opened by Electron. The separate
+>   agent is a security and lifetime decision, not browser-era weight
+>   (ADR 0033)
 
 ## 1. What this is
 
@@ -37,6 +41,13 @@ What it is **not**, any more: a web app. There is no browser build, no
 `server.ts`, no Express, no hosted deployment. macOS and Linux still have a
 tarball-installed agent that speaks WebSocket, but there is no desktop app for
 them yet.
+
+**The agent survived that deletion on its own merits.** A page could not open a
+capture handle, which is why the agent was built — but that is no longer why it
+is here, and a session reading the topology below should not conclude it is
+weight the browser left behind. It is kept so Npcap can be installed
+**admin-only**, so a capture can outlive the window, and so the capture handle
+never lives in the process that parses hostile bytes. ADR 0033.
 
 ## 2. Commands
 
@@ -96,9 +107,19 @@ beside `electron/agentService.ts`.
 
 ### The agent — `local-agent/agent.py`
 
-Runs as LocalSystem because raw capture needs elevation on every OS. Sniffs
-nothing until a client sends `start_capture`, and stops when the last client
-disconnects. Reads frames with `pcap_next_ex` directly rather than through
+Runs as LocalSystem, deliberately, for three reasons in this order (ADR 0033).
+It is what lets Npcap be installed **admin-only**, because with the agent
+holding the handle the app never needs to open one. It is what lets a capture
+outlive the window — boot-time start, a ring buffer, unattended monitoring —
+none of which a process that dies with its UI can offer. And it keeps the
+capture handle and the driver's user-mode library out of the process that
+parses hostile bytes, and off Electron's native-module ABI. The Windows fact
+behind the first of those: Npcap's **default** install leaves the capture
+devices open to every local user, so any local account can read this machine's
+traffic and inject raw frames; restricting them to Administrators is the
+recommended install, and a LocalSystem agent is what makes that cost the user
+nothing. Sniffs nothing until a client sends `start_capture`, and stops when
+the last client disconnects. Reads frames with `pcap_next_ex` directly rather than through
 scapy's socket wrapper, raises the driver's kernel buffer to 32 MB with
 `pcap_setbuff`, and reports what the driver dropped via `pcap_stats`. Frames
 are queued on the sniffer thread, bounded by both a count and a byte budget,
@@ -819,6 +840,8 @@ same hand-written byte vectors, so the rewrite is bounded by tests that already
 exist. Two gotchas to carry over: `wpcap.dll` lives in `System32\Npcap` and is
 **not** on the default DLL search path, and the SCM integration wants the
 `windows-service` crate rather than hand-rolled `StartServiceCtrlDispatcher`.
+**It keeps the service model**: it replaces what the agent is written in, not
+where it runs, and it does not fold capture into the app (ADR 0033).
 
 **Engine-side dissection.** Move the pipeline Worker's work into the store
 `utilityProcess` with a `worker_threads` pool over `SharedArrayBuffer`, sharded
@@ -897,6 +920,7 @@ plan a bump roughly every other release.
 | 0030 | One installer, two destinations, the app never elevates | accepted |
 | 0031 | A display filter answers over the whole capture | accepted |
 | 0032 | Npcap is managed by the app, not shipped by the installer | accepted; **voids 0030's Npcap paragraph** |
+| 0033 | The agent stays a separate service, and Npcap should be admin-only | accepted |
 
 **ADR 0008 weakened and it is not written down there yet.** Its argument was
 that key material "is exactly as old as the tab"; a desktop app open for days
