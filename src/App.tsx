@@ -60,11 +60,6 @@ import {
   loadSessionMeta,
   saveSessionMeta,
 } from "./services/sessionStore";
-import {
-  answerLivenessPings,
-  prepareStoredSession,
-  registerSessionWorker,
-} from "./services/sessionLifecycle";
 import { CustomDissectorEngine } from "./services/customDissectorEngine";
 import {
   ColorRulesEngine,
@@ -662,24 +657,6 @@ export default function App() {
 
 
   /**
-   * Stored frames live exactly as long as the app is open.
-   *
-   * The service worker deletes the database a few seconds after the last window
-   * closes; answering liveness pings is what stops a second window from being
-   * mistaken for a new run and wiping a capture the first one is still showing.
-   * Quitting the browser kills the worker mid-wait, and `prepareStoredSession`
-   * in the restore effect below catches that case on the next launch.
-   */
-  useEffect(() => {
-    const stopWorker = registerSessionWorker();
-    const stopAnswering = answerLivenessPings();
-    return () => {
-      stopWorker();
-      stopAnswering();
-    };
-  }, []);
-
-  /**
    * Whether quitting would cost the reader anything.
    *
    * Reported to the main process, which owns the confirmation. It used to be a
@@ -742,11 +719,6 @@ export default function App() {
     restoringRef.current = true;
 
     (async () => {
-      // Before a single frame is read: a session left behind by a closed run of
-      // the app is deleted here rather than restored onto the screen. Awaited so
-      // the reads below cannot race the wipe and resurrect part of it.
-      await prepareStoredSession();
-
       const meta = await loadSessionMeta();
 
       // The session's frames are in the capture directory the metadata names,
