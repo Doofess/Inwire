@@ -1,194 +1,608 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository.
 
-## What this is
+> **Must not come back.** These were deleted deliberately and re-adding any of
+> them undoes a decision, not a cleanup:
+>
+> - the **pairing token**, `authenticate`, `authRequired`, `auth_required` /
+>   `auth_failed` — the pipe's ACL is the authentication (ADR 0029)
+> - the **origin allowlist** and `is_origin_allowed` on Windows
+> - **`ws://localhost:8999` on Windows** — the port is not opened at all
+> - a **browser build**, a **service worker**, an **SPA fallback**, or anything
+>   under `public/` that is not a static asset the app itself loads
+> - a **phone layout** — the window minimum is 1024 and `md:` is 768
+> - **`nodeIntegration`** in the renderer, in any form, for any convenience
 
-> **Electron migration in progress.** The plan is
-> `~/.claude/plans/lets-pick-up-where-agile-shore.md`; phases 1-3 have landed.
-> This file is rewritten in full at phase 6.5, and until then some sections
-> below still describe the browser build. Where one does, the shell
-> (`electron/`), the transport (`docs/decisions/0029`) and the capture store
-> (`src/services/capture/`) are the three areas to distrust. **What is already
-> gone and must not be reintroduced: the pairing token, the origin allowlist,
-> and `ws://localhost:8999` on Windows.**
+## 1. What this is
 
-Inwire is a **desktop** network packet analyzer with a desktop-analyzer-style UI, built with React + Vite inside Electron. The browser build is dropped: `app://inwire` serves the renderer, and there is no web page to ship. Live packets come from a local Python agent (`local-agent/agent.py`) that runs as a Windows service with elevated privileges and is **bundled with the app** rather than downloaded, and it streams captured frames over a **named pipe** (`\\.\pipe\inwire-agent`) that the main process opens - see `docs/decisions/0029`. Everything else — protocol dissection, filtering, dissector rules, color rules, expert analysis, PCAP export/import — happens client-side in TypeScript.
+Inwire is a **Windows desktop network packet analyzer**: an Electron app whose
+renderer is React + Vite served from a custom `app://inwire` scheme, plus a
+Python capture agent that ships inside the same installer and runs as a
+LocalSystem service. The app talks to the agent over a named pipe. Protocol
+dissection, filtering, colour rules, expert analysis, statistics and pcap /
+pcapng import and export all happen client-side in TypeScript.
 
-Three processes, and the split is deliberate. **Main** owns what the OS owns: the window, the menu, the `app://` handler, the pipe to the agent, and native dialogs. A **utilityProcess** owns the capture files (`electron/store/`), so the module that parses hostile bytes never holds `child_process`. The **renderer** is the React app plus the pipeline Worker. Main hands the Worker one end of a `MessageChannelMain` and pumps the pipe into it, so the renderer's main thread carries the port once and then never sees a captured frame — the property ADR 0007 bought and the move of the connection into main must not hand back.
+Everything is local. There is no account, no backend, no telemetry, and no
+server of any kind in this repository. The only outbound requests are four
+optional lookups listed under **Invariants**.
 
-## Commands
+What it is **not**, any more: a web app. There is no browser build, no
+`server.ts`, no Express, no hosted deployment. macOS and Linux still have a
+tarball-installed agent that speaks WebSocket, but there is no desktop app for
+them yet.
 
-- `npm run lint` — type-check only (`tsc --noEmit`); there is no separate lint tool configured, and it does more work than that name suggests. `tsconfig.json` runs **`strict`, `noUnusedLocals`, `noUnusedParameters` and `noFallthroughCasesInSwitch`**, so an unused import, an unread local or a prop a component declares and ignores fails the build - which is how a dead role table, an unwired host-override handler and two write-only refs were found. `npm run check` runs tsc first, so this is a ratchet rather than a one-off sweep. `noImplicitReturns` is deliberately off (34 findings, nearly all a switch whose branches all return).
-- `npm run build` — Vite builds the renderer into `dist/`, then `electron/build.cjs` esbuilds `main`, `preload` and the store entry into `dist-electron/` as **`.cjs`** (the root is `"type": "module"` and a `sandbox: true` preload cannot be ESM).
-- `npm run start:app` — build and launch Electron against `app://` **without packaging**. This is the only way short of a packaged build to exercise the protocol handler, the MIME table, the 404 rule, the CSP and maplibre's worker URL; `npm run dev` runs the renderer under Vite instead, where all five behave differently.
-- `npm run dev` — Vite plus Electron, for iterating on the UI.
-- There is no test suite/runner configured in this repo.
+## 2. Commands
 
-### Local capture agent (`local-agent/`)
+- `npm run dev` — Vite plus Electron, for iterating on the UI. Runs the
+  renderer from a dev server; the `app://` handler, the MIME table, the 404
+  rule and the CSP all behave differently here, so this is not where those get
+  tested.
+- `npm run start:app` — build and launch Electron against `app://` **without
+  packaging**. The only way short of a full pack to exercise the protocol
+  handler and everything downstream of it.
+- `npm run build` — Vite builds the renderer into `dist/`, then
+  `electron/build.cjs` esbuilds `main`, `preload` and the store entry into
+  `dist-electron/` as **`.cjs`**.
+- `npm run pack` — `electron-builder --dir` into `release/win-unpacked/`.
+- `npm run lint` — `tsc --noEmit` over both programs. It does more than the
+  name suggests: `strict`, `noUnusedLocals`, `noUnusedParameters` and
+  `noFallthroughCasesInSwitch` are on, so an unused import or an unread local
+  fails the build. `noImplicitReturns` is deliberately off.
+- `npm run check` — lint, then every assertion script under `scripts/`,
+  discovered by walking the directory.
+- One script on its own: `npx tsx scripts/capture/reader.ts`.
+- `npx tsx scripts/parity/parity-check.ts` — the dissection acceptance gate.
+  Skips without the untracked fixtures.
+- `pyinstaller local-agent/inwire_agent.spec` — builds the agent to
+  `local-agent/dist/inwire-agent-windows/` (a **directory**; see
+  `local-agent/CLAUDE.md`).
+- `iscc installer/setup.iss` — compiles the unified installer to
+  `installer/output/Inwire-Setup.exe`. Needs `npm run pack` and the PyInstaller
+  build to have run first.
 
-This is a separate Python project, not built by the npm scripts:
-- `pip install -r local-agent/requirements.txt` (scapy, websockets, psutil, pyinstaller, pywin32 on Windows)
-- `python local-agent/agent.py` (run as Administrator/root — raw packet capture requires elevation on every OS). On Windows this development path needs Npcap installed already; the installer normally handles that, so install it from https://npcap.com/#download if you haven't run the installer.
-- The agent speaks a typed protocol - transport-agnostic, and unchanged by the move off the socket (`hello`/`state`/`error`/`log`/`packet`/`interface_stats`/`capture_stats`/`socket_table`/`adapter_config` from the agent; `start_capture`/`stop_capture`/`set_interfaces`/`subscribe_logs`/`unsubscribe_logs`/`subscribe_interface_stats`/`unsubscribe_interface_stats`/`subscribe_sockets`/`unsubscribe_sockets`/`subscribe_adapters`/`unsubscribe_adapters`/`refresh_adapters`/`restart_agent` to it) and starts **idle** — it only sniffs once a client sends `start_capture`, and stops again when the last client disconnects. Every state-changing command is answered with a `state` broadcast to all clients (`test_protocol.py` asserts this per command; it once went missing in a refactor and Driver Info froze). Control messages are JSON text; **packets are not**. Since 3.2.0 captured frames travel as batched binary messages (`local-agent/packet_batch.py`, `src/services/agentBinary.ts`): a magic tag, a count, then records of `seq` (per-capture sequence), `iface` (index into the interface list, which carries `id`), `tsUs` (epoch microseconds), `origLen`, and the frame's bytes. A record carries **no** source, destination, protocol, ports or info - the browser dissects the bytes itself and always overwrote those anyway. Both ends assert the same fixed vectors (`test_protocol.py`, `scripts/agent/binary.ts`), which is the only thing keeping two implementations of one format in agreement. `capture_stats` reports once a second what the driver (`pcap_stats`) and the agent's own queue dropped, and the app shows it in Settings → Driver Info. `socket_table` (3.4.0, behind `subscribe_sockets`) reports which process owns which local socket - see Off-wire enrichment below. `adapter_config` (3.6.0, behind `subscribe_adapters`, re-read on `refresh_adapters`) reports how each **capture** adapter is configured - addresses with prefixes, gateway and its MAC, resolvers, DHCP server and lease - and is a **whole snapshot** rather than a delta, deliberately: a machine has a handful of adapters and the message is ~6 KB, where the socket table is 890 entries and 52 KB, so a delta protocol would cost more in complexity than it saves in bytes. What it does share is the silence - nothing is sent when nothing changed, which is almost every 10s poll. It is narrowed to the capture list because Windows lists **51** adapters (LWF bindings, WAN miniports, tunnels), and sending the rest would hand the browser the configuration of adapters nobody is capturing on. `error.code` is a closed set: `empty_interfaces`, `invalid_interfaces`, `restart_unavailable`, `capture_failed`, `unknown_command`. Wire decisions: `docs/decisions/0005-agent-wire-format.md`.
-- `subscribe_logs` streams the agent's own log to that one client: a backlog of up to 200 lines read from the tail of `agent.log`, then each new line live via a `logging.Handler` on the `inwire` logger (`local-agent/agent_log.py`). Nothing is sent to clients that have not subscribed, and the subscription dies with the connection. The web app surfaces this in Settings → Driver Info.
-- **Who may connect is the kernel's answer, not ours.** On Windows the agent's only transport is a named pipe, created with the security descriptor `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)`. `IU` — the interactive user — is the ACE that makes it work at all, because the service is LocalSystem and the app deliberately is not, and the default DACL on a pipe a LocalSystem service creates admits SYSTEM and administrators only. `WD`, `AN` and `NU` are **deliberately absent**: a named pipe answers over SMB as `\\host\pipe\name` unless the descriptor says otherwise. The loopback port is not opened at all on Windows — leaving it listening beside the pipe would keep the whole attack surface the pipe exists to remove. **The pairing token, `authenticate`, `authRequired`, the `auth_required`/`auth_failed` codes, the origin allowlist and `AgentPairingPanel` are deleted, not ported**; `register` skips the token when the connection reports `kernel_authenticated`, so the question is never asked rather than merely answered. What this does not stop is an administrator, and code injected into the app's own process — both were true of the token too; what changed is that the kernel enforces it. macOS and Linux **keep the WebSocket and the token**, because there is no interactive-user SID to name on a socket file and deciding who may open one is a genuinely different design. `docs/decisions/0029`.
-- **A pipe is a byte stream, so framing is ours.** `src/services/agentFraming.ts` and `local-agent/pipe_frame.py`: a `u32` length, a `u8` kind (0 JSON, 1 binary batch), little-endian to match `packet_batch.py`. Both ends refuse a declared length past `MAX_FRAME_BYTES` **before allocating**, because the agent is a privileged service and a five-byte header must never ask for four gigabytes. Hand-written byte vectors on both sides (`scripts/agent/pipe-framing.ts`, `test_protocol.py`), the same rule the packet batch follows. Nothing **above** the framing changed when the socket went — not one message, not the 18-byte record. Two Windows traps are written down where they bit: the pipe must be `FILE_FLAG_OVERLAPPED` or a write silently queues behind a blocked read (it worked on the handshake and stopped on the traffic), and a `Buffer` must never be fed to `FrameReader`, because `Buffer.prototype.slice` is `subarray` and payloads would be windows into Node's read pool.
+**Every assertion script runs under plain `tsx`, with no Electron and no
+browser.** That is a property to protect, not an accident: it is what makes the
+suite runnable in CI on ubuntu and fast enough to run on every commit. The
+pattern for anything that needs Electron is to split the decision into a module
+that does not import it — `electron/pipeTransport.ts` beside `agentPipe.ts`,
+`electron/saveTarget.ts` beside `saveFile.ts`, `src/services/agentHealth.ts`
+beside `electron/agentService.ts`.
 
-- **One capture has one owner.** The connection that sends `start_capture` owns it; `stop_capture` and `set_interfaces` from anyone else get `error{capture_busy}`, and packets go to the owner alone. `hello` hands each connection a `clientId` and `state` names the `owner`, which is how a second window tells "capture is running" from "capture is running and I can stop it". Before this, two tabs shared one global sniffer: the second tab's remembered `set_interfaces` restarted it on *that* tab's adapter the moment it connected, and Stop in either stopped both.
-- Logs go to `%ProgramData%\Inwire\agent.log` (rotating). When the agent runs as a service there is no console, so this is the only place to look.
-- Any change to the agent's wire protocol or behavior must bump the version, which appears in three places that must move together: `AGENT_VERSION` in `local-agent/agent.py`, `REQUIRED_AGENT_VERSION` in `src/services/agentProtocol.ts`, and `MyAgentVersion` in `local-agent/installer/setup.iss`. `python local-agent/test_protocol.py` enforces that all three agree and are a valid `MAJOR.MINOR.PATCH`, and that the agent version has never been **reset** - it is the left-hand side of `isAgentOutdated`, so an ordering, and a reset makes an agent left behind by an earlier install read as newer than required, which shows as "not connected" rather than "update your agent". Beside it and independent of it is `MyAppVersion`, the **product** version, locked to `package.json` (1.0.0 - the desktop app starts its own count) and used by the unified installer, which needs its own AppId because a product resetting to 1.0.0 under the agent's would read as a downgrade. The two stopped moving together the moment one installer carried both: a UI release ships an installer and no new agent at all.
+## 3. Process topology
 
-**Windows distribution** — the agent ships as a Windows service, installed once and thereafter invisible (no console, no tray icon, no UAC prompt). The PyInstaller/Inno Setup build steps live in `local-agent/CLAUDE.md`, which loads when working in that directory.
+```
+  agent (Python, LocalSystem service)
+    │  named pipe \\.\pipe\inwire-agent, SDDL-gated
+    ▼
+  main (Node)  ── app:// handler · window · menu · quit guard
+    │            agent supervisor + health · native dialogs
+    │
+    ├── utilityProcess: capture store  ── NodeBlockFile → %LOCALAPPDATA%
+    │     ▲ MessageChannelMain
+    │     │
+    └─────┼──────────────── MessageChannelMain ──────────────┐
+          │                                                  ▼
+  renderer (sandboxed Chromium)                      pipeline Worker
+    React UI ── pipelineClient ──────────────────────  dissection
+    ferries both ports across, then sees no frame      trackers
+```
 
-**macOS and Linux** — one tarball, built from the real sources by `npx tsx scripts/agent/package-unix.ts --build`, carrying its own `install.sh` (root-owned virtualenv, systemd unit or LaunchDaemon, pairing token, `uninstall` verb). It replaced two bootstrap scripts that each embedded a copy of `agent.py` frozen around 2.1 - a copy that can go stale will, so there is no copy, and an assertion fails if a module the agent imports is missing from the archive. `platformDetect.ts` offers nothing at all on iOS and Android, where the agent cannot run.
+### The agent — `local-agent/agent.py`
 
-**Scapy is a capture driver here and nothing else** - and since **3.7.0** it is barely even that: the capture loop calls **`pcap_next_ex` directly**, not `sock.recv_raw()`. 3.5.0 stopped scapy dissecting every frame into an object graph the agent threw away, but it left `recv_raw` in place, and `_PcapWrapper_libpcap.next()` ends with `bytes(bytearray(self.pkt_data[:...]))` - **slicing a ctypes pointer, which builds one Python int object per captured byte**. Measured over a real 300,228-frame capture: **26.67 us a frame against 2.22** for the single memcpy `ctypes.string_at` does, an 11x difference on the whole sniffer path that *scales with frame size*, so a bulk transfer is the exact traffic it drowns. It is the same class of waste as 3.5.0's, one layer down, and it survived because that change stopped at `recv_raw` rather than looking inside it. The rewrite also fixes a bug in that line: it reads `.len`, the length on the **wire**, out of a buffer holding only `.caplen`, so a truncated frame is a buffer over-read. `read_frame` keeps the two apart and `packet_to_record` carries the wire length separately. Two other things scapy does not do at all are done in the same place: **`pcap_setbuff`** raises the capture driver's kernel buffer from libpcap's Windows default of **1 MB (~67 ms of slack at a busy adapter's rate) to 32 MB**, which is what one measured capture lost **302,448 frames** to; and `pcap_stats` reports the loss. `MAX_QUEUED_PACKETS` went 8,192 -> 30,000 in the same release, because at a 1,100-byte mean frame the old count was 9 MB of a 32 MB byte budget - the two bounds are meant to be reached by different traffic, not for one to make the other unreachable. **The wire record is 18 bytes and was 24** (`packet_batch.py` VERSION 2): two reserved bytes on a layout read with a DataView, a u32 `capLen` that cannot exceed a snaplen, and a second u32 repeating what `capLen` already said on every untruncated frame, now sent as the **excess** instead. Worth 0.53% of a real stream and 6% of each record on the 26% of frames under 100 bytes - small, and said plainly rather than dressed up; six more bytes were available as batch-relative `seq`/`tsUs` deltas and were left, because a record is encoded on the **sniffer thread** and one whose meaning depended on its batch could not be dropped or re-batched when a viewer falls behind. **Loss has three independent stages and they are different frames**: the driver's (Npcap had it, the read loop never collected it), the agent's (read and encoded, evicted from the send queue), and the buffer's (displayed, then trimmed). Before 3.5.0 the loop was `sniff(prn=...)`. That went through `SuperSocket.recv`, which is `recv_raw()` followed by `cls(val)` - so every frame was dissected into an object graph, and `packet_to_record` then called `bytes(pkt)` on it, **re-serialising the object scapy had just built from those same bytes**. 83.36 us a frame to arrive back where it started, against 0.58 us now: 142x, and the ~12,000 frames/s ceiling it implied is what `droppedKernel` was counting. Verified byte-identical across all 27,640 frames of both fixtures before the dissection was removed. A socket that has not overridden `recv_raw` keeps `sniff()`, because `SuperSocket`'s base returns no timestamp and losing capture times is not a trade worth throughput. Decisions: `docs/decisions/0010-raw-frame-capture.md`. Separately, since 3.2.0 `conf.load_layers` is cut to `l2`/`inet`/`inet6` before `scapy.all` is imported - the protocol classes the agent used to import had no reader left, and loading the other seventeen hundred cost 65.6 MB and 0.33 s at every start against 39.9 MB and 0.17 s now. `inet`/`inet6` stay because the capture socket looks up a class for the link type it is handed, and a raw-IP adapter hands it one.
-- Neither `local-agent/dist/` nor `public/downloads/` is tracked in git (rebuild rather than editing binaries).
+Runs as LocalSystem because raw capture needs elevation on every OS. Sniffs
+nothing until a client sends `start_capture`, and stops when the last client
+disconnects. Reads frames with `pcap_next_ex` directly rather than through
+scapy's socket wrapper, raises the driver's kernel buffer to 32 MB with
+`pcap_setbuff`, and reports what the driver dropped via `pcap_stats`. Frames
+are queued on the sniffer thread, bounded by both a count and a byte budget,
+and drained into batched binary messages by one pump task.
 
-## Architecture
+It carries the driver's timestamps, a per-capture sequence number, and the
+interface index. It does **not** dissect: a record has no source, destination,
+protocol, ports or info, because the app dissects the bytes itself and always
+overwrote those anyway (ADR 0010).
 
-### Data flow
+On Windows its only transport is the named pipe, created with the security
+descriptor `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)`. `IU` is the point — the
+service is LocalSystem and the app deliberately is not. `WD`, `AN` and `NU` are
+absent because a pipe answers over SMB unless the descriptor says otherwise.
+`local-agent/pipe_server.py`; ADR 0029.
 
-**`App.tsx` is the application's controller with a view attached** - 2,181 lines, and when this was measured only 475 of 2,455 were JSX. Two of its three largest anonymous effects are now hooks. `hooks/useKeyboardNavigation.ts` holds the window's shortcuts: everything it reads comes through a ref, because a `keydown` listener re-registered whenever the buffer or selection changed would re-register ten times a second during a capture. `hooks/usePacketBuffer.ts` holds the buffer - the three arrival queues, the accounting, the dense-field writer, `packets`/`droppedBuffer`/`bufferAutoPaused`, the flush, `queueFrames`, and `adoptBuffer`. That grouping was **measured, not guessed**: eight refs were touched by exactly six sites and by nothing else in the file, which is one concern wearing a disguise. Extracting a single effect instead would have threaded seventeen parameters into a hook owning none of them.
+### main — `electron/main.ts`
 
-Three things about it are load-bearing. The **flush lives in `services/packetBuffer.ts`, not in the hook**, so it can be called without React - which is what `scripts/session/ingest.ts` does, running every commit **twice** because React does. It is split into `prepareBatch` (what must happen exactly once - the store write, the field split, the byte count) and `commitBatch` (the updater, which must survive repetition). The **auto-pause handler is a ref**, because the buffer must be able to stop a capture, stopping one needs `sendAgentCommand` from the agent hook, and the agent hook needs `queueFrames` from the buffer - a circle the codebase already breaks this way. And **the session restore deliberately stays in `App.tsx`**, borrowing `accountingRef` and `fieldWriter`: it refills the buffer, so it looks like it belongs, but it also reads the agent, the host identity, the capture clock and the stored session. That borrow is the one seam left. The **modals are not a candidate** and look like one: five booleans, each used in a declaration, one open handler, one close handler and one render guard.
+A thin adapter over things only a privileged process can hold. It owns the
+`app://` handler, the window, the menu, the quit guard, the pipe client, the
+agent's service diagnosis, native save dialogs, and the capture store's
+lifetime. Every decision worth testing is in a module beside it: `appPaths.ts`,
+`window.ts`, `csp.ts`, `menu.ts`, `windowState.ts`, `saveTarget.ts`,
+`pipeTransport.ts`, `agentService.ts`.
 
-**`App.tsx` does not own the agent link.** Sixteen pieces of state, four refs and five effects for the connection live in `src/hooks/useAgentConnection.ts`. It owns the socket lifecycle - status, pairing, version, interfaces, capture state, drop counters, adapters, the agent's own log, interface rates - and hands the host four callbacks for the things that touch the **buffer** rather than the connection: `onFrames`, `onSocketTable`, `onHostIdentity`, `onNetworkFacts`. Those are held in a **ref**, not passed as effect deps: the connection effect's deps are `[canCapture, agentLinkEnabled]` and must stay that way, or a callback with a new identity each render would reconnect the socket once per render.
-`local-agent/agent.py` (Scapy sniff → batched binary frames over WebSocket, idle until told to start) → **`src/workers/pipeline.worker.ts`**, which owns the socket, the ordering window (`dissect/orderingWindow.ts`) and the trackers, and dissects every frame with `services/pcapParser.ts` (`decodeRawEthernetPacket`) - the same code an imported `.pcap` goes through → `services/pipelineClient.ts` → `App.tsx`, which commits a batch to React state every 100 ms. The main thread never parses an agent message, never base64-decodes, never advances a tracker and never dissects. Control messages are forwarded up verbatim; `pipelineClient` is deliberately shaped like the WebSocket it replaced (`connect`, `command`, `onAgentMessage`, `onStatus`), and the 3s reconnect moved into the Worker with it.
+**No captured frame passes through main's JavaScript as anything but an opaque
+buffer.** Main deframes the pipe's byte stream and posts the payload onward
+without looking at it.
 
-A posted `Packet` carries its **bytes** and not its **tree**. Measured (`scripts/perf/clone-cost.ts`): a tree is 10.6 kB against the frame's own 1.2 kB, 91% of the cost of crossing the worker boundary and 89% of the buffer's memory - so a 100k buffer was a gigabyte and is now ~180 MB. Carrying the bytes costs 1.1 µs a frame and is what keeps export, Follow Stream, the hex view, the byte-range highlighter and session persistence working on the main thread untouched. `docs/decisions/0007` records the measurement; it corrects ADR 0003, which had assumed the reverse.
+### The capture store — `electron/store/`, a `utilityProcess`
 
-**The per-frame lists are pooled, not encoded.** `frameProtocols`, `analysisFlags` and `expert` have very few distinct values across a capture - measured at **21 chains, 13 flag sets and 209 finding sets** over both fixtures' 27,640 frames - so `services/dissect/tokenPool.ts` hands out one frozen array per distinct list instead of one per frame. Worth 204 B a frame, and the whole record is now **1,876 B** (`scripts/perf/record-cost.ts`). A bitmask, which is what the plan asked for, would have been smaller and **wrong**: the protocol hierarchy reads `frameProtocols` in nesting order, and a set of bits has no order. Pooling changes nothing downstream - same contents, same order, same type, no decode on the read side - and the arrays are frozen because a shared list a consumer sorted would change what every frame carrying it reports. Two caveats. Structured clone preserves shared references **within one message and not between two**, so a live-captured frame gets the saving per flush batch (the Worker posts a whole flush at once) rather than globally, which scales with capture rate - and an import, dissected on the main thread, gets it in full. Clone also drops frozen-ness, so the freeze is a guard on the Worker and import paths rather than a guarantee in the main thread's buffer. `info` was measured and **not** pooled: 60.7% of its strings are distinct, so a pool of them costs 20 B a frame more than it saves. What is left is `fields` at **1,431 B, 76% of the record**, where ADR 0013 already showed no encoding wins. Decisions: `docs/decisions/0016-pooling-the-per-frame-lists.md`. **The 33 fields most frames carry live in typed columns rather than in the bag.** `Packet.fields` was 1,431 B a frame - 24.7 entries each costing a full dictionary-mode property slot of about 58 B, a third of them booleans with two values - and 33 keys hold 85.4% of all entries. They now go to a shared `FieldBlock` (`services/dissect/fieldBlock.ts`), declared in `dissect/denseFields.ts`, split out in `dissect/fieldSplit.ts`, and read through `dissect/fieldAccess.ts`, which is the only code that knows a value can be in two places. **The record is 1,876 -> 663 B a frame and `fields` 1,431 -> 154.** The dissector is untouched: the bag is assembled by scattered assignment with no single write to intercept, so the split happens at the one moment a finished frame joins a buffer (`buildPacketsFromFrames`, and App's flush). Blocks are **referenced by their frames, never registered** - when the buffer trims the last frame sharing one it is simply collected, so nothing rebases on a trim. Four things are load-bearing and none is a refinement: column widths come from the **protocol** rather than from the fixtures (`tcp.flags` is 12 bits though the captures only showed 5; `tcp.len` passes 64 KB under segment offload), and widen at runtime for the computed fields no protocol bounds; **presence is a packed bit** because zero is a value and `tcp.flags.syn == 0` is a real filter; string columns are 2-byte indices into a per-block table; and the filter engine resolves which half a key lives in at **compile** time so the 90 sparse keys never probe a column. Sized naively - a Float64 per numeric key, a presence byte per key - the split *loses* 49 B a frame, which is what ADR 0017 unknowingly modelled. **The bag is still the contract**: a frame that never joined a buffer (a CSV import, a replay for the detail tree) carries its whole bag and reads as it always did. Anything that clears `fields` must clear `cols`/`row` too, or the values stay readable - Anonymise did exactly that until it was fixed. Any measurement touching a typed array must count `arrayBuffers` as well as `heapUsed`, or it will report the columns as nearly free, which is how 0017 got its headline wrong. Decisions: `docs/decisions/0017-the-dense-sparse-split.md` and `0018-implementing-the-field-split.md`.
+Owns the capture files. A separate process rather than a Node worker inside the
+renderer, for three reasons: `nodeIntegrationInWorker` is renderer-wide and
+incompatible with `sandbox: true`; it does not work with `type: 'module'`
+workers, which `captureClient.ts` uses; and it would hand `child_process` to
+the same renderer that parses hostile bytes. `entry.ts` is the process,
+`host.ts` forks it and brokers the channel, `volume.ts` is the `node:fs`
+implementation of the four capture files.
 
-**The tree is dissected on demand** (`lib/usePacketDetail.ts` → the Worker): from a cache of the last `DETAIL_CACHE_FRAMES` dissected, or - on a miss - by **replaying that frame's conversation** through fresh trackers (`services/pipeline/replay.ts`). Replay rather than retention because a frame's tree is not a function of its own bytes: the TLS record cursor, the QUIC keys, the DNS and ICMP pairings and the TCP relative sequence numbers are all state the frames before it built up, which is why Wireshark re-dissects too. The stream is selected by five-tuple (`services/followStream.ts`), the stream *index* is seeded from the frame's own `streamId` (a fresh tracker would call it 0), and `[Response In: N]` - written by the frame that answers, which the replay never reaches - is handed back from `Packet.fields`. `scripts/pipeline/replay.ts` holds all of this to **exact equality** with the eagerly built tree on real TCP, TLS, QUIC, DNS and non-stream frames. A replay that could not start at the conversation's beginning says so in the tree rather than presenting sequence numbers relative to a base it invented.
+Forked with `stdio: 'pipe'` (a packaged GUI app has no console to inherit, so
+`fail()` messages would go nowhere) and `--max-old-space-size=2048`, so a
+runaway index kills the store rather than the machine — and a dead store is a
+handled state, because `child.on('exit')` tells the renderer over a separate
+channel. A `MessagePort` that goes quiet would otherwise hang every pending
+read for the life of the window.
 
-Consequences to know about: `Packet.layers` is empty for every frame nobody has selected, so anything aggregating over the buffer must not walk it - `Packet.expert` carries the frame's findings as a flat list for exactly this reason (`services/expertInfo.ts` reads it, and falls back to the tree only for frames from older builds). `PcapService.parseCaptureFile` and `restoreBatch` take a `keepTrees` flag, default false; scripts that assert on tree content pass true.
+### The renderer
 
-The packet buffer is bounded by **bytes**, not by a frame count (`services/bufferBudget.ts`: `planBufferTrim` against the `packetBufferBytes` preference, 512 MB by default) - a frame is anywhere from 60 bytes to 64 kB, so a frame count cannot answer "how much memory is this". `PACKET_BUFFER_CAP` and `trimToCap` are gone with it; `BUDGET_SLACK` is the surviving reason not to trim on every flush, since moving `packets[0]` costs three caches an O(buffer) fallback each time. Oldest dropped first, and capture auto-pauses at 99% of it. Frames pushed out are counted and shown in Driver Info beside the driver's and the agent's - a third loss point, worded apart because those frames were captured and shown and are still in the stored session, and gated on its own count rather than on the agent's report because the buffer fills during an import too.
+`sandbox: true`, `contextIsolation: true`, `nodeIntegration: false`, no
+service workers, every permission request denied. The preload is a **single
+CommonJS file** — a sandboxed preload cannot be ESM and cannot `require` a
+relative module, so `electron/build.cjs` bundles it.
 
-**A connection is looked up several times per frame, and the lookup is memoised.** `locate` builds three strings to find one - `srcIp:srcPort`, `dstIp:dstPort` and the key joining them, around 135 characters for a pair of IPv6 addresses - and one TCP frame asks separately for its sequence analysis, its TLS cursor, its TLS conversation and whichever of LDAP/SMB2/BGP the port matched. Profiled at **8.6%** of the pipeline. `TcpStreamTracker.lastLookup` holds the last result against the four values that produced it, which hits for every call within a frame and for consecutive frames on the same connection - a bulk transfer being one connection for its whole length. The comparison tests the **ports first**, so a miss is normally two integer compares. Three properties make it safe rather than fast-and-wrong, and `scripts/tcp/tracker-bounds.ts` pins each: the reverse direction is not the same lookup, a differing port is a different connection, and **a `peek` that finds nothing memoises nothing** - storing absence would let the `locate` behind it return the memo instead of creating the connection.
+The React app never dissects and never parses an agent message. That is
+`src/workers/pipeline.worker.ts`, which holds the ordering window, the
+trackers, and `pcapParser.ts`.
 
-**The trackers are bounded separately, and per connection rather than per frame.** The buffer trim slices the array, trims the store and evicts raw bytes; it has never touched a tracker, and `resetPipeline` fires only on the four events that mean the buffer is *gone*, never that it got smaller. So dissection state - a TCP connection's sequence analysis and TLS cursors, a QUIC flow's keys and reassembly, unanswered echo requests, which process held which local port - used to grow for the length of a capture: measured at 2,162 B a connection and 255 B an unanswered echo (`scripts/perf/tracker-cost.ts`). It overtakes the `Packet` records once a capture averages fewer than ~10-30 frames per connection, which is what browsing looks like, so chasing bytes-per-frame while this grew would have been the wrong number. `TcpStreamTracker` now holds **one record per connection** rather than nine map entries each keeping their own copy of the key (2,162 -> 1,645 B), and every tracker has a **least-recently-used cap** - which is the mechanism that fits, because a connection that closes stops being touched and drifts to the front of the eviction queue on its own, where oldest-first would evict the long-lived connection someone is watching. The socket table is swept by age instead, since its entries are written by a poll rather than touched by traffic, and an **open** life is never swept however old it is. A frame on an evicted connection reads as one never seen before - a new stream index and a mid-stream sequence base, exactly as a capture started mid-connection does - and stream indexes are never reused, so Follow Stream and every filter naming one keep their meaning. `TcpStreamTracker.evictedConnections` counts it rather than leaving it silent. Decisions: `docs/decisions/0014-bounding-the-trackers.md`; the properties that make eviction safe rather than lossy are in `scripts/tcp/tracker-bounds.ts`, and are deliberately not memory assertions.
+### The frame path, end to end
 
-Imported PCAP files go through the same `pcapParser.ts` path via `ExportImportModal`, so live capture and file import produce identical `Packet` shapes. A capture import is capped at the buffer-size preference (`performanceStore.packetBufferCap`, passed as `maxFrames` to `PcapService.parseCaptureFile`), and the importer reports the file's true frame count alongside so the panel can say how many were left out - there is no fixed import ceiling any more.
+```
+agent → pipe → main (deframe) → MessagePortMain → pipeline Worker
+      → dissect → 100 ms flush → renderer main thread → React state
+```
 
-**An import works out whose machine took the capture BEFORE it dissects.** A live capture is handed the answer by the agent's adapter list; a file has to infer it from its own frames, which is a loop - so `parseCaptureFile` dissects a prefix of at most `SCORING_FRAMES` (20,000, all `inferHostIdentity` reads anyway), scores it, throws it away, and dissects the file for real with the result. `App.deriveForBuffer` still walks the buffer afterwards, and has to: an override, and the network facts an import collects on the main thread, both ride that pass. What it cannot do is anything the dissector decides *using* the direction, and there is one - **the checksum verdict**, which is a tree row, an expert finding and a dense column, none of which can be rewritten after the fact. Without the prefix pass the two fixtures raised 3,891 and 3,594 "Bad checksum" findings on import and painted 30.3% and 24.4% of their lists Broken: the same offload artefact that kept the old expert band disabled, arriving by a different door. Two things follow. `redirect.ts` must **keep** a direction decided by an offload signal it cannot reproduce (it reads `eth.src`/`eth.dst` and the addresses, not the raw bytes) rather than clearing it - harmless while imports had no direction at all, wrong the moment they did. And the Worker has to be told the inferred host too (`pipeline.setHost`), because it is what rebuilds the detail tree on demand: a replay that does not know decides `Bad` where the summary decided `Unverified`, and the tree contradicts the row that opened it. `scripts/pipeline/replay.ts` holds the two to exact equality and is what caught it.
+Main hands the Worker one end of a `MessageChannelMain`. The renderer's main
+thread receives that port from the preload and transfers it straight into the
+Worker — it carries the port exactly once and then plays no part in the frame
+path, which is the property ADR 0007 bought.
 
-### QUIC
-`QuicFlowTracker` holds Initial-packet keys, connection ids and the CRYPTO reassembly buffer. `dissectors/quic.ts` decrypts Initials and returns the CRYPTO fragments; the tracker fills a sparse buffer per direction and parses the handshake with `parseQuicHandshake` in `dissectors/tls.ts` once it is contiguous. That is the only way a passive observer learns a QUIC connection's server name.
+**There is one copy, and it is unavoidable.** `MessagePortMain.postMessage`
+accepts only ports in its transfer list; an `ArrayBuffer` is cloned, not
+transferred. At the agent's ~256 kB batch about thirty times a second that is
+single-digit MB/s. Measured on the pipe itself: **4,000 batches of 64 kB —
+262 MB — in 539 ms, or 487 MB/s**, so the transport is not the ceiling. The
+cost of the cross-process clone specifically has **not** been measured; see
+**Direction**.
 
-### DNS
-`dissectors/dnsRecords.ts` parses the message once into questions and records; `dissectors/dns.ts` renders the Info line and the tree from that one parse, and returns the name-to-address mappings, which land on `Packet.resolved` and feed the passive resolution map. `dnsTracker.ts` pairs queries with responses - keyed on transaction id and client for unicast, on the question name alone for mDNS, because a multicast answer comes from the host that owns the name rather than the one that asked.
+## 4. The capture format and the agent protocol
 
-### L2/L3
-**The link layer is read, not assumed** (`dissectors/linkLayer.ts`). The capture's declared link type - the pcap header's `network` field, the pcapng IDB's per-interface `LinkType` - decides what sits in front of the network header: Ethernet II (with VLAN tags stripped and LLC/SNAP read), Linux cooked v1/v2, raw IP, or BSD loopback. Until Phase 6 this was hard-coded to Ethernet at offset 14 and the file's own declaration was parsed and ignored, so a `tcpdump -i any` capture was decoded six bytes early into a different and entirely plausible packet. A type/length field at or below 1500 is an 802.3 **length**, and the LLC header after it is a layer of its own - every STP BPDU is one, and they used to dissect only because the STP dissector reached past a header nothing described.
+### On disk — `src/services/capture/`
 
-`dissectors/ipv4.ts` names DSCP and ECN - and owns the **only** copy of those two tables: `pcapParser.ts` held a private 13-entry `DSCP_NAMES` in a different format for the IPv6 branch, so nine codepoints (AF12, AF13, AF22, AF23, AF32, AF33, AF42, AF43, Voice-Admit) read as a name over IPv4 and as a bare number over IPv6 in one capture. It also reads the options between the fixed header and the transport header (Router Alert, Record Route, Timestamp, Stream Identifier), and turns TTL into a distance. `services/l3Tracker.ts` holds the two facts no single frame contains: which frames make up a fragmented datagram, and which MAC last claimed an address. **IPv4 fragments are reassembled**: the fragments are stitched back together and the transport dissector runs once, on the whole datagram, in the frame that completed it - so a non-first fragment reads `Fragmented IP protocol (...)` and gets `[Reassembled in N]`, rather than having its application data read as a transport header and reported as invented ports. A hole is never zero-filled (the datagram is reported incomplete instead), overlaps resolve first-arrival-wins and are flagged as the evasion they usually are, and out-of-order arrival works because the datagram is only forgotten once it is actually assembled - not when the fragment with More Fragments clear turns up, which is often first. A layer built from a reassembled datagram carries no byte ranges, since it describes bytes outside this frame's hex dump; that is the same rule TLS reassembly across segments follows. **IPv6 fragments** use the same tracker, keyed as RFC 8200 §4.5 keys them - source, destination and the Fragment header's 32-bit identification, with the payload protocol deliberately excluded. An atomic fragment (offset 0, no More Fragments) is not fragmented and is dissected where it stands (RFC 6946), and the fragmentable part may itself start with extension headers, so the reassembled buffer is walked again before the transport dissector sees it. `dissectors/udpApps.ts` adds NTP and STUN; DNS over TCP is the datagram dissector behind a two-byte length prefix.
+A capture is a directory named `cap-YYYYMMDD-HHMMSS-xxxx` holding four files:
+`index.iwidx`, `prefix.iwpfx`, `summary.iwsum`, `frames.iwbyt`. Written by
+`captureWriter.ts` through `chunkCodec.ts`, read back by `captureReader.ts`,
+addressed by `captureIndex.ts`, searched by `captureScan.ts` and `matchSet.ts`.
 
-**A leaf UDP protocol is dispatched from a table, not a branch** (`dissectors/udpDispatch.ts`). One entry per protocol - the ports it claims, the token it pushes, the function that reads it - because the alternative was thirteen copies of the same eight lines in `pcapParser.ts`, and a chain that long is where a missing `protocolTokens.push` hides. Only the **simple** protocols are in it: DHCP, DNS, NBNS and QUIC each return something more (resolved names, a matched query frame, tracker state), and folding them in would give the result type four optional members most entries never set. One entry reads the destination address, and it is not a refinement: **a datagram on port 1985 addressed to a host is not HSRP** - tshark reads a frame to 224.0.0.2 as HSRP and the byte-identical frame to a unicast address as plain UDP, and the port is unregistered enough that something else will land on it. `scripts/dissect/udp-ports.ts` asserts what the lookup quietly assumes: no two entries claim a port (the lookup returns the *first* match, so an overlap would make the table's order part of its meaning), and none claims a port dispatched before the table is reached.
+`blockFile.ts` is the seam; `nodeBlockFile.ts` is the real-file implementation
+and **loops** its `readSync`/`writeSync`, because a short read on a 5 GB
+`frames.iwbyt` would otherwise read as a torn tail and truncate a healthy
+capture. `serialQueue.ts` exists because the writer once used `void handle(msg)`
+and `append` overtook an async `open`, losing 500 frames silently.
 
-**Protocols are found by content as well as by port** (`dissectors/heuristics.ts`). Port dispatch is a convention and the traffic that matters least respects it - WebRTC media lands on whatever ICE negotiated, and RTCP has no assigned port at all. Seven detectors (STUN, NTP, RADIUS, SNMP, NBNS, SIP, RTCP, Syslog) run **only** where no port claimed the payload, so a protocol on its own port is never second-guessed. The failure mode is a *confident wrong label*, which is worse than `50000 → 50001 Len=76`, so every detector must key on a magic number, a fixed-value field or a self-describing length - never on length alone - and **every detector must reject every other's payloads**. That is asserted, not hoped for: `scripts/dissect/heuristics.ts` runs the full cross product plus **752 anonymous UDP payloads lifted from the two fixtures**, and a heuristic match publishes which detector made it as `inwire.heuristic`. Two deliberate refusals are pinned by tests: a QUIC short-header packet stays anonymous (740 fixture frames that tshark also declines, for want of the Initial), and **RTP is not detected at all** - its fingerprint is two version bits, and Wireshark ships its own RTP heuristic off for the same reason.
+Recovery: a capture whose trailing chunk is incomplete loses that chunk and
+nothing else. `scripts/capture/recovery-on-disk.ts`.
 
-**Protocols the fixtures do not contain are held to tshark on synthetic frames** (`scripts/parity/synthetic.ts`). Measured, the two fixtures hold 18 distinct protocols and every one was already dissected, so `parity-check.ts` can say nothing about a new dissector - and a test whose expectations are the author's reading of an RFC is a test of the author. Frames are built byte by byte from an RFC's own layouts, written to a real `.pcap` with a twenty-line writer of its own (not `generatePcapBinary`, or a shared bug would cancel out), and handed to tshark. Same oracle as the fixture harness, same exact-string comparison; only the provenance of the bytes differs. It strips the line ending and **never trailing spaces** - SIP's Info ends `" | "` and HTTP/1.1's ends in a space, and a `trimEnd()` here would forgive exactly what it exists to catch. Skips rather than fails where tshark is absent.
+### On the wire — `src/services/agentFraming.ts` / `local-agent/pipe_frame.py`
 
-**NBNS, syslog, RADIUS, SNMP, SIP and RTCP** were added this way. Notes worth keeping: NBNS shares DNS's message structure and almost nothing else - RFC 1001 first-level name encoding, its own opcodes 5-8, and NB/NBSTAT records - so pointing the DNS dissector at port 137 produced `Standard query 0x8f8e TYPE32 FHEPFCELEHFCEPFFFACACACACACACAAA`, which is `WORKGROUP<00>` with the encoding still on; it also finally gives the `nbns` NameSource a producer, having been declared in `nameResolution.ts` with none. `parseDnsMessage` took an opcode predicate rather than losing its opcode check, which is most of what stops DNS claiming arbitrary UDP. SNMP brought **`dissectors/ber.ts`**, an ASN.1/BER reader whose long-form lengths, signed minimal integers and base-128 OID groups all fail *quietly*, and which is the unlock for LDAP and Kerberos; indefinite lengths are refused rather than guessed at. SNMPv3 is declined rather than half-read. SIP's Info format carries three rules that are in no RFC and were established by asking tshark: a response names the request it answers only when the status is **exactly 200** (not 2xx), a REGISTER carries a binding summary after two spaces, and both forms end `" | "`.
+A pipe is a byte stream, so framing is ours: a `u32` length, a `u8` kind
+(`FRAME_JSON` 0, `FRAME_BINARY` 1), little-endian to match `packet_batch.py`.
+Both ends refuse a declared length past `MAX_FRAME_BYTES` (8 MB) **before
+allocating anything** — the agent is a privileged service and a five-byte
+header must never ask for four gigabytes.
 
-`dissectors/ipv6Ext.ts` walks the IPv6 extension-header chain before the transport decoder runs (three different length rules; a non-first fragment or ESP stops the walk). `dissectors/dhcp.ts` covers DHCP and DHCPv6, and is where the passive name map gets the hostnames a machine gives for itself. `src/services/macVendors.ts` is generated from IEEE's registry by `scripts/gen-oui.ts` (~40k entries, ~1.1 MB) - short names are derived by this project's own rule rather than copied from another analyzer's list, so they usually but not always match. Still assumed: Ethernet link type, no LLC/SNAP, no IPv4 options, no fragment reassembly.
+Above the framing nothing changed when the WebSocket went. The 18-byte record
+in `local-agent/packet_batch.py` and `src/services/agentBinary.ts`, and every
+control message in `src/services/agentProtocol.ts`, are transport-agnostic.
+Both ends assert the same hand-written byte vectors — `scripts/agent/binary.ts`
+and `scripts/agent/pipe-framing.ts` against `local-agent/test_protocol.py` —
+which is the only thing keeping two implementations of one format in agreement.
 
-### TCP analysis
-`src/services/dissect/tcpAnalysis.ts` is Wireshark's `tcp_analyze_sequence_number` as a pure function over per-direction state kept in `TcpStreamTracker`; the TCP branch of `pcapParser.ts` takes its flags, Info tags (Wireshark's prepend order) and generated fields. Change it only against the reference source and the fixture counts in `test/fixtures/acceptance.json`. TCP/UDP checksums are verified with the offload policy (zero, truncated or over-MTU segments are `Unverified`, never `Bad`).
+`src/services/agentLink.ts` is the vocabulary between main and the Worker.
 
-### TLS
-`src/services/dissectors/tls.ts` reassembles TLS records across TCP segments with a per-direction cursor kept in `TcpStreamTracker` (sequence-number based; Wireshark's resync rules, including "Ignored Unknown Record"). The frame in which a record completes gets the TLS label; earlier segments are patched afterwards with "[TCP PDU reassembled in N]" through `InfoPatch` (`applyInfoPatches` in the import, restore and live paths). The version label is the negotiated one from the ServerHello, applied retroactively to the ClientHello. JA3/JA3S/JA4 are computed from the hellos and compared against tshark's as parity columns. Every field is registered in `dissect/fieldRegistry.ts`.
+### Two version numbers
 
-**Two ceilings, and they are different numbers.** `CT_MAX` (26) decides what may *resynchronise* a stream and follows `ssl_is_valid_content_type` - 25 is `tls12_cid`, 26 the DTLS 1.3 ACK - because a record this build cannot decode still has to end the desynchronised region it began. `INFO_NAMED_CONTENT_TYPE_MAX` (24) decides what the reader is *told about*: asked directly, tshark parses a type-25 record, names it "Connection ID (25)" in the tree, and writes **nothing** to Info. Naming it gave `Unknown (25), Ignored Unknown Record`; the ignored wording would have printed that wording twice. An empty description is dropped from the join rather than joined as an empty element.
+**`AGENT_VERSION`** is a wire-protocol version and an **ordering**: it is the
+left-hand side of `isAgentOutdated`, so it only ever climbs. Reset it and an
+agent left behind by an earlier install reads as newer than required, which
+shows as "not connected" rather than "update your agent". Locked across three
+places — `local-agent/agent.py`, `src/services/agentProtocol.ts`
+(`REQUIRED_AGENT_VERSION`), and `MyAgentVersion` in
+`local-agent/installer/setup.iss` — by `local-agent/test_protocol.py`, which
+also refuses a reset.
 
-**A record with a hole in it is not a record.** A record's end is a sequence number and a gap does not move it, so a holed record still knows where it finishes - and that is *all* it knows, because part of the body was never captured. `applyGapToCursor` sets `holed`; `completeSpanning` then resynchronises the direction at the end sequence and yields no record, no description and no credited frame. Keeping the span while dropping the claim is what makes this different from abandoning outright, which was tried once and cost seven frames. Before it, a phantom record tagged thirty consecutive frames `[TCP PDU reassembled in N]` and ate the bytes that would have resynchronised the direction, so the error propagated well past the frames that showed it.
+**`MyAppVersion`** is the product, locked to `package.json`, and is what
+Windows compares to decide whether an install is an upgrade. The two stopped
+moving together the moment one installer carried both: a UI release ships an
+installer and no new agent at all.
 
-### Time and ordering
-`Packet.tsUs` is epoch microseconds (`tsNanos` additionally for nanosecond capture files); `relativeTime`/`timeDelta` are derived seconds. Live frames are held for 100 ms in `src/services/dissect/orderingWindow.ts` and released by the flush in `(tsUs, seq)` order before dissection, because the TCP/ICMP/QUIC trackers are order-dependent. Imports keep file order (that is what Wireshark shows and what parity compares against); the pcap writer sorts by capture time.
+## 5. Invariants
 
-**The parser is five modules, not one function.** `pcapParser.ts` was 3,466 lines with 1,854 of them in two functions (`decodeTransportLayer` at 977, `decodeRawEthernetPacket` at 878); it is **1,285**, and they are **174 and 359**. `dissectors/networkLayer.ts` holds the IPv4/IPv6 walk plus the transport dispatch under it and the twenty-one helpers only they use; `dissectors/{tcp,udp}Transport.ts` hold a branch each; `dissectors/portless.ts` holds the three protocols dispatched by IP protocol number rather than by port (IGMP, VRRP, OSPF - each of whose arms had carried the same comment saying so); `dissect/transportShared.ts` holds `checksumVerdict` and the ASCII helpers both decoders reach for. The transport branches each returned a value, so extracting them was a transplant; the network branch **decides sixteen of its caller's locals**, so those are destructured in at the top and returned at the bottom and **the 533-line body moved without a character changing** - `layers` and `filterFields` are containers and pass by reference. What made that safe is that the branch has **no early returns**. `decodeNetworkLayer` takes an offset, which is what a tunnel needs to recurse; see `docs/decisions/0023-decomposing-the-parser.md` for the two traps waiting for whoever writes GRE or VXLAN.
+Each with what enforces it. "Unenforced" means exactly that.
 
-### Dissection contract and field registry
-`src/services/dissect/` holds the two-phase contract (`types.ts`: `dissectSummary` for every frame on arrival, `dissectTree` on demand; see `docs/decisions/0001`) and the field registry (`fieldRegistry.ts`, `docs/decisions/0002`). Every key a dissector writes into `Packet.fields` must be registered there with its Wireshark abbreviation; `scripts/dissect/registry.ts` fails on an unregistered key or a registered key nothing writes, and on any React/DOM import under that directory (the pipeline moves into a Worker in Phase 11, `docs/decisions/0003`). The filter engine's known names derive from the registry, and so do the autocomplete and the "Apply as Column" catalogue. **Every abbrev is held to `tshark -G fields`** (`scripts/dissect/wireshark-abbrevs.ts`), because the registry's promise is that a filter learnt in Wireshark works here, and nothing checked it - a name can have a writer and a tree row and still be wrong. That failed on **40 of 339 fields**, and 27 were not exemptions but names this build had invented where the reference already had one (`sip.method` for `sip.Method`, `radius.username` for `radius.User_Name`, `rtcp.ssrc.sender` for `rtcp.senderssrc`, `ipv6.fragment.offset` for `ipv6.fraghdr.offset` - the header rather than the reassembly tree). This is the failure mode nobody tests, because the filter *works*; it is just spelled differently from every reference, tutorial and saved filter in existence. The 13 that genuinely have no counterpart are listed with a reason each, and two further checks keep that list honest: an exemption for a field Wireshark *has* is stale, and one for a field nobody registers is dead weight. The scanner in `registry.ts` had to widen twice to match, both times because it encoded a convention of ours rather than the reference's - a lower-case first character, and no hyphens.
+**A capture is deleted only when the user asks.** ADR 0012. The mechanism is
+`planPrune` in `src/services/capture/captureDirectory.ts`, which removes only
+directories matching `CAPTURE_ID_PATTERN` and never anything else in the
+folder — on OPFS an empty keep-list was harmless, on `%LOCALAPPDATA%` it is a
+recursive delete of a directory a person can drop files into. Enforced by
+`scripts/capture/prune-guard.ts`.
 
-A field is only half-registered until the **tree row** that shows it carries the same `abbrev` - without one the row is display-only and its filter/column menu items are greyed out; `scripts/dissect/registry.ts` decodes a synthetic TCP/IPv4 frame and fails if a core field loses its row's abbrev. No new dissector may be written on the eager `decodeRawEthernetPacket` shape; existing ones migrate as the spec's phases touch them. That migration is a **memory and contract** argument, not a speed one: measured, building the tree's objects is only ~6% of dissection (`scripts/perf/tree-cost.ts`). What dissection actually cost was `formatArrivalTime` constructing a `new Intl.DateTimeFormat` twice a frame - 38% of a CPU profile and over half of all dissection time, for two tree rows 92% of frames never show. Caching it took the Worker from 5,891 to ~19,000 frames/s. `scripts/perf/hot-path-allocations.ts` now fails on any `new Intl.*`/`TextDecoder`/`TextEncoder` built inside a function under `src/services/`; `docs/decisions/0011` records the measurement. **Caching the formatter object was only half of it**: a later profile - taken once the agent stopped being the bottleneck and the browser became it - still put `formatArrivalTime` at **15.2% of the whole pipeline**, the largest single item, because `formatToParts` is itself an ICU call and it runs twice a frame. Everything it produces except the fractional digits is a function of the **whole second**, and a capture delivers thousands of frames inside one, so the result is now cached per second (keyed on the second, not the day, which is what keeps a DST transition honest). With the TCP tracker's lookup memo below, the Worker's sustained ceiling went **26,734 -> 35,007 frames/s** on `bulk` (`scripts/perf/throughput.ts`). `inwire` measures 24,138, and the gap is the workload rather than the code: 2.68% of its frames cost over 200 us against 0.16% of `bulk`'s.
+**No captured frame crosses the renderer's main thread.** ADR 0007. Main pumps
+the pipe into a port the renderer transfers into the Worker without reading.
+*Unenforced* — nothing fails if someone adds a frame-carrying message to
+`FromPipeline`. The 100 ms flush is the one place frames legitimately arrive,
+already dissected.
+
+**The renderer does not iterate the capture to answer a question about it.**
+Rows come from `src/lib/rowSource.ts` over `captureClient.ts`; bytes come from
+`src/services/packetBytes.ts`. *Partially enforced* —
+`scripts/session/row-source.ts` covers the row path.
+
+**No Node in the renderer, and the preload imports only `electron`.** Enforced
+by `scripts/electron/preload-sandbox.ts`, which reads the **built** bundle: what
+esbuild inlined is harmless, what it left as a runtime `require` is fatal. This
+one exists because `node:os` in the preload type-checked, bundled, and then
+took the whole bridge down with no message anywhere.
+
+**Electron fuses, and ASAR integrity.** `runAsNode`,
+`enableNodeCliInspectArguments` and `enableNodeOptionsEnvironmentVariable` off;
+`onlyLoadAppFromAsar` on. **NOT IMPLEMENTED.** electron-builder does stamp ASAR
+integrity (it logs `updating asar integrity executable resource` during
+`npm run pack`), but no fuse is flipped. Flipping mutates the exe, so this must
+land **before** signing — without `runAsNode: false` any local process can run
+the signed exe with `ELECTRON_RUN_AS_NODE=1` and pass every signature check.
+
+**CSP is served as a header, not a meta tag.** `electron/csp.ts`, applied in
+`hardenSession`. `OUTBOUND_HOSTS` is the whole list of places this app can
+reach: **geojs** (map geolocation), **cloudflare-dns** (DoH reverse lookups),
+**ipapi.co** (the Network panel's public-identity section) and **openfreemap**
+(basemap tiles). Enforced by `scripts/electron/shell.ts`, which also asserts
+that the agent's old port `8999` is **not** in the policy — a `connect-src`
+entry nothing dials is a hole with no user. Every one of the four is behind the
+`nameResolution.geoIp` consent switch *except* the basemap tiles, which load
+whenever the map is shown; see **Direction**.
+
+**Cross-origin isolation is on.** `ISOLATION_HEADERS` in `electron/main.ts`
+sets COOP/COEP on every `app://` response, so `crossOriginIsolated` is true and
+`SharedArrayBuffer` exists. Verified by hand against the packaged app; nothing
+depends on it yet. *Unenforced* — an assertion must exist before anything does.
+
+**The pipe's ACL is the authentication.** See the banner at the top.
+`local-agent/test_protocol.py` pins the SDDL's shape — `IU` present, `WD`/`AN`/
+`NU` absent, `D:P` — and `scripts/electron/agent-link.ts` drives the real client
+against a real pipe. Neither can tell you the descriptor took **effect**; that
+needs a second Windows user account and is on the verification matrix.
+
+**The two TypeScript programs share their strictness flags.** `tsconfig.json`
+(renderer plus scripts) and `tsconfig.electron.json`. *Unenforced, and there are
+two, not three* — the migration plan called for a third for `scripts/`, and it
+was not split. Nothing asserts the flags match.
+
+**`src/services/` and `src/lib/` import no Electron and no `node:*`.** This is
+what keeps 127 assertion scripts runnable under plain `tsx`.
+**Unenforced** — `scripts/capture/node-safe.ts` was planned and does not exist.
+`nodeBlockFile.ts` is the live hazard: it imports `node:fs` and must never be
+reachable from `src/main.tsx`.
+
+**Dissection matches tshark.** `test/fixtures/` holds two real captures
+(untracked; ADR 0004) and tshark ground truth.
+`npx tsx scripts/parity/parity-check.ts` diffs Protocol, Source, Destination,
+Time, Length, Info and the matched colour rule against it, held to the floors in
+`test/fixtures/acceptance.json`. **Floors only rise** —
+`scripts/parity/acceptance.ts` fails a lowered one.
+
+## 6. Gotchas found only by running the packaged app
+
+Each of these type-checked, built, and failed silently at runtime.
+
+**maplibre's worker under `app://`.** `defaultWorkerUrl()` tests `/^https?:/`
+against `import.meta.url`; under `app://` it returns `""` and `new Worker("")`
+loads `index.html` as a module worker — the worker dies before registering a
+handler and maplibre reports nothing, tiles just stay `loading` forever. Fixed
+with `setWorkerUrl`, which **must** come before `setRTLTextPlugin` because that
+builds the worker pool. Guarded by `scripts/electron/shell.ts`.
+
+**`node:os` in a sandboxed preload.** Not resolvable; the preload throws while
+loading, `exposeInMainWorld` never runs, `window.inwire` is `undefined`, and
+nothing says so. Guarded by `scripts/electron/preload-sandbox.ts`.
+
+**COEP blocks same-origin workers.** A dedicated worker's script must carry
+`Cross-Origin-Embedder-Policy` itself. Set on the document via
+`onHeadersReceived` — which does not fire for `protocol.handle` responses —
+both `pipeline.worker` and maplibre's worker failed with
+`coep-frame-resource-needs-coep-header`. The headers live on the Response in
+`registerAppProtocol`. *Unenforced.*
+
+**A synchronous pipe handle serialises writes behind a blocked read.** Without
+`FILE_FLAG_OVERLAPPED`, the writer thread's `WriteFile` queues behind the reader
+thread's `ReadFile` and waits for bytes that are not coming. `hello` and the
+first reply arrived; everything after did not — it works on the handshake,
+which is what gets tested, and stops on the traffic. `local-agent/pipe_server.py`
+now gives every operation its own `OVERLAPPED` with its own event.
+
+**`readSync` returns short counts.** Not an error, a partial read. `readExact`
+threw on short and recovery read that as a torn tail. `nodeBlockFile.ts` loops;
+`scripts/capture/block-file.ts` injects short reads.
+
+**Auto-pause made the disk buffer unreachable.** `AUTO_PAUSE_AT` was 0.99 and
+`planBufferTrim` acts above `1 + BUDGET_SLACK` = 1.05, so capture stopped before
+the trim ever ran. Replaced by `DISK_RESERVE_BYTES` in
+`src/services/bufferBudget.ts`; `scripts/session/buffer-budget.ts` asserts the
+inversion.
+
+**`prune([])` on a real directory.** Harmless on OPFS, a recursive delete of
+`%LOCALAPPDATA%\Inwire\captures` here — and reached whenever `loadSessionMeta()`
+returns nothing. `scripts/capture/prune-guard.ts`.
+
+**`{userappdata}` in an elevated Inno installer** is the account that answered
+the UAC prompt, or `systemprofile` under Intune. Dissolved: nothing per-user is
+provisioned any more.
+
+**`uac_admin=True` makes `--version` raise a UAC prompt.** Harmless in the
+installer, which is already elevated; it hangs a command run by hand.
+
+**`reg query` error shapes.** A missing key gives `error.code === 1` (a
+**number**) with empty stdout; success gives no error at all. `provesAbsent` in
+`electron/agentService.ts` originally tested `code === undefined`, which is the
+shape of success — so a missing service read as unknown and a failure to ask
+read as missing, sending somebody to reinstall over a working install.
+`scripts/electron/agent-health.ts`.
+
+## 7. Testing
+
+Assertion scripts under `scripts/`, discovered by `scripts/check.ts` walking
+the directory; a handful are listed there as SKIP with a reason each
+(measurements with no right answer, or things needing the untracked fixtures). Plain `tsx`, no runner, no Electron, no browser. A script
+prints `PASS`/`FAIL` lines and exits non-zero.
+
+Three rules that keep it that way, and only one of them is currently enforced:
+
+1. `src/services/` and `src/lib/` must import no Electron and no `node:*`.
+   **Unenforced** — see Invariants.
+2. `nodeBlockFile.ts` must not be reachable from `src/main.tsx`. **Unenforced.**
+3. Both tsconfigs carry the same strictness flags. **Unenforced.**
+
+The fixtures are two real captures, untracked because they contain personal
+addresses (ADR 0004): `inwire` (general browsing) and `bulk` (a long TLS
+transfer, and 30 TCP streams with exactly one SYN, which makes it the one that
+catches anything assuming a capture opens with a handshake). They assert
+per-column mismatch floors and the expert-category counts in
+`scripts/expert/categories.ts`.
+
+`scripts/parity/synthetic.ts` covers protocols the fixtures do not contain:
+frames built byte by byte from an RFC, written to a real `.pcap`, handed to
+tshark, compared as exact strings.
+
+**Playwright is not installed.** The layer above these scripts — driving the
+real packaged app, clicking Start, waiting for rows — does not exist, and both
+the maplibre-worker bug and the preload-sandbox bug were found by hand in a
+running app. `_electron.launch` is where that gap closes.
+
+## 8. Migration status
+
+*As of 2026-09-12.*
+
+Phases 1–5 of the Electron migration are done. The plan is
+`~/.claude/plans/lets-pick-up-where-agile-shore.md`.
+
+| Phase | What | Landed |
+|---|---|---|
+| 1 | The Electron shell, `app://inwire` | `ce9d4d8` |
+| 2 | The capture store on real files, in its own process | `9971b45`, `bcf3c58` |
+| 3 | The named pipe; the token deleted; the agent bundled | `677cc41`…`4bbbfc7` |
+| 4 | Native save dialogs | `8b7be01` |
+| 5 | The web page deleted | `6d97c46`…`4010d7b` |
+| 6 | Installer, signing, updates | **in progress** — `d2423f2` |
+| 7 | Rebuild what the browser forced | planned |
+| 8 | Import-to-disk; `captureScan` wired to the filter bar | planned |
+
+Phase 6 is blocked on things outside this repository: a code-signing
+certificate (EV or Azure Trusted Signing), and whether Npcap's silent install
+needs an OEM licence. The installer compiles and the fuses are still to flip.
+
+**Owed:** ADR 0027 (the app is a desktop app), 0028 (where the store runs, with
+the measured IPC cost), 0030 (one installer). ADR 0029 is written.
+
+## 9. Direction
+
+Validated sequencing, recorded so a future session inherits the reasoning.
+These are **not** work in progress and get an ADR when each is started.
+
+**A Rust agent, as the first post-migration project.** Why it is worth doing:
+one signed exe instead of a 34 MB `--onedir` tree of unsigned `.pyd` files, no
+interpreter to start, sub-second service start. Why it is *contained*: the
+protocol is transport- and language-agnostic and both ends already assert the
+same hand-written byte vectors, so the rewrite is bounded by tests that already
+exist. Two gotchas to carry over: `wpcap.dll` lives in `System32\Npcap` and is
+**not** on the default DLL search path, and the SCM integration wants the
+`windows-service` crate rather than hand-rolled `StartServiceCtrlDispatcher`.
+
+**Engine-side dissection.** Move the pipeline Worker's work into the store
+`utilityProcess` with a `worker_threads` pool over `SharedArrayBuffer`, sharded
+by stream and merged back into timestamp order; the renderer becomes a viewer
+that asks for rows. The store protocol was built so this is a relocation rather
+than a rewrite. **Trigger:** a profile showing the cross-process copy on the
+frame path, or a sustained rate above ~100 MB/s. Not before — and the first
+step is measuring `append` and `readBytes` across the boundary, which has still
+not been done.
+
+**Offline by default, as a product invariant.** No outbound connection the user
+did not ask for. A packet analyzer that makes requests visible in the user's own
+capture is a trust problem specific to this audience. First steps: an offline
+`d3-geo` map to replace openfreemap's tiles, then the geolocation lookups behind
+an explicit opt-in or a bundled database. The near-term step is an assertion
+that every host in `OUTBOUND_HOSTS` has a recorded purpose and a consent gate.
+
+**The dependency rule.** A shipped dependency must beat the platform API that
+replaces it, and no native module lands without a measurement. The platform
+answers already chosen or available: `printToPDF` for reports, `net.fetch` for
+the updater, `dialog` for file I/O, `powerMonitor` for sleep gaps. The current
+`dependencies` list still carries `jspdf`, `jspdf-autotable`, `pdfjs-dist`,
+`exceljs` and `three` — the pass that weighs each against a platform API has
+**not** happened.
+
+**Cross-origin isolation is in place** (see Invariants) but nothing uses it. An
+assertion that `crossOriginIsolated` is true in the packaged app must exist
+before anything depends on it.
+
+**Not to do:** no V8 startup snapshots (VS Code-scale complexity for tens of
+milliseconds); no MSIX (it cannot install a kernel driver or a LocalSystem
+service cleanly); no Electron Forge migration (no Inno maker, and the update
+channel is the trap — installed fleets only move forward on the updater they
+shipped with). Electron gets security fixes for three majors; this is on 44, so
+plan a bump roughly every other release.
+
+## 10. Decisions ledger
+
+`docs/decisions/README.md` is the index. One line each:
+
+| ADR | | Status |
+|---|---|---|
+| 0001 | Two-phase packet model: summary on arrival, tree on demand | re-scoped by 0011 |
+| 0002 | One field registry feeds tree, filters and columns | accepted |
+| 0003 | Move the whole pipeline into one Worker | corrected by 0007 |
+| 0004 | Fixtures stay untracked | accepted |
+| 0005 | Agent wire format | **authentication half superseded by 0029** |
+| 0006 | pcapng writer scope | accepted |
+| 0007 | Bytes cross the worker boundary, trees do not | accepted |
+| 0008 | Where TLS key material lives | accepted; weakened — see below |
+| 0009 | Facts that did not come off the wire | accepted |
+| 0010 | The agent captures raw frames and dissects nothing | accepted |
+| 0011 | Dissection's cost was not the tree | accepted |
+| 0012 | Stored captures persist until the user says otherwise | accepted |
+| 0013 | What a million frames actually cost | superseded by 0025 |
+| 0014 | Bounding the trackers | accepted |
+| 0015 | The colour index | accepted |
+| 0016 | Pooling the per-frame lists | accepted |
+| 0017 | The dense/sparse split | accepted |
+| 0018 | Implementing the field split | accepted |
+| 0019 | Packet direction | accepted |
+| 0020 | The leaf protocols | corrected by 0022 |
+| 0021 | Where the parity chase stops | accepted |
+| 0022 | A stream protocol is not expensive any more | accepted |
+| 0023 | Decomposing the parser | accepted |
+| 0024 | Carrying a message across segments | accepted |
+| 0025 | The capture lives on disk | accepted |
+| 0026 | One capture on disk | accepted; its quota arithmetic is void on a real disk |
+| 0029 | The app and the agent talk over a named pipe | accepted |
+
+**ADR 0008 weakened and it is not written down there yet.** Its argument was
+that key material "is exactly as old as the tab"; a desktop app open for days
+breaks that. `crashReporter` stays **off** for the same reason — a renderer
+minidump is a copy of `KeyLogStore`, so the usual advice to enable it with
+`uploadToServer: false` for local dumps conflicts with 0008 and is declined
+until the key-lifetime question is reopened.
+
+---
+
+## Architecture reference
+
+The sections below describe the dissection engine, which the migration did not
+change. They are the short form; the ADRs hold the reasoning.
+
+### Data flow inside the renderer
+
+`App.tsx` is the application's controller with a view attached.
+`hooks/useKeyboardNavigation.ts` holds the window's shortcuts (everything reads
+through a ref, or a `keydown` listener would re-register ten times a second
+during a capture). `hooks/usePacketBuffer.ts` holds the buffer — the arrival
+queues, the accounting, the dense-field writer, the flush.
+`hooks/useAgentConnection.ts` owns the agent link: status, version, interfaces,
+capture state, drop counters, adapters, the agent's own log, and the health
+diagnosis. Its four callbacks are held in a **ref**, not passed as effect deps,
+or a new callback identity each render would reconnect once per render.
+
+The flush lives in `services/packetBuffer.ts`, not in the hook, so it can be
+called without React — which is what `scripts/session/ingest.ts` does, running
+every commit twice because React does. `prepareBatch` is what must happen
+exactly once; `commitBatch` must survive repetition.
+
+A posted `Packet` carries its **bytes** and not its **tree**: a tree is 10.6 kB
+against the frame's 1.2 kB (ADR 0007). Trees are dissected on demand by
+replaying that frame's conversation (`services/pipeline/replay.ts`), because a
+frame's tree is not a function of its own bytes — the TLS record cursor, the
+QUIC keys, the DNS pairings and the TCP sequence bases are all state the frames
+before it built.
+
+The per-frame lists are pooled (`dissect/tokenPool.ts`, ADR 0016) and the 33
+most common fields live in typed columns rather than in the bag
+(`dissect/fieldBlock.ts`, ADRs 0017 and 0018) — 1,876 → 663 B a frame. The bag
+is still the contract: a frame that never joined a buffer carries its whole bag.
+
+The buffer is bounded by **bytes**, not a frame count
+(`services/bufferBudget.ts`), because a frame is 60 bytes to 64 kB.
+
+### The dissector
+
+`services/pcapParser.ts` is the front door, decomposed into
+`dissectors/networkLayer.ts`, `dissectors/tcpTransport.ts`,
+`dissectors/udpTransport.ts`, `dissectors/portless.ts` and
+`dissect/transportShared.ts` (ADR 0023). The link layer is read, not assumed
+(`dissectors/linkLayer.ts`). IPv4 and IPv6 fragments are reassembled through
+`services/l3Tracker.ts`. Leaf UDP protocols dispatch from a table
+(`dissectors/udpDispatch.ts`); protocols are also found by content where no port
+claimed the payload (`dissectors/heuristics.ts`), under the rule that every
+detector must reject every other's payloads.
+
+TCP analysis is Wireshark's `tcp_analyze_sequence_number` as a pure function
+(`dissect/tcpAnalysis.ts`). TLS reassembles records across segments with a
+per-direction cursor; JA3/JA3S/JA4 are computed from the hellos. Decryption
+runs in the summary pass, not on demand, because TLS records, HTTP/2 frames and
+HPACK tables are all cross-frame state.
+
+Every key a dissector writes into `Packet.fields` must be registered in
+`dissect/fieldRegistry.ts` with its Wireshark abbreviation, and every abbrev is
+held to `tshark -G fields` by `scripts/dissect/wireshark-abbrevs.ts` — the
+registry's promise is that a filter learnt in Wireshark works here, and that
+check found 40 of 339 fields wrong.
 
 ### Display filters
-The language lives in `src/services/filter/`: `lexer.ts` → `parser.ts` (AST) → `compile.ts` (a closure with every field reader, literal and regex resolved once), with `fields.ts` resolving names through the registry. `filterEngine.ts` is a facade over it.
 
-- **`==` is equality, not "contains"** (it used to be both, so `ip.src == 10.0.0.1` matched `110.0.0.10`). Substring and pattern matching are `contains` (case-sensitive, as in Wireshark), `icontains` and `matches`/`~`. `!=` is the negation of `==` over every occurrence of a field, and a field the frame does not carry never matches under any operator.
-- A **bareword** is a layer test read from `Packet.frameProtocols` and nothing else. Never fall back to `Packet.protocol` when the frame recorded layers: `protocol` defaults to `TCP` for any frame that never reached a transport decoder, so ARP, IGMP and broadcast Ethernet all matched `tcp` until this was fixed. A layer that claims a payload without contributing a tree layer (QUIC, SSDP) must push its own token via the transport result's `protocolTokens`.
-- A name this build cannot produce **matches nothing** - it is no longer a substring search over the summary columns, which is what made the shipped DCERPC colour rule paint frames whose Info merely contained those letters. `validateFilter` calls an unknown name an error, unless it is in `UNDISSECTED` in `filter/fields.ts` (protocols Wireshark's default colour rules name and Inwire does not decode), which is a warning. `FilterEngine.filterPackets` keeps a free-text search for a *lone* unrecognised word; `compileFilter`, which colour rules use, does not.
-- `scripts/filter/engine.ts` is the assertion script, and it holds a 50,000-frame pass to a 50 ms budget.
+`services/filter/`: `lexer.ts` → `parser.ts` → `compile.ts`, with `fields.ts`
+resolving names through the registry. `==` is equality, not "contains". A
+bareword is a layer test read from `Packet.frameProtocols` and nothing else. A
+name this build cannot produce matches nothing. `scripts/filter/engine.ts` holds
+a 50,000-frame pass to a 50 ms budget.
 
-### Decryption, and the HTTP family
-`services/tls/keyLog.ts` holds an NSS key log - the `SSLKEYLOGFILE` a browser writes - indexed by **client random**, the one value that is unique per connection and sent in the clear in every ClientHello, TLS and QUIC alike. It is **in memory only**: never in the stored session, never in an export unless the user turns on the Decryption Secrets Block switch (`docs/decisions/0008`). `KeyLogStore.clear` also calls `clearDerivedKeys` in `crypto/aes.ts` - that cache is keyed by the key *bytes* and holds up to 64 expanded schedules, and nothing flushed it, so Settings → Decryption reported "Cleared." while the keys stayed in memory for the life of the page. Settings → Decryption loads one, and pushes it to *both* stores - the Worker dissects live capture with its own module instance, the main thread dissects imports.
+### Enrichment, export and theming
 
-`services/tls/cipherSuites.ts` names the suites that can be opened and, for the ones that cannot (CBC, CCM), why - a user who supplied a key log is owed the reason. `services/tls/decrypt.ts` runs both key schedules: TLS 1.2's PRF over one master secret, TLS 1.3's HKDF-Expand-Label per direction *per epoch*. Nothing guesses: **the AEAD tag is the oracle**, which is what makes it safe to try the current epoch at the current sequence number and then the next epoch from zero. There is no signal on the wire for that transition - the Finished that causes it is itself encrypted - and a wrong key cannot authenticate, so a wrong guess cannot be rendered.
+Name resolution is **passive** — every name comes out of the capture
+(`services/nameResolution.ts`). Direction (`services/direction.ts`, ADR 0019) is
+the fact a capture taken on an endpoint has and one taken anywhere else does
+not. Process attribution comes from the agent's socket table
+(`services/flowAnnotations.ts`, ADR 0009), under the rule *enrich only from the
+captured machine, never from a third party*.
 
-Decryption runs in the **summary pass**, not on demand, because TLS records, HTTP/2 frames and HPACK tables are all cross-frame state; a decoder that ran only for selected frames would index a dynamic table it never saw filled. Application-data records are buffered across segments only once a key log has opened the conversation. Measured cost: 1,051 frames of a real Cloudflare HTTP/2 session in 173 ms without a key log, 305 ms with.
+Export: `PcapService.generatePcapBinary` writes classic libpcap;
+`services/pcapngWriter.ts` writes pcapng, which is the only one that can name
+the adapter, keep nanosecond timestamps, carry the names the capture taught us,
+and record what the capture missed. `services/anonymise.ts` is
+prefix-preserving over Crypto-PAn; MACs keep their OUI.
 
-`dissectors/appStream.ts` decides what the plaintext is - by ALPN when the handshake said, by content otherwise - and holds each direction's state. `http1.ts` follows the body framing (Content-Length, chunked, the HEAD rule, Transfer-Encoding beating Content-Length) because that is what says where the *next* message starts; `http2.ts` + `hpack.ts` do HTTP/2 with a full dynamic table; `http3.ts` + `qpack.ts` do HTTP/3 over QUIC streams the flow tracker reassembles by offset. The HPACK Huffman table is stored as its 257 code **lengths** and the codes derived - the lengths must satisfy Kraft's equality, which catches a transcription error that a table of copied codes would hide.
+Theming is four themes declared in `src/lib/themeOptions.ts`, each with a
+complete token block in `src/index.css` and a palette entry in
+`src/services/themePalettes.ts`. Run `npm run check` after any colour edit —
+`scripts/themes/` enforces token completeness, contrast and CSS-vs-palette
+drift.
 
-Two things to know before touching this. The Info column matches the reference analyzer's wording (`HEADERS[1]: GET /`, a trailing space and `(media/type)` on HTTP/1.1) and the extra detail - error names, window increments - lives in the tree instead. And a frame that only *continues* a TLS record produces no TLS result: the cleartext-HTTP path is gated on the connection never having shown TLS, because without that gate it hands ciphertext to the same HTTP/2 decoder the plaintext goes to.
+### Vite config quirks — read the inline comments before touching
 
-QUIC decrypts past its Initials from the same key log (`quicFlowTracker.ts` + `dissectors/quicCrypto.ts`), including header protection in both constructions - AES-ECB over a ciphertext sample, and ChaCha20 keystream, which is a different construction rather than the same one with another cipher.
-
-### Off-wire enrichment
-`services/flowAnnotations.ts` is the one seam for facts about a flow that are **not in the frame** and come from the machine the capture was taken on. The first is **which process opened the socket** (`local-agent/sockets.py` → `socket_table` → the Worker → `dissect/processFields.ts` → `inwire.process.*` on the `frame` layer). Wireshark cannot answer "what is talking to that address" at all; a program on the endpoint can, and that is the whole justification - the rule is *enrich only from the captured machine, never from a third party*, which is what separates this from the consent-gated `geoIp`/`reverseDns` lookups. Keyed by the **local endpoint** and not a five-tuple, because Windows reports no remote address for UDP sockets (63 of 63 measured) - a five-tuple key would attribute no QUIC and no DNS - and with a **wildcard fallback**, because 34 of 59 UDP sockets bind to `0.0.0.0`/`::`, Chrome's QUIC among them. Which end is local is decided by **address, never by port**, or a frame sent to a server on 443 gets attributed to whatever listens on 443 locally. Sent as **deltas** (52 KB table, 50-250 bytes of churn a second). Each socket carries the window it was seen open, widened by one poll interval at each edge, so a **reused local port** re-attributes instead of labelling the new owner's frames with the old one's name; an overlap answers with nothing, the same way an unreadable drop counter is "unknown" and never zero. It lands in `Packet.fields`, which is what makes it filterable, column-able, and stripped by Anonymise for free (asserted in `scripts/export/anonymise.ts`). Surfaces: the **Source column renders `<address>\<program>`** for frames this machine SENT - render-only, exactly as name resolution is, so `Packet.source` is still the bare address in every filter, export and statistics table; only outbound frames get one, because attribution belongs to the local socket and the reply to a request carries it too (rendering that would put the browser's name on the server that answered), and the address is the half that ellipsises so the program is never the thing truncated away. Also an optional Process column, a row on the Frame layer of the detail tree, a **Processes** tab in Statistics (keyed on pid, not name - a browser's renderer children are separate programs), and an `opt_comment` on each pcapng EPB, which tshark reads back as `frame.comment` without knowing anything about this app. Two things build on it. **`dissect/clientFingerprints.ts`** learns which program a JA4 belongs to from hellos the OS *did* attribute, then labels ones it could not - another machine on the segment, or a socket gone before the table was read - as `inwire.process.ja4_match`. It is a match and never an identification: a fingerprint seen from two programs (every Electron app carries Chrome's) is ambiguous for ever after and names neither. **`services/linkContext.ts`** reads `navigator.connection`, whose one valuable feature is the `change` event - a machine moving network is what a gap with no frames, a burst of ARP/DHCP or a stream that stops dead actually look like. Chromium-only; Firefox and Safari report nothing rather than numbers derived from timings. `effectiveType` renders as "4g-class" because the spec defines it as a performance bucket, not a technology, and a wired gigabit link reports "4g". Decisions: `docs/decisions/0009-off-wire-enrichment.md`.
-
-**Which way a frame went** (`services/direction.ts`) is the fact a capture taken *on an endpoint* has and one taken anywhere else does not - Wireshark cannot answer it at all, because nothing tells it which of a frame's two MACs is the machine you are sitting at. Decided in `decodeRawEthernetPacket`, so live capture and import take the same path, in two stages: from the **MACs** at the moment they are still the frame's own (the L3 branches overwrite `srcIp`/`dstIp`), then from the addresses for links that have no MACs at all. The source MAC is tested **before** the destination, or every broadcast this machine sends - DHCP Discover, ARP, mDNS - reads as inbound. Offload artefacts (a frame over the MTU, an unfilled checksum) are a last resort and can only ever conclude `out`; their absence proves nothing. It rides on `Packet.direction` as **one packed number** - direction, the signal that decided it, and the duplicate bit - following `colorSlot`: the tooltip has to name the deciding signal so the signal is stored either way, a `fields` entry would be ~30 B a frame against ~8, and a **dense column is ruled out** by `POST_DISSECTION_KEYS`, because a host override has to re-derive frames already in the buffer and a filled column row cannot be rewritten. `frame.direction` and `frame.duplicate` are `ALIASES` in `filter/fields.ts` rather than registry fields, which is where every other `frame.*` name already lives; `sent`/`received` alias `out`/`in` through the same multi-value read that makes `proto == tls` and `proto == tlsv1.2` both match.
-
-**Who the host is** comes from the agent (`hostFromAdapters`) for a live capture and is **inferred** for an imported one (`services/hostIdentity.ts`), and the two are never confused: `inferred` and `confidence` travel with the answer, and a low-confidence identity is disclosed rather than hidden. Inference scores each MAC on signals that separate cleanly - measured over the fixture, the host had 1 source address, 100% initial TTLs and 315 offloaded frames against the gateway's 77, 0% and 0. **Self-LLDP outweighs everything**: Windows runs an LLDP agent, so a frame whose LLDP port id equals its own source MAC is a machine naming itself. That also corrects an assumption - **an LLDP frame is not necessarily a switch**, and the fixture's only one is the host's own, so `networkFacts` records it as `selfAdvertisedName` and reports "no neighbour LLDP seen". `services/redirect.ts` re-derives the buffer in slices — on a **MessageChannel, not animation frames**, because `requestAnimationFrame` does not fire at all in a background tab (measured: zero callbacks over 3.8 s), so a restore or import finishing while the tab was backgrounded left every frame undecided; the minimap's colour fill is right to use rAF because it is *painting*, and this is *data* (reading back the `eth.src`/`eth.dst` dense columns, mutating in place so every identity-keyed cache survives), because a synchronous pass is the 202 ms stall ADR 0015 recorded.
-
-**What the capture reveals about its own network** (`services/networkFacts.ts`) is the "observed" half of the Network panel, derived in the Worker and only read on the main thread: the gateway MAC (whatever this machine's off-link traffic is addressed to, after 8 frames so a stray one cannot rename it), the resolvers actually queried, the DHCP server seen in an ACK, the IPv6 router from Router Advertisements (`icmpv6.nd.ra.*`/`icmpv6.opt.*`, parsed and registered as fields so they are filterable), an LLDP neighbour, and DoH/DoT endpoints contacted. It costs nothing measurable on the hot path (18,938 f/s without it, 18,946 with, against a ±4% run-to-run spread). Every collector here is written to *not* fire on lookalikes - a neighbour's DNS query in promiscuous mode is not our resolver, mDNS is not a resolver at all - because these sit beside the OS's own answer and a false one reads as a finding rather than a bug.
-
-**Surfaces.** A narrow default-visible **Direction column** (glyph only, never a row colour - the row's fill is already the colouring rule's answer, and a second scheme competing for the same row would be two meanings in one place); its tooltip names the deciding signal, and an inferred one is marked `*`. Sorting reads `directionOf` rather than the field, or the packed signal bits would interleave the directions. Direction is filtered by typing it (`frame.direction == out`, or `== sent`); a segmented control in the filter bar was tried and removed as redundant with the field beside it. Conversations gain per-direction bytes and a first/last **span** per direction, because one Start and one Duration hide a request at 0.1s answered at 4.2s. pcapng writes the direction into **`epb_flags`** (option 2, bits 0-1), the format's own field, so a reader that knows nothing about this app gets it; transit is written as "not available" rather than squeezed into whichever of the two bits is less wrong. **Cross-adapter duplicates** (`services/duplicateFrames.ts`) are marked and never dropped - this cannot tell a duplicated frame from a genuinely retransmitted identical one, and a capture that quietly discarded frames would be lying about the wire; skipped entirely in single-interface mode, where there is by construction nothing to find.
-
-**The Network panel** (`components/network/`, opened from the app menu; it replaced the ISP panel and its single menu entry) puts the two halves side by side in seven sections: adapter, addresses, gateway & DNS, DHCP, IPv6 router, neighbour, and the public-identity lookup that used to be the whole panel. Gateway, DNS and DHCP render as **Configured (OS)** against **Observed (capture)**, highlighting the disagreements - a resolver queried that is not configured, a gateway MAC that is not the one the OS holds, no plain DNS at all but a DoH endpoint contacted. **The consent gate narrowed with the move**: only the public-identity section is behind `nameResolution.geoIp` now, where before the switch also withheld the machine's own MAC, lease and gateway, none of which involves anybody else. Every section works with no agent (the OS half reads "agent not connected" while the capture half still populates from an imported file), a null is always an em dash and never a guess, each value carries a copy button and names its provider on hover, and "Hide sensitive" masks addresses and MACs for screen-sharing - remembered, because somebody who shares a screen once does it again. For an import the facts are collected on the **main thread**, riding the same chunked pass that re-derives direction, since an import never goes near the Worker.
-
-### Enrichment and views
-- **Passive name resolution** (`services/nameResolution.ts`): every name comes out of the capture - DNS/mDNS answers, TLS and QUIC server names, DHCP, LLDP, and ARP to carry a known MAC's name onto its address. Nothing is looked up. Sources are ranked (a host naming itself over DHCP beats a DNS answer beats an SNI, because one CDN address serves thousands of names), and a real ECH ClientHello's outer name is deliberately **not** learned. Resolution is a **rendering** choice only: `Packet.source` stays the address everywhere, so filters, exports and the parity harness are untouched by it. `View → Name Resolution` in the app menu; `services/portServices.ts` does ports.
-- **The protocols it reads.** 57 layer tokens in `dissect/fieldRegistry.ts`'s `LAYERS`, outermost first, which is the single source the filter's barewords, the autocomplete and "Apply as Column" all derive from: `frame eth vlan llc sll null arp stp lldp ieee1905 cdp` / `ip ipv6 gre vxlan icmp icmpv6 igmp vrrp ospf` / `tcp udp` / `dns nbns nbdgm tls quic ssdp dhcp dhcpv6 ntp stun syslog radius snmp sip rtcp tftp bfd coap ptp hsrp rip ripng bgp ldap smb2 kerberos http http2 http3`, plus six IPv6 extension-header tokens. The eleven added before LDAP are all **leaves** - one datagram in, one label out, no cross-frame state - which is what made them cheap enough to add together. **LDAP is the first that is not**: `searchResDone` reports how many entries preceded it, so it keeps a counter per connection (`LdapConversationState`, on `TcpConnection` beside the TLS one, optional and bounded). It is length-delimited BER, so it reuses SNMP's `ber.ts` and needed no general reassembler, and it declines a message split across segments rather than half-reading one - the rule DNS-over-TCP already followed. Its Info format is nine details tshark had to be asked for, none in RFC 4511: a trailing space on every message; `[N results]` **after** that space, so `success  [0 results]` has two spaces and no trailing one; singular only at exactly one; a running per-messageID total a second Done does not reset; `" | "` between messages in one segment; `<ROOT>` for an empty DN, which is what a SASL bind sends; `abandonRequest` printing the id in its **body** rather than its own; `intermediateResponse` printing nothing at all; and an unnamed OID rendering its first arc as `iso.`. Port-gated on 389/3268 rather than detected by content, because a SEQUENCE holding an INTEGER is a shape many binary protocols share. **BGP is the fourth**, and the only one of the four that needed what ADR 0020 was actually afraid of. Its four siblings - DNS-over-TCP, LDAP, SMB2 and Kerberos - all **decline a message that runs past the captured bytes** rather than half-read one. BGP cannot: a peering's dominant traffic is the full-table UPDATE, which at RFC 4271's 4 kB ceiling (65 kB under RFC 8654) does not fit a segment and never did, so declining them would read the KEEPALIVEs and nothing else. `dissectors/bgp.ts` therefore carries two things across the boundary and they are different - the **body bytes still owed** on a message whose header was read (its *type* travelling with it, because the frame that COMPLETES a message is the one the reference names it in), and a **header split across the boundary**, which at ~19 bytes in 1,460 is 1.3% of boundaries and without which the direction would never resynchronise. Both live on `TcpDirection`, not `TcpConnection`: the two halves of a peering are independent byte streams. The Info column is the message type and **nothing else** - `UPDATE Message`, whatever it withdraws; a NOTIFICATION tearing the session down reads exactly as long as a KEEPALIVE. Several messages in one segment join with `", "`, which is a **fourth** convention after LDAP's `" | "`, SMB2's `"; "` and Kerberos reporting only the last, and not one of the four is derivable from the others. The sixteen-byte marker is a hard gate - without it the frame is plain TCP, not a malformed BGP message - and is still **not** used for detection, because the reference dispatches on port 179 alone and the identical bytes on 1790 are plain TCP. One deliberate difference: a segment that *begins* a multi-segment message gets an **empty** Info column from tshark where that message's later segments get the plain TCP line, an artefact of where its dissector clears the column; this build gives the plain TCP line for both. **DCERPC was probed first and deliberately deferred** - a bound context turns the reference's Protocol and Info columns into the *interface's* name and the *operation's* (`SRVSVC` / `NetShareEnumAll request`), so matching it needs ~100 interface UUIDs, ~1,500 opnums and the NDR argument dissectors under them; a build that read the RPC header and stopped would be right on the interfaces nobody uses and wrong on every one they do. Decisions: `docs/decisions/0024-carrying-a-message-across-segments.md`. **SMB2 is the second non-leaf**, and the reason to read it is that a corporate network is made of it. Same shape as LDAP - a length-prefixed message on a well-known port (445) with per-connection state, since a Create response names the file the *request* asked for. **Eight of its nineteen command names are not MS-SMB2's**: NEGOTIATE prints `Negotiate Protocol`, LOGOFF `Session Logoff`, ECHO **`KeepAlive`**, QUERY_DIRECTORY `Find`, CHANGE_NOTIFY `Notify`, QUERY_INFO `GetInfo`, SET_INFO `SetInfo`, OPLOCK_BREAK `Break` - so a dissector written from the specification prints a name no reference, tutorial or saved filter uses. The rest of the format is equally unguessable: `, Tree: '\server\share'` is single-quoted where `, File: dirile.txt` is not; Read and Write use ` Len:N Off:N` with **no comma and no space after the colon**; an Ioctl's function name has no comma either; a non-zero status appends `, Error: STATUS_...` **before** the detail, and `STATUS_PENDING` counts as an error though it is a success code; compounded PDUs join with `"; "`; and an unnamed Ioctl code is **decoded** rather than printed - device from bits 16-31, function from bits 2-13, giving `NETWORK Function:0x0d15`. One rule generalises beyond SMB2: **Wireshark runs a string through `format_text()` before the column sees it, so every backslash is doubled** - `forColumn` in `smb2.ts` - while the *field* keeps the real value, because a filter should not have to know a display convention. Two byte-order traps are worth naming: the `þSMB` magic is a **byte sequence**, and reading it with the little-endian helper every other field uses yields 0x424d53fe and silently never matches, which presents as an unwired dispatch rather than a byte-order slip.
-
-**GRE is the first tunnel, and a tunnel is a protocol you look *through* rather than name.** The reference reports the INNER packet in Protocol, Info, Source *and* Destination - a GRE datagram carrying an echo between 10.1.1.1 and 10.2.2.2 reads as `ICMP` with those addresses, and the word "GRE" appears only when nothing inside can be read (`Encapsulated IP` - not `IPv4` - or `Encapsulated Transparent Ethernet bridging`, or an unknown type in hex with `(unknown)`). So a half-tunnel that names the protocol without recursing is wrong on **four** columns at once, two of which are at 100%. `dissectors/gre.ts` reads the header only; the recursion is in `networkLayer.ts`, which owns the addresses and calls itself with the inner offset - four lines, because `decodeNetworkLayer` takes an offset (`0023`). Version 1 is refused rather than guessed at: that is PPTP's GRE, whose header puts a payload length where the key's upper half sits, so reading it as RFC 2784 finds the inner packet at the wrong offset - a plausible packet rather than a visible failure. `runCases` gained `compareAddresses` for this, off by default: for most suites the addresses are the frame builder's own constants, and for a tunnel they are the entire result. See `docs/decisions/0020-the-leaf-protocols.md` for where cheap stops and **`0022`, which corrects it**: the division is not leaf-versus-stream but how much state and of what shape, and the byte-stream reassembly 0020 said this build did not do has been in `http1.ts` all along. Three more protocols are *named* without a token of their own because they share the DNS dissector's wire format - mDNS, LLMNR - or a version label (`TLSv1.2`). `UNDISSECTED` in `filter/fields.ts` holds the names Wireshark's default colour rules reference and this build still cannot produce; a filter naming one is a **warning**, not an error, which is what keeps a shipped colour rule from reading as a typo.
-- **Statistics** (`services/statistics.ts` + `components/statistics/`): conversations, endpoints, protocol hierarchy, devices, expert info, resolved addresses. Every row applies the filter that selects its own frames, and those filters come from the service, not the dialog. The hierarchy needs `frameProtocols` to be in **nesting order** - a token appended at the end reads as a child of the last layer, which is how `quic` came to sit under the TLS it carries.
-- **Expert information** (`services/expertInfo.ts`): every finding carries an **`ExpertCategory`** - `Broken`, `Reset`, `Security`, `Loss`, `CaptureGap`, `FlowControl`, `Unverifiable`, `Note` - named after what the reader should conclude, and there is no severity scale at all. Wireshark's model is two axes (5 severities x 17 groups), a `%a` column that is off by default, and **no row painted from expert info at any point**; the groups are named after dissector subsystems ("Reassemble", "Undecoded", "Dissector bug"), which say which part of the analyzer spoke rather than what to do. Severity was dropped rather than refined because measured over both fixtures it was mostly wrong: `error/Checksum` was the largest bucket at 1,998 and 3,459 findings and **100% of them were on frames the capturing machine sent**, where the NIC fills the checksum in after the sniffer has seen the bytes - a scale that cannot tell "damaged" from "not written yet" is not measuring seriousness, and it is why the band that painted rows from it shipped switched off. Triage does not disappear with it, it moves: each category is a colour rule at the head of a **first-match-wins, user-reorderable** chain, so the priority is the reader's. `CATEGORY_ORDER` is that order and the tie-break for a frame in two categories; `inwire.expert.category` is published per frame so a colour rule and a display filter can ask (neither can walk a tree), and `CATEGORY_TEXT` is the one palette the tree, the frame table, the ladder and the Expert tab all read - there were four copies. `expertItemsFor` reads `Packet.expert` and falls back to the tree **only** when there is no flat list. Rows collapse on `category|summary`, and two summaries that name a per-frame number are normalised for the key only (`[TCP Dup ACK 3515#1]` -> `[TCP Dup ACK]`, and the offload message's byte count) - right where a message is read one frame at a time, wrong as an aggregation key, and between them they took the inwire fixture from **91 distinct findings to 14**. `scripts/expert/categories.ts` re-measures both fixtures and asserts the two properties the design turns on: **no frame this machine sent carries a bad checksum**, and no category paints more than half a capture (28.3% and 3.3% of the two fixtures carry any finding at all, against 39.2% and 25.1% before). **There is no anomaly model any more** - `AnomalyInfo`, `Packet.anomalies`, the alerts panel, the alerts widget and the rail's alerts light are gone; the two anomalies that existed were both TCP and both duplicated a finding the tree already raised.
-- **Colouring rules**: `WIRESHARK_DEFAULT_RULES` is exactly Wireshark's twenty and is what the parity harness compares against; `DEFAULT_COLOR_RULES` is that plus `INWIRE_EXTRA_RULES` (the eight expert-category bands, TLS Handshake, QUIC). The chain is user-editable and stored (Settings → Colouring Rules); order is first-match-wins, so a rule's position is its meaning. The eight expert bands **lead** the chain, where Wireshark puts Bad TCP and for the same reason, and they ship **enabled** - which the single "Expert Warnings" band they replaced did not, because it painted 14% and 22% of the two fixtures with an artefact of where the capture was taken. Checksum Errors still ships disabled, as it does in Wireshark. Their colours are **stated, not derived** (`FIXED_ROLE_COLORS` in `packetThemes.ts`): `derive()` has nine hues and all nine are taken, and a stated pair carries its own ground *and* its own text so it depends on no theme underneath; the four that mean something is wrong take dark grounds with bright text, following Wireshark's own polarity, and `colorblind` declines stated colours and falls back to derived fills. TCP RST is Wireshark's exact pair, `#a40000` on `#fffc9c`. The matched rule is cached on the frame as `Packet.colorSlot`, one number packing **which engine decided** with **which rule it decided** - 15 B against the 41 B a `WeakMap` cost, and a warm pass over a million frames at 22.7 ms against 103.8 (`scripts/perf/color-index-cost.ts`). The generation half is what makes a cache on a shared mutable object safe: a packet outlives the engine that coloured it, so without it an edited chain would read the previous chain's decision as its own. It also means an edited chain needs **no invalidation pass** - the old answers are simply not its answers - and a chain past 254 enabled rules **stops caching** rather than wrapping, since handing back a rule the frame did not match is worse than being slow. `colorSlot` is never persisted or exported (`toStoredFrame` and the export writers build explicit objects). A rule edit used to stall the main thread for **202 ms at the 100k cap and 1,985 ms at a million**, because a new chain is a new engine with an empty cache and the minimap paints every frame in the buffer synchronously in a layout effect; it now paints what is already decided and fills the rest in ~6 ms slices between animation frames, with un-evaluated rows in the theme's ground rather than a colour that is not this chain's answer. `matchedRuleIfKnown` is what expresses that: `undefined` is "not decided", distinct from `getPacketStyle`'s `{}` for "decided, nothing matched". Decisions: `docs/decisions/0015-the-colour-index.md`.
-- **The ladder view** (`components/ladder/`, a tab in the stream follower): one conversation as two lanes with time running down and an arrow per frame - the view the packet list cannot be, since a list says nothing about *shape*. The layout is pure (`ladderLayout.ts`) and asserted, because an arrow pointing the wrong way looks exactly like a conversation that really did that. Three things are load-bearing. Frames within a burst are **nudged apart and marked "ordered, not to scale"**, since a TCP window's worth of segments lands on one pixel otherwise - order is the one thing a ladder may never get wrong, time may be compressed. The drawing is **capped at what the viewport shows**, and a time window cannot do that job: frames are not spread evenly, so a window sized to seventeen frames at a connection's quiet start is ninety seconds wide and holds 1,347 later on (measured). And the frames come from the **main thread**, not the Worker - the spec asked for a windowed slice from the Worker, which has no buffer to slice (ADR 0007); the window is what bounds the work. Clicking an arrow selects that frame and the selection highlights its arrow, through the same `goToFrame` everything else uses.
-- **Follow Stream** (`services/followStream.ts`): a stream is a five-tuple, not the TCP tracker's index - that is what makes it work for UDP and QUIC, which have no index. The client end is decided by the well-known port first, arrival order second.
-
-### Dissection acceptance: tshark parity
-`test/fixtures/` holds two real captures (untracked - they contain personal names and addresses; see `docs/decisions/0004-fixtures-and-privacy.md`) and the tshark ground truth for them. `./scripts/parity/regen-ground-truth.sh` regenerates the ground truth (tshark two-pass, `-2`), and `npx tsx scripts/parity/parity-check.ts` diffs the app's Protocol/Source/Destination/Time/Length/Info columns and colouring rule against it, holding each to the floor in `test/fixtures/acceptance.json`. Floors only rise (`--write-floors` after a phase improves a column; `scripts/parity/acceptance.ts` fails a lowered one). This is the acceptance gate for `docs/specs/inwire-network-decoding-spec-v3.md`; the decisions behind it are in `docs/decisions/`. The two fixtures are `inwire` (general browsing) and `bulk` (long TLS transfer, and **30 TCP streams with exactly one SYN**, which makes it the one that catches anything assuming a capture opens with a handshake); `bulk` was called `netview` until the rename, and the label moved while the bytes did not, so numbers recorded against the old name still refer to that file.
-
-**A parity bucket is a defect only once measured** (`docs/decisions/0021`). `scripts/tcp/reassembly.ts` finds the *first* divergence per connection and classifies it, because a boundary error propagates and the raw mismatch list is mostly echoes. But a bucket is a hypothesis, not a finding: of three plausible fixes read off it, one paid (194 -> 130 Info mismatches across two commits) and two made things worse - refusing to claim TLS on a segment this build cannot place cost 42 frames, since an out-of-order segment often carries a readable record and reading it is how a direction resynchronises, and transplanting the reference's own `nextseq` guard cost **2,000**. Build the smallest thing that tests the hypothesis and let the floors decide; they turned both wrong turns into a five-minute answer. What is left is characterised there rather than left as an open number - two-pass facts (a retransmission attributed to a PDU that completed earlier, `(no response found!)`), frames this build reads and the reference does not, and 50 lone `Ignored Unknown Record` exceptions inside regions where the two otherwise agree.
-
-### Export and privacy
-`PcapService.generatePcapBinary` writes classic libpcap; `services/pcapngWriter.ts` writes pcapng, which is the only one of the two that can say **which adapter a frame came from** (one IDB each), keep **nanosecond timestamps** (`if_tsresol` is per interface), carry **the names the capture taught us** (an NRB from the passive resolution map, so the file resolves itself with no lookup) and record **what the capture missed** (an ISB with the driver's and the agent's drop counts). `scripts/export/pcapng.ts` asserts the bytes against the format rather than against this repo's reader - a writer fed to its own reader proves only that the two agree.
-
-`generatePcapNg` also writes a **Decryption Secrets Block** when asked, so the file opens its own TLS for whoever receives it; the reader picks one up automatically, which is why a pcapng carrying its own secrets needs nothing loaded. It is off by default, says how many connections would travel in the clear, and cannot be combined with Anonymise - the secrets would open the payload that was just removed.
-
-`services/anonymise.ts` is the Anonymise toggle. Addresses are **prefix-preserving** (Crypto-PAn over `services/crypto/aes.ts`), so two hosts on one /24 still look like it and the file is still a network; **MACs keep their OUI**, because the vendor half is what distinguishes the printer from the phone; everything above the transport header is **zeroed**, not scrambled. Multicast, broadcast and loopback are left alone - rewriting 224.0.0.251 hides nothing and turns mDNS into traffic to a host that does not exist. The IPv4 header checksum is recomputed (a stale one would paint the whole file as damaged), the key is random per export (so two exports cannot be correlated), and an anonymised pcapng deliberately carries **no** NRB.
-
-Every outbound request in the app is behind `nameResolution.geoIp`: GeoJS for the map, the DoH resolver, and - the `ipapi.co` call in the **Network** panel's Public identity section, which used to fire the moment the old ISP panel opened. It asks for consent inline rather than rendering empty, because a switch the user has to go and find is a worse consent moment than the one in front of them - and since the Network rewrite the gate covers **only that section**, where before it withheld the machine's own MAC, lease and gateway as well, none of which involves anybody else.
-
-### Core domain types
-`src/types/packet.ts` is the single source of truth for the domain model — every dissection, filter, and color rule is typed against it.
-
-### Services (`src/services/`) — all pure client-side engines, no backend calls except geo/DNS lookups
-- **There is no role model.** `rbacService.ts` defined `ROLE_PERMISSIONS` for four roles and nothing ever read it — `App.tsx` built the admin set by hand beside the import — so the module is gone and `UserRolePermissions` is now `Capabilities` (`types/packet.ts`), a flat set stated once in `App.tsx` and threaded to the components. The **seventeen `permissions.*` gates are live** and are where a real model would plug in; `canConfigureAlerts` went with the alerts feature.
-
-### Theming
-Theming is **four themes**, not a light/dark pair: `light` (Day), `paper`, `dark` (Graphite) and `midnight`, declared once in `src/lib/themeOptions.ts` and driven by `next-themes` (`attribute="class"`, `defaultTheme="dark"`, `enableSystem={false}`). One role declines to be derived: `reset` (`color-tcp-rst`) **states** the reference analyzer's own pair, `#a40000` on `#fffc9c`, because the point of it is to be the loudest row in the list and a fill tinted into the theme's ground is by construction not that — on Day the derived red came out `#ffdfd7`. Safe to state because the row carries its own ground *and* its own text (7.6:1, AAA), so it leans on no theme underneath; the `colorblind` set overrides it back to a derived fill, since answering somebody who cannot use the red/green axis with a saturated red would defeat the only thing that set is for. The chroma ceiling and the Vibrant-is-louder check both measure **derived** fills only — a stated colour cannot drift by tuning the ramp, so including it would blunt the tripwire rather than sharpen it; it is asserted exactly instead. Each has a complete 32-token block in `src/index.css` - `:root` IS the `light` block - and a matching entry in `src/services/themePalettes.ts` giving the nine **data** hues the packet list, map and charts derive from. `scripts/themes/*.ts` enforce the whole contract (token completeness, contrast, how far apart two row fills may be, CSS-vs-palette drift); run `npm run check` after any colour edit, and regenerate the status tokens with `npx tsx scripts/themes/status-css.ts`. Dark themes must be listed in the `@custom-variant dark` list at the top of `index.css`. `--chrome`/`--chrome-foreground` paint the header bar and the left drawer in every theme. Retired theme ids are migrated on load by `migrateStoredTheme` in `src/main.tsx` - next-themes does not validate a stored value against its own list. Most components branch on Tailwind's `dark:` classes; a few (`PacketList`'s color engine, `TrafficTimelineChart`'s D3 code, `GeoMap`, `ExportImportModal`) need a plain boolean and read `isDark` from `isDarkTheme(resolvedTheme)` in `App.tsx`, passed down as a prop.
-
-### Vite config quirks (`vite.config.ts`) — read the inline comments before touching this file
-- `maplibre-gl` is excluded from `optimizeDeps` because Vite's dependency pre-bundler breaks its web worker asset resolution, silently killing map tile rendering.
-- File watching/HMR is fully disabled when the `DISABLE_HMR` env var is set. Useful when a tool is rewriting many files at once: each save would otherwise trigger a reload, and they accumulate until the tab stalls.
-- `local-agent/**` is excluded from the file watcher so that rebuilding the Python agent doesn't trigger a full page reload (which would tear down the live agent WebSocket and look like a connect/disconnect loop). `public/downloads/**` is deliberately **not** excluded, even though it belongs to the same build chain - read the inline comment before "fixing" that, because an excluded path falls through to the SPA fallback and the browser silently downloads `index.html` renamed to `Inwire-Agent-Setup.exe`.
+`vite.config.ts`: `maplibre-gl` is excluded from `optimizeDeps` because the
+pre-bundler breaks its worker asset resolution; a plugin emits
+`maplibre-gl-worker.mjs` at an unhashed name because maplibre computes the URL
+from its own filename; the watcher ignores `local-agent/`, `release/`,
+`release-artifacts/` and `dist-electron/` — the last two because chokidar holds
+directory handles and electron-builder finishes a pack by **renaming**
+`release/win-unpacked.tmp`, which fails with EPERM under a live dev server.
 
 ### Env vars
-The app itself needs none. `vite.config.ts` reads `DISABLE_HMR`, and `electron/main.ts` reads `INWIRE_DEV_SERVER` (set by `npm run dev`); both have working defaults. `server.ts` and its `PORT` are gone - it served the browser build.
-- There is no `.env.local.example` and no `VITE_FIREBASE_*` anywhere in the source — the file the `.gitignore` used to make an exception for is gone, and so is the exception. `security_spec.md` still describes Firestore rules and a threat model (roles, admin bootstrap email, shared-capture ownership invariants) for a Firebase backend that **does not exist under `src/`**: treat it as a spec for something unbuilt, not a description of this code.
+
+`vite.config.ts` reads `DISABLE_HMR`; `electron/main.ts` reads
+`INWIRE_DEV_SERVER`, set by `npm run dev`. Both have working defaults. There is
+no `.env` of any kind. `security_spec.md` describes a Firebase backend that
+does not exist under `src/`; treat it as a spec for something unbuilt.
