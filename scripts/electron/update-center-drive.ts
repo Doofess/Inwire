@@ -256,9 +256,12 @@ try {
       labels.includes('Reinstall with admin-only'), access === 'all-users');
     checkTrue('a reinstall is never offered beside an update',
       !(labels.includes('Reinstall with admin-only') && labels.includes('Update')));
+    // Spelled exactly as Npcap's own wizard spells it. A paraphrase here would
+    // pass while sending somebody looking for a checkbox that is not there, so
+    // the assertion is the literal words and not a substring of them.
     checkTrue('...and the checkbox is named before the prompt',
       access !== 'all-users'
-      || text.includes('Restrict Npcap driver\u2019s access to Administrators only'));
+      || text.includes("Restrict Npcap driver's access to Administrators only"));
   }
 
   // The bug a screenshot found: the agent reports its version over the pipe,
