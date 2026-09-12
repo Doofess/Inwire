@@ -395,6 +395,26 @@ shape of success — so a missing service read as unknown and a failure to ask
 read as missing, sending somebody to reinstall over a working install.
 `scripts/electron/agent-health.ts`.
 
+**`Start-Process -ArgumentList ''` throws.** It does not run the program with
+no arguments — it fails parameter validation with *"Cannot validate argument on
+parameter 'ArgumentList'. The argument is null or empty."* The component that
+takes no arguments is **Npcap**, deliberately, because the alternative is `/S`
+— so the Update Center failed on the one install it exists to perform, one
+second after the click, with "the installer could not be started" and no UAC
+prompt at all.
+
+Nothing in the 177-assertion suite could have caught it. The argument list was
+right, the marker parsing was right, and PowerShell's *parser* accepts the line
+— `[Parser]::ParseInput` returns no errors, and that check was already being
+run. It is the cmdlet's parameter validation that rejects it, at run time, only
+when the variable happens to be empty. Found by clicking the button on a real
+machine, which is the only thing that would have.
+
+Fixed by splatting a hashtable and omitting the key when there is nothing to
+pass, which keeps the command line a constant. `elevate.ts`; four assertions in
+`scripts/electron/update-center.ts`, including that no bare `-ArgumentList`
+survives in either script.
+
 ## 7. Testing
 
 Assertion scripts under `scripts/`, discovered by `scripts/check.ts` walking
@@ -736,8 +756,11 @@ works but kills a service the app deliberately has no rights to stop.
 
 ### The feed
 
-One JSON document at `UPDATE_FEED_URL` — an RFC 2606 `.invalid` placeholder
-until the domain exists, overridable by `INWIRE_UPDATE_FEED` in dev. It is the
+One JSON document at `UPDATE_FEED_URL` — `https://updates.inwire.app/manifest.json`,
+overridable by `INWIRE_UPDATE_FEED` in dev. **The domain does not resolve
+yet**, so every check is a quiet no-op until it does, which is the same path
+an offline machine takes and is already the ordinary case rather than an
+error. It is the
 only remote input in this repository that can nominate an executable to be run
 elevated, so it is validated strictly and **rejected whole** — the opposite of
 how preferences are read, because a defaulted field here could mean "download

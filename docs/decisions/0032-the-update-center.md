@@ -99,6 +99,21 @@ The alternative — interpolating a quoted path into `-Command` — fails by
 running a different file, elevated. That is not a bug a reviewer catches by
 reading.
 
+**And the arguments are splatted, which is not a style choice.**
+`Start-Process -ArgumentList ''` throws rather than running the program with no
+arguments — and the component that takes no arguments is Npcap, because the
+alternative is `/S`. The first version therefore failed on the one install this
+whole decision exists to enable, a second after the click, with no prompt.
+
+It is recorded here because of *how* it was found. The pure suite could not
+have: the argument list was correct, the result parsing was correct, and
+PowerShell's own parser accepts the line — a `[Parser]::ParseInput` check on
+the encoded command was already passing. Only the cmdlet's run-time parameter
+validation rejects it, and only when the variable is empty. It took clicking
+the button on a real machine. That is the same lesson `0027` drew from the
+capture store writing no rows for an entire migration: a boundary a test does
+not cross is a boundary that is not tested.
+
 **Elevation is main's, and could not be anywhere else.** The renderer has no
 rights and no `child_process`, and must never have either. The agent is already
 LocalSystem and could spawn anything, which is exactly why it must not: it runs
@@ -182,10 +197,13 @@ Npcap host is the one the allowlist admits.
   correct for a kernel driver. Whether *application* updates should raise one
   per update, and what a second privileged component would cost to avoid it,
   is untouched.
-- **The Inwire row cannot be exercised yet.** There is no feed host and no
-  signature, so `UPDATE_FEED_URL` ships as an RFC 2606 `.invalid` placeholder
-  that cannot resolve, and the row reads "Not checked". The Npcap row works
-  today against a local feed.
+- **The Inwire row cannot be exercised yet.** `UPDATE_FEED_URL` points at
+  `updates.inwire.app`, which does not resolve, so the row reads "Not
+  checked" and every check is a quiet no-op - the same path an offline
+  machine takes. It names the real host rather than an RFC 2606 `.invalid`
+  placeholder deliberately: both exercise the same code, but only one of them
+  ever starts working, and a build left pointing at the other would fail
+  silently for ever. The Npcap row works today against a local feed.
 - **A sha256 is not a signature.** It proves the bytes are the ones the feed
   named; it says nothing about the feed being honest, and nothing about the
   publisher. Authenticode verification is owed and not built. Written down
