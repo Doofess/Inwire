@@ -1,9 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { motion } from 'motion/react';
-import { TbChartBar, TbX, TbChevronDown, TbChevronRight } from 'react-icons/tb';
+import { TbChartBar, TbChevronDown, TbChevronRight } from 'react-icons/tb';
 
 import { Packet } from '../../types/packet';
-import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import {
   conversations, endpoints, protocolHierarchy, devices, processes, processFilter,
   conversationFilter, endpointFilter, deviceFilter,
@@ -49,14 +47,14 @@ const CONVERSATION_TABS: { id: ConversationKind; label: string }[] = [
   { id: 'udp', label: 'UDP' },
 ];
 
-interface StatisticsModalProps {
+interface StatisticsPaneProps {
   /** The whole buffer. The tables count the capture, not the filtered view. */
   packets: Packet[];
   /** What the capture says its addresses are called. */
   names: NameLookup;
   resolveNames: boolean;
   resolvePorts: boolean;
-  /** Applies a display filter in the main window and closes this dialog. */
+  /** Applies a display filter in the packet list. Pairs with the return below. */
   onApplyFilter: (expression: string) => void;
   /** Opens the stream follower on a TCP or UDP conversation. */
   onFollowStream?: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
@@ -75,10 +73,20 @@ interface StatisticsModalProps {
    * non-zero.
    */
   droppedBuffer?: number;
-  onClose: () => void;
+  /**
+   * Leaves for the packet list.
+   *
+   * Named for what it does rather than `onClose`, which is what it was called
+   * while this was a dialog. Every row here is a filter, and applying one means
+   * going to look at the frames it selects - so this is not a dismissal, it is
+   * the second half of the action. Calling it `onClose` on a pane would also
+   * invite somebody to put a close button back on a surface that has no dialog
+   * to close.
+   */
+  onReturnToPackets: () => void;
 }
 
-export const StatisticsModal: React.FC<StatisticsModalProps> = ({
+export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   packets,
   names,
   resolveNames,
@@ -88,7 +96,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
   onFollowStream,
   onSelectFrame,
   droppedBuffer = 0,
-  onClose,
+  onReturnToPackets,
 }) => {
   const [tab, setTab] = useState<Tab>('hierarchy');
   const [kind, setKind] = useState<ConversationKind>('ipv4');
@@ -129,7 +137,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
 
   const apply = (expression: string) => {
     onApplyFilter(expression);
-    onClose();
+    onReturnToPackets();
   };
 
   /**
@@ -202,15 +210,20 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
       kind === id ? 'bg-accent text-primary font-bold' : 'text-muted-foreground hover:text-foreground'
     }`;
 
+  /*
+   * A pane, not a dialog.
+   *
+   * What went when it stopped being one: the `fixed inset-0` scrim that darkened
+   * the packet list it describes, the centred 85vh panel, the rounded border and
+   * the shadow that said "floating", the entrance animation, and the close
+   * button. What stayed is everything that was actually the statistics.
+   *
+   * `min-h-0` on a flex child is load-bearing - without it the tables below grow
+   * the pane instead of scrolling inside it, which in a dialog was bounded by the
+   * 85vh and here would push the window's own chrome off screen.
+   */
   return (
-    <motion.div
-      {...modalBackdropMotion}
-      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-    >
-      <motion.div
-        {...modalPanelMotion}
-        className="w-full max-w-6xl h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground"
-      >
+    <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-card text-card-foreground">
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
             <TbChartBar className="w-7 h-7 shrink-0 text-primary" />
@@ -234,13 +247,10 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
               )}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
-            aria-label="Close"
-          >
-            <TbX className="w-5 h-5" />
-          </button>
+          {/* The close button stood here. A pane is left by choosing another view
+              in the rail, or by Escape, which returns to Packets - so a control
+              whose only job was dismissing a dialog would now be a second,
+              weaker way of doing one of those. */}
         </div>
 
         <div className="px-5 py-2 border-b border-border flex items-center gap-2 text-xs shrink-0">
@@ -430,7 +440,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
                 onRowClick={(r: ExpertGroupRow) => {
                   if (r.frames.length === 0) return;
                   onSelectFrame?.(r.frames[0]);
-                  onClose();
+                  onReturnToPackets();
                 }}
                 empty="Nothing to report. No dissector raised a finding on this capture."
               />
@@ -489,7 +499,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
                     onSelect={() => {
                       if (menuRow.stream === undefined) return;
                       onFollowStream?.(menuRow.stream);
-                      onClose();
+                      onReturnToPackets();
                     }}
                   >
                     Follow Stream
@@ -502,7 +512,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
                     onSelect={() => {
                       if (menuRow.stream === undefined) return;
                       onFollowStream?.(menuRow.stream, 'ladder');
-                      onClose();
+                      onReturnToPackets();
                     }}
                   >
                     Show conversation
@@ -512,7 +522,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
                     onSelect={() => {
                       if (menuRow.frame === undefined) return;
                       onSelectFrame?.(menuRow.frame);
-                      onClose();
+                      onReturnToPackets();
                     }}
                   >
                     Go to First Frame
@@ -549,8 +559,7 @@ export const StatisticsModal: React.FC<StatisticsModalProps> = ({
             </>
           )}
         </div>
-      </motion.div>
-    </motion.div>
+    </div>
   );
 };
 

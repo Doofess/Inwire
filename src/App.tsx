@@ -96,7 +96,7 @@ import { StreamFollowerModal } from "./components/stream-follower/StreamFollower
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
 import { CustomDissectorModal } from "./components/dissectors/CustomDissectorModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
-import { StatisticsModal } from "./components/statistics/StatisticsModal";
+import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { NetworkModal } from "./components/network/NetworkModal";
 import { SettingsModal } from "./components/common/SettingsModal";
 import {
@@ -406,7 +406,6 @@ export default function App() {
   const [detailPacketId, setDetailPacketId] = useState<number | null>(null);
   const [showDissectorModal, setShowDissectorModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
-  const [showStatisticsModal, setShowStatisticsModal] = useState(false);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
@@ -1445,14 +1444,16 @@ export default function App() {
   selectedPacketRef.current = selectedPacket;
 
   /**
-   * Opens the modal the active view names. Deleted by Step 4b.
+   * Opens the modal the active view names, for the views still to be converted.
    *
-   * One direction only: the rail writes `view`, this reflects it. The modals'
-   * own close handlers write `view` back to `packets`, so there is still exactly
-   * one source of truth and no two-way sync to get stuck in a loop.
+   * Statistics is a pane now and is gone from here - it renders from `view`
+   * directly. Network follows in the next commit, and this effect goes with it.
+   *
+   * One direction only: the rail writes `view`, this reflects it. The modal's own
+   * close handler writes `view` back to `packets`, so there is still exactly one
+   * source of truth and no two-way sync to get stuck in a loop.
    */
   useEffect(() => {
-    setShowStatisticsModal(view === 'statistics');
     setShowNetworkModal(view === 'network');
   }, [view]);
 
@@ -2005,7 +2006,24 @@ export default function App() {
         {/* Central Inspection + Analytics Split Grid */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
           {/* Main Packet Inspection Core */}
-          <section className="flex-1 flex flex-col border-r border-border overflow-hidden min-w-0">
+          {/* Kept MOUNTED while another view is active, and hidden with
+              `display: none`.
+
+              Unmounting it would be cheaper per frame and is the wrong trade: the
+              list is virtualised, so its scroll offset is a function of a row
+              height and a window that would have to be measured and restored by
+              hand, and the selection would have to be re-found in a buffer that
+              has grown in the meantime. Coming back to Statistics and finding the
+              packet list exactly where it was left is worth a subtree that keeps
+              rendering while invisible.
+
+              An inline style rather than Tailwind's `hidden`: that utility and
+              `flex` are the same specificity, so which one wins depends on their
+              order in the emitted stylesheet. This cannot be got wrong. */}
+          <section
+            style={view === 'packets' ? undefined : { display: 'none' }}
+            className="flex-1 flex flex-col border-r border-border overflow-hidden min-w-0"
+          >
             {/* Upper Pane: High-Density Packet Table */}
             <div
               // The tour highlights the pane rather than a row: it runs before
@@ -2170,6 +2188,35 @@ export default function App() {
             )}
           </section>
 
+          {/* Statistics as a pane, where the packet list would be.
+
+              Unmounted when it is not the active view, unlike the packet list
+              above: it holds no scroll position worth keeping and its tables are
+              a full pass over the buffer, so leaving it mounted would aggregate
+              50,000 packets twice a second for a surface nobody is looking at.
+              The list is the exception, not the rule. */}
+          {view === 'statistics' && (
+            <StatisticsPane
+              // The whole buffer, not `filteredPackets`: these tables count the
+              // capture. A filter narrows what is being LOOKED at, and a
+              // conversation table that silently answered for a subset would be
+              // the same table with different numbers and no way to tell.
+              packets={packets}
+              names={nameMap}
+              resolveNames={nameResolution.network}
+              resolvePorts={nameResolution.transport}
+              expert={expertLog}
+              onApplyFilter={handleQuickFilter}
+              onFollowStream={handleFollowStream}
+              onSelectFrame={goToFrame}
+              droppedBuffer={droppedBuffer}
+              // Every row here is a filter, so applying one means going to look
+              // at the frames it selects. That is the cross-view navigation the
+              // plan specifies, and it falls out of the pane's own model.
+              onReturnToPackets={() => setView('packets')}
+            />
+          )}
+
           {/* The analytics column, or the icon rail it collapses to.
               The gate here was `dashboardVisible || railFits`, and `railFits`
               was a media query on **768** - which the window's own 1024
@@ -2259,32 +2306,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <AnimatePresence>
-        {showStatisticsModal && (
-          <StatisticsModal
-            key="statistics-modal"
-            // The whole buffer, not `filteredPackets`: these tables count the
-            // capture. A filter narrows what is being LOOKED at, and a
-            // conversation table that silently answered for a subset would be
-            // the same table with different numbers and no way to tell.
-            packets={packets}
-            names={nameMap}
-            resolveNames={nameResolution.network}
-            resolvePorts={nameResolution.transport}
-            expert={expertLog}
-            onApplyFilter={handleQuickFilter}
-            onFollowStream={handleFollowStream}
-            onSelectFrame={goToFrame}
-            // What the tables could not count. The buffer is the capture until
-            // it fills, and silently stops being it after that.
-            droppedBuffer={droppedBuffer}
-            // Writes the VIEW, not the boolean: the effect above owns the boolean,
-            // so closing here and leaving `view` on 'statistics' would reopen it on
-            // the next render. Step 4b turns this into leaving a pane.
-            onClose={() => setView('packets')}
-          />
-        )}
-      </AnimatePresence>
 
       <AnimatePresence>
         {showNetworkModal && (
