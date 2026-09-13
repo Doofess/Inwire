@@ -45,13 +45,3 @@ const chromeButtonBase =
  */
 export const headerButtonClass =
   `${chromeButtonBase} gap-1.5 text-xs px-3 py-1.5 font-bold uppercase tracking-wider`;
-
-/**
- * An icon-only control: the palette trigger in the title row.
- *
- * 28px square, and deliberately smaller than the rail's 36px targets - the title
- * row is 40px tall, so a 36px button would leave two pixels of air above and
- * below and read as filling the strip.
- */
-export const headerIconButtonClass =
-  `${chromeButtonBase} justify-center w-7 h-7 shrink-0`;

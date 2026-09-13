@@ -78,6 +78,11 @@ const DELIBERATELY_ABSENT = new Map<string, string>([
   // round like `server.ts`: a Header.tsx coming back would mean the 64px
   // accent bar had, and the shell section says it must not.
   ['Header.tsx', 'deleted with the 64px header bar; split into the rail and two rows'],
+  // The hamburger drawer. Three of its seven entries duplicated rail buttons,
+  // two became rail buttons, and two went to Settings -> Interface. Named the
+  // same way round for the same reason: an AppMenu.tsx coming back would mean a
+  // second navigation surface beside the rail had.
+  ['AppMenu.tsx', 'deleted with the hamburger menu; its entries are rail buttons and Settings rows'],
 ]);
 
 /**

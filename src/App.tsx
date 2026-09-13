@@ -40,7 +40,6 @@ import { shortInterfaceLabel } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
 import { FilterRow } from "./components/common/FilterRow";
-import { AppMenu } from "./components/common/AppMenu";
 import {
   useTitleBarTheme, useWindowChrome, useWindowTitle, windowTitleFor,
 } from "./lib/windowChrome";
@@ -213,7 +212,11 @@ export default function App() {
   usePreferenceSync(tourStore.key, tourStore.normalize, tourStore.accept);
   // Pushes the two outbound-lookup switches into the service that performs
   // them, so the gate lives in one place rather than at every call site.
-  const [nameResolution, patchNameResolution] = useNameResolutionPreference();
+  // Read-only here now: the two passive switches moved into
+  // Settings -> Interface with the menu that used to hold them, and that panel
+  // patches the store itself. App still READS all four - they decide what the
+  // list and the tables show.
+  const [nameResolution] = useNameResolutionPreference();
 
   const { resolvedTheme } = useTheme();
   // Resolves the "System" picker entry into a concrete theme, and keeps
@@ -2033,25 +2036,15 @@ export default function App() {
         widgets={dashboardPrefs.widgets}
         onToggleWidget={toggleWidget}
         onOpenSettings={() => setShowSettingsModal(true)}
-        onOpenUpdates={() => setShowSettingsModal(true)}
-        updateAvailable={false}
+        onOpenExport={() => setShowExportModal(true)}
+        onOpenDissectors={() => setShowDissectorModal(true)}
       />
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* 40px, matching TITLE_BAR_HEIGHT and therefore what the native overlay
             reserves. Almost all drag region - the capture controls moved into the
             rail precisely so this row could be nearly empty. */}
-        <TitleRow title={windowTitle} focused={windowFocused}>
-          <AppMenu
-            onOpenDissectorModal={() => setShowDissectorModal(true)}
-            onOpenExportModal={() => setShowExportModal(true)}
-            onOpenStatistics={() => setView('statistics')}
-            onOpenNetwork={() => setView('network')}
-            nameResolution={nameResolution}
-            onNameResolutionChange={patchNameResolution}
-            onOpenSettingsModal={() => setShowSettingsModal(true)}
-          />
-        </TitleRow>
+        <TitleRow title={windowTitle} focused={windowFocused} />
 
         {/* Hidden in Network, and only there.
 

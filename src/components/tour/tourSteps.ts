@@ -25,7 +25,7 @@
  * No React and no DOM, so the assertion script can import it.
  */
 
-export type TourAnchor = 'menu' | 'interfaces' | 'schedule' | 'start' | 'list' | 'detail';
+export type TourAnchor = 'rail' | 'interfaces' | 'schedule' | 'start' | 'list' | 'detail';
 
 export interface TourStep {
   anchor: TourAnchor;
@@ -44,9 +44,12 @@ export interface TourStep {
 // with it, and there is no menu entry to choose. A first-run user has nothing
 // to do before capturing, so the tour starts where their first ACTION is.
 //
-// The menu keeps a step - it is where everything that is not capture lives, and
-// that is worth pointing at - but it is no longer the thing standing between
-// somebody and their first packet.
+// The step that pointed at the menu now points at the rail, because the menu is
+// gone: three of its seven entries duplicated rail buttons, Export/Import and
+// Custom Dissectors became rail buttons of their own, and the two name-resolution
+// switches went to Settings -> Interface beside the two that were already there.
+// The sentence it carried - "everything else lives here" - is more true of the
+// rail than it ever was of a drawer.
 export const TOUR_STEPS: TourStep[] = [
   {
     anchor: 'interfaces',
@@ -85,13 +88,15 @@ export const TOUR_STEPS: TourStep[] = [
     side: 'top',
   },
   {
-    anchor: 'menu',
+    anchor: 'rail',
     title: 'Everything else lives here',
     body:
-      'Capture statistics, what this capture revealed about your network, name '
-      + 'resolution, and settings - including Driver Info, which says what the '
-      + 'capture agent is doing and is the first place to look if nothing arrives.',
-    side: 'bottom',
+      'Switch between the packet list, capture statistics and what this capture '
+      + 'revealed about your network. Below the line, each icon opens a chart '
+      + 'alongside them. At the bottom: export and import, custom dissectors, and '
+      + 'settings - including Driver Info, which says what the capture agent is '
+      + 'doing and is the first place to look if nothing arrives.',
+    side: 'right',
   },
   {
     anchor: 'detail',

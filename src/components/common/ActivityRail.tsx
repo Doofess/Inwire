@@ -9,7 +9,8 @@ import {
   TbSitemap,
   TbArrowsLeftRight,
   TbSettings,
-  TbCloudDownload,
+  TbFileExport,
+  TbCode,
 } from 'react-icons/tb';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
@@ -51,9 +52,9 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 13 icons, 36px targets, four dividers and a 40px top cell come to **579px**
- * against a 640px minimum window height. It fits, with 61px of slack - room for
- * exactly one more icon.
+ * 14 icons, 36px targets, four dividers and a 40px top cell come to **617px**
+ * against a 640px minimum window height. It fits, with 23px of slack - which is
+ * **not** another icon. The rail is full.
  *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that
@@ -66,6 +67,14 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * scrolls** - capture, the views and the bottom group have to stay reachable
  * without one, and the bottom group is pinned with `mt-auto`, so an overflow
  * does not scroll anything: it pushes Settings off the bottom edge.
+ *
+ * The last slot went to Custom Dissectors when the hamburger menu was deleted.
+ * Of that menu's seven entries, three already had a rail button - Capture
+ * Statistics, Network and Settings - Export/Import and Custom Dissectors became
+ * the two here, and the two name-resolution switches went to
+ * Settings -> Interface, beside the two outbound lookups that were already
+ * there. That last pair came here first and did not fit: four icons in this
+ * group is 693px, 53px past the smallest window this app opens at.
  */
 
 /** 32px was the old rail's target in a 48px strip; 36 is this one's in 56. */
@@ -142,9 +151,26 @@ export interface ActivityRailProps {
 
   /* --- bottom ----------------------------------------------------------- */
   onOpenSettings: () => void;
-  onOpenUpdates: () => void;
-  /** Badges the Update Center when something is actually installable. */
-  updateAvailable: boolean;
+  /**
+   * Export / Import PCAP.
+   *
+   * It took the Update Center's slot, and that cost nothing: `onOpenUpdates`
+   * and `onOpenSettings` were the same handler - both opened the Settings modal,
+   * which is where the Update Center lives as a section - and `updateAvailable`
+   * was passed `false` at the only call site, so the badge could never light. It
+   * was a second Settings button with a dot that never appeared. Settings ->
+   * Updates is still the one place this app updates anything (ADR 0032).
+   */
+  onOpenExport: () => void;
+  /**
+   * Custom Dissectors, which took the rail's last free slot.
+   *
+   * With this the rail is 617px against a 640px minimum window - 23px of slack,
+   * which is not another icon. Anything else that needs a permanent home has to
+   * go to Settings or make the widgets group scroll; `scripts/session/view.ts`
+   * is where that stops being a matter of opinion.
+   */
+  onOpenDissectors: () => void;
 }
 
 export const ActivityRail: React.FC<ActivityRailProps> = ({
@@ -153,7 +179,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
   dockItems, widgets, onToggleWidget,
-  onOpenSettings, onOpenUpdates, updateAvailable,
+  onOpenSettings, onOpenExport, onOpenDissectors,
 }) => {
   const selected = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
   const attention = agentNeedsAttention(agentHealth);
@@ -424,7 +450,12 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
 
       <RailDivider />
 
-      <div className={GROUP} role="group" aria-label="Views">
+      {/* The tour's "everything else lives here" step used to point at the
+          hamburger. It points here now - the rail IS the answer to that
+          sentence. `scripts/accessibility/tour.ts` asserts both directions, so
+          deleting the old anchor without moving the step fails the suite rather
+          than leaving a step pointing at nothing. */}
+      <div className={GROUP} role="group" aria-label="Views" data-tour="rail">
         {APP_VIEWS.map(({ id, label, shortcut }) => {
           const Icon = VIEW_ICONS[id];
           const active = view === id;
@@ -496,21 +527,30 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           above can grow without overlapping it. */}
       <div className={`${GROUP} mt-auto pb-2`} role="group" aria-label="Application">
         <RailDivider />
+        {/* `TbFileExport` rather than the menu's `TbDownload`, and deliberately
+            not `TbArrowsExchange`: an exchange glyph would sit five icons below
+            Follow Stream's `TbArrowsLeftRight` and read as the same control
+            twice. That mistake has been made in this strip once already - the
+            brand mark opened as a `TbNetwork`, identical to the adapter button
+            42px under it, and only a screenshot found it. */}
         <button
-          onClick={onOpenUpdates}
-          aria-label={updateAvailable ? 'Updates - one available' : 'Updates'}
-          title={updateAvailable ? 'An update is available' : 'Updates'}
+          onClick={onOpenExport}
+          aria-label="Export or import a capture"
+          title="Export / Import PCAP"
           className={railButton(false, 'toggle')}
         >
-          {updateAvailable && (
-            // A dot, and the colour is the only thing that differs from a
-            // widget's: this one is news, not a state the user chose.
-            <span
-              aria-hidden
-              className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-warning"
-            />
-          )}
-          <TbCloudDownload className={GLYPH} />
+          <TbFileExport className={GLYPH} />
+        </button>
+        {/* `TbCode` - the angle brackets - rather than another file glyph: it
+            sits directly under `TbFileExport` and two file icons in a row read
+            as one control with a modifier. */}
+        <button
+          onClick={onOpenDissectors}
+          aria-label="Custom dissectors"
+          title="Custom Dissectors"
+          className={railButton(false, 'toggle')}
+        >
+          <TbCode className={GLYPH} />
         </button>
         <button
           onClick={onOpenSettings}

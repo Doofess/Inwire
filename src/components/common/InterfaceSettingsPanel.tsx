@@ -206,6 +206,49 @@ export const InterfaceSettingsPanel: React.FC = () => {
         </SettingRow>
       </Section>
 
+      {/* Wireshark keeps these under View -> Name Resolution, and so did this
+          app, in the hamburger menu beside the views they changed. That menu is
+          gone - everything in it either had a permanent control already or has
+          one now - and these two came here rather than to the rail for a reason
+          with a number behind it: the rail is 579px against a 640px minimum
+          window, which is room for exactly one more icon, and Custom Dissectors
+          took it. `scripts/session/view.ts` holds that arithmetic.
+
+          Here rather than anywhere else because the other half of name
+          resolution is already here. The split is the point of the two sections:
+          these two are answered entirely out of the capture, and the two below
+          send an address to somebody. Keeping them apart is what lets the
+          Privacy heading mean something. */}
+      <Section title="Name resolution">
+        <p className="text-[11px] text-muted-foreground pb-1 leading-snug">
+          Both are passive: every name they show was already in the capture. Nothing is sent.
+        </p>
+
+        <SettingRow
+          label="Resolve network addresses"
+          description="Shows host names instead of IP addresses in the packet list's address columns and in the statistics tables, where the capture itself carried the name - from DNS responses, mDNS, NetBIOS and the like."
+          htmlFor="setting-resolve-network"
+        >
+          <Switch
+            id="setting-resolve-network"
+            checked={nameResolution.network}
+            onCheckedChange={(network) => patchNameResolution({ network })}
+          />
+        </SettingRow>
+
+        <SettingRow
+          label="Resolve transport ports"
+          description="Shows service names beside port numbers in the statistics tables - 443 as https, 53 as domain. From a table built into Inwire."
+          htmlFor="setting-resolve-transport"
+        >
+          <Switch
+            id="setting-resolve-transport"
+            checked={nameResolution.transport}
+            onCheckedChange={(transport) => patchNameResolution({ transport })}
+          />
+        </SettingRow>
+      </Section>
+
       <Section title="Privacy">
         <p className="text-[11px] text-muted-foreground pb-1 leading-snug">
           These lookups send the public addresses in your capture to third-party services. Both are
