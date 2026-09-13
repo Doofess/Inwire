@@ -59,6 +59,23 @@ export interface DockPrefs {
   /** Pixels. Clamped against the window by `clampDockWidth`, not stored clamped. */
   width: number;
   items: DockItem[];
+  /**
+   * Hidden, leaving only the rail's icons.
+   *
+   * **What this is not.** `DashboardMode` was three modes - full, icons, hidden
+   * - on a right-hand column that morphed into a 48px strip as you dragged it
+   * narrower, and Step 6 of the rail work deleted all of it. This is one
+   * boolean on a left-hand dock, and the rail it collapses to already exists
+   * and is always there. A future session should not read this as the morph
+   * coming back.
+   *
+   * It changes what a widget icon **does**, which is the whole reason it is
+   * persisted rather than local: expanded, an icon toggles that widget in the
+   * dock; minimized, it opens that widget's overlay. One control, two meanings,
+   * and which one is in force has to survive a restart or the first click after
+   * every launch is a surprise.
+   */
+  minimized: boolean;
 }
 
 /** The rail's own width, which the dock's arithmetic has to account for. */
@@ -140,6 +157,7 @@ export function defaultItems(): DockItem[] {
 
 export const DOCK_DEFAULTS: DockPrefs = {
   width: DOCK_DEFAULT_WIDTH,
+  minimized: false,
   // Built once and never handed out to be edited, the same reason
   // `DASHBOARD_DEFAULTS` does it: this object IS the store's value when nothing
   // is stored, so a getter would hand every reader a new array identity.
@@ -228,6 +246,11 @@ export function normalizeDockPrefs(raw: unknown): DockPrefs | null {
       ? Math.round(value.width)
       : DOCK_DEFAULT_WIDTH,
     items: normalizeItems(value.items),
+    // Defaults to SHOWN for an unreadable value, which is the less surprising
+    // way to be wrong: a dock that is there when it should not be is one click
+    // from correct, and one that is missing reads as a widget that stopped
+    // working.
+    minimized: value.minimized === true,
   };
 }
 
@@ -258,7 +281,15 @@ function seedFromDashboard(): void {
     if (legacy === null) return;
     const items = migrateFromDashboard(JSON.parse(legacy));
     if (items === null) return;
-    localStorage.setItem(DOCK_KEY, JSON.stringify({ width: DOCK_DEFAULT_WIDTH, items }));
+    // `minimized` is not migrated from the old `mode`, deliberately. `icons`
+    // and `hidden` meant a collapsed column, which sounds like this - but
+    // `migrateFromDashboard` already answers them by opening nothing, and
+    // carrying the collapse across as well would hide a dock that is already
+    // empty. The user would land on a rail whose widget icons all opened
+    // overlays, with no sign the dock existed.
+    localStorage.setItem(DOCK_KEY, JSON.stringify({
+      width: DOCK_DEFAULT_WIDTH, items, minimized: false,
+    }));
   } catch {
     // Blocked, absent or corrupt storage. The defaults are a usable dock.
   }

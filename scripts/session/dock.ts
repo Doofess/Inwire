@@ -17,7 +17,7 @@
 import {
   clampDockWidth, defaultItems, dockOrder, maxDockWidth, migrateFromDashboard,
   normalizeDockPrefs, normalizeItems, reorderItems,
-  DOCK_DEFAULT_WIDTH, DOCK_MAX_WIDTH, DOCK_MIN_WIDTH, LIST_RESERVE, RAIL_WIDTH,
+  DOCK_DEFAULTS, DOCK_DEFAULT_WIDTH, DOCK_MAX_WIDTH, DOCK_MIN_WIDTH, LIST_RESERVE, RAIL_WIDTH,
 } from '../../src/services/dockPrefs';
 import { WIDGET_TYPE_IDS } from '../../src/services/dashboardPrefs';
 import { MIN_WINDOW_WIDTH } from '../../electron/window';
@@ -244,6 +244,32 @@ console.log('\n--- the width rule, against the window ---\n');
   }
   check('every clamp across every supported window lands in range',
     outOfRange.slice(0, 5), []);
+}
+
+console.log('\n--- hidden, which changes what a rail icon does ---\n');
+
+{
+  // The flag is persisted rather than local because it changes what the rail's
+  // widget icons MEAN - toggle in the dock, or open in a window - and which one
+  // is in force has to survive a restart, or the first click after every launch
+  // is a surprise.
+  check('a fresh dock is shown', DOCK_DEFAULTS.minimized, false);
+  check('hidden survives the read', normalizeDockPrefs({ minimized: true, items: [] })?.minimized, true);
+  check('shown survives the read', normalizeDockPrefs({ minimized: false, items: [] })?.minimized, false);
+
+  // Defaults to SHOWN for anything unreadable, which is the less surprising way
+  // to be wrong: a dock that is there when it should not be is one click from
+  // correct, and one that is missing reads as a widget that stopped working.
+  check('a missing flag is shown', normalizeDockPrefs({ items: [] })?.minimized, false);
+  check('a string is shown', normalizeDockPrefs({ minimized: 'yes', items: [] })?.minimized, false);
+  check('null is shown', normalizeDockPrefs({ minimized: null, items: [] })?.minimized, false);
+  check('the number 1 is shown', normalizeDockPrefs({ minimized: 1, items: [] })?.minimized, false);
+
+  // One bad field never discards its siblings - the house rule, applied to the
+  // newest field.
+  check('an unreadable flag keeps the items',
+    open(normalizeDockPrefs({ minimized: 'x', items: [{ type: 'geo', open: true }] })?.items ?? []),
+    ['geo']);
 }
 
 console.log('\n--- what is stored, and what is not ---\n');

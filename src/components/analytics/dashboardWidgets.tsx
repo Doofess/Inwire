@@ -97,6 +97,17 @@ export interface WidgetRenderer {
   readonly emptyMessage?: string;
   /** The body reaches the card's edge, and the heading grows a divider. */
   readonly bleed?: boolean;
+  /**
+   * This type draws something DIFFERENT at `variant: 'full'`, so its card earns
+   * an expand button.
+   *
+   * True for the map alone. The overlay itself is generic - it will render any
+   * widget at full size, and the rail relies on that when the dock is hidden -
+   * but a button on a card that would reopen the same drawing larger is chrome
+   * promising something it does not deliver. So the overlay is reachable for
+   * everything and the *button* is offered only where there is more to see.
+   */
+  readonly hasFullView?: boolean;
   render(ctx: DashboardWidgetContext, config: WidgetConfig, frame: WidgetFrame): React.ReactNode;
 }
 
@@ -114,6 +125,7 @@ function listHeight(rows: number, rowPx: number): number {
 export const WIDGET_RENDERERS: Record<WidgetTypeId, WidgetRenderer> = {
   geo: {
     icon: TbMap2,
+    hasFullView: true,
     // A shape rather than a height, so the map scales with a column that can be
     // dragged instead of staying 256px tall in a 640px-wide card. 11/8 is what
     // 256px was at the default width, so an untouched dashboard is unchanged.

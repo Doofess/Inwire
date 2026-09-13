@@ -453,10 +453,32 @@ export default function App() {
     patchDock({ items: dock.items.map((i) => (i.type === type ? { ...i, ...patch } : i)) });
   }, [dock.items, patchDock]);
 
+  /**
+   * What a rail widget icon does, which depends on whether the dock is shown.
+   *
+   * Shown, it toggles that widget in the dock - the original behaviour. Hidden,
+   * it opens that widget's overlay instead, because there is no dock for it to
+   * appear in and an icon that did nothing would be five of the six inert.
+   *
+   * The overlay renders ANY widget: `WIDGET_RENDERERS[type].render(..., {
+   * variant: 'full' })` is generic, and only the map reads `variant` to draw
+   * something richer. So the rule is one sentence with no exceptions rather
+   * than "iff that widget has a full-size version", which would have left the
+   * counts card and three charts as dead icons.
+   */
   const toggleWidget = useCallback((type: string) => {
+    if (dock.minimized) {
+      setExpandOrigin(undefined);
+      setExpandedWidget(type);
+      return;
+    }
     const item = dock.items.find((i) => i.type === type);
     patchItem(type, { open: !(item?.open ?? false) });
-  }, [dock.items, patchItem]);
+  }, [dock.items, dock.minimized, patchItem]);
+
+  const toggleDockMinimized = useCallback(() => {
+    patchDock({ minimized: !dock.minimized });
+  }, [dock.minimized, patchDock]);
 
   /**
    * Reorders the OPEN items, leaving the closed ones where they were.
@@ -2043,6 +2065,8 @@ export default function App() {
         dockItems={dock.items}
         widgets={dashboardPrefs.widgets}
         onToggleWidget={toggleWidget}
+        dockMinimized={dock.minimized}
+        onToggleDockMinimized={toggleDockMinimized}
         onOpenSettings={() => setShowSettingsModal(true)}
         onOpenExport={() => setShowExportModal(true)}
         packetSearchText={packetSearchText}
@@ -2105,6 +2129,7 @@ export default function App() {
               on the right. Everything inside it is unchanged - `RenderedWidget`
               is the same call the old column made. */}
           <Dock
+            minimized={dock.minimized}
             items={dock.items}
             width={dock.width}
             context={dashboardContext}
