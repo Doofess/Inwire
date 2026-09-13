@@ -267,12 +267,20 @@ for (const theme of THEMES) {
 // come back one className at a time.
 //
 // `AnomalyAlertsPanel.tsx` used to be the second entry and is gone with the
-// anomaly model. The two that replaced it are the surviving surfaces that
-// paint a fault state - both now ask `isFaultCategory(categoryOfPacket(p))`
-// rather than reading an anomaly list - so they are where a raw shade would
-// next creep in.
+// anomaly model. The others are the surviving surfaces that paint a fault state
+// - the two analytics ones ask `isFaultCategory(categoryOfPacket(p))` rather
+// than reading an anomaly list - so they are where a raw shade would next creep
+// in.
+//
+// `Header.tsx` was the first entry and is gone with the 64px header bar. Its
+// fault states split in two and both are listed in its place: the rail draws the
+// adapter's warning badge and the capture button's stop glyph, and the filter
+// row draws the banner that says why capture cannot start. Replacing the entry
+// rather than dropping it matters - the check is only worth having on whichever
+// file currently owns the decision.
 const GUARDED_FILES = [
-  'src/components/common/Header.tsx',
+  'src/components/common/ActivityRail.tsx',
+  'src/components/common/FilterRow.tsx',
   'src/components/analytics/NetworkMatrix.tsx',
   'src/components/analytics/TrafficTimelineChart.tsx',
 ];

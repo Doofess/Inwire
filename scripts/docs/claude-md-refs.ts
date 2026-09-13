@@ -74,6 +74,10 @@ const NOT_PATHS = new Set([
 const DELIBERATELY_ABSENT = new Map<string, string>([
   ['server.ts', 'deleted with the browser build; named under "what it is not"'],
   ['security_spec.md', 'deleted; what was worth keeping is docs/ideas/sharing-threat-model.md'],
+  // Replaced by ActivityRail + TitleRow + FilterRow. Asserted the other way
+  // round like `server.ts`: a Header.tsx coming back would mean the 64px
+  // accent bar had, and the shell section says it must not.
+  ['Header.tsx', 'deleted with the 64px header bar; split into the rail and two rows'],
 ]);
 
 /**

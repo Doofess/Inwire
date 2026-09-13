@@ -448,17 +448,15 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             onMouseDown={e => e.preventDefault()}
             onClick={toggleSearch}
             title="Find packet"
-            // Collapsed, this glyph sits directly on the header bar, which is
-            // `--chrome` in every theme and where a muted grey all but
-            // disappears. Expanded, it sits on the field it opens, where
-            // chrome-foreground would be the thing that disappears instead. So
-            // it follows the surface underneath it rather than picking one
-            // colour and being wrong half the time.
-            className={`p-0.5 shrink-0 rounded transition-colors hover:bg-accent ${
-              isSearchExpanded
-                ? 'text-muted-foreground hover:text-foreground'
-                : 'text-chrome-foreground/80 hover:text-chrome-foreground'
-            }`}
+            // Both states are the same pair now, and that is a simplification
+            // the new chrome bought. This used to sit on the saturated `--chrome`
+            // header bar when collapsed - where a muted grey all but disappeared -
+            // and on its own field when expanded, where `--chrome-foreground`
+            // would have been the thing that disappeared. There is no accent bar
+            // any more: the filter row is `--background`, so one pair is correct
+            // on both surfaces.
+            className="p-0.5 shrink-0 rounded transition-colors hover:bg-accent
+              text-muted-foreground hover:text-foreground"
           >
             <TbSearch className="w-3.5 h-3.5" />
           </button>

@@ -2,6 +2,7 @@ import { useEffect, type RefObject } from 'react';
 
 import type { Packet } from '../types/packet';
 import type { AgentCommand } from '../services/agentProtocol';
+import { APP_VIEWS, type AppView } from '../services/viewPrefs';
 
 /**
  * The keyboard shortcuts that belong to the window rather than to a control.
@@ -23,6 +24,8 @@ export interface KeyboardNavigationOptions {
   /** Non-null while the packet detail window is open, which owns the keyboard. */
   detailPacketId: number | null;
   canCapture: boolean;
+  /** Switches the rail's active view, for Ctrl+1..4. */
+  onViewShortcut: (view: AppView) => void;
   filteredPacketsRef: RefObject<Packet[]>;
   selectedPacketRef: RefObject<Packet | null>;
   isCapturingRef: RefObject<boolean>;
@@ -38,6 +41,7 @@ export interface KeyboardNavigationOptions {
 export function useKeyboardNavigation({
   detailPacketId,
   canCapture,
+  onViewShortcut,
   filteredPacketsRef,
   selectedPacketRef,
   isCapturingRef,
@@ -64,7 +68,46 @@ export function useKeyboardNavigation({
         return;
       }
 
-      if (e.code === "Space") {
+      /**
+       * Ctrl+1..4 switch views. Taken before the input guard above? No - after,
+       * deliberately: a digit typed into the filter box is a filter, and these
+       * carry a modifier precisely so they do not collide with typing anywhere
+       * else. Digits were entirely unbound before this.
+       *
+       * `APP_VIEWS` order IS the numbering, so the rail's tooltips and this
+       * cannot disagree about which key opens what.
+       */
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+        const at = Number.parseInt(e.key, 10);
+        const view = Number.isInteger(at) ? APP_VIEWS[at - 1] : undefined;
+        if (view !== undefined) {
+          e.preventDefault();
+          onViewShortcut(view.id);
+          return;
+        }
+      }
+
+      /**
+       * Space toggles capture, and it is scoped **positively**.
+       *
+       * It used to be scoped by exclusion - everything except an input or a
+       * textarea - which was correct only while nothing else in the window was
+       * focusable. The activity rail is thirteen buttons, and Space on a focused
+       * button is how a button is pressed: under the old rule, tabbing to Start
+       * and pressing Space both activated it and ran this handler's
+       * `preventDefault`, so the button's own activation was suppressed and the
+       * capture toggled anyway - the same outcome by the wrong route, and the
+       * wrong outcome entirely on the other twelve.
+       *
+       * So it now fires only where there is nothing else Space could mean: the
+       * body itself, or inside the packet list. Every control added to this
+       * window from here on is safe by default rather than by being remembered.
+       */
+      const target = e.target;
+      const spaceIsOurs = target === document.body
+        || (target instanceof Element && target.closest('[role="grid"]') !== null);
+
+      if (e.code === "Space" && spaceIsOurs) {
         e.preventDefault();
         // Mirror the Header start/stop buttons: flip local state and tell the
         // agent, rather than just flipping local state (which used to be
@@ -138,5 +181,7 @@ export function useKeyboardNavigation({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canCapture, detailPacketId]);
+    // `onViewShortcut` joins the deps rather than going through a ref: it is
+    // a stable `useCallback` in App, so this re-registers once, not per flush.
+  }, [canCapture, detailPacketId, onViewShortcut]);
 }

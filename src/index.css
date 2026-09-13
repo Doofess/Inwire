@@ -323,6 +323,55 @@
   animation: nv-morph-in 180ms ease-out;
 }
 
+/* --- The window's own title bar -------------------------------------------
+
+   `titleBarStyle: 'hidden'` removes the OS caption strip but keeps the frame,
+   so the window still has Windows' resize borders, Snap Layouts and focus
+   shadow. Two things become ours: saying which parts of our chrome drag the
+   window, and keeping clear of the buttons Windows still draws.
+
+   These are plain classes and NOT custom properties on `:root`. That block is
+   the theme baseline, and `scripts/themes/registry.ts` requires every token in
+   it to be redeclared by all four theme blocks - correctly, since a colour
+   declared only there is silently inherited. A layout constant has no business
+   in that set. The two sizes it would have held are Tailwind's own scale
+   already: the rail is `w-14` (56px) and the title row `h-10` (40px). */
+
+/* Drags the window. Applied to the title row and the rail's top cell.
+
+   `-webkit-app-region` is the only name Chromium implements; there is no
+   unprefixed form to pair it with. */
+.app-drag {
+  -webkit-app-region: drag;
+  /* A drag region swallows text selection, which is right for the strip itself
+     and wrong for anything it contains - so the children opt back out. */
+  user-select: none;
+}
+
+/* Opts a control back out of its dragging ancestor.
+
+   Every interactive thing inside a drag region needs this: without it a button
+   in the title row moves the window instead of being pressed, and the only
+   symptom is a click that does nothing. */
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Keeps the title row clear of the native buttons.
+
+   The reserved area is NOT a constant: it is about 138px at 100% scaling and
+   about 207px at 150%, and a hardcoded value puts our own controls underneath
+   Windows' close button on any machine that is not at 100%. `env()` is the only
+   thing that knows.
+
+   The fallback is `100vw`, so the padding computes to zero where there is no
+   overlay at all - `npm run dev` in a browser, and every platform but Windows.
+   Written as `100vw` rather than `0px` for exactly that reason: the value is
+   subtracted, so the neutral fallback is the full width. */
+.titlebar-reserve {
+  padding-right: calc(100vw - env(titlebar-area-width, 100vw));
+}
+
 @keyframes nv-menu-out {
   from {
     opacity: 1;

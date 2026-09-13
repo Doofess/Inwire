@@ -32,6 +32,18 @@ import { usePreferenceStore, usePreferenceValue } from "./services/preferenceSto
 import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { DashboardAside } from "./components/analytics/DashboardAside";
+import { shortInterfaceLabel } from "./services/captureInterfaces";
+import { ActivityRail } from "./components/common/ActivityRail";
+import { TitleRow } from "./components/common/TitleRow";
+import { FilterRow } from "./components/common/FilterRow";
+import { AppMenu } from "./components/common/AppMenu";
+import {
+  useTitleBarTheme, useWindowChrome, useWindowTitle, windowTitleFor,
+} from "./lib/windowChrome";
+import {
+  restoredView, viewStore, type AppView,
+} from "./services/viewPrefs";
+import { dashboardStore } from "./services/dashboardPrefs";
 import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Capabilities, Packet } from "./types/packet";
@@ -75,7 +87,6 @@ import {
 } from "./services/agentProtocol";
 
 // UI Components
-import { Header } from "./components/common/Header";
 import { FilterBar } from "./components/common/FilterBar";
 import { PacketList } from "./components/packet-list/PacketList";
 import { PacketDetailsTree } from "./components/packet-details/PacketDetailsTree";
@@ -204,6 +215,12 @@ export default function App() {
   // Resolves the "System" picker entry into a concrete theme, and keeps
   // resolving it when the OS setting changes.
   useSystemThemePreference();
+  // And tells main, which colours the native window buttons from it. Sends the
+  // RESOLVED name: "system" is a rule, not a palette.
+  useTitleBarTheme(resolvedTheme);
+  // Maximized and focused are facts only main is told, and a window drawing its
+  // own title bar has to draw what the frame used to.
+  const { focused: windowFocused } = useWindowChrome();
   const isDark = isDarkTheme(resolvedTheme);
 
   // The packet list's colours, derived from the app theme rather than chosen
@@ -392,6 +409,40 @@ export default function App() {
   const [showStatisticsModal, setShowStatisticsModal] = useState(false);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+
+  /**
+   * Which of the four surfaces the rail says we are on.
+   *
+   * Persisted, and `restoredView` decides what is resumable - `stream` is a
+   * legal stored value and is not a restorable one, because the conversation it
+   * pointed at lived in a buffer that is being rebuilt.
+   *
+   * **In this step the three non-Packets views are still modals.** The rail is
+   * the single source of truth and an effect below opens the matching modal, so
+   * the group is exercised before it is converted. Step 4b replaces that effect
+   * with real panes, one commit at a time; nothing else here changes when it
+   * does, which is the point of routing through a view id now rather than
+   * wiring the rail straight to three booleans.
+   */
+  const [viewPrefs, patchViewPrefs] = usePreferenceStore(viewStore);
+  usePreferenceSync(viewStore.key, viewStore.normalize, viewStore.accept);
+  const [view, setViewState] = useState<AppView>(() => restoredView(viewPrefs.view));
+  const setView = useCallback((next: AppView) => {
+    setViewState(next);
+    patchViewPrefs({ view: next });
+  }, [patchViewPrefs]);
+
+  // The widget group drives the dashboard's own `enabled` flags, which is what
+  // the old right-hand column already reads. Step 5 points the same toggle at
+  // the dock; until then the rail controls the column that exists.
+  const [dashboardPrefs, patchDashboardPrefs] = usePreferenceStore(dashboardStore);
+  usePreferenceSync(dashboardStore.key, dashboardStore.normalize, dashboardStore.accept);
+  const toggleWidget = useCallback((type: string) => {
+    patchDashboardPrefs({
+      widgets: dashboardPrefs.widgets.map((w) =>
+        w.type === type ? { ...w, enabled: !w.enabled } : w),
+    });
+  }, [dashboardPrefs.widgets, patchDashboardPrefs]);
   /**
    * How this machine's adapters are configured, and who this machine is.
    *
@@ -1393,10 +1444,42 @@ export default function App() {
   const selectedPacketRef = useRef(selectedPacket);
   selectedPacketRef.current = selectedPacket;
 
+  /**
+   * Opens the modal the active view names. Deleted by Step 4b.
+   *
+   * One direction only: the rail writes `view`, this reflects it. The modals'
+   * own close handlers write `view` back to `packets`, so there is still exactly
+   * one source of truth and no two-way sync to get stuck in a loop.
+   */
+  useEffect(() => {
+    setShowStatisticsModal(view === 'statistics');
+    setShowNetworkModal(view === 'network');
+  }, [view]);
+
+  /**
+   * Escape in a non-Packets view returns to Packets.
+   *
+   * **Last in the chain, by construction.** Every inner consumer - the palette,
+   * the filter presets dropdown, the discard prompt, the geo overlay - listens in
+   * the capture phase and calls `stopPropagation`, so this bubble-phase listener
+   * only ever sees an Escape that nothing else claimed. Registering it in the
+   * capture phase instead would make it the FIRST to see the key and navigate
+   * out from under an open popover.
+   */
+  useEffect(() => {
+    if (view === 'packets') return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setView('packets');
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [view, setView]);
+
   // Window-level keyboard shortcuts - see hooks/useKeyboardNavigation.ts.
   useKeyboardNavigation({
     detailPacketId,
     canCapture: permissions.canCapture,
+    onViewShortcut: setView,
     filteredPacketsRef,
     selectedPacketRef,
     isCapturingRef,
@@ -1815,26 +1898,72 @@ export default function App() {
     () => (showSettingsModal ? dashboardPackets.reduce((sum, p) => sum + p.length, 0) : 0),
     [dashboardPackets, showSettingsModal],
   );
+  /**
+   * What the window calls itself. Pure, and asserted without a window.
+   *
+   * The adapter leads when capturing: an analyst with four windows open is
+   * looking for the one on the interface they care about, and "Inwire" four
+   * times in the taskbar says nothing.
+   */
+  const captureAdapter = (() => {
+    const label = agentInterfaces.find((i) => i.name === selectedInterfaces[0])?.label;
+    return label === undefined ? null : shortInterfaceLabel(label);
+  })();
+  // One string, used twice: the OS taskbar gets it through main, and the title
+  // row shows it. Computed once so the two cannot say different things.
+  const windowTitle = windowTitleFor({
+    capturing: isCapturing, adapter: captureAdapter, packets: packets.length,
+  });
+  useWindowTitle(windowTitle);
+
   return (
     <div className="h-screen w-screen flex font-sans overflow-hidden transition-colors bg-background text-foreground">
-      {/* 1. Main Workstation Body */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Top Command Bar & Stream Interface */}
+      {/* The rail spans the full window height, so it reaches the top and its
+          own 40px cell sits level with the title row beside it. That is the
+          whole reason it is here rather than inside <main>. */}
+      <ActivityRail
+        isCapturing={isCapturing}
+        onStartCapture={handleStartCapture}
+        onStopCapture={handlePauseCapture}
+        onClearPackets={handleClearPackets}
+        bufferedPackets={packets.length}
+        permissions={permissions}
+        agentInterfaces={agentInterfaces}
+        selectedInterfaces={selectedInterfaces}
+        onSelectInterface={handleSelectInterface}
+        interfaceRates={interfaceRates}
+        onInterfacePickerOpenChange={handleInterfacePickerOpenChange}
+        captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
+        agentHealth={agentHealth}
+        view={view}
+        onViewChange={setView}
+        streamAvailable={streamToFollow !== null}
+        widgets={dashboardPrefs.widgets}
+        onToggleWidget={toggleWidget}
+        onOpenSettings={() => setShowSettingsModal(true)}
+        onOpenUpdates={() => setShowSettingsModal(true)}
+        updateAvailable={false}
+      />
 
-        <Header
+      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* 40px, matching TITLE_BAR_HEIGHT and therefore what the native overlay
+            reserves. Almost all drag region - the capture controls moved into the
+            rail precisely so this row could be nearly empty. */}
+        <TitleRow title={windowTitle} focused={windowFocused}>
+          <AppMenu
+            onOpenDissectorModal={() => setShowDissectorModal(true)}
+            onOpenExportModal={() => setShowExportModal(true)}
+            onOpenStatisticsModal={() => setView('statistics')}
+            onOpenNetworkModal={() => setView('network')}
+            nameResolution={nameResolution}
+            onNameResolutionChange={patchNameResolution}
+            onOpenSettingsModal={() => setShowSettingsModal(true)}
+          />
+        </TitleRow>
+
+        <FilterRow
           isCapturing={isCapturing}
-          onStartCapture={handleStartCapture}
-          onPauseCapture={handlePauseCapture}
-          // Was `() => setPackets([])`, which emptied the list but left the
-          // packet-number counter and the relative-time clock running, so a
-          // cleared buffer kept counting from wherever the last one stopped.
-          onClearPackets={handleClearPackets}
-          agentInterfaces={agentInterfaces}
-          selectedInterfaces={selectedInterfaces}
-          onSelectInterface={handleSelectInterface}
-          interfaceRates={interfaceRates}
-          captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
-          onInterfacePickerOpenChange={handleInterfacePickerOpenChange}
+          captureAdapter={captureAdapter}
           schedule={schedule}
           onScheduleChange={setSchedule}
           schedulePresets={schedulePresets}
@@ -1849,39 +1978,29 @@ export default function App() {
           )}
           scheduleNow={scheduleNow}
           bufferedPackets={packets.length}
-          permissions={permissions}
-          onOpenDissectorModal={() => setShowDissectorModal(true)}
-          onOpenExportModal={() => setShowExportModal(true)}
-          onOpenStatisticsModal={() => setShowStatisticsModal(true)}
-          nameResolution={nameResolution}
-          onNameResolutionChange={patchNameResolution}
-          onOpenNetworkModal={() => setShowNetworkModal(true)}
-          filterSlot={
-          <FilterBar
-            filterText={filterText}
-            onFilterChange={setFilterText}
-            onApplyFilter={(newFilter?: string) =>
-              setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
-            }
-            totalPackets={captureRowCount}
-            filteredPackets={shownRowCount}
-            filterScan={captureFilter.state}
-            scanUncovered={filterUncovered}
-            onRescan={captureFilter.rescan}
-            packetSearchText={packetSearchText}
-            onPacketSearchChange={setPacketSearchText}
-            filterPresetLibrary={filterPresetLibrary}
-            onSaveCurrentFilter={handleSaveCurrentFilter}
-          />
-          }
-          onOpenSettingsModal={() => setShowSettingsModal(true)}
-          agentStatus={agentStatus}
-          agentLinkEnabled={agentLinkEnabled}
-          agentHealth={agentHealth}
-          totalPacketsCount={packets.length}
           restoreProgress={restoreProgress}
+          agentHealth={agentHealth}
+          agentLinkEnabled={agentLinkEnabled}
+          onOpenDriverInfo={() => setShowSettingsModal(true)}
+          filterSlot={
+            <FilterBar
+              filterText={filterText}
+              onFilterChange={setFilterText}
+              onApplyFilter={(newFilter?: string) =>
+                setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
+              }
+              totalPackets={captureRowCount}
+              filteredPackets={shownRowCount}
+              filterScan={captureFilter.state}
+              scanUncovered={filterUncovered}
+              onRescan={captureFilter.rescan}
+              packetSearchText={packetSearchText}
+              onPacketSearchChange={setPacketSearchText}
+              filterPresetLibrary={filterPresetLibrary}
+              onSaveCurrentFilter={handleSaveCurrentFilter}
+            />
+          }
         />
-
 
         {/* Central Inspection + Analytics Split Grid */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
@@ -2159,7 +2278,10 @@ export default function App() {
             // What the tables could not count. The buffer is the capture until
             // it fills, and silently stops being it after that.
             droppedBuffer={droppedBuffer}
-            onClose={() => setShowStatisticsModal(false)}
+            // Writes the VIEW, not the boolean: the effect above owns the boolean,
+            // so closing here and leaving `view` on 'statistics' would reopen it on
+            // the next render. Step 4b turns this into leaving a pane.
+            onClose={() => setView('packets')}
           />
         )}
       </AnimatePresence>
@@ -2168,7 +2290,7 @@ export default function App() {
         {showNetworkModal && (
           <NetworkModal
             key="network-modal"
-            onClose={() => setShowNetworkModal(false)}
+            onClose={() => setView('packets')}
             adapters={adapters}
             facts={networkFacts}
             captureInterfaces={selectedInterfaces}
