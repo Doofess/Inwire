@@ -307,19 +307,11 @@ export interface WidgetInstance {
   type: WidgetTypeId;
   /** What the user renamed it to. Absent means "use the type's label". */
   title?: string;
-  /**
-   * Switched off rather than deleted - there is no deleting.
-   *
-   * A disabled widget is not rendered at all, so it stops recalculating as
-   * packets arrive. That is the whole of what removing one used to do, without
-   * the half that could not be undone.
-   */
-  enabled: boolean;
   config: WidgetConfig;
 }
 
 export function createWidget(type: WidgetTypeId): WidgetInstance {
-  return { type, enabled: true, config: defaultConfig(type) };
+  return { type, config: defaultConfig(type) };
 }
 
 /** The name to show: what the user called it, or what it is. */
@@ -333,54 +325,18 @@ export function widgetTitle(widget: WidgetInstance): string {
 // ---------------------------------------------------------------------------
 
 /**
- * How much of the dashboard is showing.
+ * What a widget IS, as opposed to where it is drawn.
  *
- * `icons` is not merely a smaller `full`. The full column needs about 384px and
- * is hidden below the `lg` breakpoint, so on a laptop-width window the
- * dashboard simply does not exist and nothing says so. A 48px rail fits where
- * the column cannot, which makes this the only way some users will see these
- * widgets at all.
+ * `mode` and `width` lived here and are gone with the right-hand column they
+ * described - a three-way full/icons/hidden and a width that morphed into a 48px
+ * rail below 200px. Which widgets are open, in what order, how wide the dock is
+ * and what is pinned are all `inwire.dock` now; `services/dockPrefs.ts` explains
+ * the split and carries the one-time migration.
+ *
+ * What is left is the pair that is true of a widget wherever it is drawn: what
+ * the user renamed it to, and how it is configured.
  */
-export type DashboardMode = 'full' | 'icons' | 'hidden';
-
-/**
- * The widths the column moves between.
- *
- * `MORPH` is the interesting one: it is the width at which a column stops
- * being a column. Drag narrower than this and the widgets have less room than
- * their own headings need, so rather than showing squeezed cards the dashboard
- * becomes the icon rail - and dragging back out past it turns it into a column
- * again. One gesture, both directions, no mode control involved.
- *
- * The rail width matches the packet detail window's own rail (FrameMetaRail),
- * because two 48px icon strips in one app that disagree by a few pixels is
- * something you only notice when they are on screen together.
- */
-export const DASHBOARD_RAIL_WIDTH = 48;
-export const DASHBOARD_MORPH_WIDTH = 200;
-export const DASHBOARD_MAX_WIDTH = 640;
-
-/**
- * How wide a widget is at the default column width, in pixels.
- *
- * This is the size the rail's popout bubbles are drawn at: the point of the
- * bubble is that it IS the widget rather than a shrunken preview of it, so it
- * is the width that widget has in a column nobody has resized - 384 less the
- * column's own 16px of padding on each side. Exported because the bubble lives
- * in a portalled popover and so cannot measure the column it came from.
- */
-export const WIDGET_CARD_WIDTH = 352;
-
 export interface DashboardPrefs {
-  mode: DashboardMode;
-  /**
-   * How wide the full column is, in pixels.
-   *
-   * Kept while the rail is showing rather than collapsed to 48, so expanding
-   * gives back the column the user had rather than a default one. That is also
-   * why it is stored beside `mode` instead of being derived from it.
-   */
-  width: number;
   widgets: WidgetInstance[];
 }
 
@@ -397,24 +353,14 @@ export function defaultWidgets(): WidgetInstance[] {
 }
 
 export const DASHBOARD_DEFAULTS: DashboardPrefs = {
-  mode: 'full',
-  // What `lg:w-96` gave before the column could be dragged, so nobody's
-  // dashboard changes size the first time they load a build with this in it.
-  width: 384,
   // Built once, and never handed out to be edited. It has to be a stable
   // reference rather than a getter returning a fresh list: this object IS the
   // store's value when nothing is stored yet, so a getter would hand every
-  // reader a new array identity on every read, and the memo in DashboardAside
-  // that keys on the widget list would rebuild the whole column forever.
-  // Callers that want a fresh copy call `defaultWidgets()`, which is what this
-  // was built from.
+  // reader a new array identity on every read, and a memo keyed on the widget
+  // list would rebuild forever. Callers that want a fresh copy call
+  // `defaultWidgets()`, which is what this was built from.
   widgets: defaultWidgets(),
 };
-
-/** Clamped rather than rejected - see normalizeDashboard. */
-export function clampDashboardWidth(value: number): number {
-  return Math.round(Math.max(DASHBOARD_MORPH_WIDTH, Math.min(value, DASHBOARD_MAX_WIDTH)));
-}
 
 /**
  * What the widget ids meant before the dashboard was user-built.
@@ -481,7 +427,6 @@ export function normalizeWidgets(raw: unknown): WidgetInstance[] {
       // Absent means shown. Only an explicit `false` switches a widget off, so
       // a list written by a build that predates the field comes back with
       // everything visible rather than everything hidden.
-      enabled: v.enabled !== false,
       config: normalizeConfig(type, v.config),
     });
   }
@@ -501,8 +446,10 @@ export function normalizeWidgets(raw: unknown): WidgetInstance[] {
  * `type` and ignores `id`, so those lists - duplicates and all - already land
  * on one widget per type with their order intact.
  */
-function migrateLegacyWidgets(order: unknown, disabled: unknown): WidgetInstance[] {
-  const off = new Set(Array.isArray(disabled) ? disabled.filter((d) => typeof d === 'string') : []);
+function migrateLegacyWidgets(order: unknown): WidgetInstance[] {
+  // `disabled` was the second argument and is no longer read: which widgets are
+  // shown is `inwire.dock`'s, and its own migration reads the raw key for that.
+  // This one carries only the order and the types.
   const seen = new Set<WidgetTypeId>();
   const out: WidgetInstance[] = [];
 
@@ -511,7 +458,7 @@ function migrateLegacyWidgets(order: unknown, disabled: unknown): WidgetInstance
     const type = LEGACY_TYPES[legacy];
     if (!type || seen.has(type)) continue;
     seen.add(type);
-    out.push({ type, enabled: !off.has(legacy), config: defaultConfig(type) });
+    out.push({ type, config: defaultConfig(type) });
   }
 
   // Whatever that build did not have. `normalizeWidgets` would do this anyway;
@@ -528,24 +475,18 @@ export function normalizeDashboard(raw: unknown): DashboardPrefs | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const v = raw as Record<string, unknown>;
 
+  // `mode` and `width` were read here and are not any more. A key written by an
+  // older build still HAS them; they are ignored rather than migrated, because
+  // `dockPrefs.ts` reads this same raw key once to seed `inwire.dock` and is the
+  // only thing that still has any use for them. Deleting them from storage here
+  // would take that away before it ran.
   return {
-    mode:
-      v.mode === 'full' || v.mode === 'icons' || v.mode === 'hidden'
-        ? v.mode
-        : DASHBOARD_DEFAULTS.mode,
-    // Clamped, not rejected: a width stored on a much wider monitor must not
-    // leave the column occupying a screen it no longer fits, but throwing the
-    // value away would take the widget list with it.
-    width:
-      typeof v.width === 'number' && Number.isFinite(v.width)
-        ? clampDashboardWidth(v.width)
-        : DASHBOARD_DEFAULTS.width,
     // The legacy branch is keyed on the ABSENCE of `widgets` rather than on the
     // presence of `order`, so a half-written key - one this app wrote, then a
     // hand edit stripped a field from - still lands on the modern shape.
     widgets:
       v.widgets === undefined
-        ? migrateLegacyWidgets(v.order, v.disabled)
+        ? migrateLegacyWidgets(v.order)
         : normalizeWidgets(v.widgets),
   };
 }

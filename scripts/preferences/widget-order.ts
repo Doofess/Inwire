@@ -21,19 +21,23 @@
  *   - `{ widgets: [{ id, type, ... }] }` from the short-lived build that let the
  *     user create widgets, which could contain the same type twice.
  *
+ * **`mode`, `width` and `enabled` are no longer here.** They described the
+ * right-hand column - three-way full/icons/hidden, a width that morphed into a
+ * 48px rail, and a per-widget switch - and they moved to `inwire.dock` with it.
+ * `scripts/session/dock.ts` covers them now, including the one-time migration out
+ * of this key. What is left here is what a widget IS: its type, its name and its
+ * config, and the postcondition below that the list is always a permutation of
+ * the registry.
+ *
  * Note this file imports from services/dashboardPrefs and not from the widget
  * registry. The registry imports GeoMap, which imports maplibre-gl at module
  * scope; under tsx there is no browser for it to attach to. Keeping the types
  * and the validators in a plain module is what makes them testable at all.
  */
 import {
-  DASHBOARD_MAX_WIDTH,
-  DASHBOARD_MORPH_WIDTH,
-  DASHBOARD_RAIL_WIDTH,
   DASHBOARD_DEFAULTS,
   WIDGET_TYPES,
   WIDGET_TYPE_IDS,
-  clampDashboardWidth,
   createWidget,
   defaultConfig,
   defaultWidgets,
@@ -58,7 +62,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 
 /** The shape assertions care about, without the config noise. */
 const shape = (widgets: WidgetInstance[]) =>
-  widgets.map((w) => `${w.type}${w.enabled ? '' : ':off'}`);
+  widgets.map((w) => w.type);
 
 const ALL = [...WIDGET_TYPE_IDS];
 
@@ -197,12 +201,12 @@ check(
 check(
   'a new widget of a type carries that type defaults',
   createWidget('talkers'),
-  { type: 'talkers', enabled: true, config: { view: 'flows', top: 5 } },
+  { type: 'talkers', config: { view: 'flows', top: 5 } },
 );
 
 check(
   'an untitled widget shows its type name',
-  widgetTitle({ type: 'breakdown', enabled: true, config: {} }),
+  widgetTitle({ type: 'breakdown', config: {} }),
   'Protocol breakdown',
 );
 
@@ -211,10 +215,10 @@ check(
 check(
   'a well-formed list is left in the order it was given',
   shape(normalizeWidgets([
-    { type: 'sizes', enabled: true },
-    { type: 'geo', enabled: false },
+    { type: 'sizes' },
+    { type: 'geo' },
   ])),
-  ['sizes', 'geo:off', 'timeseries', 'breakdown', 'talkers'],
+  ['sizes', 'geo', 'timeseries', 'breakdown', 'talkers'],
 );
 
 check(
@@ -226,11 +230,11 @@ check(
 check(
   'a repeated type collapses to its first appearance',
   shape(normalizeWidgets([
-    { type: 'talkers', enabled: false },
-    { type: 'talkers', enabled: true },
-    { type: 'talkers', enabled: true },
+    { type: 'talkers' },
+    { type: 'talkers' },
+    { type: 'talkers' },
   ])).slice(0, 1),
-  ['talkers:off'],
+  ['talkers'],
 );
 
 check(
@@ -243,13 +247,7 @@ check(
 check(
   'ids from the build that had them are ignored, not carried',
   Object.keys(normalizeWidgets([{ id: 'talkers-7', type: 'talkers' }])[0]).sort(),
-  ['config', 'enabled', 'type'],
-);
-
-check(
-  'a widget with no enabled field is shown, not hidden',
-  normalizeWidgets([{ type: 'sizes' }])[0].enabled,
-  true,
+  ['config', 'type'],
 );
 
 check(
@@ -327,7 +325,6 @@ for (const junk of [null, undefined, 'geo', 7, {}, [[]], [null], [{ id: 'geo' }]
     'talkers',
     'sizes',
   ]);
-  check('...at the width it was stored at', out!.width, 512);
 }
 
 check(
@@ -336,10 +333,13 @@ check(
   ['talkers', 'geo', 'breakdown', 'timeseries', 'sizes'],
 );
 
+// Which widgets were switched off is `inwire.dock`'s answer now, and
+// `scripts/session/dock.ts` asserts that the migration carries it. What this
+// one still guards is that a legacy `disabled` list does not disturb the ORDER.
 check(
-  'legacy widgets that were switched off are still switched off',
+  'a legacy disabled list leaves the order alone',
   shape(normalizeDashboard({ order: ['geo', 'timeline'], disabled: ['timeline'] })!.widgets),
-  ['geo', 'timeseries:off', 'breakdown', 'sizes', 'talkers'],
+  ['geo', 'timeseries', 'breakdown', 'sizes', 'talkers'],
 );
 
 check(
@@ -359,7 +359,7 @@ check(
   // of `widgets` is what decides, so a stale `order` sitting beside it - which
   // is exactly what one upgrade-then-downgrade leaves behind - is ignored.
   const out = normalizeDashboard({
-    widgets: [{ type: 'sizes', enabled: true, config: {} }],
+    widgets: [{ type: 'sizes', config: {} }],
     order: ['geo', 'timeline', 'protocols', 'talkers'],
   });
   check('a modern list wins over a stale legacy order beside it', shape(out!.widgets)[0], 'sizes');
@@ -372,9 +372,9 @@ check(
     mode: 'full',
     width: 384,
     widgets: [
-      { id: 'talkers', type: 'talkers', enabled: true, config: { view: 'hosts', top: 8 } },
-      { id: 'breakdown', type: 'breakdown', enabled: true, config: {} },
-      { id: 'breakdown-2', type: 'breakdown', enabled: true, config: { chart: 'donut' } },
+      { id: 'talkers', type: 'talkers', config: { view: 'hosts', top: 8 } },
+      { id: 'breakdown', type: 'breakdown', config: {} },
+      { id: 'breakdown-2', type: 'breakdown', config: { chart: 'donut' } },
     ],
   });
   check('the builder build migrates, deduped and in order', shape(out!.widgets), [
@@ -391,90 +391,6 @@ check(
 }
 
 // --- The whole preference ---------------------------------------------------
-
-{
-  // The sibling-survival property: a broken list must not take `mode` down with
-  // it, or a corrupt widget silently un-minimizes the dashboard.
-  const out = normalizeDashboard({ mode: 'icons', widgets: 'nonsense' });
-  check('a broken list does not discard the mode beside it',
-    [out!.mode, shape(out!.widgets)], ['icons', ALL]);
-}
-
-{
-  const out = normalizeDashboard({ mode: 'sideways', widgets: [{ type: 'sizes' }] });
-  check('an unknown mode falls back while the list survives',
-    [out!.mode, shape(out!.widgets)[0]], [DASHBOARD_DEFAULTS.mode, 'sizes']);
-}
-
-check('a non-object is rejected outright so the caller uses defaults', normalizeDashboard('icons'), null);
-
-// --- The dragged width ------------------------------------------------------
-
-{
-  // Clamped rather than rejected, and the reason is the same as everywhere else
-  // on this tab: a width stored on a 34-inch monitor must not leave the column
-  // occupying most of a laptop screen, but discarding it would take the whole
-  // widget list with it.
-  check('a width wider than the maximum is clamped',
-    normalizeDashboard({ width: 5000 })?.width, DASHBOARD_MAX_WIDTH);
-  check('...and one below the morph point is clamped up to it',
-    normalizeDashboard({ width: 10 })?.width, DASHBOARD_MORPH_WIDTH);
-  // 48 is the RAIL's width, and it is not a column width. Storing it as one
-  // would mean expanding the rail produced a 48px column - a dashboard that
-  // appears to refuse to open.
-  check('the rail width is not a legal column width',
-    clampDashboardWidth(DASHBOARD_RAIL_WIDTH), DASHBOARD_MORPH_WIDTH);
-}
-
-check('a width that is not a number defaults rather than throwing',
-  [
-    normalizeDashboard({ width: 'wide' })?.width,
-    normalizeDashboard({ width: NaN })?.width,
-    normalizeDashboard({ width: Infinity })?.width,
-    normalizeDashboard({ width: null })?.width,
-  ],
-  [
-    DASHBOARD_DEFAULTS.width, DASHBOARD_DEFAULTS.width,
-    DASHBOARD_DEFAULTS.width, DASHBOARD_DEFAULTS.width,
-  ]);
-
-{
-  // The morph point has to sit inside the legal range, or there is a band of
-  // widths the column can be dragged to and never stored at.
-  check('the morph point is the narrowest column, not a value below it',
-    DASHBOARD_MORPH_WIDTH < DASHBOARD_MAX_WIDTH && DASHBOARD_RAIL_WIDTH < DASHBOARD_MORPH_WIDTH,
-    true);
-  check('a valid width survives a round trip unchanged',
-    normalizeDashboard({ width: 421 })?.width, 421);
-}
-
-// --- Round trip -------------------------------------------------------------
-
-{
-  // What the app writes, the app must read back unchanged - otherwise every
-  // load quietly rewrites the key and the debounced writer never settles.
-  //
-  // Stated as idempotence rather than as equality against a hand-built list,
-  // and the distinction is not pedantic: `preferenceStore.set` compares with
-  // JSON.stringify, so KEY ORDER is part of "unchanged". Comparing against a
-  // literal would only prove the literal was typed in the writer's field order.
-  const built = defaultWidgets();
-  built[1].title = 'Egress';
-  built[2].enabled = false;
-  built[2].config = { ...built[2].config, chart: 'donut', metric: 'bytes' };
-
-  const once = normalizeDashboard(JSON.parse(JSON.stringify({ mode: 'icons', width: 421, widgets: built })));
-  const twice = normalizeDashboard(JSON.parse(JSON.stringify(once)));
-  check('normalizing an already-normalized dashboard changes nothing at all', twice, once);
-
-  // ...and that the round trip actually kept everything, rather than settling
-  // on some other list that would also be idempotent.
-  check('the round trip keeps every widget, its name and its switch',
-    shape(once!.widgets), ['geo', 'timeseries', 'breakdown:off', 'sizes', 'talkers']);
-  check('...including the rename', once!.widgets[1].title, 'Egress');
-  check('...including the settings', once!.widgets[2].config,
-    { metric: 'bytes', chart: 'donut', top: 5 });
-}
 
 console.log();
 if (failures) {

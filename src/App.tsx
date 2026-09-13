@@ -47,7 +47,7 @@ import {
 import {
   restoredView, viewStore, type AppView,
 } from "./services/viewPrefs";
-import { dashboardStore, widgetTitle } from "./services/dashboardPrefs";
+import { dashboardStore, widgetTitle, type WidgetConfig } from "./services/dashboardPrefs";
 import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Capabilities, Packet } from "./types/packet";
@@ -479,6 +479,40 @@ export default function App() {
   /** The geo map's window. Not persisted - it is a glance, not a setting. */
   const [expandedWidget, setExpandedWidget] = useState<string | null>(null);
   const [expandOrigin, setExpandOrigin] = useState<{ x: number; y: number } | undefined>();
+
+  /**
+   * Every callback the dock takes, stabilised.
+   *
+   * `Dock` is `React.memo`'d - the app's only memo boundary, inherited from the
+   * column it replaces - and an inline arrow in any one of these turns that memo
+   * into a no-op. It would still be correct, and it would hand ten renders a
+   * second to five widgets that each do a full pass over the buffer.
+   */
+  const dockConfigChange = useCallback((type: string, patch: WidgetConfig) => {
+    patchDashboardPrefs({
+      widgets: dashboardPrefs.widgets.map((w) =>
+        (w.type === type ? { ...w, config: { ...w.config, ...patch } } : w)),
+    });
+  }, [dashboardPrefs.widgets, patchDashboardPrefs]);
+
+  const dockTogglePinned = useCallback((type: string) => {
+    const item = dock.items.find((i) => i.type === type);
+    patchItem(type, { pinned: !(item?.pinned ?? false) });
+  }, [dock.items, patchItem]);
+
+  // Closing IS deselecting: there is no hidden-but-toggled state, which is the
+  // defect `mode: 'hidden'` used to be.
+  const dockClose = useCallback((type: string) => patchItem(type, { open: false }), [patchItem]);
+
+  const dockWidthChange = useCallback((width: number) => patchDock({ width }), [patchDock]);
+
+  const dockExpand = useCallback((type: string, from: HTMLElement | null) => {
+    const rect = from?.getBoundingClientRect();
+    setExpandOrigin(rect === undefined
+      ? undefined
+      : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+    setExpandedWidget(type);
+  }, []);
   /**
    * How this machine's adapters are configured, and who this machine is.
    *
@@ -1910,7 +1944,8 @@ export default function App() {
   /**
    * Everything the analytics widgets need, in one object.
    *
-   * Memoized because `DashboardAside` sits behind `React.memo`, and a context
+   * Memoized because `Dock` sits behind `React.memo` - as the right-hand column
+   * it replaces did, and for the same reason - and a context
    * rebuilt on every render would defeat that boundary entirely - this
    * component re-renders about ten times a second while capturing, which is
    * the whole reason the boundary is there.
@@ -2085,26 +2120,12 @@ export default function App() {
             width={dock.width}
             context={dashboardContext}
             widgets={dashboardPrefs.widgets}
-            onConfigChange={(type, patch) => patchDashboardPrefs({
-              widgets: dashboardPrefs.widgets.map((w) =>
-                (w.type === type ? { ...w, config: { ...w.config, ...patch } } : w)),
-            })}
+            onConfigChange={dockConfigChange}
             onReorder={reorderDock}
-            onTogglePinned={(type) => {
-              const item = dock.items.find((i) => i.type === type);
-              patchItem(type, { pinned: !(item?.pinned ?? false) });
-            }}
-            // Closing IS deselecting: there is no hidden-but-toggled state, which
-            // is the defect `mode: 'hidden'` used to be.
-            onClose={(type) => patchItem(type, { open: false })}
-            onWidthChange={(width) => patchDock({ width })}
-            onExpand={(type, from) => {
-              const rect = from?.getBoundingClientRect();
-              setExpandOrigin(rect === undefined
-                ? undefined
-                : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-              setExpandedWidget(type);
-            }}
+            onTogglePinned={dockTogglePinned}
+            onClose={dockClose}
+            onWidthChange={dockWidthChange}
+            onExpand={dockExpand}
           />
 
           {/* Main Packet Inspection Core */}
