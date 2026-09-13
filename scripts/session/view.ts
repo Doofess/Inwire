@@ -34,7 +34,7 @@ import {
   type AppView,
 } from '../../src/services/viewPrefs';
 import { WIDGET_TYPE_IDS } from '../../src/services/dashboardPrefs';
-import { MIN_WINDOW_HEIGHT, TITLE_BAR_HEIGHT } from '../../electron/window';
+import { MIN_WINDOW_HEIGHT } from '../../electron/window';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -217,10 +217,17 @@ console.log('\n--- the rail fits the smallest window ---\n');
   classIs('the button target', "const TARGET = 'w-9 h-9'");
   classIs('the gap inside a group', 'gap-0.5');
   classIs('the divider', 'my-1.5 h-px w-7');
-  classIs('the top cell', 'h-10 w-full shrink-0');
   classIs('the capture group\'s top padding', '${GROUP} pt-1');
   classIs('the bottom group\'s padding', '${GROUP} mt-auto pb-2');
   classIs('the rail\'s own width', 'w-14 shrink-0');
+  // The rail starts at the top now: the 40px cell that held the brand mark went
+  // with the mark, which is in the title row. An `h-10` cell coming back here
+  // would be 40px of rail height spent on nothing, and there is not 40px spare.
+  checkTrue('there is no top cell', !rail.includes('h-10 w-full shrink-0'));
+  // And with it went the rail's only drag region. The title row is where a
+  // window is grabbed; a rail that claimed part of the drag would be a strip of
+  // buttons that move the window instead of being pressed.
+  checkTrue('the rail is entirely no-drag', !rail.includes('app-drag'));
 
   const TARGET = 36;        // w-9
   const GAP = 2;            // gap-0.5
@@ -228,7 +235,6 @@ console.log('\n--- the rail fits the smallest window ---\n');
   const group = (items: number): number => items * TARGET + Math.max(0, items - 1) * GAP;
 
   const blocks = [
-    ['top cell, level with the title row', TITLE_BAR_HEIGHT],
     ['capture: adapter, Start/Stop', 4 + group(2)],
     ['divider', DIVIDER],
     [`views: ${ids.length}`, group(ids.length)],
@@ -252,7 +258,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // changed. Held here rather than trusted there, and it has earned that once
   // already: deleting the hamburger menu moved Custom Dissectors into the bottom
   // group, and this is the line that says what that cost.
-  check('the rail is as tall as it says it is', total, 541);
+  check('the rail is as tall as it says it is', total, 501);
   // The raw file, not `code()`: the figure lives in the header comment, which is
   // the first thing `code()` throws away. The point of this one is that the
   // prose and the arithmetic cannot part company again.

@@ -12,7 +12,6 @@ import {
 } from 'react-icons/tb';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
-import { BrandMark } from './BrandMark';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import { WIDGET_RENDERERS } from '../analytics/dashboardWidgets';
@@ -50,9 +49,9 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 12 icons, 36px targets, four dividers and a 40px top cell come to **541px**
- * against a 640px minimum window height. It fits, with 99px of slack - room for
- * two more icons.
+ * 12 icons, 36px targets and four dividers come to **501px** against a 640px
+ * minimum window height. It fits, with 139px of slack - room for three more
+ * icons, which this batch is about to spend.
  *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that
@@ -74,6 +73,11 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * the filter row had to be hidden above it and nowhere else, so it became a
  * Settings tab next to Driver Info. That is two icons back, and `Ctrl+3` now
  * opens Follow Stream.
+ *
+ * The last 40px came from **deleting the top cell**. It held the brand mark,
+ * aligned to the title row; the mark is centred in the title row itself now,
+ * which is where a desktop window keeps its identity rather than in a page's
+ * top-left corner. An empty cell would have been 40px spent on nothing.
  *
  * What has not changed is the rule for the next one: if a sixth widget arrives,
  * **the widgets group is the one that scrolls**.
@@ -298,23 +302,15 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       className="w-14 shrink-0 flex flex-col items-center border-r border-border bg-card
         text-card-foreground select-none"
     >
-      {/* Aligned to the title row so the mark sits level with the window title,
-          and part of the drag region: the rail is otherwise entirely no-drag,
-          but a window needs somewhere to be grabbed on the left. */}
-      <div className="h-10 w-full shrink-0 flex items-center justify-center app-drag">
-        {/* The real mark, not a `TbNetwork`. The first version of this used that
-            glyph and put it 42px above the adapter button, which uses the SAME
-            glyph - two near-identical icons at the top of the strip, one of
-            which is a logo and one a control. Caught by looking at it; no
-            assertion would have. The wordmark it used to sit beside needed
-            1280px of window to appear at all, and there is no room for it here.
+      {/* No top cell. It was 40px holding the brand mark, aligned to the title
+          row - and the mark is in the title row itself now, which is where a
+          desktop window keeps its identity. An empty 40px cell would have been
+          40px of rail height spent on nothing, and this rail has none to spare.
 
-            `text-chrome-brand` follows the Colourful setting, which is what the
-            old lockup did and the one place in the new chrome that still reads
-            that token. */}
-        <BrandMark className="w-6 h-6 text-chrome-brand" title="Inwire" />
-      </div>
-
+          It also carried `.app-drag`, so the window could be grabbed by the
+          top-left corner. That is gone with it: the title row is drag region
+          across its whole width bar the controls, which is where a window is
+          grabbed. The rail is now entirely no-drag. */}
       <div className={`${GROUP} pt-1`} role="group" aria-label="Capture">
         {agentInterfaces.length === 0 ? (
           // A dead end by design: there is no adapter list to open, and a button

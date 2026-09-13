@@ -1,4 +1,5 @@
 import React from 'react';
+import { BrandMark } from './BrandMark';
 import { WindowControls } from './WindowControls';
 
 /**
@@ -6,8 +7,23 @@ import { WindowControls } from './WindowControls';
  *
  * The capture controls went into the rail precisely so this row could be
  * empty, and the menu that used to trigger from its left edge is gone. What is
- * left is the window's own name in the middle and **the app's own three window
- * buttons** on the right - the window is frameless, so those are ours to draw.
+ * left is **the app's mark and the window's name, centred**, and the app's own
+ * three window buttons on the right - the window is frameless, so those are
+ * ours to draw.
+ *
+ * ## Why the mark is here and not in the rail
+ *
+ * It was in the rail's top cell, at the top-left corner, which is where a web
+ * page puts a logo. A desktop window does not: the identity belongs in the
+ * caption, which is the strip the OS reserves for exactly that, and which the
+ * taskbar and Alt+Tab echo. Putting it here also emptied the rail's 40px top
+ * cell, and the cell went with it - the rail starts at the very top now, like
+ * VS Code's activity bar. That is 40px of rail height reclaimed, which
+ * `scripts/session/view.ts` needed for the icons this batch adds.
+ *
+ * The mark takes `--card-foreground` and not `--chrome-brand`. That token was
+ * authored for a mark sitting on the saturated bar of the 64px header this
+ * replaced, and on `--card` it resolves to white-on-white in the light themes.
  *
  * **It holds no control at all, and that is the finished state rather than a
  * gap.** Every app this one is measured against does the same: VS Code's title
@@ -61,18 +77,24 @@ export const TitleRow: React.FC<TitleRowProps> = ({ title, focused, maximized })
       bg-card text-card-foreground app-drag transition-opacity
       ${focused ? '' : 'opacity-60'}`}
   >
-    {/* Balances the controls so the title is centred in the WINDOW rather than
-        in the space left over beside them. `aria-hidden` because it is spacing,
-        not content, and 138px because that is what three 46px buttons come to -
-        the one number in this file that has to track `WindowControls`. */}
+    {/* Balances the controls so the mark and title are centred in the WINDOW
+        rather than in the space left over beside them. `aria-hidden` because it
+        is spacing, not content, and 138px because that is what three 46px
+        buttons come to - the one number in this file that has to track
+        `WindowControls`. */}
     <div aria-hidden className="w-[138px] shrink-0" />
 
-    <span
-      className="flex-1 min-w-0 text-center text-[11px] font-medium tracking-wide
-        text-muted-foreground truncate"
-    >
-      {title}
-    </span>
+    <div className="flex-1 min-w-0 flex items-center justify-center gap-2">
+      {/* Titled, so it is the accessible name of the app rather than decoration
+          - this is the only place the app names itself visually now. */}
+      <BrandMark className="w-4 h-4 shrink-0 text-card-foreground" title="Inwire" />
+      <span
+        className="min-w-0 text-[11px] font-medium tracking-wide
+          text-muted-foreground truncate"
+      >
+        {title}
+      </span>
+    </div>
 
     <WindowControls maximized={maximized} />
   </header>

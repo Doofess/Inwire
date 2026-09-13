@@ -2002,9 +2002,7 @@ export default function App() {
   })();
   // One string, used twice: the OS taskbar gets it through main, and the title
   // row shows it. Computed once so the two cannot say different things.
-  const windowTitle = windowTitleFor({
-    capturing: isCapturing, adapter: captureAdapter, packets: packets.length,
-  });
+  const windowTitle = windowTitleFor({ capturing: isCapturing, adapter: captureAdapter });
   useWindowTitle(windowTitle);
 
   return (
