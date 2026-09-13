@@ -13,6 +13,7 @@ import {
 } from 'react-icons/tb';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
+import { BrandMark } from './BrandMark';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import { WIDGET_RENDERERS } from '../analytics/dashboardWidgets';
@@ -70,7 +71,12 @@ const GROUP = 'flex flex-col items-center gap-0.5 shrink-0';
  * separator announced between them would be noise on top of that.
  */
 const RailDivider: React.FC = () => (
-  <div aria-hidden className="my-1 h-px w-6 shrink-0 bg-border" />
+  // `border` on `card` is a small delta on the dark themes - measured on
+  // Graphite it is #292524 on #1c1917 - and at 1px by 24px the line was very
+  // nearly invisible, which left the grouping carried by the active states
+  // alone. Wider, and `muted-foreground` at low opacity so it reads on all four
+  // grounds rather than on the two light ones.
+  <div aria-hidden className="my-1.5 h-px w-7 shrink-0 bg-muted-foreground/30" />
 );
 
 /** The shared button shape. `active` styling is supplied per group. */
@@ -264,11 +270,17 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           and part of the drag region: the rail is otherwise entirely no-drag,
           but a window needs somewhere to be grabbed on the left. */}
       <div className="h-10 w-full shrink-0 flex items-center justify-center app-drag">
-        <span aria-hidden className="text-chrome-brand">
-          {/* The mark alone. The wordmark it used to sit beside needed 1280px of
-              window to appear at all, and there is no room for it here. */}
-          <TbNetwork className="w-5 h-5" />
-        </span>
+        {/* The real mark, not a `TbNetwork`. The first version of this used that
+            glyph and put it 42px above the adapter button, which uses the SAME
+            glyph - two near-identical icons at the top of the strip, one of
+            which is a logo and one a control. Caught by looking at it; no
+            assertion would have. The wordmark it used to sit beside needed
+            1280px of window to appear at all, and there is no room for it here.
+
+            `text-chrome-brand` follows the Colourful setting, which is what the
+            old lockup did and the one place in the new chrome that still reads
+            that token. */}
+        <BrandMark className="w-6 h-6 text-chrome-brand" title="Inwire" />
       </div>
 
       <div className={`${GROUP} pt-1`} role="group" aria-label="Capture">
