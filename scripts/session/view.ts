@@ -3,7 +3,7 @@
  *
  *   npx tsx scripts/session/view.ts
  *
- * Everything here guards a **silent** failure. The rail is a strip of thirteen
+ * Everything here guards a **silent** failure. The rail is a strip of a dozen
  * icons and a view is a whole surface, so the ways these can disagree all look
  * like working software:
  *
@@ -154,11 +154,21 @@ console.log('\n--- every view has a surface, and a conditional one is not restor
   checkTrue('the packet list is hidden rather than unmounted',
     app.includes("view === 'packets' ? undefined : { display: 'none' }"));
 
-  // Network describes the machine, not the capture, so a display filter above it
-  // would be a control with nothing to act on. One view hides the filter row and
-  // it is that one.
+  // This check used to read "only Network hides the filter row", and the day it
+  // could be inverted is the day Network stopped being a view.
+  //
+  // A display filter acts on the capture, so a view that hides the filter row is
+  // announcing that it is not a way of looking at the capture - which is what
+  // Network was: the machine's adapters, DNS and public identity, none of which
+  // change when a packet arrives. It is a Settings tab now, beside Driver Info.
+  //
+  // So the rule is the strong form: **no view hides the filter row.** Every
+  // remaining view IS the capture - the list is the frames, Statistics counts
+  // them, Follow Stream reads one conversation out of them. A future view that
+  // needs the row hidden has to fail here first and answer the question Network
+  // never did.
   const hidesFilterRow = [...app.matchAll(/view !== '([a-z]+)'/g)].map((m) => m[1]);
-  check('only Network hides the filter row', [...new Set(hidesFilterRow)], ['network']);
+  check('no view hides the filter row', [...new Set(hidesFilterRow)], []);
 }
 
 console.log('\n--- the stored view ---\n');
@@ -226,7 +236,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
     [`widgets: ${WIDGET_TYPE_IDS.length}`, group(WIDGET_TYPE_IDS.length)],
     // The bottom group carries its own divider, so the gap between that line and
     // the first button is the group's gap rather than the divider's margin.
-    ['bottom: Export/Import, Dissectors, Settings', DIVIDER + GAP + group(3) + 8],
+    ['bottom: Export/Import, Settings', DIVIDER + GAP + group(2) + 8],
   ] as const;
 
   let total = 0;
@@ -242,7 +252,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // changed. Held here rather than trusted there, and it has earned that once
   // already: deleting the hamburger menu moved Custom Dissectors into the bottom
   // group, and this is the line that says what that cost.
-  check('the rail is as tall as it says it is', total, 617);
+  check('the rail is as tall as it says it is', total, 541);
   // The raw file, not `code()`: the figure lives in the header comment, which is
   // the first thing `code()` throws away. The point of this one is that the
   // prose and the arithmetic cannot part company again.

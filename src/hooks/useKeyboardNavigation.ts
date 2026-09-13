@@ -92,7 +92,7 @@ export function useKeyboardNavigation({
        *
        * It used to be scoped by exclusion - everything except an input or a
        * textarea - which was correct only while nothing else in the window was
-       * focusable. The activity rail is thirteen buttons, and Space on a focused
+       * focusable. The activity rail is a dozen buttons, and Space on a focused
        * button is how a button is pressed: under the old rule, tabbing to Start
        * and pressing Space both activated it and ran this handler's
        * `preventDefault`, so the button's own activation was suppressed and the

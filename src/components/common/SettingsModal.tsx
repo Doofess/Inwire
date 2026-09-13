@@ -5,7 +5,7 @@ import type { LinkChange, LinkContext } from '../../services/linkContext';
 import { motion } from 'motion/react';
 import {
   TbSettings, TbX, TbPalette, TbActivity, TbFilter, TbTrash, TbEraser, TbLayoutBoard, TbAccessible, TbKey,
-  TbDownload,
+  TbDownload, TbCode, TbNetwork,
 } from 'react-icons/tb';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
@@ -16,6 +16,11 @@ import { AccessibilitySettingsPanel } from './AccessibilitySettingsPanel';
 import { DisplayFiltersPanel } from './DisplayFiltersPanel';
 import { ColorRulesPanel } from './ColorRulesPanel';
 import { DecryptionSettingsPanel } from './DecryptionSettingsPanel';
+import { CustomDissectorsPanel } from '../dissectors/CustomDissectorsPanel';
+import { NetworkPane } from '../network/NetworkPane';
+import type { CustomDissectorEngine } from '../../services/customDissectorEngine';
+import type { AgentAdapter } from '../../services/agentProtocol';
+import type { NetworkFacts } from '../../services/networkFacts';
 import type { AgentLogEntry } from '../../services/agentProtocol';
 import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/packet';
 import type { PacketTheme } from '../../services/packetThemes';
@@ -36,7 +41,8 @@ import type { CaptureStorageState } from '../../services/capture/captureProtocol
  * Reading "the driver is capturing" and "the buffer is 99% full" as two
  * separate visits made a single story into two.
  */
-type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters' | 'colors' | 'decryption' | 'driver' | 'updates';
+type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters' | 'colors'
+  | 'dissectors' | 'decryption' | 'network' | 'driver' | 'updates';
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'appearance', label: 'Appearance', icon: TbPalette },
@@ -53,10 +59,23 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // autocomplete. Splitting them across the panel would ask the reader to
   // learn the language twice.
   { id: 'colors', label: 'Colouring Rules', icon: TbPalette },
+  // Beside Decryption, and before it, because the two are the pair that changes
+  // what the dissector can READ rather than what is shown: one adds a protocol,
+  // the other supplies the keys to see inside one. It was a full-screen modal
+  // off the hamburger menu until that menu was deleted.
+  { id: 'dissectors', label: 'Custom Dissectors', icon: TbCode },
   // After the two filter tabs and before the hardware one: a key log changes
   // what the dissector can read, which is the same kind of setting as a rule
   // that changes what is shown - and nothing to do with the driver.
   { id: 'decryption', label: 'Decryption', icon: TbKey },
+  // The first of the three that describe this MACHINE rather than configure the
+  // app, and deliberately first of them: Network says how this computer is
+  // connected, Driver Info says what the capture driver is doing on it, Updates
+  // says which version of that driver you have. It was a rail view with its own
+  // Ctrl+3 - and the thing that made it odd there was that it never described
+  // the capture, so the filter row had to be hidden above it. Nothing in it
+  // changes when a packet arrives.
+  { id: 'network', label: 'Network', icon: TbNetwork },
   { id: 'driver', label: 'Driver Info', icon: TbActivity },
   // Last, directly after Driver Info, because the two answer halves of one
   // question. Driver Info says what the capture driver is doing; this says
@@ -113,6 +132,15 @@ interface SettingsModalProps {
   onSubscribeAgentLog: () => void;
   onUnsubscribeAgentLog: () => void;
   onClearAgentLog: () => void;
+
+  /* --- Custom Dissectors, which was a modal off the deleted menu ---------- */
+  dissectorEngine: CustomDissectorEngine;
+  onUpdateDissectors: () => void;
+
+  /* --- Network, which was a rail view ------------------------------------ */
+  adapters: AgentAdapter[];
+  networkFacts: NetworkFacts;
+  onRefreshAdapters: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -153,6 +181,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSubscribeAgentLog,
   onUnsubscribeAgentLog,
   onClearAgentLog,
+  dissectorEngine,
+  onUpdateDissectors,
+  adapters,
+  networkFacts,
+  onRefreshAdapters,
 }) => {
   const [section, setSection] = useState<SettingsSection>('appearance');
   const bufferPercent = packetBufferBytes > 0
@@ -166,7 +199,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     >
       <motion.div
         {...modalPanelMotion}
-        className="w-full max-w-3xl max-h-[90vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground"
+        // `max-w-5xl`, not the `max-w-3xl` this was: Custom Dissectors is a
+        // two-column editor rather than a list of setting rows, and at 3xl the
+        // 176px nav left it about 220px to edit in. 5xl is what its own modal
+        // used. The window minimum is 1024, so `w-full` caps this at 992.
+        className="w-full max-w-5xl max-h-[90vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground"
       >
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
@@ -224,7 +261,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               />
             )}
 
+            {section === 'dissectors' && (
+              <CustomDissectorsPanel
+                dissectorEngine={dissectorEngine}
+                onUpdateDissectors={onUpdateDissectors}
+                permissions={permissions}
+              />
+            )}
+
             {section === 'decryption' && <DecryptionSettingsPanel />}
+
+            {/* The pane, unchanged. It never took a "return to packets"
+                callback - it describes the machine, so it had nothing to hand
+                back - which is exactly what made it a poor view and makes it a
+                good tab. */}
+            {section === 'network' && (
+              <NetworkPane
+                adapters={adapters}
+                facts={networkFacts}
+                captureInterfaces={selectedInterfaces}
+                agentConnected={agentStatus === 'connected'}
+                onRefresh={onRefreshAdapters}
+              />
+            )}
 
             {section === 'updates' && (
               <UpdateCenterPanel

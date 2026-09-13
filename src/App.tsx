@@ -97,10 +97,8 @@ import { HexViewer } from "./components/packet-details/HexViewer";
 import { PacketDetailModal } from "./components/packet-details/PacketDetailModal";
 import { StreamFollowerPane } from "./components/stream-follower/StreamFollowerPane";
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
-import { CustomDissectorModal } from "./components/dissectors/CustomDissectorModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
-import { NetworkPane } from "./components/network/NetworkPane";
 import { SettingsModal } from "./components/common/SettingsModal";
 import {
   FILTER_PRESETS_STORAGE_KEY,
@@ -419,7 +417,6 @@ export default function App() {
   // a number rather than a Packet so the window keeps following the same frame
   // as the buffer around it changes.
   const [detailPacketId, setDetailPacketId] = useState<number | null>(null);
-  const [showDissectorModal, setShowDissectorModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
@@ -2037,7 +2034,6 @@ export default function App() {
         onToggleWidget={toggleWidget}
         onOpenSettings={() => setShowSettingsModal(true)}
         onOpenExport={() => setShowExportModal(true)}
-        onOpenDissectors={() => setShowDissectorModal(true)}
       />
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -2046,16 +2042,14 @@ export default function App() {
             rail precisely so this row could be nearly empty. */}
         <TitleRow title={windowTitle} focused={windowFocused} />
 
-        {/* Hidden in Network, and only there.
+        {/* Always shown, now that Network is a Settings tab rather than a view.
 
-            Network describes how this machine is configured; a display filter
-            acts on the capture. Leaving the row up would be a control with
-            nothing in view to act on - and worse, one that still reports
-            "PACKETS 1,204 / 50,000" about a list that is not on screen.
-
-            Statistics keeps it, because its tables ARE the capture and its rows
-            hand filters back to it. */}
-        {view !== 'network' && (
+            It used to be hidden there and nowhere else, because Network
+            describes how this machine is configured while a display filter acts
+            on the capture - so the row was a control with nothing in view to act
+            on, reporting "PACKETS 1,204 / 50,000" about a list that was not on
+            screen. Both remaining views ARE the capture: the list is the frames,
+            and Statistics' tables count them and hand filters back. */}
         <FilterRow
           isCapturing={isCapturing}
           captureAdapter={captureAdapter}
@@ -2096,7 +2090,6 @@ export default function App() {
             />
           }
         />
-        )}
 
         {/* Central Inspection + Analytics Split Grid */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
@@ -2331,17 +2324,6 @@ export default function App() {
             />
           )}
 
-          {/* Network as a pane. Unmounted when inactive, like Statistics. */}
-          {view === 'network' && (
-            <NetworkPane
-              adapters={adapters}
-              facts={networkFacts}
-              captureInterfaces={selectedInterfaces}
-              agentConnected={agentStatus === 'connected'}
-              onRefresh={() => sendAgentCommand({ type: 'refresh_adapters' })}
-            />
-          )}
-
           {/* Follow Stream as a pane.
 
               Guarded on the target as well as the view: the two are kept in step
@@ -2397,15 +2379,6 @@ export default function App() {
 
       {/* 4. Modals */}
       <AnimatePresence>
-        {showDissectorModal && (
-          <CustomDissectorModal
-            key="dissector-modal"
-            dissectorEngine={dissectorEngine}
-            onUpdateDissectors={handleUpdateDissectors}
-            onClose={() => setShowDissectorModal(false)}
-            permissions={permissions}
-          />
-        )}
       </AnimatePresence>
 
       <AnimatePresence>
@@ -2466,6 +2439,11 @@ export default function App() {
           <SettingsModal
             key="settings-modal"
             onClose={() => setShowSettingsModal(false)}
+            dissectorEngine={dissectorEngine}
+            onUpdateDissectors={handleUpdateDissectors}
+            adapters={adapters}
+            networkFacts={networkFacts}
+            onRefreshAdapters={() => sendAgentCommand({ type: 'refresh_adapters' })}
             agentLinkEnabled={agentLinkEnabled}
             agentHealth={agentHealth}
             onStartAgentService={startAgentService}

@@ -45,11 +45,11 @@ export interface TourStep {
 // to do before capturing, so the tour starts where their first ACTION is.
 //
 // The step that pointed at the menu now points at the rail, because the menu is
-// gone: three of its seven entries duplicated rail buttons, Export/Import and
-// Custom Dissectors became rail buttons of their own, and the two name-resolution
-// switches went to Settings -> Interface beside the two that were already there.
-// The sentence it carried - "everything else lives here" - is more true of the
-// rail than it ever was of a drawer.
+// gone: three of its seven entries duplicated rail buttons, Export/Import became
+// one, and the rest went to Settings - the two name-resolution switches to
+// Interface, Custom Dissectors to a tab of its own. Network followed them out of
+// the rail for the same reason. The sentence this step carried - "everything else
+// lives here" - is more true of the rail than it ever was of a drawer.
 export const TOUR_STEPS: TourStep[] = [
   {
     anchor: 'interfaces',
@@ -91,10 +91,10 @@ export const TOUR_STEPS: TourStep[] = [
     anchor: 'rail',
     title: 'Everything else lives here',
     body:
-      'Switch between the packet list, capture statistics and what this capture '
-      + 'revealed about your network. Below the line, each icon opens a chart '
-      + 'alongside them. At the bottom: export and import, custom dissectors, and '
-      + 'settings - including Driver Info, which says what the capture agent is '
+      'Switch between the packet list, capture statistics, and the conversation '
+      + 'behind whichever frame you are following. Below the line, each icon opens '
+      + 'a chart alongside them. At the bottom: export and import, and settings - '
+      + 'where you will find Driver Info, which says what the capture agent is '
       + 'doing and is the first place to look if nothing arrives.',
     side: 'right',
   },
