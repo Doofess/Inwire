@@ -1,31 +1,38 @@
 import React, { useState } from 'react';
-import { motion } from 'motion/react';
 import { CustomDissectorRule, CustomDissectorFieldDef, Capabilities } from '../../types/packet';
 import { CustomDissectorEngine } from '../../services/customDissectorEngine';
-import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import {
-  TbCode,
   TbPlus,
   TbTrash,
   TbCheck,
-  TbX,
   TbPlayerPlay,
   TbShield,
   TbChevronUp,
   TbChevronDown,
 } from 'react-icons/tb';
 
-interface CustomDissectorModalProps {
+/**
+ * Custom dissectors, as a Settings section.
+ *
+ * It was a full-screen modal reached from the hamburger menu, and it is the same
+ * editor with its shell taken off: no backdrop, no panel, no header, no Done
+ * button. Settings already owns the surfaces that change what the dissector can
+ * read - Colouring Rules, Display Filters, Decryption - and a plugin that adds a
+ * protocol is the same kind of thing. What it is NOT is a place to look at a
+ * capture, which is why it is here and not a view.
+ *
+ * The two-column layout survives because Settings widened to `max-w-5xl` to take
+ * it; at the old `max-w-3xl` the editor would have had about 220px.
+ */
+interface CustomDissectorsPanelProps {
   dissectorEngine: CustomDissectorEngine;
   onUpdateDissectors: () => void;
-  onClose: () => void;
   permissions: Capabilities;
 }
 
-export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
+export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
   dissectorEngine,
   onUpdateDissectors,
-  onClose,
   permissions,
 }) => {
   const [dissectors, setDissectors] = useState<CustomDissectorRule[]>(dissectorEngine.getDissectors());
@@ -141,43 +148,29 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
   };
 
   return (
-    <motion.div
-      {...modalBackdropMotion}
-      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-    >
-      <motion.div
-        {...modalPanelMotion}
-        className={`w-full max-w-5xl max-h-[90vh] rounded-xl border flex flex-col shadow-2xl transition-colors ${
-          'bg-card border-border text-card-foreground'
-        }`}
-      >
-        {/* Header */}
-        <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <TbCode className="w-7 h-7 shrink-0 text-primary" />
-            <div>
-              <div className="flex items-center gap-2 font-bold text-base">
-                <span>Modular Custom Protocol Dissector Plugin Engine</span>
-                <span className="text-xs px-2 py-0.5 rounded bg-primary/20 text-primary font-mono">
-                  Active Plugins ({dissectors.length})
-                </span>
-              </div>
-              <p className={`text-xs ${"text-muted-foreground"}`}>
-                Extend packet analysis capabilities for proprietary, IoT, and custom application network standards
-              </p>
-            </div>
-          </div>
-
-          <button onClick={onClose} className={`p-1.5 rounded-md hover:bg-accent ${"text-muted-foreground"} hover:text-foreground`}>
-            <TbX className="w-5 h-5" />
-          </button>
+    <div className="flex flex-col h-full min-h-0">
+      {/* Standing in for the modal header this used to have. The Settings modal
+          draws its own, so this is one line rather than a title block - what is
+          worth keeping from the old header is the count, because "how many are
+          active" is the question somebody opens this to answer. */}
+      <div className="pb-3 mb-3 border-b border-border">
+        <div className="flex items-center gap-2 font-semibold text-sm">
+          <span>Custom dissectors</span>
+          <span className="text-[11px] px-2 py-0.5 rounded bg-primary/20 text-primary font-mono">
+            {dissectors.length} active
+          </span>
         </div>
+        <p className="text-[11px] text-muted-foreground leading-snug pt-0.5">
+          Teach the dissector a protocol it does not know - proprietary, IoT, or anything else on a
+          port nothing claims. Rules are compiled and evaluated in real time on every incoming packet.
+        </p>
+      </div>
 
-        {/* Content Body: Left sidebar (list of plugins) + Right Editor/Viewer */}
-        <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+      {/* Left sidebar (list of plugins) + right editor. */}
+      <div className="flex-1 flex min-h-0 overflow-hidden -mx-1">
           {/* Left Sidebar */}
-          <div className="w-full md:w-72 border-r border-border p-3 flex flex-col justify-between bg-muted/30">
-            <div className="space-y-1 overflow-y-auto custom-scrollbar pr-1 max-h-[300px] md:max-h-none">
+          <div className="w-60 shrink-0 border-r border-border p-3 flex flex-col justify-between bg-muted/30">
+            <div className="space-y-1 overflow-y-auto custom-scrollbar pr-1 ">
               <div className={`text-[11px] font-bold ${"text-muted-foreground"} px-1 py-1 uppercase tracking-wider`}>
                 Installed Dissectors
               </div>
@@ -528,20 +521,6 @@ export const CustomDissectorModal: React.FC<CustomDissectorModalProps> = ({
             )}
           </div>
         </div>
-
-        {/* Footer */}
-        <div className="px-5 py-3 border-t border-border flex items-center justify-between text-xs">
-          <span className={`${"text-muted-foreground"}`}>
-            Dissector rules are compiled and evaluated in real time on all incoming packets.
-          </span>
-          <button
-            onClick={onClose}
-            className={`px-4 py-1.5 rounded-md bg-secondary hover:bg-accent ${"text-foreground"} font-medium transition-colors`}
-          >
-            Done
-          </button>
-        </div>
-      </motion.div>
-    </motion.div>
+    </div>
   );
 };

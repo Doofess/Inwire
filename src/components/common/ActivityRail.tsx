@@ -6,11 +6,9 @@ import {
   TbAlertTriangle,
   TbListDetails,
   TbChartHistogram,
-  TbSitemap,
   TbArrowsLeftRight,
   TbSettings,
   TbFileExport,
-  TbCode,
 } from 'react-icons/tb';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
@@ -52,9 +50,9 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 14 icons, 36px targets, four dividers and a 40px top cell come to **617px**
- * against a 640px minimum window height. It fits, with 23px of slack - which is
- * **not** another icon. The rail is full.
+ * 12 icons, 36px targets, four dividers and a 40px top cell come to **541px**
+ * against a 640px minimum window height. It fits, with 99px of slack - room for
+ * two more icons.
  *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that
@@ -68,13 +66,17 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * without one, and the bottom group is pinned with `mt-auto`, so an overflow
  * does not scroll anything: it pushes Settings off the bottom edge.
  *
- * The last slot went to Custom Dissectors when the hamburger menu was deleted.
- * Of that menu's seven entries, three already had a rail button - Capture
- * Statistics, Network and Settings - Export/Import and Custom Dissectors became
- * the two here, and the two name-resolution switches went to
- * Settings -> Interface, beside the two outbound lookups that were already
- * there. That last pair came here first and did not fit: four icons in this
- * group is 693px, 53px past the smallest window this app opens at.
+ * The slack came back, and it is worth knowing where from. Deleting the
+ * hamburger menu pushed this to 617px - Export/Import and Custom Dissectors took
+ * the bottom group to three icons, which was the last one that fit. Then Custom
+ * Dissectors went to Settings beside Decryption, and **Network stopped being a
+ * view at all**: it described the machine rather than the capture, which is why
+ * the filter row had to be hidden above it and nowhere else, so it became a
+ * Settings tab next to Driver Info. That is two icons back, and `Ctrl+3` now
+ * opens Follow Stream.
+ *
+ * What has not changed is the rule for the next one: if a sixth widget arrives,
+ * **the widgets group is the one that scrolls**.
  */
 
 /** 32px was the old rail's target in a 48px strip; 36 is this one's in 56. */
@@ -115,7 +117,6 @@ function railButton(active: boolean, kind: 'view' | 'toggle'): string {
 const VIEW_ICONS: Record<AppView, React.ComponentType<{ className?: string }>> = {
   packets: TbListDetails,
   statistics: TbChartHistogram,
-  network: TbSitemap,
   stream: TbArrowsLeftRight,
 };
 
@@ -162,15 +163,6 @@ export interface ActivityRailProps {
    * Updates is still the one place this app updates anything (ADR 0032).
    */
   onOpenExport: () => void;
-  /**
-   * Custom Dissectors, which took the rail's last free slot.
-   *
-   * With this the rail is 617px against a 640px minimum window - 23px of slack,
-   * which is not another icon. Anything else that needs a permanent home has to
-   * go to Settings or make the widgets group scroll; `scripts/session/view.ts`
-   * is where that stops being a matter of opinion.
-   */
-  onOpenDissectors: () => void;
 }
 
 export const ActivityRail: React.FC<ActivityRailProps> = ({
@@ -179,7 +171,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
   dockItems, widgets, onToggleWidget,
-  onOpenSettings, onOpenExport, onOpenDissectors,
+  onOpenSettings, onOpenExport,
 }) => {
   const selected = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
   const attention = agentNeedsAttention(agentHealth);
@@ -540,17 +532,6 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           className={railButton(false, 'toggle')}
         >
           <TbFileExport className={GLYPH} />
-        </button>
-        {/* `TbCode` - the angle brackets - rather than another file glyph: it
-            sits directly under `TbFileExport` and two file icons in a row read
-            as one control with a modifier. */}
-        <button
-          onClick={onOpenDissectors}
-          aria-label="Custom dissectors"
-          title="Custom Dissectors"
-          className={railButton(false, 'toggle')}
-        >
-          <TbCode className={GLYPH} />
         </button>
         <button
           onClick={onOpenSettings}

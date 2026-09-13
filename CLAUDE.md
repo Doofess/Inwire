@@ -226,12 +226,27 @@ relative module, so `electron/build.cjs` bundles it.
 `Header.tsx` is deleted and its contents are split three ways; `AppMenu.tsx` -
 the hamburger drawer that hung off the title row - is deleted too. Of its seven
 entries, **three already had a rail button** (Capture Statistics, Network,
-Settings), Export/Import and Custom Dissectors **became** rail buttons, and the
-two passive name-resolution switches went to `Settings -> Interface`, beside the
-two outbound lookups that were already there. Nothing that duplicated a visible
-control survived, which was the menu's own stated rule turned on itself. The
-title row holds **no control at all** now, and `cmdk` left `dependencies` with
-it.
+Settings), **Export/Import became** the one new rail button, and the rest went to
+Settings: the two passive name-resolution switches to `Interface` beside the two
+outbound lookups already there, and Custom Dissectors to a tab of its own beside
+Decryption - the pair that change what the dissector can **read** rather than
+what is shown. Nothing that duplicated a visible control survived, which was the
+menu's own stated rule turned on itself. The title row holds **no control at
+all** now, and `cmdk` left `dependencies` with it.
+
+**Network left the rail too, and for a reason worth keeping.** It was the third
+view, on Ctrl+3, and it failed the test the view list applies: a view is a way of
+looking at the capture. Network describes the *machine* - adapters, DNS, public
+identity - and nothing in it changes when a packet arrives. The tell was the
+filter row, which had to be hidden above Network and nowhere else, because a
+display filter there was a control with nothing in view to act on. It is a
+Settings tab now, next to Driver Info, which is the other read-only report about
+this machine. `scripts/session/view.ts` carries the inverted rule: **no view
+hides the filter row**, so a future one that wants to has to answer the question
+Network never did.
+
+Settings widened from `max-w-3xl` to `max-w-5xl` to take the dissector editor,
+which is two columns rather than a list of setting rows.
 
 ```
 ┌──────┬─────────────────────────────────────────────────┐
@@ -240,15 +255,15 @@ it.
 │ 56px │ FilterRow  (banner, filter, capturing)          │
 │      ├────────────┬────────────────────────────────────┤
 │      │ dock       │ packets (hidden, never unmounted)  │
-│      │ 240-640px  │ statistics | network | stream      │
+│      │ 240-640px  │ statistics | stream                │
 └──────┴────────────┴────────────────────────────────────┘
 ```
 
 `ActivityRail.tsx` is 56px and spans the full window height, so it reaches the
 top and its own 40px cell sits level with the title row. Four groups: **capture**
-(Start/Stop, adapter), **views** (Packets, Statistics, Network, Follow Stream),
+(Start/Stop, adapter), **views** (Packets, Statistics, Follow Stream),
 **widgets** (the five dashboard types), and a bottom group (Export/Import,
-Custom Dissectors, Settings) pinned with `mt-auto`.
+Settings) pinned with `mt-auto`.
 
 **There was an Updates button and it was a second Settings button.**
 `onOpenUpdates` and `onOpenSettings` were the same handler, and `updateAvailable`
@@ -257,14 +272,17 @@ Export/Import took the slot. The Update Center is unchanged and still lives wher
 ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs a
 real `updateAvailable` first, and Settings is the icon to hang it on.
 
-14 icons at 36px targets with four dividers come to **617px** against the 640px
-minimum window height - 23px of slack, which is **not** another icon. The rail is
-full. `scripts/session/view.ts` adds that up from the Tailwind classes and holds
-each class to what the sum assumes, because the comment in `ActivityRail.tsx`
-said 549 until it did - and it is what decided where the menu's leftovers went:
-the two name-resolution switches would have made the bottom group four icons and
-693px, 53px past the smallest window this app opens at, so they went to Settings
-instead. If anything else ever needs a permanent home, **the widgets group is the
+12 icons at 36px targets with four dividers come to **541px** against the 640px
+minimum window height - 99px of slack, room for two more.
+`scripts/session/view.ts` adds that up from the Tailwind classes and holds each
+class to what the sum assumes, because the comment in `ActivityRail.tsx` said 549
+until it did.
+
+It has already decided one design question. Deleting the menu took the rail to
+617px, at which point the two name-resolution switches would have made the bottom
+group four icons and 693px - 53px past the smallest window this app opens at - so
+they went to Settings. Custom Dissectors and Network leaving gave the two slots
+back. If anything else ever needs a permanent home, **the widgets group is the
 one that scrolls**: the bottom group is pinned with `mt-auto`, so an overflow
 does not scroll anything, it pushes Settings off the bottom edge.
 
@@ -1168,10 +1186,10 @@ through a ref, or a `keydown` listener would re-register ten times a second
 during a capture). **Space is scoped positively** — the body, or inside
 `[role="grid"]` — and not by excluding the controls that must not receive it.
 The old exclusion rule was correct only while nothing else in the window was
-focusable; with thirteen rail buttons, Space on a focused one both activated it
+focusable; with a dozen rail buttons, Space on a focused one both activated it
 and ran this handler's `preventDefault`, so the button's own activation was
 suppressed and capture toggled anyway. Scoped positively, every control added
-from here on is safe by default rather than by being remembered. `Ctrl+1..4`
+from here on is safe by default rather than by being remembered. `Ctrl+1..3`
 switch views, and `APP_VIEWS` order **is** the numbering. `hooks/usePacketBuffer.ts` holds the buffer — the arrival
 queues, the accounting, the dense-field writer, the flush.
 `hooks/useAgentConnection.ts` owns the agent link: status, version, interfaces,
