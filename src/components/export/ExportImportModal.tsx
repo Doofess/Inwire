@@ -16,7 +16,7 @@ import { ImportErrorDialog } from './ImportErrorDialog';
  * Two tabs rather than the single scrolling panel this used to be. The export
  * side gained a filter bar, two option switches and a fifth format card, and
  * stacking all of that above the import dropzone made a dialog taller than most
- * laptop screens. The tab strip is the one `StatisticsModal` already uses.
+ * laptop screens. The tab strip is the one `StatisticsPane` already uses.
  */
 
 interface ExportImportModalProps {

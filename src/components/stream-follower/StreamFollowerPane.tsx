@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Packet } from '../../types/packet';
-import { TbMessage, TbX, TbCopy, TbCheck, TbDownload, TbAlertTriangle, TbLoader2 } from 'react-icons/tb';
+import { TbMessage, TbCopy, TbCheck, TbDownload, TbAlertTriangle, TbLoader2 } from 'react-icons/tb';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 import { saveGeneratedBlob } from '../../lib/saveFile';
 import {
@@ -30,10 +30,20 @@ import { LadderView } from '../ladder/LadderView';
  */
 const EMPTY_FRAMES: Packet[] = [];
 
-interface StreamFollowerModalProps {
+interface StreamFollowerPaneProps {
   target: StreamTarget | null;
   packets: Packet[];
-  onClose: () => void;
+  /**
+   * Leaves for the packet list, and lands on the frame this was opened from.
+   *
+   * Unlike Statistics' version of this, it has a destination: a stream is always
+   * entered from one packet - a row's context menu, the detail window, a
+   * conversation table - and the thing you were looking at before is the thing
+   * you want back. App records the origin and restores the selection.
+   */
+  onReturnToPackets: () => void;
+  /** The frame the stream was opened from, named on the control that returns. */
+  originFrame?: number | null;
   /**
    * The frame selected in the packet list, and how to change it.
    *
@@ -55,10 +65,11 @@ interface StreamFollowerModalProps {
   initialTab?: 'dialogue' | 'ladder';
 }
 
-export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
+export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   target,
   packets,
-  onClose,
+  onReturnToPackets,
+  originFrame = null,
   selectedId,
   onSelectFrame,
   initialTab = 'dialogue',
@@ -71,29 +82,21 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
   const [viewFormat, setViewFormat] = useState<'ascii' | 'hex' | 'raw'>('ascii');
   const [copied, setCopied] = useState(false);
 
-  /**
-   * Escape closes this window, matching every other modal.
+  /*
+   * Escape used to be handled here, in the capture phase with `stopPropagation`,
+   * because this window opened ON TOP of the packet detail window and that
+   * window stands down while covered - so without it the topmost thing on screen
+   * was the one key that dismissed nothing.
    *
-   * It also has to be handled HERE rather than left to whatever is underneath:
-   * this window can open on top of the packet detail window, which listens for
-   * Escape on `window` in the capture phase. That window stands down while it
-   * is covered, so without this the topmost thing on screen would be the one
-   * key that dismisses nothing.
-   *
-   * Declared above the `streamId === null` early return so the hook order is
-   * the same on every render.
+   * It is gone, and the inversion is why. This is a pane now, so the detail
+   * window opens on top of IT rather than underneath, and App's view-level
+   * handler owns Escape in the bubble phase. That ordering is correct without
+   * anything here: the detail window still claims Escape in the capture phase, so
+   * while it is open Escape closes it, and only once nothing else has claimed the
+   * key does the view fall back to Packets. A capture-phase listener here would
+   * have made this pane the FIRST to see it and navigated out from under the
+   * window above.
    */
-  useEffect(() => {
-    if (target === null) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      e.stopPropagation();
-      onClose();
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [target, onClose]);
 
   // Hydrated, because every view below reads the frames' bytes and a buffer
   // large enough to have dropped them would otherwise render an empty stream
@@ -178,13 +181,14 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
   };
 
   return (
-    // z-[60] rather than the z-50 every other modal uses, because this is the
-    // only one that opens ON TOP of another: the packet detail window has a
-    // Follow Stream link. Relying on render order instead would work today and
-    // break silently the first time someone reorders the JSX in App.tsx.
-    <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4">
-      <div className="w-full max-w-4xl max-h-[85vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground">
-        {/* Modal Header */}
+    /*
+     * A pane. The `z-[60]` that put this above every other modal is gone with the
+     * scrim, and so is the reason for it: it was the only modal that opened on top
+     * of another, and it does not open on top of anything now.
+     */
+    <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-card text-card-foreground">
+      <>
+        {/* Pane header */}
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2">
             <TbMessage className="w-7 h-7 shrink-0 text-primary" />
@@ -269,12 +273,9 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
               <TbDownload className="w-4 h-4 text-foreground" />
             </button>
 
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground"
-            >
-              <TbX className="w-5 h-5" />
-            </button>
+            {/* The X stood here. The footer's control is the one that returns,
+                and it names where it goes - two ways out of a pane, one of which
+                is unlabelled, is one too many. */}
           </div>
         </div>
 
@@ -373,14 +374,16 @@ export const StreamFollowerModal: React.FC<StreamFollowerModalProps> = ({
           <span className="text-muted-foreground font-mono">
             Total {streamPackets.length} Packets ({totalClientBytes + totalServerBytes} bytes exchanged)
           </span>
+          {/* Named, because it is navigation rather than dismissal: it goes back
+              to the list and lands on the frame this stream was opened from. */}
           <button
-            onClick={onClose}
-            className="px-4 py-1.5 rounded-md bg-secondary hover:bg-accent text-foreground font-medium transition-colors"
+            onClick={onReturnToPackets}
+            className="px-4 py-1.5 rounded-md bg-secondary hover:bg-accent text-foreground font-medium transition-colors cursor-pointer"
           >
-            Close
+            {originFrame === null ? 'Back to packets' : `Back to frame ${originFrame.toLocaleString()}`}
           </button>
         </div>
-      </div>
+      </>
     </div>
   );
 };

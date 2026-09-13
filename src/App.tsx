@@ -92,7 +92,7 @@ import { PacketList } from "./components/packet-list/PacketList";
 import { PacketDetailsTree } from "./components/packet-details/PacketDetailsTree";
 import { HexViewer } from "./components/packet-details/HexViewer";
 import { PacketDetailModal } from "./components/packet-details/PacketDetailModal";
-import { StreamFollowerModal } from "./components/stream-follower/StreamFollowerModal";
+import { StreamFollowerPane } from "./components/stream-follower/StreamFollowerPane";
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
 import { CustomDissectorModal } from "./components/dissectors/CustomDissectorModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
@@ -325,8 +325,17 @@ export default function App() {
 
 
   const [selectedPacket, setSelectedPacket] = useState<Packet | null>(null);
-  /** Which view the stream window opens on - see handleFollowStream. */
+  /** Which view the stream pane opens on - see handleFollowStream. */
   const [streamView, setStreamView] = useState<'dialogue' | 'ladder'>('dialogue');
+  /**
+   * The frame the stream was entered from, so leaving can land back on it.
+   *
+   * An id rather than the packet, for the same reason the restored selection is:
+   * the object is a fresh one decoded from bytes on the way back in, and only its
+   * number survives. Null when a stream was opened with nothing selected, which a
+   * conversation table can do.
+   */
+  const [streamOrigin, setStreamOrigin] = useState<number | null>(null);
   // Stored as an id, not the packet: the object a refresh restores is a fresh
   // one decoded from bytes, so only its number survives the round trip.
   // Zero stands for "nothing selected" and is rejected by the validator.
@@ -1696,12 +1705,46 @@ export default function App() {
    * different question in mind - content against shape - so the view is a
    * parameter rather than a second modal that would drift out of step.
    */
-  const handleFollowStream = (
+  /**
+   * Opens a stream, from wherever it was asked for.
+   *
+   * Switching the view is part of it now rather than something the caller
+   * remembers: a stream is followed from a packet row, the detail window or a
+   * conversation table, and all three mean "show me this". The origin is recorded
+   * here because this is the only place that knows what was selected when the
+   * request was made.
+   */
+  const handleFollowStream = useCallback((
     target: StreamTarget, view: 'dialogue' | 'ladder' = 'dialogue',
   ) => {
     setStreamToFollow(target);
     setStreamView(view);
-  };
+    setStreamOrigin(selectedPacketRef.current?.id ?? null);
+    setView('stream');
+  }, [setView]);
+
+  /**
+   * Leaves the stream pane, landing on the frame it was opened from.
+   *
+   * `goToFrame` rather than a bare `setSelectedPacket`: it refuses a frame that
+   * has left the buffer and says so, which is a real case here - a long capture
+   * can drop the origin while the stream is being read.
+   */
+  const leaveStream = useCallback(() => {
+    setView('packets');
+    if (streamOrigin !== null) goToFrame(streamOrigin);
+  }, [setView, streamOrigin, goToFrame]);
+
+  /**
+   * A stream that goes away takes its view with it.
+   *
+   * The buffer being cleared, or a capture being restarted, leaves `view` on
+   * 'stream' with nothing to show - and the rail's icon is disabled in exactly
+   * that state, so the view would be unreachable and unleavable at once.
+   */
+  useEffect(() => {
+    if (streamToFollow === null && view === 'stream') setView('packets');
+  }, [streamToFollow, view, setView]);
 
   /**
    * The capture directory an import is writing into, while it writes.
@@ -1939,8 +1982,8 @@ export default function App() {
           <AppMenu
             onOpenDissectorModal={() => setShowDissectorModal(true)}
             onOpenExportModal={() => setShowExportModal(true)}
-            onOpenStatisticsModal={() => setView('statistics')}
-            onOpenNetworkModal={() => setView('network')}
+            onOpenStatistics={() => setView('statistics')}
+            onOpenNetwork={() => setView('network')}
             nameResolution={nameResolution}
             onNameResolutionChange={patchNameResolution}
             onOpenSettingsModal={() => setShowSettingsModal(true)}
@@ -2224,6 +2267,28 @@ export default function App() {
             />
           )}
 
+          {/* Follow Stream as a pane.
+
+              Guarded on the target as well as the view: the two are kept in step
+              by the effect above and by the rail's disabled icon, but a pane that
+              rendered `target={null}` would be the empty Follow Stream the rail
+              exists to prevent. */}
+          {view === 'stream' && streamToFollow !== null && (
+            <StreamFollowerPane
+              target={streamToFollow}
+              packets={packets}
+              onReturnToPackets={leaveStream}
+              originFrame={streamOrigin}
+              initialTab={streamView}
+              selectedId={selectedPacket?.id}
+              // The pane stays open. Selecting a frame from in here is usually
+              // one of several - reading down a conversation and checking each
+              // against the tree - and leaving on the first would make that a
+              // dozen round trips through the context menu.
+              onSelectFrame={goToFrame}
+            />
+          )}
+
           {/* The analytics column, or the icon rail it collapses to.
               The gate here was `dashboardVisible || railFits`, and `railFits`
               was a media query on **768** - which the window's own 1024
@@ -2242,21 +2307,6 @@ export default function App() {
       </main>
 
       {/* 4. Modals */}
-      {streamToFollow !== null && (
-        <StreamFollowerModal
-          target={streamToFollow}
-          packets={packets}
-          onClose={() => setStreamToFollow(null)}
-          initialTab={streamView}
-          selectedId={selectedPacket?.id}
-          // The window stays open. Selecting a frame from in here is usually
-          // one of several - reading down a conversation and checking each
-          // against the tree - and closing on the first would make that a
-          // dozen round trips through the context menu.
-          onSelectFrame={goToFrame}
-        />
-      )}
-
       <AnimatePresence>
         {showDissectorModal && (
           <CustomDissectorModal
@@ -2282,7 +2332,14 @@ export default function App() {
             colorEngine={colorEngine}
             packetTheme={packetTheme}
             permissions={permissions}
-            obscured={streamToFollow !== null}
+            // No longer obscured by the stream, and that is the whole of what
+            // changed: the stream was a modal at `z-[60]` that opened ON TOP of
+            // this window, so this one had to stand down from Escape and the
+            // arrows. It is a pane behind this window now, so nothing covers
+            // this one and the keyboard is its own again. Left as an explicit
+            // `false` rather than deleted, because the prop is still the right
+            // mechanism the next time something opens above.
+            obscured={false}
           />
         )}
       </AnimatePresence>
