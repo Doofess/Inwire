@@ -6,7 +6,6 @@ import { Switch } from '../ui/switch';
 import { Segmented } from '../ui/segmented';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import {
-  colorfulChromeStore,
   followSystemThemeStore,
   packetColorSetStore,
 } from '../../services/themePrefs';
@@ -73,7 +72,6 @@ export const AppearanceSettingsPanel: React.FC = () => {
   const [colorSet, setColorSet] = usePreferenceValue(packetColorSetStore);
   const [arcProtocolColors, setArcProtocolColors] = usePreferenceValue(arcProtocolColorStore);
   const [mapSkin, setMapSkin] = usePreferenceValue(mapSkinStore);
-  const [colorfulChrome, setColorfulChrome] = usePreferenceValue(colorfulChromeStore);
 
   // The same derivation the packet list runs, against the theme that is live
   // right now - so the strip shows the chosen set on the chosen theme rather
@@ -117,20 +115,6 @@ export const AppearanceSettingsPanel: React.FC = () => {
             })}
           </div>
         </div>
-      </Section>
-
-      <Section title="Chrome">
-        <SettingRow
-          label="Colourful"
-          description="On, the header bar and the menu drawer are painted in the theme's accent. Off, they take the same surface as the panels below them, so the window reads as one continuous sheet with a border across the top rather than a coloured band."
-          htmlFor="setting-colorful-chrome"
-        >
-          <Switch
-            id="setting-colorful-chrome"
-            checked={colorfulChrome}
-            onCheckedChange={setColorfulChrome}
-          />
-        </SettingRow>
       </Section>
 
       <Section title="Packet colours">

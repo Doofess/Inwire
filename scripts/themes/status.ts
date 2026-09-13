@@ -81,14 +81,12 @@ const unmapped = Object.values(STATUS_TOKENS).filter(
 );
 check('every status token is mapped into @theme so the utilities resolve', unmapped, []);
 
-// The same guard for the chrome pair. Not a status colour, but the same silent
-// failure: a token declared in every theme block and left out of `@theme` gives
-// a `bg-chrome` utility that does not exist, so the header bar renders
-// transparent rather than erroring.
-const chromeUnmapped = ['--chrome', '--chrome-foreground', '--chrome-brand', '--chrome-sunken'].filter(
-  (token) => !themeBlock.includes(`--color${token.slice(1)}: var(${token});`),
-);
-check('the chrome tokens are mapped into @theme', chromeUnmapped, []);
+// The chrome pair used to be guarded here for the same reason - a token in
+// every theme block and left out of `@theme` gives a `bg-chrome` utility that
+// does not exist, so the bar rendered transparent rather than erroring. There
+// is no bar and there are no chrome tokens: the accent header was deleted with
+// the migration, and the Colourful switch that painted it went when the only
+// thing it still changed was making the brand mark invisible.
 
 // --- Legibility ---------------------------------------------------------------
 

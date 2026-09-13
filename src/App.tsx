@@ -9,7 +9,6 @@ import { useTheme } from "next-themes";
 import { useSystemThemePreference } from "./lib/useSystemTheme";
 import { useMotionPreference } from "./lib/motion";
 import { useFontPreference } from "./lib/font";
-import { useChromePreference } from "./lib/chrome";
 import { TourOverlay } from "./components/tour/TourOverlay";
 import { tourStore } from "./services/tourPrefs";
 import { useNameResolutionPreference } from "./lib/nameResolution";
@@ -203,7 +202,6 @@ export default function App() {
   // setting defers to it. See lib/motion.
   useMotionPreference();
   useFontPreference();
-  useChromePreference();
   // The first-run walkthrough. `completed` is set by finishing it AND by
   // skipping it - see services/tourPrefs for why skipping counts.
   const [tour] = usePreferenceValue(tourStore);
