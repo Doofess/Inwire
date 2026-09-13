@@ -23,8 +23,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
-  STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, UNSAVED_CAPTURE_CHANNEL,
-  UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL, UPDATE_STATE_REQUEST,
+  STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, TITLE_BAR_THEME_CHANNEL,
+  UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
+  UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_TITLE_CHANNEL,
 } from './channels';
 
 /**
@@ -172,6 +173,36 @@ const api = {
     const handler = (_event: unknown, state: unknown): void => listener(state);
     ipcRenderer.on(UPDATE_STATE_CHANNEL, handler);
     return () => { ipcRenderer.removeListener(UPDATE_STATE_CHANNEL, handler); };
+  },
+
+  /**
+   * Reports the resolved theme, so main can colour the native window buttons.
+   *
+   * A theme name and not a colour: `titleBarColors.ts` owns the hex, and says
+   * why a value computed in the renderer is always a frame behind the cascade
+   * that produced it. `resolvedTheme`, never `theme` - the picker's fifth entry,
+   * System, is a rule rather than a palette.
+   */
+  setTitleBarTheme(theme: string): void {
+    ipcRenderer.send(TITLE_BAR_THEME_CHANNEL, theme);
+  },
+
+  /** Sets the window title. The renderer decides what it says. */
+  setWindowTitle(title: string): void {
+    ipcRenderer.send(WINDOW_TITLE_CHANNEL, title);
+  },
+
+  /**
+   * Subscribes to maximized/focused, and **returns the unsubscribe**.
+   *
+   * Same disposer form as `onUpdateState` even though the title row mounts once
+   * for the life of the window: a listener that cannot be removed is a rule this
+   * file keeps uniformly, because the exception is what gets copied.
+   */
+  onWindowState(listener: (state: unknown) => void): () => void {
+    const handler = (_event: unknown, state: unknown): void => listener(state);
+    ipcRenderer.on(WINDOW_STATE_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(WINDOW_STATE_CHANNEL, handler); };
   },
 } as const;
 

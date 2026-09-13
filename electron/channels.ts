@@ -64,3 +64,30 @@ export const UPDATE_CHECK_CHANNEL = 'inwire:update-check';
  * carries is checked against `isComponentId` before anything acts on it.
  */
 export const UPDATE_APPLY_CHANNEL = 'inwire:update-apply';
+
+/**
+ * Renderer -> main: the theme the title row is currently painted in.
+ *
+ * Carries the **resolved theme name**, not a colour. Main owns the hex, in
+ * `titleBarColors.ts`, for the reason that module explains: a table resolves
+ * before the first paint, and a colour computed in the renderer is always at
+ * least one frame behind the cascade that produced it.
+ *
+ * Sent on every theme change, and once at startup - the startup send is not
+ * redundant, because the value main opened the window with came off disk and
+ * the renderer is the only thing that knows whether it was still right.
+ */
+export const TITLE_BAR_THEME_CHANNEL = 'inwire:title-bar-theme';
+
+/**
+ * Main -> renderer: whether the window is maximized and whether it has focus.
+ *
+ * Both are facts only the main process is told. The renderer needs them because
+ * a window wearing its own title bar has to draw what the OS used to: a
+ * restored window gets the frame's rounded corners and so must not paint into
+ * them, and an unfocused window's chrome dims. Neither has a CSS media query.
+ */
+export const WINDOW_STATE_CHANNEL = 'inwire:window-state';
+
+/** Renderer -> main: what the window's title should say, from capture state. */
+export const WINDOW_TITLE_CHANNEL = 'inwire:window-title';

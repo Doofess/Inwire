@@ -201,9 +201,17 @@ try {
     save: typeof window.inwire?.saveFile,
     agentPort: typeof window.inwire?.requestAgentPort,
     storePort: typeof window.inwire?.requestCaptureStorePort,
+    // The title bar's three. A window wearing its own chrome cannot colour the
+    // native buttons, dim them on blur, or name itself without these, and all
+    // three fail the same silent way the rest of this object exists to catch.
+    titleBarTheme: typeof window.inwire?.setTitleBarTheme,
+    windowTitle: typeof window.inwire?.setWindowTitle,
+    windowState: typeof window.inwire?.onWindowState,
   }));
-  check('the preload bridge is exposed', bridge,
-    { present: 'object', save: 'function', agentPort: 'function', storePort: 'function' });
+  check('the preload bridge is exposed', bridge, {
+    present: 'object', save: 'function', agentPort: 'function', storePort: 'function',
+    titleBarTheme: 'function', windowTitle: 'function', windowState: 'function',
+  });
 
   // Cross-origin isolation, which nothing depends on yet - so this is the
   // assertion that has to exist BEFORE anything does.
