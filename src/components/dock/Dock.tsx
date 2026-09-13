@@ -33,6 +33,21 @@ import {
  * chart is still the chart's. The Settings list also stays, with its up/down
  * buttons, because native HTML5 drag exposes nothing to a keyboard.
  *
+ * ## The title truncates at the default width, and that is accepted
+ *
+ * `WidgetCard`'s header holds the title, the type's `Segmented` control and the
+ * expand button, and it was sized for a 352px card - the width the old right-hand
+ * column gave it. At the dock's 260px default that leaves the title about 80px
+ * and "TRAFFIC TIMELINE" becomes "TRAFFI...".
+ *
+ * Left alone deliberately, rather than by not having noticed. The widget is still
+ * identifiable three other ways - its icon, this item's `aria-label`, and the
+ * rail's own tooltip - and the alternatives all cost more than the truncation
+ * does: moving the title into this header duplicates it, suppressing the card's
+ * means changing a component every other caller shares, and widening the default
+ * reverses a decision made with the 352 in view. A future session should not
+ * "fix" this without reopening that.
+ *
  * Native drag and drop rather than a library, which is what
  * `DisplayFiltersPanel` already does for the same shape of list - and every drag
  * fact is mirrored into a ref, for the reason that file states: two events
@@ -62,7 +77,7 @@ export interface DockProps {
   onExpand?: (type: WidgetTypeId, from: HTMLElement | null) => void;
 }
 
-export const Dock: React.FC<DockProps> = ({
+const DockImpl: React.FC<DockProps> = ({
   items, width, context, widgets, onConfigChange,
   onReorder, onTogglePinned, onClose, onWidthChange, onExpand,
 }) => {
@@ -312,3 +327,20 @@ export const Dock: React.FC<DockProps> = ({
     </>
   );
 };
+
+/**
+ * The app's one memo boundary, inherited from the column this replaces.
+ *
+ * `App` re-renders about ten times a second during a capture - that is the 100ms
+ * flush - and every widget in here does a full pass over the buffer when its
+ * inputs change. `DashboardAside` was `React.memo`'d for exactly that reason and
+ * was the only memo in the application; moving the column without moving the memo
+ * would have quietly handed every one of those renders to the charts.
+ *
+ * It only works because every prop is stable: `context` is memoised in `App`,
+ * `items` and `widgets` come from preference stores that return the same
+ * reference until something changes, and all six callbacks are `useCallback`
+ * there. An inline arrow in any one of them turns this back into a no-op, which
+ * is the failure mode to watch for - it is invisible except as a profile.
+ */
+export const Dock = React.memo(DockImpl);

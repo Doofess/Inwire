@@ -45,15 +45,6 @@ interface WidgetOverlayProps {
   /** Accessible name for the panel - the widget's own name. */
   label: string;
   onClose: () => void;
-  /**
-   * Leave the icon rail uncovered.
-   *
-   * Only true when the rail is what opened this. The rail sits above the scrim
-   * so it stays usable while the map is open, and a panel drawn over it would
-   * take that back. It is the one thing the two doors cannot share, because in
-   * the full column there is no rail to leave room for.
-   */
-  gutter?: boolean;
   /** The widget's own icon, for the title bar. */
   icon?: React.ComponentType<{ className?: string }>;
   /**
@@ -75,7 +66,6 @@ interface WidgetOverlayProps {
 export const WidgetOverlay: React.FC<WidgetOverlayProps> = ({
   label,
   onClose,
-  gutter,
   icon: Icon,
   origin,
   children,
@@ -161,9 +151,13 @@ export const WidgetOverlay: React.FC<WidgetOverlayProps> = ({
         role="dialog"
         aria-label={label}
         tabIndex={0}
-        className={`fixed inset-4 md:inset-10 m-auto max-w-[1600px] max-h-[1000px] ${
-          gutter ? 'mr-16' : ''
-        } z-40 rounded-xl border bg-card border-border text-card-foreground shadow-2xl flex flex-col overflow-hidden`}
+        // `md:inset-10` was here and is gone with it: 768 is below the
+        // window's own 1024 minimum, so that half of the pair could never
+        // apply. A `mr-16` gutter was here too, to leave the old right-hand icon
+        // rail uncovered - the rail is on the left now and this window has no
+        // reason to avoid it, because the scrim is what keeps it unreachable and
+        // that was already true of every other modal.
+        className={`fixed inset-10 m-auto max-w-[1600px] max-h-[1000px]  z-40 rounded-xl border bg-card border-border text-card-foreground shadow-2xl flex flex-col overflow-hidden`}
       >
         {/* A real title bar, which this deliberately did NOT have before.
             The reasoning then was sound and its premise has since gone: four of
