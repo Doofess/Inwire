@@ -17,6 +17,7 @@ import {
   type WidgetTypeId,
 } from '../../services/dashboardPrefs';
 import { usePreferenceStore } from '../../services/preferenceStore';
+import { dockStore } from '../../services/dockPrefs';
 import { WIDGET_RENDERERS } from '../analytics/dashboardWidgets';
 
 /**
@@ -44,7 +45,23 @@ import { WIDGET_RENDERERS } from '../analytics/dashboardWidgets';
  */
 export const DashboardWidgetList: React.FC = () => {
   const [dashboard, patchDashboard] = usePreferenceStore(dashboardStore);
-  const widgets = dashboard.widgets;
+  /**
+   * Order and open/closed are the DOCK's now, not the dashboard's.
+   *
+   * This list is still the keyboard-accessible path to both - native HTML5 drag
+   * fires no key events, so a drag-only reorder is a setting some people simply
+   * cannot change, and that argument did not stop being true when the dock grew
+   * a grip of its own. What changed is only which key it writes: `inwire.dock`
+   * for where a widget sits and whether it is shown, `inwire.dashboard` for what
+   * it is called and how it is drawn.
+   */
+  const [dock, patchDock] = usePreferenceStore(dockStore);
+  // Rendered in the dock's order, which is the order being edited.
+  const widgets = dock.items
+    .map((item) => dashboard.widgets.find((w) => w.type === item.type))
+    .filter((w): w is NonNullable<typeof w> => w !== undefined);
+  const openOf = (type: WidgetTypeId): boolean =>
+    dock.items.find((i) => i.type === type)?.open ?? false;
 
   const [dragging, setDragging] = useState<WidgetTypeId | null>(null);
   const [expanded, setExpanded] = useState<WidgetTypeId | null>(null);
@@ -52,13 +69,35 @@ export const DashboardWidgetList: React.FC = () => {
   /** What just moved, so focus can follow the ITEM rather than the position. */
   const buttonRefs = useRef(new Map<string, HTMLButtonElement>());
 
-  const write = (next: WidgetInstance[]) => patchDashboard({ widgets: next });
+  /**
+   * Two writers, because this list edits two different keys.
+   *
+   * There was one, called `write`, back when order and content lived together.
+   * Splitting the keys split it, and the pair must stay apart: routing a title
+   * edit through the order writer drops the title, and routing a reorder through
+   * the content writer stores an order nothing reads. Both fail silently, which
+   * is why they are named for the key they write rather than for `next`.
+   */
+  const writeOrder = (next: WidgetInstance[]) => {
+    const order = next.map((w) => w.type);
+    patchDock({
+      items: [...dock.items].sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type)),
+    });
+  };
+  const writeWidgets = (next: WidgetInstance[]) => {
+    // Merged by type into the stored array rather than replacing it: `next` is
+    // in the dock's order, and the dashboard key has no opinion about order.
+    const patched = new Map(next.map((w) => [w.type, w] as const));
+    patchDashboard({
+      widgets: dashboard.widgets.map((w) => patched.get(w.type) ?? w),
+    });
+  };
 
   const update = (type: WidgetTypeId, patch: Partial<WidgetInstance>) =>
-    write(widgets.map((w) => (w.type === type ? { ...w, ...patch } : w)));
+    writeWidgets(widgets.map((w) => (w.type === type ? { ...w, ...patch } : w)));
 
   const patchConfig = (type: WidgetTypeId, key: string, value: string | number) =>
-    write(
+    writeWidgets(
       widgets.map((w) =>
         w.type === type ? { ...w, config: { ...w.config, [key]: value } } : w,
       ),
@@ -71,7 +110,7 @@ export const DashboardWidgetList: React.FC = () => {
     const next = [...widgets];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
-    write(next);
+    writeOrder(next);
     setAnnouncement(`${widgetTitle(moved)} moved to position ${to + 1} of ${widgets.length}`);
     if (viaKeyboard) {
       // Focus follows the widget, not the slot. Re-focusing by position would
@@ -89,7 +128,7 @@ export const DashboardWidgetList: React.FC = () => {
     if (!moved) return;
     const next = widgets.filter((w) => w.type !== type);
     next.splice(next.findIndex((w) => w.type === targetType), 0, moved);
-    write(next);
+    writeOrder(next);
   };
 
   return (
@@ -164,8 +203,11 @@ export const DashboardWidgetList: React.FC = () => {
                 </div>
 
                 <Switch
-                  checked={widget.enabled}
-                  onCheckedChange={(enabled) => update(widget.type, { enabled })}
+                  checked={openOf(widget.type)}
+                  onCheckedChange={(open) => patchDock({
+                    items: dock.items.map((i) =>
+                      (i.type === widget.type ? { ...i, open } : i)),
+                  })}
                   aria-label={`Show ${widgetTitle(widget)}`}
                   className="ml-1 shrink-0"
                 />

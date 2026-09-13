@@ -6,7 +6,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { AnimatePresence } from "motion/react";
 import { useTheme } from "next-themes";
-import { useMediaQuery } from "./lib/useMediaQuery";
 import { useSystemThemePreference } from "./lib/useSystemTheme";
 import { useMotionPreference } from "./lib/motion";
 import { useFontPreference } from "./lib/font";
@@ -31,7 +30,12 @@ import { MAX_CUSTOM_COLUMNS } from "./lib/packetColumns";
 import { usePreferenceStore, usePreferenceValue } from "./services/preferenceStore";
 import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
-import { DashboardAside } from "./components/analytics/DashboardAside";
+import { Dock } from "./components/dock/Dock";
+import {
+  dockStore, type DockItem,
+} from "./services/dockPrefs";
+import { WidgetOverlay } from "./components/analytics/WidgetOverlay";
+import { WIDGET_RENDERERS } from "./components/analytics/dashboardWidgets";
 import { shortInterfaceLabel } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
@@ -43,7 +47,7 @@ import {
 import {
   restoredView, viewStore, type AppView,
 } from "./services/viewPrefs";
-import { dashboardStore } from "./services/dashboardPrefs";
+import { dashboardStore, widgetTitle } from "./services/dashboardPrefs";
 import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Capabilities, Packet } from "./types/packet";
@@ -252,7 +256,6 @@ export default function App() {
   // `lg:` in CSS, and the one breakpoint that is NOT dead: the window's minimum
   // is 1024 and the viewport is a few pixels short of it, so at the smallest
   // allowed size the full column is hidden and the rail shows instead.
-  const dashboardVisible = useMediaQuery("(min-width: 1024px)");
   /**
    * Whether the icon rail has room, which is a lower bar than the column.
    *
@@ -439,17 +442,43 @@ export default function App() {
     patchViewPrefs({ view: next });
   }, [patchViewPrefs]);
 
-  // The widget group drives the dashboard's own `enabled` flags, which is what
-  // the old right-hand column already reads. Step 5 points the same toggle at
-  // the dock; until then the rail controls the column that exists.
+  // `inwire.dashboard` is now only the widgets themselves - custom titles and
+  // per-widget config. Where they are, whether they are open and in what order
+  // is `inwire.dock`.
   const [dashboardPrefs, patchDashboardPrefs] = usePreferenceStore(dashboardStore);
   usePreferenceSync(dashboardStore.key, dashboardStore.normalize, dashboardStore.accept);
+  const [dock, patchDock] = usePreferenceStore(dockStore);
+  usePreferenceSync(dockStore.key, dockStore.normalize, dockStore.accept);
+
+  const patchItem = useCallback((type: string, patch: Partial<DockItem>) => {
+    patchDock({ items: dock.items.map((i) => (i.type === type ? { ...i, ...patch } : i)) });
+  }, [dock.items, patchDock]);
+
   const toggleWidget = useCallback((type: string) => {
-    patchDashboardPrefs({
-      widgets: dashboardPrefs.widgets.map((w) =>
-        w.type === type ? { ...w, enabled: !w.enabled } : w),
+    const item = dock.items.find((i) => i.type === type);
+    patchItem(type, { open: !(item?.open ?? false) });
+  }, [dock.items, patchItem]);
+
+  /**
+   * Reorders the OPEN items, leaving the closed ones where they were.
+   *
+   * The dock only shows what is open, so a drag can only speak about those - but
+   * the stored list holds every type, which is what lets a closed widget come
+   * back where it was. So the new order is spliced over the open positions and
+   * the closed entries keep their slots.
+   */
+  const reorderDock = useCallback((order: string[]) => {
+    const queue = [...order];
+    patchDock({
+      items: dock.items.map((item) => (
+        item.open ? dock.items.find((i) => i.type === queue.shift())! : item
+      )),
     });
-  }, [dashboardPrefs.widgets, patchDashboardPrefs]);
+  }, [dock.items, patchDock]);
+
+  /** The geo map's window. Not persisted - it is a glance, not a setting. */
+  const [expandedWidget, setExpandedWidget] = useState<string | null>(null);
+  const [expandOrigin, setExpandOrigin] = useState<{ x: number; y: number } | undefined>();
   /**
    * How this machine's adapters are configured, and who this machine is.
    *
@@ -1967,6 +1996,7 @@ export default function App() {
         view={view}
         onViewChange={setView}
         streamAvailable={streamToFollow !== null}
+        dockItems={dock.items}
         widgets={dashboardPrefs.widgets}
         onToggleWidget={toggleWidget}
         onOpenSettings={() => setShowSettingsModal(true)}
@@ -2044,6 +2074,39 @@ export default function App() {
 
         {/* Central Inspection + Analytics Split Grid */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
+          {/* The dock, between the rail and the content it describes.
+
+              It renders BEFORE the packet section in the flex row, which is the
+              whole move: the analytics column used to be the last child and sat
+              on the right. Everything inside it is unchanged - `RenderedWidget`
+              is the same call the old column made. */}
+          <Dock
+            items={dock.items}
+            width={dock.width}
+            context={dashboardContext}
+            widgets={dashboardPrefs.widgets}
+            onConfigChange={(type, patch) => patchDashboardPrefs({
+              widgets: dashboardPrefs.widgets.map((w) =>
+                (w.type === type ? { ...w, config: { ...w.config, ...patch } } : w)),
+            })}
+            onReorder={reorderDock}
+            onTogglePinned={(type) => {
+              const item = dock.items.find((i) => i.type === type);
+              patchItem(type, { pinned: !(item?.pinned ?? false) });
+            }}
+            // Closing IS deselecting: there is no hidden-but-toggled state, which
+            // is the defect `mode: 'hidden'` used to be.
+            onClose={(type) => patchItem(type, { open: false })}
+            onWidthChange={(width) => patchDock({ width })}
+            onExpand={(type, from) => {
+              const rect = from?.getBoundingClientRect();
+              setExpandOrigin(rect === undefined
+                ? undefined
+                : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+              setExpandedWidget(type);
+            }}
+          />
+
           {/* Main Packet Inspection Core */}
           {/* Kept MOUNTED while another view is active, and hidden with
               `display: none`.
@@ -2289,22 +2352,36 @@ export default function App() {
             />
           )}
 
-          {/* The analytics column, or the icon rail it collapses to.
-              The gate here was `dashboardVisible || railFits`, and `railFits`
-              was a media query on **768** - which the window's own 1024
-              minimum makes permanently true, so the gate read "yes" always and
-              the protection its comment described had not worked for some
-              time: `hidden lg:flex` is CSS, CSS does not stop React, and every
-              widget in the column went on aggregating the whole buffer twice a
-              second for something nobody could see.
-              `columnVisible` is that same `lg:` breakpoint, handed to the
-              aside so it can decline in JS what CSS was declining in paint.
-              It is not dead - the viewport is a few pixels under 1024 at the
-              smallest allowed window - and it is the only breakpoint here that
-              is still reachable. */}
-          <DashboardAside context={dashboardContext} columnVisible={dashboardVisible} />
+
         </div>
       </main>
+
+      {/* The geo map's expanded window.
+
+          Rendered here rather than inside the dock, and that placement is load
+          bearing: `WidgetOverlay` is `fixed`, and a fixed panel is not clipped by
+          an overflow ancestor today but is one `transform` away from being so -
+          and the dock's drag-to-reorder is exactly the kind of thing that
+          introduces one. The old column kept it outside its own scroll container
+          for the same reason. */}
+      <AnimatePresence>
+        {expandedWidget !== null && (() => {
+          const widget = dashboardPrefs.widgets.find((w) => w.type === expandedWidget);
+          if (widget === undefined) return null;
+          const renderer = WIDGET_RENDERERS[widget.type];
+          return (
+            <WidgetOverlay
+              key={widget.type}
+              label={widgetTitle(widget)}
+              icon={renderer.icon}
+              onClose={() => setExpandedWidget(null)}
+              origin={expandOrigin}
+            >
+              {renderer.render(dashboardContext, widget.config, { variant: 'full' })}
+            </WidgetOverlay>
+          );
+        })()}
+      </AnimatePresence>
 
       {/* 4. Modals */}
       <AnimatePresence>
