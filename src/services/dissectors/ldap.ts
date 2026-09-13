@@ -30,11 +30,6 @@
 import type { ProtocolLayer, ProtocolField } from '../../types/packet';
 import { BER_TAG, readBer, berChildren, berUnsigned, berString, type BerValue } from './ber';
 
-/** LDAP's registered port. 636 is LDAPS, which is TLS and never reaches here. */
-export const LDAP_PORT = 389;
-/** Microsoft's Global Catalog, which speaks the same protocol on another port. */
-export const LDAP_GC_PORT = 3268;
-
 /**
  * `[APPLICATION n]` tags, and the names tshark prints for them.
  *

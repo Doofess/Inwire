@@ -268,28 +268,6 @@
   }
 }
 
-/* The dashboard's morph between a column and the icon rail.
-   The width itself is a CSS transition on the aside, which carries across the
-   crossover because both states are now the SAME element. What cannot
-   transition is the contents: a column of five cards and a strip of five icons
-   share no elements, so React mounts one set and unmounts the other, and a
-   width that slides while the contents cut abruptly reads as a glitch rather
-   than as a change of shape.
-
-   Applied to the children rather than the aside, and unconditionally: an
-   animation runs when an element is MOUNTED, so only the swapped-in contents
-   play it. Dragging the column wider does not remount anything, so it does not
-   flicker - which a fade keyed on a class or a React key would have done on
-   every pointer move that crossed the threshold. */
-@keyframes nv-morph-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-.nv-morph > * {
-  animation: nv-morph-in 180ms ease-out;
-}
-
 /* --- The window's own title bar -------------------------------------------
 
    `titleBarStyle: 'hidden'` removes the OS caption strip but keeps the frame,

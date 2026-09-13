@@ -53,7 +53,6 @@ export const FAVICON_SVG = brandMarkSvg({
 /** The sizes each artefact needs, and what it is for. */
 export const PNG_TARGETS = [
   { file: 'public/icon-192.png', size: 192 },
-  { file: 'public/icon-512.png', size: 512 },
   { file: 'public/apple-touch-icon.png', size: 180 },
 ] as const;
 

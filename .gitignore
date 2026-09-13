@@ -18,10 +18,17 @@ coverage/
 #
 # The Unix tarball goes to release-artifacts/, which is NOT under public/:
 # Vite copies public/** into dist/ verbatim, so an artifact left there is
-# packaged inside the desktop app.
+# packaged inside the desktop app. `release/` does not match it - the comment
+# above assumed it did, and the next --build run put a tarball in `git status`.
 installer/output/
 local-agent/installer/output/
+release-artifacts/
 public/downloads/
+
+# `proc/self/fd/1` is not a directory Windows has. Under Git Bash a redirect to
+# /proc/self/fd/1 makes MSYS create a real file at that path instead of writing
+# to stdout, and one was committed that way. Ignored so it cannot come back.
+proc/
 
 # Python bytecode cache
 __pycache__/

@@ -154,13 +154,6 @@ export const COLUMN_ALIGN_CLASS: Record<ColumnAlign, string> = {
   right: 'text-right',
 };
 
-/** The header buttons are flex rows, so they need a justification, not an alignment. */
-export const COLUMN_ALIGN_JUSTIFY: Record<ColumnAlign, string> = {
-  left: 'justify-start',
-  center: 'justify-center',
-  right: 'justify-end',
-};
-
 /**
  * Where the text sits, per column.
  *
