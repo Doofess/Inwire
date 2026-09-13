@@ -14,10 +14,12 @@
  * all*, so it cannot ask `localStorage` anything. A small JSON file beside the
  * app's other state is the only place this can live.
  *
- * **The title bar's colours are here for exactly that reason and no other.**
- * `titleBarOverlay` paints before the renderer hydrates, so the alternative is
- * opening every window in one theme's colours and correcting it a beat later -
- * a flash in the one strip of the window the user cannot look away from. The
+ * **The window's own ground colour is here for exactly that reason and no
+ * other.** `backgroundColor` is fixed when the window is constructed, long
+ * before a renderer could report a theme, so the alternative is opening every
+ * window in one theme's colour and correcting it a beat later. That was a
+ * survivable flaw while a native caption sat above the page; on a frameless
+ * window the ground IS the app's surface, so it is a full-window flash. The
  * theme itself still lives in `localStorage` like every other preference; this
  * is a cache of what it resolved to last time, written by the renderer and read
  * by main, and it is never the source of truth.
@@ -30,9 +32,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { TITLE_BAR_HEIGHT } from './window';
 import {
-  DEFAULT_TITLE_BAR_THEME, isTitleBarColors, resolveTitleBarColors,
-  type TitleBarColors,
-} from './titleBarColors';
+  DEFAULT_WINDOW_THEME, isHexColor, resolveWindowBackground,
+} from './windowColors';
 
 export interface WindowBounds {
   width: number;
@@ -44,35 +45,36 @@ export interface WindowBounds {
 export interface WindowState {
   bounds: WindowBounds;
   maximized: boolean;
-  titleBar: TitleBarColors;
+  /** The resolved theme's `--background`, for the very first paint. */
+  background: string;
 }
 
 const DEFAULT_STATE: WindowState = {
   bounds: { width: 1600, height: 950 },
   maximized: false,
-  // Focused, because a window that has just been created has focus.
-  titleBar: resolveTitleBarColors(DEFAULT_TITLE_BAR_THEME, true),
+  background: resolveWindowBackground(DEFAULT_WINDOW_THEME),
 };
 
 /**
- * The last pair the renderer reported, held for the next `save()`.
+ * The last ground the renderer reported, held for the next `save()`.
  *
  * Module state rather than a field on the tracker because the two halves are
  * written by different things at different times: bounds change on a drag, the
- * colours change on a theme switch, and both end up in one file. One window at
+ * colour changes on a theme switch, and both end up in one file. One window at
  * a time is guaranteed by `requestSingleInstanceLock` in `main.ts`.
  */
-let lastTitleBar: TitleBarColors = DEFAULT_STATE.titleBar;
+let lastBackground: string = DEFAULT_STATE.background;
 
 /**
- * Records what the title row is painted in, for the *next* launch.
+ * Records the theme's ground colour, for the *next* launch.
  *
- * Does not repaint anything - `main.ts` calls `setTitleBarOverlay` for that.
- * This only makes sure the window that opens tomorrow opens in the colours the
- * user was last looking at.
+ * Repaints nothing. `backgroundColor` is only read when a window is
+ * constructed, so this cannot affect the window that is open - it exists so the
+ * window that opens tomorrow opens in the colour the user was last looking at
+ * rather than flashing the default and correcting itself.
  */
-export function rememberTitleBar(colors: TitleBarColors): void {
-  lastTitleBar = colors;
+export function rememberBackground(background: string): void {
+  lastBackground = background;
 }
 
 function statePath(): string {
@@ -106,13 +108,13 @@ export function loadWindowState(): WindowState {
   const state: WindowState = {
     bounds: { width: bounds.width, height: bounds.height },
     maximized: stored?.maximized === true,
-    // Validated as a pair of hex strings rather than trusted: this value is
-    // handed straight to Electron, and `titleBarOverlay` with a malformed
-    // colour throws at construction - which would be a profile that stops the
-    // app opening at all, the one outcome this file exists to avoid.
-    titleBar: isTitleBarColors(stored?.titleBar) ? stored.titleBar : DEFAULT_STATE.titleBar,
+    // Validated as a hex string rather than trusted: this goes straight to
+    // Electron's `backgroundColor`, which rejects a malformed value at
+    // construction - a profile that stops the app opening at all, which is the
+    // one outcome this file exists to avoid.
+    background: isHexColor(stored?.background) ? stored.background : DEFAULT_STATE.background,
   };
-  lastTitleBar = state.titleBar;
+  lastBackground = state.background;
 
   if (typeof bounds.x === 'number' && typeof bounds.y === 'number' && onSomeScreen(bounds)) {
     state.bounds.x = bounds.x;
@@ -150,7 +152,7 @@ export function trackWindowState(window: BrowserWindow): void {
     const state: WindowState = {
       bounds: window.getNormalBounds(),
       maximized: window.isMaximized(),
-      titleBar: lastTitleBar,
+      background: lastBackground,
     };
     try {
       mkdirSync(path.dirname(statePath()), { recursive: true });

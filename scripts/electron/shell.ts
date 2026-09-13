@@ -38,7 +38,8 @@ import {
 import { menuTemplate } from '../../electron/menu';
 import {
   APP_ORIGIN, COMMAND_LINE_SWITCHES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SCHEME_PRIVILEGES,
-  TITLE_BAR_HEIGHT, TITLE_BAR_STYLE, WEB_PREFERENCES,
+  TITLE_BAR_HEIGHT, WEB_PREFERENCES, WINDOW_CONTROL_COUNT, WINDOW_CONTROL_WIDTH,
+  WINDOW_IS_FRAMELESS,
 } from '../../electron/window';
 
 let failures = 0;
@@ -82,30 +83,66 @@ console.log('--- the window, field by field ---\n');
   ]);
 }
 
-console.log('\n--- the window wears its own title bar ---\n');
+console.log('\n--- the window is frameless and draws its own controls ---\n');
 
 {
-  // `'hidden'` and not `frame: false`, which is a line in CLAUDE.md's banner.
-  // Frameless would hand back the resize borders, the snap layouts, the system
-  // menu and the focus shadow to be reimplemented, and the buttons with them.
-  check('the title bar is hidden, not the frame', TITLE_BAR_STYLE, 'hidden');
-  // Asserted as the absence of a word rather than the presence of one: there is
-  // no `frame` export to compare against, and what must never come back is the
-  // option itself.
-  //
   // Comments stripped first, the same way the outbound-host drift check below
-  // does it - both files explain at length why `frame: false` is not used, and
-  // a check that cannot tell prose from code would fail on its own rationale.
+  // does it - these files explain at length what frameless costs, and a check
+  // that cannot tell prose from code would fail on its own rationale. That has
+  // already happened once here.
   const withoutComments = (file: string): string => readFileSync(file, 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/(^|[^:])\/\/.*$/gm, '$1');
-  checkTrue('...and `frame` is not an option this app sets',
-    !withoutComments('electron/window.ts').includes('frame:')
-    && !withoutComments('electron/main.ts').includes('frame:'));
-  // The renderer's title row and the rail's top cell are both laid out against
-  // this, so a change here that did not reach the CSS would leave the brand mark
-  // misaligned against the window title.
-  check('the overlay is 40px', TITLE_BAR_HEIGHT, 40);
+
+  checkTrue('the window declares itself frameless', WINDOW_IS_FRAMELESS);
+  checkTrue('...and main actually sets it',
+    withoutComments('electron/main.ts').includes('frame: false'));
+
+  // **The option that would undo the whole trade.** `thickFrame` defaults to
+  // true, and that default is the only reason a frameless window still resizes
+  // from its edges, keeps its drop shadow and keeps its minimise animation.
+  // Setting it false is a one-word change that looks like tidying and costs all
+  // three - so what is asserted is that the word does not appear at all.
+  checkTrue('`thickFrame` is never set, at any value',
+    !withoutComments('electron/window.ts').includes('thickFrame')
+    && !withoutComments('electron/main.ts').includes('thickFrame'));
+  // Same argument, for Windows 11's corner radius.
+  checkTrue('`roundedCorners` is never set, at any value',
+    !withoutComments('electron/window.ts').includes('roundedCorners')
+    && !withoutComments('electron/main.ts').includes('roundedCorners'));
+
+  // The overlay is gone with the native buttons. A `titleBarOverlay` coming
+  // back would mean Windows was drawing a second set of controls on top of the
+  // app's own, which is a thing that renders rather than throws.
+  checkTrue('`titleBarOverlay` is gone',
+    !withoutComments('electron/window.ts').includes('titleBarOverlay')
+    && !withoutComments('electron/main.ts').includes('titleBarOverlay'));
+  checkTrue('...and so is `titleBarStyle`',
+    !withoutComments('electron/main.ts').includes('titleBarStyle'));
+
+  // The renderer's title row is laid out against this, so a change here that
+  // did not reach the CSS would leave the controls straddling the row's edge.
+  check('the title row is 40px', TITLE_BAR_HEIGHT, 40);
+  // And the reserve the title row uses to centre its label is three buttons
+  // wide. This is the number frameless made a constant: under the overlay it
+  // had to come from `env(titlebar-area-width)`, because Windows drew the
+  // buttons wider at 150% scaling.
+  check('three controls reserve 138px',
+    WINDOW_CONTROL_WIDTH * WINDOW_CONTROL_COUNT, 138);
+  checkTrue('...and the title row reserves exactly that',
+    readFileSync('src/components/common/TitleRow.tsx', 'utf8')
+      .includes(`w-[${WINDOW_CONTROL_WIDTH * WINDOW_CONTROL_COUNT}px]`));
+
+  // `env(titlebar-area-width)` has no meaning without the overlay: it would
+  // resolve to its fallback and silently pad by zero.
+  checkTrue('nothing still reads the overlay env()',
+    !readFileSync('src/index.css', 'utf8').includes('titlebar-area-width'));
+
+  // The one that has a discarded capture behind it. `destroy()` skips the
+  // `close` event, and the quit guard is registered on `close`.
+  checkTrue('the close button closes the window rather than destroying it',
+    withoutComments('electron/main.ts').includes('window.close()')
+    && !withoutComments('electron/main.ts').includes('window.destroy()'));
 
   // Unchanged by the hidden title bar, and load-bearing: `role: 'editMenu'` is
   // the only source of Ctrl+C/V/A/Z for every input in the app, and Alt is what

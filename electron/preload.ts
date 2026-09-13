@@ -23,9 +23,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
-  STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, TITLE_BAR_THEME_CHANNEL,
+  STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
-  UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_TITLE_CHANNEL,
+  UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
+  type WindowControl,
 } from './channels';
 
 /**
@@ -176,15 +177,27 @@ const api = {
   },
 
   /**
-   * Reports the resolved theme, so main can colour the native window buttons.
+   * Reports the resolved theme, so main can cache the ground the NEXT window
+   * opens on.
    *
-   * A theme name and not a colour: `titleBarColors.ts` owns the hex, and says
-   * why a value computed in the renderer is always a frame behind the cascade
-   * that produced it. `resolvedTheme`, never `theme` - the picker's fifth entry,
+   * A theme name and not a colour: `windowColors.ts` owns the hex, and says why
+   * a value computed in the renderer is always a frame behind the cascade that
+   * produced it. `resolvedTheme`, never `theme` - the picker's fifth entry,
    * System, is a rule rather than a palette.
    */
-  setTitleBarTheme(theme: string): void {
-    ipcRenderer.send(TITLE_BAR_THEME_CHANNEL, theme);
+  setWindowTheme(theme: string): void {
+    ipcRenderer.send(WINDOW_THEME_CHANNEL, theme);
+  },
+
+  /**
+   * The three window buttons, which the app draws itself.
+   *
+   * Typed to the union rather than `string`: the bridge is the boundary where a
+   * typo stops being a compile error, and `'maximize'` instead of
+   * `'toggle-maximize'` would be a button that silently did nothing.
+   */
+  windowControl(action: WindowControl): void {
+    ipcRenderer.send(WINDOW_CONTROL_CHANNEL, action);
   },
 
   /** Sets the window title. The renderer decides what it says. */

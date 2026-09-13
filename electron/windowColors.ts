@@ -1,0 +1,84 @@
+/**
+ * The colour a window is painted before the renderer has drawn anything.
+ *
+ * This was `titleBarColors.ts`, and it existed because Windows drew the
+ * caption buttons and had to be told two colours for them. The window is
+ * frameless now and those buttons are ours, drawn in CSS by
+ * `WindowControls.tsx`, which follows the cascade like everything else in the
+ * app. So the whole `symbolColor` half of this module - the focused/unfocused
+ * axis, `mixHex`, the pre-composited 60% dim - went with it: an unfocused
+ * window dims its controls with `opacity`, the way any other element does.
+ *
+ * What is left is the one thing CSS still cannot do, because it happens before
+ * there is a document: **the colour of the window itself, at the instant it is
+ * created.**
+ *
+ * ## Why that is not just a constant
+ *
+ * It used to be - `WINDOW_BACKGROUND`, `#09090b`, a near-black picked to match
+ * `index.html`'s own class. That was survivable while the flash was a plain
+ * window with a native caption above it. It is not survivable now: a frameless
+ * window IS the app's surface, so opening one in near-black and repainting it
+ * to Day's `#f6f7f9` a beat later is a full-window flash rather than a dark
+ * rectangle that happens to be the right colour already.
+ *
+ * So main caches the resolved theme's ground in `window-state.json` and opens
+ * the next window in it. The theme still lives in `localStorage`; this is a
+ * cache of what it resolved to, written by the renderer, never the source of
+ * truth - exactly the argument `windowState.ts` makes for window bounds, which
+ * is why it is the same file.
+ *
+ * ## Why this is a table and not a read of the cascade
+ *
+ * `src/lib/chrome.ts` settled that argument once: resolving theme colours in
+ * JavaScript means reading a token out of the computed style and setting it
+ * back, which is JavaScript doing what the cascade already does and getting it
+ * wrong for one frame every time the theme changes. Here it is worse, because
+ * the consumer is in another process and runs before the page exists at all.
+ *
+ * The hex comes from `PALETTE_BY_THEME`, which already duplicates index.css's
+ * surfaces as concrete hex for canvas, MapLibre and the assertion scripts, and
+ * which `scripts/themes/packet-themes.ts` holds to index.css so the copies
+ * cannot drift. One more consumer of an existing, asserted duplicate is much
+ * cheaper than a third copy of four colours.
+ */
+import { PALETTE_BY_THEME } from '../src/services/themePalettes';
+
+/**
+ * The theme a window opens with when nothing is stored.
+ *
+ * `normalizeThemeName` in `src/lib/themeOptions.ts` also defaults to `dark`,
+ * and for the same reason: guessing light and being wrong is a white flash,
+ * guessing dark and being wrong is a dark one, and the second is the one people
+ * do not report as a bug.
+ */
+export const DEFAULT_WINDOW_THEME = 'dark';
+
+/**
+ * The window ground for a resolved theme name.
+ *
+ * Takes `resolvedTheme`, never `theme` - the picker has a fifth entry, System,
+ * which is a rule for choosing between two themes rather than a theme, so the
+ * unresolved value can be the literal string `system` and has no palette.
+ *
+ * An unknown name falls back to the default rather than throwing: this runs
+ * while a window is being created, and a stored name from a build that had a
+ * theme this one retired must not stop the app opening.
+ */
+export function resolveWindowBackground(resolvedTheme: string | undefined): string {
+  const palette = PALETTE_BY_THEME[resolvedTheme ?? '']
+    ?? PALETTE_BY_THEME[DEFAULT_WINDOW_THEME];
+  return palette.surface.background;
+}
+
+/**
+ * Whether a value off the disk is a colour this can hand to Electron.
+ *
+ * Validated rather than trusted for the reason the bounds are: this value is
+ * handed straight to `backgroundColor`, and a malformed one is rejected by
+ * Electron at construction - which would be a window that does not open,
+ * caused by a file the user can edit.
+ */
+export function isHexColor(value: unknown): value is string {
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+}

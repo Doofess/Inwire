@@ -69,15 +69,20 @@ export const UPDATE_APPLY_CHANNEL = 'inwire:update-apply';
  * Renderer -> main: the theme the title row is currently painted in.
  *
  * Carries the **resolved theme name**, not a colour. Main owns the hex, in
- * `titleBarColors.ts`, for the reason that module explains: a table resolves
+ * `windowColors.ts`, for the reason that module explains: a table resolves
  * before the first paint, and a colour computed in the renderer is always at
  * least one frame behind the cascade that produced it.
+ *
+ * Nothing on screen changes when this arrives - the window's controls are CSS
+ * now, and follow the cascade like everything else. It is written to
+ * `window-state.json` so the *next* launch opens on the right ground instead of
+ * flashing the default and correcting itself.
  *
  * Sent on every theme change, and once at startup - the startup send is not
  * redundant, because the value main opened the window with came off disk and
  * the renderer is the only thing that knows whether it was still right.
  */
-export const TITLE_BAR_THEME_CHANNEL = 'inwire:title-bar-theme';
+export const WINDOW_THEME_CHANNEL = 'inwire:window-theme';
 
 /**
  * Main -> renderer: whether the window is maximized and whether it has focus.
@@ -91,3 +96,22 @@ export const WINDOW_STATE_CHANNEL = 'inwire:window-state';
 
 /** Renderer -> main: what the window's title should say, from capture state. */
 export const WINDOW_TITLE_CHANNEL = 'inwire:window-title';
+
+/**
+ * Renderer -> main: minimize, toggle maximize, or close.
+ *
+ * The window is frameless, so these three are the app's own buttons rather than
+ * Windows'. One channel with a verb rather than three channels, because they
+ * are one control group and a renderer that could reach two of them can reach
+ * the third.
+ *
+ * **`close` means `window.close()`, never `destroy()`.** The quit guard hangs
+ * off the `close` event, so a button that destroyed the window would skip the
+ * "you have unsaved frames" confirm entirely - which is the one thing standing
+ * between a click and a discarded capture.
+ */
+export const WINDOW_CONTROL_CHANNEL = 'inwire:window-control';
+
+/** The verbs `WINDOW_CONTROL_CHANNEL` accepts. Anything else is ignored. */
+export const WINDOW_CONTROLS = ['minimize', 'toggle-maximize', 'close'] as const;
+export type WindowControl = (typeof WINDOW_CONTROLS)[number];

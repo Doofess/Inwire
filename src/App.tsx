@@ -41,7 +41,7 @@ import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
 import { FilterRow } from "./components/common/FilterRow";
 import {
-  useTitleBarTheme, useWindowChrome, useWindowTitle, windowTitleFor,
+  useWindowChrome, useWindowTheme, useWindowTitle, windowTitleFor,
 } from "./lib/windowChrome";
 import {
   restoredView, viewStore, type AppView,
@@ -220,12 +220,12 @@ export default function App() {
   // Resolves the "System" picker entry into a concrete theme, and keeps
   // resolving it when the OS setting changes.
   useSystemThemePreference();
-  // And tells main, which colours the native window buttons from it. Sends the
+  // And tells main, which caches the ground the NEXT window opens on. Sends the
   // RESOLVED name: "system" is a rule, not a palette.
-  useTitleBarTheme(resolvedTheme);
+  useWindowTheme(resolvedTheme);
   // Maximized and focused are facts only main is told, and a window drawing its
   // own title bar has to draw what the frame used to.
-  const { focused: windowFocused } = useWindowChrome();
+  const { focused: windowFocused, maximized: windowMaximized } = useWindowChrome();
   const isDark = isDarkTheme(resolvedTheme);
 
   // The packet list's colours, derived from the app theme rather than chosen
@@ -2040,7 +2040,7 @@ export default function App() {
         {/* 40px, matching TITLE_BAR_HEIGHT and therefore what the native overlay
             reserves. Almost all drag region - the capture controls moved into the
             rail precisely so this row could be nearly empty. */}
-        <TitleRow title={windowTitle} focused={windowFocused} />
+        <TitleRow title={windowTitle} focused={windowFocused} maximized={windowMaximized} />
 
         {/* Always shown, now that Network is a Settings tab rather than a view.
 

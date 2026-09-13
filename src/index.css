@@ -368,10 +368,6 @@
    overlay at all - `npm run dev` in a browser, and every platform but Windows.
    Written as `100vw` rather than `0px` for exactly that reason: the value is
    subtracted, so the neutral fallback is the full width. */
-.titlebar-reserve {
-  padding-right: calc(100vw - env(titlebar-area-width, 100vw));
-}
-
 @keyframes nv-menu-out {
   from {
     opacity: 1;
