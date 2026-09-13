@@ -38,7 +38,15 @@ export const THEME_OPTIONS: ThemeOption[] = [
   { value: 'light', label: 'Day', icon: TbSun, mode: 'light' },
   { value: 'paper', label: 'Paper', icon: TbBook, mode: 'light' },
   { value: 'dark', label: 'Graphite', icon: TbMoon, mode: 'dark' },
-  { value: 'midnight', label: 'Midnight', icon: TbMoonStars, mode: 'dark' },
+  // Labelled "Dark" and stored as `midnight`, which is the one place in this
+  // file where a label and an id deliberately disagree by more than wording.
+  // The id cannot be `dark` - that belongs to Graphite, and next-themes only
+  // writes `color-scheme` for the literal strings "light" and "dark", so moving
+  // it would cost native scrollbars and form controls their light/dark side for
+  // the theme most people will now be on. The label is free; the id is not.
+  // Renaming it also stopped describing a colour: it was blue-black, and it is
+  // a neutral #1e1e1e ground now.
+  { value: 'midnight', label: 'Dark', icon: TbMoonStars, mode: 'dark' },
 ];
 
 /**
@@ -66,7 +74,8 @@ export const THEME_OPTIONS: ThemeOption[] = [
  *
  * Each retired theme goes to the survivor closest to it, not to a default:
  * the two warm lights become Paper, the three cool/low-contrast darks become
- * Midnight, and Colorblind Safe - which was a light theme - becomes Day.
+ * Dark (stored as `midnight`), and Colorblind Safe - which was a light theme -
+ * becomes Day.
  */
 export const RETIRED_THEMES: Record<string, string> = {
   'solarized-light': 'paper',
@@ -108,10 +117,12 @@ export const SYSTEM_THEME_OPTION = {
 /**
  * Which two themes "System" chooses between.
  *
- * Midnight rather than Graphite for the dark half, which is why next-themes'
- * own `enableSystem` is not used: it would resolve to the theme literally named
- * `dark`. Which dark theme suits someone who has asked for "whatever the OS
- * says" is a product decision, and this is where it is made.
+ * Dark - stored as `midnight` - rather than Graphite, which is why next-themes'
+ * own `enableSystem` is not used: it would resolve to the theme whose id is
+ * literally `dark`, which is Graphite, which is the warm one. Which dark theme
+ * suits someone who has asked for "whatever the OS says" is a product decision,
+ * and this is where it is made. It is also why the neutral theme is the one
+ * labelled "Dark": it is what the OS setting already selected.
  */
 export const SYSTEM_THEME_PAIR = { light: 'light', dark: 'midnight' } as const;
 
