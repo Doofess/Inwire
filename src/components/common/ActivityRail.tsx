@@ -51,10 +51,21 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 13 icons, 36px targets, three dividers and a 40px top cell come to about
- * 549px against a 640px minimum window height. It fits, with ~90px of slack. If
- * a sixth widget ever arrives, **the widgets group is the one that scrolls** -
- * capture, views and the bottom group have to stay reachable without one.
+ * 13 icons, 36px targets, four dividers and a 40px top cell come to **579px**
+ * against a 640px minimum window height. It fits, with 61px of slack - room for
+ * exactly one more icon.
+ *
+ * That number is added up from these classes by `scripts/session/view.ts`, which
+ * also holds each class to what the sum assumes. This comment said 549 until that
+ * script was written: the figure was for `my-1` dividers, it counted three rather
+ * than the four actually rendered, and it ignored the capture group's `pt-1` and
+ * the bottom group's `pb-2`. A height budget nothing checks is a height budget
+ * that has already drifted.
+ *
+ * So if a sixth widget ever arrives, **the widgets group is the one that
+ * scrolls** - capture, the views and the bottom group have to stay reachable
+ * without one, and the bottom group is pinned with `mt-auto`, so an overflow
+ * does not scroll anything: it pushes Settings off the bottom edge.
  */
 
 /** 32px was the old rail's target in a 48px strip; 36 is this one's in 56. */

@@ -217,22 +217,28 @@ relative module, so `electron/build.cjs` bundles it.
 any more; `Header.tsx` is deleted and its contents are split three ways.
 
 ```
-┌──────┬──────────────────────────────────────────┐
-│      │ 40px TitleRow   palette · title · overlay│
-│ rail ├──────────────────────────────────────────┤
-│ 56px │ FilterRow  (banner, filter, capturing)   │
-│      ├──────────────────────────────────────────┤
-│      │ packet list · detail panes · dashboard   │
-└──────┴──────────────────────────────────────────┘
+┌──────┬─────────────────────────────────────────────────┐
+│      │ 40px TitleRow      palette · title · overlay    │
+│ rail ├─────────────────────────────────────────────────┤
+│ 56px │ FilterRow  (banner, filter, capturing)          │
+│      ├────────────┬────────────────────────────────────┤
+│      │ dock       │ packets (hidden, never unmounted)  │
+│      │ 240-640px  │ statistics | network | stream      │
+└──────┴────────────┴────────────────────────────────────┘
 ```
 
 `ActivityRail.tsx` is 56px and spans the full window height, so it reaches the
 top and its own 40px cell sits level with the title row. Four groups: **capture**
 (Start/Stop, adapter), **views** (Packets, Statistics, Network, Follow Stream),
 **widgets** (the five dashboard types), and a bottom group (Updates, Settings)
-pinned with `mt-auto`. 13 icons at 36px targets with three dividers come to about
-549px against the 640px minimum window height; if a sixth widget ever arrives,
-**the widgets group is the one that scrolls**, not the rail.
+pinned with `mt-auto`. 13 icons at 36px targets with four dividers come to
+**579px** against the 640px minimum window height - 61px of slack, which is room
+for exactly one more icon. `scripts/session/view.ts` adds that up from the
+Tailwind classes and holds each class to what the sum assumes, because the comment
+in `ActivityRail.tsx` said 549 until it did. If a sixth widget ever arrives, **the
+widgets group is the one that scrolls**: the bottom group is pinned with
+`mt-auto`, so an overflow does not scroll anything, it pushes Settings off the
+bottom edge.
 
 Two behaviours in one strip, so the active states are deliberately different
 shapes: a view carries a **2px left accent edge plus a filled background**, a
@@ -255,7 +261,46 @@ redeclared by all four themes, which a layout constant has no business being.
 `DashboardAside`'s rule that "'which panel did I have open' is not a setting",
 and does so knowingly: a modal is a detour, a pane is a place. `stream` is a
 legal stored value that `restoredView` refuses to restore, because the
-conversation it named lived in a buffer that is being rebuilt.
+conversation it named lived in a buffer that is being rebuilt. Those two facts
+have to move together and now do: `scripts/session/view.ts` reads the JSX guard
+for every view out of `App.tsx` and asserts that the one view needing a second
+condition to render - `stream`, which needs a target - is exactly the one
+`restoredView` refuses.
+
+**The dock replaced the right-hand column.** `components/dock/Dock.tsx` sits
+between the rail and the content and stacks whichever widgets are open;
+`DashboardAside` and its collapse-to-a-rail morph are deleted. `services/dockPrefs.ts`
+is the furniture - `inwire.dock`, holding the width and an `items` list that is a
+permutation of every widget type with `open` and `pinned` flags, so a widget
+closed and reopened returns **where it was**. `inwire.dashboard` keeps what is
+still true of a widget wherever it is drawn, its `title` and its `config`; its
+`mode` and `width` are no longer read, and are deliberately **not** deleted from
+storage, because `seedFromDashboard()` reads that raw key once to migrate.
+
+Four things about it worth knowing before touching it:
+
+- **The migration runs once per user and cannot be repeated.** `inwire.dock` is
+  absent and the old data is under a different name, so a normaliser never gets
+  the chance - the seed happens at module scope, before `createPreferenceStore`
+  reads. A stored `'full'` column carries its enabled widgets across; `'icons'` or
+  `'hidden'` opens **nothing**, because a collapsed user was not looking at any of
+  them and honouring the list would open five widgets nobody asked for. It is the
+  single highest-value thing `scripts/session/dock.ts` covers.
+- **`LIST_RESERVE` is 640 and does not fit every column.** Measured: the fixed
+  columns take ~785px. It is still right, for a reason about the window rather
+  than the columns - a reserve large enough to keep every column would mean the
+  dock **cannot open at all** at the 1024 minimum. The list already scrolls
+  horizontally by design; the reserve guarantees it keeps its identity, the frame
+  number, the time and both addresses.
+- **The width is stored unclamped.** `clampDockWidth` applies at the point of use,
+  against the window, so narrowing shrinks an open dock and widening gives back
+  the width the user chose. A width clamped on the way out would never grow back.
+- **`Dock` is behind `React.memo`, and it is the application's only memo
+  boundary.** App re-renders ~10x a second during a capture and every widget does
+  a full pass over the buffer. `DashboardAside` was memoised for this; Step 5 of
+  the rail work did not carry that across and handed every one of those renders to
+  the charts. Nothing failed - it was only slower, visible in a profile. An inline
+  arrow in any of the six callbacks App passes it silently defeats it.
 
 `lib/windowChrome.ts` is the renderer's half of the bridge: it reports the
 resolved theme and the window title to main, and subscribes once at module scope
@@ -413,7 +458,7 @@ depends on it yet. *Unenforced* — an assertion must exist before anything does
 `local-agent/test_protocol.py` pins the SDDL's shape — `IU` present, `WD`/`AN`/
 `NU` absent, `D:P` — and `scripts/electron/agent-link.ts` drives the real client
 against a real pipe. Neither can tell you the descriptor took **effect**; that
-needs a second Windows user account and is on the verification matrix.
+needs a second Windows user account and is in `docs/verification.md`.
 
 **The two TypeScript programs share their strictness flags, and stay
 separate.** `tsconfig.json` (renderer plus scripts) and
@@ -524,6 +569,15 @@ Assertion scripts under `scripts/`, discovered by `scripts/check.ts` walking
 the directory; a handful are listed there as SKIP with a reason each
 (measurements with no right answer, or things needing the untracked fixtures). Plain `tsx`, no runner, no Electron, no browser. A script
 prints `PASS`/`FAIL` lines and exits non-zero.
+
+**`docs/verification.md` is the other half**, and it is a real document rather
+than an aspiration: everything this repository knows to check and cannot check by
+itself - the window's own chrome against all four themes and three scaling
+factors, Snap Layouts, the drag regions, the dock at its 240px floor, the
+once-per-user dock migration against a real profile, the pipe's security
+descriptor taking effect (which needs a second Windows account), and the UAC
+prompt. Each item says what a failure *looks like*, because everything in it
+fails silently - which is the reason it is there and not in a script.
 
 Three rules keep it that way, and all three are now checked:
 
