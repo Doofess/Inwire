@@ -1,10 +1,8 @@
 import React, { useMemo, useState } from 'react';
-import { motion } from 'motion/react';
 import {
-  TbNetwork, TbX, TbRefresh, TbEye, TbEyeOff, TbDeviceDesktop, TbAddressBook,
+  TbNetwork, TbRefresh, TbEye, TbEyeOff, TbDeviceDesktop, TbAddressBook,
   TbRouter, TbClock, TbWorld, TbPlugConnected, TbShield,
 } from 'react-icons/tb';
-import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { useNameResolutionPreference } from '../../lib/nameResolution';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { networkPanelStore } from '../../services/interfacePrefs';
@@ -59,8 +57,15 @@ const SECTIONS: {
   { id: 'public', label: 'Public identity', icon: TbShield },
 ];
 
-interface NetworkModalProps {
-  onClose: () => void;
+interface NetworkPaneProps {
+  /**
+   * No longer a prop.
+   *
+   * Network described the machine rather than the capture, so it had nothing to
+   * hand back on the way out - unlike Statistics, where every row is a filter and
+   * leaving IS the second half of the action. A pane with nothing to return is
+   * left through the rail or Escape, and needed no callback at all.
+   */
   adapters: AgentAdapter[];
   facts: NetworkFacts;
   /** Which adapters the capture is running on, so the right one leads. */
@@ -91,8 +96,8 @@ function countdown(seconds: number | null): string | null {
   return delta >= 0 ? `in ${amount}` : `expired ${amount} ago`;
 }
 
-export const NetworkModal: React.FC<NetworkModalProps> = ({
-  onClose, adapters, facts, captureInterfaces, agentConnected, onRefresh,
+export const NetworkPane: React.FC<NetworkPaneProps> = ({
+  adapters, facts, captureInterfaces, agentConnected, onRefresh,
 }) => {
   const [section, setSection] = useState<NetworkSection>('adapter');
   const [nameResolution, patchNameResolution] = useNameResolutionPreference();
@@ -118,12 +123,18 @@ export const NetworkModal: React.FC<NetworkModalProps> = ({
 
   const setHidden = (next: boolean) => setPanel({ ...panel, hideSensitive: next });
 
+  /*
+   * A pane, not a dialog. Same conversion as Statistics: the `fixed inset-0`
+   * scrim, the centred 90vh panel, its border, shadow and entrance animation, and
+   * the close button are all gone.
+   *
+   * The filter row above is hidden while this view is active, which is App's
+   * decision rather than this component's: a display filter acts on the capture,
+   * and this surface is about the machine - so the control would have been a
+   * control with nothing in view to act on.
+   */
   return (
-    <motion.div {...modalBackdropMotion}
-      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-      <motion.div {...modalPanelMotion}
-        className="w-full max-w-4xl max-h-[90vh] rounded-xl border flex flex-col shadow-2xl
-          transition-colors bg-card border-border text-card-foreground">
+    <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-card text-card-foreground">
 
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -151,10 +162,7 @@ export const NetworkModal: React.FC<NetworkModalProps> = ({
                 hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed">
               <TbRefresh className="w-4 h-4" />
             </button>
-            <button onClick={onClose}
-              className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground">
-              <TbX className="w-5 h-5" />
-            </button>
+            {/* The close button stood here, beside Refresh. */}
           </div>
         </div>
 
@@ -463,7 +471,6 @@ export const NetworkModal: React.FC<NetworkModalProps> = ({
             )}
           </div>
         </div>
-      </motion.div>
-    </motion.div>
+    </div>
   );
 };

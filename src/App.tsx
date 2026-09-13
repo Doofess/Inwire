@@ -97,7 +97,7 @@ import { findPacketIndexById, frameJumpRefusal } from "./components/packet-detai
 import { CustomDissectorModal } from "./components/dissectors/CustomDissectorModal";
 import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
-import { NetworkModal } from "./components/network/NetworkModal";
+import { NetworkPane } from "./components/network/NetworkPane";
 import { SettingsModal } from "./components/common/SettingsModal";
 import {
   FILTER_PRESETS_STORAGE_KEY,
@@ -406,7 +406,6 @@ export default function App() {
   const [detailPacketId, setDetailPacketId] = useState<number | null>(null);
   const [showDissectorModal, setShowDissectorModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
-  const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   /**
@@ -1444,20 +1443,6 @@ export default function App() {
   selectedPacketRef.current = selectedPacket;
 
   /**
-   * Opens the modal the active view names, for the views still to be converted.
-   *
-   * Statistics is a pane now and is gone from here - it renders from `view`
-   * directly. Network follows in the next commit, and this effect goes with it.
-   *
-   * One direction only: the rail writes `view`, this reflects it. The modal's own
-   * close handler writes `view` back to `packets`, so there is still exactly one
-   * source of truth and no two-way sync to get stuck in a loop.
-   */
-  useEffect(() => {
-    setShowNetworkModal(view === 'network');
-  }, [view]);
-
-  /**
    * Escape in a non-Packets view returns to Packets.
    *
    * **Last in the chain, by construction.** Every inner consumer - the palette,
@@ -1962,6 +1947,16 @@ export default function App() {
           />
         </TitleRow>
 
+        {/* Hidden in Network, and only there.
+
+            Network describes how this machine is configured; a display filter
+            acts on the capture. Leaving the row up would be a control with
+            nothing in view to act on - and worse, one that still reports
+            "PACKETS 1,204 / 50,000" about a list that is not on screen.
+
+            Statistics keeps it, because its tables ARE the capture and its rows
+            hand filters back to it. */}
+        {view !== 'network' && (
         <FilterRow
           isCapturing={isCapturing}
           captureAdapter={captureAdapter}
@@ -2002,6 +1997,7 @@ export default function App() {
             />
           }
         />
+        )}
 
         {/* Central Inspection + Analytics Split Grid */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
@@ -2217,6 +2213,17 @@ export default function App() {
             />
           )}
 
+          {/* Network as a pane. Unmounted when inactive, like Statistics. */}
+          {view === 'network' && (
+            <NetworkPane
+              adapters={adapters}
+              facts={networkFacts}
+              captureInterfaces={selectedInterfaces}
+              agentConnected={agentStatus === 'connected'}
+              onRefresh={() => sendAgentCommand({ type: 'refresh_adapters' })}
+            />
+          )}
+
           {/* The analytics column, or the icon rail it collapses to.
               The gate here was `dashboardVisible || railFits`, and `railFits`
               was a media query on **768** - which the window's own 1024
@@ -2307,19 +2314,6 @@ export default function App() {
       </AnimatePresence>
 
 
-      <AnimatePresence>
-        {showNetworkModal && (
-          <NetworkModal
-            key="network-modal"
-            onClose={() => setView('packets')}
-            adapters={adapters}
-            facts={networkFacts}
-            captureInterfaces={selectedInterfaces}
-            agentConnected={agentStatus === 'connected'}
-            onRefresh={() => sendAgentCommand({ type: 'refresh_adapters' })}
-          />
-        )}
-      </AnimatePresence>
 
       <AnimatePresence>
         {showSettingsModal && (
