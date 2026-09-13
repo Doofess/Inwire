@@ -133,13 +133,16 @@ export function useWindowTitle(title: string): void {
  * in the taskbar tells them nothing.
  */
 export function windowTitleFor(
-  { capturing, adapter, packets }: { capturing: boolean; adapter: string | null; packets: number },
+  { capturing, adapter }: { capturing: boolean; adapter: string | null },
 ): string {
   if (capturing && adapter !== null) return `${adapter} - capturing - Inwire`;
   if (capturing) return 'Capturing - Inwire';
-  // A buffer with frames in it but no capture running is a finished capture
-  // somebody may still be reading, which is worth distinguishing from an empty
-  // window - it is also the state `guardClose` refuses to quit out of silently.
-  if (packets > 0) return `${packets.toLocaleString()} packets - Inwire`;
+  // **No packet count.** This used to read "2,224 packets - Inwire" once a
+  // capture stopped, and it was wrong in two ways at once: the title row is the
+  // one strip a person cannot look away from, so a number that changes is the
+  // most distracting thing that could be put in it - and the count was already
+  // on screen, in the filter bar, against the filter that produced it. A second
+  // copy with no filter attached answered a different question in the same
+  // words. The count is a dock widget now.
   return 'Inwire';
 }
