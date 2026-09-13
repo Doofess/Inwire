@@ -8,7 +8,6 @@ import {
 import { FilterEngine, FilterValidationResult } from '../../services/filterEngine';
 import { allPresets } from '../../services/filterPresets';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
-import type { CaptureFilterState } from '../../lib/useCaptureFilter';
 
 /**
  * Which surface this bar is standing on.
@@ -40,20 +39,6 @@ interface FilterBarProps {
    * million frames sit on disk unexamined is an answer to a question nobody
    * asked. `App.tsx` derives them; see `matchesBeforeWindow`.
    */
-  totalPackets?: number;
-  filteredPackets?: number;
-  /**
-   * The whole-capture scan behind those numbers. Header variant only.
-   *
-   * The counts above are worth nothing without it: while a scan is running
-   * they describe the RAM window alone, and saying so is the difference
-   * between a number that is settling and a number that is wrong.
-   */
-  filterScan?: CaptureFilterState;
-  /** Rows below the window the scan did not reach - a capture that grew. */
-  scanUncovered?: number;
-  /** Runs the scan again, to take in what the last one missed. */
-  onRescan?: () => void;
   /**
    * The preset library, owned by App.tsx and edited in
    * Settings > Display Filters. Read-only here apart from the bookmark button,
@@ -71,11 +56,6 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   onFilterChange,
   onApplyFilter,
   variant = 'header',
-  totalPackets = 0,
-  filteredPackets = 0,
-  filterScan,
-  scanUncovered = 0,
-  onRescan,
   filterPresetLibrary,
   onSaveCurrentFilter,
 }) => {
@@ -183,14 +163,6 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 
   const presetCount = allPresets(filterPresetLibrary).length;
   const isNotEmpty = filterText.trim().length > 0;
-  const filterPercentage = totalPackets > 0 ? ((filteredPackets / totalPackets) * 100).toFixed(1) : '100.0';
-
-  // Read out here rather than in the JSX so the badge below stays legible, and
-  // so `off` and `ready` are one case: neither has anything to say.
-  const scanState = filterScan?.status ?? 'off';
-  const scanDone = filterScan?.status === 'scanning' ? filterScan.framesDone : 0;
-  const scanTotal = filterScan?.status === 'scanning' ? filterScan.frameCount : 0;
-  const scanMessage = filterScan?.status === 'failed' ? filterScan.message : '';
 
   // Escape closes the presets list from anywhere, which the input's own keydown
   // handler cannot do: the list is opened from a button, so the field often does
@@ -417,59 +389,14 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             answered over the whole capture on disk, and the search is a
             substring match over the rows already in hand. */}
 
-        {/* Packet Count Status Badge. The compact variant leaves this to its
-            host, which counts against a different total.
+        {/* The packet counter used to be here, and it is a dock widget now -
+            `counts`, which subscribes to `services/packetCounts.ts` for itself.
 
-            The badge carries the scan's state beside the counts rather than
-            somewhere else on screen, because the state is a statement ABOUT
-            those counts: while a scan runs they describe the RAM window
-            alone, and a percentage that quietly changes meaning as the answer
-            lands is worse than one that says which question it answered. */}
-        {!isCompact && (
-          <div className="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-md border shrink-0 bg-background border-border text-foreground/80">
-            <span className="text-muted-foreground">PACKETS:</span>
-            <span className="font-semibold text-foreground">
-              {filteredPackets.toLocaleString()} <span className="text-muted-foreground">/</span> {totalPackets.toLocaleString()}
-            </span>
-            {scanState === 'scanning' ? (
-              <span
-                className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400 font-bold"
-                title={`Filtering the stored capture: ${scanDone.toLocaleString()} of ${scanTotal.toLocaleString()} frames`}
-              >
-                {/* Indeterminate until the first progress message, which is
-                    150,000 frames in - a percentage of an unknown total is a
-                    number, and a wrong one. */}
-                SCANNING{scanTotal > 0 ? ` ${Math.floor((scanDone / scanTotal) * 100)}%` : ''}
-              </span>
-            ) : (
-              <span className="text-[10px] px-1.5 py-0.2 rounded bg-primary/20 text-primary font-bold">
-                {filterPercentage}%
-              </span>
-            )}
-            {scanState === 'failed' && (
-              <span
-                className="text-[10px] px-1.5 py-0.2 rounded bg-destructive/20 text-destructive font-bold"
-                title={scanMessage}
-              >
-                STORED FRAMES NOT SEARCHED
-              </span>
-            )}
-            {/* A capture that grew after the scan started, which while one is
-                running it always does. Clickable rather than automatic: a scan
-                that re-ran itself would be a whole-capture pass about once a
-                second, competing with the frames still arriving. */}
-            {scanUncovered > 0 && onRescan && (
-              <button
-                type="button"
-                onClick={onRescan}
-                className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400 font-bold hover:bg-amber-500/30 transition-colors"
-                title={`${scanUncovered.toLocaleString()} stored frames arrived after this filter was run over the capture. Click to run it again.`}
-              >
-                +{scanUncovered.toLocaleString()} UNSEARCHED
-              </button>
-            )}
-          </div>
-        )}
+            It left for the same reason find-packet did: the row above the list
+            had become the place everything went that had nowhere else to be. A
+            count is something you glance at while reading, which is what a dock
+            card is for, and having it here meant it was always on screen at
+            12px whether or not anybody was looking at it. */}
       </div>
     </div>
   );

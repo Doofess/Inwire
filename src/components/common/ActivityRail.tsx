@@ -54,9 +54,9 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 14 icons, 36px targets and four dividers come to **577px** against a 640px
- * minimum window height. It fits, with 63px of slack - room for one more icon,
- * which the counts widget takes.
+ * 15 icons, 36px targets and four dividers come to **615px** against a 640px
+ * minimum window height. It fits, with 25px of slack - which is **not** another
+ * icon. The rail is full.
  *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that

@@ -122,7 +122,10 @@ check(
   check(
     'the header control is the one you switch while reading, not while configuring',
     WIDGET_TYPE_IDS.map((id) => `${id}:${headerOption(id)?.id ?? '-'}`),
-    ['geo:-', 'timeseries:metric', 'breakdown:metric', 'sizes:-', 'talkers:view'],
+    ['geo:-', 'timeseries:metric', 'breakdown:metric', 'sizes:-', 'talkers:view',
+      // `counts` has no options at all: it is two numbers and a percentage,
+      // and there is nothing about that to configure.
+      'counts:-'],
   );
 
   const stepper = WIDGET_TYPE_IDS.filter((id) =>
@@ -218,7 +221,7 @@ check(
     { type: 'sizes' },
     { type: 'geo' },
   ])),
-  ['sizes', 'geo', 'timeseries', 'breakdown', 'talkers'],
+  ['sizes', 'geo', 'timeseries', 'breakdown', 'talkers', 'counts'],
 );
 
 check(
@@ -324,13 +327,14 @@ for (const junk of [null, undefined, 'geo', 7, {}, [[]], [null], [{ id: 'geo' }]
     'breakdown',
     'talkers',
     'sizes',
+    'counts',
   ]);
 }
 
 check(
   'a reordered legacy list keeps the order the user put it in',
   shape(normalizeDashboard({ order: ['talkers', 'geo', 'protocols', 'timeline'] })!.widgets),
-  ['talkers', 'geo', 'breakdown', 'timeseries', 'sizes'],
+  ['talkers', 'geo', 'breakdown', 'timeseries', 'sizes', 'counts'],
 );
 
 // Which widgets were switched off is `inwire.dock`'s answer now, and
@@ -339,13 +343,13 @@ check(
 check(
   'a legacy disabled list leaves the order alone',
   shape(normalizeDashboard({ order: ['geo', 'timeline'], disabled: ['timeline'] })!.widgets),
-  ['geo', 'timeseries', 'breakdown', 'sizes', 'talkers'],
+  ['geo', 'timeseries', 'breakdown', 'sizes', 'talkers', 'counts'],
 );
 
 check(
   'a repeated legacy id is taken once',
   shape(normalizeDashboard({ order: ['geo', 'geo', 'geo', 'talkers'] })!.widgets),
-  ['geo', 'talkers', 'timeseries', 'breakdown', 'sizes'],
+  ['geo', 'talkers', 'timeseries', 'breakdown', 'sizes', 'counts'],
 );
 
 check(
@@ -383,6 +387,7 @@ check(
     'geo',
     'timeseries',
     'sizes',
+    'counts',
   ]);
   check('...keeping the FIRST of a duplicated type, settings and all',
     out!.widgets[1].config, { metric: 'packets', chart: 'bars', top: 5 });

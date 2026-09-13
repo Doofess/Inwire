@@ -112,6 +112,7 @@ console.log('\n--- a drag-reorder lands on the open slots ---\n');
     { type: 'breakdown' as const, open: false, pinned: false },
     { type: 'sizes' as const, open: true, pinned: false },
     { type: 'talkers' as const, open: true, pinned: false },
+    { type: 'counts' as const, open: false, pinned: false },
   ];
   const visible = types(dockOrder(items));
   check('the visible list is the open ones in stored order', visible,
@@ -139,7 +140,7 @@ console.log('\n--- a drag-reorder lands on the open slots ---\n');
   check('...and the closed item still in its own',
     moved.findIndex((i) => i.type === 'breakdown'), 2);
   check('...carrying its flags across', moved.map((i) => i.open),
-    [true, true, false, true, true]);
+    [true, true, false, true, true, false]);
 
   // Both ends, because an off-by-one in the insertion shows up there and nowhere
   // else.
