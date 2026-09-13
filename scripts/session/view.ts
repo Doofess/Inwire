@@ -235,7 +235,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
   const group = (items: number): number => items * TARGET + Math.max(0, items - 1) * GAP;
 
   const blocks = [
-    ['capture: adapter, Start/Stop', 4 + group(2)],
+    ['capture: Start/Stop, adapter, schedule', 4 + group(3)],
     ['divider', DIVIDER],
     [`views: ${ids.length}`, group(ids.length)],
     ['divider', DIVIDER],
@@ -258,7 +258,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // changed. Held here rather than trusted there, and it has earned that once
   // already: deleting the hamburger menu moved Custom Dissectors into the bottom
   // group, and this is the line that says what that cost.
-  check('the rail is as tall as it says it is', total, 501);
+  check('the rail is as tall as it says it is', total, 539);
   // The raw file, not `code()`: the figure lives in the header comment, which is
   // the first thing `code()` throws away. The point of this one is that the
   // prose and the arithmetic cannot part company again.

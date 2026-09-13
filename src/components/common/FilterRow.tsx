@@ -1,32 +1,28 @@
 import React from 'react';
-import { TbClock, TbAlertTriangle } from 'react-icons/tb';
+import { TbAlertTriangle } from 'react-icons/tb';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
-import { CaptureSchedulePicker } from './CaptureSchedulePicker';
-import type { CaptureSchedule, SchedulePreset } from '../../services/captureSchedule';
-import { headerButtonClass } from './headerButton';
 
 /**
  * The row below the title row: the display filter, and the state of the capture.
  *
  * This is where the old 64px header's remaining contents ended up. The capture
- * controls went into the rail; the schedule picker and the restore readout came
- * here, because they are things you read rather than things you reach for, and
- * the row already carries the packet counter.
+ * controls went into the rail, and **the schedule picker followed them there**:
+ * it decides when a capture starts and when it stops, which makes it a capture
+ * control rather than something that belongs above the packet list. What is
+ * left here is the display filter, the capturing readout, the restore progress,
+ * and the banner.
  *
- * It is NOT the chrome accent any more. The header it replaces was `--chrome`,
- * and everything in it took `--chrome-foreground`; this row sits on the app's own
- * `--background` beside the packet list, so its text is ordinary foreground. A
- * `text-chrome-foreground` left behind in here would be white text on a white
- * ground in Day.
+ * It is NOT an accent bar. The header it replaces was painted in a saturated
+ * `--chrome` and everything in it took `--chrome-foreground`; this row sits on
+ * the app's own `--background` beside the packet list, so its text is ordinary
+ * foreground. Those tokens no longer exist - see the Colourful deletion.
  *
  * ## Two things that never drop under pressure
  *
  * The capturing prefix and the banner are state, not decoration. When the row is
- * short of space the order is: the restore readout goes first (it is transient),
- * then the schedule picker becomes icon-only, then the counter loses its `%`
- * badge. Those three are `FilterBar`'s and this component's own; the two below
- * stay put.
+ * short of space the restore readout goes first, because it is transient. Those
+ * are `FilterBar`'s and this component's own; the two below stay put.
  */
 export interface FilterRowProps {
   /** `<FilterBar/>`, passed in so this stays a layout component. */
@@ -36,13 +32,6 @@ export interface FilterRowProps {
   /** The adapter's short label, for the capturing prefix. Null if none. */
   captureAdapter: string | null;
 
-  schedule: CaptureSchedule;
-  onScheduleChange: (next: CaptureSchedule) => void;
-  schedulePresets: SchedulePreset[];
-  onSchedulePresetsChange: (next: SchedulePreset[]) => void;
-  scheduleSummary: string;
-  scheduleNow: number;
-  bufferedPackets: number;
 
   restoreProgress?: { done: number; total: number } | null;
 
@@ -55,8 +44,6 @@ export interface FilterRowProps {
 
 export const FilterRow: React.FC<FilterRowProps> = ({
   filterSlot, isCapturing, captureAdapter,
-  schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
-  scheduleSummary, scheduleNow, bufferedPackets,
   restoreProgress, agentHealth, agentLinkEnabled, onOpenDriverInfo,
 }) => {
   /**
@@ -134,27 +121,6 @@ export const FilterRow: React.FC<FilterRowProps> = ({
           </span>
         )}
 
-        {/* Last, and deliberately: it is the only control in the row that is not
-            the filter, and it is something you set before a capture rather than
-            during one. */}
-        <CaptureSchedulePicker
-          schedule={schedule}
-          onScheduleChange={onScheduleChange}
-          presets={schedulePresets}
-          onPresetsChange={onSchedulePresetsChange}
-          bufferedPackets={bufferedPackets}
-          now={scheduleNow}
-          align="end"
-        >
-          <button
-            data-tour="schedule"
-            className={`${headerButtonClass} shrink-0 max-w-[12rem] active:scale-95 cursor-pointer`}
-            title="Schedule when this capture starts and stops"
-          >
-            <TbClock className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">{scheduleSummary}</span>
-          </button>
-        </CaptureSchedulePicker>
       </div>
     </div>
   );

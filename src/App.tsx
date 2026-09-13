@@ -2030,6 +2030,19 @@ export default function App() {
         onToggleWidget={toggleWidget}
         onOpenSettings={() => setShowSettingsModal(true)}
         onOpenExport={() => setShowExportModal(true)}
+        schedule={schedule}
+        onScheduleChange={setSchedule}
+        schedulePresets={schedulePresets}
+        onSchedulePresetsChange={setSchedulePresets}
+        // Recomputed on the hook's own tick, which is what makes the
+        // countdown advance without this component owning a timer.
+        scheduleSummary={describeSchedule(
+          schedule, scheduleNow, isCapturing, captureStartedAtRef.current,
+          (epochMs) => new Date(epochMs).toLocaleString(undefined, {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+          }),
+        )}
+        scheduleNow={scheduleNow}
       />
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -2049,20 +2062,6 @@ export default function App() {
         <FilterRow
           isCapturing={isCapturing}
           captureAdapter={captureAdapter}
-          schedule={schedule}
-          onScheduleChange={setSchedule}
-          schedulePresets={schedulePresets}
-          onSchedulePresetsChange={setSchedulePresets}
-          // Recomputed on the hook's own tick, which is what makes the
-          // countdown advance without this component owning a timer.
-          scheduleSummary={describeSchedule(
-            schedule, scheduleNow, isCapturing, captureStartedAtRef.current,
-            (epochMs) => new Date(epochMs).toLocaleString(undefined, {
-              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-            }),
-          )}
-          scheduleNow={scheduleNow}
-          bufferedPackets={packets.length}
           restoreProgress={restoreProgress}
           agentHealth={agentHealth}
           agentLinkEnabled={agentLinkEnabled}

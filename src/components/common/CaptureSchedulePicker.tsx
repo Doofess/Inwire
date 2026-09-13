@@ -30,6 +30,15 @@ interface CaptureSchedulePickerProps {
   now: number;
   children: React.ReactNode;
   align?: 'start' | 'center' | 'end';
+  /**
+   * Which side of the trigger it opens on.
+   *
+   * `'right'` from the activity rail, for the reason the discard prompt and the
+   * interface picker both open that way: a 56px strip has no room under a
+   * control, and a menu that opened downward would be anchored to the rail's
+   * edge with its whole width hanging over the packet list anyway.
+   */
+  side?: 'top' | 'right' | 'bottom' | 'left';
 }
 
 const fieldClass =
@@ -93,6 +102,7 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
   now,
   children,
   align = 'start',
+  side,
 }) => {
   const [newPresetName, setNewPresetName] = React.useState('');
   /** Which field the shared calendar is editing, or null when it is closed. */
@@ -128,6 +138,7 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
           draws a hard rectangle around the panel. */}
       <DropdownMenuContent
         align={align}
+        side={side}
         className="w-80 max-h-[32rem] overflow-y-auto custom-scrollbar border-0 shadow-lg"
       >
         <DropdownMenuLabel className={rowLabelClass}>Schedule capture</DropdownMenuLabel>
