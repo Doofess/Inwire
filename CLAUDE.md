@@ -1284,7 +1284,12 @@ prefix-preserving over Crypto-PAn; MACs keep their OUI.
 
 Theming is four themes declared in `src/lib/themeOptions.ts`, each with a
 complete token block in `src/index.css` and a palette entry in
-`src/services/themePalettes.ts`. Run `npm run check` after any colour edit —
+`src/services/themePalettes.ts`. **There is no Colourful setting**: the four
+`--chrome*` tokens painted a 64px accent header and a menu drawer that are both
+deleted, and by the end the only thing the switch still changed was making the
+brand mark invisible - white on white in Day and Paper. Its checks in
+`scripts/themes/registry.ts` went on passing throughout, because they measured
+the mark against `--chrome`, the bar it had stopped sitting on. Run `npm run check` after any colour edit —
 `scripts/themes/` enforces token completeness, contrast and CSS-vs-palette
 drift.
 

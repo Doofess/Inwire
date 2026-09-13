@@ -41,25 +41,3 @@ export const packetColorSetStore = createPreferenceStore<PacketColorSet>(
   'default',
 );
 
-/**
- * Whether the header bar and the drawer are painted in the accent.
- *
- * On - the default, and what the app has always done - they take `--chrome`,
- * which is each theme's accent as that ground can carry it. Off, they fall back
- * to `--card`, the same surface as the panels beside them, and the app reads as
- * one continuous window with a border across the top instead of a coloured
- * band.
- *
- * Not part of the theme. It is a second axis over all four, for the same reason
- * the packet colour set is: the theme owns the palette, and this owns how much
- * of it the chrome is allowed to spend. Collapsing them would mean eight themes
- * where there are four.
- *
- * The switching itself is CSS - see the `[data-chrome="plain"]` block in
- * index.css and `lib/chrome.ts`, which writes the attribute.
- */
-export const colorfulChromeStore = createPreferenceStore<boolean>(
-  'inwire.colorfulChrome',
-  (raw) => (typeof raw === 'boolean' ? raw : null),
-  true,
-);

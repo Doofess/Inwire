@@ -126,18 +126,20 @@ checkTrue('an unknown stored theme defaults to dark', isDarkTheme('theme-that-wa
 // `:root` is the light baseline and therefore the full set every other block
 // has to match. A block that omits one silently inherits it from here.
 const REQUIRED_TOKENS = tokensIn(':root');
-// 23 chrome tokens - 19, plus the `--chrome` pair the header bar and the
-// drawer read, `--chrome-brand` for the lockup and `--chrome-sunken` for the
-// capture buttons - and the 11 status tokens (see scripts/themes/status.ts). Deliberately a hard number
-// rather than a floor: it is the tripwire for someone adding a token to `:root`
-// and to nowhere else, which is silent - the other themes just inherit the
-// light value and nothing throws.
-// 35 since `--packet-gridline-lighten` joined them: how much white the packet
+// 19 surface tokens and the 11 status tokens (see scripts/themes/status.ts).
+// Deliberately a hard number rather than a floor: it is the tripwire for
+// someone adding a token to `:root` and to nowhere else, which is silent - the
+// other themes just inherit the light value and nothing throws.
+//
+// It was 35 until the four `--chrome*` tokens went. They painted a 64px accent
+// header and a menu drawer, both of which are deleted, and the Colourful switch
+// that chose between them had nothing left to change.
+// `--packet-gridline-lighten` is one of the 31: how much white the packet
 // list's column separators mix into the background they are drawn on. This
 // check is what caught it being added, which is exactly the tripwire it is
 // there to be - a token declared in `:root` alone is inherited silently by
 // every other theme and nothing else would have said so.
-check('the :root baseline declares 35 tokens', REQUIRED_TOKENS.length, 35);
+check('the :root baseline declares 31 tokens', REQUIRED_TOKENS.length, 31);
 
 for (const t of THEME_OPTIONS) {
   if (!t.mode) continue;
@@ -213,34 +215,29 @@ for (const t of light) {
   checkTrue(`${t.value} is NOT in the dark variant`, !variant.includes(`.${t.value}`));
 }
 
-// --- The Colourful setting ---------------------------------------------------
+// --- The brand mark, against the ground it sits on ---------------------------
 
 /**
- * The accent bar can be turned off, and the whole switch is one CSS block.
+ * What is left of the Colourful setting's checks, and the one that matters.
  *
- * What makes that safe is that `bg-chrome` and `text-chrome-foreground` are the
- * only way anything reaches those colours - so the block below is checked to
- * redefine exactly the three tokens and nothing else. A fourth token appearing
- * there would be a colour that changes with the setting and is not documented
- * as doing so.
+ * That setting painted the chrome with a saturated accent, and this section used
+ * to hold five checks about it - the capture buttons' label on their fill, the
+ * fill against the bar, and the brand lockup against the bar in both states. All
+ * of them tested the mark against `--chrome`, the bar it sat on.
+ *
+ * **It sat on `--chrome` and then it did not, and the checks did not notice.**
+ * The 64px accent header was deleted; the mark moved to the rail and then to the
+ * title row, both of which are `--card`. `--chrome-brand` resolved to
+ * `--chrome-foreground` (white) on the light themes and to `--secondary` on the
+ * dark ones, so turning Colourful ON made the mark white-on-white in Day and
+ * Paper and near-invisible in the other two - while this file went on asserting
+ * it was legible against a bar nothing drew any more. A guard aimed at the wrong
+ * ground passes for exactly as long as it is wrong.
+ *
+ * So the check that survives is the one about the ground the mark is actually
+ * on. It is ordinary text contrast now, and holds to the real threshold.
  */
-{
-  const plain = tokensIn(':root[data-chrome="plain"]');
-  check('the plain-chrome block redefines exactly the chrome tokens',
-    [...plain].sort(), ['--chrome', '--chrome-brand', '--chrome-foreground', '--chrome-sunken']);
-
-  // The bug this is written against, and the reason --chrome-brand exists at
-  // all: the lockup's dark-theme colour is the surface tone under the accent
-  // bar, and against a PLAIN bar - which is that same surface - it would sit at
-  // 1:1 and vanish. A logo is allowed to be low contrast; it is not allowed to
-  // be invisible, and the difference is not visible in a diff.
-  //
-  // The floor is 1.6 rather than a WCAG number on purpose. The colourful dark
-  // themes run the lockup at about 2:1 deliberately, so a text threshold would
-  // fail a treatment that is correct.
-  // Parsed line by line rather than with a regex: the values that matter here
-  // are half literals and half `var(--other)` references, and following a
-  // reference is a recursive lookup, not a pattern.
+for (const t of THEME_OPTIONS) {
   const hex = (theme: string, token: string): string => {
     const selector = theme === 'light' ? ':root' : `.${theme}`;
     const start = css.indexOf(`${selector} {`);
@@ -254,39 +251,12 @@ for (const t of light) {
     }
     return '#000000';
   };
-
-  // The capture buttons' label on their own fill. Which pair that is depends on
-  // the theme - the light ones put `--chrome-foreground` on `--chrome-sunken`,
-  // the dark ones put `--primary` on it - so the check follows the class rather
-  // than assuming one pair. This is button text at 11px uppercase, so it holds
-  // to the real AA threshold and not to the logo exemption below.
-  for (const t of THEME_OPTIONS) {
-    const fill = hex(t.value, '--chrome-sunken');
-    const label = hex(t.value, t.mode === 'dark' ? '--primary' : '--chrome-foreground');
-    checkTrue(
-      `${t.value}: the capture buttons' label clears AA on their fill `
-      + `(${contrastRatio(label, fill).toFixed(2)}:1)`,
-      contrastRatio(label, fill) >= 4.5);
-    // ...and the fill has to be visible AS a button against the bar it sits on.
-    checkTrue(
-      `${t.value}: ...and the fill reads against the bar `
-      + `(${contrastRatio(fill, hex(t.value, '--chrome')).toFixed(2)}:1)`,
-      contrastRatio(fill, hex(t.value, '--chrome')) >= 1.25);
-  }
-
-  for (const t of THEME_OPTIONS) {
-    const brand = hex(t.value, '--chrome-brand');
-    checkTrue(
-      `${t.value}: the lockup is visible on the colourful bar `
-      + `(${contrastRatio(brand, hex(t.value, '--chrome')).toFixed(2)}:1)`,
-      contrastRatio(brand, hex(t.value, '--chrome')) >= 1.6);
-    // With the bar plain, both sides come from the card pair, so this is the
-    // ordinary text contrast and holds to the real threshold.
-    checkTrue(
-      `${t.value}: ...and on the plain one `
-      + `(${contrastRatio(hex(t.value, '--card-foreground'), hex(t.value, '--card')).toFixed(2)}:1)`,
-      contrastRatio(hex(t.value, '--card-foreground'), hex(t.value, '--card')) >= 4.5);
-  }
+  const mark = hex(t.value, '--card-foreground');
+  const ground = hex(t.value, '--card');
+  checkTrue(
+    `${t.value}: the brand mark is legible in the title row `
+    + `(${contrastRatio(mark, ground).toFixed(2)}:1)`,
+    contrastRatio(mark, ground) >= 4.5);
 }
 
 console.log();

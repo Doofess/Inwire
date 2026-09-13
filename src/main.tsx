@@ -6,7 +6,6 @@ import {TooltipProvider} from './components/ui/tooltip';
 import {RETIRED_THEMES, THEME_NAMES, isDarkTheme, normalizeThemeName} from './lib/themeOptions';
 import {motionStore} from './services/interfacePrefs';
 import {applyStoredFont} from './lib/font';
-import {applyStoredChrome} from './lib/chrome';
 import {usePreferenceValue} from './services/preferenceStore';
 import App from './App.tsx';
 import './index.css';
@@ -51,7 +50,6 @@ migrateStoredTheme();
  * into the chosen one a frame later.
  */
 applyStoredFont();
-applyStoredChrome();
 
 /**
  * The app's motion setting, in the form motion/react wants.

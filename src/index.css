@@ -61,30 +61,6 @@
   --border: #e1e5ea;
   --input: #e1e5ea;
   --ring: #0b6bcb;
-  /* The bar and the drawer, in every theme.
-     `--chrome` is the accent AS THIS GROUND CAN CARRY IT. On a light ground
-     that is the accent itself; on a dark one it is deepened, because a 64px
-     bar plus a 320px full-height drawer at full accent strength is more
-     saturated area than the packet list beside it, and the chrome would win a
-     fight it should not be in. White clears AA on all four, so the foreground
-     is one constant rather than a per-theme judgement. */
-  --chrome: #0b6bcb;
-  --chrome-foreground: #ffffff;
-  /* The brand lockup, which is a THIRD chrome colour rather than the
-     foreground. On the light themes it is the foreground; on the dark ones it
-     drops to the surface tone below, so the lockup reads as pressed into the
-     bar instead of sitting on it. It is a token and not a `dark:` utility
-     because the Colourful setting has to be able to move it - see the
-     [data-chrome="plain"] block at the end of this file. */
-  /* The capture buttons' fill: the bar's own colour, deepened.
-     The two dark themes already sank their buttons into the bar with
-     `--secondary`; this is the same idea for the light ones, where a white slab
-     on a saturated bar was the loudest thing in the window. Written as a
-     literal rather than derived, because "deepened" has to clear AA against
-     `--chrome-foreground` and a blanket multiplier does not guarantee that -
-     scripts/themes/registry.ts checks the pair each theme actually uses. */
-  --chrome-sunken: #084f96;
-  --chrome-brand: var(--chrome-foreground);
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
      Run `npx tsx scripts/themes/status-css.ts` to regenerate;
@@ -136,11 +112,6 @@
   --border: #292524;
   --input: #292524;
   --ring: #fb923c;
-  --chrome: #9a4008;
-  --chrome-foreground: #ffffff;
-  --chrome-brand: var(--secondary);
-  /* Already sunken on the dark themes - see the note in :root. */
-  --chrome-sunken: var(--secondary);
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
      Run `npx tsx scripts/themes/status-css.ts` to regenerate;
@@ -185,10 +156,6 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chrome: var(--chrome);
-  --color-chrome-foreground: var(--chrome-foreground);
-  --color-chrome-brand: var(--chrome-brand);
-  --color-chrome-sunken: var(--chrome-sunken);
   --color-success: var(--success);
   --color-success-foreground: var(--success-foreground);
   --color-success-muted: var(--success-muted);
@@ -643,11 +610,7 @@
   --border: #e4dbc9;
   --input: #e4dbc9;
   --ring: #a35a16;
-  --chrome: #a35a16;
-  --chrome-foreground: #ffffff;
   /* The bar deepened. See the note in :root. */
-  --chrome-sunken: #794310;
-  --chrome-brand: var(--chrome-foreground);
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
      Run `npx tsx scripts/themes/status-css.ts` to regenerate;
@@ -721,11 +684,6 @@
   --border: #3c3c3c;
   --input: #3c3c3c;
   --ring: #7dd3fc;
-  --chrome: #0e5f85;
-  --chrome-foreground: #ffffff;
-  --chrome-brand: var(--secondary);
-  /* Already sunken on the dark themes - see the note in :root. */
-  --chrome-sunken: var(--secondary);
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
      Run `npx tsx scripts/themes/status-css.ts` to regenerate;
@@ -743,33 +701,6 @@
   --danger-strong-foreground: #ffffff;
 }
 
-/* Colourful off: the header bar and the drawer stop being accent-coloured.
- *
- * One rule for all four themes, and no second set of hand-picked colours,
- * because `--card` and `--card-foreground` are already a designed, contrast-
- * checked pair in every theme - they are what the panels beside the bar are
- * painted in. Reusing them is what makes "plain" mean the same thing on Day as
- * on Midnight without anyone tuning it four times.
- *
- * Every consumer goes through `bg-chrome` / `text-chrome-foreground`, so
- * redefining the tokens repaints the bar, the drawer, the menu rows, the search
- * field, the filter tabs and the capture readout at once. Nothing that reads
- * them needs to know the setting exists.
- *
- * `--chrome-brand` follows the foreground here rather than staying on the
- * surface tone. That IS the bug this token was extracted for: the lockup's dark
- * theme colour is `--secondary`, which sits deliberately close to the accent
- * bar - and against a plain `--card` bar it would be near-invisible.
- *
- * Specificity is the mechanism: `:root[data-chrome="plain"]` is (0,2,0) and the
- * theme blocks are a single class at (0,1,0), so this wins over all four
- * without !important. The attribute is written to <html> by lib/chrome.ts. */
-:root[data-chrome="plain"] {
-  --chrome: var(--card);
-  --chrome-foreground: var(--card-foreground);
-  --chrome-brand: var(--chrome-foreground);
-  --chrome-sunken: var(--secondary);
-}
 
 
 /* maplibre-gl ships its own stylesheet, and it sets a hard
