@@ -365,6 +365,12 @@ const DashboardAsideImpl: React.FC<DashboardAsideProps> = ({ context, columnVisi
         const onKeyDown = (e: React.KeyboardEvent) => {
           if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
           e.preventDefault();
+          // And stopped, which it was not. `useKeyboardNavigation` listens on
+          // `window` for the same two keys and steps the packet selection,
+          // guarded only against `[role="grid"]` - so an arrow press in this
+          // rail moved focus here AND moved the selected packet underneath it.
+          // `preventDefault` alone does not stop a listener further up.
+          e.stopPropagation();
           focusRail(widget.type, e.key === 'ArrowDown' ? 1 : -1);
         };
         const setRef = (node: HTMLButtonElement | null) => {

@@ -213,6 +213,54 @@ service workers, every permission request denied. The preload is a **single
 CommonJS file** — a sandboxed preload cannot be ESM and cannot `require` a
 relative module, so `electron/build.cjs` bundles it.
 
+**The shell is a rail, a title row and a filter row.** There is no 64px header
+any more; `Header.tsx` is deleted and its contents are split three ways.
+
+```
+┌──────┬──────────────────────────────────────────┐
+│      │ 40px TitleRow   palette · title · overlay│
+│ rail ├──────────────────────────────────────────┤
+│ 56px │ FilterRow  (banner, filter, capturing)   │
+│      ├──────────────────────────────────────────┤
+│      │ packet list · detail panes · dashboard   │
+└──────┴──────────────────────────────────────────┘
+```
+
+`ActivityRail.tsx` is 56px and spans the full window height, so it reaches the
+top and its own 40px cell sits level with the title row. Four groups: **capture**
+(Start/Stop, adapter), **views** (Packets, Statistics, Network, Follow Stream),
+**widgets** (the five dashboard types), and a bottom group (Updates, Settings)
+pinned with `mt-auto`. 13 icons at 36px targets with three dividers come to about
+549px against the 640px minimum window height; if a sixth widget ever arrives,
+**the widgets group is the one that scrolls**, not the rail.
+
+Two behaviours in one strip, so the active states are deliberately different
+shapes: a view carries a **2px left accent edge plus a filled background**, a
+widget carries a **dot and an outline**. Neither appears on hover. 56 disagrees
+with `DASHBOARD_RAIL_WIDTH` and `FrameMetaRail`, both 48, and that is accepted
+rather than overlooked.
+
+**The drag-region rule.** The title row and the rail's top cell are
+`.app-drag`; everything interactive inside them is `.app-no-drag`; the rest of
+the rail is neither, which is to say not draggable. A control that forgets
+`no-drag` moves the window instead of being pressed, and the only symptom is a
+click that does nothing. `.titlebar-reserve` keeps the row clear of the native
+buttons from `env(titlebar-area-width)` — **never a constant**, because that area
+is ~138px at 100% scaling and ~207px at 150%. All three classes are in
+`index.css` and deliberately not `:root` custom properties: that block is the
+theme baseline and `scripts/themes/registry.ts` requires every token in it to be
+redeclared by all four themes, which a layout constant has no business being.
+
+`viewPrefs.ts` holds the active view, persisted — which argues against
+`DashboardAside`'s rule that "'which panel did I have open' is not a setting",
+and does so knowingly: a modal is a detour, a pane is a place. `stream` is a
+legal stored value that `restoredView` refuses to restore, because the
+conversation it named lived in a buffer that is being rebuilt.
+
+`lib/windowChrome.ts` is the renderer's half of the bridge: it reports the
+resolved theme and the window title to main, and subscribes once at module scope
+to maximized/focused.
+
 The React app never dissects and never parses an agent message. That is
 `src/workers/pipeline.worker.ts`, which holds the ordering window, the
 trackers, and `pcapParser.ts`.
@@ -1012,7 +1060,14 @@ change. They are the short form; the ADRs hold the reasoning.
 `App.tsx` is the application's controller with a view attached.
 `hooks/useKeyboardNavigation.ts` holds the window's shortcuts (everything reads
 through a ref, or a `keydown` listener would re-register ten times a second
-during a capture). `hooks/usePacketBuffer.ts` holds the buffer — the arrival
+during a capture). **Space is scoped positively** — the body, or inside
+`[role="grid"]` — and not by excluding the controls that must not receive it.
+The old exclusion rule was correct only while nothing else in the window was
+focusable; with thirteen rail buttons, Space on a focused one both activated it
+and ran this handler's `preventDefault`, so the button's own activation was
+suppressed and capture toggled anyway. Scoped positively, every control added
+from here on is safe by default rather than by being remembered. `Ctrl+1..4`
+switch views, and `APP_VIEWS` order **is** the numbering. `hooks/usePacketBuffer.ts` holds the buffer — the arrival
 queues, the accounting, the dense-field writer, the flush.
 `hooks/useAgentConnection.ts` owns the agent link: status, version, interfaces,
 capture state, drop counters, adapters, the agent's own log, and the health

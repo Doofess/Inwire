@@ -25,7 +25,15 @@ interface CaptureInterfacePickerProps {
   onSelect: (interfaceName: string) => void;
   children: React.ReactNode;
   align?: 'start' | 'center' | 'end';
-  side?: 'top' | 'bottom';
+  /**
+   * Which edge the menu opens from.
+   *
+   * `'right'` since the trigger moved into the activity rail: a 56px strip
+   * has no room for a 288px menu below it, and Radix flips a `bottom` menu
+   * to wherever it fits, which is not a decision worth leaving to a
+   * collision.
+   */
+  side?: 'top' | 'bottom' | 'left' | 'right';
   /** Recent packets/sec per interface name, oldest sample first. */
   interfaceRates?: Record<string, number[]>;
   /**
