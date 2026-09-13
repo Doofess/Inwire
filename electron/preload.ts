@@ -233,6 +233,4 @@ ipcRenderer.on(AGENT_PORT_CHANNEL, (event) => {
   window.postMessage({ channel: AGENT_PORT_CHANNEL }, '*', event.ports);
 });
 
-export type InwireBridge = typeof api;
-
 contextBridge.exposeInMainWorld('inwire', api);

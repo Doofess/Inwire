@@ -22,9 +22,6 @@
  * the imports.
  */
 import type { ExpertCategory, Packet, ProtocolLayer, ProtocolType } from '../../types/packet';
-import type { TcpStreamTracker } from '../tcpStreamTracker';
-import type { IcmpEchoTracker } from '../icmpEchoTracker';
-import type { QuicFlowTracker } from '../quicFlowTracker';
 
 /** pcap/pcapng link types this dissector distinguishes (LINKTYPE_* values). */
 export const LINKTYPE = {
@@ -84,15 +81,6 @@ export interface DissectSummary {
    * un-migrated. Deleted when the last one moves to `dissectTree`.
    */
   legacyLayers?: ProtocolLayer[];
-}
-
-/** Per-capture state that only arrival-order processing may touch. */
-export interface DissectContext {
-  tcp: TcpStreamTracker;
-  icmp: IcmpEchoTracker;
-  quic: QuicFlowTracker;
-  /** Live capture only: the adapter, for the Frame layer's interface rows. */
-  captureInterface?: { name: string; label: string };
 }
 
 /**

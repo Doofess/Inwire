@@ -121,9 +121,6 @@ export const DOCK_MIN_WIDTH = 240;
 export const DOCK_MAX_WIDTH = 640;
 export const DOCK_DEFAULT_WIDTH = 260;
 
-/** 8, not the old column's 16: that was sized for a 384px column. */
-export const DOCK_PADDING = 8;
-
 /**
  * The widest the dock may be, given the window.
  *
