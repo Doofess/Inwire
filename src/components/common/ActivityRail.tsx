@@ -4,6 +4,7 @@ import {
   TbPlayerStop,
   TbNetwork,
   TbAlertTriangle,
+  TbClock,
   TbListDetails,
   TbChartHistogram,
   TbArrowsLeftRight,
@@ -13,6 +14,8 @@ import {
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
+import { CaptureSchedulePicker } from './CaptureSchedulePicker';
+import { isScheduleEmpty, type CaptureSchedule, type SchedulePreset } from '../../services/captureSchedule';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import { WIDGET_RENDERERS } from '../analytics/dashboardWidgets';
 import { WIDGET_TYPE_IDS, widgetTitle, type WidgetInstance, type WidgetTypeId } from '../../services/dashboardPrefs';
@@ -49,8 +52,8 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 12 icons, 36px targets and four dividers come to **501px** against a 640px
- * minimum window height. It fits, with 139px of slack - room for three more
+ * 13 icons, 36px targets and four dividers come to **539px** against a 640px
+ * minimum window height. It fits, with 101px of slack - room for two more
  * icons, which this batch is about to spend.
  *
  * That number is added up from these classes by `scripts/session/view.ts`, which
@@ -73,6 +76,12 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * the filter row had to be hidden above it and nowhere else, so it became a
  * Settings tab next to Driver Info. That is two icons back, and `Ctrl+3` now
  * opens Follow Stream.
+ *
+ * The capture group took one of those back: the schedule picker was a labelled
+ * button in the filter row, and it is a capture control - it decides when a
+ * capture starts and stops - so it sits with Start/Stop and the adapter. The
+ * group reads top to bottom in the order it is used: **start, what to listen
+ * on, when.**
  *
  * The last 40px came from **deleting the top cell**. It held the brand mark,
  * aligned to the title row; the mark is centred in the title row itself now,
@@ -140,6 +149,20 @@ export interface ActivityRailProps {
   onInterfacePickerOpenChange?: (open: boolean) => void;
   captureOwnedElsewhere?: boolean;
   agentHealth: AgentHealth;
+  /**
+   * The capture schedule, which moved here from the filter row.
+   *
+   * It is a capture control - it decides when one starts and when it stops - so
+   * it sits with Start/Stop and the adapter rather than above the packet list.
+   */
+  schedule: CaptureSchedule;
+  onScheduleChange: (next: CaptureSchedule) => void;
+  schedulePresets: SchedulePreset[];
+  onSchedulePresetsChange: (next: SchedulePreset[]) => void;
+  /** "Stops in 14:58". The tooltip, now that there is no room for a label. */
+  scheduleSummary: string;
+  /** The schedule hook's clock, so "already passed" updates without a timer. */
+  scheduleNow: number;
 
   /* --- views ------------------------------------------------------------ */
   view: AppView;
@@ -176,6 +199,8 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   view, onViewChange, streamAvailable,
   dockItems, widgets, onToggleWidget,
   onOpenSettings, onOpenExport,
+  schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
+  scheduleSummary, scheduleNow,
 }) => {
   const selected = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
   const attention = agentNeedsAttention(agentHealth);
@@ -196,6 +221,11 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       ? 'none selected'
       : shortInterfaceLabel(selected.label);
   const adapterName = `Interfaces - ${adapterDetail}`;
+
+  // A clock glyph looks the same whether or not anything is scheduled, which is
+  // the failure the adapter's warning badge exists to avoid - so the dot is the
+  // signal and the tooltip carries the detail.
+  const scheduleSet = !isScheduleEmpty(schedule);
   const adapterTitle = attention && 'summary' in agentHealth
     ? `${agentHealth.summary}. Settings > Driver Info has the detail.`
     : selected === null
@@ -312,39 +342,6 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           across its whole width bar the controls, which is where a window is
           grabbed. The rail is now entirely no-drag. */}
       <div className={`${GROUP} pt-1`} role="group" aria-label="Capture">
-        {agentInterfaces.length === 0 ? (
-          // A dead end by design: there is no adapter list to open, and a button
-          // that opens an empty menu reads as broken rather than as blocked.
-          <button
-            disabled
-            data-tour="interfaces"
-            aria-label={adapterName}
-            title={adapterTitle}
-            className={`${railButton(false, 'toggle')} cursor-not-allowed opacity-60`}
-          >
-            <AdapterGlyph attention={attention} />
-          </button>
-        ) : (
-          <CaptureInterfacePicker
-            interfaces={agentInterfaces}
-            selectedInterface={selectedInterfaces[0] ?? null}
-            onSelect={onSelectInterface}
-            interfaceRates={interfaceRates}
-            onOpenChange={onInterfacePickerOpenChange}
-            align="start"
-            side="right"
-          >
-            <button
-              data-tour="interfaces"
-              aria-label={adapterName}
-              title={adapterTitle}
-              className={railButton(selected !== null, 'toggle')}
-            >
-              <AdapterGlyph attention={attention} />
-            </button>
-          </CaptureInterfacePicker>
-        )}
-
         {/* The capture button and its discard prompt. `relative` so the prompt
             anchors here; it opens to the right, because there is no room below
             a control in a 56px strip. */}
@@ -435,6 +432,75 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           )}
         </div>
       </div>
+
+        {agentInterfaces.length === 0 ? (
+          // A dead end by design: there is no adapter list to open, and a button
+          // that opens an empty menu reads as broken rather than as blocked.
+          <button
+            disabled
+            data-tour="interfaces"
+            aria-label={adapterName}
+            title={adapterTitle}
+            className={`${railButton(false, 'toggle')} cursor-not-allowed opacity-60`}
+          >
+            <AdapterGlyph attention={attention} />
+          </button>
+        ) : (
+          <CaptureInterfacePicker
+            interfaces={agentInterfaces}
+            selectedInterface={selectedInterfaces[0] ?? null}
+            onSelect={onSelectInterface}
+            interfaceRates={interfaceRates}
+            onOpenChange={onInterfacePickerOpenChange}
+            align="start"
+            side="right"
+          >
+            <button
+              data-tour="interfaces"
+              aria-label={adapterName}
+              title={adapterTitle}
+              className={railButton(selected !== null, 'toggle')}
+            >
+              <AdapterGlyph attention={attention} />
+            </button>
+          </CaptureInterfacePicker>
+        )}
+
+        {/* The schedule picker, which was a labelled button in the filter row.
+
+            It is a capture control - it decides when a capture starts and when
+            it stops - so it belongs with Start/Stop and the adapter rather than
+            above the packet list. What it loses in the move is its summary
+            text: the row had 12rem for "Stops in 14:58", and a 56px strip has
+            none. The summary is the tooltip and the popover's own heading now,
+            and the glyph carries a dot when a schedule is set, because a clock
+            that looks identical whether or not anything is scheduled is the
+            same failure the adapter's health badge exists to avoid. */}
+        <CaptureSchedulePicker
+          schedule={schedule}
+          onScheduleChange={onScheduleChange}
+          presets={schedulePresets}
+          onPresetsChange={onSchedulePresetsChange}
+          bufferedPackets={bufferedPackets}
+          now={scheduleNow}
+          align="start"
+          side="right"
+        >
+          <button
+            data-tour="schedule"
+            aria-label={scheduleSet ? `Capture schedule - ${scheduleSummary}` : 'Capture schedule'}
+            title={scheduleSet ? scheduleSummary : 'Schedule when this capture starts and stops'}
+            className={railButton(false, 'toggle')}
+          >
+            {scheduleSet && (
+              <span
+                aria-hidden
+                className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"
+              />
+            )}
+            <TbClock className={GLYPH} />
+          </button>
+        </CaptureSchedulePicker>
 
       <RailDivider />
 
