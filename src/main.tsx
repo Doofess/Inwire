@@ -2,7 +2,6 @@ import React, {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import {ThemeProvider, useTheme} from 'next-themes';
 import {MotionConfig} from 'motion/react';
-import {TooltipProvider} from './components/ui/tooltip';
 import {RETIRED_THEMES, THEME_NAMES, isDarkTheme, normalizeThemeName} from './lib/themeOptions';
 import {motionStore} from './services/interfacePrefs';
 import {applyStoredFont} from './lib/font';
@@ -113,9 +112,7 @@ createRoot(document.getElementById('root')!).render(
     >
       <ColorScheme>
       <MotionPreference>
-        <TooltipProvider>
-          <App />
-        </TooltipProvider>
+        <App />
       </MotionPreference>
       </ColorScheme>
     </ThemeProvider>

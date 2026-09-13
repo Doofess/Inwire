@@ -38,25 +38,16 @@
 const DB_NAME = 'inwire';
 
 /**
- * The database name this app used before it was renamed.
+ * 2, and it does not go back to 1.
  *
- * Read once, on the first open after an update, and deleted afterwards. See
- * `migrateLegacyDatabase`.
- */
-const LEGACY_DB_NAME = 'netview';
-
-/** Frames copied per transaction during that migration. */
-/**
- * Bumped when the frames left.
- *
- * Version 2 **deletes** the `frames` object store, which is the only way to
- * reclaim what a previous build wrote: up to 512 MB of raw capture that
- * nothing reads any more, and which would otherwise sit against the origin's
- * quota - the same quota the capture store now needs. An object store cannot
- * be dropped outside an upgrade, so the version had to move.
+ * Version 2 was the bump that dropped a `frames` object store a browser build
+ * had written. Nothing can be holding that store now - the desktop renderer
+ * runs on `app://inwire` and has never opened a database a browser profile
+ * wrote - so the upgrade that dropped it is gone. **The number stays**, because
+ * IndexedDB cannot be downgraded: a profile that has already opened this
+ * database at 2 would fail to open it at 1, and that profile is every profile.
  */
 const DB_VERSION = 2;
-const LEGACY_FRAME_STORE = 'frames';
 const META_STORE = 'meta';
 const SESSION_KEY = 'session';
 
@@ -141,14 +132,7 @@ let dbPromise: Promise<IDBDatabase | null> | null = null;
  */
 function openDb(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
-  // The migration is folded into the open rather than run beside it, so that
-  // every caller - restore, trim, append - is holding a database that has
-  // already absorbed the old one. A migration running in parallel with the
-  // first append would be racing it for the same object store.
-  dbPromise = openCurrentDb().then(async (db) => {
-    if (db) await migrateLegacyDatabase(db);
-    return db;
-  });
+  dbPromise = openCurrentDb();
   return dbPromise;
 }
 
@@ -163,12 +147,6 @@ function openCurrentDb(): Promise<IDBDatabase | null> {
     }
     request.onupgradeneeded = () => {
       const db = request.result;
-      // The frames are in the capture store now. Dropping the store here is
-      // what actually frees the bytes a previous build left behind; clearing
-      // it would leave an empty store to explain for ever.
-      if (db.objectStoreNames.contains(LEGACY_FRAME_STORE)) {
-        db.deleteObjectStore(LEGACY_FRAME_STORE);
-      }
       if (!db.objectStoreNames.contains(META_STORE)) {
         db.createObjectStore(META_STORE);
       }
@@ -182,93 +160,6 @@ function openCurrentDb(): Promise<IDBDatabase | null> {
     request.onerror = () => resolve(null);
     request.onblocked = () => resolve(null);
   });
-}
-
-/**
- * Carry a stored session across the app's rename, once.
- *
- * The captured session is a crash-recovery cache rather than authored data,
- * but it is the difference between reopening the tab onto the adapter and
- * timeline you were working with and reopening it onto nothing - which after
- * an update reads as "the update lost my capture".
- *
- * **The metadata only.** The old database's frames are in a store this build
- * has just deleted from its own database, and copying them into a store that
- * no longer exists to feed a restore that no longer reads it would be work
- * with no reader. A session carried across the rename comes back naming a
- * capture directory that the old build never wrote, so it restores no frames -
- * which is the same answer as before for anyone whose frames the old build's
- * 512 MB budget had already evicted.
- *
- * Only runs when the current database is empty. A session already stored under
- * the new name is the newer one by construction, and must not be overwritten
- * by whatever the old build left behind.
- *
- * Opening the old database WITHOUT a version is what makes this safe to call
- * forever: that form opens an existing database at whatever version it is on,
- * and only fires `onupgradeneeded` when it had to create one. So an
- * `onupgradeneeded` here means there was nothing to migrate, and the empty
- * database this call just brought into being is deleted again on the way out -
- * otherwise every load would recreate the very thing it is trying to remove.
- */
-async function migrateLegacyDatabase(db: IDBDatabase): Promise<void> {
-  try {
-    const existing = await runTx<unknown>(db, META_STORE, 'readonly', (store) =>
-      store.get(SESSION_KEY));
-    if (existing) return;
-
-    const legacy = await new Promise<IDBDatabase | null>((resolve) => {
-      let created = false;
-      let request: IDBOpenDBRequest;
-      try {
-        request = indexedDB.open(LEGACY_DB_NAME);
-      } catch {
-        resolve(null);
-        return;
-      }
-      request.onupgradeneeded = () => {
-        created = true;
-      };
-      request.onsuccess = () => {
-        const opened = request.result;
-        if (created) {
-          opened.close();
-          try {
-            indexedDB.deleteDatabase(LEGACY_DB_NAME);
-          } catch {
-            // Nothing to clean up that we can reach. Harmless either way.
-          }
-          resolve(null);
-          return;
-        }
-        resolve(opened);
-      };
-      request.onerror = () => resolve(null);
-      request.onblocked = () => resolve(null);
-    });
-    if (!legacy) return;
-
-    try {
-      const meta = legacy.objectStoreNames.contains(META_STORE)
-        ? await runTx<unknown>(legacy, META_STORE, 'readonly', (store) => store.get(SESSION_KEY))
-        : null;
-      if (meta) {
-        await runTx(db, META_STORE, 'readwrite', (store) => store.put(meta, SESSION_KEY));
-      }
-    } finally {
-      legacy.close();
-    }
-
-    try {
-      indexedDB.deleteDatabase(LEGACY_DB_NAME);
-    } catch {
-      // The copy is what mattered; a database left behind costs nothing but
-      // space, and the emptiness check above stops it being read twice.
-    }
-  } catch {
-    // A blocked, full or unavailable IndexedDB. The session is a cache - the
-    // app starts without it exactly as it would on a fresh machine.
-  }
 }
 
 function runTx<T>(
