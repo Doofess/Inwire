@@ -515,6 +515,29 @@ first reply arrived; everything after did not — it works on the handshake,
 which is what gets tested, and stops on the traffic. `local-agent/pipe_server.py`
 now gives every operation its own `OVERLAPPED` with its own event.
 
+**A `queue.shift()` inside a `find` predicate.** The dock's drag-reorder read
+
+```ts
+items.map((item) => (item.open ? items.find((i) => i.type === queue.shift())! : item))
+```
+
+which shifts once per element `find` **compares**, not once per open slot. The
+queue drained in the first couple of comparisons, `shift()` returned `undefined`,
+nothing matched, and the non-null assertion let `undefined` into the list - so the
+next render read `undefined.open` and took the renderer down. Deterministic on the
+first drag that actually moved anything, and it shipped because nothing in the
+suite could reach a `useCallback` in `App.tsx`.
+
+It was also **persisted**: `createPreferenceStore`'s `set` does not normalise, only
+`loadPreference` does, so the hole was written out as `null`. The key self-heals
+because `normalizeItems` skips those and appends the missing types closed - which
+is the whole argument for repairing rather than rejecting, arriving unasked.
+
+The arithmetic is `reorderItems` in `dockPrefs.ts` now, beside `dockOrder`, where
+`scripts/session/dock.ts` can reach it; every refusal returns the list unchanged
+rather than asserting. Put the bug back and the script throws the same
+`Cannot read properties of undefined` the renderer did.
+
 **`readSync` returns short counts.** Not an error, a partial read. `readExact`
 threw on short and recovery read that as a torn tail. `nodeBlockFile.ts` loops;
 `scripts/capture/block-file.ts` injects short reads.

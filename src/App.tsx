@@ -32,7 +32,7 @@ import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { Dock } from "./components/dock/Dock";
 import {
-  dockStore, type DockItem,
+  dockStore, reorderItems, type DockItem,
 } from "./services/dockPrefs";
 import { WidgetOverlay } from "./components/analytics/WidgetOverlay";
 import { WIDGET_RENDERERS } from "./components/analytics/dashboardWidgets";
@@ -468,12 +468,10 @@ export default function App() {
    * the closed entries keep their slots.
    */
   const reorderDock = useCallback((order: string[]) => {
-    const queue = [...order];
-    patchDock({
-      items: dock.items.map((item) => (
-        item.open ? dock.items.find((i) => i.type === queue.shift())! : item
-      )),
-    });
+    // The arithmetic is in `dockPrefs.ts` so an assertion script can reach it.
+    // The version that lived here shifted a queue from inside a `find`
+    // predicate and put `undefined` into the list; see `reorderItems`.
+    patchDock({ items: reorderItems(dock.items, order) });
   }, [dock.items, patchDock]);
 
   /** The geo map's window. Not persisted - it is a glance, not a setting. */
