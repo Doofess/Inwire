@@ -1,10 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { motion } from 'motion/react';
 import {
   TbAlertCircle,
   TbX,
   TbBookmark,
-  TbSearch,
   TbInfoCircle,
 } from 'react-icons/tb';
 import { FilterEngine, FilterValidationResult } from '../../services/filterEngine';
@@ -56,9 +54,6 @@ interface FilterBarProps {
   scanUncovered?: number;
   /** Runs the scan again, to take in what the last one missed. */
   onRescan?: () => void;
-  /** Required by the `header` variant; unused and omitted by `compact`. */
-  packetSearchText?: string;
-  onPacketSearchChange?: (text: string) => void;
   /**
    * The preset library, owned by App.tsx and edited in
    * Settings > Display Filters. Read-only here apart from the bookmark button,
@@ -81,8 +76,6 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   filterScan,
   scanUncovered = 0,
   onRescan,
-  packetSearchText = '',
-  onPacketSearchChange,
   filterPresetLibrary,
   onSaveCurrentFilter,
 }) => {
@@ -100,26 +93,8 @@ export const FilterBar: React.FC<FilterBarProps> = ({
    * a dissector registers it and can never be offered after it is retired.
    */
   const [highlighted, setHighlighted] = useState(-1);
-  const [isSearchOpen, setIsSearchOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const isSearchExpanded = isSearchOpen || packetSearchText.trim().length > 0;
-
-  const clearSearch = () => {
-    onPacketSearchChange?.('');
-    setIsSearchOpen(false);
-  };
-
-  const toggleSearch = () => {
-    if (isSearchExpanded) {
-      clearSearch();
-    } else {
-      setIsSearchOpen(true);
-      requestAnimationFrame(() => searchInputRef.current?.focus());
-    }
-  };
-
   // Validate syntax as the user types.
   useEffect(() => {
     setValidation(FilterEngine.validateFilter(filterText));
@@ -434,59 +409,13 @@ export const FilterBar: React.FC<FilterBarProps> = ({
           )}
         </div>
 
-        {/* Find Packet - quick substring search applied on top of the
-            display filter above (relocated from PacketList's own toolbar
-            row, which no longer exists). Absent in `compact`: it narrows what
-            the packet list DISPLAYS, which is a different question from what
-            an export contains. */}
-        {!isCompact && <div
-          className={`flex items-center gap-1.5 px-1.5 py-1.5 rounded-md border transition-colors overflow-hidden shrink-0 ${
-            isSearchExpanded ? 'bg-background border-border' : 'bg-transparent border-transparent'
-          }`}
-        >
-          <button
-            onMouseDown={e => e.preventDefault()}
-            onClick={toggleSearch}
-            title="Find packet"
-            // Both states are the same pair now, and that is a simplification
-            // the new chrome bought. This used to sit on the saturated `--chrome`
-            // header bar when collapsed - where a muted grey all but disappeared -
-            // and on its own field when expanded, where `--chrome-foreground`
-            // would have been the thing that disappeared. There is no accent bar
-            // any more: the filter row is `--background`, so one pair is correct
-            // on both surfaces.
-            className="p-0.5 shrink-0 rounded transition-colors hover:bg-accent
-              text-muted-foreground hover:text-foreground"
-          >
-            <TbSearch className="w-3.5 h-3.5" />
-          </button>
-          <motion.input
-            ref={searchInputRef}
-            type="text"
-            placeholder="Find packet (IP, protocol, info)..."
-            value={packetSearchText}
-            onChange={e => onPacketSearchChange?.(e.target.value)}
-            onFocus={() => setIsSearchOpen(true)}
-            onBlur={() => {
-              if (!packetSearchText.trim()) setIsSearchOpen(false);
-            }}
-            onKeyDown={e => {
-              if (e.key === 'Escape') {
-                clearSearch();
-                searchInputRef.current?.blur();
-              }
-            }}
-            initial={false}
-            animate={{ width: isSearchExpanded ? 224 : 0 }}
-            transition={{ duration: 0.18, ease: 'easeOut' }}
-            className="bg-transparent outline-none text-xs font-mono text-foreground placeholder-muted-foreground"
-          />
-          {packetSearchText && (
-            <button onClick={clearSearch} className="p-0.5 shrink-0 rounded-full hover:bg-accent text-muted-foreground">
-              <TbX className="w-3 h-3" />
-            </button>
-          )}
-        </div>}
+        {/* Find packet used to be here - a magnifier that grew a 224px input.
+            It is a rail control now, in the bottom group beside Export/Import
+            and Settings, because it is an action rather than part of the filter
+            expression. Keeping it adjacent to the display filter implied a
+            relationship the two do not have: the filter is compiled and
+            answered over the whole capture on disk, and the search is a
+            substring match over the rows already in hand. */}
 
         {/* Packet Count Status Badge. The compact variant leaves this to its
             host, which counts against a different total.

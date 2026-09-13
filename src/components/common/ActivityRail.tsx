@@ -10,11 +10,13 @@ import {
   TbArrowsLeftRight,
   TbSettings,
   TbFileExport,
+  TbSearch,
 } from 'react-icons/tb';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
 import { CaptureSchedulePicker } from './CaptureSchedulePicker';
+import { FindPacketPopover } from './FindPacketPopover';
 import { isScheduleEmpty, type CaptureSchedule, type SchedulePreset } from '../../services/captureSchedule';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import { WIDGET_RENDERERS } from '../analytics/dashboardWidgets';
@@ -52,9 +54,9 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 13 icons, 36px targets and four dividers come to **539px** against a 640px
- * minimum window height. It fits, with 101px of slack - room for two more
- * icons, which this batch is about to spend.
+ * 14 icons, 36px targets and four dividers come to **577px** against a 640px
+ * minimum window height. It fits, with 63px of slack - room for one more icon,
+ * which the counts widget takes.
  *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that
@@ -76,6 +78,12 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * the filter row had to be hidden above it and nowhere else, so it became a
  * Settings tab next to Driver Info. That is two icons back, and `Ctrl+3` now
  * opens Follow Stream.
+ *
+ * Find packet took the other: it was an expanding field in the filter bar,
+ * beside the display filter, which implied a relationship the two do not have -
+ * the filter is compiled and answered over the whole capture on disk, and the
+ * search is a substring match over the rows already in hand. It is in the
+ * bottom group because that group holds **actions** rather than places.
  *
  * The capture group took one of those back: the schedule picker was a labelled
  * button in the filter row, and it is a capture control - it decides when a
@@ -190,6 +198,16 @@ export interface ActivityRailProps {
    * Updates is still the one place this app updates anything (ADR 0032).
    */
   onOpenExport: () => void;
+
+  /**
+   * Find packet - a substring match over the rows the display filter selected.
+   *
+   * Not the display filter, which is compiled and answered over the whole
+   * capture on disk. It was an expanding field in the filter bar, which put the
+   * two side by side and implied a relationship they do not have.
+   */
+  packetSearchText: string;
+  onPacketSearchChange: (text: string) => void;
 }
 
 export const ActivityRail: React.FC<ActivityRailProps> = ({
@@ -198,7 +216,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
   dockItems, widgets, onToggleWidget,
-  onOpenSettings, onOpenExport,
+  onOpenSettings, onOpenExport, packetSearchText, onPacketSearchChange,
   schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
   scheduleSummary, scheduleNow,
 }) => {
@@ -226,6 +244,10 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   // the failure the adapter's warning badge exists to avoid - so the dot is the
   // signal and the tooltip carries the detail.
   const scheduleSet = !isScheduleEmpty(schedule);
+
+  // Local, like the discard prompt above it: which popover is open is not a
+  // setting, and `dockPrefs`' rule about one key per writer would make it one.
+  const [findOpen, setFindOpen] = React.useState(false);
   const adapterTitle = attention && 'summary' in agentHealth
     ? `${agentHealth.summary}. Settings > Driver Info has the detail.`
     : selected === null
@@ -587,6 +609,32 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
             twice. That mistake has been made in this strip once already - the
             brand mark opened as a `TbNetwork`, identical to the adapter button
             42px under it, and only a screenshot found it. */}
+        {/* The dot says the list is narrowed by something that is not the
+            filter bar. Without it a search left in the box is invisible from
+            here and the packet list is quietly short of rows. */}
+        <FindPacketPopover
+          open={findOpen}
+          onOpenChange={setFindOpen}
+          text={packetSearchText}
+          onTextChange={onPacketSearchChange}
+        >
+          <button
+            onClick={() => setFindOpen((wasOpen) => !wasOpen)}
+            aria-haspopup="dialog"
+            aria-expanded={findOpen}
+            aria-label={packetSearchText === '' ? 'Find packet' : `Find packet - ${packetSearchText}`}
+            title="Find packet"
+            className={railButton(findOpen, 'toggle')}
+          >
+            {packetSearchText !== '' && (
+              <span
+                aria-hidden
+                className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"
+              />
+            )}
+            <TbSearch className={GLYPH} />
+          </button>
+        </FindPacketPopover>
         <button
           onClick={onOpenExport}
           aria-label="Export or import a capture"

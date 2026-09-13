@@ -242,7 +242,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
     [`widgets: ${WIDGET_TYPE_IDS.length}`, group(WIDGET_TYPE_IDS.length)],
     // The bottom group carries its own divider, so the gap between that line and
     // the first button is the group's gap rather than the divider's margin.
-    ['bottom: Export/Import, Settings', DIVIDER + GAP + group(2) + 8],
+    ['bottom: Find, Export/Import, Settings', DIVIDER + GAP + group(3) + 8],
   ] as const;
 
   let total = 0;
@@ -258,7 +258,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // changed. Held here rather than trusted there, and it has earned that once
   // already: deleting the hamburger menu moved Custom Dissectors into the bottom
   // group, and this is the line that says what that cost.
-  check('the rail is as tall as it says it is', total, 539);
+  check('the rail is as tall as it says it is', total, 577);
   // The raw file, not `code()`: the figure lives in the header comment, which is
   // the first thing `code()` throws away. The point of this one is that the
   // prose and the arithmetic cannot part company again.
