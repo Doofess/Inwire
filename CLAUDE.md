@@ -159,8 +159,17 @@ banner. Three things follow, and each is a trap with a comment on it:
   focused). It resolves the **plain** chrome pair - `--card` /
   `--card-foreground` - in all four themes and deliberately ignores the
   Colourful preference, because a saturated band with native buttons in it is
-  what reads as a web page wearing a frame. Colourful keeps a real consumer in
-  `AppMenu.tsx`, so nothing is dead; the missing axis is a scope decision.
+  what reads as a web page wearing a frame.
+
+  **Colourful now has almost nothing left to colour**, and that is a live
+  question rather than a decision. Its last real consumer was `AppMenu.tsx`; with
+  the hamburger deleted, the only `--chrome*` token any component still reads is
+  `text-chrome-brand` on the rail's 24px brand mark. The preference, its store
+  (`inwire.colorfulChrome`), the `:root[data-chrome="plain"]` remap and four
+  themes' worth of `--chrome` / `--chrome-foreground` / `--chrome-sunken` tokens
+  are all still there, serving one glyph. Either it gets a surface back or it
+  goes; what it must not do is sit in Settings offering a choice that changes
+  almost nothing.
 - **The colours are cached in `window-state.json`.** `titleBarOverlay`'s
   constructor value paints before the renderer hydrates, so the alternative is
   opening in one theme and correcting a beat later - a flash in the one strip of
@@ -213,12 +222,20 @@ service workers, every permission request denied. The preload is a **single
 CommonJS file** — a sandboxed preload cannot be ESM and cannot `require` a
 relative module, so `electron/build.cjs` bundles it.
 
-**The shell is a rail, a title row and a filter row.** There is no 64px header
-any more; `Header.tsx` is deleted and its contents are split three ways.
+**The shell is a rail, a title row and a filter row, and there is no menu.**
+`Header.tsx` is deleted and its contents are split three ways; `AppMenu.tsx` -
+the hamburger drawer that hung off the title row - is deleted too. Of its seven
+entries, **three already had a rail button** (Capture Statistics, Network,
+Settings), Export/Import and Custom Dissectors **became** rail buttons, and the
+two passive name-resolution switches went to `Settings -> Interface`, beside the
+two outbound lookups that were already there. Nothing that duplicated a visible
+control survived, which was the menu's own stated rule turned on itself. The
+title row holds **no control at all** now, and `cmdk` left `dependencies` with
+it.
 
 ```
 ┌──────┬─────────────────────────────────────────────────┐
-│      │ 40px TitleRow      palette · title · overlay    │
+│      │ 40px TitleRow            title · overlay       │
 │ rail ├─────────────────────────────────────────────────┤
 │ 56px │ FilterRow  (banner, filter, capturing)          │
 │      ├────────────┬────────────────────────────────────┤
@@ -230,15 +247,26 @@ any more; `Header.tsx` is deleted and its contents are split three ways.
 `ActivityRail.tsx` is 56px and spans the full window height, so it reaches the
 top and its own 40px cell sits level with the title row. Four groups: **capture**
 (Start/Stop, adapter), **views** (Packets, Statistics, Network, Follow Stream),
-**widgets** (the five dashboard types), and a bottom group (Updates, Settings)
-pinned with `mt-auto`. 13 icons at 36px targets with four dividers come to
-**579px** against the 640px minimum window height - 61px of slack, which is room
-for exactly one more icon. `scripts/session/view.ts` adds that up from the
-Tailwind classes and holds each class to what the sum assumes, because the comment
-in `ActivityRail.tsx` said 549 until it did. If a sixth widget ever arrives, **the
-widgets group is the one that scrolls**: the bottom group is pinned with
-`mt-auto`, so an overflow does not scroll anything, it pushes Settings off the
-bottom edge.
+**widgets** (the five dashboard types), and a bottom group (Export/Import,
+Custom Dissectors, Settings) pinned with `mt-auto`.
+
+**There was an Updates button and it was a second Settings button.**
+`onOpenUpdates` and `onOpenSettings` were the same handler, and `updateAvailable`
+was passed `false` at the only call site, so its badge could never light.
+Export/Import took the slot. The Update Center is unchanged and still lives where
+ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs a
+real `updateAvailable` first, and Settings is the icon to hang it on.
+
+14 icons at 36px targets with four dividers come to **617px** against the 640px
+minimum window height - 23px of slack, which is **not** another icon. The rail is
+full. `scripts/session/view.ts` adds that up from the Tailwind classes and holds
+each class to what the sum assumes, because the comment in `ActivityRail.tsx`
+said 549 until it did - and it is what decided where the menu's leftovers went:
+the two name-resolution switches would have made the bottom group four icons and
+693px, 53px past the smallest window this app opens at, so they went to Settings
+instead. If anything else ever needs a permanent home, **the widgets group is the
+one that scrolls**: the bottom group is pinned with `mt-auto`, so an overflow
+does not scroll anything, it pushes Settings off the bottom edge.
 
 Two behaviours in one strip, so the active states are deliberately different
 shapes: a view carries a **2px left accent edge plus a filled background**, a
