@@ -11,6 +11,8 @@ import {
   TbSettings,
   TbFileExport,
   TbSearch,
+  TbChevronLeft,
+  TbChevronRight,
 } from 'react-icons/tb';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
@@ -54,9 +56,12 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 15 icons, 36px targets and four dividers come to **615px** against a 640px
- * minimum window height. It fits, with 25px of slack - which is **not** another
- * icon. The rail is full.
+ * 15 icons at 36px, three dividers, the dock's 20px collapse control and the
+ * bottom group's padding come to **630px** against a 640px minimum window
+ * height. It fits, with 10px of slack. **The rail is full** - not "nearly", not
+ * "for now": there is no room for a sixteenth icon, and the collapse control
+ * went into the widgets divider's slot rather than beside them precisely
+ * because there was already no room for it.
  *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that
@@ -182,6 +187,17 @@ export interface ActivityRailProps {
   /** The dock's list: every type, each with whether it is open. */
   dockItems: { type: WidgetTypeId; open: boolean }[];
   onToggleWidget: (type: WidgetTypeId) => void;
+  /**
+   * The dock is hidden, leaving only these icons.
+   *
+   * It changes what a widget icon does rather than only how it looks: shown, an
+   * icon toggles that widget in the dock; hidden, it opens that widget's
+   * overlay. `onToggleWidget` is the same callback either way - App branches -
+   * so this is here to get the *marker* right. A dot meaning "in the dock"
+   * would be a lie about a dock nobody can see.
+   */
+  dockMinimized: boolean;
+  onToggleDockMinimized: () => void;
   /** `inwire.dashboard`, for the custom titles the tooltips show. */
   widgets: WidgetInstance[];
 
@@ -215,7 +231,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces, onSelectInterface,
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
-  dockItems, widgets, onToggleWidget,
+  dockItems, widgets, onToggleWidget, dockMinimized, onToggleDockMinimized,
   onOpenSettings, onOpenExport, packetSearchText, onPacketSearchChange,
   schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
   scheduleSummary, scheduleNow,
@@ -567,7 +583,33 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
         })}
       </div>
 
-      <RailDivider />
+      {/* The widgets group's divider, with a job.
+          
+          This is where the collapse control has to be, and the constraint is
+          arithmetic: the rail is 615px against a 640px minimum window, so there
+          is no room for another 36px icon. A 20px group header in the slot the
+          divider already occupied costs 15px, and it reads as what it is - the
+          head of the group it collapses - rather than as a fifteenth peer to
+          the fourteen icons around it.
+
+          It is also the ONLY way back. Minimized, every widget icon opens an
+          overlay rather than toggling the dock, so none of them can restore it. */}
+      <button
+        onClick={onToggleDockMinimized}
+        aria-pressed={dockMinimized}
+        aria-label={dockMinimized ? 'Show the widget panel' : 'Hide the widget panel'}
+        title={dockMinimized
+          ? 'Show the widget panel. Icons toggle widgets in it.'
+          : 'Hide the widget panel. Icons open widgets in their own window.'}
+        className="my-1 h-5 w-7 shrink-0 flex items-center justify-center rounded
+          text-muted-foreground hover:bg-accent hover:text-foreground transition-colors
+          cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1
+          focus-visible:outline-ring"
+      >
+        {dockMinimized
+          ? <TbChevronRight className="w-3.5 h-3.5" />
+          : <TbChevronLeft className="w-3.5 h-3.5" />}
+      </button>
 
       <div className={GROUP} role="group" aria-label="Widgets">
         {WIDGET_TYPE_IDS.map((type) => {
@@ -575,18 +617,26 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           const on = enabled.has(type);
           const instance = byType.get(type);
           const label = instance ? widgetTitle(instance) : type;
+          // Minimized, `on` describes a dock nobody can see - so the marker and
+          // the active fill are suppressed rather than showing a state with no
+          // visible consequence, and the tooltip says what the click will
+          // actually do. `aria-pressed` goes with them: it would be announcing
+          // a toggle that is not what this button is right now.
+          const marked = on && !dockMinimized;
           return (
             <button
               key={type}
               onClick={() => onToggleWidget(type)}
-              aria-pressed={on}
+              aria-pressed={dockMinimized ? undefined : on}
               aria-label={label}
-              title={on ? `Hide ${label}` : `Show ${label}`}
-              className={railButton(on, 'toggle')}
+              title={dockMinimized
+                ? `Open ${label} in its own window`
+                : on ? `Hide ${label}` : `Show ${label}`}
+              className={railButton(marked, 'toggle')}
             >
               {/* The dot, not an edge: many can be on at once, so this says
                   "showing" rather than "you are here". */}
-              {on && (
+              {marked && (
                 <span
                   aria-hidden
                   className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"

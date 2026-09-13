@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { TbPin, TbPinFilled, TbX, TbGripVertical } from 'react-icons/tb';
 import { RenderedWidget } from '../analytics/RenderedWidget';
+import { WIDGET_RENDERERS } from '../analytics/dashboardWidgets';
 import type { DashboardWidgetContext } from '../analytics/dashboardWidgets';
 import {
   widgetTitle, type WidgetConfig, type WidgetInstance, type WidgetTypeId,
@@ -75,11 +76,20 @@ export interface DockProps {
    * rather than from the widget.
    */
   onExpand?: (type: WidgetTypeId, from: HTMLElement | null) => void;
+  /**
+   * Hidden, leaving only the rail's icons.
+   *
+   * Rendered as nothing rather than as a zero-width column: the resize handle,
+   * the drag targets and six subscribed widgets would all still be mounted, and
+   * the counts card would go on re-rendering ten times a second for a panel
+   * nobody can see.
+   */
+  minimized: boolean;
 }
 
 const DockImpl: React.FC<DockProps> = ({
   items, width, context, widgets, onConfigChange,
-  onReorder, onTogglePinned, onClose, onWidthChange, onExpand,
+  onReorder, onTogglePinned, onClose, onWidthChange, onExpand, minimized,
 }) => {
   const visible = dockOrder(items);
   const byType = new Map(widgets.map((w) => [w.type, w] as const));
@@ -197,7 +207,9 @@ const DockImpl: React.FC<DockProps> = ({
     onReorder(without);
   };
 
-  if (visible.length === 0) return null;
+  // Nothing open, or hidden by the rail's collapse control. Both are the same
+  // thing from here: no dock, and the packet list takes the width back.
+  if (visible.length === 0 || minimized) return null;
 
   return (
     <>
@@ -278,12 +290,18 @@ const DockImpl: React.FC<DockProps> = ({
                 </button>
               </div>
 
-              {/* Untouched. Exactly the call the right-hand column made. */}
+              {/* The expand button, offered only where the overlay draws
+                  something different - the map. Every other card would reopen
+                  the same rendering at a larger size, which is a control that
+                  promises more than it gives. The overlay stays reachable for
+                  all six from the rail when the dock is hidden; this is about
+                  the button, not the window. */}
               <RenderedWidget
                 widget={instance}
                 context={context}
                 onConfigChange={onConfigChange}
                 onExpand={onExpand === undefined
+                  || WIDGET_RENDERERS[item.type].hasFullView !== true
                   ? undefined
                   : () => onExpand(item.type, cardRefs.current.get(item.type) ?? null)}
               />
