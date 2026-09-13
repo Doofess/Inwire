@@ -682,24 +682,48 @@
 .midnight {
   /* See the note in `:root`. */
   --packet-gridline-lighten: 40%;
-  --background: #0d1219;
-  --foreground: #dbe3ec;
-  --card: #161d26;
-  --card-foreground: #dbe3ec;
-  --popover: #161d26;
-  --popover-foreground: #dbe3ec;
+  /* Neutral grey, not the blue-black this used to be.
+
+     It was `#0d1219` with a `#dbe3ec` foreground - a cool cast on every surface,
+     which is where the name came from. The theme it is measured against now is
+     VS Code's Dark+: a flat `#1e1e1e` ground with the chrome a step lighter
+     rather than darker, which is why `--card` is ABOVE `--background` here and
+     in `.dark` both. Nothing else in the app assumes a direction; the rail and
+     the title row just take `--card`.
+
+     `--card` is `#222222` and not the `#252526` that pairing normally uses, and
+     that is a constraint rather than a preference: the colour-blind packet set is
+     Okabe-Ito, which is defined for LIGHT backgrounds and contains both a black
+     and a `#999999` grey. On a dark card the black has to be lifted to clear AA,
+     and above a card of about `#222222` it lands on `#919191` - 3.1 deltaE from
+     that grey, against a floor of 6, so two protocol accents stop being telling
+     apart by the people the set exists for. `scripts/themes/packet-themes.ts` is
+     what says so. The separation between the rail and the list is carried by
+     `--border` here instead, which is what a low-contrast dark UI does anyway.
+
+     Only the surfaces went neutral. `--primary`, `--destructive`, `--ring` and
+     the protocol hues in `themePalettes.ts` carry meaning rather than taste, and
+     a blue accent on a grey ground is the point of an accent. */
+  --background: #1e1e1e;
+  --foreground: #e4e4e4;
+  --card: #222222;
+  --card-foreground: #e4e4e4;
+  --popover: #222222;
+  --popover-foreground: #e4e4e4;
   --primary: #38bdf8;
-  --primary-foreground: #0d1219;
-  --secondary: #1e2733;
-  --secondary-foreground: #dbe3ec;
-  --muted: #1e2733;
-  --muted-foreground: #94a3b8;
-  --accent: #232b36;
-  --accent-foreground: #dbe3ec;
+  --primary-foreground: #1e1e1e;
+  --secondary: #2b2b2b;
+  --secondary-foreground: #e4e4e4;
+  --muted: #2b2b2b;
+  --muted-foreground: #a1a1a1;
+  /* One step above `--muted`, because this is the rail's hover and the rail sits
+     on `--card`. At `--muted` a hover would be invisible there. */
+  --accent: #333333;
+  --accent-foreground: #e4e4e4;
   --destructive: #fb7185;
-  --destructive-foreground: #0d1219;
-  --border: #232b36;
-  --input: #232b36;
+  --destructive-foreground: #1e1e1e;
+  --border: #3c3c3c;
+  --input: #3c3c3c;
   --ring: #7dd3fc;
   --chrome: #0e5f85;
   --chrome-foreground: #ffffff;
@@ -718,7 +742,7 @@
   --warning-muted: #d77f37;
   --danger: #d26161;
   --danger-foreground: #0b0f14;
-  --danger-muted: #d26161;
+  --danger-muted: #db6968;
   --danger-strong: #a2373c;
   --danger-strong-foreground: #ffffff;
 }
