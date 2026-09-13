@@ -276,12 +276,13 @@ which is two columns rather than a list of setting rows.
 │      │ 240-640px  │ statistics | stream                │
 └──────┴────────────┴────────────────────────────────────┘
 ```
-
-`ActivityRail.tsx` is 56px and spans the full window height, so it reaches the
-top and its own 40px cell sits level with the title row. Four groups: **capture**
-(Start/Stop, adapter), **views** (Packets, Statistics, Follow Stream),
-**widgets** (the five dashboard types), and a bottom group (Export/Import,
-Settings) pinned with `mt-auto`.
+`ActivityRail.tsx` is 56px and spans the full window height, starting at the very
+top - there is no cell above the first group, because the brand mark that filled
+one is in the title row now. Four groups: **capture** (Start/Stop, adapter,
+schedule - in the order they are used), **views** (Packets, Statistics, Follow
+Stream), **widgets** (the six dashboard types, under a collapse control), and a
+bottom group of actions (Find packet, Export/Import, Settings) pinned with
+`mt-auto`.
 
 **There was an Updates button and it was a second Settings button.**
 `onOpenUpdates` and `onOpenSettings` were the same handler, and `updateAvailable`
@@ -290,29 +291,42 @@ Export/Import took the slot. The Update Center is unchanged and still lives wher
 ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs a
 real `updateAvailable` first, and Settings is the icon to hang it on.
 
-12 icons at 36px targets with four dividers come to **541px** against the 640px
-minimum window height - 99px of slack, room for two more.
-`scripts/session/view.ts` adds that up from the Tailwind classes and holds each
-class to what the sum assumes, because the comment in `ActivityRail.tsx` said 549
-until it did.
+15 icons at 36px, three dividers, the 20px collapse control and the bottom
+group's padding come to **630px** against the 640px minimum window height - 10px
+of slack. **The rail is full.** `scripts/session/view.ts` adds that up from the
+Tailwind classes, holds each class to what the sum assumes, and prints "the rail
+is FULL" when the answer is no more icons.
 
-It has already decided one design question. Deleting the menu took the rail to
-617px, at which point the two name-resolution switches would have made the bottom
-group four icons and 693px - 53px past the smallest window this app opens at - so
-they went to Settings. Custom Dissectors and Network leaving gave the two slots
-back. If anything else ever needs a permanent home, **the widgets group is the
-one that scrolls**: the bottom group is pinned with `mt-auto`, so an overflow
-does not scroll anything, it pushes Settings off the bottom edge.
+That arithmetic has decided three design questions rather than merely recording
+them. It is why the two name-resolution switches went to Settings rather than the
+rail (four icons in the bottom group would have been 693px, 53px over). It is
+why the brand mark's 40px cell was reclaimed rather than left empty. And it is
+why the dock's collapse control is a 20px group header in the widgets divider's
+slot rather than a sixteenth icon: at 615px there was no room for one, and the
+header costs 15px.
+
+If anything else ever needs a permanent home, **the widgets group is the one that
+scrolls**: the bottom group is pinned with `mt-auto`, so an overflow does not
+scroll anything, it pushes Settings off the bottom edge.
 
 Two behaviours in one strip, so the active states are deliberately different
 shapes: a view carries a **2px left accent edge plus a filled background**, a
-widget carries a **dot and an outline**. Neither appears on hover. 56 disagrees
+widget carries a **dot and an outline**. Neither appears on hover.
+
+**A widget icon means two things, and which one is in force is persisted.** With
+the dock shown it toggles that widget in it; with the dock hidden it opens that
+widget's overlay instead, and the dot and fill are suppressed because they would
+describe a dock nobody can see. Every icon does something in both states: the
+overlay renders any widget at full size, so there is no "iff it has one". What
+*is* gated is the expand button on a dock card - `hasFullView`, true for the map
+alone, because a button that reopens the same drawing larger promises what it
+does not deliver. 56 disagrees
 with `DASHBOARD_RAIL_WIDTH` and `FrameMetaRail`, both 48, and that is accepted
 rather than overlooked.
 
-**The drag-region rule.** The title row and the rail's top cell are
-`.app-drag`; everything interactive inside them is `.app-no-drag`; the rest of
-the rail is neither, which is to say not draggable. A control that forgets
+**The drag-region rule.** The title row is `.app-drag` and everything
+interactive in it is `.app-no-drag`; **the rail is entirely no-drag**, and has
+been since the top cell went with the brand mark. A control that forgets
 `no-drag` moves the window instead of being pressed, and the only symptom is a
 click that does nothing — which on the close button is a window that cannot be
 closed, so `scripts/electron/window-chrome.ts` asserts the class is on the
@@ -334,9 +348,9 @@ condition to render - `stream`, which needs a target - is exactly the one
 **The dock replaced the right-hand column.** `components/dock/Dock.tsx` sits
 between the rail and the content and stacks whichever widgets are open;
 `DashboardAside` and its collapse-to-a-rail morph are deleted. `services/dockPrefs.ts`
-is the furniture - `inwire.dock`, holding the width and an `items` list that is a
-permutation of every widget type with `open` and `pinned` flags, so a widget
-closed and reopened returns **where it was**. `inwire.dashboard` keeps what is
+is the furniture - `inwire.dock`, holding the width, `minimized`, and an `items`
+list that is a permutation of every widget type with `open` and `pinned` flags,
+so a widget closed and reopened returns **where it was**. `inwire.dashboard` keeps what is
 still true of a widget wherever it is drawn, its `title` and its `config`; its
 `mode` and `width` are no longer read, and are deliberately **not** deleted from
 storage, because `seedFromDashboard()` reads that raw key once to migrate.
@@ -359,12 +373,24 @@ Four things about it worth knowing before touching it:
 - **The width is stored unclamped.** `clampDockWidth` applies at the point of use,
   against the window, so narrowing shrinks an open dock and widening gives back
   the width the user chose. A width clamped on the way out would never grow back.
+- **`minimized` is not a revival of `DashboardMode`.** That was three modes and
+  a morph gesture on a right-hand column that became a 48px strip as you dragged
+  it narrower; this is one boolean on a left-hand dock whose rail already exists.
+  The migration does not carry the old `mode` across either - `icons` and
+  `hidden` are already answered by opening nothing, and collapsing on top of
+  that would hand somebody a rail whose every widget icon opened an overlay,
+  with no sign the dock existed.
 - **`Dock` is behind `React.memo`, and it is the application's only memo
   boundary.** App re-renders ~10x a second during a capture and every widget does
   a full pass over the buffer. `DashboardAside` was memoised for this; Step 5 of
   the rail work did not carry that across and handed every one of those renders to
   the charts. Nothing failed - it was only slower, visible in a profile. An inline
-  arrow in any of the six callbacks App passes it silently defeats it.
+  arrow in any of the six callbacks App passes it silently defeats it. So does a
+  fast-changing field in `DashboardWidgetContext`, which is why the packet
+  counter publishes through `services/packetCounts.ts` and the `counts` card
+  subscribes for itself: a frame count in that context would change its identity
+  on every 100ms flush and re-render all six widgets for a number one of them
+  shows.
 
 `lib/windowChrome.ts` is the renderer's half of the bridge: it reports the
 resolved theme and the window title to main, and subscribes once at module scope
