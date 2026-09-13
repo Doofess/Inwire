@@ -1,8 +1,7 @@
 /**
  * The window's security posture, stated once so it can be asserted.
  *
- * `scripts/electron/window-options.ts` reads this file and checks every field
- * by name. That is a ratchet in the same spirit as `noUnusedLocals` and
+ * `scripts/electron/shell.ts` reads this file and checks every field by name. That is a ratchet in the same spirit as `noUnusedLocals` and
  * `scripts/dissect/registry.ts`: these are not settings, they are decisions,
  * and the cost of one of them quietly flipping is not a failing build - it is
  * an app that still works and is no longer safe.
@@ -90,16 +89,51 @@ export const WEB_PREFERENCES = {
 } as const;
 
 /**
- * A window narrower than this enters the app's phone layout.
+ * The narrowest window the layout is designed for.
  *
- * `App.tsx` and `PacketList.tsx` branch on `window.innerWidth < 768` and keep a
- * `mobileTab`, which a browser could reach and a desktop window can too, just
- * by being dragged narrow. Until those branches are removed this is what stops
- * it, and it is worth having afterwards regardless: a packet list below about
- * a thousand pixels is a list with no Info column worth reading.
+ * This began as the guard against the app's phone layout - `App.tsx` and
+ * `PacketList.tsx` used to branch on `window.innerWidth < 768` and keep a
+ * `mobileTab`, which a dragged-narrow desktop window could reach. Those
+ * branches are gone and `mobileTab` no longer exists, so the number now earns
+ * its place on its own: a packet list below about a thousand pixels is a list
+ * with no Info column worth reading.
+ *
+ * **It deliberately stays 1024 now that the window also carries a 56px activity
+ * rail and a dock.** Raising it to 1280, which would give the dock more room,
+ * breaks half-screen snapping on a 1920px display - Windows gives a 960px
+ * window there, and analyser on one half with a terminal on the other is a
+ * workflow this tool exists to support. The dock absorbs the pressure instead,
+ * by reserving 640px for the list; see the width rule in `src/services/`.
  */
 export const MIN_WINDOW_WIDTH = 1024;
 export const MIN_WINDOW_HEIGHT = 640;
+
+/**
+ * The window wears its own title bar.
+ *
+ * `'hidden'` and **not** `frame: false`: the frame is what gives the window
+ * Windows' own resize borders, snap layouts on a maximise-button hover, the
+ * system menu on Alt+Space and the shadow that tells a focused window from an
+ * unfocused one. `frame: false` hands all of that back to us to reimplement
+ * badly, and the buttons with it. `'hidden'` keeps every one of them and only
+ * removes the caption strip.
+ *
+ * Paired with `titleBarOverlay`, which is what reserves the area Windows draws
+ * the buttons into. The renderer must keep that area clear - it reads the width
+ * from `env(titlebar-area-width)` rather than assuming, because the reserved
+ * area is wider at 150% and 200% scaling.
+ */
+export const TITLE_BAR_STYLE = 'hidden' as const;
+
+/**
+ * The height of the app's own title row, and therefore of the overlay.
+ *
+ * 40 is what the reference class settled on - Windows Terminal puts its tabs in
+ * a 40px caption, Figma's desktop shell is about the same, VS Code runs 35 and
+ * feels cramped for anything but a menu. It is also the height the rail's top
+ * cell aligns to, so the brand mark sits level with the window title.
+ */
+export const TITLE_BAR_HEIGHT = 40;
 
 /**
  * The ground the window paints before the renderer has drawn anything.

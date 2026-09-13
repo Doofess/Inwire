@@ -13,6 +13,11 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 >   under `public/` that is not a static asset the app itself loads
 > - a **phone layout** — the window minimum is 1024 and `md:` is 768
 > - **`nodeIntegration`** in the renderer, in any form, for any convenience
+> - **`frame: false` and custom-drawn window controls.** The window wears its
+>   own 40px title row, but the buttons in it are Windows', drawn by Windows,
+>   inside the area `titleBarOverlay` reserves. Frameless would hand back the
+>   resize borders, Snap Layouts, the Alt+Space system menu and the focus
+>   shadow to be reimplemented badly (`electron/window.ts`, ADR pending)
 > - **`/S` on Npcap's installer**, anywhere, for any reason — it is the OEM
 >   silent-install feature and the free licence does not grant it (ADR 0032).
 >   Npcap's wizard is shown, because its licence is shown with it
@@ -143,7 +148,36 @@ A thin adapter over things only a privileged process can hold. It owns the
 agent's service diagnosis, native save dialogs, and the capture store's
 lifetime. Every decision worth testing is in a module beside it: `appPaths.ts`,
 `window.ts`, `csp.ts`, `menu.ts`, `windowState.ts`, `saveTarget.ts`,
-`pipeTransport.ts`, `agentService.ts`.
+`pipeTransport.ts`, `agentService.ts`, `titleBarColors.ts`.
+
+**The window wears its own title bar.** `titleBarStyle: 'hidden'` plus
+`titleBarOverlay` at `TITLE_BAR_HEIGHT` (40), never `frame: false` - see the
+banner. Three things follow, and each is a trap with a comment on it:
+
+- **Windows draws the buttons**, at a weight we do not control, and is told two
+  colours. `titleBarColors.ts` is that table, keyed on (resolved theme ×
+  focused). It resolves the **plain** chrome pair - `--card` /
+  `--card-foreground` - in all four themes and deliberately ignores the
+  Colourful preference, because a saturated band with native buttons in it is
+  what reads as a web page wearing a frame. Colourful keeps a real consumer in
+  `AppMenu.tsx`, so nothing is dead; the missing axis is a scope decision.
+- **The colours are cached in `window-state.json`.** `titleBarOverlay`'s
+  constructor value paints before the renderer hydrates, so the alternative is
+  opening in one theme and correcting a beat later - a flash in the one strip of
+  the window nobody can look away from. The theme still lives in `localStorage`;
+  this is a cache of what it resolved to, written by the renderer, never the
+  source of truth. Same argument as window bounds, which is why it is the same
+  file.
+- **The dim on blur is opaque.** `titleBarOverlay` takes a flat colour, not an
+  alpha, so the 60% foreground fade is pre-composited in `mixHex` and pushed
+  with `setTitleBarOverlay` on every `focus`/`blur`. That is why `focused` is a
+  parameter rather than a CSS class.
+
+`maximize`/`unmaximize`/`focus`/`blur` are forwarded to the renderer over
+`WINDOW_STATE_CHANNEL`, because a window drawing its own chrome has to know what
+the OS used to draw: a restored window must not paint into the frame's rounded
+corners, and neither fact has a CSS media query. `setTitle` is driven from the
+renderer, which is the only side that knows the adapter's name.
 
 **No captured frame passes through main's JavaScript as anything but an opaque
 buffer.** Main deframes the pipe's byte stream and posts the payload onward

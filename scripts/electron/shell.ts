@@ -37,7 +37,8 @@ import {
 } from '../../electron/updateCenter/manifest';
 import { menuTemplate } from '../../electron/menu';
 import {
-  APP_ORIGIN, COMMAND_LINE_SWITCHES, SCHEME_PRIVILEGES, WEB_PREFERENCES,
+  APP_ORIGIN, COMMAND_LINE_SWITCHES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SCHEME_PRIVILEGES,
+  TITLE_BAR_HEIGHT, TITLE_BAR_STYLE, WEB_PREFERENCES,
 } from '../../electron/window';
 
 let failures = 0;
@@ -79,6 +80,44 @@ console.log('--- the window, field by field ---\n');
     'disable-backgrounding-occluded-windows',
     'disable-renderer-backgrounding',
   ]);
+}
+
+console.log('\n--- the window wears its own title bar ---\n');
+
+{
+  // `'hidden'` and not `frame: false`, which is a line in CLAUDE.md's banner.
+  // Frameless would hand back the resize borders, the snap layouts, the system
+  // menu and the focus shadow to be reimplemented, and the buttons with them.
+  check('the title bar is hidden, not the frame', TITLE_BAR_STYLE, 'hidden');
+  // Asserted as the absence of a word rather than the presence of one: there is
+  // no `frame` export to compare against, and what must never come back is the
+  // option itself.
+  //
+  // Comments stripped first, the same way the outbound-host drift check below
+  // does it - both files explain at length why `frame: false` is not used, and
+  // a check that cannot tell prose from code would fail on its own rationale.
+  const withoutComments = (file: string): string => readFileSync(file, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  checkTrue('...and `frame` is not an option this app sets',
+    !withoutComments('electron/window.ts').includes('frame:')
+    && !withoutComments('electron/main.ts').includes('frame:'));
+  // The renderer's title row and the rail's top cell are both laid out against
+  // this, so a change here that did not reach the CSS would leave the brand mark
+  // misaligned against the window title.
+  check('the overlay is 40px', TITLE_BAR_HEIGHT, 40);
+
+  // Unchanged by the hidden title bar, and load-bearing: `role: 'editMenu'` is
+  // the only source of Ctrl+C/V/A/Z for every input in the app, and Alt is what
+  // reveals it. Hiding the caption strip does not hide the menu bar.
+  checkTrue('the menu bar is still auto-hidden rather than gone',
+    readFileSync('electron/main.ts', 'utf8').includes('autoHideMenuBar: true'));
+
+  // The minimum stays 1024 now that the window also carries a 56px rail and a
+  // dock. Raising it to 1280 would break half-screen snapping on a 1920px
+  // display, where Windows gives a 960px window - analyser on one half with a
+  // terminal on the other is a workflow this tool exists to support.
+  check('the window minimum is unchanged', [MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT], [1024, 640]);
 }
 
 console.log('\n--- the scheme, whose flags each hide a silent failure ---\n');

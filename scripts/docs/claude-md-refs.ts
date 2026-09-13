@@ -77,12 +77,13 @@ const DELIBERATELY_ABSENT = new Map<string, string>([
 ]);
 
 /**
- * Named, and produced by a build rather than committed.
+ * Named, and written by something rather than committed.
  *
  * Separate from DELIBERATELY_ABSENT because the assertion is different: these
- * SHOULD exist after the right command has run, and a check that demanded them
- * would fail on a clean clone. Reported so they stay visible; not asserted
- * either way.
+ * SHOULD exist once the right thing has run, and a check that demanded them
+ * would fail on a clean clone. Two kinds live here - build outputs, and files
+ * written into the user's profile at runtime, which are never in the repository
+ * at all. Reported so they stay visible; not asserted either way.
  */
 const GENERATED = new Map<string, string>([
   ['maplibre-gl-worker.mjs', 'emitted into dist/assets by the vite plugin'],
@@ -91,6 +92,7 @@ const GENERATED = new Map<string, string>([
   // before `npm run build` in CI - so it exists on a developer's machine and
   // not on the runner, which is the worst shape an assertion can have.
   ['dist-electron/', 'written by electron/build.cjs during `npm run build`'],
+  ['window-state.json', 'runtime, in userData: bounds and the title bar colour cache'],
 ]);
 
 /** Where the prose's relative paths are rooted. */

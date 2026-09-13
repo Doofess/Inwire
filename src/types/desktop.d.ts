@@ -110,6 +110,39 @@ declare global {
        * a Settings panel that mounts and unmounts on every visit.
        */
       onUpdateState?(listener: (state: unknown) => void): () => void;
+      /**
+       * Reports the resolved theme, so main can colour the native buttons.
+       *
+       * Windows draws the minimise/maximise/close glyphs itself, inside the
+       * area `titleBarOverlay` reserves, and it is told the two colours to use.
+       * A theme *name* crosses rather than a colour: `electron/titleBarColors.ts`
+       * owns the hex and explains why resolving it in the renderer is always one
+       * frame behind the cascade.
+       *
+       * Pass `resolvedTheme`, never `theme` - the picker's fifth entry, System,
+       * is a rule for choosing between two themes and has no palette of its own.
+       */
+      setTitleBarTheme?(theme: string): void;
+      /**
+       * Sets the window title.
+       *
+       * The renderer decides the wording, because it is the only side that
+       * knows the adapter's name and whether frames are arriving. Main refuses
+       * an empty string rather than titling the window after a bug.
+       */
+      setWindowTitle?(title: string): void;
+      /**
+       * Subscribes to maximized/focused, and returns the unsubscribe.
+       *
+       * Both are facts only the main process is told, and a window wearing its
+       * own title bar has to draw what the OS used to: a restored window must
+       * not paint into the frame's rounded corners, and an unfocused window's
+       * chrome dims. Neither has a CSS media query.
+       *
+       * The payload is `unknown` like every other message from main, and
+       * narrowed on this side.
+       */
+      onWindowState?(listener: (state: unknown) => void): () => void;
     };
   }
 }

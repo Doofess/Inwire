@@ -14,12 +14,25 @@
  * all*, so it cannot ask `localStorage` anything. A small JSON file beside the
  * app's other state is the only place this can live.
  *
+ * **The title bar's colours are here for exactly that reason and no other.**
+ * `titleBarOverlay` paints before the renderer hydrates, so the alternative is
+ * opening every window in one theme's colours and correcting it a beat later -
+ * a flash in the one strip of the window the user cannot look away from. The
+ * theme itself still lives in `localStorage` like every other preference; this
+ * is a cache of what it resolved to last time, written by the renderer and read
+ * by main, and it is never the source of truth.
+ *
  * Failure is always silent and always falls back to the default. A window that
  * opens in the wrong place is a smaller problem than an app that will not open.
  */
 import { app, screen, type BrowserWindow } from 'electron';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { TITLE_BAR_HEIGHT } from './window';
+import {
+  DEFAULT_TITLE_BAR_THEME, isTitleBarColors, resolveTitleBarColors,
+  type TitleBarColors,
+} from './titleBarColors';
 
 export interface WindowBounds {
   width: number;
@@ -31,12 +44,36 @@ export interface WindowBounds {
 export interface WindowState {
   bounds: WindowBounds;
   maximized: boolean;
+  titleBar: TitleBarColors;
 }
 
 const DEFAULT_STATE: WindowState = {
   bounds: { width: 1600, height: 950 },
   maximized: false,
+  // Focused, because a window that has just been created has focus.
+  titleBar: resolveTitleBarColors(DEFAULT_TITLE_BAR_THEME, true),
 };
+
+/**
+ * The last pair the renderer reported, held for the next `save()`.
+ *
+ * Module state rather than a field on the tracker because the two halves are
+ * written by different things at different times: bounds change on a drag, the
+ * colours change on a theme switch, and both end up in one file. One window at
+ * a time is guaranteed by `requestSingleInstanceLock` in `main.ts`.
+ */
+let lastTitleBar: TitleBarColors = DEFAULT_STATE.titleBar;
+
+/**
+ * Records what the title row is painted in, for the *next* launch.
+ *
+ * Does not repaint anything - `main.ts` calls `setTitleBarOverlay` for that.
+ * This only makes sure the window that opens tomorrow opens in the colours the
+ * user was last looking at.
+ */
+export function rememberTitleBar(colors: TitleBarColors): void {
+  lastTitleBar = colors;
+}
 
 function statePath(): string {
   return path.join(app.getPath('userData'), 'window-state.json');
@@ -69,7 +106,13 @@ export function loadWindowState(): WindowState {
   const state: WindowState = {
     bounds: { width: bounds.width, height: bounds.height },
     maximized: stored?.maximized === true,
+    // Validated as a pair of hex strings rather than trusted: this value is
+    // handed straight to Electron, and `titleBarOverlay` with a malformed
+    // colour throws at construction - which would be a profile that stops the
+    // app opening at all, the one outcome this file exists to avoid.
+    titleBar: isTitleBarColors(stored?.titleBar) ? stored.titleBar : DEFAULT_STATE.titleBar,
   };
+  lastTitleBar = state.titleBar;
 
   if (typeof bounds.x === 'number' && typeof bounds.y === 'number' && onSomeScreen(bounds)) {
     state.bounds.x = bounds.x;
@@ -81,12 +124,14 @@ export function loadWindowState(): WindowState {
 function onSomeScreen(bounds: WindowBounds): boolean {
   if (bounds.x === undefined || bounds.y === undefined) return false;
   // A window counts as reachable if its title bar is inside a display, which
-  // is what the user needs in order to drag it anywhere else.
+  // is what the user needs in order to drag it anywhere else. The title bar is
+  // now the app's own, so the height comes from the constant rather than from a
+  // guess at what Windows draws.
   return screen.getAllDisplays().some(({ workArea }) =>
     bounds.x! >= workArea.x - bounds.width + 120
     && bounds.x! <= workArea.x + workArea.width - 120
     && bounds.y! >= workArea.y
-    && bounds.y! <= workArea.y + workArea.height - 40);
+    && bounds.y! <= workArea.y + workArea.height - TITLE_BAR_HEIGHT);
 }
 
 /**
@@ -105,6 +150,7 @@ export function trackWindowState(window: BrowserWindow): void {
     const state: WindowState = {
       bounds: window.getNormalBounds(),
       maximized: window.isMaximized(),
+      titleBar: lastTitleBar,
     };
     try {
       mkdirSync(path.dirname(statePath()), { recursive: true });
