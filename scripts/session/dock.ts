@@ -16,7 +16,7 @@
  */
 import {
   clampDockWidth, defaultItems, dockOrder, maxDockWidth, migrateFromDashboard,
-  normalizeDockPrefs, normalizeItems,
+  normalizeDockPrefs, normalizeItems, reorderItems,
   DOCK_DEFAULT_WIDTH, DOCK_MAX_WIDTH, DOCK_MIN_WIDTH, LIST_RESERVE, RAIL_WIDTH,
 } from '../../src/services/dockPrefs';
 import { WIDGET_TYPE_IDS } from '../../src/services/dashboardPrefs';
@@ -98,6 +98,84 @@ console.log('\n--- pinned items lead, and order is otherwise kept ---\n');
     !types(dockOrder(items)).includes('timeseries'));
   check('...and unpinned items keep their relative order',
     types(dockOrder(items)).slice(1), ['geo', 'sizes']);
+}
+
+console.log('\n--- a drag-reorder lands on the open slots ---\n');
+
+{
+  // Four open, one closed and deliberately immovable: a widget closed and
+  // reopened has to come back where it was, so `breakdown` keeps slot 2 through
+  // every reorder below.
+  const items = [
+    { type: 'timeseries' as const, open: true, pinned: false },
+    { type: 'geo' as const, open: true, pinned: false },
+    { type: 'breakdown' as const, open: false, pinned: false },
+    { type: 'sizes' as const, open: true, pinned: false },
+    { type: 'talkers' as const, open: true, pinned: false },
+  ];
+  const visible = types(dockOrder(items));
+  check('the visible list is the open ones in stored order', visible,
+    ['timeseries', 'geo', 'sizes', 'talkers']);
+
+  // The regression. The version of this in `App.tsx` shifted a queue from inside
+  // a `find` predicate, so the queue drained once per COMPARISON rather than once
+  // per slot - `undefined` went into the list, the renderer read `undefined.open`
+  // and died. Any reorder that moves the first element reproduced it, so that is
+  // what this is.
+  //
+  // Checked by putting the bug back: the next check FAILS, and then `types()`
+  // throws `Cannot read properties of undefined`, which is the renderer's own
+  // crash reproduced in a script that needs neither Electron nor a browser. The
+  // throw is left unguarded deliberately - the named failure comes first, and an
+  // assertion suite that swallowed a hole in the list would be describing the
+  // defect instead of refusing it.
+  const moved = reorderItems(items, ['talkers', 'timeseries', 'geo', 'sizes']);
+  check('a reorder contains no holes',
+    moved.every((i) => i !== undefined && typeof i === 'object'), true);
+  check('...and is still every type exactly once', types(moved).slice().sort(),
+    [...WIDGET_TYPE_IDS].slice().sort());
+  check('...with the new order in the open slots',
+    types(dockOrder(moved)), ['talkers', 'timeseries', 'geo', 'sizes']);
+  check('...and the closed item still in its own',
+    moved.findIndex((i) => i.type === 'breakdown'), 2);
+  check('...carrying its flags across', moved.map((i) => i.open),
+    [true, true, false, true, true]);
+
+  // Both ends, because an off-by-one in the insertion shows up there and nowhere
+  // else.
+  check('the first can move to the back',
+    types(dockOrder(reorderItems(items, ['geo', 'sizes', 'talkers', 'timeseries']))),
+    ['geo', 'sizes', 'talkers', 'timeseries']);
+  check('an unchanged order is a no-op', types(reorderItems(items, visible)), types(items));
+
+  // Every refusal returns the list UNCHANGED rather than asserting. A drop that
+  // does nothing can be retried; a list with a hole in it crashed the renderer
+  // and was persisted.
+  check('a short order is refused', reorderItems(items, ['geo']), items);
+  check('a long order is refused',
+    reorderItems(items, ['timeseries', 'geo', 'sizes', 'talkers', 'breakdown']), items);
+  check('a repeat is refused', reorderItems(items, ['geo', 'geo', 'sizes', 'talkers']), items);
+  check('an unknown type is refused',
+    reorderItems(items, ['alerts', 'geo', 'sizes', 'talkers']), items);
+  // A closed type in the sequence means the caller built it from something other
+  // than `dockOrder` - the one refusal where the open count can still match.
+  check('a closed type in the order is refused',
+    reorderItems(items, ['breakdown', 'geo', 'sizes', 'talkers']), items);
+  const allClosed = items.map((i) => ({ ...i, open: false }));
+  check('an empty dock is unchanged by a reorder', reorderItems(allClosed, []), allClosed);
+
+  // A pin holds the top of the stack, so a drag that tries to push one down is
+  // undone on the next render. That is the intended meaning of the flag, and it is
+  // asserted so a later session does not read it as an off-by-one.
+  const pinned = items.map((i) => (i.type === 'geo' ? { ...i, pinned: true } : i));
+  check('a pinned item leads', types(dockOrder(pinned)),
+    ['geo', 'timeseries', 'sizes', 'talkers']);
+  check('...and cannot be dragged out of the lead',
+    types(dockOrder(reorderItems(pinned, ['timeseries', 'geo', 'sizes', 'talkers']))),
+    ['geo', 'timeseries', 'sizes', 'talkers']);
+  check('...while the unpinned reorder around it',
+    types(dockOrder(reorderItems(pinned, ['geo', 'talkers', 'sizes', 'timeseries']))),
+    ['geo', 'talkers', 'sizes', 'timeseries']);
 }
 
 console.log('\n--- the width rule, against the window ---\n');

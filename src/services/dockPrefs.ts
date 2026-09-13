@@ -273,3 +273,69 @@ export function dockOrder(items: DockItem[]): DockItem[] {
   const open = items.filter((i) => i.open);
   return [...open.filter((i) => i.pinned), ...open.filter((i) => !i.pinned)];
 }
+
+/**
+ * Applies a drag-reorder of the **visible** items back onto the stored list.
+ *
+ * The dock shows `dockOrder(items)` - the open ones, pinned first - and hands
+ * back a new sequence of those. Closed items are not in that sequence and must
+ * not move: they keep their slots, so a widget closed and reopened still comes
+ * back where it was. So the rule is that the new sequence fills the **open
+ * slots** of the stored list, in order, and everything else is left alone.
+ *
+ * Writing the pinned-first sequence into slots that are in stored order is
+ * deliberate and is what makes a pinned item immovable: `dockOrder` re-sorts
+ * pinned to the front afterwards, so a drag that tried to push one down is
+ * undone on the next render. That is the intended behaviour of a pin, not a
+ * rounding error.
+ *
+ * ## Why this is a function here rather than four lines in `App.tsx`
+ *
+ * It was four lines in `App.tsx`, and they crashed the renderer:
+ *
+ * ```ts
+ * items: dock.items.map((item) => (
+ *   item.open ? dock.items.find((i) => i.type === queue.shift())! : item
+ * ))
+ * ```
+ *
+ * `queue.shift()` is evaluated **inside `find`'s predicate**, so it ran once per
+ * element `find` compared rather than once per open slot. The queue drained in
+ * the first couple of comparisons, `shift()` began returning `undefined`,
+ * nothing matched, and the non-null assertion let `undefined` into the array -
+ * so the next render read `undefined.open` and took the renderer down. The
+ * store does not normalise on write, only on read, so it was also persisted, as
+ * `null` after `JSON.stringify`. (`normalizeItems` skips those and appends the
+ * missing types closed, which is the only reason the key self-heals.)
+ *
+ * Two lessons, both of which this signature answers. A non-null assertion is a
+ * claim about an invariant, and this one had no invariant behind it - so every
+ * refusal below returns the list **unchanged** rather than asserting. And a
+ * reorder is arithmetic over a persisted permutation, which is the repository's
+ * own definition of a decision that belongs in a module an assertion script can
+ * import, beside `dockOrder` rather than inside a `useCallback`.
+ */
+export function reorderItems(items: DockItem[], order: readonly string[]): DockItem[] {
+  // A reorder is a permutation of exactly the open items. Anything else is a
+  // caller bug, and the conservative answer to one is to change nothing: a drop
+  // that does nothing is recoverable by dragging again, and a list with a hole
+  // in it is not.
+  const openCount = items.filter((i) => i.open).length;
+  if (order.length !== openCount) return items;
+  if (new Set(order).size !== order.length) return items;
+
+  const byType = new Map<string, DockItem>(items.map((i) => [i.type, i]));
+  const moved = order.map((type) => byType.get(type));
+  if (moved.some((i) => i === undefined || !i.open)) return items;
+
+  let next = 0;
+  return items.map((item) => {
+    if (!item.open) return item;
+    const slot = moved[next];
+    next++;
+    // Belt and braces, and deliberately not a `!`: the guards above already
+    // prove this is defined, and the whole bug was a `!` standing in for a proof
+    // that did not exist.
+    return slot ?? item;
+  });
+}
