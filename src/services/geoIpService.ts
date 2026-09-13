@@ -280,11 +280,13 @@ export function parseGeoResponse(ip: string, raw: unknown): GeoLocation | null {
 /**
  * The two hosts this module talks to, named rather than written inline.
  *
- * Both are behind the `nameResolution.geoIp` consent switch, and both send an
- * address off this machine - which makes "what does this app contact" a
- * question somebody is entitled to answer with one grep. The DoH URL used to
- * be a template literal buried inside `resolveHostname`, where it was
- * findable only by knowing to look.
+ * They are behind **different** consent switches, which is the thing to get
+ * right when reading this file: `GEO_ENDPOINT` is gated by
+ * `nameResolution.geoIp`, `DOH_ENDPOINT` by `nameResolution.reverseDns`, and
+ * they are two separate rows in Settings. Both send an address off this machine
+ * - which makes "what does this app contact" a question somebody is entitled to
+ * answer with one grep. The DoH URL used to be a template literal buried inside
+ * `resolveHostname`, where it was findable only by knowing to look.
  */
 const GEO_ENDPOINT = 'https://get.geojs.io/v1/ip/geo.json';
 

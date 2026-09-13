@@ -37,13 +37,18 @@ files:
   - package.json
   - '!node_modules/**/*'
 
-# `dir` only, for now. The real installer is Inno Setup wrapping this output:
-# `local-agent/installer/setup.iss` already contains the Npcap
-# download-at-install-time logic (which exists for licensing reasons, not
-# technical ones), the service registration with its failure-recovery policy,
-# the exe-unlock sequence for a service that can starve under load and miss an
-# SCM stop, and the legacy-name cleanup. Re-deriving that in NSIS is the
-# highest-risk rewrite available in this migration for no user-visible gain.
+# `dir` only, for now. The real installer is Inno Setup wrapping this output,
+# and it is `installer/setup.iss` - the unified one that carries both the app
+# and the agent. `local-agent/installer/setup.iss` is the legacy agent-only
+# installer (ADR 0032 calls it that) and is no longer what ships.
+#
+# Npcap is **not** installed by either of them any more: ADR 0032 moved it to
+# the Update Center, because the silent install needs an OEM licence. What the
+# Inno script still carries is the service registration with its
+# failure-recovery policy, the exe-unlock sequence for a service that can starve
+# under load and miss an SCM stop, and the legacy-name cleanup. Re-deriving that
+# in NSIS is the highest-risk rewrite available in this migration for no
+# user-visible gain.
 #
 # The cost, accepted deliberately: electron-updater cannot drive an Inno
 # installer, so updates are hand-rolled.
