@@ -2030,6 +2030,8 @@ export default function App() {
         onToggleWidget={toggleWidget}
         onOpenSettings={() => setShowSettingsModal(true)}
         onOpenExport={() => setShowExportModal(true)}
+        packetSearchText={packetSearchText}
+        onPacketSearchChange={setPacketSearchText}
         schedule={schedule}
         onScheduleChange={setSchedule}
         schedulePresets={schedulePresets}
@@ -2078,8 +2080,6 @@ export default function App() {
               filterScan={captureFilter.state}
               scanUncovered={filterUncovered}
               onRescan={captureFilter.rescan}
-              packetSearchText={packetSearchText}
-              onPacketSearchChange={setPacketSearchText}
               filterPresetLibrary={filterPresetLibrary}
               onSaveCurrentFilter={handleSaveCurrentFilter}
             />
