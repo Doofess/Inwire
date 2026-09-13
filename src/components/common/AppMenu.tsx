@@ -27,8 +27,8 @@ import type { NameResolutionPrefs } from '../../services/interfacePrefs';
 interface AppMenuProps {
   onOpenDissectorModal: () => void;
   onOpenExportModal: () => void;
-  onOpenStatisticsModal: () => void;
-  onOpenNetworkModal?: () => void;
+  onOpenStatistics: () => void;
+  onOpenNetwork?: () => void;
   /**
    * Wireshark puts name resolution under a View menu; this app's only menu is
    * this one, so the two passive switches live here beside the views they
@@ -61,8 +61,8 @@ const itemIconClass = 'w-3.5 h-3.5 shrink-0 text-chrome-foreground';
 export const AppMenu: React.FC<AppMenuProps> = ({
   onOpenDissectorModal,
   onOpenExportModal,
-  onOpenStatisticsModal,
-  onOpenNetworkModal,
+  onOpenStatistics,
+  onOpenNetwork,
   nameResolution,
   onNameResolutionChange,
   onOpenSettingsModal,
@@ -217,7 +217,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                   </Command.Item>
                   <Command.Item
                     value="capture-statistics"
-                    onSelect={() => run(onOpenStatisticsModal)}
+                    onSelect={() => run(onOpenStatistics)}
                     className={itemClass}
                   >
                     <TbChartBar className={itemIconClass} />
@@ -254,7 +254,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                     <TbCode className={itemIconClass} />
                     <span>Custom Dissectors</span>
                   </Command.Item>
-                  {onOpenNetworkModal && (
+                  {onOpenNetwork && (
                     <Command.Item
                       // cmdk matches typed search text against this value, so
                       // it tracks the label rather than staying "isp-stats".
@@ -262,7 +262,7 @@ export const AppMenu: React.FC<AppMenuProps> = ({
                       // longer about the provider: the ISP is one of its seven
                       // sections, and the other six are this machine's own.
                       value="network"
-                      onSelect={() => run(onOpenNetworkModal)}
+                      onSelect={() => run(onOpenNetwork)}
                       className={itemClass}
                     >
                       <TbNetwork className={itemIconClass} />
