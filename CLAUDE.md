@@ -460,11 +460,21 @@ which is the only thing keeping two implementations of one format in agreement.
 **`AGENT_VERSION`** is a wire-protocol version and an **ordering**: it is the
 left-hand side of `isAgentOutdated`, so it only ever climbs. Reset it and an
 agent left behind by an earlier install reads as newer than required, which
-shows as "not connected" rather than "update your agent". Locked across three
+shows as "not connected" rather than "update your agent". Locked across **four**
 places — `local-agent/agent.py`, `src/services/agentProtocol.ts`
-(`REQUIRED_AGENT_VERSION`), and `MyAgentVersion` in
-`local-agent/installer/setup.iss` — by `local-agent/test_protocol.py`, which
-also refuses a reset.
+(`REQUIRED_AGENT_VERSION`), and `MyAgentVersion` in **both**
+`installer/setup.iss` (the one that ships) and
+`local-agent/installer/setup.iss` (the legacy agent-only one).
+
+Two things enforce it, and the split matters. `local-agent/test_protocol.py`
+reads the legacy `.iss` and refuses a reset — but it is Python, and
+`scripts/check.ts` only discovers TypeScript, so it fires only when somebody
+runs it. `scripts/agent/installer-versions.ts` covers **both** `.iss` files and
+runs on every `npm run check`. It exists because the shipping installer's two
+stamps were read by nothing at all: they agreed with the code by hand. It holds
+the same anti-reset floor, compared as numbers rather than as a string —
+`"3.10.0"` sorts before `"3.9.0"` lexically, so a string floor would reject the
+first version past 3.9 and every one after it.
 
 **`MyAppVersion`** is the product, locked to `package.json`, and is what
 Windows compares to decide whether an install is an upgrade. The two stopped
