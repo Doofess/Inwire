@@ -28,9 +28,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
 import {
-  AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL, STORE_PORT_REQUEST, TITLE_BAR_THEME_CHANNEL,
+  AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
-  UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_TITLE_CHANNEL,
+  UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
 } from './channels';
 import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
 import { AgentPipeLink } from './agentPipe';
@@ -39,17 +39,14 @@ import { UpdateCenter } from './updateCenter/host';
 import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
-import { loadWindowState, rememberTitleBar, trackWindowState } from './windowState';
-import { resolveTitleBarColors, type TitleBarColors } from './titleBarColors';
+import { loadWindowState, rememberBackground, trackWindowState } from './windowState';
+import { resolveWindowBackground } from './windowColors';
 import {
   COMMAND_LINE_SWITCHES,
   MIN_WINDOW_HEIGHT,
   MIN_WINDOW_WIDTH,
   SCHEME_PRIVILEGES,
-  TITLE_BAR_HEIGHT,
-  TITLE_BAR_STYLE,
   WEB_PREFERENCES,
-  WINDOW_BACKGROUND,
 } from './window';
 
 /**
@@ -180,13 +177,29 @@ async function start(): Promise<void> {
   ipcMain.on(UNSAVED_CAPTURE_CHANNEL, (_event, hasFrames: unknown) => {
     unsavedCapture = hasFrames === true;
   });
-  // The renderer reports its resolved theme; main owns the hex. Held so the
-  // focus handlers below can recompute the dimmed pair without asking again.
-  ipcMain.on(TITLE_BAR_THEME_CHANNEL, (event, theme: unknown) => {
+  // The renderer reports its resolved theme; main owns the hex. Nothing is
+  // repainted - `backgroundColor` is read once, when a window is constructed -
+  // so this only records what the NEXT launch should open on.
+  ipcMain.on(WINDOW_THEME_CHANNEL, (_event, theme: unknown) => {
+    rememberBackground(resolveWindowBackground(typeof theme === 'string' ? theme : undefined));
+  });
+
+  // The three buttons the app draws for itself, now that the window is
+  // frameless. `close()` and never `destroy()`: the quit guard hangs off the
+  // `close` event, and a button that skipped it would discard a capture on one
+  // click with no confirm.
+  ipcMain.on(WINDOW_CONTROL_CHANNEL, (event, action: unknown) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     if (window === null || window.isDestroyed()) return;
-    titleBarTheme = typeof theme === 'string' ? theme : undefined;
-    paintTitleBar(window);
+    if (action === 'minimize') window.minimize();
+    else if (action === 'close') window.close();
+    else if (action === 'toggle-maximize') {
+      if (window.isMaximized()) window.unmaximize();
+      else window.maximize();
+    }
+    // Anything else is ignored. The renderer is typed to the union, so an
+    // unknown verb means the bridge was reached by something that is not this
+    // app's own code.
   });
   // A title, not a format string: what the window should say is a product
   // decision and it is made in the renderer, which is the only place that
@@ -339,41 +352,6 @@ function openExternally(raw: string): void {
   void shell.openExternal(parsed.toString());
 }
 
-/**
- * The theme the renderer last reported, or `undefined` before it has spoken.
- *
- * Module-level for the same reason `unsavedCapture` is: it is a fact about the
- * one window this app allows, and the handlers that need it are registered in
- * `start()` while the window is created later.
- */
-let titleBarTheme: string | undefined;
-
-/**
- * Repaints the native buttons for the current theme and focus state.
- *
- * `setTitleBarOverlay` rather than only the constructor option, because both
- * inputs change while the window is open - the theme from Settings, the focus
- * from the user clicking somewhere else - and the constructor value is only
- * ever the first frame.
- *
- * Also records the pair, so the *next* launch opens in these colours instead of
- * flashing the default and correcting itself. `rememberTitleBar` does not
- * write immediately; `trackWindowState`'s debounce picks it up.
- */
-function paintTitleBar(window: BrowserWindow): void {
-  const colors: TitleBarColors = resolveTitleBarColors(titleBarTheme, window.isFocused());
-  // Only the focused pair is worth restoring: a window opens focused, so
-  // caching the dimmed one would mean every launch started grey and brightened.
-  if (window.isFocused()) rememberTitleBar(colors);
-  try {
-    window.setTitleBarOverlay({ ...colors, height: TITLE_BAR_HEIGHT });
-  } catch {
-    // Throws on a platform with no overlay, which is every platform but
-    // Windows. There is no desktop build for those yet, and a main process that
-    // refused to open a window over a button colour would be the worse bug.
-  }
-}
-
 /** Tells the renderer what only main is told: maximized, and focused. */
 function sendWindowState(window: BrowserWindow): void {
   if (window.isDestroyed()) return;
@@ -389,17 +367,20 @@ async function createWindow(): Promise<BrowserWindow> {
     ...state.bounds,
     minWidth: MIN_WINDOW_WIDTH,
     minHeight: MIN_WINDOW_HEIGHT,
-    backgroundColor: WINDOW_BACKGROUND,
+    // Off disk, so the very first frame is already the user's theme rather than
+    // a near-black rectangle that turns white on Day. `windowState.ts` explains
+    // why that cache exists at all; `WINDOW_BACKGROUND` is what a profile with
+    // nothing stored gets.
+    backgroundColor: state.background,
     // Shown on `ready-to-show`, so a multi-megabyte bundle parses behind a
     // window painted in the app's own ground rather than a white rectangle.
     show: false,
-    // Hidden, not frameless: see TITLE_BAR_STYLE in `window.ts` for what
-    // `frame: false` would cost. The colours come off disk so the very first
-    // frame is already the user's theme - `windowState.ts` explains why that
-    // cache exists at all.
-    titleBarStyle: TITLE_BAR_STYLE,
-    titleBarOverlay: { ...state.titleBar, height: TITLE_BAR_HEIGHT },
-    // Still true with a hidden title bar, and still load-bearing: the menu is
+    // Frameless, and the app draws its own controls. `thickFrame` and
+    // `roundedCorners` are deliberately NOT set - their defaults are what keep
+    // edge resizing, the drop shadow, the window animations and Windows 11's
+    // corner radius. See `window.ts` for what this costs and what it does not.
+    frame: false,
+    // Still true with no frame, and still load-bearing: the menu is
     // what supplies Ctrl+C/V/A/Z to every input in the app (`menu.ts`), and
     // Alt reveals it. Hiding the caption strip does not hide the menu bar.
     autoHideMenuBar: true,
@@ -424,14 +405,11 @@ async function createWindow(): Promise<BrowserWindow> {
   window.on('unmaximize', announce);
   window.on('enter-full-screen', announce);
   window.on('leave-full-screen', announce);
-  // Focus also repaints: the overlay takes an opaque colour, so the unfocused
-  // dim has to be recomputed and pushed rather than expressed as a CSS alpha.
-  const announceAndRepaint = (): void => {
-    sendWindowState(window);
-    paintTitleBar(window);
-  };
-  window.on('focus', announceAndRepaint);
-  window.on('blur', announceAndRepaint);
+  // Focus is now just another announcement: the controls dim in CSS, because
+  // they are the app's own elements rather than glyphs Windows draws from an
+  // opaque colour it was handed.
+  window.on('focus', announce);
+  window.on('blur', announce);
   window.webContents.once('did-finish-load', () => sendWindowState(window));
 
   window.once('ready-to-show', () => window.show());

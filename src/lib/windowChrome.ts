@@ -81,19 +81,35 @@ export function useWindowChrome(): WindowChromeState {
 }
 
 /**
- * Tells main which theme to paint the native buttons for.
+ * Tells main which theme this window resolved to.
+ *
+ * Nothing on screen depends on the answer - the window's controls are CSS and
+ * follow the cascade. Main caches it so the *next* window is constructed with
+ * the right `backgroundColor`, which is the one colour decision that happens
+ * before a renderer exists to make it.
  *
  * Takes `resolvedTheme`, never `theme`: the picker's fifth entry, System, is a
  * rule for choosing between two themes rather than a theme, and has no palette.
  * Skips the undefined tick next-themes has before its mount effect runs - main
- * already opened the window in the cached pair, so saying nothing is better
+ * already opened the window on the cached ground, so saying nothing is better
  * than saying the wrong thing and correcting it.
  */
-export function useTitleBarTheme(resolvedTheme: string | undefined): void {
+export function useWindowTheme(resolvedTheme: string | undefined): void {
   useEffect(() => {
     if (resolvedTheme === undefined) return;
-    window.inwire?.setTitleBarTheme?.(resolvedTheme);
+    window.inwire?.setWindowTheme?.(resolvedTheme);
   }, [resolvedTheme]);
+}
+
+/**
+ * The three window buttons' one action, as a stable callback.
+ *
+ * Here rather than inline in the component so the bridge is reached in exactly
+ * one place in the renderer, the same way every other `window.inwire` call in
+ * this file is.
+ */
+export function windowControl(action: 'minimize' | 'toggle-maximize' | 'close'): void {
+  window.inwire?.windowControl?.(action);
 }
 
 /**

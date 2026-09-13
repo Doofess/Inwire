@@ -57,9 +57,15 @@ then launch the app beside it and pick **Ethernet (stub)**.
 
 ## 1. The window's own chrome
 
-`titleBarStyle: 'hidden'` plus `titleBarOverlay`, on branch
-`feat/integrated-chrome`. The whole section exists because the window is drawing
-furniture Windows used to draw, and every failure here is visual.
+`frame: false`, with the app drawing its own minimize / maximize / close. The
+whole section exists because the window is drawing furniture Windows used to
+draw, and every failure here is visual.
+
+**Two things do not work, by decision, and are not defects:** the Snap Layouts
+flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
+`HTMAXBUTTON`, which Electron does not expose) and the Alt+Space system menu
+(there is no native caption to raise it from). Do not file either; do not
+"fix" either by reaching for `titleBarOverlay`.
 
 ### Dragging and the resize frame
 
@@ -69,71 +75,86 @@ furniture Windows used to draw, and every failure here is visual.
 - [ ] **Try to drag it by the rail below the top cell.** It does **not** move, and
       the buttons still press. A control that forgot `.app-no-drag` has exactly
       one symptom: a click that does nothing at all.
-- [ ] Every control in the title row and the top cell is still clickable: the
-      palette trigger, the brand mark's tooltip.
-- [ ] **Double-click the empty title row** → maximizes; again → restores.
-- [ ] **Right-click the title row** → the Windows system menu (Move, Size, Close).
-- [ ] **Alt+Space** → the same menu. Frameless would have lost both.
-- [ ] Drag each of the four window edges and all four corners. They resize.
-- [ ] The focus shadow is Windows' own — a restored window has a drop shadow and
-      a 1px border that the app did not draw.
+- [ ] **Double-click the empty title row** → maximizes; again → restores. **Check
+      this first.** It is the one caption behaviour that is neither clearly kept
+      nor clearly lost with `frame: false` — Chromium is supposed to handle it
+      for `-webkit-app-region: drag`, and if it does not, it has to be
+      reimplemented on the row's `dblclick`.
+- [ ] **Right-click the title row** still does nothing — there is no native
+      caption behind it. Accepted, with Alt+Space.
+- [ ] **Drag each of the four window edges and all four corners. They resize.**
+      This is `thickFrame`, which defaults to true and is never set - if edge
+      resizing is gone, somebody set it false and took the drop shadow and the
+      minimise animation with it.
+- [ ] The drop shadow is there, and a restored window has Windows 11's corner
+      radius - `roundedCorners`, also a default that is never set.
+- [ ] Minimize and restore from the taskbar: the window **animates** rather than
+      appearing. Same option, same tell.
 
 ### Snap
 
 - [ ] **Win+Left / Win+Right.** On a 1920px display this gives a 960px window,
       which is **below** `MIN_WINDOW_WIDTH` of 1024 — Windows allows that and the
       layout must survive it. The dock clamps to its floor; the packet list
-      scrolls horizontally. Nothing overlaps the native buttons.
-- [ ] **Hover the maximize button** → Snap Layouts opens. This is the single
-      clearest thing `frame: false` would have cost, and it is why the banner in
-      CLAUDE.md forbids it.
-- [ ] Pick a Snap Layout quadrant. The window takes it.
+      scrolls horizontally. Nothing overlaps the window controls.
+- [ ] Hovering the maximize button does **not** open Snap Layouts. Expected; see
+      the top of this section.
 
-### The native buttons, and the colours under them
+### The app's own buttons
 
-`titleBarColors.ts` is the table; it resolves the **plain** chrome pair
-(`--card` / `--card-foreground`) in all four themes and deliberately ignores the
-Colourful preference.
+`WindowControls.tsx`. 46x32 with 10px glyphs, which are Windows' own metrics —
+the target size and spacing are what muscle memory aims at.
 
+- [ ] **All three work**: minimize, maximize, restore-down, close. The maximize
+      glyph becomes the two-rectangle restore glyph while maximized.
+- [ ] **Each is actually clickable.** A control that lost `.app-no-drag` drags
+      the window instead, and the only symptom is a click that does nothing — on
+      close, a window that cannot be closed.
+- [ ] **With frames in the buffer, press close.** `guardClose`'s native "Quit
+      Inwire?" box appears. Cancel → the window stays and the capture is intact.
+      The button calls `window.close()`, never `destroy()`; destroying would skip
+      this box and discard a capture on one click. (No automated test can answer
+      it, which is why `smoke.ts` clears `setUnsavedCapture` before closing.)
 - [ ] In **Settings → Appearance**, switch through all four themes — Day, Paper,
-      Graphite, Midnight — and watch the minimize/maximize/close buttons. The band
-      behind them matches the title row exactly. A mismatch is a seam straight
-      across the top of the window.
-- [ ] The glyphs are legible in each: dark symbols on Day and Paper, light on
-      Graphite and Midnight.
-- [ ] Turn **Colourful chrome** on. The title row and the rail stay on the plain
-      pair; only `AppMenu` picks up the saturated token. (If the band goes
-      saturated, the title bar has started reading the wrong axis.)
-- [ ] **Hover the close button.** Windows paints its own red. The app does not
-      interfere.
-- [ ] **Click another window so Inwire loses focus.** The title row's own
-      foreground dims, *and the native glyphs dim with it* — `symbolColor` is
-      pushed on every `blur`. Click back: both restore. A dim that reaches only
-      the app's half of the row is `setTitleBarOverlay` not firing.
-- [ ] Switch theme **while the window is unfocused**, then focus it. The band is
-      the new theme's, not a stale one.
+      Graphite, Dark. The buttons follow, because they are CSS.
+- [ ] **Hover close** → Windows' red `#c42b1c`, white glyph, in every theme.
+      Hover the other two → the theme's accent.
+- [ ] **Click another window so Inwire loses focus.** The whole title row dims,
+      controls included — it is one `opacity` on the row, so they cannot dim out
+      of step. Click back: it restores.
+- [ ] The window name is **centred in the window**, not in what is left beside
+      the buttons. Sitting left of centre means the spacer and the controls
+      disagree about 138px.
+
 
 ### No flash at launch
 
-- [ ] Set the theme to **Midnight**, quit, and launch again. The title bar is dark
-      **from the first frame**. A light band correcting itself a beat later means
-      the colour cache in `window-state.json` was not read before the window was
-      constructed — the one strip of the window nobody can look away from.
-- [ ] Delete `window-state.json` from the user-data directory and launch. It opens
-      on the default (dark) band with no error, then corrects once the renderer
-      reports its theme.
+This matters more than it did. A frameless window IS the app's surface, so the
+wrong ground is a full-window flash rather than a strip.
+
+- [ ] Set the theme to **Day**, quit, and launch again. The window is **light
+      from the first frame**. A dark window turning light a beat later means the
+      cache in `window-state.json` was not read before the window was
+      constructed. Day is the one to test with - the fallback is dark, so a
+      broken cache is invisible on the dark themes.
+- [ ] Delete `window-state.json` from the user-data directory and launch. It
+      opens dark with no error, then corrects once the renderer reports its
+      theme.
 
 ### Scaling
 
-The reserved area is read from `env(titlebar-area-width)` and is **never** a
-constant: it is about 138px at 100% and about 207px at 150%.
+The reserve is ours now — 138 CSS pixels at every scale factor, because the
+buttons are elements. Under the old overlay it had to come from
+`env(titlebar-area-width)`, because Windows drew it wider at 150%.
 
 - [ ] At **100%**, **150%** and **200%** display scaling (Settings → System →
-      Display → Scale), nothing in the title row sits under the native buttons,
-      and nothing is clipped. Log out and back in if Windows asks.
-- [ ] Change the scale **while the app is running** and look again. Chromium
-      updates the environment variable; a hardcoded reserve would not move.
-- [ ] At 200% the window still meets its 1024×640 minimum in *logical* pixels.
+      Display → Scale), the three controls are crisp, sit inside the 40px row,
+      and nothing in the title row overlaps them. Log out and back in if Windows
+      asks.
+- [ ] The glyphs are **sharp, not blurred** — they are 1px axis-aligned SVG
+      strokes with `shapeRendering="crispEdges"`, and half-pixel placement is
+      what would soften them.
+- [ ] At 200% the window still meets its 1024x640 minimum in *logical* pixels.
 
 ### Still there after all of it
 
@@ -141,10 +162,7 @@ constant: it is about 138px at 100% and about 207px at 150%.
       load-bearing: `role: 'editMenu'` is the only source of Ctrl+C/V/A/Z for
       every input in the app.
 - [ ] In the filter box: **Ctrl+A**, **Ctrl+C**, **Ctrl+V**, **Ctrl+Z** all work.
-- [ ] With frames in the buffer, **close the window**. `guardClose`'s native
-      "Quit Inwire?" box appears. Cancel → the window stays and the capture is
-      intact. (No automated test can answer this box, which is why `smoke.ts`
-      clears `setUnsavedCapture` before closing.)
+- [ ] **Alt+Space** does nothing. Expected; see the top of this section.
 - [ ] Maximize and restore, and look at the padding along the top edge in both.
       A maximized window has no rounded corners to avoid; a restored one must not
       paint into them.

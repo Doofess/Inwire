@@ -111,18 +111,28 @@ declare global {
        */
       onUpdateState?(listener: (state: unknown) => void): () => void;
       /**
-       * Reports the resolved theme, so main can colour the native buttons.
+       * Reports the resolved theme, so main can cache the ground the NEXT
+       * window opens on.
        *
-       * Windows draws the minimise/maximise/close glyphs itself, inside the
-       * area `titleBarOverlay` reserves, and it is told the two colours to use.
-       * A theme *name* crosses rather than a colour: `electron/titleBarColors.ts`
-       * owns the hex and explains why resolving it in the renderer is always one
-       * frame behind the cascade.
+       * Nothing on screen changes when this arrives. The window's controls are
+       * this app's own CSS now and follow the cascade like everything else; what
+       * main cannot do from CSS is pick `backgroundColor` at construction, which
+       * happens before a renderer exists. A theme *name* crosses rather than a
+       * colour: `electron/windowColors.ts` owns the hex and explains why
+       * resolving it in the renderer is always one frame behind the cascade.
        *
        * Pass `resolvedTheme`, never `theme` - the picker's fifth entry, System,
        * is a rule for choosing between two themes and has no palette of its own.
        */
-      setTitleBarTheme?(theme: string): void;
+      setWindowTheme?(theme: string): void;
+      /**
+       * Minimize, toggle maximize, or close - the three buttons the app draws.
+       *
+       * `'close'` reaches `window.close()` and therefore the quit guard, so it
+       * still raises the "unsaved frames" confirm. Nothing here destroys a
+       * window.
+       */
+      windowControl?(action: 'minimize' | 'toggle-maximize' | 'close'): void;
       /**
        * Sets the window title.
        *

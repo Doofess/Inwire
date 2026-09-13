@@ -13,11 +13,20 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 >   under `public/` that is not a static asset the app itself loads
 > - a **phone layout** — the window minimum is 1024 and `md:` is 768
 > - **`nodeIntegration`** in the renderer, in any form, for any convenience
-> - **`frame: false` and custom-drawn window controls.** The window wears its
->   own 40px title row, but the buttons in it are Windows', drawn by Windows,
->   inside the area `titleBarOverlay` reserves. Frameless would hand back the
->   resize borders, Snap Layouts, the Alt+Space system menu and the focus
->   shadow to be reimplemented badly (`electron/window.ts`, ADR pending)
+> - **`thickFrame: false` and `roundedCorners: false`.** The window *is*
+>   frameless and draws its own controls - that entry was reversed deliberately,
+>   and the one it replaced was wrong on the facts. What it claimed frameless
+>   costs, Electron's typings say those two options cost: `thickFrame` defaults
+>   true and is the only reason edge resizing, the drop shadow and the window
+>   animations survive; `roundedCorners` defaults true and is Windows 11's
+>   radius. Neither is ever set, at any value, and `scripts/electron/shell.ts`
+>   asserts the words do not appear (`electron/window.ts`)
+> - **`titleBarOverlay` / `titleBarStyle`.** Bringing either back means Windows
+>   drawing a second set of caption buttons on top of the app's own - which
+>   renders rather than throws
+> - **`window.destroy()` on the close path.** The quit guard is registered on
+>   the `close` event, so destroying skips the "unsaved frames" confirm and
+>   discards a capture on one click
 > - **`/S` on Npcap's installer**, anywhere, for any reason — it is the OEM
 >   silent-install feature and the free licence does not grant it (ADR 0032).
 >   Npcap's wizard is shown, because its licence is shown with it
@@ -148,39 +157,48 @@ A thin adapter over things only a privileged process can hold. It owns the
 agent's service diagnosis, native save dialogs, and the capture store's
 lifetime. Every decision worth testing is in a module beside it: `appPaths.ts`,
 `window.ts`, `csp.ts`, `menu.ts`, `windowState.ts`, `saveTarget.ts`,
-`pipeTransport.ts`, `agentService.ts`, `titleBarColors.ts`.
+`pipeTransport.ts`, `agentService.ts`, `windowColors.ts`.
 
-**The window wears its own title bar.** `titleBarStyle: 'hidden'` plus
-`titleBarOverlay` at `TITLE_BAR_HEIGHT` (40), never `frame: false` - see the
-banner. Three things follow, and each is a trap with a comment on it:
+**The window is frameless and draws its own controls.** `frame: false`, and a
+40px title row carrying the app's own minimize / maximize / close. This reverses
+an earlier decision; the banner says which options must never come back and why.
 
-- **Windows draws the buttons**, at a weight we do not control, and is told two
-  colours. `titleBarColors.ts` is that table, keyed on (resolved theme ×
-  focused). It resolves the **plain** chrome pair - `--card` /
-  `--card-foreground` - in all four themes and deliberately ignores the
-  Colourful preference, because a saturated band with native buttons in it is
-  what reads as a web page wearing a frame.
+**The premise the old decision rested on was two-thirds wrong**, which is worth
+recording because it is what made the reversal cheap. The comment in
+`window.ts` used to say `frame: false` would hand back "the resize borders, snap
+layouts, the system menu on Alt+Space and the shadow". Electron's typings say
+`thickFrame` (default **true**) is what keeps edge resizing, the drop shadow and
+the window animations, and `roundedCorners` (default **true**) is Windows 11's
+radius. A frameless window on defaults keeps all of it.
 
-  **Colourful now has almost nothing left to colour**, and that is a live
-  question rather than a decision. Its last real consumer was `AppMenu.tsx`; with
-  the hamburger deleted, the only `--chrome*` token any component still reads is
-  `text-chrome-brand` on the rail's 24px brand mark. The preference, its store
-  (`inwire.colorfulChrome`), the `:root[data-chrome="plain"]` remap and four
-  themes' worth of `--chrome` / `--chrome-foreground` / `--chrome-sunken` tokens
-  are all still there, serving one glyph. Either it gets a surface back or it
-  goes; what it must not do is sit in Settings offering a choice that changes
-  almost nothing.
-- **The colours are cached in `window-state.json`.** `titleBarOverlay`'s
-  constructor value paints before the renderer hydrates, so the alternative is
-  opening in one theme and correcting a beat later - a flash in the one strip of
-  the window nobody can look away from. The theme still lives in `localStorage`;
-  this is a cache of what it resolved to, written by the renderer, never the
-  source of truth. Same argument as window bounds, which is why it is the same
-  file.
-- **The dim on blur is opaque.** `titleBarOverlay` takes a flat colour, not an
-  alpha, so the 60% foreground fade is pre-composited in `mixHex` and pushed
-  with `setTitleBarOverlay` on every `focus`/`blur`. That is why `focused` is a
-  parameter rather than a CSS class.
+What is actually lost, and accepted: **Snap Layouts** (the flyout on a
+maximise-button hover - it needs `WM_NCHITTEST` to answer `HTMAXBUTTON`, and
+Electron exposes no hook; Win+Arrow snapping is unaffected) and **Alt+Space**
+(there is no native caption to raise the system menu from). Both are in
+`docs/verification.md` as accepted losses rather than as things to re-check.
+
+Three things follow, each a trap with a comment on it:
+
+- **The controls are ours, so they follow the cascade.** `WindowControls.tsx`,
+  46×32 with 10px glyphs - Windows' own metrics, because the target size and
+  spacing are what muscle memory aims at. The dim on blur is `opacity` on the
+  row, not a pre-composited colour pushed over IPC, which is the whole
+  `mixHex`/`setTitleBarOverlay` apparatus deleted. One colour is hardcoded and
+  only one: close hovers to `#c42b1c`, which is learned rather than designed.
+- **The ground is cached in `window-state.json`.** `backgroundColor` is fixed
+  when the window is constructed, before a renderer exists to report a theme -
+  so the alternative is opening every window in one theme and correcting a beat
+  later. That was survivable when a native caption sat above the page; on a
+  frameless window the ground IS the app's surface, so it is a full-window
+  flash. `windowColors.ts` is the table, and the theme still lives in
+  `localStorage` - this is a cache of what it resolved to, written by the
+  renderer, never the source of truth. Same argument as window bounds, which is
+  why it is the same file.
+- **The reserve is a constant again, and that is what frameless bought.** Under
+  the overlay the button area had to come from `env(titlebar-area-width)`,
+  because Windows drew it at ~138px at 100% scaling and ~207px at 150%. The
+  buttons are elements now, so they are 138 CSS pixels at every scale factor;
+  `.titlebar-reserve` and the `env()` are gone.
 
 `maximize`/`unmaximize`/`focus`/`blur` are forwarded to the renderer over
 `WINDOW_STATE_CHANNEL`, because a window drawing its own chrome has to know what
@@ -296,12 +314,12 @@ rather than overlooked.
 `.app-drag`; everything interactive inside them is `.app-no-drag`; the rest of
 the rail is neither, which is to say not draggable. A control that forgets
 `no-drag` moves the window instead of being pressed, and the only symptom is a
-click that does nothing. `.titlebar-reserve` keeps the row clear of the native
-buttons from `env(titlebar-area-width)` — **never a constant**, because that area
-is ~138px at 100% scaling and ~207px at 150%. All three classes are in
-`index.css` and deliberately not `:root` custom properties: that block is the
-theme baseline and `scripts/themes/registry.ts` requires every token in it to be
-redeclared by all four themes, which a layout constant has no business being.
+click that does nothing — which on the close button is a window that cannot be
+closed, so `scripts/electron/window-chrome.ts` asserts the class is on the
+shared button class rather than on each button. Both classes are in `index.css`
+and deliberately not `:root` custom properties: that block is the theme baseline
+and `scripts/themes/registry.ts` requires every token in it to be redeclared by
+all four themes, which a layout constant has no business being.
 
 `viewPrefs.ts` holds the active view, persisted — which argues against
 `DashboardAside`'s rule that "'which panel did I have open' is not a setting",
