@@ -70,11 +70,13 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
 ### Dragging and the resize frame
 
 - [ ] **Drag the window by the empty part of the title row.** It moves.
-- [ ] **Drag it by the rail's top cell** (the brand mark). It moves — that is the
-      only draggable part of the rail.
-- [ ] **Try to drag it by the rail below the top cell.** It does **not** move, and
-      the buttons still press. A control that forgot `.app-no-drag` has exactly
-      one symptom: a click that does nothing at all.
+- [ ] **Try to drag the window by the rail.** It does **not** move, anywhere -
+      the rail is entirely no-drag now that the brand mark and its 40px cell have
+      gone to the title row. Every rail button still presses; a control that
+      forgot `.app-no-drag` has exactly one symptom, a click that does nothing.
+- [ ] The **brand mark and the window name are centred** in the title row, and
+      the mark is legible in all four themes (it takes `--card-foreground`; under
+      the deleted Colourful setting it was white-on-white in Day).
 - [ ] **Double-click the empty title row** → maximizes; again → restores. **Check
       this first.** It is the one caption behaviour that is neither clearly kept
       nor clearly lost with `frame: false` — Chromium is supposed to handle it
@@ -166,9 +168,11 @@ buttons are elements. Under the old overlay it had to come from
 - [ ] Maximize and restore, and look at the padding along the top edge in both.
       A maximized window has no rounded corners to avoid; a restored one must not
       paint into them.
+- [ ] The window title carries **no packet count** — it is the adapter while
+      capturing and `Inwire` otherwise. A number there is the most distracting
+      thing that can be put in a title bar, and the count is a dock widget now.
 - [ ] The window title tracks the state, in the taskbar as well as the title row:
-      `Inwire` when empty, `<adapter> - capturing - Inwire` while capturing, and
-      `<n> packets - Inwire` once stopped with frames still in the buffer. It is
+      `<adapter> - capturing - Inwire` while capturing, `Inwire` otherwise. It is
       set from the renderer, which is the only side that knows the adapter's name.
 
 ---
@@ -196,6 +200,22 @@ whether the strip reads as two kinds of control.
       inputs, so a focused rail button both activated and toggled capture. It is
       scoped positively now — body, or inside `[role="grid"]`.
 - [ ] **Arrow keys inside the rail do not also move the packet selection.**
+- [ ] **The capture group reads Start/Stop, adapter, schedule**, top to bottom -
+      the order they are used in.
+- [ ] **The schedule picker opens to the right** and carries a dot when a
+      schedule is set. Without the dot a clock looks identical whether or not
+      anything is scheduled, which is the failure the adapter's badge exists to
+      avoid. Its summary ("Stops in 14:58") is the tooltip now; there is no room
+      for a label in 56px.
+- [ ] **Find packet** (bottom group) opens a popover to the right, focused and
+      typeable immediately. Type something: the packet list narrows and the rail
+      button grows a dot.
+- [ ] Click into the packet list **with text in the find box**. The popover stays
+      open - closing it would undo the thing being looked at. Clear the box, then
+      click out: it closes.
+- [ ] **Escape in the find box clears it first**, and closes it on a second
+      press. Neither press should also send you back to Packets from another
+      view - that would be the missing `stopPropagation`.
 - [ ] With no stream being followed, **Follow Stream is disabled** and its tooltip
       says why. It is disabled rather than hidden: a group that changes length
       would move the divider and every widget below it.
@@ -223,6 +243,24 @@ whether the strip reads as two kinds of control.
 arithmetic and the migration. What needs a person is the gesture and whether
 each widget is readable at the floor.
 
+- [ ] **The collapse control** sits above the widgets group, where the divider
+      was. Press it: the dock disappears and the packet list takes the width
+      back. Press it again: the dock returns with the same widgets open.
+- [ ] **While hidden, every widget icon opens that widget's own window** - all
+      six, not just the map. None should be inert, and none should show a dot or
+      an active fill, because there is no dock for them to be "in".
+- [ ] The map's window is its **richer full-size map**; the other five are the
+      same card, larger. That is expected - the overlay is generic.
+- [ ] **Restart while hidden.** It comes back hidden, and the first widget icon
+      you press still opens a window rather than toggling.
+- [ ] **The expand button inside a dock card appears only on the map.** Any other
+      card showing one would be a control that reopens the same drawing larger.
+- [ ] **Packet counts** is the sixth widget. Open it during a capture: the
+      figures track the list, and the percentage reads 100% with no filter
+      applied and 0% on an empty capture. It has **no expand button**, by design.
+- [ ] Watch the other five widgets while the counter is ticking. They must
+      **not** redraw on every flush - the counter subscribes for itself precisely
+      so the dock's memo boundary holds.
 - [ ] **Zero widgets open**: no dock at all, and no empty column. Close the last
       one and its rail icon goes dark — there is no hidden-but-toggled state.
 - [ ] **One widget.** **Two.** **All five.** The stack scrolls if it has to; the
