@@ -123,8 +123,11 @@ export interface ActivityRailProps {
   streamAvailable: boolean;
 
   /* --- widgets ---------------------------------------------------------- */
-  widgets: WidgetInstance[];
+  /** The dock's list: every type, each with whether it is open. */
+  dockItems: { type: WidgetTypeId; open: boolean }[];
   onToggleWidget: (type: WidgetTypeId) => void;
+  /** `inwire.dashboard`, for the custom titles the tooltips show. */
+  widgets: WidgetInstance[];
 
   /* --- bottom ----------------------------------------------------------- */
   onOpenSettings: () => void;
@@ -138,7 +141,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces, onSelectInterface,
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
-  widgets, onToggleWidget,
+  dockItems, widgets, onToggleWidget,
   onOpenSettings, onOpenUpdates, updateAvailable,
 }) => {
   const selected = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
@@ -224,7 +227,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
     onStartCapture();
   };
 
-  const enabled = new Set(widgets.filter((w) => w.enabled).map((w) => w.type));
+  const enabled = new Set(dockItems.filter((i) => i.open).map((i) => i.type));
   const byType = new Map(widgets.map((w) => [w.type, w] as const));
 
   /**

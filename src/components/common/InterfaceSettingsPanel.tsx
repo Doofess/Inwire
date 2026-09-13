@@ -14,7 +14,6 @@ import {
   type PaneArrangement,
 } from '../../services/interfacePrefs';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
-import { dashboardStore, type DashboardMode } from '../../services/dashboardPrefs';
 import { DashboardWidgetList } from './DashboardWidgetList';
 import { Section, SettingRow } from './settingsLayout';
 import { AVERAGE_FRAME_BYTES, framesForBudget } from '../../services/bufferBudget';
@@ -77,11 +76,6 @@ const BUFFER_OPTIONS = [
   { value: String(1024 * 1024 * 1024), label: '1 GB' },
 ];
 
-const DASHBOARD_MODE_OPTIONS = [
-  { value: 'full' as DashboardMode, label: 'Full' },
-  { value: 'icons' as DashboardMode, label: 'Icon rail' },
-  { value: 'hidden' as DashboardMode, label: 'Hidden' },
-];
 
 /**
  * Animations live in the Accessibility tab now, not here.
@@ -98,7 +92,6 @@ export const InterfaceSettingsPanel: React.FC = () => {
   const [list, patchList] = usePreferenceStore(packetListStore);
   const [minimap, setMinimap] = usePreferenceValue(minimapStore);
   const [perf, patchPerf] = usePreferenceStore(performanceStore);
-  const [dashboard, patchDashboard] = usePreferenceStore(dashboardStore);
   const [nameResolution, patchNameResolution] = usePreferenceStore(nameResolutionStore);
 
   return (
@@ -128,20 +121,19 @@ export const InterfaceSettingsPanel: React.FC = () => {
             disabled={!layout.panes}
           />
         </SettingRow>
-        <SettingRow
-          label="Dashboard"
-          description="The analytics column on the right. The icon rail fits in narrower windows than the full column does, where today the dashboard disappears entirely."
-        >
-          <Segmented
-            ariaLabel="Dashboard"
-            value={dashboard.mode}
-            onValueChange={(mode) => patchDashboard({ mode })}
-            options={DASHBOARD_MODE_OPTIONS}
-          />
-        </SettingRow>
+        {/* The three-way Dashboard control stood here - full, icons, hidden -
+            and its description began "The analytics column on the right".
+            There is no column and no right: the rail's widget group is the
+            control now, a widget is open or it is not, and the dock appears when
+            at least one is. A setting duplicating that would be a second place
+            to say the same thing and a second place for it to disagree. */}
 
         <div className="py-2.5">
           <div className="text-xs font-semibold text-foreground">Widgets</div>
+          <p className="text-[11px] text-muted-foreground mt-0.5 mb-1.5 leading-snug">
+            What the dock shows, in what order. The rail toggles the same
+            switches; these are here because a drag needs a keyboard equivalent.
+          </p>
           <DashboardWidgetList />
         </div>
       </Section>
