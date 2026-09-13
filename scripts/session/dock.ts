@@ -126,6 +126,45 @@ console.log('\n--- the width rule, against the window ---\n');
   check('a drag past the left edge clamps', clampDockWidth(10, 1920), DOCK_MIN_WIDTH);
   check('NaN falls back to the default', clampDockWidth(Number.NaN, 1920), DOCK_DEFAULT_WIDTH);
   check('a fractional drag lands on a whole pixel', clampDockWidth(301.6, 1920), 302);
+
+  // The one that would show as a dock opening narrower than its own default on a
+  // fresh install: if `DOCK_DEFAULT_WIDTH` were ever raised above what the
+  // minimum window allows, the first launch at 1024 would clamp it, and the
+  // stored width would disagree with the one on screen from the start.
+  check('the default is reachable at the minimum window',
+    clampDockWidth(DOCK_DEFAULT_WIDTH, MIN_WINDOW_WIDTH), DOCK_DEFAULT_WIDTH);
+
+  // Narrowing the window shrinks an open dock rather than squeezing the list -
+  // and the STORED width is untouched, so widening gives back what the user
+  // chose. That pair is the whole width contract, and neither half is observable
+  // from inside the other.
+  check('narrowing the window shrinks the dock', clampDockWidth(600, 1024), 328);
+  check('...and widening it gives the chosen width back', clampDockWidth(600, 1336), 600);
+
+  // The degenerate window, below the app's own minimum: min and max are both the
+  // floor, so every drag resolves to the floor. It must not produce something
+  // between them, and it must not go negative.
+  check('below the app minimum every drag resolves to the floor',
+    [clampDockWidth(500, 200), clampDockWidth(240, 200), clampDockWidth(1, 200)],
+    [DOCK_MIN_WIDTH, DOCK_MIN_WIDTH, DOCK_MIN_WIDTH]);
+
+  // Walked one pixel at a time across the whole supported range, because the
+  // three constants and the reserve are four numbers whose relationship only has
+  // to be wrong once. A clamp that can return less than the floor is a dock the
+  // widgets do not fit; one that can exceed the window is a packet list pushed
+  // off the right edge.
+  const outOfRange: string[] = [];
+  for (let windowWidth = MIN_WINDOW_WIDTH; windowWidth <= 3840; windowWidth++) {
+    for (const asked of [0, 1, 239, 240, 260, 328, 639, 640, 641, 5000]) {
+      const got = clampDockWidth(asked, windowWidth);
+      const fits = got >= DOCK_MIN_WIDTH
+        && got <= DOCK_MAX_WIDTH
+        && got <= Math.max(DOCK_MIN_WIDTH, windowWidth - RAIL_WIDTH - LIST_RESERVE);
+      if (!fits) outOfRange.push(`${asked}@${windowWidth} -> ${got}`);
+    }
+  }
+  check('every clamp across every supported window lands in range',
+    outOfRange.slice(0, 5), []);
 }
 
 console.log('\n--- what is stored, and what is not ---\n');

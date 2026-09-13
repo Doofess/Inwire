@@ -40,10 +40,17 @@ export interface DockItem {
   /** In the dock. The rail's icon is lit for exactly this. */
   open: boolean;
   /**
-   * Held at the top of the stack, and kept by "close all".
+   * Held at the top of the stack, above everything unpinned.
    *
    * It deliberately does NOT mean "survives a view change" - nothing is hidden
    * on a view change, because the dock is view-independent.
+   *
+   * The plan also gave it a second meaning, "kept by close all", and **there is
+   * no close-all control**: the rail's widget icons are the only way to close
+   * anything, one at a time. So pinning currently buys the top of the stack and
+   * immunity from a drag-reorder, and nothing else. Written down because the flag
+   * is persisted and a later session adding close-all must honour it rather than
+   * discover it.
    */
   pinned: boolean;
 }

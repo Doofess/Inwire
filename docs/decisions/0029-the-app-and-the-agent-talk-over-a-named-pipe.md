@@ -178,4 +178,4 @@ instances ourselves.
   absent, `D:P` — and `scripts/electron/agent-link.ts` drives the real client
   against a real pipe on Windows and a Unix socket elsewhere. Neither can tell
   you the descriptor **took effect**. That needs a machine with a second user
-  account, and it is on the verification matrix rather than in CI.
+  account, so it is in `docs/verification.md` rather than in CI.
