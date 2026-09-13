@@ -28,6 +28,11 @@ export const WIDGET_TYPE_IDS = [
   'breakdown',
   'sizes',
   'talkers',
+  // Last, deliberately: this order is the rail's widget group top to bottom and
+  // the order a repaired `inwire.dock` appends missing types in, so an existing
+  // dock gains this one at the bottom, closed, rather than having its stored
+  // order reshuffled by a new arrival.
+  'counts',
 ] as const;
 
 export type WidgetTypeId = (typeof WIDGET_TYPE_IDS)[number];
@@ -220,6 +225,15 @@ export const WIDGET_TYPES: Record<WidgetTypeId, WidgetTypeSpec> = {
         fallback: 'bars',
       },
     ],
+  },
+  counts: {
+    id: 'counts',
+    label: 'Packet counts',
+    description: 'How many rows the filter selected, out of the whole capture.',
+    // No options. Every other widget has a choice worth persisting - a metric,
+    // a chart shape, how many rows - and this one is two numbers and a
+    // percentage. An options list with nothing in it is what `geo` already has.
+    options: [],
   },
   talkers: {
     id: 'talkers',

@@ -29,6 +29,7 @@ import { MAX_CUSTOM_COLUMNS } from "./lib/packetColumns";
 import { usePreferenceStore, usePreferenceValue } from "./services/preferenceStore";
 import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
+import { publishPacketCounts } from "./services/packetCounts";
 import { Dock } from "./components/dock/Dock";
 import {
   dockStore, reorderItems, type DockItem,
@@ -2003,6 +2004,20 @@ export default function App() {
   const windowTitle = windowTitleFor({ capturing: isCapturing, adapter: captureAdapter });
   useWindowTitle(windowTitle);
 
+  // Published rather than passed: the counts widget subscribes for itself, so a
+  // number that changes on every 100ms flush never reaches `dashboardContext`
+  // and never re-renders the five widgets that do not show it. See
+  // `services/packetCounts.ts` for what putting it there would cost.
+  useEffect(() => {
+    publishPacketCounts({
+      filtered: shownRowCount,
+      total: captureRowCount,
+      scan: captureFilter.state,
+      uncovered: filterUncovered,
+      onRescan: captureFilter.rescan,
+    });
+  }, [shownRowCount, captureRowCount, captureFilter.state, filterUncovered, captureFilter.rescan]);
+
   return (
     <div className="h-screen w-screen flex font-sans overflow-hidden transition-colors bg-background text-foreground">
       {/* The rail spans the full window height, so it reaches the top and its
@@ -2075,11 +2090,6 @@ export default function App() {
               onApplyFilter={(newFilter?: string) =>
                 setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
               }
-              totalPackets={captureRowCount}
-              filteredPackets={shownRowCount}
-              filterScan={captureFilter.state}
-              scanUncovered={filterUncovered}
-              onRescan={captureFilter.rescan}
               filterPresetLibrary={filterPresetLibrary}
               onSaveCurrentFilter={handleSaveCurrentFilter}
             />

@@ -4,11 +4,13 @@ import {
   TbActivity,
   TbChartPie,
   TbNetwork,
+  TbSum,
   TbRulerMeasure,
 } from 'react-icons/tb';
 import type { Packet } from '../../types/packet';
 import type { WidgetConfig, WidgetTypeId } from '../../services/dashboardPrefs';
 import { WIDGET_TYPE_IDS } from '../../services/dashboardPrefs';
+import { PacketCountsCard } from './PacketCountsCard';
 import { GeoMap } from './GeoMap';
 import { TrafficTimelineChart, type TimelineChart, type TimelineMetric } from './TrafficTimelineChart';
 import { ProtocolBreakdown, type BreakdownChart, type BreakdownMetric } from './ProtocolBreakdown';
@@ -180,6 +182,22 @@ export const WIDGET_RENDERERS: Record<WidgetTypeId, WidgetRenderer> = {
     render: (ctx, config) => (
       <PacketSizeChart packets={ctx.packets} chart={config.chart as SizeChart} />
     ),
+  },
+
+  counts: {
+    icon: TbSum,
+    // A fixed height rather than a ratio: the content is two lines and a badge
+    // row, and an aspect ratio would make it grow with the dock for no reason.
+    cardHeight: () => 96,
+    // Deliberately no emptyMessage. "0 / 0" is the honest answer before a
+    // capture starts, and replacing it with a line of text would hide the one
+    // widget whose whole job is to report a number.
+    //
+    // It takes neither `ctx` nor `config`: it subscribes to `packetCounts` for
+    // itself, because a count in `DashboardWidgetContext` would change that
+    // context's identity on every flush and re-render all six widgets through
+    // the dock's memo. See `services/packetCounts.ts`.
+    render: () => <PacketCountsCard />,
   },
 
   talkers: {
