@@ -523,9 +523,11 @@ reach: **geojs** (map geolocation), **cloudflare-dns** (DoH reverse lookups),
 **ipapi.co** (the Network panel's public-identity section) and **openfreemap**
 (basemap tiles). Enforced by `scripts/electron/shell.ts`, which also asserts
 that the agent's old port `8999` is **not** in the policy — a `connect-src`
-entry nothing dials is a hole with no user. Every one of the four is behind the
-`nameResolution.geoIp` consent switch *except* the basemap tiles, which load
-whenever the map is shown; see **Direction**.
+entry nothing dials is a hole with no user. Three of the four are behind a consent switch and the fourth is not, and
+**which switch is not uniform**: geojs and ipapi.co are behind
+`nameResolution.geoIp`, the DoH resolver is behind `nameResolution.reverseDns`
+— they are two separate Settings rows — and the basemap tiles are behind
+neither, loading whenever the map is shown. See **Direction**.
 
 **Main reaches two more hosts, and they are deliberately not in the policy.**
 The update feed and `npcap.com` are dialled by `net.fetch` in the main process,
@@ -541,8 +543,11 @@ and Npcap behind a click.
 
 **Cross-origin isolation is on.** `ISOLATION_HEADERS` in `electron/main.ts`
 sets COOP/COEP on every `app://` response, so `crossOriginIsolated` is true and
-`SharedArrayBuffer` exists. Verified by hand against the packaged app; nothing
-depends on it yet. *Unenforced* — an assertion must exist before anything does.
+`SharedArrayBuffer` exists. Nothing depends on it yet. Enforced by
+`scripts/electron/smoke.ts`, which evaluates `crossOriginIsolated` in the
+running window — so this is checked on every `npm run check`, not by hand. The
+one gap left is the build it drives: `smoke.ts` launches `dist/`, so the
+*packaged* app is still only verified by hand.
 
 **The pipe's ACL is the authentication.** See the banner at the top.
 `local-agent/test_protocol.py` pins the SDDL's shape — `IU` present, `WD`/`AN`/
@@ -801,10 +806,12 @@ nothing to click.
 
 ## 8. Migration status
 
-*As of 2026-09-12.*
+*As of 2026-09-13.*
 
-Phases 1–5 of the Electron migration are done. The plan is
-`~/.claude/plans/lets-pick-up-where-agile-shore.md`.
+Phases 1–5 of the Electron migration are done, and so is 7 but for its last
+item. The plan is
+`~/.claude/plans/lets-pick-up-where-agile-shore.md`, which was repurposed for
+the Update Center — its banner is the status of record for what was left.
 
 | Phase | What | Landed |
 |---|---|---|
@@ -813,13 +820,25 @@ Phases 1–5 of the Electron migration are done. The plan is
 | 3 | The named pipe; the token deleted; the agent bundled | `677cc41`…`4bbbfc7` |
 | 4 | Native save dialogs | `8b7be01` |
 | 5 | The web page deleted | `6d97c46`…`4010d7b` |
-| 6 | Installer, signing, updates | **in progress** — `d2423f2` |
-| 7 | Rebuild what the browser forced | planned |
-| 8 | Import-to-disk; `captureScan` wired to the filter bar | **in progress** — `1bfcbf9`; scaled scrolling is what is left |
+| 6 | Installer, signing, updates | **deprioritised** — `d2423f2`; see below |
+| 7 | Rebuild what the browser forced | `73e5c26`…`3879433`, `380976e`, `b07f165`; the offline basemap is what is left |
+| 8 | Import-to-disk; `captureScan` wired to the filter bar | **in progress** — `1bfcbf9`, `93cd08b`, `7c5dd21`, `992b1d5`; scaled scrolling is what is left |
 
-Phase 6 is blocked on one thing outside this repository: a code-signing
-certificate (EV or Azure Trusted Signing). The installer compiles and the
-fuses are still to flip.
+**Phase 6 is deprioritised, not blocked.** It waits on a code-signing
+certificate (EV or Azure Trusted Signing) outside this repository — but signing,
+the fuses, the VM matrix and the Npcap OEM licence were all set aside
+deliberately, because this is a machine the author works on rather than a fleet
+they ship to. The installer compiles; the fuses are still to flip, and must land
+**before** signing. Read the row as a choice, not a gap.
+
+**Phase 7 landed on 2026-09-13**, in the thirteen commits that row spans: the
+window's own title bar, the 56px activity rail, the dock that replaced the
+right-hand column, the hamburger's deletion, and Custom Dissectors and Network
+becoming Settings tabs. §3 describes the result. Its **no-GPU fallback landed
+with it** — `src/components/analytics/renderTier.ts`, two tiers rather than
+three, asserted by `scripts/perf/render-tier.ts`. What remains of the phase is
+the **offline basemap**: `tiles.openfreemap.org` is still in `OUTBOUND_HOSTS`
+(`electron/csp.ts`) and there is no `d3-geo`. See **Direction**.
 
 **The Npcap question is answered rather than blocking.** It was "does the
 silent install need an OEM licence", and the answer is yes - so the installer
@@ -1157,9 +1176,10 @@ the updater, `dialog` for file I/O, `powerMonitor` for sleep gaps. The current
 `exceljs` and `three` — the pass that weighs each against a platform API has
 **not** happened.
 
-**Cross-origin isolation is in place** (see Invariants) but nothing uses it. An
-assertion that `crossOriginIsolated` is true in the packaged app must exist
-before anything depends on it.
+**Cross-origin isolation is in place** (see Invariants) but nothing uses it.
+`scripts/electron/smoke.ts` already asserts `crossOriginIsolated` against
+`dist/`; what is still owed is the same assertion against a **packaged** build,
+which is where the protocol handler and the headers behave differently.
 
 **Not to do:** no V8 startup snapshots (VS Code-scale complexity for tens of
 milliseconds); no MSIX (it cannot install a kernel driver or a LocalSystem
