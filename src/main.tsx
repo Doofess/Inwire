@@ -4,7 +4,6 @@ import {ThemeProvider, useTheme} from 'next-themes';
 import {MotionConfig} from 'motion/react';
 import {RETIRED_THEMES, THEME_NAMES, isDarkTheme, normalizeThemeName} from './lib/themeOptions';
 import {motionStore} from './services/interfacePrefs';
-import {applyStoredFont} from './lib/font';
 import {usePreferenceValue} from './services/preferenceStore';
 import App from './App.tsx';
 import './index.css';
@@ -41,24 +40,15 @@ function migrateStoredTheme(): void {
 migrateStoredTheme();
 
 /**
- * The chosen typeface, before the first paint.
- *
- * Same placement and the same reason as the theme fixup above: a React effect
- * runs after the browser has already drawn, so leaving this to
- * `useFontPreference` alone would paint the app in the default face and reflow
- * into the chosen one a frame later.
- */
-applyStoredFont();
-
-/**
  * The app's motion setting, in the form motion/react wants.
  *
  * The mapping is an INVERSION, not the one-to-one this used to claim: the
  * app's setting says whether to animate, motion's says whether to reduce. With
  * "user" hardwired here, choosing Always or Never changed the CSS - which is
  * keyed on a `data-motion` attribute App writes - and left every motion/react
- * component still following the OS. The dashboard's morph and the capture
- * button's icon swap are both motion/react, so that gap is now visible.
+ * component still following the OS. The modals' enter/exit (Settings,
+ * Export/Import, the import error dialog - see `lib/modalMotion.ts`) and the
+ * tour overlay are motion/react, so that gap is visible on them.
  */
 function MotionPreference({children}: {children: React.ReactNode}) {
   const [setting] = usePreferenceValue(motionStore);
@@ -75,8 +65,10 @@ function MotionPreference({children}: {children: React.ReactNode}) {
  * Tells the browser which way to draw its OWN widgets.
  *
  * next-themes writes `color-scheme` inline on `<html>`, and it only understands
- * light and dark - so all four of these custom theme names resolve to `light`,
- * and an inline style beats any rule a stylesheet could carry. The visible
+ * the literal strings `light` and `dark` - so any theme stored under another
+ * id resolved to `light`, which is what every theme this app has shipped and
+ * retired did (`RETIRED_THEMES`), Night included while it was `midnight`. An
+ * inline style beats any rule a stylesheet could carry. The visible
  * result was a light-grey native calendar popping out of a near-black app, and
  * the same applies to scrollbars, form controls and focus rings: they are
  * rendered by the browser outside the page and no selector here can reach them.
@@ -94,16 +86,23 @@ function ColorScheme({children}: {children: React.ReactNode}) {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    {/* `themes` has to list every value explicitly once there is more than
-        light/dark - next-themes will not apply a class it was not told about.
-        Taken from the theme registry so the picker, this list and the CSS
-        cannot drift apart; the dark ones among them are also named in
-        index.css's @custom-variant. */}
-    {/* No `system`. Every entry in the picker now names a real palette, and
-        the packet list derives its colours from whichever one is active - so a
-        theme that resolves to a different theme at runtime would leave the
-        list following something the user never picked. The cost is real and
-        worth naming: the app no longer follows the OS light/dark setting. */}
+    {/* `themes` is taken from the theme registry rather than written out here,
+        so the picker, this list and the CSS cannot drift apart - next-themes
+        will not apply a class it was not told about. The dark ones among them
+        are also named in index.css's @custom-variant. */}
+    {/* `enableSystem={false}`, and the app DOES still follow the OS - those
+        two are not in tension. next-themes' own system mode resolves the OS
+        preference to whichever themes are literally named `light` and `dark`,
+        which is a naming coincidence rather than a decision: it was the wrong
+        answer outright while the `dark` id belonged to Graphite, and it would
+        be wrong again the moment a third theme arrives. So System is a MODE
+        over a declared pair instead - `SYSTEM_THEME_PAIR` and
+        `useSystemThemePreference` in lib/useSystemTheme.ts, offered in the
+        picker as `SYSTEM_THEME_OPTION` and stored as its own boolean. What
+        next-themes holds here is always a concrete theme, which is what the
+        packet list needs: it derives its colours from the active theme, and a
+        value that resolves to a different theme at runtime would leave the
+        list following something the user never picked. */}
     <ThemeProvider
       attribute="class"
       defaultTheme="dark"
