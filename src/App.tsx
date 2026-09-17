@@ -8,7 +8,6 @@ import { AnimatePresence } from "motion/react";
 import { useTheme } from "next-themes";
 import { useSystemThemePreference } from "./lib/useSystemTheme";
 import { useMotionPreference } from "./lib/motion";
-import { useFontPreference } from "./lib/font";
 import { TourOverlay } from "./components/tour/TourOverlay";
 import { tourStore } from "./services/tourPrefs";
 import { useNameResolutionPreference } from "./lib/nameResolution";
@@ -19,7 +18,7 @@ import {
   performanceStore,
 } from "./services/interfacePrefs";
 import { NameResolutionMap, snapshot as nameSnapshot } from "./services/nameResolution";
-import type { StreamTarget } from "./services/followStream";
+import { targetForPacket, type StreamTarget } from "./services/followStream";
 import { ExpertLog, expertSnapshot } from "./services/expertInfo";
 import { useIncrementalAggregate } from "./lib/useIncrementalAggregate";
 import { useWindowOrdinal } from "./lib/useWindowOrdinal";
@@ -30,12 +29,7 @@ import { usePreferenceStore, usePreferenceValue } from "./services/preferenceSto
 import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { publishPacketCounts } from "./services/packetCounts";
-import { Dock } from "./components/dock/Dock";
-import {
-  dockStore, reorderItems, type DockItem,
-} from "./services/dockPrefs";
-import { WidgetOverlay } from "./components/analytics/WidgetOverlay";
-import { WIDGET_RENDERERS } from "./components/analytics/dashboardWidgets";
+import { GeoMap } from "./components/analytics/GeoMap";
 import { shortInterfaceLabel } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
@@ -46,7 +40,6 @@ import {
 import {
   restoredView, viewStore, type AppView,
 } from "./services/viewPrefs";
-import { dashboardStore, widgetTitle, type WidgetConfig } from "./services/dashboardPrefs";
 import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Capabilities, Packet } from "./types/packet";
@@ -94,7 +87,7 @@ import { FilterBar } from "./components/common/FilterBar";
 import { PacketList } from "./components/packet-list/PacketList";
 import { PacketDetailsTree } from "./components/packet-details/PacketDetailsTree";
 import { HexViewer } from "./components/packet-details/HexViewer";
-import { PacketDetailModal } from "./components/packet-details/PacketDetailModal";
+import { PacketDetailPane } from "./components/packet-details/PacketDetailPane";
 import { StreamFollowerPane } from "./components/stream-follower/StreamFollowerPane";
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
 import { ExportImportModal } from "./components/export/ExportImportModal";
@@ -162,7 +155,6 @@ const SOCKET_RETRO_WINDOW_US = 3_000_000;
  * Each validator is module scope so it keeps one identity across renders.
  */
 const DISPLAY_FILTER_KEY = "inwire.displayFilter";
-const PACKET_SEARCH_KEY = "inwire.packetSearch";
 const SELECTED_PACKET_KEY = "inwire.selectedPacketId";
 // Preferences this build no longer reads are cleared here rather than left to
 // sit in storage looking like live configuration. The list, and the reasoning,
@@ -177,11 +169,6 @@ function normalizeDisplayFilter(raw: unknown): { filterText: string; appliedFilt
     appliedFilter: typeof value.appliedFilter === "string" ? value.appliedFilter : "",
   };
 }
-
-function normalizeString(raw: unknown): string | null {
-  return typeof raw === "string" ? raw : null;
-}
-
 
 function normalizePacketId(raw: unknown): number | null {
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null;
@@ -202,7 +189,6 @@ export default function App() {
   // Writes data-motion onto <html>, and keeps it in step with the OS while the
   // setting defers to it. See lib/motion.
   useMotionPreference();
-  useFontPreference();
   // The first-run walkthrough. `completed` is set by finishing it AND by
   // skipping it - see services/tourPrefs for why skipping counts.
   const [tour] = usePreferenceValue(tourStore);
@@ -244,26 +230,19 @@ export default function App() {
     [resolvedTheme, packetColorSet],
   );
 
-  /**
-   * Whether the analytics column has room to exist.
-   *
-   * Matches the `lg:` breakpoint the aside's own className uses, because the
-   * two must agree: this decides whether the column is MOUNTED, the className
-   * decides how it looks once it is. Read as a media query rather than left to
-   * CSS because the difference between "hidden" and "not rendered" is, for
-   * these five widgets, a full pass over the packet buffer twice a second.
-   */
-  // `lg:` in CSS, and the one breakpoint that is NOT dead: the window's minimum
-  // is 1024 and the viewport is a few pixels short of it, so at the smallest
-  // allowed size the full column is hidden and the rail shows instead.
-  /**
-   * Whether the icon rail has room, which is a lower bar than the column.
-   *
-   * The full dashboard needs about 384px and is hidden below `lg`, so on a
-   * laptop-width window it vanishes and nothing says it exists. A 48px rail
-   * fits from `md`, which turns "minimize" from a way to hide the dashboard
-   * into the only way some users will ever see it.
-   */
+  /* **Two media queries stood here - "has the analytics column room?" and "has
+     its icon rail room?" - and both are gone with the column.** They had already
+     outlived their declarations and were documenting nothing.
+
+     What survives them is the rule they were enforcing, and it is enforced by
+     the component tree now rather than by a breakpoint: **hidden is not the same
+     as not rendered**, because every summary surface is a full pass over the
+     packet buffer when its input changes. So Statistics, the Routing Map and
+     Frame Detail are unmounted unless their view is active - see the JSX below,
+     where each says so - and the packet list is the deliberate exception,
+     because its scroll offset and selection are worth more than the renders.
+     That is a stronger guarantee than a media query, which only ever decided
+     whether to mount a column that no longer exists. */
 
   // Stream & Capturing State
   const [isCapturing, setIsCapturing] = useState(false);
@@ -352,6 +331,14 @@ export default function App() {
     [number, number] | null
   >(null);
 
+  /* **There is no `hoveredByte` here any more.** It was the one byte under the
+     pointer, derived from `activeByteRange` and handed to the window-spanning
+     bottom bar. The byte inspector is back inside the Hex View pane and reads
+     that pane's own hover state, which is the narrower and more truthful of the
+     two: `activeByteRange` is also what the protocol tree publishes for a
+     one-byte field, so the derivation answered "this byte" for a hover in a
+     different pane. See `HexViewer`'s footer. */
+
   // Filter State
   // Seeded from the last session rather than blank, so a refresh does not
   // silently drop the filter the user was looking through.
@@ -361,12 +348,7 @@ export default function App() {
   );
   const [filterText, setFilterText] = useState(storedDisplayFilter.filterText);
   const [appliedFilter, setAppliedFilter] = useState(storedDisplayFilter.appliedFilter);
-  const [packetSearchText, setPacketSearchText] = useState(() =>
-    loadPreference(PACKET_SEARCH_KEY, normalizeString, ""),
-  );
-
   useDebouncedPreference(DISPLAY_FILTER_KEY, useMemo(() => ({ filterText, appliedFilter }), [filterText, appliedFilter]));
-  useDebouncedPreference(PACKET_SEARCH_KEY, packetSearchText);
 
   // The display-filter preset library, read once from localStorage and owned
   // here so the header's Presets dropdown and Settings > Display Filters are
@@ -412,26 +394,29 @@ export default function App() {
 
   // Modals
   const [streamToFollow, setStreamToFollow] = useState<StreamTarget | null>(null);
-  // The frame the detail window is showing, or null when it is closed. Held as
-  // a number rather than a Packet so the window keeps following the same frame
-  // as the buffer around it changes.
-  const [detailPacketId, setDetailPacketId] = useState<number | null>(null);
+  // **There is no `detailPacketId`.** The detail window held one - a frame of
+  // its own, separate from the list's selection, so closing it dropped you back
+  // wherever the list had been left. As a view it reads `selectedPacket` like
+  // the bottom panes do, which is what makes stepping frames in there move the
+  // list too, and what makes leaving for the list and coming back land on the
+  // frame you were reading.
   const [showExportModal, setShowExportModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   /**
-   * Which of the four surfaces the rail says we are on.
+   * Which of the five surfaces the rail says we are on.
    *
    * Persisted, and `restoredView` decides what is resumable - `stream` is a
    * legal stored value and is not a restorable one, because the conversation it
    * pointed at lived in a buffer that is being rebuilt.
    *
-   * **In this step the three non-Packets views are still modals.** The rail is
-   * the single source of truth and an effect below opens the matching modal, so
-   * the group is exercised before it is converted. Step 4b replaces that effect
-   * with real panes, one commit at a time; nothing else here changes when it
-   * does, which is the point of routing through a view id now rather than
-   * wiring the rail straight to three booleans.
+   * **All four non-Packets views are real panes now**, rendered as siblings of
+   * the packet list in the row below. They were modals opened by an effect
+   * keyed on this value, which was a deliberate intermediate step: routing the
+   * rail through a view id first meant the conversion changed only what the JSX
+   * renders and nothing here. That is why this block did not move when they
+   * landed, and it is the argument for not wiring a future view straight to a
+   * boolean.
    */
   const [viewPrefs, patchViewPrefs] = usePreferenceStore(viewStore);
   usePreferenceSync(viewStore.key, viewStore.normalize, viewStore.accept);
@@ -441,97 +426,16 @@ export default function App() {
     patchViewPrefs({ view: next });
   }, [patchViewPrefs]);
 
-  // `inwire.dashboard` is now only the widgets themselves - custom titles and
-  // per-widget config. Where they are, whether they are open and in what order
-  // is `inwire.dock`.
-  const [dashboardPrefs, patchDashboardPrefs] = usePreferenceStore(dashboardStore);
-  usePreferenceSync(dashboardStore.key, dashboardStore.normalize, dashboardStore.accept);
-  const [dock, patchDock] = usePreferenceStore(dockStore);
-  usePreferenceSync(dockStore.key, dockStore.normalize, dockStore.accept);
-
-  const patchItem = useCallback((type: string, patch: Partial<DockItem>) => {
-    patchDock({ items: dock.items.map((i) => (i.type === type ? { ...i, ...patch } : i)) });
-  }, [dock.items, patchDock]);
-
-  /**
-   * What a rail widget icon does, which depends on whether the dock is shown.
-   *
-   * Shown, it toggles that widget in the dock - the original behaviour. Hidden,
-   * it opens that widget's overlay instead, because there is no dock for it to
-   * appear in and an icon that did nothing would be five of the six inert.
-   *
-   * The overlay renders ANY widget: `WIDGET_RENDERERS[type].render(..., {
-   * variant: 'full' })` is generic, and only the map reads `variant` to draw
-   * something richer. So the rule is one sentence with no exceptions rather
-   * than "iff that widget has a full-size version", which would have left the
-   * counts card and three charts as dead icons.
-   */
-  const toggleWidget = useCallback((type: string) => {
-    if (dock.minimized) {
-      setExpandOrigin(undefined);
-      setExpandedWidget(type);
-      return;
-    }
-    const item = dock.items.find((i) => i.type === type);
-    patchItem(type, { open: !(item?.open ?? false) });
-  }, [dock.items, dock.minimized, patchItem]);
-
-  const toggleDockMinimized = useCallback(() => {
-    patchDock({ minimized: !dock.minimized });
-  }, [dock.minimized, patchDock]);
-
-  /**
-   * Reorders the OPEN items, leaving the closed ones where they were.
-   *
-   * The dock only shows what is open, so a drag can only speak about those - but
-   * the stored list holds every type, which is what lets a closed widget come
-   * back where it was. So the new order is spliced over the open positions and
-   * the closed entries keep their slots.
-   */
-  const reorderDock = useCallback((order: string[]) => {
-    // The arithmetic is in `dockPrefs.ts` so an assertion script can reach it.
-    // The version that lived here shifted a queue from inside a `find`
-    // predicate and put `undefined` into the list; see `reorderItems`.
-    patchDock({ items: reorderItems(dock.items, order) });
-  }, [dock.items, patchDock]);
-
-  /** The geo map's window. Not persisted - it is a glance, not a setting. */
-  const [expandedWidget, setExpandedWidget] = useState<string | null>(null);
-  const [expandOrigin, setExpandOrigin] = useState<{ x: number; y: number } | undefined>();
-
-  /**
-   * Every callback the dock takes, stabilised.
-   *
-   * `Dock` is `React.memo`'d - the app's only memo boundary, inherited from the
-   * column it replaces - and an inline arrow in any one of these turns that memo
-   * into a no-op. It would still be correct, and it would hand ten renders a
-   * second to five widgets that each do a full pass over the buffer.
-   */
-  const dockConfigChange = useCallback((type: string, patch: WidgetConfig) => {
-    patchDashboardPrefs({
-      widgets: dashboardPrefs.widgets.map((w) =>
-        (w.type === type ? { ...w, config: { ...w.config, ...patch } } : w)),
-    });
-  }, [dashboardPrefs.widgets, patchDashboardPrefs]);
-
-  const dockTogglePinned = useCallback((type: string) => {
-    const item = dock.items.find((i) => i.type === type);
-    patchItem(type, { pinned: !(item?.pinned ?? false) });
-  }, [dock.items, patchItem]);
-
-  // Closing IS deselecting: there is no hidden-but-toggled state, which is the
-  // defect `mode: 'hidden'` used to be.
-  const dockClose = useCallback((type: string) => patchItem(type, { open: false }), [patchItem]);
-
-  const dockWidthChange = useCallback((width: number) => patchDock({ width }), [patchDock]);
-
-  const dockExpand = useCallback((type: string, from: HTMLElement | null) => {
-    const rect = from?.getBoundingClientRect();
-    setExpandOrigin(rect === undefined
-      ? undefined
-      : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-    setExpandedWidget(type);
-  }, []);
+  // **The dock's whole state block was here and is gone.** Two preference keys
+  // (`inwire.dock`, `inwire.dashboard`), nine callbacks, and the expanded-widget
+  // window - all of it deleted with the dock itself.
+  //
+  // Where the three widgets went: the geo map is a VIEW now (`view === 'geo'`,
+  // and the ONLY place it is mounted - the small copy that briefly sat beside
+  // the hex dump is deleted too), and the traffic timeline and
+  // the packet-size chart are a tab of the Statistics pane. What none of them
+  // needed was a column, an open/closed flag, a pin, a drag-reorder or an
+  // overlay - which is most of what this block was.
   /**
    * How this machine's adapters are configured, and who this machine is.
    *
@@ -606,7 +510,7 @@ export default function App() {
     setLinkChanges((prev) => prev.concat(change).slice(-32));
   }), []);
   // How far a session restore has got, or null when none is running. Drives
-  // the header's progress readout; also the flag the UI uses to explain why
+  // the filter row's progress readout; also the flag the UI uses to explain why
   // packets are appearing without a capture being started.
   const [restoreProgress, setRestoreProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -621,7 +525,7 @@ export default function App() {
    * gone; this is the whole of the model.
    *
    * It is still threaded to the components rather than inlined at each gate,
-   * because the seventeen `permissions.*` reads are where a real one would
+   * because the sixteen `permissions.*` reads are where a real one would
    * plug in.
    */
   const permissions: Capabilities = {
@@ -695,8 +599,17 @@ export default function App() {
       });
   }, []);
 
-  /**
-   * A flush of dissected frames from the Worker. Queued, not committed: the
+  /* **The flush handler was here, and the sentence describing it was left
+     truncated mid-clause by the edit that moved it** - "A flush of dissected
+     frames from the Worker. Queued, not committed: the". Whatever it went on to
+     say is not recoverable from this file, and is not invented back here.
+
+     What is certain is where the work went: `queueFrames` in
+     `hooks/usePacketBuffer.ts` is the handler now - it is passed to the agent
+     hook as `onFrames` below - and the reasoning the fragment was starting on
+     survives beside it: a batch is appended and returned from, and one flush
+     commits the whole batch in a single state update, which is what keeps
+     ingest cost independent of buffer size. */
 
   /**
    * The link to the local capture agent.
@@ -754,7 +667,7 @@ export default function App() {
   /**
    * Starts a capture the schedule asked for, or reports why it could not.
    *
-   * It does what the header's own Start does - clear, then start - rather than
+   * It does what the rail's own Start does - clear, then start - rather than
    * opening a second path into the same state. The discard is deliberate and
    * was consented to in the dropdown, which warns while the schedule is being
    * set precisely because a timer cannot answer a confirmation dialog.
@@ -1084,6 +997,23 @@ export default function App() {
   const isDraggingRef = useRef(false);
   const isDraggingColumnRef = useRef(false);
   const bottomPaneRef = useRef<HTMLDivElement>(null);
+  /**
+   * Where the layout's custom properties live.
+   *
+   * The root rather than the bottom pane, and the two are different jobs that
+   * used to share one ref: the pane is what a drag MEASURES - its own
+   * `getBoundingClientRect` is what makes a ratio a ratio, whatever sits either
+   * side of it - and the root is what the properties are SET on.
+   *
+   * **The reason for the root was the window-spanning status bar, and that bar
+   * is deleted.** It sat outside the pane and had to resolve a percentage
+   * against the same base the panes were sized by, which only the root could
+   * give it. Only the panes read these now, so the placement is no longer
+   * load-bearing - it is kept because moving it back onto the pane would be a
+   * layout change made for tidiness alone. What IS still load-bearing is the
+   * split above: measure the pane, write the root.
+   */
+  const layoutVarsRef = useRef<HTMLDivElement>(null);
 
   /**
    * The live size during a drag, before it is committed.
@@ -1103,15 +1033,28 @@ export default function App() {
   }, [bottomPaneHeight, detailsPaneRatio]);
 
   const applyLayoutVars = useCallback(() => {
-    const el = bottomPaneRef.current;
+    const el = layoutVarsRef.current;
     if (!el) return;
     el.style.setProperty("--bottom-pane-height", `${dragRef.current.bottomPaneHeight}px`);
+    // One share and a remainder, so there is no interaction to clamp. There
+    // were two - the map's and the tree's, with "the hex dump keeps at least a
+    // tenth" enforced here rather than in the normalizer - and both went with
+    // the map. The dump's floor is `MIN_PANE_PX` again, where it was before.
     el.style.setProperty("--details-pane-size", `${dragRef.current.detailsPaneRatio * 100}%`);
   }, []);
 
   /** A floor that only stops either side being dragged to nothing. */
   const MIN_PANE_PX = 220;
 
+  /**
+   * The row's one divider: between the tree and the dump, resizing the TREE.
+   *
+   * A plain offset from the leading edge, because the tree is the first pane in
+   * the row. It briefly was not: with the map ahead of it this subtracted the
+   * map's share from the offset, and read that share out of `dragRef` rather
+   * than out of props because during a drag of the other divider the committed
+   * value is a frame behind. Both went with the map.
+   */
   const resizeSplit = useCallback((clientX: number, clientY: number) => {
     const el = bottomPaneRef.current;
     if (!el) return;
@@ -1132,13 +1075,27 @@ export default function App() {
   useEffect(() => {
     const handlePointerMove = (e: PointerEvent) => {
       if (isDraggingRef.current) {
-        // No footer offset. There used to be one - a hardcoded 28px for a
-        // footer element that does not exist anywhere in the tree - which put
-        // every vertical drag 28px away from the pointer.
-        const next = window.innerHeight - e.clientY;
+        // Measured off the pane's own bottom edge, not the window's.
+        //
+        // The two are the same number again - the byte inspector is back inside
+        // the Hex View pane, so the rail-and-panes row runs to the bottom of the
+        // window - and this still measures, deliberately.
+        //
+        // The history is the argument. There was a hardcoded 28px offset here
+        // once, for a footer that had been deleted; it was removed for good
+        // reason and the footer came back. Then the footer became a
+        // window-spanning bar, which put ~25px between the row's bottom and the
+        // window's and would have needed the offset back. Then the bar was
+        // deleted and the footer came back again. Every one of those four turns
+        // changes this number and none of them changes this line, because a
+        // `getBoundingClientRect` asks rather than assumes - and the symptom of
+        // assuming wrong is a divider that sits a fixed distance from the
+        // pointer and stays there for the rest of the gesture.
+        const bottom = bottomPaneRef.current?.getBoundingClientRect().bottom
+          ?? window.innerHeight;
         dragRef.current.bottomPaneHeight = Math.max(
           100,
-          Math.min(next, window.innerHeight - 200),
+          Math.min(bottom - e.clientY, bottom - 200),
         );
         applyLayoutVars();
         return;
@@ -1219,7 +1176,7 @@ export default function App() {
   /**
    * The colour of the row the selected packet was picked from.
    *
-   * The two detail panes below the list, and the detail window, all label a
+   * The two detail panes below the list, and the Frame Detail view, all label a
    * frame they did not draw. Labelling it in the app accent said the same thing
    * for every frame; labelling it in the frame's own colour ties the header to
    * the row the eye just left.
@@ -1252,7 +1209,7 @@ export default function App() {
    * Selects frame `id` in the list, or explains why it cannot.
    *
    * The one path every in-app jump takes: the detail tree's frame links, the
-   * Statistics tables, and the detail window's own navigation. They each used
+   * Statistics tables, and the Frame Detail view's own navigation. They each used
    * to do their own `packets.find` and silently drop the miss.
    */
   const goToFrame = useCallback((id: number) => {
@@ -1264,18 +1221,11 @@ export default function App() {
     setSelectedPacket(packets[index]);
   }, [packets]);
 
-  /** The same, for the detail window, which navigates by id rather than object. */
-  const showFrameInWindow = useCallback((id: number) => {
-    const refusal = frameJumpRefusal(packets, id);
-    if (refusal !== null) { setNavNotice(refusal); return; }
-    setNavNotice(null);
-    setDetailPacketId(id);
-  }, [packets]);
-
-  const selectedPacketAccent = useMemo(
-    () => (selectedPacket ? colorEngine.getPacketAccent(selectedPacket, packetTheme) : null),
-    [selectedPacket, colorEngine, packetTheme],
-  );
+  /* **`showFrameInWindow` is deleted.** It was `goToFrame` for the detail
+     window, identical but for the last line - one set the list's selection and
+     the other set the window's own frame id. The window is a view reading the
+     same selection now, so there is one jump path again, which is what
+     `goToFrame`'s comment above already claimed there was. */
 
 
 
@@ -1291,12 +1241,12 @@ export default function App() {
   /**
    * Driver Info's Connect / Disconnect.
    *
-   * Both only set intent - the WebSocket effect above owns the socket, and
-   * flipping this flag is what makes it run its cleanup or reconnect. Nothing
-   * is sent to the agent on disconnect and nothing needs to be: the agent
-   * stops its sniffer when the last client goes away (handle_disconnect in
-   * agent.py), so closing the socket genuinely stops the capture rather than
-   * just hiding it from this tab.
+   * Both only set intent - the agent-link effect in `useAgentConnection` owns
+   * the connection, and flipping this flag is what makes it run its cleanup or
+   * reconnect. Nothing is sent to the agent on disconnect and nothing needs to
+   * be: the agent stops its sniffer when the last client goes away
+   * (handle_disconnect in agent.py), so dropping the link genuinely stops the
+   * capture rather than just hiding it from this window.
    *
    * Memoized like the log handlers above, because DriverInfoPanel keys effects
    * on these identities.
@@ -1308,7 +1258,7 @@ export default function App() {
    * Driver Info's Restart Agent.
    *
    * Fire and forget by design. The agent acks by dying, so there is no reply
-   * to wait for - the socket drops, the existing 3s reconnect loop starts
+   * to wait for - the pipe drops, the existing 3s reconnect loop starts
    * retrying, and the agent comes back under it. If the agent refuses (it is
    * not running as the service, or no restart policy is in place) it answers
    * with an `error` message instead and the log pane shows why.
@@ -1424,25 +1374,29 @@ export default function App() {
    * The packet buffer as the summary panels see it: the same array, but
    * changing at most twice a second instead of ten times.
    *
-   * Every panel in the analytics aside does at least one full pass over the
-   * buffer when this identity changes. Measured together at a 21,903-packet
-   * buffer they cost 16.6ms per flush - 166ms of every second, and about
-   * 380ms/s at the 50,000 cap - to redraw summaries that no one can read at
-   * 10Hz. Throttling the input is what makes that proportional to how fast the
-   * information is actually consumed rather than to how fast packets arrive.
+   * A surface fed from this does at least one full pass over the buffer when
+   * the identity changes. Measured across the analytics column this throttle
+   * was built for - five panels, since reduced to one live consumer - a
+   * 21,903-packet buffer cost 16.6ms per flush: 166ms of every second, and
+   * about 380ms/s at the 50,000 cap, to redraw summaries that no one can read
+   * at 10Hz. Throttling the input is what makes that proportional to how fast
+   * the information is actually consumed rather than to how fast packets
+   * arrive. The map is the consumer now and the arithmetic is unchanged - it
+   * redraws every arc when this identity moves.
    *
-   * Deliberately NOT used for the packet list (it is the live view), the header
-   * counters (`.length` is O(1)), or the export and stream-follower modals,
-   * which reconstruct exact data and must never see a stale snapshot.
+   * Deliberately NOT used for the packet list (it is the live view), the title
+   * row's counter (`.length` is O(1), and it subscribes rather than being
+   * passed), or the export modal and the stream pane, which reconstruct exact
+   * data and must never see a stale snapshot.
    */
-  // The analytics panels' feed.
+  // The throttled feed.
   //
-  // `dashboardRefreshMs` of 0 means paused: the panels keep the last buffer
-  // they were given, so every memo keyed on it stops recomputing. That is the
-  // whole cost of the dashboard, and pausing removes it without removing the
-  // panels. The throttle still runs underneath at a slow rate rather than
-  // being torn down, so resuming publishes immediately instead of waiting out
-  // a fresh interval.
+  // `dashboardRefreshMs` of 0 means paused: the consumer keeps the last buffer
+  // it was given, so every memo keyed on it stops recomputing. That is the
+  // whole cost of the throttled surfaces, and pausing removes it without
+  // removing them. The throttle still runs underneath at a slow rate rather
+  // than being torn down, so resuming publishes immediately instead of waiting
+  // out a fresh interval.
   const throttledDashboardPackets = useThrottledValue(
     packets,
     dashboardRefreshMs === 0 ? 2000 : dashboardRefreshMs,
@@ -1515,10 +1469,12 @@ export default function App() {
   }, [filteredPackets, packets, selectedPacket]);
 
   // The keyboard handler below reads the live list and selection through refs
-  // so that it is registered once per open/close of the detail window rather
-  // than re-registered on every flush - which, with `filteredPackets` in its
-  // dependency list, it was: ten window listener swaps a second for the whole
-  // life of a capture.
+  // so that it is registered once rather than re-registered on every flush -
+  // which, with `filteredPackets` in its dependency list, it was: ten window
+  // listener swaps a second for the whole life of a capture. It used to be
+  // registered once per open/close of the detail MODAL, whose open flag was in
+  // its dependency list; Frame Detail is a view and that gate is gone, so the
+  // effect now depends on nothing that moves during a capture at all.
   /**
    * The buffer, for the paths that need to read it outside a render.
    *
@@ -1532,6 +1488,92 @@ export default function App() {
   filteredPacketsRef.current = filteredPackets;
   const selectedPacketRef = useRef(selectedPacket);
   selectedPacketRef.current = selectedPacket;
+
+  /* `handleFollowStream` and the view-change handler below it sit HERE, above
+     `useKeyboardNavigation`, rather than down with `leaveStream` where the rest
+     of the stream state lives. `Ctrl+5` resolves through the same handler the
+     rail button uses, and a `const` cannot be read before it is declared - so
+     the alternative was the shortcut and the button meaning two different
+     things, which is exactly what this handler exists to prevent. */
+
+  /**
+   * Opens a stream, from wherever it was asked for.
+   *
+   * Switching the view is part of it now rather than something the caller
+   * remembers: a stream is followed from a packet row, the Frame Detail view or
+   * a conversation table, and all three mean "show me this". The origin is
+   * recorded here because this is the only place that knows what was selected
+   * when the request was made.
+   *
+   * **The second argument is which of the two readings to open on, and it is a
+   * parameter for a reason worth keeping.** "Follow stream" and "Show
+   * conversation" ask different questions of the same frames - content against
+   * shape - and the tempting shape for that is a second surface. It is one
+   * surface with a tab, so the two cannot drift out of step.
+   */
+  const handleFollowStream = useCallback((
+    target: StreamTarget, view: 'dialogue' | 'ladder' = 'dialogue',
+  ) => {
+    setStreamToFollow(target);
+    setStreamView(view);
+    setStreamOrigin(selectedPacketRef.current?.id ?? null);
+    setView('stream');
+  }, [setView]);
+
+  /**
+   * The rail's Follow Stream button, which is a verb and was reading as a place.
+   *
+   * ## What was broken
+   *
+   * Every other entry in the rail's view group is a pure navigation: press it,
+   * that surface fills the window. Follow Stream is not - it needs a stream -
+   * and it was wired as if it were. `streamAvailable` was `streamToFollow !==
+   * null`, which is "a stream is ALREADY open", and the click was a bare
+   * `setView('stream')`, which shows whatever that happens to hold. Three
+   * symptoms, all of them the same bug:
+   *
+   *  - selecting a frame on a TCP stream left the button **disabled**, because
+   *    nothing had been followed yet;
+   *  - following one from the Frame Detail pane enabled it, because that path
+   *    sets `streamToFollow`;
+   *  - and from then on it opened **that** stream for ever, because selecting a
+   *    different frame never touched the state the button reads.
+   *
+   * ## What it does now
+   *
+   * The button follows the SELECTION, which is what its name says and what the
+   * context menu on a packet row has always done. Availability is the selected
+   * frame having a stream to follow, **or** a stream already being open - the
+   * second half so the view stays reachable while reading a conversation whose
+   * frames are not what is selected, and so the icon does not flicker
+   * enabled/disabled as somebody arrows down the list past an ARP.
+   *
+   * The selection wins when both are true. Clicking with frame 900 selected
+   * means "follow frame 900's stream", even if frame 12's is the one on screen.
+   *
+   * `targetForPacket` reads `frameProtocols`, the two ports and `streamId` -
+   * all summary fields carried by a buffered frame - so this asks nothing of
+   * the dissector and costs nothing per render.
+   */
+  const streamForSelection = selectedPacket !== null ? targetForPacket(selectedPacket) : null;
+
+  /**
+   * The rail's and the keyboard's one way of changing view.
+   *
+   * Both go through here rather than through `setView` directly, so `Ctrl+5`
+   * and the rail button cannot come to mean different things - which is the
+   * same reason `APP_VIEWS` order IS the numbering.
+   */
+  const handleViewChange = useCallback((next: AppView) => {
+    if (next !== 'stream') { setView(next); return; }
+    const target = selectedPacketRef.current !== null
+      ? targetForPacket(selectedPacketRef.current) : null;
+    // No stream on the selection: fall back to whatever is already open. The
+    // rail disables the button when neither is true, so this is reachable only
+    // by the shortcut.
+    if (target === null) { if (streamToFollow !== null) setView('stream'); return; }
+    handleFollowStream(target);
+  }, [setView, streamToFollow, handleFollowStream]);
 
   /**
    * Escape in a non-Packets view returns to Packets.
@@ -1554,9 +1596,8 @@ export default function App() {
 
   // Window-level keyboard shortcuts - see hooks/useKeyboardNavigation.ts.
   useKeyboardNavigation({
-    detailPacketId,
     canCapture: permissions.canCapture,
-    onViewShortcut: setView,
+    onViewShortcut: handleViewChange,
     filteredPacketsRef,
     selectedPacketRef,
     isCapturingRef,
@@ -1739,17 +1780,12 @@ export default function App() {
     setAppliedFilter(expression);
   }, []);
 
-  const handleSelectProtocol = useCallback((proto: string) => {
-    const expr = `proto == ${proto.toLowerCase()}`;
-    setFilterText(expr);
-    setAppliedFilter(expr);
-  }, []);
-
-  const handleFilterHost = useCallback((ip: string) => {
-    const expr = `ip.addr == "${ip}"`;
-    setFilterText(expr);
-    setAppliedFilter(expr);
-  }, []);
+  // `handleSelectProtocol` (`proto == tcp`) and `handleFilterHost`
+  // (`ip.addr == "…"`) were here, for the two dashboard widgets that could hand
+  // a filter back - Protocol breakdown and Top talkers, both deleted. Every
+  // other route into the filter bar goes through `handleQuickFilter` above,
+  // which Statistics uses for exactly this and which takes the whole expression
+  // rather than building one.
 
   /**
    * "Apply as Filter" / "Prepare as Filter" from a row of the detail tree.
@@ -1774,36 +1810,11 @@ export default function App() {
     });
   }, []);
 
-  // Hoisted out of the aside's JSX for the same reason.
-  const handleInspectFromDashboard = useCallback((pkt: Packet) => {
-    setSelectedPacket(pkt);
-  }, []);
+  // `handleInspectFromDashboard` was here - a widget handing a frame back to
+  // the list, through `dashboardContext`. Neither surviving surface does that:
+  // the map selects a place rather than a packet, and the charts are aggregates
+  // with no single frame to point at.
 
-
-  /**
-   * Opens the stream window, on whichever of its two views was asked for.
-   *
-   * "Follow stream" and "Show conversation" are the same window with a
-   * different question in mind - content against shape - so the view is a
-   * parameter rather than a second modal that would drift out of step.
-   */
-  /**
-   * Opens a stream, from wherever it was asked for.
-   *
-   * Switching the view is part of it now rather than something the caller
-   * remembers: a stream is followed from a packet row, the detail window or a
-   * conversation table, and all three mean "show me this". The origin is recorded
-   * here because this is the only place that knows what was selected when the
-   * request was made.
-   */
-  const handleFollowStream = useCallback((
-    target: StreamTarget, view: 'dialogue' | 'ladder' = 'dialogue',
-  ) => {
-    setStreamToFollow(target);
-    setStreamView(view);
-    setStreamOrigin(selectedPacketRef.current?.id ?? null);
-    setView('stream');
-  }, [setView]);
 
   /**
    * Leaves the stream pane, landing on the frame it was opened from.
@@ -1960,41 +1971,17 @@ export default function App() {
    */
   const handleUpdateDissectors = () => {};
 
-  /**
-   * Everything the analytics widgets need, in one object.
-   *
-   * Memoized because `Dock` sits behind `React.memo` - as the right-hand column
-   * it replaces did, and for the same reason - and a context
-   * rebuilt on every render would defeat that boundary entirely - this
-   * component re-renders about ten times a second while capturing, which is
-   * the whole reason the boundary is there.
-   *
-   * The only field that churns is `packets`, which is the throttled dashboard
-   * feed rather than the live buffer; every callback below is a stable
-   * `useCallback`. So this changes at the dashboard's rate, not the capture's.
-   */
-  const dashboardContext = useMemo(
-    () => ({
-      packets: dashboardPackets,
-      isDark,
-      themeKey: resolvedTheme,
-      isCapturing,
-      appliedFilter,
-      onSelectProtocol: handleSelectProtocol,
-      onFilterHost: handleFilterHost,
-      onInspectPacket: handleInspectFromDashboard,
-    }),
-    [
-      dashboardPackets,
-      isDark,
-      resolvedTheme,
-      isCapturing,
-      appliedFilter,
-      handleSelectProtocol,
-      handleFilterHost,
-      handleInspectFromDashboard,
-    ],
-  );
+  // **`dashboardContext` was here and is gone with the dock.** One memoised
+  // object carrying the throttled packet feed, two theme facts and a stable
+  // callback, held together so `Dock`'s `React.memo` could actually hold. That
+  // was the application's only memo boundary; `React.memo` now appears nowhere
+  // in `src/` at all.
+  //
+  // There is no boundary to hold up any more: the map and the charts take their
+  // props directly, from the two places that render them, and both of those are
+  // unmounted when their view is not active. `dashboardPackets` survives and is
+  // still the throttled feed - see `perf.dashboardRefreshMs` - because the map
+  // redrawing its arcs ten times a second was never about the dock.
 
   // Live capture telemetry, surfaced in the Settings modal's buffer badge.
   //
@@ -2021,14 +2008,17 @@ export default function App() {
     const label = agentInterfaces.find((i) => i.name === selectedInterfaces[0])?.label;
     return label === undefined ? null : shortInterfaceLabel(label);
   })();
-  // One string, used twice: the OS taskbar gets it through main, and the title
-  // row shows it. Computed once so the two cannot say different things.
+  // The window's name, for the OS alone now: the taskbar, Alt-Tab and the
+  // window list. The title row's centre shows the packet counter instead - see
+  // `components/common/PacketCountsReadout.tsx` - so this string has exactly one
+  // consumer again, which is what `windowTitleFor`'s own comment assumed.
   const windowTitle = windowTitleFor({ capturing: isCapturing, adapter: captureAdapter });
   useWindowTitle(windowTitle);
 
-  // Published rather than passed: the counts widget subscribes for itself, so a
-  // number that changes on every 100ms flush never reaches `dashboardContext`
-  // and never re-renders the five widgets that do not show it. See
+  // Published rather than passed: the title row's readout subscribes for
+  // itself, so a number that changes on every 100ms flush never travels down
+  // through props - and the row it sits in is on screen in every view, so
+  // passing it would re-render the whole tree to move one number. See
   // `services/packetCounts.ts` for what putting it there would cost.
   useEffect(() => {
     publishPacketCounts({
@@ -2041,401 +2031,505 @@ export default function App() {
   }, [shownRowCount, captureRowCount, captureFilter.state, filterUncovered, captureFilter.rescan]);
 
   return (
-    <div className="h-screen w-screen flex font-sans overflow-hidden transition-colors bg-background text-foreground">
-      {/* The rail spans the full window height, so it reaches the top and its
-          own 40px cell sits level with the title row beside it. That is the
-          whole reason it is here rather than inside <main>. */}
-      <ActivityRail
-        isCapturing={isCapturing}
-        onStartCapture={handleStartCapture}
-        onStopCapture={handlePauseCapture}
-        onClearPackets={handleClearPackets}
-        bufferedPackets={packets.length}
-        permissions={permissions}
-        agentInterfaces={agentInterfaces}
-        selectedInterfaces={selectedInterfaces}
-        onSelectInterface={handleSelectInterface}
-        interfaceRates={interfaceRates}
-        onInterfacePickerOpenChange={handleInterfacePickerOpenChange}
-        captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
-        agentHealth={agentHealth}
-        view={view}
-        onViewChange={setView}
-        streamAvailable={streamToFollow !== null}
-        dockItems={dock.items}
-        widgets={dashboardPrefs.widgets}
-        onToggleWidget={toggleWidget}
-        dockMinimized={dock.minimized}
-        onToggleDockMinimized={toggleDockMinimized}
-        onOpenSettings={() => setShowSettingsModal(true)}
-        onOpenExport={() => setShowExportModal(true)}
-        packetSearchText={packetSearchText}
-        onPacketSearchChange={setPacketSearchText}
-        schedule={schedule}
-        onScheduleChange={setSchedule}
-        schedulePresets={schedulePresets}
-        onSchedulePresetsChange={setSchedulePresets}
-        // Recomputed on the hook's own tick, which is what makes the
-        // countdown advance without this component owning a timer.
-        scheduleSummary={describeSchedule(
-          schedule, scheduleNow, isCapturing, captureStartedAtRef.current,
-          (epochMs) => new Date(epochMs).toLocaleString(undefined, {
-            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-          }),
-        )}
-        scheduleNow={scheduleNow}
-      />
+    <div
+      ref={layoutVarsRef}
+      style={
+        {
+          // Both on the root rather than on the bottom pane - see `layoutVarsRef`
+          // for why that placement outlived the bar it was chosen for. There was
+          // a third, `--geo-pane-size`, and it is the reason this object exists:
+          // it had never been in the React style at all, only in the imperative
+          // drag path, so the map pane had no width until somebody dragged
+          // something.
+          "--bottom-pane-height": `${bottomPaneHeight}px`,
+          "--details-pane-size": `${detailsPaneRatio * 100}%`,
+        } as React.CSSProperties
+      }
+      className="h-screen w-screen flex flex-col font-sans overflow-hidden transition-colors bg-background text-foreground"
+    >
+      {/* The title row spans the WINDOW, and the rail hangs below it. That is
+          what puts the app's mark at the true top-left corner, and what lets
+          the row and the rail - both `bg-secondary`, with no border between
+          them - read as one surface running into Windows' own rounded corner.
 
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* 40px, matching TITLE_BAR_HEIGHT and therefore what the native overlay
-            reserves. Almost all drag region - the capture controls moved into the
-            rail precisely so this row could be nearly empty. */}
-        <TitleRow title={windowTitle} focused={windowFocused} maximized={windowMaximized} />
+          It costs `TITLE_BAR_HEIGHT` (32px) of rail height, which is why
+          `MIN_WINDOW_HEIGHT` is 680: the subtraction leaves the rail 648, and
+          its icons come to 494. `scripts/session/view.ts` does that sum and is
+          the only place it is worth trusting - the numbers were quoted here as
+          40 / 640 / 630 long after all three had moved. */}
+      <TitleRow focused={windowFocused} maximized={windowMaximized} />
 
-        {/* Always shown, now that Network is a Settings tab rather than a view.
+      {/* **`bg-secondary`, and it must track the rail and the title row.** It is
+          never seen except in one place: the notch left by the rounded corner
+          below. The row is covered edge to edge by the rail and <main>, so this
+          is the colour that shows THROUGH that curve - which is what makes the
+          pane look cut out of the chrome rather than laid on top of it.
 
-            It used to be hidden there and nowhere else, because Network
-            describes how this machine is configured while a display filter acts
-            on the capture - so the row was a control with nothing in view to act
-            on, reporting "PACKETS 1,204 / 50,000" about a list that was not on
-            screen. Both remaining views ARE the capture: the list is the frames,
-            and Statistics' tables count them and hand filters back. */}
-        <FilterRow
+          It was `bg-card` and the chrome moved to `bg-secondary` without it,
+          which put a wedge of the WRONG grey in the one curve the whole
+          arrangement is about. Nothing catches that: it is a few dozen pixels,
+          it is only visible against the rounded corner, and both colours are
+          plausible greys. If the chrome's ground changes again, this changes
+          with it. */}
+      <div className="flex-1 flex min-h-0 overflow-hidden bg-secondary">
+        <ActivityRail
           isCapturing={isCapturing}
-          captureAdapter={captureAdapter}
-          restoreProgress={restoreProgress}
+          onStartCapture={handleStartCapture}
+          onStopCapture={handlePauseCapture}
+          onClearPackets={handleClearPackets}
+          bufferedPackets={packets.length}
+          permissions={permissions}
+          agentInterfaces={agentInterfaces}
+          selectedInterfaces={selectedInterfaces}
+          onSelectInterface={handleSelectInterface}
+          interfaceRates={interfaceRates}
+          onInterfacePickerOpenChange={handleInterfacePickerOpenChange}
+          captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
           agentHealth={agentHealth}
-          agentLinkEnabled={agentLinkEnabled}
-          onOpenDriverInfo={() => setShowSettingsModal(true)}
-          filterSlot={
-            <FilterBar
-              filterText={filterText}
-              onFilterChange={setFilterText}
-              onApplyFilter={(newFilter?: string) =>
-                setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
-              }
-              filterPresetLibrary={filterPresetLibrary}
-              onSaveCurrentFilter={handleSaveCurrentFilter}
-            />
-          }
+          view={view}
+          onViewChange={handleViewChange}
+          streamAvailable={streamForSelection !== null || streamToFollow !== null}
+          onOpenSettings={() => setShowSettingsModal(true)}
+          onOpenExport={() => setShowExportModal(true)}
+          schedule={schedule}
+          onScheduleChange={setSchedule}
+          schedulePresets={schedulePresets}
+          onSchedulePresetsChange={setSchedulePresets}
+          // Recomputed on the hook's own tick, which is what makes the
+          // countdown advance without this component owning a timer.
+          scheduleSummary={describeSchedule(
+            schedule, scheduleNow, isCapturing, captureStartedAtRef.current,
+            (epochMs) => new Date(epochMs).toLocaleString(undefined, {
+              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+            }),
+          )}
+          scheduleNow={scheduleNow}
         />
 
-        {/* Central Inspection + Analytics Split Grid */}
-        <div className="flex-1 flex min-h-0 overflow-hidden">
-          {/* The dock, between the rail and the content it describes.
+        {/* The content pane, tucked into the corner the title row and the rail
+            make. Its top-left is rounded and the other three are square: this is
+            the only corner where two `--card` edges meet, and rounding a corner
+            that runs into the window's own edge would be a second curve inside
+            Windows' radius - the thing `TitleRow.tsx` refuses to draw.
 
-              It renders BEFORE the packet section in the flex row, which is the
-              whole move: the analytics column used to be the last child and sat
-              on the right. Everything inside it is unchanged - `RenderedWidget`
-              is the same call the old column made. */}
-          <Dock
-            minimized={dock.minimized}
-            items={dock.items}
-            width={dock.width}
-            context={dashboardContext}
-            widgets={dashboardPrefs.widgets}
-            onConfigChange={dockConfigChange}
-            onReorder={reorderDock}
-            onTogglePinned={dockTogglePinned}
-            onClose={dockClose}
-            onWidthChange={dockWidthChange}
-            onExpand={dockExpand}
-          />
+            **The border is on this pane and not on the rail**, and that is the
+            whole reason the curve is visible. `--card` against `--background` is
+            a 4/255 delta in Night, so a notch cut out of the ground shows
+            nothing at all; the 1px edge is what the eye actually follows round
+            the corner. The rail's `border-r` used to draw that line straight
+            past this point, so the two cannot both exist - it went when this
+            arrived.
 
-          {/* Main Packet Inspection Core */}
-          {/* Kept MOUNTED while another view is active, and hidden with
-              `display: none`.
+            `overflow-hidden` is what makes it work rather than decoration:
+            whichever child lands in that corner paints its own `bg-background`
+            straight into it, so without the clip the curve would be drawn and
+            then covered by the thing sitting in it. That child is the FILTER
+            ROW, which is `bg-background`.
 
-              Unmounting it would be cheaper per frame and is the wrong trade: the
-              list is virtualised, so its scroll offset is a function of a row
-              height and a window that would have to be measured and restored by
-              hand, and the selection would have to be re-found in a buffer that
-              has grown in the meantime. Coming back to Statistics and finding the
-              packet list exactly where it was left is worth a subtree that keeps
-              rendering while invisible.
+            **This is a column, and it was a row for exactly one revision.** The
+            dock ran the pane's full height with the filter row beside it, so
+            that a widget summarising the whole capture did not sit under a row
+            that narrows the list. Deleting the dock answered the same question
+            by removing the thing that raised it, and the filter row now spans
+            exactly what it acts on because there is nothing else in the row.
 
-              An inline style rather than Tailwind's `hidden`: that utility and
-              `flex` are the same specificity, so which one wins depends on their
-              order in the emitted stylesheet. This cannot be got wrong. */}
-          <section
-            style={view === 'packets' ? undefined : { display: 'none' }}
-            className="flex-1 flex flex-col border-r border-border overflow-hidden min-w-0"
-          >
-            {/* Upper Pane: High-Density Packet Table */}
-            <div
-              // The tour highlights the pane rather than a row: it runs before
-              // there are any rows. See components/tour/tourSteps.
-              data-tour="list"
-              className="flex-1 flex flex-col min-h-0 overflow-hidden"
-            >
-              <PacketList
-                names={nameMap}
-                resolveNames={nameResolution.network}
-                sourceProcess={sourceProcessFor}
-                packets={filteredPackets}
-                // Both arrays, because they mean different things to the row
-                // space: `packets` is what `belowWindow` was measured against
-                // and therefore indexes the capture, `filteredPackets` is what
-                // to show. Their identity is also how "no filter" is known -
-                // the same check the selection-visibility effect above uses.
-                allPackets={packets}
-                below={belowWindow}
-                filterScan={captureFilter.state}
-                themeKey={resolvedTheme}
-                selectedPacket={selectedPacket}
-                onSelectPacket={(pkt) => setSelectedPacket(pkt)}
-                onInspectPacket={(pkt) => setDetailPacketId(pkt.id)}
-                onFollowStream={handleFollowStream}
-                onQuickFilter={handleQuickFilter}
-                searchText={packetSearchText}
-                // So a filter that finds nothing can say whether it searched
-                // the capture or only what is left of it.
-                droppedBuffer={droppedBuffer}
-                colorEngine={colorEngine}
-                packetTheme={packetTheme}
+            The dock's width reserve went with it. `LIST_RESERVE` in
+            `dockPrefs.ts` guaranteed the packet list a width while a column sat
+            beside it; both the constant and the file are deleted, and nothing
+            competes with the list for horizontal space in this row any more. */}
+        <main className="flex-1 flex flex-col min-w-0 overflow-hidden
+          rounded-tl-xl border-l border-t border-border bg-background">
+          {/* **The filter row belongs to the Packets view, and only to it.**
+
+              This reverses the rule that was here, and the reversal is the
+              older argument finally applied to every view rather than to one.
+              The row was hidden above Network and nowhere else, because Network
+              described the machine while a display filter acts on the capture -
+              a control with nothing in view to act on. Network became a Settings
+              tab, the rule was inverted to "no view hides the filter row", and
+              the four views that inherited it turned out to fail the same test
+              Network did:
+
+                - **Statistics** is handed `packets`, not `filteredPackets`, on
+                  purpose - "these tables count the capture" - so the row above
+                  it changed nothing on screen at all.
+                - **Routing Map** draws `dashboardPackets`, the throttled feed.
+                - **Follow Stream** reads one conversation out of `packets`.
+                - **Frame Detail** shows the one selected frame; the filter
+                  reaches it only as a notice saying the frame is filtered out,
+                  which is a REPORT about the filter, not a control acting on
+                  what is in view.
+
+              So the row is rendered by NAMING the view that has it rather than
+              by excluding the ones that do not. That is the form that survives a
+              new view being added: an exclusion list silently hands the row to
+              anything added later, which is how four views came to carry an
+              inert control in the first place. */}
+          {view === 'packets' && (
+          <FilterRow
+            restoreProgress={restoreProgress}
+            agentHealth={agentHealth}
+            agentLinkEnabled={agentLinkEnabled}
+            onOpenDriverInfo={() => setShowSettingsModal(true)}
+            filterSlot={
+              <FilterBar
+                filterText={filterText}
+                onFilterChange={setFilterText}
+                onApplyFilter={(newFilter?: string) =>
+                  setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
+                }
+                filterPresetLibrary={filterPresetLibrary}
+                onSaveCurrentFilter={handleSaveCurrentFilter}
               />
-            </div>
+            }
+          />
+          )}
 
-            {/* Resize Drag Handle */}
-            {showPanes && (
-            <div
-              role="separator"
-              aria-orientation="horizontal"
-              aria-label="Resize packet detail panes"
-              aria-valuenow={Math.round(bottomPaneHeight)}
-              aria-valuemin={100}
-              aria-valuemax={Math.max(100, window.innerHeight - 200)}
-              tabIndex={0}
-              title="Drag to resize - right-click to reset, Enter to hide the panes"
-              className="block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50"
-              onPointerDown={() => beginDrag("height")}
-              // Right-click restores the default, on every draggable bar in the
-              // app. A drag is easy to overshoot and there is nothing to undo
-              // it with; the alternative is hunting for whatever number looked
-              // right before, which is not something anyone can actually do.
-              // preventDefault suppresses the browser's own menu, and
-              // stopPropagation keeps the packet list's row menu out of it.
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                patchLayout({ bottomPaneHeight: LAYOUT_DEFAULTS.bottomPaneHeight });
-              }}
-              onKeyDown={(e) => {
-                // Up grows the panes, because up is the direction the divider
-                // moves to make them bigger.
-                const step = e.shiftKey ? 64 : 16;
-                if (e.key === "ArrowUp") { e.preventDefault(); nudgeHeight(step); }
-                else if (e.key === "ArrowDown") { e.preventDefault(); nudgeHeight(-step); }
-                else if (e.key === "Home") { e.preventDefault(); patchLayout({ bottomPaneHeight: 100 }); }
-                else if (e.key === "End") { e.preventDefault(); patchLayout({ bottomPaneHeight: window.innerHeight - 200 }); }
-                else if (e.key === "Enter") { e.preventDefault(); patchLayout({ panes: false }); }
-              }}
-            />
-            )}
+          {/* The views. One row still, because Statistics and Follow Stream are
+              siblings of the packet list rather than children of it. */}
+          <div className="flex-1 flex min-h-0 overflow-hidden">
+            {/* Main Packet Inspection Core */}
+            {/* Kept MOUNTED while another view is active, and hidden with
+                `display: none`.
 
-            {/* Lower Pane: Geometric Split of Protocol Details Tree & Hex Viewer */}
-            {showPanes && (
-            <div
-              ref={bottomPaneRef}
-              style={
-                {
-                  // Both sizes live here, on one element, so a drag can write
-                  // them straight to the DOM without going through React.
-                  "--bottom-pane-height": `${bottomPaneHeight}px`,
-                  "--details-pane-size": `${detailsPaneRatio * 100}%`,
-                } as React.CSSProperties
-              }
-              className={`h-[var(--bottom-pane-height)] border-t border-border flex ${stacked ? "flex-col" : "flex-row"} overflow-hidden transition-colors shrink-0 bg-card`}
+                Unmounting it would be cheaper per frame and is the wrong trade: the
+                list is virtualised, so its scroll offset is a function of a row
+                height and a window that would have to be measured and restored by
+                hand, and the selection would have to be re-found in a buffer that
+                has grown in the meantime. Coming back to Statistics and finding the
+                packet list exactly where it was left is worth a subtree that keeps
+                rendering while invisible.
+
+                An inline style rather than Tailwind's `hidden`: that utility and
+                `flex` are the same specificity, so which one wins depends on their
+                order in the emitted stylesheet. This cannot be got wrong. */}
+            <section
+              style={view === 'packets' ? undefined : { display: 'none' }}
+              className="flex-1 flex flex-col border-r border-border overflow-hidden min-w-0"
             >
-              {/* Protocol Layers Inspection Tree */}
+              {/* Upper Pane: High-Density Packet Table */}
               <div
-                // On the container, not inside PacketDetailsTree - that renders
-                // two different trees for "a packet" and "no packet", and the
-                // tour needs one anchor that exists in both states.
-                data-tour="detail"
-                className={`block min-w-0 overflow-hidden shrink-0 ${
-                  stacked
-                    ? "w-full h-[var(--details-pane-size)]"
-                    : "w-[var(--details-pane-size)] h-full"
-                }`}
+                // The tour highlights the pane rather than a row: it runs before
+                // there are any rows. See components/tour/tourSteps.
+                data-tour="list"
+                className="flex-1 flex flex-col min-h-0 overflow-hidden"
               >
-                <PacketDetailsTree
-                  packet={selectedPacketDetail}
-                  accentColor={selectedPacketAccent}
-                  onHoverByteRange={setActiveByteRange}
-                  onSelectFrame={goToFrame}
-                  activeByteRange={activeByteRange}
-                  onFieldFilter={handleFieldFilter}
-                  currentFilter={filterText}
-                  onAddColumn={handleAddColumn}
+                <PacketList
+                  names={nameMap}
+                  resolveNames={nameResolution.network}
+                  sourceProcess={sourceProcessFor}
+                  packets={filteredPackets}
+                  // Both arrays, because they mean different things to the row
+                  // space: `packets` is what `belowWindow` was measured against
+                  // and therefore indexes the capture, `filteredPackets` is what
+                  // to show. Their identity is also how "no filter" is known -
+                  // the same check the selection-visibility effect above uses.
+                  allPackets={packets}
+                  below={belowWindow}
+                  filterScan={captureFilter.state}
+                  themeKey={resolvedTheme}
+                  selectedPacket={selectedPacket}
+                  onSelectPacket={(pkt) => setSelectedPacket(pkt)}
+                  // A double-click opens the Frame Detail view on that frame.
+                  // It used to open a modal over this list; the row is selected
+                  // first so the view has something to show and so the list is
+                  // on the same frame when it is come back to.
+                  onInspectPacket={(pkt) => { setSelectedPacket(pkt); setView('detail'); }}
+                  onFollowStream={handleFollowStream}
+                  onQuickFilter={handleQuickFilter}
+                  // So a filter that finds nothing can say whether it searched
+                  // the capture or only what is left of it.
+                  droppedBuffer={droppedBuffer}
+                  colorEngine={colorEngine}
+                  packetTheme={packetTheme}
                 />
               </div>
 
-              {/* Split Drag Handle - doubles as the border between the panes */}
+              {/* Resize Drag Handle */}
+              {showPanes && (
               <div
                 role="separator"
-                aria-orientation={stacked ? "horizontal" : "vertical"}
-                aria-label="Resize protocol tree and byte view"
-                aria-valuenow={Math.round(detailsPaneRatio * 100)}
-                aria-valuemin={10}
-                aria-valuemax={90}
+                aria-orientation="horizontal"
+                aria-label="Resize packet detail panes"
+                aria-valuenow={Math.round(bottomPaneHeight)}
+                aria-valuemin={100}
+                aria-valuemax={Math.max(100, window.innerHeight - 200)}
                 tabIndex={0}
-                className={`block transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50 ${
-                  stacked ? "h-1.5 w-full cursor-row-resize" : "w-1.5 h-full cursor-col-resize"
-                }`}
-                title="Drag to resize - right-click, double-click or Enter to even out"
-                onPointerDown={() => beginDrag("split")}
-                onDoubleClick={() => patchLayout({ detailsPaneRatio: 0.5 })}
+                title="Drag to resize - right-click to reset, Enter to hide the panes"
+                className="block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50"
+                onPointerDown={() => beginDrag("height")}
+                // Right-click restores the default, on every draggable bar in the
+                // app. A drag is easy to overshoot and there is nothing to undo
+                // it with; the alternative is hunting for whatever number looked
+                // right before, which is not something anyone can actually do.
+                // preventDefault suppresses the browser's own menu, and
+                // stopPropagation keeps the packet list's row menu out of it.
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  patchLayout({ detailsPaneRatio: LAYOUT_DEFAULTS.detailsPaneRatio });
+                  patchLayout({ bottomPaneHeight: LAYOUT_DEFAULTS.bottomPaneHeight });
                 }}
                 onKeyDown={(e) => {
-                  // Whichever pair of arrows points along the divider's axis.
-                  const step = e.shiftKey ? 0.1 : 0.02;
-                  const less = stacked ? "ArrowUp" : "ArrowLeft";
-                  const more = stacked ? "ArrowDown" : "ArrowRight";
-                  if (e.key === less) { e.preventDefault(); nudgeSplit(-step); }
-                  else if (e.key === more) { e.preventDefault(); nudgeSplit(step); }
-                  else if (e.key === "Home") { e.preventDefault(); patchLayout({ detailsPaneRatio: 0.1 }); }
-                  else if (e.key === "End") { e.preventDefault(); patchLayout({ detailsPaneRatio: 0.9 }); }
-                  else if (e.key === "Enter") { e.preventDefault(); patchLayout({ detailsPaneRatio: 0.5 }); }
+                  // Up grows the panes, because up is the direction the divider
+                  // moves to make them bigger.
+                  const step = e.shiftKey ? 64 : 16;
+                  if (e.key === "ArrowUp") { e.preventDefault(); nudgeHeight(step); }
+                  else if (e.key === "ArrowDown") { e.preventDefault(); nudgeHeight(-step); }
+                  else if (e.key === "Home") { e.preventDefault(); patchLayout({ bottomPaneHeight: 100 }); }
+                  else if (e.key === "End") { e.preventDefault(); patchLayout({ bottomPaneHeight: window.innerHeight - 200 }); }
+                  else if (e.key === "Enter") { e.preventDefault(); patchLayout({ panes: false }); }
                 }}
               />
+              )}
 
-              {/* Raw Hex & ASCII Dump View */}
+              {/* Lower Pane: Geometric Split of Protocol Details Tree & Hex Viewer */}
+              {showPanes && (
               <div
-                className="block w-full flex-1 h-full min-w-0 overflow-hidden"
+                ref={bottomPaneRef}
+                // The sizes are inherited from the root, which is where they are
+                // set - see `layoutVarsRef`. This element is what a drag
+                // measures, not what it writes.
+                className={`h-[var(--bottom-pane-height)] border-t border-border flex ${stacked ? "flex-col" : "flex-row"} overflow-hidden transition-colors shrink-0 bg-card`}
               >
-                <HexViewer
-                  packet={selectedPacketDetail}
-                  bytesState={selectedDetailState}
-                  accentColor={selectedPacketAccent}
-                  activeByteRange={activeByteRange}
-                  onHoverByte={(byteIdx) => {
-                    if (byteIdx !== null)
-                      setActiveByteRange([byteIdx, byteIdx]);
-                    else setActiveByteRange(null);
+                {/* **The tree, then the dump**, and one divider between
+                    them. There was a map ahead of the tree - the Routing Map
+                    view's own drawing, at pane size - and it is gone: the map
+                    is a VIEW and nothing else now, so it is mounted in exactly
+                    one place at a time by construction rather than by a guard
+                    on `view === 'packets'` that existed only to keep a second
+                    WebGL context from being built behind a hidden section.
+
+                    The divider resizes the pane on its LEFT and the hex dump
+                    absorbs the difference - it is `flex-1`, the tree carries a
+                    stored share. That is why the dump is last: it is the pane
+                    with no minimum content width worth defending, since a dump
+                    narrower than its own 16-byte row wraps into nonsense while
+                    the tree truncates field names. */}
+
+                {/* Protocol Layers Inspection Tree */}
+                <div
+                  // On the container, not inside PacketDetailsTree - that renders
+                  // two different trees for "a packet" and "no packet", and the
+                  // tour needs one anchor that exists in both states.
+                  data-tour="detail"
+                  className={`block min-w-0 overflow-hidden shrink-0 ${
+                    stacked
+                      ? "w-full h-[var(--details-pane-size)]"
+                      : "w-[var(--details-pane-size)] h-full"
+                  }`}
+                >
+                  <PacketDetailsTree
+                    packet={selectedPacketDetail}
+                    onHoverByteRange={setActiveByteRange}
+                    onSelectFrame={goToFrame}
+                    activeByteRange={activeByteRange}
+                    onFieldFilter={handleFieldFilter}
+                    currentFilter={filterText}
+                    onAddColumn={handleAddColumn}
+                  />
+                </div>
+
+                {/* Split Drag Handle - doubles as the border between the panes */}
+                <div
+                  role="separator"
+                  aria-orientation={stacked ? "horizontal" : "vertical"}
+                  aria-label="Resize protocol tree and byte view"
+                  aria-valuenow={Math.round(detailsPaneRatio * 100)}
+                  aria-valuemin={10}
+                  aria-valuemax={90}
+                  tabIndex={0}
+                  className={`block transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50 ${
+                    stacked ? "h-1.5 w-full cursor-row-resize" : "w-1.5 h-full cursor-col-resize"
+                  }`}
+                  title="Drag to resize - right-click, double-click or Enter to even out"
+                  onPointerDown={() => beginDrag("split")}
+                  onDoubleClick={() => patchLayout({
+                    detailsPaneRatio: LAYOUT_DEFAULTS.detailsPaneRatio,
+                  })}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    patchLayout({ detailsPaneRatio: LAYOUT_DEFAULTS.detailsPaneRatio });
                   }}
-                  permissions={permissions}
+                  onKeyDown={(e) => {
+                    // Whichever pair of arrows points along the divider's axis.
+                    const step = e.shiftKey ? 0.1 : 0.02;
+                    const less = stacked ? "ArrowUp" : "ArrowLeft";
+                    const more = stacked ? "ArrowDown" : "ArrowRight";
+                    if (e.key === less) { e.preventDefault(); nudgeSplit(-step); }
+                    else if (e.key === more) { e.preventDefault(); nudgeSplit(step); }
+                    else if (e.key === "Home") { e.preventDefault(); patchLayout({ detailsPaneRatio: 0.1 }); }
+                    else if (e.key === "End") { e.preventDefault(); patchLayout({ detailsPaneRatio: 0.9 }); }
+                    else if (e.key === "Enter") {
+                      e.preventDefault();
+                      patchLayout({ detailsPaneRatio: LAYOUT_DEFAULTS.detailsPaneRatio });
+                    }
+                  }}
+                />
+
+                {/* Raw Hex & ASCII Dump View */}
+                <div
+                  className="block w-full flex-1 h-full min-w-0 overflow-hidden"
+                >
+                  <HexViewer
+                    packet={selectedPacketDetail}
+                    bytesState={selectedDetailState}
+                    activeByteRange={activeByteRange}
+                    onHoverByte={(byteIdx) => {
+                      if (byteIdx !== null)
+                        setActiveByteRange([byteIdx, byteIdx]);
+                      else setActiveByteRange(null);
+                    }}
+                    permissions={permissions}
+                  />
+                </div>
+
+              </div>
+              )}
+            </section>
+
+            {/* Frame Detail as a pane, where the packet list would be.
+
+                Unmounted when it is not the active view, like Statistics and
+                the map: it draws a field table over one frame's whole tree,
+                and there is no scroll position worth keeping across a view
+                change - the pane already scrolls itself back to the top of the
+                fields whenever the frame changes.
+
+                `selectedPacketDetail` rather than a frame of its own. The
+                packet list's own panes are handed exactly this, from the one
+                `usePacketDetail` above: the list is hidden rather than
+                unmounted while this view is active, so a second hook on the
+                same frame would be a second replay request for one tree.
+
+                Unguarded, unlike Follow Stream: with nothing selected this pane
+                renders its go-to-frame box, which is the view's way in rather
+                than an empty state to be prevented. `scripts/session/view.ts`
+                holds that to `restoredView` - a view with no extra condition
+                here has to be one that survives a restart. */}
+            {view === 'detail' && (
+              <PacketDetailPane
+                packets={packets}
+                packet={selectedPacketDetail}
+                detailState={selectedDetailState}
+                filteredPackets={filteredPackets}
+                onShowFrame={goToFrame}
+                onFollowStream={handleFollowStream}
+                colorEngine={colorEngine}
+                permissions={permissions}
+              />
+            )}
+
+            {/* Statistics as a pane, where the packet list would be.
+
+                Unmounted when it is not the active view, unlike the packet list
+                above: it holds no scroll position worth keeping and its tables are
+                a full pass over the buffer, so leaving it mounted would aggregate
+                50,000 packets twice a second for a surface nobody is looking at.
+                The list is the exception, not the rule. */}
+            {view === 'statistics' && (
+              <StatisticsPane
+                // The whole buffer, not `filteredPackets`: these tables count the
+                // capture. A filter narrows what is being LOOKED at, and a
+                // conversation table that silently answered for a subset would be
+                // the same table with different numbers and no way to tell.
+                packets={packets}
+                names={nameMap}
+                resolveNames={nameResolution.network}
+                resolvePorts={nameResolution.transport}
+                expert={expertLog}
+                onApplyFilter={handleQuickFilter}
+                onFollowStream={handleFollowStream}
+                onSelectFrame={goToFrame}
+                droppedBuffer={droppedBuffer}
+                // Every row here is a filter, so applying one means going to look
+                // at the frames it selects. That is the cross-view navigation the
+                // plan specifies, and it falls out of the pane's own model.
+                onReturnToPackets={() => setView('packets')}
+                // For the Graphs tab alone - the charts moved here from the
+                // dock, and the timeline's D3 draw needs a theme key to redraw
+                // on. Every other tab in the pane is a table and takes neither.
+                isDark={isDark}
+                themeKey={resolvedTheme}
+              />
+            )}
+
+            {/* The map as a pane, where the packet list would be.
+
+                Unmounted when it is not the active view, for the same reason
+                Statistics is and one more: this is a MapLibre instance, so a
+                hidden-but-mounted copy would be a WebGL context and a tile
+                fetcher running for a surface nobody is looking at. This is the
+                only place it is mounted - there was a second, pane-sized copy in
+                the Packets view's bottom row, and "exactly one map is ever live"
+                needed a guard to stay true where it is now a fact about the
+                tree.
+
+                `dashboardPackets` rather than `packets`: the throttled feed, the
+                same one the dock's widgets took. The map redraws arcs on every
+                change and the live buffer changes ten times a second. */}
+            {view === 'geo' && (
+              <div className="flex-1 min-w-0 overflow-hidden">
+                <GeoMap
+                  packets={dashboardPackets}
+                  isDark={isDark}
+                  themeKey={resolvedTheme}
                 />
               </div>
-            </div>
             )}
-          </section>
 
-          {/* Statistics as a pane, where the packet list would be.
+            {/* Follow Stream as a pane.
 
-              Unmounted when it is not the active view, unlike the packet list
-              above: it holds no scroll position worth keeping and its tables are
-              a full pass over the buffer, so leaving it mounted would aggregate
-              50,000 packets twice a second for a surface nobody is looking at.
-              The list is the exception, not the rule. */}
-          {view === 'statistics' && (
-            <StatisticsPane
-              // The whole buffer, not `filteredPackets`: these tables count the
-              // capture. A filter narrows what is being LOOKED at, and a
-              // conversation table that silently answered for a subset would be
-              // the same table with different numbers and no way to tell.
-              packets={packets}
-              names={nameMap}
-              resolveNames={nameResolution.network}
-              resolvePorts={nameResolution.transport}
-              expert={expertLog}
-              onApplyFilter={handleQuickFilter}
-              onFollowStream={handleFollowStream}
-              onSelectFrame={goToFrame}
-              droppedBuffer={droppedBuffer}
-              // Every row here is a filter, so applying one means going to look
-              // at the frames it selects. That is the cross-view navigation the
-              // plan specifies, and it falls out of the pane's own model.
-              onReturnToPackets={() => setView('packets')}
-            />
-          )}
-
-          {/* Follow Stream as a pane.
-
-              Guarded on the target as well as the view: the two are kept in step
-              by the effect above and by the rail's disabled icon, but a pane that
-              rendered `target={null}` would be the empty Follow Stream the rail
-              exists to prevent. */}
-          {view === 'stream' && streamToFollow !== null && (
-            <StreamFollowerPane
-              target={streamToFollow}
-              packets={packets}
-              onReturnToPackets={leaveStream}
-              originFrame={streamOrigin}
-              initialTab={streamView}
-              selectedId={selectedPacket?.id}
-              // The pane stays open. Selecting a frame from in here is usually
-              // one of several - reading down a conversation and checking each
-              // against the tree - and leaving on the first would make that a
-              // dozen round trips through the context menu.
-              onSelectFrame={goToFrame}
-            />
-          )}
+                Guarded on the target as well as the view: the two are kept in step
+                by the effect above and by the rail's disabled icon, but a pane that
+                rendered `target={null}` would be the empty Follow Stream the rail
+                exists to prevent. */}
+            {view === 'stream' && streamToFollow !== null && (
+              <StreamFollowerPane
+                target={streamToFollow}
+                packets={packets}
+                onReturnToPackets={leaveStream}
+                originFrame={streamOrigin}
+                initialTab={streamView}
+                selectedId={selectedPacket?.id}
+                // The pane stays open. Selecting a frame from in here is usually
+                // one of several - reading down a conversation and checking each
+                // against the tree - and leaving on the first would make that a
+                // dozen round trips through the context menu.
+                onSelectFrame={goToFrame}
+              />
+            )}
 
 
-        </div>
-      </main>
+          </div>
+        </main>
+      </div>
 
-      {/* The geo map's expanded window.
+      {/* **The application's bottom bar was here and is deleted.** It spanned the
+          window under the rail and the panes, carrying the byte inspector with
+          its text pushed sideways to line up under the Hex View pane. That
+          indent is the whole argument against it: a full-width bar that has to
+          be inset to look like it belongs somewhere narrower belongs there
+          instead. The readout is `HexViewer`'s footer again, where it reads that
+          pane's own hover rather than a range derived up here.
 
-          Rendered here rather than inside the dock, and that placement is load
-          bearing: `WidgetOverlay` is `fixed`, and a fixed panel is not clipped by
-          an overflow ancestor today but is one `transform` away from being so -
-          and the dock's drag-to-reorder is exactly the kind of thing that
-          introduces one. The old column kept it outside its own scroll container
-          for the same reason. */}
-      <AnimatePresence>
-        {expandedWidget !== null && (() => {
-          const widget = dashboardPrefs.widgets.find((w) => w.type === expandedWidget);
-          if (widget === undefined) return null;
-          const renderer = WIDGET_RENDERERS[widget.type];
-          return (
-            <WidgetOverlay
-              key={widget.type}
-              label={widgetTitle(widget)}
-              icon={renderer.icon}
-              onClose={() => setExpandedWidget(null)}
-              origin={expandOrigin}
-            >
-              {renderer.render(dashboardContext, widget.config, { variant: 'full' })}
-            </WidgetOverlay>
-          );
-        })()}
-      </AnimatePresence>
+          `--details-pane-size` stays on the ROOT element, and now only the panes
+          read it. That placement was chosen so the bar could resolve a
+          percentage against the same base the panes are sized by; it costs
+          nothing to keep, and moving it back onto the pane would be a second
+          layout change made for tidiness alone. */}
 
-      {/* 4. Modals */}
-      <AnimatePresence>
-      </AnimatePresence>
+      {/* **The geo map's expanded window was here.** A `WidgetOverlay`, fixed
+          and rendered at the top level so the dock's own overflow could never
+          clip it. The map is a view now - `view === 'geo'`, a pane like
+          Statistics - so there is no modal to keep out of a scroll container and
+          nothing that needs to escape one. */}
 
-      <AnimatePresence>
-        {detailPacketId !== null && (
-          <PacketDetailModal
-            key="packet-detail-modal"
-            packets={packets}
-            packetId={detailPacketId}
-            filteredPackets={filteredPackets}
-            onClose={() => setDetailPacketId(null)}
-            onShowFrame={showFrameInWindow}
-            onFollowStream={handleFollowStream}
-            colorEngine={colorEngine}
-            packetTheme={packetTheme}
-            permissions={permissions}
-            // No longer obscured by the stream, and that is the whole of what
-            // changed: the stream was a modal at `z-[60]` that opened ON TOP of
-            // this window, so this one had to stand down from Escape and the
-            // arrows. It is a pane behind this window now, so nothing covers
-            // this one and the keyboard is its own again. Left as an explicit
-            // `false` rather than deleted, because the prop is still the right
-            // mechanism the next time something opens above.
-            obscured={false}
-          />
-        )}
-      </AnimatePresence>
-
+      {/* **The packet detail window was here.** A `fixed inset-0` backdrop with
+          a 92vh panel in it, opened on `detailPacketId` and dismissed with
+          Escape. It is a view now - `view === 'detail'`, in the row above with
+          Statistics and the Routing Map - so there is no backdrop to escape
+          from and no second frame id to keep in step with the selection. */}
 
       <AnimatePresence>
         {showExportModal && (
@@ -2521,7 +2615,8 @@ export default function App() {
 
       {/* A jump that could not happen, said out loud.
           Bottom-centre and above the modals, because the click that triggers
-          it can come from inside one - the detail window's tree links point at
+          it can come from inside one - and the Frame Detail view's tree links
+          and the Statistics tables both point at
           frames the buffer may since have trimmed. It never takes the pointer:
           the notice explains a refusal, it does not ask for anything. */}
       {navNotice !== null && (

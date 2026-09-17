@@ -3,25 +3,29 @@
 /* Self-hosted rather than pulled from fonts.googleapis.com: Inwire is often
    pointed at an isolated or offline network, and an analyzer that blocks on a
    third-party font request would both render unstyled and show up in its own
-   capture. The -Variable packages ship one file covering every weight. */
-@import "@fontsource-variable/geist";
-@import "@fontsource-variable/jetbrains-mono";
+   capture.
 
-/* The two alternatives the Accessibility tab offers for the chrome. Imported
-   unconditionally rather than fetched when chosen: they are unicode-range
-   subset, so the browser downloads a face only once something is actually set
-   in it, and a lazy import would mean the person who most needs Hyperlegible
-   waits for a network round trip on a machine that may have no network. See
-   src/lib/fontOptions.ts, which the assertion script checks against this list. */
-@import "@fontsource/atkinson-hyperlegible";
-@import "@fontsource-variable/nunito";
+   One family, two cuts. IBM Plex Sans ships as a variable font - one file
+   covering every weight - and IBM Plex Mono does not: IBM never released a
+   variable Plex Mono, and `@fontsource-variable/ibm-plex-mono` does not exist.
+   So the mono is imported a weight at a time. Every @fontsource file is
+   unicode-range subset, so the browser fetches only the latin slice of only
+   the weights something is actually set in; four imports here cost what the
+   one file would have. */
+@import "@fontsource-variable/ibm-plex-sans";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+@import "@fontsource/ibm-plex-mono/700.css";
 
-/* The italic face, for the header wordmark and nothing else so far.
-   Its own import because each package's default entry is the roman face only,
-   and without a real italic the browser synthesises one by shearing the roman,
-   which at black weight visibly distorts the letterforms. The unicode-range
-   subsetting means only the latin slice is actually fetched. */
-@import "@fontsource-variable/jetbrains-mono/wght-italic.css";
+/* The mono italic. Without a real italic the browser synthesises one by
+   shearing the roman, which visibly distorts the letterforms. What reaches it
+   is the italic used for generated fields and empty states inside the protocol
+   tree and the packet tables, which render in mono. Regular weight only:
+   nothing sets mono italic at another weight, and the subsetting means an
+   import nothing uses costs no request either way. No sans italic is imported,
+   which is what was true of Geist too. */
+@import "@fontsource/ibm-plex-mono/400-italic.css";
 
 /* Tailwind v4 has no JS config file, so class-based dark mode (toggled by
    next-themes adding/removing .dark on <html>) is opted into here instead
@@ -32,10 +36,7 @@
    them would render its light treatment on a near-black canvas. Adding a dark
    theme means adding it to this list - scripts/themes/registry.ts fails if a
    registered dark theme is missing from it. */
-@custom-variant dark (&:where(
-  .dark, .dark *,
-  .midnight, .midnight *
-));
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
   /* How much white a column separator mixes into the background it is drawn
@@ -78,61 +79,10 @@
   --danger-strong-foreground: #ffffff;
 }
 
-/* Orange on warm grey. See PALETTE_BY_THEME.dark for why the ground is `stone`
-   and not `slate`.
-
-   `--primary-foreground` is near-black rather than white, and that is measured
-   rather than chosen: white on orange-500 is about 2.9:1, which fails at every
-   size, while the ground colour on the same fill is about 5.9:1. Every filled
-   accent control in the app reads its text colour from this token, so getting
-   it wrong here would be wrong in twenty places at once.
-
-   `--ring` is a lighter orange than `--primary` on purpose - the focus ring has
-   to be visible ON accent-filled controls as well as beside them, and a ring
-   the same colour as the button it surrounds is not a ring. */
-.dark {
-  /* See the note in `:root`. */
-  --packet-gridline-lighten: 40%;
-  --background: #0c0a09;
-  --foreground: #e7e5e4;
-  --card: #1c1917;
-  --card-foreground: #e7e5e4;
-  --popover: #1c1917;
-  --popover-foreground: #e7e5e4;
-  --primary: #f97316;
-  --primary-foreground: #1c1917;
-  --secondary: #292524;
-  --secondary-foreground: #e7e5e4;
-  --muted: #292524;
-  --muted-foreground: #a8a29e;
-  --accent: #292524;
-  --accent-foreground: #e7e5e4;
-  --destructive: #f43f5e;
-  --destructive-foreground: #ffffff;
-  --border: #292524;
-  --input: #292524;
-  --ring: #fb923c;
-  /* Status colours - "fine", "check this", "wrong".
-     GENERATED from this theme's own palette by src/services/statusColors.ts.
-     Run `npx tsx scripts/themes/status-css.ts` to regenerate;
-     `npx tsx scripts/themes/status.ts` fails if these have drifted. */
-  --success: #49c273;
-  --success-foreground: #0b0f14;
-  --success-muted: #49c273;
-  --warning: #dcb424;
-  --warning-foreground: #0b0f14;
-  --warning-muted: #dcb424;
-  --danger: #d26161;
-  --danger-foreground: #0b0f14;
-  --danger-muted: #d26161;
-  --danger-strong: #a2373c;
-  --danger-strong-foreground: #ffffff;
-}
-
 /* NOT `@theme inline`. With `inline`, Tailwind substitutes each token's value
    as resolved against :root directly into the utilities, so `bg-primary`
-   compiled to the light theme's blue and stayed that colour under .dark and
-   .midnight no matter what those blocks declared - the variable updated, the
+   compiled to the light theme's blue and stayed that colour under .dark no
+   matter what that block declared - the variable updated, the
    painted pixel did not. Without `inline`, Tailwind emits --color-primary as
    a real runtime variable pointing at var(--primary), which then follows
    whichever theme class is on <html>. */
@@ -170,27 +120,28 @@
 
   /* Overriding Tailwind's two default stacks reaches every `font-mono` and
      `font-sans` in the app - and the body default - from one place, rather
-     than editing the 109 utilities spread across 20 components.
+     than editing the 168 utilities spread across 44 components.
 
-     Geist for chrome: flat terminals, tight apertures and a tall x-height, so
-     it stays legible at the 10px section headings and status lines this UI is
-     full of. It also answers the mark, which is two folded chevrons - a soft
-     humanist face under an angular mark reads as two products.
+     One family in two cuts, and that is the decision: IBM Plex Sans for the
+     chrome, IBM Plex Mono for the data. The two tokens used to name two
+     unrelated families - Geist and JetBrains Mono - chosen independently, and
+     the seam showed wherever a sans label sat over a mono value, which in this
+     app is every table header and every field name. Plex was drawn as a
+     superfamily, so the mono shares the sans's skeleton and proportions and
+     there is no seam to show. Plex also carries real tabular figures and a
+     slashed zero, which `body`'s font-feature-settings asks for.
 
-     JetBrains Mono for data: the packet list, hex dump and protocol tree are
-     column-aligned and MUST stay monospaced. That is also what keeps the
-     header wordmark out of the typeface setting - the lockup is `font-mono`,
-     so it follows this token rather than the settable one.
+     The mono is not a preference. The packet list, hex dump and protocol tree
+     are column-aligned and MUST stay monospaced.
 
-     `--font-sans` is a DEFAULT, not the last word. The Accessibility tab
-     overrides it on <html> - see src/lib/font.ts - which works because this is
-     a plain `@theme` block rather than `@theme inline`, so Tailwind emits a
-     real custom property an inline style can beat. Same mechanism as the
-     theme classes, for the same reason. */
-  --font-sans: "Geist Variable", "Geist", ui-sans-serif, system-ui,
-    -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace,
-    "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+     Both tokens are the last word. There used to be a typeface picker on the
+     Accessibility tab that rewrote `--font-sans` on <html> at runtime; it is
+     deleted, and scripts/accessibility/fonts.ts fails the build if anything
+     writes either token or names a family anywhere but here. */
+  --font-sans: "IBM Plex Sans Variable", "IBM Plex Sans", ui-sans-serif,
+    system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas,
+    "Liberation Mono", monospace;
 }
 
 @layer base {
@@ -204,10 +155,10 @@
 
   /* The focus ring.
 
-     Every one of the eight themes defines --ring, and until this rule existed
-     nothing painted it: the only two files referencing --color-ring were
-     ui/button.tsx and ui/dialog.tsx, neither of which has a consumer. So the
-     app shipped eight carefully chosen focus colours and no visible focus.
+     Both themes define --ring, and until this rule existed nothing painted it:
+     the only files referencing --color-ring were two `components/ui`
+     primitives, neither of which then had a consumer. So the app shipped
+     carefully chosen focus colours and no visible focus.
 
      One rule rather than a class on each control, because the alternative is
      remembering it on every button ever added - and the failure mode is
@@ -270,19 +221,36 @@
 
 /* --- The window's own title bar -------------------------------------------
 
-   `titleBarStyle: 'hidden'` removes the OS caption strip but keeps the frame,
-   so the window still has Windows' resize borders, Snap Layouts and focus
-   shadow. Two things become ours: saying which parts of our chrome drag the
-   window, and keeping clear of the buttons Windows still draws.
+   The window is `frame: false` and draws its own minimize / maximize / close.
+   `titleBarStyle` and `titleBarOverlay` are BANNED, not current - see the
+   banner at the top of CLAUDE.md and `electron/window.ts`. Bringing either
+   back means Windows drawing a second set of caption buttons over the app's
+   own, which renders rather than throws.
+
+   What a frameless window keeps, on defaults: edge resizing, the drop shadow
+   and the window animations (`thickFrame`, default true) and Windows 11's
+   corner radius (`roundedCorners`, default true). Neither is ever set, at any
+   value. What it loses, accepted rather than to be re-checked: Snap Layouts -
+   the flyout on a maximise-button hover, which needs `WM_NCHITTEST` to answer
+   `HTMAXBUTTON` and Electron exposes no hook for - and Alt+Space, since there
+   is no native caption to raise the system menu from. Win+Arrow snapping is
+   unaffected. Both are in `docs/verification.md`.
+
+   So one thing becomes ours here: saying which parts of our chrome drag the
+   window. There is nothing to keep clear of any more - the buttons are our own
+   elements, so the reserve is a constant (138px) rather than something read
+   from `env()`.
 
    These are plain classes and NOT custom properties on `:root`. That block is
    the theme baseline, and `scripts/themes/registry.ts` requires every token in
-   it to be redeclared by all four theme blocks - correctly, since a colour
+   it to be redeclared by both theme blocks - correctly, since a colour
    declared only there is silently inherited. A layout constant has no business
    in that set. The two sizes it would have held are Tailwind's own scale
-   already: the rail is `w-14` (56px) and the title row `h-10` (40px). */
+   already: the rail is `w-14` (56px) and the title row `h-8` (32px, and
+   `scripts/electron/shell.ts` asserts that 32 against `TITLE_BAR_HEIGHT`). */
 
-/* Drags the window. Applied to the title row and the rail's top cell.
+/* Drags the window. Applied to the title row, and to nothing else: the rail is
+   entirely no-drag, and has been since its top cell went with the brand mark.
 
    `-webkit-app-region` is the only name Chromium implements; there is no
    unprefixed form to pair it with. */
@@ -302,17 +270,6 @@
   -webkit-app-region: no-drag;
 }
 
-/* Keeps the title row clear of the native buttons.
-
-   The reserved area is NOT a constant: it is about 138px at 100% scaling and
-   about 207px at 150%, and a hardcoded value puts our own controls underneath
-   Windows' close button on any machine that is not at 100%. `env()` is the only
-   thing that knows.
-
-   The fallback is `100vw`, so the padding computes to zero where there is no
-   overlay at all - `npm run dev` in a browser, and every platform but Windows.
-   Written as `100vw` rather than `0px` for exactly that reason: the value is
-   subtracted, so the neutral fallback is the full width. */
 @keyframes nv-menu-out {
   from {
     opacity: 1;
@@ -346,10 +303,12 @@
   transform-origin: var(--radix-select-content-transform-origin, center);
 }
 
-/* A panel anchored to the side of its trigger - the dashboard's popout bubbles
-   - travels horizontally or not at all, so the vertical offset the menus use
-   would drag it off the icon it is growing out of. Scaling from the anchored
-   origin above is the whole motion here. */
+/* A panel anchored to the SIDE of its trigger - a popover opening left or
+   right of a rail button rather than below a menu bar - travels horizontally
+   or not at all, so the vertical offset the menus use would drag it off the
+   icon it is growing out of. Scaling from the anchored origin above is the
+   whole motion here. (The dashboard's popout bubbles were the original case;
+   they are deleted, and the rule stands on the geometry rather than on them.) */
 [data-slot='popover-content'][data-side='left'],
 [data-slot='popover-content'][data-side='right'] {
   --nv-menu-offset: 0px;
@@ -471,9 +430,18 @@
    own ground and each painted row overrides it with the colour its rule chose,
    so the cascade does the per-row part with no work at the border. */
 
-/* The header sits on the app's chrome rather than on the list's ground. */
+/* The header sits on `--card` - the same ground every other titled bar in the
+   window uses - rather than on the list's own.
+
+   **This has to track `HEADER_CHROME` in `PacketList.tsx` and nothing makes it.**
+   That constant paints the header; this publishes the ground its GRIDLINES are
+   mixed against in the rule below. They were both `--secondary`, the header
+   moved to `bg-card`, and this did not - so the column separators in the header
+   row were being computed against a ground the header no longer had. It is a
+   fraction of a step of lightness on a 1px line, which is why nothing caught it
+   and why it is worth a comment rather than a silent fix. */
 .packet-grid thead tr {
-  --row-bg: var(--secondary);
+  --row-bg: var(--card);
 }
 
 .packet-grid tr > :not(:last-child) {
@@ -510,7 +478,7 @@
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  /* Was a literal slate, which stayed the same grey under all four themes -
+  /* Was a literal slate, which stayed the same grey under every theme -
      the same mistake the hover state below already carries a note about. A
      scrollbar belongs to the surface it sits on, so it mixes the theme's own
      muted foreground into transparency rather than naming a colour. */
@@ -556,111 +524,73 @@
   border-bottom-color: var(--popover) !important;
 }
 
-/* Paper - the warm light theme.
+/* Night - the dark theme, and the only one.
 
-   Not a sepia filter over Day. Every hue is individually pulled warm and
-   darkened in themePalettes.ts, because a cool hue tinted into a warm ground
-   reads as dirty rather than as itself, and the ground here is warm enough to
-   be unmistakably a different theme rather than Day with a filter on it.
+   It was `.midnight`, the cool counterweight to a warm dark called Graphite.
+   Graphite is gone and this took the `.dark` class with its id, which is worth
+   more than the name was: next-themes writes `color-scheme` onto the document
+   only for the literal strings "light" and "dark", so under `.midnight` the
+   native scrollbars, text selection and form controls stayed on the light side
+   of the divide for the theme most people are on. They follow now.
 
-   The accent is a rust rather than a brown: it has to work as a 64px bar, as
-   the wordmark, and as text on the card, and a true brown fails the last of
-   those on a ground this light. */
-.paper {
-  /* See the note in `:root`. */
-  --packet-gridline-lighten: 40%;
-  --background: #f4efe4;
-  --foreground: #2b2620;
-  --card: #fdfaf3;
-  --card-foreground: #2b2620;
-  --popover: #fdfaf3;
-  --popover-foreground: #2b2620;
-  --primary: #a35a16;
-  --primary-foreground: #ffffff;
-  --secondary: #ece5d6;
-  --secondary-foreground: #2b2620;
-  --muted: #ece5d6;
-  --muted-foreground: #6b6154;
-  --accent: #e4dbc9;
-  --accent-foreground: #2b2620;
-  --destructive: #b3261e;
-  --destructive-foreground: #ffffff;
-  --border: #e4dbc9;
-  --input: #e4dbc9;
-  --ring: #a35a16;
-  /* The bar deepened. See the note in :root. */
-  /* Status colours - "fine", "check this", "wrong".
-     GENERATED from this theme's own palette by src/services/statusColors.ts.
-     Run `npx tsx scripts/themes/status-css.ts` to regenerate;
-     `npx tsx scripts/themes/status.ts` fails if these have drifted. */
-  --success: #2f5415;
-  --success-foreground: #ffffff;
-  --success-muted: #2f5415;
-  --warning: #705805;
-  --warning-foreground: #ffffff;
-  --warning-muted: #705805;
-  --danger: #8e1914;
-  --danger-foreground: #ffffff;
-  --danger-muted: #8e1914;
-  --danger-strong: #600000;
-  --danger-strong-foreground: #ffffff;
-}
-
-/* Midnight - the cool dark theme.
-
-   Graphite's counterweight, and the reason both survive the cut to four: one
-   warm dark and one cool dark is a real choice, where four darks separated by
-   a few percent of saturation were not.
-
-   The ground carries a deliberate blue cast (#0d1219 rather than a neutral
-   #111318). Against Graphite's stone it is what makes the two readable as
-   different themes at a glance rather than as two greys - the registry's
-   surface check wants 5 deltaE between any pair and this gives 7.8. */
-.midnight {
+   The ground is a neutral #161616. It carried a blue cast while it had a warm
+   dark to be told apart from; with one dark theme there is nothing to
+   distinguish it from, and neutral is the better ground on its own. */
+.dark {
   /* See the note in `:root`. */
   --packet-gridline-lighten: 40%;
   /* Neutral grey, not the blue-black this used to be.
 
      It was `#0d1219` with a `#dbe3ec` foreground - a cool cast on every surface,
-     which is where the name came from. The theme it is measured against now is
-     VS Code's Dark+: a flat `#1e1e1e` ground with the chrome a step lighter
-     rather than darker, which is why `--card` is ABOVE `--background` here and
-     in `.dark` both. Nothing else in the app assumes a direction; the rail and
-     the title row just take `--card`.
+     which is where the name came from. The shape it took after that is VS Code's
+     Dark+: a flat ground with the chrome a step lighter rather than darker, which
+     is why `--card` is ABOVE `--background` here. Nothing else in the app assumes
+     a direction; the rail and the title row just take `--card`.
 
-     `--card` is `#222222` and not the `#252526` that pairing normally uses, and
-     that is a constraint rather than a preference: the colour-blind packet set is
-     Okabe-Ito, which is defined for LIGHT backgrounds and contains both a black
-     and a `#999999` grey. On a dark card the black has to be lifted to clear AA,
-     and above a card of about `#222222` it lands on `#919191` - 3.1 deltaE from
-     that grey, against a floor of 6, so two protocol accents stop being telling
-     apart by the people the set exists for. `scripts/themes/packet-themes.ts` is
-     what says so. The separation between the rail and the list is carried by
-     `--border` here instead, which is what a low-contrast dark UI does anyway.
+     The ground is a step below Dark+'s own `#1e1e1e`, and the whole neutral
+     ladder came down with it by the same 8/255 - ground, card, secondary, muted,
+     accent, border. Moving one rung alone would have been the visible change:
+     `--card` over `--background` is a 4/255 delta on purpose, because `<main>` is
+     a notch cut out of the ground and its 1px border is the only thing the eye
+     follows round the corner (see `App.tsx`). Widen that delta and the pane draws
+     a second edge nobody asked for.
+
+     The ceiling is on `--card`, and it is a constraint rather than a preference:
+     the colour-blind packet set is Okabe-Ito, which is defined for LIGHT
+     backgrounds and contains both a black and a `#999999` grey. On a dark card
+     the black has to be lifted to clear AA, and above a card of about `#222222`
+     it lands on `#919191` - 3.1 deltaE from that grey, against a floor of 6, so
+     two protocol accents stop being tellable apart by the people the set exists
+     for. `scripts/themes/packet-themes.ts` is what says so. Darkening moves away
+     from that wall, never toward it. The separation between the rail and the list
+     is carried by `--border` here instead, which is what a low-contrast dark UI
+     does anyway.
 
      Only the surfaces went neutral. `--primary`, `--destructive`, `--ring` and
      the protocol hues in `themePalettes.ts` carry meaning rather than taste, and
      a blue accent on a grey ground is the point of an accent. */
-  --background: #1e1e1e;
+  --background: #161616;
   --foreground: #e4e4e4;
-  --card: #222222;
+  --card: #1a1a1a;
   --card-foreground: #e4e4e4;
-  --popover: #222222;
+  --popover: #1a1a1a;
   --popover-foreground: #e4e4e4;
   --primary: #38bdf8;
-  --primary-foreground: #1e1e1e;
-  --secondary: #2b2b2b;
+  --primary-foreground: #161616;
+  --secondary: #232323;
   --secondary-foreground: #e4e4e4;
-  --muted: #2b2b2b;
+  --muted: #232323;
   --muted-foreground: #a1a1a1;
-  /* One step above `--muted`, because this is the rail's hover and the rail sits
-     on `--card`. At `--muted` a hover would be invisible there. */
-  --accent: #333333;
+  /* One step above `--secondary`, which is what the rail and the title row sit
+     on - so the rail's hover is visible against its own ground. It used to be
+     phrased against `--card`, which is where that chrome used to be; the
+     relationship is the same one and the ground under it moved. */
+  --accent: #2b2b2b;
   --accent-foreground: #e4e4e4;
   --destructive: #fb7185;
-  --destructive-foreground: #1e1e1e;
-  --border: #3c3c3c;
-  --input: #3c3c3c;
+  --destructive-foreground: #161616;
+  --border: #343434;
+  --input: #343434;
   --ring: #7dd3fc;
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
@@ -674,7 +604,7 @@
   --warning-muted: #d77f37;
   --danger: #d26161;
   --danger-foreground: #0b0f14;
-  --danger-muted: #db6968;
+  --danger-muted: #d26161;
   --danger-strong: #a2373c;
   --danger-strong-foreground: #ffffff;
 }

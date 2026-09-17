@@ -1,24 +1,31 @@
 /**
- * Assertion tests for the typeface options.
+ * Assertion tests for the typography.
  *
  *   npx tsx scripts/accessibility/fonts.ts
  *
- * The picker in the Accessibility tab, the `@fontsource` imports in
- * `index.css` and the dependencies in `package.json` are three lists that have
- * to agree, and only one of them is visible while you are editing any of the
- * others.
+ * The app is set in one type family, IBM Plex, in two cuts: Plex Sans on
+ * `--font-sans` for the chrome, Plex Mono on `--font-mono` for the data. That
+ * is the whole of the typography, and every rule here exists to keep it the
+ * whole of it.
  *
- * The failure this exists to catch is silent in the worst way: add a face to
- * `FONT_OPTIONS` and forget the import, and the option appears in Settings,
- * selects cleanly, persists across reloads - and changes nothing on screen,
- * because the font it names was never loaded. No error, no warning, and the
- * person most likely to hit it is the one who went looking for a more legible
- * face because the default was not working for them.
+ * This script used to police a typeface picker - three faces on the
+ * Accessibility tab, rewriting `--font-sans` on <html> at runtime - and its
+ * rules were about keeping the picker's three lists in sync. The picker is
+ * deleted, and with it the one thing that could set the sans and the mono from
+ * different families. Atkinson Hyperlegible went with it; that is a real
+ * low-vision accommodation lost and is recorded in CLAUDE.md rather than
+ * glossed. What replaces the old rules is their inverse: nothing offers a
+ * face, nothing writes a token, and no component names a family of its own.
+ *
+ * Each failure this catches is silent. A stray `font-family` in a component
+ * renders in whatever it names and looks fine on its own - the seam only shows
+ * beside its neighbours. A runtime write to `--font-sans` is the picker coming
+ * back one setting at a time. A retired package left in `dependencies` ships
+ * a megabyte of woff2 nothing loads.
  */
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_FONT_ID, FONT_OPTIONS } from '../../src/lib/fontOptions';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const text = (p: string) => readFileSync(join(root, p), 'utf8');
@@ -38,50 +45,109 @@ const css = text('src/index.css');
 const pkg = JSON.parse(text('package.json')) as { dependencies?: Record<string, string> };
 const deps = pkg.dependencies ?? {};
 
-// --- Every offered face is actually loaded ----------------------------------
+/** Every source file under src/, as a posix-separated path relative to root. */
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(join(root, dir))) {
+    const rel = `${dir}/${entry}`;
+    if (statSync(join(root, rel)).isDirectory()) out.push(...walk(rel));
+    else if (/\.(ts|tsx|css)$/.test(entry)) out.push(rel.split(sep).join('/'));
+  }
+  return out;
+}
+const sources = walk('src');
 
-check('every typeface option is imported by index.css',
-  FONT_OPTIONS.filter((f) => !css.includes(`@import "${f.packageName}"`)).map((f) => f.id), []);
+// --- The two packages ----------------------------------------------------------
 
-check('...and installed',
-  FONT_OPTIONS.filter((f) => !(f.packageName in deps)).map((f) => f.id), []);
+const WANTED = ['@fontsource-variable/ibm-plex-sans', '@fontsource/ibm-plex-mono'];
+const RETIRED = [
+  '@fontsource-variable/geist',
+  '@fontsource-variable/jetbrains-mono',
+  '@fontsource/atkinson-hyperlegible',
+  '@fontsource-variable/nunito',
+];
 
-// --- The stacks themselves ---------------------------------------------------
+check('both Plex packages are imported by index.css',
+  WANTED.filter((p) => !css.includes(`@import "${p}`)), []);
 
-const GENERIC = ['sans-serif', 'serif', 'monospace', 'system-ui', 'ui-sans-serif'];
-check('every stack ends in a generic family, so a failed load degrades',
-  FONT_OPTIONS.filter((f) => !GENERIC.some((g) => f.stack.trim().endsWith(g))).map((f) => f.id),
-  []);
+check('both Plex packages are installed',
+  WANTED.filter((p) => !(p in deps)), []);
 
-// A stack naming only the variable file falls back to nothing when the static
-// build is what is installed, and vice versa - both names, or neither works.
-check('no stack is a single family with no fallback at all',
-  FONT_OPTIONS.filter((f) => f.stack.split(',').length < 2).map((f) => f.id), []);
+check('no retired face is still imported by index.css',
+  RETIRED.filter((p) => css.includes(`@import "${p}`)), []);
 
-check('the default is one of the options',
-  FONT_OPTIONS.some((f) => f.id === DEFAULT_FONT_ID), true);
+check('no retired face is still installed',
+  RETIRED.filter((p) => p in deps), []);
 
-check('ids are unique',
-  FONT_OPTIONS.length, new Set(FONT_OPTIONS.map((f) => f.id)).size);
+// --- The two tokens ------------------------------------------------------------
 
-// --- What the setting is allowed to touch ------------------------------------
+/** The value of one `--token:` declaration in index.css, whitespace collapsed. */
+function tokenValue(name: string): string {
+  const m = css.match(new RegExp(`${name}:\\s*([^;]+);`));
+  return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+}
+const sans = tokenValue('--font-sans');
+const mono = tokenValue('--font-mono');
 
-// The packet list, hex dump and protocol tree only line up because every glyph
-// is the same width, and the header wordmark rides on the same token. A
-// typeface option that reached --font-mono would break all four at once, so the
-// setting must never name it.
-check('no option offers to change the monospace token',
-  FONT_OPTIONS.filter((f) => /mono/i.test(f.stack)).map((f) => f.id), []);
+check('--font-sans is IBM Plex Sans', sans.startsWith('"IBM Plex Sans Variable", "IBM Plex Sans"'), true);
+check('--font-mono is IBM Plex Mono', mono.startsWith('"IBM Plex Mono"'), true);
 
-const fontModule = text('src/lib/font.ts');
-check('the applier writes --font-sans and nothing else',
-  [...fontModule.matchAll(/setProperty\(\s*'(--[a-z-]+)'/g)].map((m) => m[1]),
-  ['--font-sans', '--font-sans']);
+// A stack that does not end in a generic family falls back to the browser's
+// default serif when the woff2 fails to load - which on an air-gapped machine
+// with a cold cache is not hypothetical.
+check('--font-sans ends in a generic family', sans.endsWith('sans-serif'), true);
+check('--font-mono ends in a generic family', mono.endsWith('monospace'), true);
+
+// --- Nothing else names a family -----------------------------------------------
+
+// A font family may be declared outside index.css only as a token. That means
+// a CSS `font-family:`, a JSX `fontFamily=`, a style-object `fontFamily:` or a
+// d3 `.style('font-family', ...)` must carry `var(--font-sans)` or
+// `var(--font-mono)` on the same line. The two d3 axis calls in
+// TrafficTimelineChart.tsx are the legitimate case. READING a computed family
+// is not a declaration and is not checked - PacketList.tsx reads
+// `style.fontFamily` to size a canvas for text measurement, and a canvas font
+// string cannot hold a var() anyway.
+const DECLARES_A_FAMILY = /(?:font-family|fontFamily)\s*[:=](?!=)|['"]font-family['"]\s*,/;
+const namesAFamily: string[] = [];
+for (const file of sources) {
+  if (file === 'src/index.css') continue;
+  const lines = text(file).split('\n');
+  lines.forEach((line, i) => {
+    if (!DECLARES_A_FAMILY.test(line)) return;
+    if (/var\(--font-(sans|mono)\)/.test(line)) return;
+    namesAFamily.push(`${file}:${i + 1}`);
+  });
+}
+check('every font-family declared outside index.css is a token, not a family name', namesAFamily, []);
+
+// --- Nothing writes the tokens -------------------------------------------------
+
+// The picker wrote `--font-sans` onto <html> with setProperty. Reading a token
+// (`var(--font-sans)`) is fine anywhere; naming one as a bare string in a .ts
+// or .tsx file is only ever done to write it.
+const writesAToken: string[] = [];
+for (const file of sources) {
+  if (!/\.tsx?$/.test(file)) continue;
+  const stripped = text(file).replace(/var\(--font-(sans|mono)\)/g, '');
+  if (/--font-(sans|mono)/.test(stripped)) writesAToken.push(file);
+}
+check('no source file names --font-sans or --font-mono outside a var()', writesAToken, []);
+
+// --- The picker is gone ----------------------------------------------------------
+
+const deleted = ['src/lib/fontOptions.ts', 'src/lib/font.ts', 'src/services/accessibilityPrefs.ts'];
+check('the picker\'s three modules are deleted',
+  deleted.filter((p) => sources.includes(p)), []);
+
+const prefs = text('src/services/preferences.ts');
+check('inwire.font is a retired preference key',
+  /RETIRED_PREFERENCE_KEYS[\s\S]*?'inwire\.font'[\s\S]*?\];/.test(prefs), true);
 
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
   process.exit(1);
 }
-console.log('All typeface checks passed.');
+console.log('All typography checks passed.');
 process.exit(0);

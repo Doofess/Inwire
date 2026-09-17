@@ -237,7 +237,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
               <g key={t} transform={`translate(0, ${timeScale(t)})`}>
                 <line x1={0} x2={size.width} stroke="currentColor" strokeOpacity={0.07} />
                 <text x={4} y={-3} fontSize={9} fill="currentColor" fillOpacity={0.45}
-                  fontFamily="ui-monospace, monospace">{t.toFixed(3)}s</text>
+                  className="font-mono">{t.toFixed(3)}s</text>
               </g>
             ))}
 
@@ -308,14 +308,14 @@ const Arrow: React.FC<{
           Info line does not push the lanes apart. */}
       <text
         x={(x1 + x2) / 2} y={arrow.y - 4} textAnchor="middle"
-        fontSize={10} fontFamily="ui-monospace, monospace"
+        fontSize={10} className="font-mono"
         fill="currentColor" fillOpacity={selected ? 0.95 : 0.75}
       >
         {arrow.flags ? `[${arrow.flags}] ` : ''}{truncate(arrow.info, 78)}
       </text>
       <text
         x={(x1 + x2) / 2} y={arrow.y + 11} textAnchor="middle"
-        fontSize={9} fontFamily="ui-monospace, monospace"
+        fontSize={9} className="font-mono"
         fill="currentColor" fillOpacity={0.4}
       >
         #{arrow.packet.id} · {arrow.length} B

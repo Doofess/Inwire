@@ -175,18 +175,41 @@ export function resetPreferenceCache(): void {
 }
 
 /**
- * Keys this build no longer reads.
+ * Keys this build no longer reads **and is better off removing**.
  *
  * Retiring a preference is not the same as ignoring it. A key nothing honours
  * still sits in storage looking like live configuration to anyone who opens
  * devtools and reads it - which is the reasoning that was already written out
  * for `inwire.packetTheme`, as a one-off `removeItem` at the top of App. This
  * is that, with somewhere for the next one to go.
+ *
+ * **It is not a list of every key a build stopped reading, and adding one is a
+ * decision rather than tidying.** This is a delete path: every entry is a
+ * `removeItem` against the user's own storage, so the bar is that the stored
+ * VALUE would mislead - it names a choice the user still believes is in force
+ * (`inwire.packetTheme`), or it would come back as a control nothing on screen
+ * can show (`inwire.packetSearch`).
+ *
+ * A key whose whole surface is gone fails that bar and is left where it is:
+ * `inwire.dock`, `inwire.dashboard` and `inwire.mapProjection` are the three
+ * today. Nothing reads them, they cost a few bytes, and there is no state they
+ * could be mistaken for. `mapPrefs.ts` states the same rule from the other
+ * side, and `docs/verification.md` checks it on a profile that has them.
  */
 export const RETIRED_PREFERENCE_KEYS: readonly string[] = [
   // The packet list used to carry its own theme, chosen separately from the
   // app theme. The two are one choice now.
   'inwire.packetTheme',
+  // The quick-find search box, which stored what was last typed into it. The
+  // feature is deleted - the display filter answers the same questions over the
+  // whole capture rather than the rows in hand - and a stored query with nothing
+  // reading it would be a filter left applied that nothing on screen can show.
+  'inwire.packetSearch',
+  // The typeface picker on the Accessibility tab, which stored one of three
+  // face ids and rewrote the sans token on <html> at runtime. Deleted: the app
+  // is set in one family in two cuts, and a setting that moved the sans and not
+  // the mono put the seam back for exactly the readers who reached for it.
+  'inwire.font',
 ];
 
 export function clearRetiredPreferences(

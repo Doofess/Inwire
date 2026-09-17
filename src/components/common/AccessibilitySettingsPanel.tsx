@@ -1,8 +1,6 @@
 import React from 'react';
 import { Button } from '../ui/button';
 import { Segmented } from '../ui/segmented';
-import { FONT_OPTIONS } from '../../lib/fontOptions';
-import { fontStore } from '../../services/accessibilityPrefs';
 import { motionStore, type MotionSetting } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { tourStore } from '../../services/tourPrefs';
@@ -15,8 +13,14 @@ import { Section, SettingRow } from './settingsLayout';
  * The line between this tab and Appearance is not "text here, colour there" -
  * it is who the setting is FOR. Appearance offers choices between things that
  * are all fine; these offer a way out for someone the default does not work
- * for. That is why the typeface picker is here and not beside the theme picker,
- * and it is what Hyperlegible is doing on the list.
+ * for.
+ *
+ * There used to be a typeface picker at the top of this tab, and Atkinson
+ * Hyperlegible on it was the clearest case of that rule. It is deleted: the app
+ * is set in one family in two cuts, and a picker that moved the sans and not
+ * the mono re-created the seam it exists to close. The loss is a real one and
+ * is recorded in CLAUDE.md and in the header of scripts/accessibility/fonts.ts
+ * rather than glossed here.
  *
  * Animations moved here from the Interface tab. Only the row moved:
  * `motionStore` is a module-level store, so the key, the stored value and every
@@ -29,33 +33,12 @@ const MOTION_OPTIONS = [
   { value: 'never' as MotionSetting, label: 'Never' },
 ];
 
-const FONT_CHOICES = FONT_OPTIONS.map((f) => ({
-  value: f.id,
-  label: f.label,
-  hint: f.hint,
-}));
-
 export const AccessibilitySettingsPanel: React.FC = () => {
-  const [font, setFont] = usePreferenceValue(fontStore);
   const [motion, setMotion] = usePreferenceValue(motionStore);
   const [tour] = usePreferenceValue(tourStore);
 
   return (
     <div>
-      <Section title="Reading">
-        <SettingRow
-          label="Typeface"
-          description="Applies to the interface - menus, settings and labels. The packet list, hex dump and protocol tree stay monospaced whatever is chosen here, because their columns only line up if every character is the same width."
-        >
-          <Segmented
-            ariaLabel="Interface typeface"
-            value={font}
-            onValueChange={setFont}
-            options={FONT_CHOICES}
-          />
-        </SettingRow>
-      </Section>
-
       <Section title="Motion">
         <SettingRow
           label="Animations"
