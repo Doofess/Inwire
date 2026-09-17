@@ -18,8 +18,9 @@
  * arrives later than that still goes out, just not ahead of what already
  * left; nothing here can un-emit.
  *
- * Deliberately free of React and the DOM (docs/decisions/0003): this moves into
- * the pipeline Worker in Phase 11 unchanged.
+ * Deliberately free of React and the DOM (docs/decisions/0003), which is what
+ * let it run in the pipeline Worker unchanged - `src/workers/pipeline.worker.ts`
+ * is its only caller in the app.
  */
 
 export interface Orderable {
@@ -27,7 +28,7 @@ export interface Orderable {
   tsUs: number;
   /** The agent's per-capture sequence number; ties on `tsUs` resolve by it. */
   seq: number;
-  /** When this frame reached the browser, in `performance.now()` milliseconds. */
+  /** When this frame reached the renderer, in `performance.now()` milliseconds. */
   arrivedAt: number;
 }
 

@@ -1,5 +1,12 @@
 # 0030 — One installer, two destinations, and the app never elevates
 
+> **Its Npcap paragraph is void, corrected by**
+> **[0032](0032-the-update-center.md).** The installer does not install Npcap and
+> must not: the silent flag is Npcap's OEM feature and the free licence does not
+> grant it, so the driver is a prerequisite the Update Center manages behind a
+> UAC prompt and Npcap's own wizard. Everything else here - one installer, two
+> destinations, the app never elevates - stands.
+
 **Status:** accepted for the mechanics; **signing and updates are deliberately
 unfinished** and are not decided here. **Extends `0027`**; depends on `0029`
 for why the service and the app can be different principals at all.

@@ -55,7 +55,7 @@ export function dissectUdpTransport(
   const dstPort = (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3];
   const udpLen = (rawBytes[transportOffset + 4] << 8) | rawBytes[transportOffset + 5];
   const udpChecksum = (rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7];
-  const udpVerdict = checksumVerdict(pseudoHeader, rawBytes, transportOffset, transportOffset + udpLen, udpChecksum, true, sentByUs);
+  const udpVerdict = checksumVerdict(pseudoHeader, rawBytes, transportOffset, transportOffset + udpLen, udpChecksum, sentByUs);
 
   let proto: Packet['protocol'] = 'UDP';
   let protocolLabel: string | undefined;

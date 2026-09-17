@@ -14,7 +14,12 @@
  * QUIC stay where they are, because each returns something more - resolved
  * names, a matched query frame, a tracker's state - and folding them into a
  * table would mean the table's result type carried four optional members that
- * nine of thirteen entries never set.
+ * every entry below leaves unset.
+ *
+ * (That last clause used to read "nine of thirteen entries", counting the
+ * table as it stood when it was split out. It has grown since - Kerberos
+ * arrived in `9ac9111` - so it is stated as a property rather than a count,
+ * which is what it was always asserting.)
  */
 import type { ProtocolLayer } from '../../types/packet';
 import { dissectSip } from './sip';

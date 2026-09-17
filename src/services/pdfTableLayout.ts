@@ -63,14 +63,14 @@ export function isPacketHeader(line: Line): boolean {
  * whatever widths the table generator chose rather than assuming any. The
  * midpoint between two header x values is the boundary between their columns.
  */
-export function buildColumnBoundaries(header: Line): number[] {
+function buildColumnBoundaries(header: Line): number[] {
   const xs = header.fragments.map(f => f.x);
   const bounds: number[] = [];
   for (let i = 1; i < xs.length; i++) bounds.push((xs[i - 1] + xs[i]) / 2);
   return bounds;
 }
 
-export function columnOf(x: number, bounds: number[]): number {
+function columnOf(x: number, bounds: number[]): number {
   let column = 0;
   while (column < bounds.length && x >= bounds[column]) column++;
   return column;

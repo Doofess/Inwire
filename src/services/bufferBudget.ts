@@ -42,17 +42,6 @@ export const BUDGET_CHOICES = [
 ] as const;
 
 /**
- * How far over budget the buffer is allowed to go before anything is dropped.
- *
- * Carried over from `TRIM_SLACK` in `App.tsx`, and load-bearing for the same
- * reason its comment gives: moving the head of the buffer invalidates every
- * identity-based cache - `packetsExtend`, the display-filter cache, each
- * `useIncrementalAggregate` - so all of them fall back to a full pass. Without
- * slack that happened ten times a second forever. A budget that trimmed the
- * instant it was exceeded would do the same thing at a buffer size where the
- * full pass costs far more.
- */
-/**
  * How much free disk a capture stops itself at.
  *
  * This replaces `AUTO_PAUSE_AT = 0.99`, which stopped a capture at 99% of the
@@ -90,6 +79,17 @@ export function shouldStopForDisk(freeBytes: number | null): boolean {
   return freeBytes !== null && freeBytes < DISK_RESERVE_BYTES;
 }
 
+/**
+ * How far over budget the buffer is allowed to go before anything is dropped.
+ *
+ * Carried over from `TRIM_SLACK` in `App.tsx`, and load-bearing for the same
+ * reason its comment gives: moving the head of the buffer invalidates every
+ * identity-based cache - `packetsExtend`, the display-filter cache, each
+ * `useIncrementalAggregate` - so all of them fall back to a full pass. Without
+ * slack that happened ten times a second forever. A budget that trimmed the
+ * instant it was exceeded would do the same thing at a buffer size where the
+ * full pass costs far more.
+ */
 export const BUDGET_SLACK = 0.05;
 
 /**

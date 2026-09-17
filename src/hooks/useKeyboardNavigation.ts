@@ -17,14 +17,13 @@ import { APP_VIEWS, type AppView } from '../services/viewPrefs';
  * listener re-registered on every change of the buffer or the selection would
  * be re-registered on every flush - 10 times a second during a capture - so
  * the effect depends only on the two things that change what the handler MEANS
- * (whether the detail window is open, and whether the user may capture) and
- * reads everything else live.
+ * (whether the user may capture, and the view-switch callback) and reads
+ * everything else live. There used to be a third - whether the detail MODAL was
+ * open - and the gate it fed is gone with the modal; see the note inside.
  */
 export interface KeyboardNavigationOptions {
-  /** Non-null while the packet detail window is open, which owns the keyboard. */
-  detailPacketId: number | null;
   canCapture: boolean;
-  /** Switches the rail's active view, for Ctrl+1..4. */
+  /** Switches the rail's active view, for Ctrl+1..5. */
   onViewShortcut: (view: AppView) => void;
   filteredPacketsRef: RefObject<Packet[]>;
   selectedPacketRef: RefObject<Packet | null>;
@@ -39,7 +38,6 @@ export interface KeyboardNavigationOptions {
 }
 
 export function useKeyboardNavigation({
-  detailPacketId,
   canCapture,
   onViewShortcut,
   filteredPacketsRef,
@@ -52,10 +50,13 @@ export function useKeyboardNavigation({
   sendAgentCommand,
 }: KeyboardNavigationOptions): void {
   useEffect(() => {
-    // The packet detail window owns the keyboard while it is open: its own
-    // arrows step frames, and Space must not reach the capture toggle
-    // underneath it and start or stop a live capture nobody asked to change.
-    if (detailPacketId !== null) return;
+    /* **There is no detail-window gate any more.** This used to bail out
+       entirely while `detailPacketId` was set, because a modal was covering the
+       window: its own arrows stepped frames and Space must not have reached the
+       capture toggle underneath it. Frame Detail is a view, so there is nothing
+       underneath and nothing to shield - and the two handlers no longer
+       overlap. This binds Up and Down, the pane binds Left and Right, and both
+       move the same selection. */
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const filteredPackets = filteredPacketsRef.current;
@@ -69,7 +70,7 @@ export function useKeyboardNavigation({
       }
 
       /**
-       * Ctrl+1..4 switch views. Taken before the input guard above? No - after,
+       * Ctrl+1..5 switch views. Taken before the input guard above? No - after,
        * deliberately: a digit typed into the filter box is a filter, and these
        * carry a modifier precisely so they do not collide with typing anywhere
        * else. Digits were entirely unbound before this.
@@ -109,7 +110,7 @@ export function useKeyboardNavigation({
 
       if (e.code === "Space" && spaceIsOurs) {
         e.preventDefault();
-        // Mirror the Header start/stop buttons: flip local state and tell the
+        // Mirror the rail's start/stop button: flip local state and tell the
         // agent, rather than just flipping local state (which used to be
         // enough when the old agent sniffed unconditionally from launch).
         const wasCapturing = isCapturingRef.current;
@@ -122,7 +123,7 @@ export function useKeyboardNavigation({
         if (!wasCapturing && selectedInterfacesRef.current.length === 0) return;
         // Nor does it start one that would DISCARD a buffer. A stopped capture
         // cannot be resumed, so starting again clears what is there - and that
-        // is a question, asked by the header button's prompt. A keyboard
+        // is a question, asked by the rail button's own confirm prompt. A keyboard
         // shortcut has nowhere to ask it and must not answer it silently:
         // Space would otherwise be one keystroke, with no undo, between a
         // finished capture and an empty list. Stopping stays unconditional.
@@ -183,5 +184,5 @@ export function useKeyboardNavigation({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // `onViewShortcut` joins the deps rather than going through a ref: it is
     // a stable `useCallback` in App, so this re-registers once, not per flush.
-  }, [canCapture, detailPacketId, onViewShortcut]);
+  }, [canCapture, onViewShortcut]);
 }

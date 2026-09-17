@@ -39,7 +39,22 @@ export type PaneArrangement = 'side-by-side' | 'stacked';
 export interface LayoutPrefs {
   /** Pixel height of the detail panes. Dragged, so it changes continuously. */
   bottomPaneHeight: number;
-  /** Split between the two panes, as a fraction of the axis they share. */
+  /**
+   * The details pane's share of the axis the two panes share. Hex takes what is
+   * left.
+   *
+   * One share and a remainder rather than a boundary, because the remainder is
+   * the pane with no minimum content width worth defending: the tree truncates
+   * field names, but a hex dump narrower than its own 16-byte row wraps into
+   * nonsense. Making hex `flex-1` means it absorbs every window resize while
+   * the tree keeps the width the user actually chose.
+   *
+   * There was a `geoPaneRatio` beside this - the map's share, back when the map
+   * was a third pane in that row - and with it the rule that two shares are
+   * stored unclamped against each other and the interaction ("hex keeps at
+   * least a tenth") is applied at the point of use. One share has no
+   * interaction to defer, so the ceiling below is the whole clamp again.
+   */
   detailsPaneRatio: number;
   /** Whether the detail panes are shown at all. */
   panes: boolean;
@@ -48,6 +63,8 @@ export interface LayoutPrefs {
 
 export const LAYOUT_DEFAULTS: LayoutPrefs = {
   bottomPaneHeight: 280,
+  // Half each, which is what it was before the map took a third of the row and
+  // 0.36 / 0.36 / 0.28 out of it.
   detailsPaneRatio: 0.5,
   panes: true,
   arrangement: 'side-by-side',
@@ -72,6 +89,10 @@ export function normalizeLayout(raw: unknown): LayoutPrefs | null {
       typeof v.bottomPaneHeight === 'number' && Number.isFinite(v.bottomPaneHeight)
         ? Math.max(100, Math.min(v.bottomPaneHeight, 900))
         : LAYOUT_DEFAULTS.bottomPaneHeight,
+    // 0.9 again. It was 0.5 while the map was a third pane in the row, because
+    // a details pane at 0.9 would then have left a tenth of the row for the hex
+    // dump AND the map together. There are two panes, so the dump's tenth is
+    // the only thing this ceiling has to defend.
     detailsPaneRatio:
       typeof v.detailsPaneRatio === 'number' && Number.isFinite(v.detailsPaneRatio)
         ? Math.max(0.1, Math.min(v.detailsPaneRatio, 0.9))

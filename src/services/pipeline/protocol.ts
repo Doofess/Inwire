@@ -24,7 +24,7 @@ import type { Packet } from '../../types/packet';
 import type { NetworkFacts } from '../networkFacts';
 import type { InfoPatch } from '../pcapParser';
 
-/** Where a connection stands, in the terms the header already shows. */
+/** Where a connection stands, in the terms `agentHealth.ts` diagnoses from. */
 export type PipelineStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 /** Which adapter a frame came from, so the Frame layer can name it. */
@@ -54,7 +54,7 @@ export type ToPipeline =
   | { type: 'connect' }
   /** Ask it to disconnect and stop retrying. */
   | { type: 'disconnect' }
-  /** Forward a command to the agent. Dropped if the socket is not open. */
+  /** Forward a command to the agent. Dropped if the pipe is not open. */
   | { type: 'command'; command: AgentCommand }
   /**
    * Whether arriving frames should be dissected at all. The socket stays open

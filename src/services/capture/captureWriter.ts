@@ -86,12 +86,15 @@ export interface WriterOptions {
   /**
    * How many chunks between `flush()` calls.
    *
-   * Rarely, on purpose. A `write()` that has returned already survives a tab
-   * crash or a refresh - it is in the browser's file layer, not in this page.
-   * `flush()` defends only against power loss, and `scripts/perf/throughput.ts`
-   * records what flushing per batch costs: *"flush() is synchronous, so it is
-   * the tail that overruns the 100 ms budget and starves ws.onmessage, which is
-   * what makes the agent's queue overflow."*
+   * Rarely, on purpose, and the reason is stated once on `BlockFile.flush` -
+   * a returned `write()` is already in the OS page cache, so `flush()` defends
+   * only against power loss. What belongs here is the cost:
+   * `scripts/perf/throughput.ts` records what flushing per batch bought, in the
+   * terms of the transport of the day - *"flush() is synchronous, so it is the
+   * tail that overruns the 100 ms budget and starves the socket handler, which
+   * is what makes the agent's queue overflow."* The transport is a named pipe
+   * now and the arithmetic is unchanged: a synchronous barrier 30 times a
+   * second is paid out of the same 100 ms budget.
    */
   flushEveryChunks?: number;
   /** Injected so the module stays synchronous and testable outside a browser. */

@@ -1,5 +1,11 @@
 # 0026 — One capture on disk, and no launch prompt
 
+> **Its quota arithmetic is void**, because
+> [0027](0027-the-app-is-a-desktop-app.md) dissolved the quota it reasons from:
+> there is no browser storage budget on a real disk. **The decision itself - one
+> capture, no library, no launch prompt - stands**, and the argument for it did
+> not rest on the quota.
+
 **Status:** accepted. Closes the question `0025` §4 left open.
 
 ## Context

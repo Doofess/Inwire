@@ -77,7 +77,7 @@ export interface TcpConnectionState {
   initialRttUs: number | null;
 }
 
-export function freshDirection(): TcpDirectionState {
+function freshDirection(): TcpDirectionState {
   return {
     nextSeq: 0, nextSeqTimeUs: 0, nextSeqFrame: 0, maxSeqToBeAcked: 0, lastAck: 0, lastAckTimeUs: 0, lastAckLen: 0,
     window: 0, windowSeen: false, winScale: -1, dupAckNum: 0, lastNonDupAckFrame: 0, lastWasKeepAlive: false, lastWasZeroWindowProbe: false,

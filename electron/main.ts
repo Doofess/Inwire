@@ -22,10 +22,11 @@
  * logoff - and the capture store is about to start writing multi-gigabyte
  * files into it.
  */
-import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell } from 'electron';
+import {
+  app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell,
+} from 'electron';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
 import {
   AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
@@ -40,7 +41,7 @@ import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
 import { loadWindowState, rememberBackground, trackWindowState } from './windowState';
-import { resolveWindowBackground } from './windowColors';
+import { resolveWindowBackground, resolveWindowIsDark } from './windowColors';
 import {
   COMMAND_LINE_SWITCHES,
   MIN_WINDOW_HEIGHT,
@@ -141,6 +142,14 @@ if (!app.requestSingleInstanceLock()) {
 let unsavedCapture = false;
 /** Set once the reader has said yes, so the guard does not ask twice. */
 let quitConfirmed = false;
+/**
+ * Whether the renderer's current theme is a dark one, as last reported.
+ *
+ * Only `guardClose` reads it. Defaults to true for the reason
+ * `DEFAULT_WINDOW_THEME` does: guessing light and being wrong is a white
+ * flash, and nobody reports the other way round.
+ */
+let windowIsDark = true;
 /** The capture store, forked on the renderer's first request for its port. */
 const store = new CaptureStoreHost(captureDirectory());
 /**
@@ -181,7 +190,11 @@ async function start(): Promise<void> {
   // repainted - `backgroundColor` is read once, when a window is constructed -
   // so this only records what the NEXT launch should open on.
   ipcMain.on(WINDOW_THEME_CHANNEL, (_event, theme: unknown) => {
-    rememberBackground(resolveWindowBackground(typeof theme === 'string' ? theme : undefined));
+    const name = typeof theme === 'string' ? theme : undefined;
+    rememberBackground(resolveWindowBackground(name));
+    // Not applied here. It is read by `guardClose`, which is the only thing in
+    // main that draws in the OS's colours rather than the app's.
+    windowIsDark = resolveWindowIsDark(name);
   });
 
   // The three buttons the app draws for itself, now that the window is
@@ -287,10 +300,6 @@ function registerAppProtocol(): void {
       return new Response(null, { status: 404 });
     }
   });
-  // Referenced so the import is not dropped; `net` is the documented escape
-  // hatch if a future asset has to be streamed rather than buffered.
-  void net;
-  void pathToFileURL;
 }
 
 /**
@@ -369,8 +378,9 @@ async function createWindow(): Promise<BrowserWindow> {
     minHeight: MIN_WINDOW_HEIGHT,
     // Off disk, so the very first frame is already the user's theme rather than
     // a near-black rectangle that turns white on Day. `windowState.ts` explains
-    // why that cache exists at all; `WINDOW_BACKGROUND` is what a profile with
-    // nothing stored gets.
+    // why that cache exists at all; a profile with nothing stored gets
+    // `resolveWindowBackground(DEFAULT_WINDOW_THEME)` - Night's own ground, read
+    // out of the palette by `windowColors.ts` rather than restated as a literal.
     backgroundColor: state.background,
     // Shown on `ready-to-show`, so a multi-megabyte bundle parses behind a
     // window painted in the app's own ground rather than a white rectangle.
@@ -380,6 +390,12 @@ async function createWindow(): Promise<BrowserWindow> {
     // edge resizing, the drop shadow, the window animations and Windows 11's
     // corner radius. See `window.ts` for what this costs and what it does not.
     frame: false,
+    // The WINDOW's icon, which is a different thing from the executable's.
+    // Packaged, the taskbar and Alt-Tab take the icon compiled into the exe by
+    // `electron-builder.yml`; unpackaged - `npm run dev`, `npm run start:app` -
+    // there is no exe of ours to take one from, so without this the app runs
+    // under Electron's default. Same file either way.
+    icon: path.join(__dirname, '..', 'electron', 'resources', 'icon.ico'),
     // Still true with no frame, and still load-bearing: the menu is
     // what supplies Ctrl+C/V/A/Z to every input in the app (`menu.ts`), and
     // Alt reveals it. Hiding the caption strip does not hide the menu bar.
@@ -439,6 +455,25 @@ function guardClose(window: BrowserWindow): void {
     if (quitConfirmed || !unsavedCapture) return;
     event.preventDefault();
     void (async () => {
+      /**
+       * The one place the app's theme has to reach a window it does not paint.
+       *
+       * `showMessageBox` is drawn by the OS and follows `nativeTheme`, which
+       * follows the OS by default - so on a machine set to light, the app in
+       * Night threw a white box over a dark window on the way out.
+       *
+       * **Set for the dialog and put straight back**, rather than tracked for
+       * the life of the app, and that is not caution - a standing override
+       * would break System. `themeSource` drives `prefers-color-scheme` in the
+       * renderer too, and `useSystemThemePreference` reads exactly that media
+       * query: pinned to the app's own theme, the app would be following
+       * itself, and an OS theme change would never be seen at all. Held only
+       * while a modal is up, it cannot: when following is on the app's theme
+       * already equals the OS's, so the override is a no-op, and when it is off
+       * the hook does not run.
+       */
+      const restore = nativeTheme.themeSource;
+      nativeTheme.themeSource = windowIsDark ? 'dark' : 'light';
       const { response } = await dialog.showMessageBox(window, {
         type: 'warning',
         buttons: ['Quit', 'Keep capturing'],
@@ -450,7 +485,7 @@ function guardClose(window: BrowserWindow): void {
         detail:
           'Frames already written to the capture store are kept and will be '
           + 'restored next time. Anything still in memory is discarded.',
-      });
+      }).finally(() => { nativeTheme.themeSource = restore; });
       if (response !== 0) return;
       quitConfirmed = true;
       window.close();

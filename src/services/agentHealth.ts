@@ -128,7 +128,7 @@ export function diagnoseAgent(input: AgentHealthInput): AgentHealth {
  * of three consumers is how they stop agreeing. Pure, so
  * `scripts/electron/agent-health.ts` can hold every branch to a label.
  */
-export const AGENT_SILENT_LABEL: Partial<Record<AgentHealth['kind'], string>> = {
+const AGENT_SILENT_LABEL: Partial<Record<AgentHealth['kind'], string>> = {
   missing: 'Agent missing',
   disabled: 'Agent disabled',
   crashing: 'Agent crashing',
@@ -144,10 +144,12 @@ export function agentSilentLabel(health: AgentHealth): string {
 /**
  * Whether the adapter control should draw its warning badge.
  *
- * **Shape as well as colour, deliberately.** The control is a 32px icon in the
- * rail with no room for the label it used to carry, and a tint alone is the one
+ * **Shape as well as colour, deliberately.** The control is an icon in the rail
+ * with no room for the label it used to carry, and a tint alone is the one
  * thing a colour-blind user cannot read - so the badge is the signal and the
- * tint reinforces it, rather than the other way round.
+ * tint reinforces it, rather than the other way round. No pixel size is quoted
+ * here on purpose: the rail's target has been 32, 36 and 44, and the argument
+ * has never depended on which.
  *
  * `connecting` is false on purpose, and it is the only interesting case here.
  * While the link is still opening the interface list is legitimately empty, and

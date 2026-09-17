@@ -1,5 +1,10 @@
 # 0017 - Dense columns and a sparse bag
 
+> **Implemented by [0018](0018-implementing-the-field-split.md)**, which also
+> corrects the central number below. The status line's "not yet built" is the
+> state on the day this was written; `src/services/dissect/fieldBlock.ts` is the
+> built answer.
+
 **Status:** Measured 2026-09-05, not yet built. **Corrects the conclusion of
 0013**, which said there was no cheap large win in `Packet.fields`.
 

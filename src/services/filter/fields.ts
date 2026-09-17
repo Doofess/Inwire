@@ -31,6 +31,15 @@ export interface FieldResolution {
   /** False when nothing in this build can ever produce the field. */
   known: boolean;
   /**
+   * Set when the name IS registered and is deliberately not filterable - shown
+   * in the detail tree, never written into the bag. See `FieldDef.treeOnly`.
+   *
+   * Carried on the resolution rather than looked up from the registry by the
+   * caller, so `compile.ts` keeps depending on this module alone and not on
+   * `dissect/fieldRegistry` as well.
+   */
+  treeOnly?: true;
+  /**
    * Compare this field's text without regard to case.
    *
    * True where case carries no meaning on the wire - a protocol name, an
@@ -310,7 +319,15 @@ export function resolveField(name: string): FieldResolution {
     return {
       name: def.abbrev,
       type: def.type,
-      known: true,
+      // A tree-only field is registered and drawn in the detail tree, and no
+      // dissector writes it into the bag - so `fromBag` would answer `undefined`
+      // for every frame and the comparison would quietly be false everywhere.
+      // `known: false` is the honest resolution: it compiles to ALWAYS_FALSE
+      // exactly as before, and `unknownNames` now has something to report, so
+      // the filter bar can SAY the field is not filterable instead of returning
+      // an empty list that looks like "no such traffic". See `FieldDef.treeOnly`.
+      known: def.treeOnly !== true,
+      ...(def.treeOnly === true ? { treeOnly: true as const } : {}),
       ci: CASE_INSENSITIVE_TYPES.has(def.type),
       read: fromBag(def.abbrev),
     };
@@ -327,9 +344,23 @@ export function resolveField(name: string): FieldResolution {
   };
 }
 
-/** Every name a filter may use, for validation and autocomplete. */
+/**
+ * Every name a filter may use, for validation and autocomplete.
+ *
+ * Tree-only fields are excluded. Offering a completion for a name that can
+ * never match is worse than not offering it: it is the app telling the user the
+ * filter is right.
+ */
 export function knownFieldNames(): string[] {
-  return [...Object.keys(ALIASES), ...FIELDS.map((f) => f.abbrev)].sort();
+  return [
+    ...Object.keys(ALIASES),
+    ...FIELDS.filter((f) => f.treeOnly !== true).map((f) => f.abbrev),
+  ].sort();
+}
+
+/** The registered names the tree shows and a filter cannot read. */
+export function treeOnlyFieldNames(): string[] {
+  return FIELDS.filter((f) => f.treeOnly === true).map((f) => f.abbrev).sort();
 }
 
 /** Every bareword that tests for a protocol's presence. */

@@ -229,11 +229,13 @@ const { land, sea, wallUpper, wallLower, boundary, label, labelHalo } = BASEMAP_
   checkTrue('no two roles share a colour', new Set(values).size === values.length);
 }
 
-// --- 8. The theme-synced skin, on all four themes ----------------------------
+// --- 8. The theme-synced skin, on every theme --------------------------------
 //
 // The section the original bug needed and did not have. Every colour in this
-// skin is an expression over the theme's tokens, so it can be - and once was -
-// correct on three themes and a single flat sheet on the fourth.
+// skin is an expression over the theme's tokens, so it can be - and once was,
+// back when there were four - correct on three of them and a single flat sheet
+// on the fourth. Driven by `THEME_OPTIONS` rather than by a count, so it covers
+// whatever the list holds; today that is Day and Night.
 {
   const THEMES = THEME_OPTIONS.map((t) => t.value);
 

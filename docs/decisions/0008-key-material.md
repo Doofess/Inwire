@@ -1,6 +1,21 @@
 # 0008 — Where TLS key material lives, and where it does not
 
-**Status:** accepted, Phase 13.
+> **Weakened by [0027](0027-the-app-is-a-desktop-app.md), and the question is
+> reopened rather than answered.** The decision below stands - key material is
+> still memory-only, still never written to a preference or a stored session,
+> still out of an export unless a switch that counts the connections is turned
+> on. What no longer holds is the *bound* the argument rests on: this file says
+> the exposure "is exactly as old as the tab", and there is no tab. A desktop
+> window stays open for days, so "the life of the page" below should be read as
+> the life of the process, which is unbounded in a way a browser tab was not.
+>
+> **`crashReporter` stays off for the same reason.** A renderer minidump is a
+> copy of `KeyLogStore`, so the usual advice - enable it with
+> `uploadToServer: false` for local dumps - conflicts with this ADR and is
+> declined until the key-lifetime question is reopened properly. Reopening it is
+> what a successor ADR would do; this banner only records that the premise moved.
+
+**Status:** accepted, Phase 13. **Weakened by 0027** — see the banner above.
 **Supersedes nothing. Related: 0004 (fixtures and privacy), 0001 (two-phase dissection).**
 
 ## The decision

@@ -21,7 +21,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { contrastRatio, deltaE76 } from '../../src/lib/colorMix';
+import { contrastRatio, deltaE76, mixHex } from '../../src/lib/colorMix';
 import {
   RETIRED_THEMES,
   SYSTEM_THEME_PAIR,
@@ -61,16 +61,25 @@ function tokensIn(selector: string): string[] {
 const light = THEME_OPTIONS.filter((t) => t.mode === 'light');
 const dark = THEME_OPTIONS.filter((t) => t.mode === 'dark');
 
-check('two light themes', light.length, 2);
-check('two dark themes', dark.length, 2);
-check('four themes, all of them real', THEME_NAMES.length, 4);
+// One of each, and that is the whole set. Paper and Graphite were the second
+// light and the second dark; each existed as the other survivor's counterweight
+// - one warm, one cool - which was an argument for four and not an argument for
+// keeping a spare of each once the answer wanted is Day, Night and System.
+//
+// Pinned as exact counts rather than as `>= 1`, because the cost of a theme is
+// not in this file: it is a complete token block in index.css, a palette, and
+// every pairwise contrast and deltaE check below. A theme added without that
+// deliberation should fail here first.
+check('one light theme', light.length, 1);
+check('one dark theme', dark.length, 1);
+check('two themes, both of them real', THEME_NAMES.length, 2);
 // `system` is gone, so there is no longer a picker entry that resolves to
 // something else at runtime. Every option now names a palette directly, which
 // is what let `mode` become required rather than optional.
 checkTrue('no theme is offered without a mode', THEME_OPTIONS.every((t) => t.mode !== undefined));
-// `system` IS offered in the picker again, but as a MODE over the four rather
-// than a fifth palette: it has no class block, no palette and no `mode`, so it
-// must never reach next-themes or any of the lookups keyed on a theme name.
+// `system` IS offered in the picker, but as a MODE over the two rather than a
+// third palette: it has no class block, no palette and no `mode`, so it must
+// never reach next-themes or any of the lookups keyed on a theme name.
 // See SYSTEM_THEME_OPTION and useSystemThemePreference.
 checkTrue('system is not one of the palettes',
   THEME_OPTIONS.every((t) => t.value !== 'system') && !THEME_NAMES.includes('system'));
@@ -100,7 +109,13 @@ for (const [retired, target] of Object.entries(RETIRED_THEMES)) {
 }
 check('no retired id is also a live one',
   Object.keys(RETIRED_THEMES).filter((k) => THEME_NAMES.includes(k)), []);
-check('a live theme is returned unchanged', normalizeThemeName('midnight'), 'midnight');
+check('a live theme is returned unchanged', normalizeThemeName('dark'), 'dark');
+// The migration most stored profiles actually take. `midnight` was the neutral
+// dark theme's id until Graphite was deleted and freed the `dark` one; landing
+// it anywhere else would move somebody off the theme they are already using.
+check('midnight, the id the dark theme used to have, lands on it',
+  normalizeThemeName('midnight'), 'dark');
+check('paper falls back to the surviving light theme', normalizeThemeName('paper'), 'light');
 check('an unknown name falls back to the default dark',
   normalizeThemeName('theme-that-never-existed'), 'dark');
 check('a missing value falls back to the default dark', normalizeThemeName(null), 'dark');
@@ -168,15 +183,29 @@ for (const t of THEME_OPTIONS) {
  */
 
 /**
- * 5.0 sits well above the ~2.3 "just noticeable difference" while staying under
- * the closest legitimate pair - Graphite vs Midnight, ~7.8 - so it rejects
- * twins without dictating taste.
+ * 5.0 sits well above the ~2.3 "just noticeable difference" without dictating
+ * taste.
  *
- * With four themes rather than eight this is doing more work than it used to,
- * not less: the surviving pairs are one warm/cool pair per mode, which is
- * exactly the kind of distinction that is easy to author too subtly.
+ * The number was chosen when there were eight themes and had to clear the
+ * closest legitimate pair of the day - Graphite against Midnight, ~7.8. Both of
+ * those are deleted, and with **two** themes there is exactly one pair left:
+ * Day against Night, which is a light theme against a dark one and clears this
+ * by an enormous margin. So this is no longer a bar anything is pressed
+ * against; it is the floor a third theme would have to clear, and it is kept at
+ * 5 rather than raised to the current distance precisely so it stays a floor
+ * rather than a pin on today's palettes.
  */
 const MIN_SURFACE_DELTA_E = 5;
+
+/**
+ * The same bar, for two STATES of one control rather than two themes.
+ *
+ * Kept at 5 for the same reason: well above the ~2.3 just-noticeable difference,
+ * and low enough not to dictate taste. The rail's active fill clears it against
+ * both its ground and its hover by a wide margin today (the tightest is 12.4),
+ * so this is a floor rather than a constraint anything is pressed against.
+ */
+const MIN_STATE_DELTA_E = 5;
 
 function surfaceColors(theme: string): { background: string; card: string } | null {
   const selector = theme === 'light' ? ':root' : `.${theme}`;
@@ -204,59 +233,171 @@ for (let i = 0; i < realThemes.length; i++) {
 }
 check(`no two themes share a surface within ${MIN_SURFACE_DELTA_E} deltaE`, tooAlike, []);
 
-// --- Dark themes reach the `dark:` variant -----------------------------------
-
-const variant = css.slice(css.indexOf('@custom-variant dark'), css.indexOf('@custom-variant dark') + 400);
-for (const t of dark) {
-  checkTrue(`${t.value} is listed in the dark custom variant`, variant.includes(`.${t.value}`));
-}
-for (const t of light) {
-  if (t.value === 'light') continue;
-  checkTrue(`${t.value} is NOT in the dark variant`, !variant.includes(`.${t.value}`));
-}
-
-// --- The brand mark, against the ground it sits on ---------------------------
+// --- The `dark:` variant lists exactly the dark themes ------------------------
 
 /**
- * What is left of the Colourful setting's checks, and the one that matters.
+ * One set comparison, where this was two loops - and the second of them had
+ * stopped asserting anything at all.
  *
- * That setting painted the chrome with a saturated accent, and this section used
- * to hold five checks about it - the capture buttons' label on their fill, the
- * fill against the bar, and the brand lockup against the bar in both states. All
- * of them tested the mark against `--chrome`, the bar it sat on.
+ * It read `for (const t of light) { if (t.value === 'light') continue; ... }`,
+ * which was written when Paper was the second light theme. Paper is deleted, so
+ * `light` holds exactly one entry, the `continue` fired on it, and the body
+ * never ran: no PASS line, nothing guarded. What it had been guarding is the
+ * worse half of the pair - a LIGHT theme listed in the dark variant renders
+ * every `dark:` utility in the app as its dark treatment on a white ground,
+ * across the whole UI at once - and `light` itself was the one value the loop
+ * could never reach, because skipping it was how the loop avoided asserting
+ * about `:root`.
+ *
+ * Read as a set both ways instead. That covers the missing dark theme, the
+ * light theme that must not be there, and the third case neither loop could
+ * see: a class left in the variant for a theme that no longer exists, which
+ * costs nothing today and quietly comes back to life if the id is ever reused.
+ * `RETIRED_THEMES` reuses `midnight` and `paper` as stored ids for exactly that
+ * reason, so the case is not hypothetical.
+ *
+ * Read to the statement's own semicolon rather than by a fixed 400-character
+ * window. The window worked only because the token declarations under it happen
+ * to contain no class selectors; a set comparison cannot afford to scoop up
+ * whatever follows.
+ */
+const variantAt = css.indexOf('@custom-variant dark');
+checkTrue('index.css declares a dark custom variant', variantAt !== -1);
+const variant = css.slice(variantAt, css.indexOf(';', variantAt) + 1);
+const listed = [...new Set(
+  [...variant.matchAll(/\.([a-z][a-z0-9-]*)/g)].map((m) => m[1]),
+)].sort();
+check('the dark variant lists exactly the dark themes, and nothing else',
+  listed, dark.map((t) => t.value).sort());
+
+// --- The chrome, against the grounds it actually sits on ---------------------
+
+/**
+ * What is left of the Colourful setting's checks, retargeted twice.
+ *
+ * That setting painted the chrome with a saturated accent, and this section held
+ * five checks about it - the capture buttons' label on their fill, the fill
+ * against the bar, and the brand lockup against the bar in both states. All of
+ * them tested against `--chrome`, the bar it sat on.
  *
  * **It sat on `--chrome` and then it did not, and the checks did not notice.**
  * The 64px accent header was deleted; the mark moved to the rail and then to the
- * title row, both of which are `--card`. `--chrome-brand` resolved to
- * `--chrome-foreground` (white) on the light themes and to `--secondary` on the
- * dark ones, so turning Colourful ON made the mark white-on-white in Day and
- * Paper and near-invisible in the other two - while this file went on asserting
- * it was legible against a bar nothing drew any more. A guard aimed at the wrong
- * ground passes for exactly as long as it is wrong.
+ * title row. `--chrome-brand` resolved to white on the light themes, so turning
+ * Colourful ON made the mark white-on-white in Day - while this file went on
+ * asserting it was legible against a bar nothing drew any more.
  *
- * So the check that survives is the one about the ground the mark is actually
- * on. It is ordinary text contrast now, and holds to the real threshold.
+ * **Then it happened a second time, which is why this is a list and not a line.**
+ * What survived that cleanup was one check: `--card-foreground` against
+ * `--card`, described as "the brand mark in the title row". Two things were
+ * wrong with it by the time anybody looked. It was covering the WORDMARK, not
+ * the mark - the mark is a shaded form carrying its own colours from
+ * `lib/brandMark.ts` and takes nothing from the cascade - and the wordmark has
+ * since been deleted outright. And the title row moved off `--card` to
+ * `--secondary`, so the ground was wrong as well as the subject.
+ *
+ * A guard aimed at the wrong ground passes for exactly as long as it is wrong,
+ * and this one did it twice. So the rule now is to name the PAIR and the surface
+ * it is drawn on, one entry per thing actually rendered, and to let the list
+ * grow rather than letting one survivor stand in for a chrome that keeps moving.
+ *
+ * All four are held to 4.5:1 - the text threshold - rather than the 3:1 WCAG
+ * allows for non-text. Two of them are icons and could take the weaker bar; they
+ * clear the stronger one in both themes today (the tightest is 4.66), so holding
+ * them there costs nothing and says something a 3:1 floor would not.
  */
+const hexOf = (theme: string, token: string): string => {
+  const selector = theme === 'light' ? ':root' : `.${theme}`;
+  const start = css.indexOf(`${selector} {`);
+  const body = css.slice(start, css.indexOf('\n}', start));
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith(`${token}:`)) continue;
+    const value = trimmed.slice(token.length + 1).replace(';', '').trim();
+    if (value.startsWith('#')) return value;
+    if (value.startsWith('var(')) return hexOf(theme, value.slice(4, value.indexOf(')')));
+  }
+  return '#000000';
+};
+
+/**
+ * The rail's active fill is TRANSLUCENT, so its real ground is a composite.
+ *
+ * Read out of the component rather than written down twice: the alpha is a
+ * Tailwind opacity suffix (`bg-primary/20`), which no token file knows about, so
+ * a check that hardcoded it would go on asserting 20% for exactly as long as
+ * somebody left it at 20%.
+ *
+ * **Comments stripped first, and here that is not tidiness.** This is the only
+ * read in this file whose result is a NUMBER rather than a yes/no: the alpha
+ * drives four contrast and deltaE assertions below. `exec` takes the FIRST
+ * match, and `ActivityRail.tsx` explains its own active state at length - so a
+ * paragraph mentioning `bg-primary/30` written above the class string would
+ * silently move every one of those four assertions onto a ground the rail does
+ * not draw, and all four would go on passing. That is the exact failure the
+ * section below records having survived twice, arriving by a new route.
+ * `session/view.ts` and `electron/shell.ts` strip for the same reason.
+ */
+const code = (source: string): string => source
+  .replace(/\/\*[\s\S]*?\*\//g, ' ')
+  .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+const railSource = code(
+  fs.readFileSync(path.join(process.cwd(), 'src/components/common/ActivityRail.tsx'), 'utf8'),
+);
+const activeAlpha = (() => {
+  const m = /bg-primary\/(\d+)/.exec(railSource);
+  return m ? Number(m[1]) / 100 : Number.NaN;
+})();
+checkTrue('the rail draws its active view as a translucent accent fill',
+  Number.isFinite(activeAlpha) && activeAlpha > 0 && activeAlpha < 1);
+checkTrue('...and the 2px accent edge that used to sit over it is gone',
+  !/w-0\.5 rounded-full bg-primary/.test(railSource));
+
+/**
+ * Each entry is `[what is drawn, the ground it is drawn on, what renders it]`.
+ * The third field is the point: it is what a future session checks before
+ * trusting the first two, and it is what was missing when this section spent two
+ * revisions testing a ground nothing used.
+ */
+const CHROME_PAIRS: readonly [string, string, string][] = [
+  // The title row's packet counter and the rail's own text. Both surfaces are
+  // `bg-secondary`; see `TitleRow` for why the chrome is a step brighter than
+  // the panes rather than the same grey.
+  ['--secondary-foreground', '--secondary', 'TitleRow / ActivityRail text'],
+  // The rail's idle icons, which are `text-muted-foreground` on that ground.
+  ['--muted-foreground', '--secondary', 'ActivityRail idle icons'],
+];
+
 for (const t of THEME_OPTIONS) {
-  const hex = (theme: string, token: string): string => {
-    const selector = theme === 'light' ? ':root' : `.${theme}`;
-    const start = css.indexOf(`${selector} {`);
-    const body = css.slice(start, css.indexOf('\n}', start));
-    for (const line of body.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith(`${token}:`)) continue;
-      const value = trimmed.slice(token.length + 1).replace(';', '').trim();
-      if (value.startsWith('#')) return value;
-      if (value.startsWith('var(')) return hex(theme, value.slice(4, value.indexOf(')')));
-    }
-    return '#000000';
-  };
-  const mark = hex(t.value, '--card-foreground');
-  const ground = hex(t.value, '--card');
-  checkTrue(
-    `${t.value}: the brand mark is legible in the title row `
-    + `(${contrastRatio(mark, ground).toFixed(2)}:1)`,
-    contrastRatio(mark, ground) >= 4.5);
+  if (!t.mode) continue;
+  for (const [ink, ground, what] of CHROME_PAIRS) {
+    const ratio = contrastRatio(hexOf(t.value, ink), hexOf(t.value, ground));
+    checkTrue(`${t.value}: ${what} (${ratio.toFixed(2)}:1)`, ratio >= 4.5);
+  }
+
+  // The active view's glyph, on the composite the translucent fill makes.
+  //
+  // `--foreground` rather than `--primary`, and Day is why: `--primary` on a
+  // tint of itself peaks at 3.97:1 there and falls as the alpha rises, because
+  // `#0b6bcb` is a mid-blue and the tint lightens toward it. The
+  // accent-on-accent-tint pattern simply cannot clear the floor in this palette,
+  // which is a fact about the palette rather than about the floor - so the glyph
+  // changed and the floor did not.
+  const chrome = hexOf(t.value, '--secondary');
+  const fill = mixHex(hexOf(t.value, '--primary'), chrome, activeAlpha);
+  const glyph = contrastRatio(hexOf(t.value, '--foreground'), fill);
+  checkTrue(`${t.value}: ActivityRail active glyph (${glyph.toFixed(2)}:1)`, glyph >= 4.5);
+
+  // And the fill against the two things it must not be mistaken for. The second
+  // is the one that matters and the one a contrast ratio would not catch: an
+  // active marker a HOVER can be mistaken for is not a marker, and hover is
+  // `--accent`, which is deliberately one step off the same ground.
+  const fromChrome = deltaE76(fill, chrome);
+  const fromHover = deltaE76(fill, hexOf(t.value, '--accent'));
+  checkTrue(`${t.value}: the active fill reads against the rail (${fromChrome.toFixed(1)} deltaE)`,
+    fromChrome >= MIN_STATE_DELTA_E);
+  checkTrue(`${t.value}: ...and is not its hover (${fromHover.toFixed(1)} deltaE)`,
+    fromHover >= MIN_STATE_DELTA_E);
 }
 
 console.log();

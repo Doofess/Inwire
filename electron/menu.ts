@@ -10,8 +10,9 @@
  * search box, a display-filter editor and a colour-rule editor.
  *
  * **The default menu** brings Ctrl+R, Ctrl+Shift+R and Ctrl+W. A renderer
- * reload tears down the pipeline worker, the WebSocket and the RAM buffer
- * exactly as a browser refresh did - and the elaborate reload-intent heuristic
+ * reload tears down the pipeline worker, the agent's `MessagePort` and the RAM
+ * buffer exactly as a browser refresh did - `AgentPipeLink.attach` calls
+ * `detach()` first for precisely that reason - and the reload-intent heuristic
  * in `App.tsx` existed only to tell that refresh apart from a close. In a
  * desktop app there is no reason to offer a reload at all, so in a packaged
  * build there is not one.

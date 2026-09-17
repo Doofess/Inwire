@@ -285,7 +285,7 @@ const PACKET_STATUSES = new Set<string>(['ok', 'warning', 'alert', 'retransmit',
  * union, which is what would otherwise put `"TLSv1.2"` into a field every color
  * rule and display filter believes is one of twelve values.
  */
-export function coerceProtocol(raw: string): { protocol: ProtocolType; protocolLabel?: string } {
+function coerceProtocol(raw: string): { protocol: ProtocolType; protocolLabel?: string } {
   const text = raw.trim();
   const upper = text.toUpperCase();
   if (PROTOCOL_TYPES.has(upper)) return { protocol: upper as ProtocolType };

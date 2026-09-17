@@ -33,6 +33,21 @@ interface Tlv {
   next: number;    // one past the whole TLV
 }
 
+/**
+ * Reads one TLV. A second implementation of `dissectors/ber.ts`'s `readBer`,
+ * and deliberately not replaced by it.
+ *
+ * `ber.ts` is the general reader - SNMP, LDAP and Kerberos all drive it - and
+ * it is the stricter of the two: it rejects the high-tag-number form, and
+ * `berChildren` caps a constructed value at **128 children**. That cap is
+ * right for a PDU and wrong here, because a shared-hosting certificate's
+ * subjectAltName routinely carries more than 128 dNSNames, and truncating that
+ * list silently is exactly the kind of wrong answer this file's header refuses.
+ *
+ * So the duplication is kept, and the pieces that must not diverge are the
+ * OID arithmetic in `decodeOid` below and the length handling here. Anything
+ * learnt about BER belongs in both.
+ */
 function readTlv(b: Uint8Array, offset: number, end: number): Tlv | null {
   if (offset + 2 > end) return null;
   const tag = b[offset];
@@ -69,18 +84,29 @@ const OID_NAMES: Record<string, string> = {
   '2.5.29.17': 'subjectAltName',
 };
 
+/**
+ * An object identifier, in dotted form.
+ *
+ * The first group is two arcs, `40 * x + y`, and **x is capped at 2 rather
+ * than divided out**: an OID under `2.x` may have a second arc above 39, and
+ * the division carries the excess into the wrong place - `2.100.3` encodes its
+ * first group as 180 and decodes to `4.20.3` uncapped. `dissectors/ber.ts`'s
+ * `berOid` is the same rule, and this is a deliberate second copy: see the note
+ * on `readTlv` above for why this file does not import it.
+ */
 function decodeOid(b: Uint8Array, tlv: Tlv): string {
-  const parts: number[] = [];
+  const groups: number[] = [];
   let value = 0;
   for (let p = tlv.start; p < tlv.end; p++) {
     value = value * 128 + (b[p] & 0x7f);
     if ((b[p] & 0x80) === 0) {
-      if (parts.length === 0) { parts.push(Math.floor(value / 40), value % 40); }
-      else parts.push(value);
+      groups.push(value);
       value = 0;
     }
   }
-  return parts.join('.');
+  if (groups.length === 0) return '';
+  const x = Math.min(2, Math.floor(groups[0] / 40));
+  return [x, groups[0] - x * 40, ...groups.slice(1)].join('.');
 }
 
 const utf8 = new TextDecoder();

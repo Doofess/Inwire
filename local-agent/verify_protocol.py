@@ -4,6 +4,23 @@ End-to-end smoke test against a REAL running agent - not a unit test, since
 this exercises the actual WebSocket/thread/scapy wiring that test_protocol.py
 deliberately fakes out.
 
+## macOS and Linux only. It cannot reach the Windows service.
+
+Everything below dials ``ws://localhost:8999`` with a pairing token and an
+``Origin`` header, and on Windows none of those three exist: the transport is
+the named pipe, the token is gone because the pipe's descriptor is the
+authentication (docs/decisions/0029), and ``main()`` returns from the pipe
+branch without ever calling ``websockets.serve`` - ``PipeServer.start`` sets
+``serving`` on every win32 run, so there is no fallback. ``websockets`` is not
+even importable in the frozen build: ``agent.py`` sets it to ``None`` on win32
+and ``inwire_agent.spec`` lists it in ``excludes``.
+
+The release checklist used to send people here after installing on Windows,
+where the only possible outcome is a connection refused. The Windows
+equivalents are ``npx tsx scripts/electron/smoke.ts`` (real app, real pipe,
+frames on screen) and ``python local-agent/test_protocol.py`` for the protocol
+itself. Porting this to the pipe is worth doing and has not been done.
+
 Coverage:
   - hello on connect, start_capture -> sniffing, stop_capture -> idle
   - set_interfaces narrowed to a single interface, exercised through a full
@@ -12,8 +29,10 @@ Coverage:
     would silently change what the user's browser captures afterwards)
   - set_interfaces with an empty list is rejected with an "empty_interfaces"
     error instead of silently succeeding
-  - the origin allowlist - the agent's only authentication - actually
-    rejects a disallowed Origin, and a missing Origin, with HTTP 403
+  - the origin allowlist - the agent's only authentication ON THESE
+    PLATFORMS; on Windows it is the pipe's descriptor and there is no
+    Origin at all - actually rejects a disallowed Origin, and a missing
+    Origin, with HTTP 403
   - subscribe_logs returns a backlog and then streams live lines, and
     unsubscribe_logs stops them
 
@@ -26,9 +45,23 @@ import os
 import sys
 import time
 
-import websockets
+# Before `import websockets`, so a Windows run says why rather than dying on an
+# ImportError (the frozen build excludes the library) or, with it installed, on
+# a connection refused against a port the Windows agent never opens.
+if sys.platform == "win32":
+    print(
+        "verify_protocol.py is the macOS/Linux check and cannot reach the Windows\n"
+        "agent: that one speaks the named pipe, and ws://localhost:8999 is not\n"
+        "opened at all. On Windows run:\n"
+        "  npx tsx scripts/electron/smoke.ts   - the real app over the real pipe\n"
+        "  python local-agent/test_protocol.py - the protocol itself",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
-import config
+import websockets  # noqa: E402  (must follow the platform guard above)
+
+import config  # noqa: E402
 
 AGENT_URL = "ws://localhost:8999"
 

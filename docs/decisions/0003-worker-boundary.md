@@ -1,5 +1,9 @@
 # 0003 - Keep dissection synchronous; move the whole pipeline into one Worker
 
+> **Corrected by [0007](0007-what-crosses-the-worker-boundary.md).** "The whole
+> pipeline into one Worker" held; what this file got wrong is what crosses the
+> boundary. 0007 is the rule in force: bytes cross, trees do not.
+
 **Status:** Accepted 2026-09-04
 
 ## Context

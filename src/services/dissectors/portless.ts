@@ -19,9 +19,9 @@ import { dissectVrrp } from './vrrp';
 import { dissectOspf } from './ospf';
 
 /** IP protocol numbers this module claims. */
-export const IGMP_PROTOCOL = 2;
-export const OSPF_PROTOCOL = 89;
-export const VRRP_PROTOCOL = 112;
+const IGMP_PROTOCOL = 2;
+const OSPF_PROTOCOL = 89;
+const VRRP_PROTOCOL = 112;
 
 /** True when `dissectPortless` is the right decoder for this protocol number. */
 export function isPortlessProtocol(ipProtocolNum: number): boolean {

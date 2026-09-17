@@ -41,7 +41,7 @@ export interface Split {
  *   1. The position is measured against the CONTAINER's bounding rect, not the
  *      window, so the ratio stays correct no matter what sits to the left or
  *      right of it - which is the whole difference between this working inside
- *      a centred modal and only working full-bleed.
+ *      a pane inset from the window's edges and only working full-bleed.
  *   2. The listeners live on `window`, not the handle, so a fast drag that
  *      outruns the cursor does not drop the gesture.
  *   3. `body`'s cursor and `user-select` are set for the duration, so the

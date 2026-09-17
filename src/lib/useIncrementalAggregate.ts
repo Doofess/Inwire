@@ -25,7 +25,7 @@ import {
  *
  * `add` runs once per packet ever seen. `finalize` runs once per tick, so it
  * may sort and allocate freely as long as it is O(distinct keys) rather than
- * O(packets) - that is the line this hook exists to keep the widget on.
+ * O(packets) - that is the line this hook exists to keep its callers on.
  *
  * **`deps` covers everything the callbacks read that is not a packet.** A value
  * `add` closes over is baked into work already folded in, so changing one can

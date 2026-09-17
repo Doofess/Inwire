@@ -1,5 +1,12 @@
 # 0012 - A stored capture is discarded only when the user asks
 
+> **Mechanism superseded by [0025](0025-the-capture-lives-on-disk.md)**, and 0025
+> by [0027](0027-the-app-is-a-desktop-app.md) in turn. **The rule below survives
+> intact and is the invariant the app still holds** - a capture is deleted only
+> when the user asks. What changed is where a capture lives: not a browser
+> database but real files under `%LOCALAPPDATA%`, pruned by `planPrune` and
+> guarded by `scripts/capture/prune-guard.ts`.
+
 **Status:** Accepted 2026-09-05. **Reverses the retention policy** stated in
 `src/services/sessionLifecycle.ts` and `public/inwire-sw.js`.
 

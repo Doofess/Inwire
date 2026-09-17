@@ -361,8 +361,10 @@ export interface RecoveryPlan {
  *
  * Pure, and exported for that reason: this is the one function in the capture
  * store that decides a user's frames are gone, and it should be testable
- * directly rather than only by killing a browser. `planBudgetEviction` is
- * exported for exactly the same reason and says so.
+ * directly rather than only by killing the process mid-write.
+ * `scripts/capture/recovery-on-disk.ts` is what drives it, against a real file
+ * truncated at chosen offsets. The disk budget's `planBudgetEviction` was
+ * exported for exactly the same reason, and went with the budget it enforced.
  *
  * The rule is one-directional because the write order is. Data is written and
  * flushed before its index record, so the only inconsistency a crash can

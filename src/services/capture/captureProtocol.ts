@@ -1,5 +1,5 @@
 /**
- * The messages between the app and the capture worker.
+ * The messages between the app and the capture store process.
  *
  * A closed set, in its own module, the way `services/pipeline/protocol.ts` is
  * for the dissection worker: both ends import these types, so a message that
@@ -197,7 +197,7 @@ export type FromCapture =
       message: string | null;
     }
   /**
-   * The capture worker could not do something, and said so.
+   * The capture store could not do something, and said so.
    *
    * Never silent: a storage layer that fails quietly is the failure
    * `sessionStore`'s own budget comment was written to prevent - "on a full

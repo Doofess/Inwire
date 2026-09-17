@@ -1,5 +1,11 @@
 scapy>=2.5.0
-websockets>=12.0
+# The transport on macOS and Linux, and NOT on Windows - agent.py sets it to
+# None on win32 and never loads a line of it, inwire_agent.spec lists it in
+# `excludes`, and shipping a library the product cannot reach inside a signed
+# installer is not defensible. Marked rather than installed-then-excluded,
+# which is what this was: without the marker a Windows build environment
+# installs it and PyInstaller has to be told twice to leave it out.
+websockets>=12.0; sys_platform != 'win32'
 # Per-adapter byte/packet counters behind the interface picker's sparklines.
 # Reading the OS counters is what keeps that feature from needing a capture
 # handle on every adapter - see interface_stats.py.

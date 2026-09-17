@@ -302,6 +302,6 @@ export function dissectStun(bytes: Uint8Array, start: number, end: number): UdpA
 
 // `dissectUdpByContent` used to live here as a two-line `if` chain over STUN
 // and NTP - the whole of this app's content-based dispatch. It is
-// `dissectors/heuristics.ts` now, which holds seven detectors and, more to the
+// `dissectors/heuristics.ts` now, which holds eight detectors and, more to the
 // point, an assertion that each rejects every other's payloads.
 

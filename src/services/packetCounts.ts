@@ -4,34 +4,27 @@ import { useSyncExternalStore } from 'react';
 import type { CaptureFilterState } from '../lib/useCaptureFilter';
 
 /**
- * What the packet counter says, published from App and read by one widget.
+ * What the packet counter says, published from App and read by the title row.
  *
- * ## Why this is a store and not a field on `DashboardWidgetContext`
+ * ## Why this is a store and not a prop threaded down from `App`
  *
- * Because it would undo the application's only `React.memo` boundary.
+ * Because threading it down is the regression that shipped once already
+ * (`b0ce1fc`), and the reason it is still a regression has changed.
  *
- * `Dock` is memoised - it is the one thing standing between `App` re-rendering
- * about ten times a second during a capture and six widgets each doing a full
- * pass over the buffer. The memo holds because `dashboardContext` is itself
- * memoised on inputs that change rarely: the packet array identity, the theme,
- * three stable callbacks. Putting a frame count in there would change its
- * identity on **every flush**, which is exactly the rate the memo exists to
- * absorb, and all six widgets would re-render for a number one of them shows.
- * That regression has already shipped once (`b0ce1fc`); this is the shape that
- * cannot cause it again.
+ * The original argument was a memo boundary: `Dock` was the application's only
+ * `React.memo`, it held because `DashboardWidgetContext` was memoised on inputs
+ * that changed rarely, and putting a ten-times-a-second number into that context
+ * would have broken it. **That boundary no longer exists** - the dock is
+ * deleted, and `React.memo` appears nowhere in `src/`.
  *
- * So the counter subscribes for itself. Only the component that calls
- * `usePacketCounts` re-renders when these change, and the dock around it does
- * not. It is the same pattern `lib/windowChrome.ts` uses for maximized/focused,
- * and for the same reason: a fact that changes on its own schedule, read by one
- * place, does not belong in a context every other consumer is memoised against.
- *
- * ## Why it is here rather than in the widget's own file
- *
- * `src/services/` imports no React components and no Electron, which is what
- * lets an assertion script import it under plain `tsx`. The arithmetic - what
- * percentage to show, and whether a percentage means anything yet - is the part
- * worth asserting, so it lives on this side of that line.
+ * What replaced it is stronger, which is why this store stays. Every surface
+ * that reads the buffer is now unmounted unless its view is active, so there is
+ * nothing to memoise: the cost is not paid at all rather than paid and then
+ * skipped. The counter is the one exception - it lives in the title row, which
+ * is on screen in every view - so it is the one thing that must update ten
+ * times a second without re-rendering anything else. A prop from `App` would
+ * re-render the whole tree to move one number; a store re-renders its one
+ * subscriber.
  */
 export interface PacketCounts {
   /** Rows the display filter selected, over the whole capture. */
@@ -100,7 +93,7 @@ export function filterPercentage({ filtered, total }: PacketCounts): number {
  * How far a whole-capture scan has got, or null while that is unknowable.
  *
  * Null until the store reports a frame count, which is 150,000 frames in. A
- * percentage of an unknown total is a number, and a wrong one - so the card
+ * percentage of an unknown total is a number, and a wrong one - so the readout
  * says "scanning" with no figure rather than "0%" for the first few seconds of
  * every scan over a large capture.
  */

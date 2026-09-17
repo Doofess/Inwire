@@ -51,8 +51,6 @@ import { AGENT_PORT_CHANNEL } from './channels';
  */
 const SERVICE_POLL_MS = 20_000;
 
-export { AGENT_PIPE_PATH };
-
 /**
  * One renderer's link to the agent.
  *
@@ -150,9 +148,9 @@ export class AgentPipeLink {
    * is pure and drivable from a script. This half is here because both inputs
    * are things only main can reach.
    */
-  private async reportService(force = false): Promise<void> {
+  private async reportService(): Promise<void> {
     const now = Date.now();
-    if (!force && now - this.serviceCheckedAt < SERVICE_POLL_MS) return;
+    if (now - this.serviceCheckedAt < SERVICE_POLL_MS) return;
     this.serviceCheckedAt = now;
     const facts = await readAgentService();
     this.tell({ type: 'service', facts, shortConnections: this.pipe.shortConnections });
@@ -162,9 +160,21 @@ export class AgentPipeLink {
    * Raises the UAC prompt that starts the service.
    *
    * The app is unelevated on purpose - the dissector must never parse hostile
-   * bytes as an administrator - so it cannot start a LocalSystem service, and
-   * no amount of arranging makes it able to. What it can do is ask Windows to,
-   * which is a prompt the person sees and refuses if they did not expect it.
+   * bytes as an administrator - so by default it cannot start a LocalSystem
+   * service. What it can do is ask Windows to, which is a prompt the person
+   * sees and refuses if they did not expect it.
+   *
+   * **`-Verb RunAs` unconditionally, and that is a live loose end.**
+   * `installer/setup.iss` runs `sc sdset` to grant `RP` on the service's `IU`
+   * ACE (`GrantServiceStartToInteractiveUsers`) precisely so an unelevated
+   * `sc start InwireAgent` succeeds without a prompt - and this call never
+   * tries it, so the prompt appears every time and the grant buys nothing
+   * here. It is not dead on the machine: it still lets somebody start the
+   * agent from an unelevated prompt by hand. The fix, when it is worth making,
+   * is to attempt an unelevated `sc.exe start` first and fall back to this -
+   * which must keep the invariant below intact, since the fallback is the
+   * privileged half. This used to say "no amount of arranging makes it able
+   * to", which the installer had already disproved.
    *
    * The arguments are constants. Nothing the renderer sends reaches this
    * command line, because a privileged command built from a message is a

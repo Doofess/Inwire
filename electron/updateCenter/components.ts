@@ -111,8 +111,10 @@ export function isVersion(version: string | null): boolean {
  * Returns <0, 0 or >0, comparing group by group with missing groups as zero.
  *
  * Written out rather than compared as strings for the reason
- * `installer/setup.iss:231` already gives about its own copy of this: `'1.10.0'`
- * sorts before `'1.9.0'`, and getting exactly that case right is the point.
+ * `installer/setup.iss` already gives above its own `SplitVersion`/
+ * `CompareVersions` pair: `'1.10.0'` sorts before `'1.9.0'`, and getting
+ * exactly that case right is the point. (Named rather than given a line
+ * number - the old `:231` pointed a hundred lines past the comment it meant.)
  *
  * Unequal lengths compare correctly in both directions - `1.88` against
  * `1.10.6` is 88 vs 10 at the second group and never reaches the third. That

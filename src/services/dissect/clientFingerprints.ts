@@ -132,7 +132,7 @@ export function learnOrLabelFingerprint(
  * came from this machine's process table, not from the handshake, and putting
  * it under TLS would present it as something the bytes said.
  */
-export function addFingerprintRow(layers: ProtocolLayer[], name: string, frames: number): void {
+function addFingerprintRow(layers: ProtocolLayer[], name: string, frames: number): void {
   const frame = layers.find((layer) => layer.name === 'Frame');
   if (!frame) return;
   frame.fields.push({

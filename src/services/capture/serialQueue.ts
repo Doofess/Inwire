@@ -16,13 +16,24 @@
  * `sessionStore`'s budget comment was written to prevent, arriving by a
  * different door.
  *
- * ## Why it is here rather than in the worker
+ * ## Why it is here rather than in the process that hosts the store
  *
- * The worker's own header says it should hold "no logic worth testing", and
- * ordering is logic worth testing - a promise chain is three lines and two of
- * them can be wrong in ways that only show up under a timing that a browser
- * produces and a reviewer does not imagine. **OPFS does not exist in Node, so
- * the worker cannot be driven from a script; this can.**
+ * The rule `capture.worker.ts` set and `captureHost.ts` inherited is that the
+ * hosting layer holds "no logic worth testing", and ordering is logic worth
+ * testing: a promise chain is three lines and two of them can be wrong in ways
+ * that only show up under a timing a reviewer does not imagine. Here it is
+ * driven directly - `scripts/capture/store-protocol.ts` runs the whole message
+ * union through `CaptureHost` under plain Node, and `electron/store/entry.ts`
+ * is left as an adapter with nothing to assert.
+ *
+ * ## Why it stays, now that the race it was written for is gone
+ *
+ * Opening the four files is a synchronous call on `node:fs`, so an `append`
+ * can no longer overtake an `open` the way it did above. The queue is kept
+ * anyway and deliberately, for the reason `captureHost.ts` gives: the
+ * guarantee should not rest on every handler *remaining* synchronous for ever.
+ * It costs one promise per message, and it is the difference between an
+ * ordering rule and a habit.
  *
  * ## The rule
  *

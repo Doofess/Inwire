@@ -1,5 +1,10 @@
 /**
- * BER - the encoding half of ASN.1, as used by SNMP, LDAP, Kerberos and X.509.
+ * BER - the encoding half of ASN.1, as used by SNMP, LDAP and Kerberos.
+ *
+ * X.509 is the fourth protocol built on it and does **not** come through here:
+ * `dissectors/x509.ts` keeps its own walker, because `berChildren`'s 128-child
+ * cap would truncate a certificate's subjectAltName list. That file's `readTlv`
+ * says so; the two must not diverge on OIDs or on lengths.
  *
  * A reader, not a schema engine. Every value is a tag, a length and a body,
  * and this walks that structure and nothing else: it does not know what an

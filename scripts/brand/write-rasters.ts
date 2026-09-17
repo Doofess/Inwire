@@ -8,10 +8,10 @@
  * Split from `render-icons.ts` only because that half needs a browser and this
  * half needs a filesystem.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ICO_SIZES, PNG_TARGETS, packIco } from './render-icons';
+import { ICO_SIZES, ICO_TARGETS, PNG_TARGETS, packIco } from './render-icons';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const raw = JSON.parse(readFileSync(process.argv[2], 'utf8')) as Record<string, unknown>;
@@ -31,6 +31,11 @@ for (const { file, size } of PNG_TARGETS) {
   console.log(`${file}  ${size}px  ${buf.length} bytes`);
 }
 
+// One buffer, written to every destination. `icon.ts` asserts they match, and
+// this is the reason they can: they are never built twice.
 const ico = packIco(ICO_SIZES.map((size) => ({ size, png: png(size) })));
-writeFileSync(join(root, 'local-agent', 'icon.ico'), ico);
-console.log(`local-agent/icon.ico  ${ICO_SIZES.join('/')}  ${ico.length} bytes`);
+for (const target of ICO_TARGETS) {
+  mkdirSync(dirname(join(root, target)), { recursive: true });
+  writeFileSync(join(root, target), ico);
+  console.log(`${target}  ${ICO_SIZES.join('/')}  ${ico.length} bytes`);
+}

@@ -3,9 +3,9 @@
  *
  * ## The flag that does nothing
  *
- * `host.ts` forks the store with `execArgv: ['--max-old-space-size=2048']`,
- * and the comment beside it says a runaway store then kills itself rather than
- * the machine. **It does not.** Measured against the running app: the flag
+ * `host.ts` forks the store with `execArgv: ['--max-old-space-size=2048']`, and
+ * that flag **does nothing** - the comment beside it there now says so, and this
+ * module is what stands in its place. Measured against the running app: the flag
  * arrives - `process.execArgv` in the store reads back
  * `["--max-old-space-size=2048"]` - and `v8.getHeapStatistics().heap_size_limit`
  * is **4192 MB**, V8's own 64-bit default. `v8.setFlagsFromString` at the top
@@ -67,7 +67,8 @@ function mb(bytes: number): string {
 /**
  * Whether the store should say something, or stop.
  *
- * @param used     `heap_used_size` this sample.
+ * @param used     `used_heap_size` this sample, as `entry.ts` reads it out of
+ *                 `v8.getHeapStatistics()`.
  * @param limit    V8's own limit, which is the real wall and may be *lower*
  *                 than the ceiling on a 32-bit build or under a container
  *                 memory cap. Standing down at our number when V8's is

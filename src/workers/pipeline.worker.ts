@@ -329,7 +329,7 @@ setInterval(flush, FLUSH_MS);
 // --- the agent link ----------------------------------------------------------
 //
 // Main owns the pipe and the retry timer; this end owns what the messages
-// mean. The three cases below are exactly what `ws.onmessage` and the socket's
+// mean. The four cases below are exactly what `ws.onmessage` and the socket's
 // own events used to deliver, which is why everything downstream of them is
 // unchanged.
 
@@ -341,7 +341,8 @@ function receiveFromAgent(message: FromAgentLink): void {
   switch (message.type) {
     case 'status':
       // Main is the authority on this now. It reports the same four states the
-      // socket's `onopen`/`onerror`/`onclose` did, so the header is unchanged.
+      // socket's `onopen`/`onerror`/`onclose` did, so everything that renders
+      // the connection status is unchanged.
       post({ type: 'status', status: message.status });
       return;
     case 'service':

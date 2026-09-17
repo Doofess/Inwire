@@ -99,14 +99,37 @@ export const WEB_PREFERENCES = {
  * with no Info column worth reading.
  *
  * **It deliberately stays 1024 now that the window also carries a 56px activity
- * rail and a dock.** Raising it to 1280, which would give the dock more room,
- * breaks half-screen snapping on a 1920px display - Windows gives a 960px
- * window there, and analyser on one half with a terminal on the other is a
- * workflow this tool exists to support. The dock absorbs the pressure instead,
- * by reserving 640px for the list; see the width rule in `src/services/`.
+ * rail.** Raising it to 1280 breaks half-screen snapping on a 1920px display -
+ * Windows gives a 960px window there, and analyser on one half with a terminal
+ * on the other is a workflow this tool exists to support. So the rail's 56px
+ * comes out of the list's width rather than out of the minimum.
+ *
+ * The dock used to be the other half of that argument: it reserved 640px for
+ * the list, which is what made 1280 tempting and what the snapping rule
+ * refused. The dock is deleted and its reserve with it, so only the snapping
+ * rule is left - which was always the load-bearing one.
  */
 export const MIN_WINDOW_WIDTH = 1024;
-export const MIN_WINDOW_HEIGHT = 640;
+/**
+ * 680, not 640, and the difference is the title row.
+ *
+ * The title row spans the full window width now, so the rail starts below it
+ * rather than beside it - which is what puts the app's mark at the true
+ * top-left corner and lets the rail and the row read as one surface. Taking
+ * that height out of the rail instead would push Settings off the bottom edge
+ * at the minimum, because the bottom group is pinned with `mt-auto` and an
+ * overflow there does not scroll.
+ *
+ * So the minimum carries the row: 680 - `TITLE_BAR_HEIGHT` (32, declared just
+ * below) leaves the rail 648, against the 494 its icons come to - 154 of slack.
+ * `scripts/session/view.ts` does that subtraction rather than assuming it, and
+ * the width is untouched for the half-screen-snapping reason above.
+ *
+ * Those numbers were 40 / 640 / 630 here for a while, which disagreed with the
+ * `TITLE_BAR_HEIGHT` fifteen lines down and with the rail itself. Six deleted
+ * icons and a 32px row are what moved them.
+ */
+export const MIN_WINDOW_HEIGHT = 680;
 
 /**
  * The window is frameless, and draws its own controls.
@@ -150,11 +173,27 @@ export const WINDOW_IS_FRAMELESS = true;
 /**
  * The height of the app's own title row.
  *
- * 40 is what the reference class settled on - Windows Terminal puts its tabs in
- * a 40px caption, Figma's desktop shell is about the same, VS Code runs 35 and
- * feels cramped for anything but a menu.
+ * **32, and that is the floor rather than a further step.** It was 40, then 36.
+ * The reference class spans that range - Windows Terminal puts its tabs in a
+ * 40px caption, VS Code runs 35 - and 40 was chosen when this row carried a
+ * centred window title and nothing else. It carries a lockup and the packet
+ * counter now, both set at 11-12px, so the row was taller than its contents.
+ *
+ * It cannot go below 32 without redrawing the window buttons, which are 46x32
+ * (`WindowControls`) because **32 is Windows' own caption-button metric** rather
+ * than a choice this app made. At 32 they fill the row exactly, edge to edge.
+ *
+ * The 36 in between was chosen to keep 2px of air above and below them, on the
+ * argument that it stopped the close button's hit area touching the screen edge
+ * when maximised. That was the wrong way round: a maximised window whose close
+ * button reaches the very top-left... corner is Fitts's law working, and it is
+ * precisely what Windows does with its own caption. The 2px was costing the
+ * thing it was meant to protect.
+ *
+ * `MIN_WINDOW_HEIGHT` has not moved through any of it. The rail gets
+ * 680 - 32 = 648 now - see the arithmetic in `scripts/session/view.ts`.
  */
-export const TITLE_BAR_HEIGHT = 40;
+export const TITLE_BAR_HEIGHT = 32;
 
 /**
  * One window control's hit target, and how many there are.
@@ -175,16 +214,15 @@ export const WINDOW_CONTROL_WIDTH = 46;
 export const WINDOW_CONTROL_HEIGHT = 32;
 export const WINDOW_CONTROL_COUNT = 3;
 
-/**
- * The ground the window paints before the renderer has drawn anything.
- *
- * Only the fallback now: `windowState.ts` caches the resolved theme's own
- * ground and `main.ts` opens the window in that, because a frameless window IS
- * the app's surface and opening it in the wrong theme is a full-window flash
- * rather than a dark rectangle behind a native caption. This is what a profile
- * with nothing stored gets. Paired with `show: false` and `ready-to-show`.
- */
-export const WINDOW_BACKGROUND = '#09090b';
+// There is deliberately no `WINDOW_BACKGROUND` here any more, and re-adding one
+// would be a second answer to a question that already has one. It was
+// `'#09090b'`, a near-black picked to match `index.html`'s own class, and by the
+// end nothing imported it: the fallback ground is
+// `resolveWindowBackground(DEFAULT_WINDOW_THEME)` in `windowColors.ts`, which
+// reads Night's own `--background` out of `PALETTE_BY_THEME` - `#161616`, not
+// `#09090b`. A literal here had drifted from the palette by a shade nobody would
+// notice until the window flashed it. `windowState.ts` caches what the renderer
+// last resolved; `windowColors.ts` is what a profile with nothing stored gets.
 
 /** Chromium switches that must be set before `app.whenReady()`. */
 export const COMMAND_LINE_SWITCHES: readonly string[] = [

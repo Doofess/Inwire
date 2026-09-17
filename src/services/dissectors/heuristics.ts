@@ -47,7 +47,7 @@ export interface HeuristicDissector {
 /**
  * Adapts a dissector that returns its own result shape.
  *
- * The five protocols added since `UdpAppResult` was written return a `layer`
+ * The six protocols added since `UdpAppResult` was written return a `layer`
  * plus fields without a `token`, because their token comes from
  * `PROTOCOL_NAME_MAP`. Here the token has to be explicit, since a heuristic
  * match has no port to have been dispatched from.

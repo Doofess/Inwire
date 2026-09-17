@@ -57,12 +57,20 @@
 ; Two version numbers, because they are two different things.
 ;
 ; MyAppVersion is the PRODUCT, and is what Windows compares to decide whether
-; an install is an upgrade. Locked to package.json by test_protocol.py.
+; an install is an upgrade. Locked to package.json.
 ;
 ; MyAgentVersion is a WIRE PROTOCOL version - the left-hand side of
 ; `isAgentOutdated`, so an ordering that only ever climbs. Locked to
 ; AGENT_VERSION in agent.py and REQUIRED_AGENT_VERSION in agentProtocol.ts.
 ; They stopped moving in step the moment one installer carried both.
+;
+; Both stamps are enforced by scripts/agent/installer-versions.ts, which runs on
+; every `npm run check` and covers this file AND the legacy agent-only one.
+; NOT by test_protocol.py, which this comment used to credit: that script reads
+; only local-agent/installer/setup.iss (its `_SETUP_ISS`), so for a long while
+; the two numbers here agreed with the code by hand and nothing would have said
+; otherwise. Reset MyAgentVersion and installer-versions.ts fails on the
+; anti-reset floor - compared as numbers, because "3.10.0" sorts before "3.9.0".
 #define MyAppVersion "1.0.0"
 #define MyAgentVersion "3.9.0"
 
@@ -375,10 +383,19 @@ end;
 // Lets whoever is sitting at this machine START the agent, and nothing else.
 //
 // The app runs unelevated on purpose - the dissector must never parse hostile
-// bytes as an administrator - so it cannot start a LocalSystem service. Without
-// this, an agent that has stopped can only be restarted from an elevated
-// prompt, and Driver Info's "Start the agent" button would raise a UAC prompt
-// every time.
+// bytes as an administrator - so without a grant it cannot start a LocalSystem
+// service at all, and an agent that has stopped could only be restarted from an
+// elevated prompt.
+//
+// **The app does not yet take this up, and the comment here used to claim it
+// did.** It said the grant was what keeps Driver Info's "Start the agent"
+// button from raising a UAC prompt every time. It does not: `startService` in
+// `electron/agentPipe.ts` runs `Start-Process ... -Verb RunAs` unconditionally,
+// with no unelevated attempt and no fallback, so the prompt appears either way.
+// The grant is still worth having - it is what lets somebody run
+// `sc start InwireAgent` from an ordinary prompt - and it is what an unelevated
+// first attempt in the app would need to exist before it could be written. That
+// loose end is recorded at the call site too, so neither end can lose it.
 //
 // `IU` is the interactive-user SID, the same principal the agent's named pipe
 // admits (see pipe_server.py). Not a specific account SID: under a

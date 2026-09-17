@@ -9,9 +9,9 @@ export interface ElementSize {
  * The measured size of an element, for drawing code that cannot use CSS.
  *
  * The charts here are drawn into an SVG at explicit pixel dimensions, so a
- * container that changes size - the dashboard column being dragged, the pane
- * divider moving, the window resizing - leaves the drawing at whatever size it
- * was built at. `clientWidth` read once inside a draw effect only happens to be
+ * container that changes size - the pane divider moving, a Statistics tab
+ * becoming visible, the window resizing - leaves the drawing at whatever size
+ * it was built at. `clientWidth` read once inside a draw effect only happens to be
  * right because something else usually triggers a redraw soon after; a chart
  * that is not being fed new data simply stays wrong.
  *

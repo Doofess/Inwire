@@ -250,8 +250,15 @@ try {
 
   // The whole point. Frames left the stub, crossed the pipe, crossed main,
   // crossed a MessagePort into the Worker, were dissected, and reached React.
+  //
+  // Read through `[data-packet-counts]`, not by matching a label in
+  // `document.body.innerText`. It matched `PACKETS:`, which this readout
+  // rendered while it was a dock widget and stopped rendering when it became
+  // the title row's - so the match found nothing, this returned `'0'`, and the
+  // assertion below failed as "frames arrive and are counted", pointing at the
+  // pipe and the Worker rather than at its own locator.
   const rows = () => page.evaluate(
-    () => document.body.innerText.match(/PACKETS:\s*\n?([\d,]+)/)?.[1] ?? '0');
+    () => document.querySelector('[data-packet-counts]')?.textContent?.match(/([\d,]+)/)?.[1] ?? '0');
   checkTrue('frames arrive and are counted',
     await until(async () => Number((await rows()).replace(/,/g, '')) > 100));
 
@@ -278,18 +285,6 @@ try {
     console.log('      no console errors');
   }
 } finally {
-  // Killed, not closed, and this is the whole reason the script used to hang.
-  //
-  // `app.close()` closes the window, and closing the window with frames in the
-  // buffer is exactly what `guardClose` in `electron/main.ts` exists to catch:
-  // it opens a native "Quit Inwire?" message box. A native modal is not in the
-  // page, so Playwright cannot see it, cannot answer it, and waits for ever -
-  // and because the output is buffered the script looks like it is still
-  // working when it has already finished every assertion.
-  //
-  // What killing gives up is the graceful shutdown path. That is the right
-  // thing to give up here: the graceful path IS a dialog, and a dialog is a
-  // person's job.
   // Closing with frames in the buffer opens `guardClose`'s native "Quit
   // Inwire?" message box, and a native modal is not in the page: Playwright
   // cannot see it, cannot answer it, and `app.close()` waits for ever - with

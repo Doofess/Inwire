@@ -267,12 +267,24 @@ def ensure_config(on_warning=None) -> dict:
     """Creates config.json, or fills in a pairing token it is missing, and
     returns the settings.
 
-    Called by the installer through the agent (`--init-config`) rather than
-    written by the installer itself. Inno Setup's Pascal Script has `Random`,
-    seeded from the clock; `secrets` is seeded from the OS entropy pool, and a
-    token whose value can be narrowed down by knowing roughly when a machine
-    was set up is not a token. This is also the only implementation of it, so
-    Windows and Unix cannot drift apart.
+    **Nothing in production calls this any more**, and the docstring said the
+    opposite for a while: "called by the installer through the agent
+    (`--init-config`)". That verb is gone from `service_windows.py` - the token
+    does not exist on Windows at all, because the pipe's descriptor is the
+    authentication (docs/decisions/0029) - and `unix/install.sh` mints its own
+    with an inline `secrets.token_hex(32)` rather than coming through here. So
+    the claim below it, that this is "the only implementation of it, so Windows
+    and Unix cannot drift apart", is not true either: there are two, and only
+    one is reachable.
+
+    It is kept because it is the correct implementation and because
+    `test_protocol.py` holds it to the rules in the next paragraph, which are
+    the ones a Unix install has to keep. If the tarball is ever wired back
+    through it, delete install.sh's copy in the same change. The original
+    argument for minting here rather than in Inno's Pascal Script still stands:
+    `Random` is seeded from the clock, `secrets` from the OS entropy pool, and a
+    token narrowed down by knowing roughly when a machine was set up is not a
+    token.
 
     An existing token is never replaced - that would invalidate one the user
     has already pasted into a browser - and neither is anything else in the

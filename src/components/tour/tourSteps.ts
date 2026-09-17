@@ -91,11 +91,12 @@ export const TOUR_STEPS: TourStep[] = [
     anchor: 'rail',
     title: 'Everything else lives here',
     body:
-      'Switch between the packet list, capture statistics, and the conversation '
-      + 'behind whichever frame you are following. Below the line, each icon opens '
-      + 'a chart alongside them. At the bottom: export and import, and settings - '
-      + 'where you will find Driver Info, which says what the capture agent is '
-      + 'doing and is the first place to look if nothing arrives.',
+      'Capture controls at the top. Below the line, the views: the packet list, '
+      + 'one frame opened up, capture statistics, a map of where your traffic '
+      + 'went, and the conversation behind whichever frame you are following. '
+      + 'At the bottom: export and import, and settings - where you will find '
+      + 'Driver Info, which says what the capture agent is doing and is the '
+      + 'first place to look if nothing arrives.',
     side: 'right',
   },
   {

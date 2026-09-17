@@ -239,8 +239,15 @@ export interface QuicDissectorResult {
  * Reads a QUIC variable-length integer (RFC 9000 §16). The top two bits of the
  * first byte give the encoded length: 1, 2, 4, or 8 bytes, with the remaining
  * bits forming the value.
+ *
+ * Exported because HTTP/3 uses this exact encoding for its own frame types,
+ * lengths and settings (RFC 9114 §7), and `dissectors/http3.ts` had a second
+ * copy of it. The import runs http3 -> quic, which is the way the layering
+ * already points; there is no cycle, `quic.ts` imports only `addressFormat`.
+ * `qpack.ts`'s prefix integer is a DIFFERENT encoding (HPACK's, RFC 7541 §5.1)
+ * and must not be folded in here.
  */
-function readVarint(bytes: Uint8Array, offset: number, end: number): { value: number; nextOffset: number } | null {
+export function readVarint(bytes: Uint8Array, offset: number, end: number): { value: number; nextOffset: number } | null {
   if (offset >= end) return null;
   const prefix = bytes[offset] >> 6;
   const length = 1 << prefix;
@@ -264,7 +271,7 @@ function readVarint(bytes: Uint8Array, offset: number, end: number): { value: nu
  * on their connection ID, so without prior flow state they are not
  * identifiable - the caller must decline to call this for an unknown flow.
  */
-export function dissectQuic(
+function dissectQuic(
   bytes: Uint8Array,
   start: number,
   end: number,

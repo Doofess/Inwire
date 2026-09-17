@@ -1230,7 +1230,7 @@ function certificateFields(certs: CertificateSummary[], conv: TlsConversationSta
   });
 }
 
-export function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: number, now: Date = new Date()): ProtocolLayer {
+function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: number, now: Date = new Date()): ProtocolLayer {
   const fields: ProtocolField[] = [];
   for (const r of records) {
     if (r.ignored) {

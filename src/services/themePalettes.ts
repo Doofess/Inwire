@@ -10,8 +10,8 @@
  * the accent.
  *
  * This is the missing layer. Each theme declares **nine hues of its own**, and
- * everything that colours data derives from them. That is what makes a Midnight
- * packet row and a Midnight map line obviously the same family: they are
+ * everything that colours data derives from them. That is what makes a Night
+ * packet row and a Night map line obviously the same family: they are
  * literally the same nine colours.
  *
  * The hues are authored per theme rather than shared and retinted, because a
@@ -87,54 +87,12 @@ const PALETTES: Record<string, ThemePalette> = {
   },
 
   /**
-   * Paper - a warm, low-glare light theme.
+   * Night - the dark theme, and the only one.
    *
-   * Not a sepia filter over Day: the hues are individually pulled toward the
-   * warm side and darkened, because a cool hue tinted into a warm ground reads
-   * as dirty rather than as itself. The ground is warm enough to be obviously
-   * a different theme (5.8 deltaE from Day across background and card, against
-   * the registry's floor of 5) while staying a working surface for eight hours
-   * rather than a novelty.
-   */
-  paper: {
-    hues: {
-      red: '#b3261e', orange: '#a3540d', yellow: '#8a6d09', green: '#3f6b1f',
-      cyan: '#116b6b', blue: '#1f4f9c', violet: '#5c3f9e', magenta: '#95306e',
-      neutral: '#6b6154',
-    },
-    surface: { background: '#f4efe4', card: '#fdfaf3', foreground: '#2b2620', border: '#e4dbc9' },
-  },
-
-  /**
-   * Graphite - the default dark theme.
-   *
-   * Orange on a warm grey. The ground is Tailwind's `stone` scale rather than
-   * `slate`, and that is the half that does the work: slate is a blue grey,
-   * and every blue-grey pixel behind an orange accent pushes the accent toward
-   * its complement and makes it read as a warning rather than as the app's own
-   * colour.
-   *
-   * The nine hues stay a full spread, because they are the PACKET LIST's
-   * colours - categorical data, not chrome - and narrowing them to the accent's
-   * family would cost the thing they exist for. Only `neutral` sits on the
-   * ground's own grey, so unmatched rows belong to the theme rather than beside
-   * it.
-   */
-  dark: {
-    hues: {
-      red: '#f87171', orange: '#fb923c', yellow: '#fbbf24', green: '#4ade80',
-      cyan: '#2dd4bf', blue: '#60a5fa', violet: '#a78bfa', magenta: '#f472b6',
-      neutral: '#a8a29e',
-    },
-    surface: { background: '#0c0a09', card: '#1c1917', foreground: '#e7e5e4', border: '#292524' },
-  },
-
-  /**
-   * Midnight - a cool, deep dark theme for long sessions.
-   *
-   * The counterweight to Graphite, and the reason both exist: one warm dark and
-   * one cool dark is a real choice, where four darks that differ by a few
-   * percent of saturation were not.
+   * This was `midnight`, the cool counterweight to a warm dark called Graphite.
+   * Graphite is gone and this took its id: next-themes writes `color-scheme`
+   * only for the literal strings "light" and "dark", so the id is what keeps
+   * native scrollbars and form controls on the right side of the divide.
    *
    * `red` and `magenta` are further apart here than the obvious rose/pink pair
    * would put them. The first draft used `#fb7185` and `#f472b6`, whose fills
@@ -142,13 +100,13 @@ const PALETTES: Record<string, ThemePalette> = {
    * because ICMP errors and ICMP are both frequent and both matter. Widening
    * the pair to red and fuchsia takes it to 10.5.
    */
-  midnight: {
+  dark: {
     hues: {
       red: '#f87171', orange: '#fb923c', yellow: '#fde047', green: '#34d399',
       cyan: '#22d3ee', blue: '#818cf8', violet: '#c084fc', magenta: '#e879f9',
       neutral: '#a1a1a1',
     },
-    surface: { background: '#1e1e1e', card: '#222222', foreground: '#e4e4e4', border: '#3c3c3c' },
+    surface: { background: '#161616', card: '#1a1a1a', foreground: '#e4e4e4', border: '#343434' },
   },
 };
 

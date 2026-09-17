@@ -512,8 +512,8 @@ export function waterColorFor(background: string, neutral: string): string {
  *
  * The muted skin cannot do that, and the reason is worth stating because the
  * obvious fix does not work. Its land IS the theme's `--background`, which on
- * Graphite is `#0c0a09` - there is no darker. A wall derived by darkening would
- * be invisible on the two dark themes and the slab would simply not exist there.
+ * Night is `#161616` and near enough the floor. A wall derived by darkening
+ * would be invisible on a dark theme and the slab would simply not exist there.
  *
  * So the muted wall steps from the land TOWARD THE SEA instead: monotone, in
  * whichever direction that theme's water lies, with the lower step nearest the

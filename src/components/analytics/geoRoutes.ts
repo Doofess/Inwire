@@ -196,3 +196,44 @@ export function aggregateRoutes(
 
   return all.sort((x, y) => y.total - x.total).slice(0, MAX_ROUTES);
 }
+
+/**
+ * One located place on the map, aggregated across every host that resolved to it.
+ *
+ * Lived in `GeoLocationCounter.tsx` until that component was deleted - it drew a
+ * floating "11 LOCATIONS" pill over the card, which stopped having a reason to
+ * exist the moment the pane grew a title bar with the count in it. The type
+ * outlived the pill because `GeoMap`'s `geoStats` and its expanded side panel
+ * are both built out of it, so it moved here, beside the route aggregation it
+ * sits next to in the data flow.
+ */
+export interface GeoPlace {
+  /**
+   * Stable identity across the session: rounded `lat,lon` for a city-level
+   * place, the country code for a country-level one - so every host the
+   * provider could only put in Germany collapses to a single Germany row rather
+   * than one per address.
+   */
+  key: string;
+  latitude: number;
+  longitude: number;
+  /** The city, or the country when that is as precise as the lookup got. */
+  label: string;
+  country: string;
+  countryCode: string;
+  /** Distinct addresses resolved to this place so far. */
+  hosts: number;
+  /**
+   * `country` rows are listed but never plotted.
+   *
+   * A country-level answer is the provider's centroid for the whole country - a
+   * real coordinate, but not this host's - so drawing it would put a pin in a
+   * field in Kansas and give it the same weight as a real fix. That is the
+   * accuracy rule the map is built on and it does not change. What changes is
+   * that these are no longer reported as a bare count of things withheld: "31
+   * hidden" tells you nothing you can act on, while "Germany, 4 hosts" is the
+   * actual answer to where the traffic went, just at a coarser resolution than
+   * the map can honestly draw.
+   */
+  precision: 'city' | 'country';
+}

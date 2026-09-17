@@ -26,8 +26,9 @@
  *
  * It is also what the sorted and searched views keep using. A sort over a
  * capture larger than memory is a different problem with a different answer
- * (`docs/specs`, the row-source step), and until that answer exists the list
- * sorts what it holds and says so - which is what it has always done.
+ * (docs/decisions/0025 and 0026 name the row source as the step that closes
+ * the scrollback gap; sorting is past even that), and until that answer exists
+ * the list sorts what it holds and says so - which is what it has always done.
  *
  * ## `rowAt` is synchronous, and a miss is not an error
  *

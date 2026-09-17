@@ -1,29 +1,34 @@
 import { createPreferenceStore } from './preferenceStore';
 
-/**
- * How the geo map projects the world.
+/*
+ * **`mapProjectionStore` was here and the flat map went with it.**
  *
- *   'mercator' - the flat plane, now free to rotate and tilt.
- *   'globe'    - the sphere.
+ * It offered 'mercator' or 'globe', defaulted to globe, and put a switcher in
+ * the map's zoom stack. The argument for keeping both was "flat remains one
+ * click away for anyone who wants the whole world at once"; the globe gives
+ * that at its own minimum zoom, so the click bought a projection that is worse
+ * at the one thing this map does. A sphere has no edge for a route to be cut in
+ * half by, and no Mercator distortion making a northern hop look like a
+ * continental crossing.
  *
- * A preference rather than session state, which is the distinction from
- * `geoSession`'s camera: where the map was last POINTING is about one sitting
- * and should not follow you into next week, but which projection you think in
- * is a standing choice.
+ * The cost of having had both is worth recording, because it was not the
+ * switcher: `applyProjectionMode` in `GeoMap.tsx` spent half its body undoing
+ * the other half - clearing `maxBounds` entering globe and restoring them
+ * leaving it, swapping the zoom anchor between centre and pointer, and carrying
+ * two minimum zooms.
  *
- * Defaults to globe. It is the more legible of the two for what this map
- * actually shows - traffic leaving one place for others around the world -
- * because a sphere has no edge for a route to be cut in half by, and no
- * Mercator distortion making a northern hop look like a continental crossing.
- * Flat remains one click away for anyone who wants the whole world at once.
+ * `inwire.mapProjection` is left in `localStorage` rather than cleared, which is
+ * the ordinary answer rather than an exception to one: `RETIRED_PREFERENCE_KEYS`
+ * in `preferences.ts` is a delete path and takes only the keys whose stored
+ * VALUE would mislead. A projection for a projection switcher that no longer
+ * exists is not one of those - nothing reads it, it costs a few bytes, and
+ * every entry added to that list is another chance to delete the wrong one.
+ *
+ * **Mercator arithmetic is not gone and must not be deleted**: `arcLayer.ts` and
+ * `pinLayer.ts` work in Web Mercator coordinates because that is the space
+ * MapLibre's shaders use, and the globe crossfades into a flat projection at
+ * high zoom on its own. Those are the library's internals.
  */
-export type MapProjectionMode = 'mercator' | 'globe';
-
-export const mapProjectionStore = createPreferenceStore<MapProjectionMode>(
-  'inwire.mapProjection',
-  (raw) => (raw === 'globe' || raw === 'mercator' ? raw : null),
-  'globe',
-);
 
 /**
  * Which of the two basemap skins the geo map paints itself in.

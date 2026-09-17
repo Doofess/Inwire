@@ -61,23 +61,37 @@ vectors: `test_protocol.py` here, `scripts/agent/pipe-framing.ts` there.
 
 ## The version lock
 
-Three places must agree, and `test_protocol.py` enforces it:
+**Four** places must agree, and two different things enforce them:
 
-| Where | What |
-|---|---|
-| `agent.py` | `AGENT_VERSION` |
-| `src/services/agentProtocol.ts` | `REQUIRED_AGENT_VERSION` |
-| `local-agent/installer/setup.iss` | `MyAgentVersion` |
+| Where | What | Enforced by |
+|---|---|---|
+| `agent.py` | `AGENT_VERSION` | both |
+| `src/services/agentProtocol.ts` | `REQUIRED_AGENT_VERSION` | both |
+| `installer/setup.iss` — the one that ships | `MyAgentVersion` | `scripts/agent/installer-versions.ts` |
+| `local-agent/installer/setup.iss` — legacy | `MyAgentVersion` | both |
+
+This table said "three places" and omitted the shipping installer, which is the
+one `iscc` actually compiles. The split matters. `test_protocol.py` reads only
+the **legacy** `.iss` (its `_SETUP_ISS`), and it is Python, so `scripts/check.ts`
+— which discovers TypeScript — never runs it: it fires only when somebody types
+it. `scripts/agent/installer-versions.ts` covers **both** `.iss` files and runs
+on every `npm run check`. It exists because until it did, the shipping
+installer's two stamps were read by nothing at all and agreed with the code by
+hand.
 
 Any change to the wire protocol or the agent's behaviour bumps it. It is an
 **ordering** — the left-hand side of `isAgentOutdated` — so it only ever
-climbs, and `test_protocol.py` refuses a reset: an agent left behind by an
-earlier install would otherwise read as newer than required, which shows as
-"not connected" rather than "update your agent".
+climbs, and both checks refuse a reset: an agent left behind by an earlier
+install would otherwise read as newer than required, which shows as "not
+connected" rather than "update your agent". `installer-versions.ts` compares the
+floor as numbers rather than as a string, because `"3.10.0"` sorts before
+`"3.9.0"` lexically and a string floor would reject the first version past 3.9
+and every one after it.
 
 `MyAppVersion` beside it is the **product** version, locked to `package.json`,
-and is what Windows compares for an upgrade. The two stopped moving together
-the moment one installer carried both.
+and is what Windows compares for an upgrade. It is in both `.iss` files too. The
+two numbers stopped moving together the moment one installer carried both — a UI
+release ships an installer and no new agent at all.
 
 ## Building
 
@@ -104,9 +118,9 @@ administrator can see what is installed.
 
 ### VERSIONINFO
 
-Generated inside the spec from `AGENT_VERSION` rather than written out: a
-fourth copy of a version number would sit outside the three-place lock and
-would eventually disagree with it. Before 3.8.0 the exe had none at all — no
+Generated inside the spec from `AGENT_VERSION` rather than written out: one more
+copy of a version number would sit outside the four-place lock above and would
+eventually disagree with it. Before 3.8.0 the exe had none at all — no
 company, no product, no version, which is also what an unsigned dropper looks
 like in the one dialog anyone checks.
 
@@ -145,9 +159,15 @@ iscc installer/setup.iss
 
 That is the **product's** installer, at the repository root — the app and the
 agent in one, under its own AppId. It needs `npm run pack` and the PyInstaller
-build to have run first. `local-agent/installer/setup.iss` is the older
-agent-only installer and is what a machine with agent 3.x has; the unified one
-uninstalls it, because it registers a service by the same name.
+build to have run first.
+
+`local-agent/installer/setup.iss` is the older agent-only installer and is what
+a machine with agent 3.x has; the unified one uninstalls it, because it
+registers a service by the same name. **Nothing builds it** — it is kept as the
+record of what is installed out there, and its version stamps are held by
+`test_protocol.py` and `scripts/agent/installer-versions.ts`. The unified
+installer does not read it: it carries its own copy of the GUID as
+`#define StandaloneAgentAppId`.
 
 ## Running it by hand
 
@@ -165,10 +185,16 @@ any agent code — so the loop is `install` once, then `debug`. And `debug` is a
 so `sys.stderr` is `None` and nothing appears on screen. Watch
 `%ProgramData%\Inwire\agent.log`.
 
-`--version` and `--init-config` produce output only through a redirect, for the
-same reason — and both raise a **UAC prompt** when run by hand, because the exe
-is built `uac_admin=True`. Harmless from the installer, which is already
-elevated; it hangs a command typed at a prompt.
+`--version` produces output only through a redirect, for the same reason — and
+it raises a **UAC prompt** when run by hand, because the exe is built
+`uac_admin=True`. Harmless from the installer, which is already elevated; it
+hangs a command typed at a prompt.
+
+There was a `--init-config` beside it and it is **deleted, and must not come
+back**. It minted a pairing token and wrote `config.json` so the installer could
+print the token on a finish page. The token does not exist on Windows — the
+pipe's descriptor is the authentication — and neither installer has called the
+verb since 3.8.0. `service_windows.py` carries the note where the branch was.
 
 ## macOS and Linux
 
@@ -194,14 +220,19 @@ from the archive.
 
 A source-only bump ships nothing.
 
-1. Bump the version in all three places.
-2. `python local-agent/test_protocol.py`
+1. Bump the version in all **four** places (see the table above).
+2. `python local-agent/test_protocol.py`, and `npm run check` — the second is
+   what covers the shipping installer's stamps.
 3. `pyinstaller --noconfirm --clean local-agent/inwire_agent.spec`
 4. `npm run pack`
 5. `iscc installer/setup.iss`
-6. Install it here, then `python local-agent/verify_protocol.py` against the
-   live service — it checks `state` after every command, `capture_stats` while
-   sniffing, and the error codes.
+6. Install it here, then `npx tsx scripts/electron/smoke.ts` — the real app over
+   the real pipe, frames on screen.
+
+Step 6 used to be `python local-agent/verify_protocol.py`, which **cannot work
+on Windows**: it dials `ws://localhost:8999` with a token and an `Origin`, and
+the Windows agent opens no port, wants no token and sees no origin. That script
+is the macOS/Linux check and now says so and refuses to run here.
 
 Neither `local-agent/dist/` nor `release-artifacts/` is tracked in git. Rebuild
 rather than editing binaries.

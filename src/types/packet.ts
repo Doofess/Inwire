@@ -391,7 +391,7 @@ export interface FilterPresetLibrary {
  * `services/rbacService.ts`. No role ever reached it - `App.tsx` built the
  * admin set by hand and the role tables sat unread - so the name promised an
  * authorisation model the app does not have. Renamed to say what it is: a flat
- * set of capabilities, read at seventeen sites to gate real controls.
+ * set of capabilities, read at sixteen sites to gate real controls.
  *
  * `canConfigureAlerts` went with the alerts feature; nothing read it after the
  * anomaly model was removed.

@@ -124,15 +124,32 @@ try {
   await sleep(1500);
 
   const counts = () => page.evaluate(() => {
-    const label = [...document.querySelectorAll('span')].find((s) => s.textContent === 'PACKETS:');
-    const m = label?.nextElementSibling?.textContent?.match(/([\d,]+)\s*\/\s*([\d,]+)/);
+    // `[data-packet-counts]` is exactly the two numbers and the slash; the row
+    // around it also carries the scan badge, whose percentage would run on to
+    // the total with no separator.
+    const text = document.querySelector('[data-packet-counts]')?.textContent ?? '';
+    const m = text.match(/([\d,]+)\s*\/\s*([\d,]+)/);
     return m ? [Number(m[1].replace(/,/g, '')), Number(m[2].replace(/,/g, ''))] : [0, 0];
   });
 
-  await page.getByRole('button', { name: /menu/i }).first().click();
-  await sleep(400);
-  await page.getByText('Export / Import PCAP').click();
+  // The rail's Export/Import button, by its accessible name.
+  //
+  // This was two clicks - `getByRole('button', { name: /menu/i })` and then
+  // `getByText('Export / Import PCAP')` - and BOTH stopped resolving when the
+  // hamburger drawer was deleted. There is no control named "menu" anywhere in
+  // the app now, and the rail button that took over is a glyph with no text
+  // node at all: `Export / Import PCAP` is its `title`, which `getByText` does
+  // not read. So this script could not reach the panel it exists to drive, and
+  // nothing said so - it is in `check.ts`'s NOT_TESTS, so it only runs when
+  // somebody runs it.
+  //
+  // `getByLabel` rather than `getByRole(..., { name })` because the button
+  // carries both an `aria-label` and a `title`: the label wins for the
+  // accessible name, and naming the attribute that decides is what stops the
+  // next edit silently changing which string this depends on.
+  await page.getByLabel('Export or import a capture').click();
   await sleep(600);
+  // The Import tab inside the modal, which does have a text node.
   await page.getByRole('button', { name: /^import$/i }).click().catch(() => { /* already there */ });
   await sleep(400);
 

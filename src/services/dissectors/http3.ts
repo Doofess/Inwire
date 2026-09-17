@@ -17,6 +17,9 @@
  * and all.
  */
 import { qpackDecode } from './qpack';
+// HTTP/3 frame types, lengths and settings are QUIC varints (RFC 9114 §7), so
+// the reader is QUIC's rather than a second copy of it. See `quic.ts`.
+import { readVarint } from './quic';
 import type { HeaderField } from './hpack';
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 
@@ -75,19 +78,6 @@ export function freshHttp3Stream(bidirectional: boolean): Http3Stream {
   return { pending: new Uint8Array(0), typeKnown: bidirectional };
 }
 
-/**
- * Reads a QUIC variable-length integer (RFC 9000 §16), the same encoding QUIC
- * itself uses: the top two bits of the first byte give the width.
- */
-export function readVarint(bytes: Uint8Array, offset: number): { value: number; next: number } | null {
-  if (offset >= bytes.length) return null;
-  const width = 1 << (bytes[offset] >> 6);
-  if (offset + width > bytes.length) return null;
-  let value = bytes[offset] & 0x3f;
-  for (let i = 1; i < width; i++) value = value * 256 + bytes[offset + i];
-  return { value, next: offset + width };
-}
-
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   if (a.length === 0) return b;
   if (b.length === 0) return a;
@@ -132,12 +122,12 @@ export function dissectHttp3Stream(
   let p = 0;
 
   if (!bidirectional && !stream.typeKnown) {
-    const type = readVarint(bytes, 0);
+    const type = readVarint(bytes, 0, bytes.length);
     if (type === null) { stream.pending = bytes.slice(); return { frames }; }
     stream.uniType = type.value;
     stream.typeKnown = true;
     streamTypeName = UNI_STREAM_TYPE_NAMES[type.value] ?? `Reserved Stream (0x${type.value.toString(16)})`;
-    p = type.next;
+    p = type.nextOffset;
 
     // The QPACK streams carry table instructions, not frames, and the push
     // stream carries a push id before its frames. Neither is read further:
@@ -152,15 +142,15 @@ export function dissectHttp3Stream(
   }
 
   for (;;) {
-    const type = readVarint(bytes, p);
+    const type = readVarint(bytes, p, bytes.length);
     if (type === null) break;
-    const length = readVarint(bytes, type.next);
+    const length = readVarint(bytes, type.nextOffset, bytes.length);
     if (length === null) break;
     if (length.value > MAX_FRAME_PAYLOAD) { stream.pending = new Uint8Array(0); return { frames, streamTypeName }; }
-    if (length.next + length.value > bytes.length) break;
+    if (length.nextOffset + length.value > bytes.length) break;
 
-    const payload = bytes.subarray(length.next, length.next + length.value);
-    p = length.next + length.value;
+    const payload = bytes.subarray(length.nextOffset, length.nextOffset + length.value);
+    p = length.nextOffset + length.value;
 
     // Grease frame types (RFC 9114 §7.2.8) exist to keep implementations from
     // hard-coding the list; they are ignorable by design, so they are named
@@ -183,24 +173,24 @@ export function dissectHttp3Stream(
       case 0x04: {
         const settings: { id: number; name: string; value: number }[] = [];
         for (let q = 0; q < payload.length;) {
-          const id = readVarint(payload, q);
+          const id = readVarint(payload, q, payload.length);
           if (id === null) break;
-          const value = readVarint(payload, id.next);
+          const value = readVarint(payload, id.nextOffset, payload.length);
           if (value === null) break;
           settings.push({ id: id.value, name: SETTING_NAMES[id.value] ?? `Reserved (0x${id.value.toString(16)})`, value: value.value });
-          q = value.next;
+          q = value.nextOffset;
         }
         frame.settings = settings;
         break;
       }
       case 0x03:
       case 0x0d: {
-        const id = readVarint(payload, 0);
+        const id = readVarint(payload, 0, payload.length);
         if (id !== null) frame.pushId = id.value;
         break;
       }
       case 0x07: {
-        const id = readVarint(payload, 0);
+        const id = readVarint(payload, 0, payload.length);
         if (id !== null) frame.goawayId = id.value;
         break;
       }
