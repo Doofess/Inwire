@@ -231,11 +231,15 @@ matches nothing beside it and looks fine on its own.
 - [ ] In the Routing Map's side panel, a located row shows a **filled** pin and
       an unlocated one a hollow pin with a slash. `fill-current` on `MapPin` is
       what keeps that, and it is the one call site the swap changed beyond the
-      name.
+      name. Lucide's pin is a path plus a separate circle, so filled it is a
+      solid teardrop rather than Tabler's pin-with-hole — expected, not a bug.
 - [ ] The rail's Stop button, while capturing, is a **filled** red square.
 - [ ] The rail's adapter button is an Ethernet port, not a tree; Frame Detail's
       is a tree. They were `TbNetwork` and `TbBinaryTree` and are `EthernetPort`
-      and `ListTree` — the two judgement calls in the mapping.
+      and `ListTree` — two of the four judgement calls in the mapping.
+- [ ] The Gateway & DNS tab's icon is a router, and Hex View with no bytes
+      shows a struck-through database — `Router` and `DatabaseX`, the other
+      two judgement calls.
 
 ### Still there after all of it
 
