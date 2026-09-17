@@ -158,7 +158,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
 
   // Same reasoning as isCapturingRef: the post-reconnect resync in the
   // `hello` handler below needs the *current* interface selection, not
-  // whatever it was when the WebSocket effect's handlers were created.
+  // whatever it was when the agent-link effect's handlers were created.
   const selectedInterfacesRef = useRef(selectedInterfaces);
   useEffect(() => {
     selectedInterfacesRef.current = selectedInterfaces;
@@ -166,19 +166,27 @@ export function useAgentConnection(host: AgentConnectionHost) {
 
   // `agentInterfacesRef` and `captureInterfaceRef` used to sit here: the
   // adapter a live frame arrived on, kept in refs because the decode happened
-  // inside the WebSocket message handler. It does not any more - dissection is
+  // inside the agent message handler. It does not any more - dissection is
   // in the Worker, which is told the list through `pipeline.setInterfaces`
   // below - so both were written on every list change and read by nothing.
 
-  // Local Agent Connection - always tries to reach ws://localhost:8999 so
-  // the "Download Driver" button can auto-detect the agent running and
-  // flip to "Agent Connected", independent of whether capture is active.
-  // Packets are only recorded into the buffer while isCapturing is true.
+  // Local Agent Connection - opened as soon as this hook runs, whether or not
+  // capture is active, so Driver Info can tell "the agent is there and idle"
+  // from "the agent is not running" without anybody pressing Start. Packets
+  // are only recorded into the buffer while isCapturing is true.
   //
-  // The socket itself lives in the pipeline Worker now, along with the
-  // ordering window, the trackers and dissection (docs/decisions/0003). What
-  // reaches this effect is what always reached it: control messages, and
-  // batches of finished frames. Nothing here parses a packet.
+  // **There is no socket here, and no port to dial.** The link is the named
+  // pipe `\\.\pipe\inwire-agent`, held by MAIN, whose ACL is the whole of the
+  // authentication (ADR 0029). Main deframes it and posts the payload onto one
+  // end of a `MessageChannelMain`; the renderer's main thread receives that
+  // port from the preload and transfers it straight into the pipeline Worker,
+  // where the ordering window, the trackers and dissection live
+  // (docs/decisions/0007). `pipelineClient` is this side's handle on that
+  // Worker and is deliberately shaped like the WebSocket it replaced -
+  // `connect`, `send`, a message callback, a status callback - which is why
+  // this effect reads as if a socket were still here. It is not: what reaches
+  // it is control messages and batches of finished frames, and nothing here
+  // parses a packet.
   useEffect(() => {
     if (!canCapture) return;
     // Driver Info's Disconnect. Bailing out here rather than tearing the
@@ -228,7 +236,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
       if (connectedDelay) { clearTimeout(connectedDelay); connectedDelay = null; }
       if (helloTimeout) { clearTimeout(helloTimeout); helloTimeout = null; }
       if (status === 'error') {
-        console.warn("[Inwire] WebSocket connection failed. Agent might not be running.");
+        console.warn("[Inwire] Agent link failed. Agent might not be running.");
         if (isFirstAttempt) setAgentStatus("error");
       } else {
         console.log("[Inwire] Disconnected from Local Agent. Reconnecting in 3s...");
@@ -334,8 +342,8 @@ export function useAgentConnection(host: AgentConnectionHost) {
         setCaptureOwner(message.owner ?? null);
         setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
         // The agent is the authority on whether capture is running. It says
-        // idle while this tab believes otherwise when every selected adapter
-        // failed to open, or when another tab stopped it - either way the
+        // idle while this window believes otherwise when every selected adapter
+        // failed to open, or when another Inwire window stopped it - either way the
         // Start button showing "stop" would be a promise about traffic
         // nobody is capturing.
         if (message.state === 'idle' && isCapturingRef.current) {

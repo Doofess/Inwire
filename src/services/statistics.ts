@@ -2,7 +2,7 @@
  * Conversations, endpoints and the protocol hierarchy.
  *
  * Pure aggregation over the packet buffer, in `services` rather than inside
- * the dialog, because these three answers are the ones a capture is opened to
+ * the pane, because these three answers are the ones a capture is opened to
  * get and they need to be assertable: "who talked to whom, how much, and for
  * how long" is a question with one right answer, and a table that quietly
  * counts a retransmission twice or attributes a flow to the wrong direction

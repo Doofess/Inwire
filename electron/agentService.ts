@@ -54,7 +54,7 @@ export interface AgentServiceFacts {
 }
 
 /** Nothing is known: the platform is not Windows, or the query failed. */
-export const SERVICE_UNKNOWN: AgentServiceFacts = { installed: true, startType: 'unknown' };
+const SERVICE_UNKNOWN: AgentServiceFacts = { installed: true, startType: 'unknown' };
 
 /**
  * Reads `Start` out of `reg query` output.

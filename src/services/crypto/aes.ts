@@ -58,7 +58,7 @@ function xtime(byte: number): number {
  * a second time - a round count that could disagree with the key it came from
  * is a bug waiting to happen.
  */
-export function expandKey(key: Uint8Array): Uint8Array {
+function expandKey(key: Uint8Array): Uint8Array {
   if (key.length !== 16 && key.length !== 24 && key.length !== 32) {
     throw new Error(`AES needs a 16-, 24- or 32-byte key, got ${key.length}`);
   }

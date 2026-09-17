@@ -43,10 +43,15 @@ export function captureVolume(directory: string): CaptureVolume {
 
     list(): string[] {
       try {
-        // `withFileTypes` so a stray file is reported as foreign rather than
-        // attempted as a directory - `planPrune` refuses both, and this keeps
-        // the reason accurate.
-        return readdirSync(directory, { withFileTypes: true }).map((entry) => entry.name);
+        // Names only, which is all `planPrune` decides on: it matches each
+        // against `CAPTURE_ID_PATTERN` and refuses everything else, file or
+        // directory alike. This read `{ withFileTypes: true }` and then
+        // `.map(e => e.name)`, with a comment claiming a stray file was
+        // "reported as foreign rather than attempted as a directory" - the map
+        // threw the dirent away, so the result was identical to this and the
+        // distinction never crossed the seam. Widening `list()` to carry the
+        // type is the change to make if that distinction is ever wanted.
+        return readdirSync(directory);
       } catch {
         return [];
       }

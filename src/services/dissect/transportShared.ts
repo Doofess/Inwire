@@ -20,10 +20,20 @@ import { ETHERNET_MAX_FRAME } from '../direction';
  */
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
 
-export const ETHERNET_IPV4_HEADER_BYTES = 14 + 20;
+/**
+ * What sits in front of a transport segment on a plain Ethernet/IPv4 frame:
+ * the 14-byte Ethernet header and a 20-byte IPv4 header with no options.
+ *
+ * `ETHERNET_MAX_FRAME` minus this is the largest transport segment that can
+ * have travelled as one frame - 1,480 bytes. Past that the adapter segmented
+ * it, so the bytes in the buffer were never the bytes on the wire and a
+ * checksum over them means nothing. Named because `1514 - 34` stated neither
+ * number's job, and 34 is the one that reads as arbitrary.
+ */
+const ETHERNET_IPV4_HEADER_BYTES = 14 + 20;
 
 /** One's-complement sum over the pseudo-header and a byte range, RFC 1071. */
-export function transportChecksum(pseudoHeader: Uint8Array, rawBytes: Uint8Array, start: number, end: number): number {
+function transportChecksum(pseudoHeader: Uint8Array, rawBytes: Uint8Array, start: number, end: number): number {
   let sum = 0;
   for (let i = 0; i + 1 < pseudoHeader.length; i += 2) sum += (pseudoHeader[i] << 8) | pseudoHeader[i + 1];
   for (let i = start; i + 1 < end; i += 2) sum += (rawBytes[i] << 8) | rawBytes[i + 1];
@@ -41,7 +51,7 @@ export function transportChecksum(pseudoHeader: Uint8Array, rawBytes: Uint8Array
  * Unverified too, since the bytes to check are not all there.
  */
 export function checksumVerdict(
-  pseudoHeader: Uint8Array | undefined, rawBytes: Uint8Array, start: number, declaredEnd: number, stored: number, udp: boolean,
+  pseudoHeader: Uint8Array | undefined, rawBytes: Uint8Array, start: number, declaredEnd: number, stored: number,
   /**
    * True when this machine SENT the frame, which settles the question.
    *
@@ -64,9 +74,14 @@ export function checksumVerdict(
   }
   if (sentByUs) return { status: 'Unverified' };
   const computed = transportChecksum(pseudoHeader, rawBytes, start, declaredEnd);
-  // A UDP checksum computing to 0 is sent as 0xffff.
-  const good = computed === 0 || (udp && computed === 0 && stored === 0xffff);
-  return { status: good ? 'Good' : 'Bad', computed };
+  // A verifying one's-complement sum is 0, and there is no protocol-specific
+  // case to add. UDP's "a checksum computing to 0 is transmitted as 0xffff"
+  // needs no second test here: summing that 0xffff back in over the whole
+  // datagram still verifies to 0. There was a `(udp && computed === 0 && ...)`
+  // disjunct for it, which could only be evaluated when `computed === 0` was
+  // already false - so it never ran, and the `udp` parameter it was the only
+  // reader of went with it.
+  return { status: computed === 0 ? 'Good' : 'Bad', computed };
 }
 
 // Surfacing a readable hostname/URL in the Info column is far more useful at
@@ -88,15 +103,15 @@ export function checksumVerdict(
 //    literal by chance in random bytes is astronomically unlikely.
 // Neither runs on known-encrypted traffic (TLS/QUIC on port 443), since that
 // can never contain genuine plaintext.
-export const URL_PATTERN = /https?:\/\/[^\s"'<>\\]+/;
+const URL_PATTERN = /https?:\/\/[^\s"'<>\\]+/;
 
-export const HTTP_HOST_HEADER_PATTERN = /(?:^|\r\n)Host:\s*([^\r\n]+)/i;
+const HTTP_HOST_HEADER_PATTERN = /(?:^|\r\n)Host:\s*([^\r\n]+)/i;
 
 // formatAsciiDump() turns CR/LF into '.' along with every other non-printable
 // byte, which destroys the "\r\n" line boundary the Host-header match relies
 // on - this variant keeps real CR/LF characters so line-based matching works,
 // while still mapping every other non-printable byte to '.' as before.
-export function toLineAwareText(bytes: Uint8Array): string {
+function toLineAwareText(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map(b => {
       if (b === 13) return '\r';

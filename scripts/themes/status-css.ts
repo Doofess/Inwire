@@ -6,8 +6,14 @@
  *
  * The stylesheet holds the values because they have to be right before first
  * paint (see statusColors.ts). This generates them so nobody hand-mixes eleven
- * colours across eight themes, and `scripts/themes/status.ts` re-derives them
+ * colours per theme by hand, and `scripts/themes/status.ts` re-derives them
  * afterwards and fails if the two copies have drifted.
+ *
+ * It was eleven colours across eight themes when this was written and it is
+ * eleven across two now - Day and Night. The generator is worth keeping at two:
+ * the drift it prevents is between a derivation and a stylesheet, and that is
+ * the same hazard whether there are two blocks or eight. It loops
+ * `THEME_OPTIONS`, so it needs no edit when that changes.
  */
 import { statusColors, STATUS_TOKENS, type StatusColors } from '../../src/services/statusColors';
 import { THEME_OPTIONS } from '../../src/lib/themeOptions';

@@ -5,22 +5,39 @@ about what capture costs is an estimate. This is the smallest thing that turns
 one number - the per-frame cost of the sniffer thread - into a measurement, so
 a change to that path can be shown to have worked rather than asserted to.
 
-**The interesting cost is not in the callback.** `sniff(prn=...)` hands the
-callback a fully dissected scapy packet, so by the time our code runs, the
-expensive part is already over: scapy's `SuperSocket.recv` did
-`cls, val, ts = self.recv_raw(x)` and then `cls(val)`, building an Ether/IP/TCP
-object graph that `packet_to_record` immediately discards in favour of
-`bytes(pkt)`. Timing the callback body would measure the cheap end and report
-that everything is fine.
+**The interesting cost is not in the callback.** By the time `sniff_callback`
+runs, the read is already over - the sniffer thread spent its time in libpcap
+before it called us. Timing the callback body alone would measure the cheap end
+and report that everything is fine.
 
 So this measures both halves and reports them apart:
 
   wall / frames      what one frame costs the sniffer thread, end to end
   callback           what our own code costs inside it
-  driver + dissect   the remainder, which is scapy and libpcap
+  driver + read      the remainder, which is where the frame came from
 
 That remainder is the number the capture path exists to reduce. Comparing it
 before and after a change is the whole point of this module.
+
+**What the remainder is depends on which branch of `sniff_on_interface` is
+running, and this docstring used to name the wrong one.** It said
+`sniff(prn=...)` hands the callback "a fully dissected scapy packet", so the
+remainder was scapy building an Ether/IP/TCP object graph that
+`packet_to_record` then discarded. That was true before 3.5.0 and is now the
+*fallback*:
+
+  pcap_next_ex       the fast path, and the one almost every capture takes.
+                     `read_frame` goes straight to libpcap, so there is NO
+                     scapy dissection at all and the remainder is the driver
+                     read plus one `string_at` copy. This is the path
+                     `read_frame`'s own 12x measurement is about.
+  recv_raw           Linux AF_PACKET, which has no libpcap handle. A plain
+                     `recvfrom` returning bytes; no dissection either.
+  sniff(prn=...)     the last resort, for a socket that has not overridden
+                     `recv_raw` and so reports no timestamp. THIS is the one
+                     where the remainder is scapy.
+
+Read a measurement against the branch the log line named at capture start.
 
 Off unless `INWIRE_PROFILE_CAPTURE` is set, and the disabled path is one
 attribute read per frame - this sits on the hot path it is measuring, and an
@@ -109,6 +126,11 @@ class CaptureProfile:
             return "capture profile: no frames yet"
         return (
             "capture profile: {frames} frames, {perFrameUs} us/frame "
-            "({callbackUs} us in callback, {driverAndDissectUs} us driver+dissect), "
+            # "driver+read", not "driver+dissect": on the pcap_next_ex path
+            # there is no dissection in the remainder at all - see the module
+            # docstring for which branch puts scapy back into it. The KEY keeps
+            # its old name because test_protocol.py pins it by name; only the
+            # words a person reads are corrected here.
+            "({callbackUs} us in callback, {driverAndDissectUs} us driver+read), "
             "~{impliedFramesPerSecond} frames/s ceiling"
         ).format(**snap)

@@ -1,27 +1,33 @@
 /**
- * The app's handle on the capture worker.
+ * The app's handle on the capture store.
  *
  * Shaped like `services/pipelineClient.ts` - one object, callbacks assigned
- * rather than an event emitter, the worker built lazily on first use - because
- * a second thing that talks to a worker should not invent a second way of
- * doing it.
+ * rather than an event emitter, the connection made lazily on first use -
+ * because a second thing that talks to another context should not invent a
+ * second way of doing it. What is on the far side is not a Worker but the store
+ * `utilityProcess` (`electron/store/`), reached over a `MessagePort` the
+ * preload hands into the page; `captureHost.ts` is the code it runs.
  *
- * ## Shadow write
+ * ## This is the read path, not a shadow of one
  *
- * Nothing reads from OPFS yet. This runs **beside** the IndexedDB store, so a
- * refresh still restores the way it always has and the new path can be watched
- * on a real capture before anything depends on it. IndexedDB goes when the read
- * path arrives, not before.
+ * It was a shadow write once - frames were persisted here while IndexedDB
+ * remained the thing a restore read back - and that is over. Every row below
+ * the RAM window comes through `readRowsAt`/`readRowsFor`, every byte a frame
+ * has dropped comes through `readBytes`, a restore comes through `reopen` and
+ * `readRows`, and the whole-capture display filter is `scanCapture`. IndexedDB
+ * holds the session's **metadata** and nothing else (`services/sessionStore.ts`).
  *
- * The cost of that overlap is honest and worth naming: every frame is
- * structured-cloned once more, on the main thread, to reach this worker. ADR
- * 0007 measured a `Packet` clone at 5.1 us, so at 35,000 frames a second that
- * is around 178 ms of main-thread time per second of capture. The main thread
- * already pays a per-frame serialisation for IndexedDB today and that one goes
- * away in the same step this one stops being a shadow, so the overlap is
- * temporary in both directions - but it is the number to measure on a real
- * capture before deciding whether the pipeline worker should hand frames over
- * directly instead.
+ * The boundary this crosses has been measured rather than estimated:
+ * `scripts/perf/store-boundary.ts` puts the serialize + `MessagePort` hop at
+ * **5.26 us a frame** against the writer's own 26.68 us - 16% of the cost, and
+ * 31,308 frames a second for the two together. That number is what ADR 0028 was
+ * waiting for, and it says moving the store back in-process would buy the 16%
+ * and nothing else, so the crossing is not the thing to optimise.
+ *
+ * One property of it is load-bearing and easy to undo: **a message is a
+ * snapshot**. `plainForStore` flattens each frame at this boundary because a
+ * structured clone drops prototypes, and `FieldBlock` is a class - see
+ * `storePacket.ts`, and the bug that hid the whole disk path.
  */
 import type { Packet } from '../../types/packet';
 import type { InfoPatch } from '../dissect/types';
@@ -89,7 +95,7 @@ export interface StoredCapture {
  * answer now comes from the preload bridge, which is absent in every one of
  * the assertion scripts and must therefore be optional rather than assumed.
  */
-export function captureStoreAvailable(): boolean {
+function captureStoreAvailable(): boolean {
   return typeof window !== 'undefined' && window.inwire?.isDesktop === true;
 }
 
@@ -148,7 +154,7 @@ class CaptureClient {
   private state: CaptureStorageState = freshCaptureStorageState();
   /** Set once a failure makes the store unusable, so nothing keeps trying. */
   private disabled = false;
-  /** In-flight byte reads, by request id. The worker always answers. */
+  /** In-flight byte reads, by request id. The store always answers. */
   private readonly pending = new Map<number, (frames: Map<number, Uint8Array>) => void>();
   /** In-flight row reads and reopens, same rule. */
   private readonly pendingRows = new Map<number, (packets: Packet[]) => void>();
@@ -408,7 +414,7 @@ class CaptureClient {
    * Synchronous on purpose. `bytesAreRecoverable` is asked while rendering a
    * frame that has no bytes, to say whether they are gone or merely elsewhere,
    * and an answer that arrived a promise later would make that a third state
-   * the detail pane has to draw. The worker pushes the range with its stats and
+   * the detail pane has to draw. The store pushes the range with its stats and
    * this is the last one it sent, which lags a poll behind the truth in the
    * safe direction: a frame just sealed keeps its bytes in RAM for another
    * couple of seconds, and no frame is ever dropped before it is readable.

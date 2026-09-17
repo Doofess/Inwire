@@ -122,7 +122,7 @@ console.log('\n--- the window is frameless and draws its own controls ---\n');
 
   // The renderer's title row is laid out against this, so a change here that
   // did not reach the CSS would leave the controls straddling the row's edge.
-  check('the title row is 40px', TITLE_BAR_HEIGHT, 40);
+  check('the title row is 32px', TITLE_BAR_HEIGHT, 32);
   // And the reserve the title row uses to centre its label is three buttons
   // wide. This is the number frameless made a constant: under the overlay it
   // had to come from `env(titlebar-area-width)`, because Windows drew the
@@ -150,11 +150,20 @@ console.log('\n--- the window is frameless and draws its own controls ---\n');
   checkTrue('the menu bar is still auto-hidden rather than gone',
     readFileSync('electron/main.ts', 'utf8').includes('autoHideMenuBar: true'));
 
-  // The minimum stays 1024 now that the window also carries a 56px rail and a
-  // dock. Raising it to 1280 would break half-screen snapping on a 1920px
-  // display, where Windows gives a 960px window - analyser on one half with a
-  // terminal on the other is a workflow this tool exists to support.
-  check('the window minimum is unchanged', [MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT], [1024, 640]);
+  // The WIDTH stays 1024 now that the window also carries a 56px rail. Raising
+  // it to 1280 would break half-screen snapping on a 1920px display, where
+  // Windows gives a 960px window - analyser on one half with a terminal on the
+  // other is a workflow this tool exists to support. (The dock was the other
+  // thing this sentence used to weigh, and it is deleted.)
+  //
+  // The HEIGHT moved 640 -> 680 when the title row went full width: the rail
+  // sits below it now, so the window has to carry the row on top of the 640 the
+  // rail needed at the time. The row has since come down 40 -> 32 and the
+  // minimum did not follow, so the rail's budget is 648.
+  // `scripts/session/view.ts` is the check with teeth - it derives that
+  // subtraction and adds the rail up against it; this one only stops the pair
+  // drifting silently.
+  check('the window minimum is unchanged', [MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT], [1024, 680]);
 }
 
 console.log('\n--- the scheme, whose flags each hide a silent failure ---\n');

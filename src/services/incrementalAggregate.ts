@@ -5,17 +5,23 @@ import { packetsExtend } from './packetPrefix';
  * Folding a growing packet buffer into a summary without re-reading the part
  * that has not changed.
  *
- * Every analytics widget answers a question of the same shape - how many
+ * Every analytics surface answers a question of the same shape - how many
  * packets per protocol, per conversation, per endpoint, per second - and every
  * one of them answered it by walking the entire buffer, from packet zero, on
- * every dashboard tick. Six such passes were running twice a second.
+ * every tick. Six such passes were running twice a second, back when all six
+ * were dock widgets on screen at once.
  *
- * Measured on a live capture, production build, Chrome at 6x CPU throttle with
+ * Measured then, on a live capture, production build, at 6x CPU throttle with
  * a 43,000-packet buffer and only ~19 packets a second actually arriving:
  *
- *   dashboard mounted      24 fps, p90 97ms, 31 long tasks and 3.7s of long
- *                          task time in an 8s window
- *   dashboard unmounted    92 fps, p90 21ms, ZERO long tasks
+ *   those surfaces mounted    24 fps, p90 97ms, 31 long tasks and 3.7s of long
+ *                             task time in an 8s window
+ *   those surfaces unmounted  92 fps, p90 21ms, ZERO long tasks
+ *
+ * The dock is gone and the surviving readers - the map, the throughput chart,
+ * the size distribution - are unmounted unless their view is active, so no two
+ * of them fold at once any more. The fold is still what makes each of them
+ * affordable while it IS on screen.
  *
  * Half the main thread, for arithmetic over packets whose contribution had
  * already been counted the last time round. The packet rate barely matters:

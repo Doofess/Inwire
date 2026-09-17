@@ -2,9 +2,30 @@
 """
 Inwire Agent
 
-Captures live packet metadata with Scapy and streams it as JSON to any
-connected browser tab over a local WebSocket. This never leaves the
-machine it runs on - the web app only talks to ws://localhost:8999.
+Captures raw frames off the wire and hands them to the Inwire desktop app,
+which does all the dissecting. A record carries the bytes, the driver's
+timestamp, a per-capture sequence number and the interface index - no source,
+destination, protocol, ports or info, because the app always overwrote those
+(docs/decisions/0010). Frames travel in batches in the binary format
+``packet_batch.py`` defines; control messages are JSON.
+
+The transport depends on the platform, and this is the part worth reading
+before anything else here:
+
+  Windows            a named pipe, ``\\\\.\\pipe\\inwire-agent``, whose
+                     security descriptor is what decides who may connect
+                     (``pipe_server.py``; docs/decisions/0029). The loopback
+                     port is not opened AT ALL - see ``main()``.
+  macOS / Linux      a WebSocket on localhost, with the pairing token and the
+                     origin allowlist that a reachable-by-anything port needs.
+                     Installed from the tarball; there is no desktop app yet.
+
+Nothing leaves the machine either way.
+
+This docstring used to say the agent "streams live packet metadata as JSON to
+any connected browser tab" over ``ws://localhost:8999``. All three halves of
+that went: JSON metadata in 3.2.0, the browser in the Electron migration, and
+the port on Windows in 3.8.0.
 
 Run elevated:
   Windows (as Administrator):  python agent.py

@@ -11,9 +11,23 @@
 ; ## Superseded, and no longer installs Npcap
 ;
 ; The product now ships as one installer at the repository root, which lays
-; down the app and the agent together and uninstalls this one by AppId. This
-; file is kept because that removal reads its AppId, and because macOS and
-; Linux still install an agent on its own.
+; down the app and the agent together and uninstalls this one by AppId.
+;
+; What keeps this file, stated accurately because the two reasons it used to
+; give were both wrong. It said it was kept "because that removal reads its
+; AppId, and because macOS and Linux still install an agent on its own".
+; Neither holds: installer/setup.iss carries its own copy of the GUID as
+; `#define StandaloneAgentAppId` and never opens this file, and an Inno script
+; installs nothing on macOS or Linux - that is the tarball from
+; scripts/agent/package-unix.ts and unix/install.sh.
+;
+; It is kept because it is the SOURCE of the product an agent-3.x machine
+; actually has installed, so the AppId and the version stamps below are a
+; record of what is out there rather than a build input. Two assertion scripts
+; read it and would have to change with it: test_protocol.py (its `_SETUP_ISS`)
+; and scripts/agent/installer-versions.ts (its `LEGACY`). Nothing builds it -
+; no npm script compiles it, and the release checklist runs
+; `iscc installer/setup.iss` only.
 ;
 ; Its Npcap handling is gone. It was worse than the unified installer's: the
 ; same `/S` - Npcap's OEM silent-install switch, which the free licence does

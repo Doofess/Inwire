@@ -1,46 +1,103 @@
 import React from 'react';
 import { BrandMark } from './BrandMark';
+import { PacketCountsReadout } from './PacketCountsReadout';
 import { WindowControls } from './WindowControls';
 
 /**
- * The 40px strip the window is dragged by.
+ * The 32px strip the window is dragged by, across the whole window width.
  *
  * The capture controls went into the rail precisely so this row could be
  * empty, and the menu that used to trigger from its left edge is gone. What is
- * left is **the app's mark and the window's name, centred**, and the app's own
- * three window buttons on the right - the window is frameless, so those are
- * ours to draw.
+ * left is **the app's mark at the top-left corner**, the packet counter
+ * centred, and the app's own three window buttons on the right - the window is
+ * frameless, so those are ours to draw.
  *
- * ## Why the mark is here and not in the rail
+ * ## The centre holds the counter, not the window's name
  *
- * It was in the rail's top cell, at the top-left corner, which is where a web
- * page puts a logo. A desktop window does not: the identity belongs in the
- * caption, which is the strip the OS reserves for exactly that, and which the
- * taskbar and Alt+Tab echo. Putting it here also emptied the rail's 40px top
- * cell, and the cell went with it - the rail starts at the very top now, like
- * VS Code's activity bar. That is 40px of rail height reclaimed, which
- * `scripts/session/view.ts` needed for the icons this batch adds.
+ * It held `windowTitleFor(...)`, which read `Inwire` when idle and
+ * `Ethernet - capturing - Inwire` during a capture. That string has not been
+ * deleted and still names the window: `useWindowTitle` sends it to main, so the
+ * taskbar, Alt-Tab and the window list are exactly as they were. What it stopped
+ * doing is spending the centre of the one strip nobody can look away from on the
+ * app's own name, which the mark two hundred pixels to its left already gives.
  *
- * The mark takes `--card-foreground` and not `--chrome-brand`. That token was
- * authored for a mark sitting on the saturated bar of the 64px header this
- * replaced, and on `--card` it resolves to white-on-white in the light themes.
+ * The counter earned the slot by being the thing that was hardest to reach:
+ * it was a dock widget, so the answer to "how many rows did this filter select"
+ * was only on screen if you had chosen to keep a panel open. See
+ * `PacketCountsReadout` for why it subscribes rather than taking props, and for
+ * the one argument in this repository that says not to do this.
  *
- * **It holds no control at all, and that is the finished state rather than a
- * gap.** Every app this one is measured against does the same: VS Code's title
- * bar carries a command centre and nothing else, Windows Terminal's carries
- * tabs, Figma's carries its menu - none carries a second navigation surface
- * beside one that already exists. Adding a button back here means taking it from
- * the rail, where it is one of thirteen in a strip built to hold exactly that.
+ * ## Why this row spans the window and the rail sits under it
+ *
+ * The rail used to run the full height with this row beside it, which put the
+ * window's top-left corner inside the rail and the mark in the middle of this
+ * row - the one place in the window that is neither the corner nor the caption.
+ * Now the row is the full width, the rail starts below it, and the mark is at
+ * the corner where an application's identity belongs and where every app this
+ * one is measured against puts it.
+ *
+ * **The two read as one surface, and that is the point.** This row and the rail
+ * are both `bg-secondary`, and this row draws no bottom border - so there is no
+ * line across the top-left corner, and the ground runs unbroken from the mark
+ * down into the rail. The border that remains is `<main>`'s `border-l` and
+ * `border-t`, which separates the content pane from this surface rather than
+ * cutting across it. The rail carried a `border-r` once and does not any more:
+ * the two would have drawn the same line twice in the same place, and the one
+ * on the pane is the one that follows the rounded corner round.
+ *
+ * **They were `bg-card` and are one step brighter.** That is a lighter grey in
+ * Night (#232323 against #1a1a1a) and a grey rather than white in Day, and it
+ * does something the old pair could not: `--card` against `--background` is a
+ * 4/255 delta in Night, so the notch `<main>`'s `rounded-tl-xl` cuts out of this
+ * surface was invisible and the 1px border was the only thing the eye could
+ * follow round the corner. At `--secondary` the delta is 13/255 and the corner
+ * reads on its own. The border stays anyway - it is what carries the edge in
+ * Day, where the two are much closer.
+ *
+ * It costs `TITLE_BAR_HEIGHT` of window rather than of rail: `MIN_WINDOW_HEIGHT`
+ * is 680, so 680 - 32 leaves the rail 648 against the 494 its icons come to.
+ * Taking it from the rail instead would eat into that, and an overflow there
+ * does not scroll - the bottom group is pinned with `mt-auto`, so Settings goes
+ * off the bottom edge. `scripts/session/view.ts` does the sum; the numbers were
+ * quoted here as 40 / 640 / 630 long after all three had moved.
+ *
+ * **There is no lockup any more, only the mark.** The wordmark is deleted, so
+ * the question the previous three paragraphs here answered at length - whether
+ * a lockup's two halves may carry different colours - has no subject. The mark
+ * is a shaded form carrying its own two colours from `lib/brandMark.ts`, which
+ * is the one place that decides them, and there is no second half to drift
+ * from.
+ *
+ * One consequence for `scripts/themes/registry.ts`: its contrast check tested
+ * `--card-foreground` against `--card` and was described as covering "the brand
+ * mark in the title row". It was covering the WORDMARK, which no longer exists,
+ * and against a ground this row no longer uses. That file's own comment warns
+ * that a guard aimed at the wrong ground passes for exactly as long as it is
+ * wrong; the check is retargeted rather than left pointing here.
+ *
+ * **It holds no NAVIGATION, and that is the finished state rather than a gap.**
+ * Every app this one is measured against does the same: VS Code's title bar
+ * carries a command centre and nothing else, Windows Terminal's carries tabs,
+ * Figma's carries its menu - none carries a second navigation surface beside one
+ * that already exists. Adding a button back here means taking it from the rail,
+ * where it is one of fourteen in a strip built to hold exactly that.
+ *
+ * It does hold exactly one control, and only because deleting the counts widget
+ * would otherwise have deleted it: the `+N UNSEARCHED` rescan button inside the
+ * readout, which is the only way to re-run a whole-capture filter scan. It
+ * carries `app-no-drag` itself.
  *
  * ## What makes this read as native rather than as a web page in a frame
  *
- *  - **The colour.** `bg-card`, the same ground the rail uses, never the
+ *  - **The colour.** `bg-secondary`, the same ground the rail uses, never the
  *    saturated `--chrome` accent. Every app this one is measured against - VS
  *    Code, Windows Terminal, Figma - keeps its title bar within a few percent of
- *    the window background. `electron/titleBarColors.ts` sends main the matching
- *    pair so the native glyphs sit on the same colour as this row.
- *  - **No self-drawn corners.** Windows 11 rounds the frame itself, and the
- *    frame is still there - `titleBarStyle: 'hidden'` only removes the caption.
+ *    the window background. There are no native glyphs to match any more:
+ *    `lib/windowChrome.ts` sends main the theme's NAME, and `windowColors.ts`
+ *    turns it into the ground the next window opens on.
+ *  - **No self-drawn corners.** `roundedCorners` defaults true and is never
+ *    set, so Windows 11 rounds this window even though it is frameless - the
+ *    rounded top-left the continuous surface above is drawn into is the OS's.
  *    A radius drawn here would be a second, wrong curve inside the real one.
  *  - **The dim is the foreground's.** An unfocused window fades its text and
  *    glyphs, not its ground, which is what Windows does to a caption.
@@ -49,16 +106,16 @@ import { WindowControls } from './WindowControls';
  *    ~207px at 150%, so it had to be read from `env(titlebar-area-width)` - a
  *    hardcoded width ran the app's content under the close button on any
  *    machine that was not at 100%. The buttons are elements now, so they are
- *    138 CSS pixels at every scale factor and the spacer below simply matches
+ *    138 CSS pixels at every scale factor and the corner block below simply matches
  *    them.
  *
- * The height is `h-10`, matching `TITLE_BAR_HEIGHT` in `electron/window.ts`,
- * which is what `titleBarOverlay` reserves. `scripts/electron/shell.ts` pins
- * that number; if it moves, both have to.
+ * The height is `h-8` - 32px - matching `TITLE_BAR_HEIGHT` in
+ * `electron/window.ts`. `scripts/electron/shell.ts` pins that number; if it
+ * moves, both have to. It was `h-10`, then `h-9`, and **this is the floor**: the
+ * window buttons are 46x32 because 32 is Windows' own caption metric, so at
+ * `h-8` they fill the row exactly and anything shorter means redrawing them.
  */
 export interface TitleRowProps {
-  /** What the window is called, shown centred. */
-  title: string;
   /** From `useWindowChrome`. Dims the row's contents when false. */
   focused: boolean;
   /** From `useWindowChrome`. Decides the maximize button's glyph and label. */
@@ -71,29 +128,53 @@ export interface TitleRowProps {
  * click that does nothing at all. `WindowControls` carries it; a second control
  * would have to carry its own.
  */
-export const TitleRow: React.FC<TitleRowProps> = ({ title, focused, maximized }) => (
+export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
   <header
-    className={`h-10 shrink-0 flex items-center border-b border-border
-      bg-card text-card-foreground app-drag transition-opacity
+    className={`h-8 shrink-0 flex items-center
+      bg-secondary text-secondary-foreground app-drag transition-opacity
       ${focused ? '' : 'opacity-60'}`}
   >
-    {/* Balances the controls so the mark and title are centred in the WINDOW
-        rather than in the space left over beside them. `aria-hidden` because it
-        is spacing, not content, and 138px because that is what three 46px
-        buttons come to - the one number in this file that has to track
-        `WindowControls`. */}
-    <div aria-hidden className="w-[138px] shrink-0" />
+    {/* The corner. 138px wide so it balances the controls and the counter stays
+        centred in the WINDOW rather than in the space left over beside them -
+        that is what three 46px buttons come to, and it is the one number in
+        this file that has to track `WindowControls`.
 
-    <div className="flex-1 min-w-0 flex items-center justify-center gap-2">
-      {/* Titled, so it is the accessible name of the app rather than decoration
-          - this is the only place the app names itself visually now. */}
-      <BrandMark className="w-4 h-4 shrink-0 text-card-foreground" title="Inwire" />
-      <span
-        className="min-w-0 text-[11px] font-medium tracking-wide
-          text-muted-foreground truncate"
-      >
-        {title}
-      </span>
+        **The `INWIRE` wordmark was here and is deleted.** It had come back from
+        the web build, where the lockup was a `w-9 h-9` mark plus the word at
+        `text-lg` on a 64px accent header; here it was scaled to `text-xs`,
+        led the mark, and named the app in the caption. What it was doing is
+        what the window already does twice - the OS caption and the taskbar both
+        carry `windowTitleFor(...)`, which `useWindowTitle` still sends to main
+        and which this row never showed.
+
+        **The mark is back on the rail's 56px axis**, which is what the wordmark
+        cost and what deleting it returns. It is centred in a `w-14` block - the
+        rail's own width - so it sits directly above the column of icons below
+        it rather than 8px to their left. That alignment is the reason the mark
+        used to be in a rail cell at all, and the reason the note about losing it
+        was in this comment for as long as the word led.
+
+        The mark carries no `title` and is decorative, which is `BrandMark`'s
+        own default and its own stated reason. With the word gone that stops
+        being "the wordmark beside it names the app" and becomes "the window's
+        caption does" - an icon that announced itself as "Inwire" to a screen
+        reader on every focus would be the third telling. */}
+    <div className="w-[138px] shrink-0 flex items-center">
+      {/* 16 CSS pixels, which is what picks the drawing: the mark is tiered and
+          the full one is a smudge at this size. Passing the size rather than the
+          tier keeps the caller saying what it knows. */}
+      <div className="w-14 shrink-0 flex items-center justify-center">
+        <BrandMark className="w-4 h-4 shrink-0" size={16} />
+      </div>
+    </div>
+
+    {/* Centred in the WINDOW, because the 138px corner above balances the three
+        46px buttons opposite - which is the whole reason that block is a fixed
+        width rather than shrink-to-fit. The counter grows and shrinks with the
+        capture, so it is the flexible half: `min-w-0` lets it truncate into the
+        space it has instead of pushing the controls off the right edge. */}
+    <div className="flex-1 min-w-0 flex items-center justify-center px-2">
+      <PacketCountsReadout />
     </div>
 
     <WindowControls maximized={maximized} />

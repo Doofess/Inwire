@@ -1,6 +1,6 @@
 import { DEFAULT_COLOR_RULES } from './colorRules';
 import { themePalette, type Hue, type ThemePalette } from './themePalettes';
-import { AA_CONTRAST, contrastRatio, isDarkColor, labToHex, legibleOn, toLabColor } from '../lib/colorMix';
+import { AA_CONTRAST, contrastRatio, isDarkColor, labToHex, toLabColor } from '../lib/colorMix';
 
 /**
  * The colours the packet list paints itself with, derived from the app theme.
@@ -47,22 +47,16 @@ export interface PacketTheme {
   };
   /** Keyed by ColorRule.id. Every built-in rule has an entry. */
   rules: Record<string, PacketThemeColors>;
-  /**
-   * The same colours, as text on a panel rather than as a row fill.
-   *
-   * Keyed by ColorRule.id like `rules`, and derived from the same hue, so the
-   * frame number in the inspection pane's header is recognisably the colour of
-   * the row it was selected from. It cannot BE that colour: a row fill is a
-   * pale wash chosen to sit under small text, and the same value used as text
-   * on a card would be invisible. So the hue is taken at full strength and only
-   * its lightness is moved, far enough to be readable on `surface.card`.
-   */
-  accents: Record<string, string>;
-  /**
-   * For a packet that matched no rule at all - the chain ends at Broadcast and
-   * has no catch-all, so this is a common case rather than an edge one.
-   */
-  accentFallback: string;
+  // **There was an `accents` table here, and an `accentFallback` beside it.**
+  // Same hues as `rules`, taken at text strength rather than as a wash, so a
+  // frame could be named in the colour of the row it came from. Nothing reads
+  // them: the panes that did have gone back to the app's own `--primary`. See
+  // the note where `getPacketAccent` was, in `colorRules.ts`.
+  //
+  // `legibleOn(hue, palette.surface.card, AA)` is the one line worth keeping in
+  // mind if they come back - a row fill is chosen to sit UNDER small text, so
+  // the same value used AS text on a card is invisible, and only the lightness
+  // may move or the hue axis the panel is built on shifts with it.
 }
 
 /**
@@ -293,8 +287,8 @@ const LIGHTNESS_BY_HUE: Record<Hue, number> = {
  *
  * A second axis over the app theme, and deliberately a *narrow* one. It does
  * not introduce new palettes: `default` and `vibrant` are the same nine theme
- * hues put through the same Lab derivation with two knobs moved, so a Midnight
- * list stays recognisably Midnight either way. Only `colorblind` substitutes
+ * hues put through the same Lab derivation with two knobs moved, so a Night
+ * list stays recognisably Night either way. Only `colorblind` substitutes
  * hues, and it has to - see OKABE_ITO.
  *
  * Scoped to the packet list and the accents derived from it. The map arcs, the
@@ -583,7 +577,6 @@ export function getPacketThemeForApp(
     : LIGHTNESS_SHIFT_ON_LIGHT) * spec.shiftScale;
 
   const rules: Record<string, PacketThemeColors> = {};
-  const accents: Record<string, string> = {};
   for (const rule of DEFAULT_COLOR_RULES) {
     const role = ROLE_BY_RULE_ID[rule.id] ?? 'neutral';
     const name = HUE_BY_ROLE[role];
@@ -593,16 +586,6 @@ export function getPacketThemeForApp(
     // whole point of it.
     const fixed = spec.hues === undefined ? FIXED_ROLE_COLORS[role] : undefined;
     rules[rule.id] = fixed ?? derive(name, hue, palette, shift, spec);
-    // From the theme's HUE, even for a stated fill.
-    //
-    // An accent is panel text, not a row fill: its job is to sit legibly on a
-    // card and stay on the same hue axis as every other accent, which is what
-    // `scripts/themes/packet-themes.ts` asserts. Taking it from the stated
-    // `#a40000` instead put the reset accent 13.6 degrees off the theme's red
-    // - still red, but off the axis the rest of the panel is built on, for no
-    // gain. The row is the thing that has to shout; the accent only has to be
-    // recognisably the same colour family.
-    accents[rule.id] = legibleOn(hue, palette.surface.card, AA);
   }
 
   return {
@@ -610,8 +593,6 @@ export function getPacketThemeForApp(
     label: `${resolvedTheme ?? 'dark'} ${spec.label}`,
     surface: palette.surface,
     rules,
-    accents,
-    accentFallback: legibleOn(hues.neutral, palette.surface.card, AA),
   };
 }
 

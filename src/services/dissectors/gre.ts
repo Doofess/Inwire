@@ -22,7 +22,7 @@ import type { ProtocolLayer, ProtocolField } from '../../types/packet';
 export const GRE_PROTOCOL = 47;
 
 /** Transparent Ethernet Bridging - the payload is a whole Ethernet frame. */
-export const ETHERTYPE_TRANSPARENT_ETHERNET = 0x6558;
+const ETHERTYPE_TRANSPARENT_ETHERNET = 0x6558;
 
 const FLAG_CHECKSUM = 0x8000;   // C, bit 0
 const FLAG_KEY = 0x2000;        // K, bit 2 (RFC 2890)

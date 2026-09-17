@@ -51,8 +51,8 @@ import type { ComponentKind } from './components';
  * Set on the child, read by the script. Two names, because the arguments must
  * not be concatenated onto the path - that would put quoting back.
  */
-export const INSTALLER_PATH_ENV = 'INWIRE_INSTALLER';
-export const INSTALLER_ARGS_ENV = 'INWIRE_ARGS';
+const INSTALLER_PATH_ENV = 'INWIRE_INSTALLER';
+const INSTALLER_ARGS_ENV = 'INWIRE_ARGS';
 
 /**
  * The script, as lines. An array rather than one template literal so that no

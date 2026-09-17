@@ -45,9 +45,14 @@ DEBUG_MODE = False
 class InwireAgentService(win32serviceutil.ServiceFramework):
     _svc_name_ = "InwireAgent"
     _svc_display_name_ = "Inwire Capture Agent"
+    # Written into the SCM by pywin32, so this is what an administrator reads
+    # in services.msc beside a LocalSystem service - the same audience the
+    # onedir build and the VERSIONINFO exist for. It said "for the Inwire web
+    # app ... until a Inwire page connects" until the web app had been deleted
+    # for two phases.
     _svc_description_ = (
-        "Captures network packets for the Inwire web app. Idle until a "
-        "Inwire page connects, and stops capturing when the last one closes."
+        "Captures network packets for the Inwire desktop app. Idle until "
+        "Inwire connects, and stops capturing when it disconnects."
     )
 
     def __init__(self, args):
@@ -155,14 +160,23 @@ if __name__ == "__main__":
         servicemanager.Initialize()
         servicemanager.PrepareToHostSingle(InwireAgentService)
         servicemanager.StartServiceCtrlDispatcher()
-    elif sys.argv[1] == "--init-config":
-        # Run by the installer, elevated, before the service starts. Creates
-        # config.json with a pairing token if there is not one already; prints
-        # the token so the installer can show it to whoever is installing,
-        # since the file it lives in is deliberately not readable by them
-        # afterwards.
-        import config
-        print(config.ensure_config().get("token") or "")
+    # There is deliberately no `--init-config` verb here, and it must not come
+    # back. It called `config.ensure_config()`, which MINTS A PAIRING TOKEN and
+    # writes config.json, then printed the token for the installer's finish page
+    # to show. The token is gone from Windows entirely - the pipe's security
+    # descriptor is the authentication, and the kernel enforces it
+    # (docs/decisions/0029) - so what this verb did was write a secret nothing
+    # reads into a file the installer stopped seeding in 3.8.0. Neither
+    # installer has invoked it since: grep `init-config` across
+    # installer/setup.iss and local-agent/installer/setup.iss and there is
+    # nothing, and the legacy one says so outright ("there is no secret to
+    # generate, no --init-config").
+    #
+    # `config.ensure_config` and `config.make_token` are still there and are
+    # still right: the macOS/Linux tarball installs over a WebSocket and keeps
+    # the token, because a socket file has no interactive-user SID to name.
+    # They cannot be reached from this file - it is the Windows SCM host and
+    # imports win32service at module scope.
     elif sys.argv[1] == "--version":
         # The installed build's version, for a person at a prompt; the app
         # learns it from hello. The frozen exe has no console, so this is

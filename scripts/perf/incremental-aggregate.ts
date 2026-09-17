@@ -3,8 +3,10 @@
  *
  *   npx tsx scripts/perf/incremental-aggregate.ts
  *
- * Every analytics widget's numbers now come out of this fold, so the property
- * that matters is not that it is fast - it is that it is **the same answer**.
+ * Every number the Statistics pane and the Routing Map draw comes out of this
+ * fold - it was "every analytics widget", and the widgets went with the dock -
+ * so the property that matters is not that it is fast; it is that it is **the
+ * same answer**.
  * A fold that drifts from a full recompute produces statistics that are wrong
  * in a way nobody notices, which is worse than the stutter it was built to fix.
  *

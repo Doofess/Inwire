@@ -628,23 +628,19 @@ export class ColorRulesEngine {
    * rows with the theme's own surface, which is what keeps a list internally
    * consistent when the packet theme and the app theme disagree about ground.
    */
-  /**
-   * The colour that NAMES this packet outside the list.
-   *
-   * The inspection pane, the hex pane and the detail window all label a frame
-   * they did not draw, and a label in the app accent said the same thing for
-   * every frame. This says which frame - the same hue the row was painted in,
-   * taken at text strength rather than as a wash.
-   *
-   * Never undefined: a packet matching no rule still has to be labelled, so it
-   * takes the theme's neutral accent rather than leaving the caller to invent
-   * a fallback.
-   */
-  public getPacketAccent(packet: Packet, theme: PacketTheme): string {
-    const rule = this.matchRule(packet);
-    if (!rule) return theme.accentFallback;
-    return theme.accents[rule.id] ?? theme.accentFallback;
-  }
+  // **There was a `getPacketAccent` here and it is deliberately gone.** It
+  // returned the matched rule's hue at text strength, and the inspection pane,
+  // the hex pane and the detail window pushed it down as a `--primary`
+  // override so every accent in them took the colour of the row the frame was
+  // selected from. Its argument was that a label in the app accent "said the
+  // same thing for every frame"; the answer is that a pane showing one frame
+  // does not need to be told which frame, and an accent that changes hue as you
+  // arrow through the list is motion carrying no information.
+  //
+  // The rule is still named in those panes - `getMatchedRuleName` - in words,
+  // which is the form that survives a colourblind set and a screenshot. And the
+  // list still paints by rule, which is where colour answers a question nothing
+  // else does: which of four hundred rows on screen is the broken one.
 
   public getPacketStyle(
     packet: Packet,

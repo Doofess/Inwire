@@ -141,17 +141,19 @@ try {
 
   /** The filter bar's two counts: rows shown, and rows in the capture. */
   const counts = () => page.evaluate(() => {
-    const label = [...document.querySelectorAll('span')].find((s) => s.textContent === 'PACKETS:');
-    // The next sibling, not the parent: the parent runs the percentage on to
-    // the total with no separator, so "44 / 178,200" "0.0%" reads as 178,2000.
-    const text = label?.nextElementSibling?.textContent ?? '';
+    // `[data-packet-counts]` is exactly the two numbers and the slash - the
+    // row around it also carries the scan badge, whose percentage would run on
+    // to the total with no separator ("44 / 178,200" "0.0%" -> 178,2000).
+    const text = document.querySelector('[data-packet-counts]')?.textContent ?? '';
     const m = text.match(/([\d,]+)\s*\/\s*([\d,]+)/);
     return m ? [Number(m[1].replace(/,/g, '')), Number(m[2].replace(/,/g, ''))] : [0, 0];
   });
-  const badge = () => page.evaluate(() => {
-    const label = [...document.querySelectorAll('span')].find((s) => s.textContent === 'PACKETS:');
-    return label?.parentElement?.textContent ?? '';
-  });
+  // The scan badge is a SIBLING of the counts span, inside the readout's row -
+  // so this reads the parent deliberately, which is the one case where running
+  // the badge on to the numbers does not matter: it only ever asks whether the
+  // word SCANNING is present.
+  const badge = () => page.evaluate(
+    () => document.querySelector('[data-packet-counts]')?.parentElement?.textContent ?? '');
 
   await page.getByRole('button', { name: 'Interfaces' }).click();
   await page.getByText('Ethernet', { exact: true }).first().click();

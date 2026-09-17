@@ -75,7 +75,7 @@ export interface NpcapFacts {
   adminOnly: boolean | null;
 }
 
-export const NPCAP_ABSENT: NpcapFacts = { installed: false, version: null, adminOnly: null };
+const NPCAP_ABSENT: NpcapFacts = { installed: false, version: null, adminOnly: null };
 
 /**
  * Reads `DisplayVersion` out of `reg query` output.
@@ -93,7 +93,7 @@ export function parseDisplayVersion(stdout: string): string | null {
 }
 
 /** The driver file, which is present whenever Npcap is, whatever the registry says. */
-export function driverPath(): string {
+function driverPath(): string {
   const root = process.env.SystemRoot ?? 'C:\\Windows';
   return `${root}\\System32\\drivers\\npcap.sys`;
 }

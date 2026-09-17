@@ -25,12 +25,12 @@ export const QUIC_V1_INITIAL_SALT = new Uint8Array([
 ]);
 
 /** RFC 9369 §3.3.1. */
-export const QUIC_V2_INITIAL_SALT = new Uint8Array([
+const QUIC_V2_INITIAL_SALT = new Uint8Array([
   0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93,
   0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9,
 ]);
 
-export const QUIC_VERSION_1 = 0x00000001;
+const QUIC_VERSION_1 = 0x00000001;
 export const QUIC_VERSION_2 = 0x6b3343cf;
 
 /** The sample used for header protection is always 16 bytes, taken 4 past the packet number. */

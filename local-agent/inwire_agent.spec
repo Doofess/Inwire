@@ -32,9 +32,13 @@
 # unsigned dropper also has, and it is the first thing anyone looks at in a
 # file's Properties. It is generated below from `AGENT_VERSION` in agent.py
 # rather than written out here, because a second copy of a version number is a
-# version number that will disagree: the three-place lock in test_protocol.py
-# covers agent.py, agentProtocol.ts and setup.iss, and a fourth literal in this
-# file would sit outside it.
+# version number that will disagree. The lock covers FOUR places - agent.py,
+# agentProtocol.ts, and `MyAgentVersion` in BOTH installer/setup.iss (the one
+# that ships) and local-agent/installer/setup.iss (the legacy agent-only one) -
+# held by test_protocol.py for the legacy file and by
+# scripts/agent/installer-versions.ts for both. A literal in this file would sit
+# outside all of it. (This comment said "three-place lock in test_protocol.py",
+# which was the count before one installer carried the app and the agent.)
 
 import re
 from pathlib import Path

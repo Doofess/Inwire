@@ -21,6 +21,19 @@ import { useEffect, useRef, useState } from 'react';
  *
  * Not for anything that has to be exact at the instant it is read (an export,
  * a stream reconstruction) - those keep reading the live value.
+ *
+ * **There was a `useDebouncedValue` beside this, and the contrast is worth
+ * keeping even though the hook is gone.** Throttling publishes at a steady
+ * rate and suits a stream of updates nobody initiated - captured packets
+ * arriving. Debouncing publishes when the input settles, which is what typing
+ * is: every intermediate value of "1.2.3.4" is a prefix nobody meant to search
+ * for, and each one costs a full pass over the buffer. Its one consumer was
+ * quick-find, which is deleted (`FindPacketPopover`, `packetSearchText`,
+ * `inwire.packetSearch`), so nothing in the app debounces today. If something
+ * needs to again, the two rules that made it work were: never debounce the
+ * FIELD, only the WORK, or the box drops characters; and do not put the
+ * settled value in the effect's deps, or the timer restarts when the value
+ * lands and schedules one more publish of what was just published.
  */
 export function useThrottledValue<T>(value: T, intervalMs: number): T {
   const [throttled, setThrottled] = useState(value);

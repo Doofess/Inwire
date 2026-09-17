@@ -1,18 +1,18 @@
 /**
- * The binary packet frame, browser side (`local-agent/packet_batch.py`).
+ * The binary packet frame, app side (`local-agent/packet_batch.py`).
  *
  * Until agent 3.2.0 every captured frame arrived as its own JSON text message
- * with the bytes base64-encoded inside it, and the browser ran `JSON.parse`
- * and `atob` per frame on the main thread inside the socket handler - before
+ * with the bytes base64-encoded inside it, and the client ran `JSON.parse` and
+ * `atob` per frame on the main thread inside the socket handler - before
  * anything could be batched, at wire rate rather than at the flush cadence.
  * The agent's own log records what that cost: 260,000+ frames dropped in one
  * session because the client could not keep up.
  *
  * Now many frames arrive in one binary message and the metadata that was only
- * ever a fallback is not sent at all: whenever the bytes were present the
- * browser re-dissected the frame itself and overwrote every field the agent
- * had guessed at. Control messages stay JSON text - there are a handful a
- * second at most, and they are the ones a human ever reads off the wire.
+ * ever a fallback is not sent at all: whenever the bytes were present the app
+ * re-dissected the frame itself and overwrote every field the agent had guessed
+ * at (ADR 0010). Control messages stay JSON text - there are a handful a second
+ * at most, and they are the ones a human ever reads off the wire.
  *
  * Layout, little-endian, read with a DataView so nothing needs to be aligned:
  *
@@ -90,7 +90,7 @@ export function isPacketBatch(buffer: ArrayBuffer): boolean {
  * Every frame in one batch.
  *
  * Throws rather than returning what it managed to read: a truncated batch
- * means the socket delivered something this build does not understand, and
+ * means the link delivered something this build does not understand, and
  * dissecting the prefix would put frames into the buffer with no way to tell
  * they are the survivors of a message that was wrong.
  */

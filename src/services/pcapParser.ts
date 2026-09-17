@@ -12,16 +12,6 @@ import {
   ETHERNET_MAX_FRAME,
 } from './direction';
 
-/**
- * What sits in front of a transport segment on a plain Ethernet/IPv4 frame:
- * the 14-byte Ethernet header and a 20-byte IPv4 header with no options.
- *
- * `ETHERNET_MAX_FRAME` minus this is the largest transport segment that can
- * have travelled as one frame - 1,480 bytes. Past that the adapter segmented
- * it, so the bytes in the buffer were never the bytes on the wire and a
- * checksum over them means nothing. Named because `1514 - 34` stated neither
- * number's job, and 34 is the one that reads as arbitrary.
- */
 import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { decodeNetworkLayer } from './dissectors/networkLayer';
 import { keyLog } from './tls/keyLog';
@@ -1468,7 +1458,7 @@ export function packetAsciiDump(packet: { asciiDump?: string; rawBytes: Uint8Arr
   return packet.asciiDump ?? formatAsciiDump(packet.rawBytes);
 }
 
-export function formatHexDump(bytes: Uint8Array): string {
+function formatHexDump(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map(b => b.toString(16).padStart(2, '0').toUpperCase())
     .join(' ');

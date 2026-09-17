@@ -14,7 +14,6 @@ import {
   type PaneArrangement,
 } from '../../services/interfacePrefs';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
-import { DashboardWidgetList } from './DashboardWidgetList';
 import { Section, SettingRow } from './settingsLayout';
 import { AVERAGE_FRAME_BYTES, framesForBudget } from '../../services/bufferBudget';
 
@@ -121,21 +120,17 @@ export const InterfaceSettingsPanel: React.FC = () => {
             disabled={!layout.panes}
           />
         </SettingRow>
-        {/* The three-way Dashboard control stood here - full, icons, hidden -
-            and its description began "The analytics column on the right".
-            There is no column and no right: the rail's widget group is the
-            control now, a widget is open or it is not, and the dock appears when
-            at least one is. A setting duplicating that would be a second place
-            to say the same thing and a second place for it to disagree. */}
+        {/* **Two widget controls stood here and both are gone.** First a
+            three-way Dashboard mode - full, icons, hidden - whose description
+            began "The analytics column on the right"; then, after the dock
+            replaced that column, a reorderable list of every widget with its
+            per-widget settings, generated from the widget catalogue.
 
-        <div className="py-2.5">
-          <div className="text-xs font-semibold text-foreground">Widgets</div>
-          <p className="text-[11px] text-muted-foreground mt-0.5 mb-1.5 leading-snug">
-            What the dock shows, in what order. The rail toggles the same
-            switches; these are here because a drag needs a keyboard equivalent.
-          </p>
-          <DashboardWidgetList />
-        </div>
+            There is no dock and no catalogue. The three widgets that survived
+            are surfaces with their own homes - the map is a view, the two charts
+            are a tab of the Statistics pane - and each carries its own controls
+            where it is drawn, which is what this list existed to substitute for
+            on a 352px card that had room for one. */}
       </Section>
 
       <Section title="Packet list">
@@ -209,10 +204,17 @@ export const InterfaceSettingsPanel: React.FC = () => {
       {/* Wireshark keeps these under View -> Name Resolution, and so did this
           app, in the hamburger menu beside the views they changed. That menu is
           gone - everything in it either had a permanent control already or has
-          one now - and these two came here rather than to the rail for a reason
-          with a number behind it: the rail is 579px against a 640px minimum
-          window, which is room for exactly one more icon, and Custom Dissectors
-          took it. `scripts/session/view.ts` holds that arithmetic.
+          one now - and these two came here rather than to the rail.
+
+          **The number that used to justify that no longer does.** The rail was
+          630px against the 640 it gets, leaving 10px and no room for an icon;
+          it is 494 against 648 now - six icons were deleted - so there is room
+          for three more. `scripts/session/view.ts` holds that arithmetic and
+          prints the slack.
+
+          The placement stands on its own argument, which is the one below: the
+          other half of name resolution is already here, and these two belong
+          with it rather than with the views.
 
           Here rather than anywhere else because the other half of name
           resolution is already here. The split is the point of the two sections:

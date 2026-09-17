@@ -182,8 +182,8 @@ const api = {
    *
    * A theme name and not a colour: `windowColors.ts` owns the hex, and says why
    * a value computed in the renderer is always a frame behind the cascade that
-   * produced it. `resolvedTheme`, never `theme` - the picker's fifth entry,
-   * System, is a rule rather than a palette.
+   * produced it. `resolvedTheme`, never `theme` - the picker carries System
+   * beside the two real themes, and System is a rule rather than a palette.
    */
   setWindowTheme(theme: string): void {
     ipcRenderer.send(WINDOW_THEME_CHANNEL, theme);

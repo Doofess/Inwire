@@ -33,9 +33,9 @@
  * from decoding and may never include one, so the answer stays this
  * evaluator's answer.
  *
- * ## Sliced, because the worker has other work
+ * ## Sliced, because the store has other work
  *
- * The storage Worker also serves byte reads and row reads while a scan runs -
+ * The store process also serves byte reads and row reads while a scan runs -
  * the reader is scrolling, and the detail pane is fetching. A scan that ran to
  * completion in one call would block both for as long as it took. `step()`
  * does whole chunks until a time budget is spent and returns whether there is
@@ -44,9 +44,12 @@
  * mean holding a decoded chunk across a yield for nothing.
  *
  * `redirect.ts` establishes the shape and the trap that goes with it: the
- * yield must not be `requestAnimationFrame`, which fires **zero** times in a
- * background tab (measured, over 3.8 s). A scan someone left running while
- * they looked at something else would simply stop.
+ * yield must not be `requestAnimationFrame`, which `redirect.ts` measured
+ * firing **zero** times over 3.8 s in a backgrounded renderer - and which does
+ * not exist at all in the store process, where this actually runs
+ * (`captureHost.stepScan` yields on `setTimeout` through the serial queue). A
+ * scan someone left running while they looked at something else would simply
+ * stop.
  *
  * ## The result is a snapshot
  *

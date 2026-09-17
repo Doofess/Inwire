@@ -14,24 +14,34 @@
  * price of a read.
  *
  * This module is the seam that makes that possible. Every main-thread consumer
- * of `Packet.rawBytes` goes through here instead, so the day the buffer starts
- * dropping bytes, none of them has to change again.
+ * of `Packet.rawBytes` goes through here instead, so nothing had to change
+ * again on the day the buffer started dropping bytes.
  *
- * **It is deliberately correct before the buffer drops anything.** Today every
- * packet still carries its bytes, so every call takes the synchronous path and
- * the disk is never touched. Introducing the seam and introducing the eviction
- * in one step would mean debugging both at once.
+ * **That day has been and gone, and the seam is live.** `evictOldBytes` below
+ * is called on every commit (`services/packetBuffer.ts`), and
+ * `usePacketBuffer` passes `BYTES_RESIDENT_FRAMES` = 25,000 - so a frame older
+ * than the newest 25,000 has an empty `rawBytes` and `packetBytes()` answers it
+ * from the store. The synchronous path is still the common one, because 25,000
+ * frames is far more than anybody clicks through, but it is no longer the only
+ * one and a caller must not assume it.
+ *
+ * The seam was introduced a step ahead of the eviction on purpose - doing both
+ * at once would have meant debugging both at once - and that is the only part
+ * of this that is history.
  *
  * ## The disk under it moved, and this module did not
  *
- * It reads from the **capture store** now (OPFS) rather than from IndexedDB,
- * and the seam is why that was three lines. The reason it had to move is not
- * that OPFS is faster: `sessionStore`'s 512 MB budget **evicts the oldest
- * frames**, and `evictOldBytes` may only drop the bytes of a frame the store
- * can supply again - so every frame the budget had evicted kept its bytes in
- * RAM for the rest of the capture, squeezed between a floor that rose faster
- * than the window's and a window that could not pass it. The capture store
- * evicts nothing, so its range only grows and eviction can always proceed.
+ * It reads from the **capture store** now rather than from IndexedDB, and the
+ * seam is why that was three lines. The store is real files under
+ * `%LOCALAPPDATA%` (`capture/nodeBlockFile.ts`), written by a separate process;
+ * it was briefly OPFS on the way, and neither is why the move had to happen.
+ * The reason it had to happen is that `sessionStore`'s 512 MB budget **evicted
+ * the oldest frames**, and `evictOldBytes` may only drop the bytes of a frame
+ * the store can supply again - so every frame the budget had evicted kept its
+ * bytes in RAM for the rest of the capture, squeezed between a floor that rose
+ * faster than the window's and a window that could not pass it. The capture
+ * store evicts nothing, so its range only grows and eviction can always
+ * proceed.
  */
 import { captureStore } from './capture/captureClient';
 import type { Packet } from '../types/packet';
@@ -60,10 +70,11 @@ export function bytesAreRecoverable(id: number): boolean {
 /**
  * One frame's bytes.
  *
- * Synchronous when the packet still has them, which today is always. Falls back
- * to a read, and to an empty array when the store cannot supply them either -
- * never a throw, because a frame whose bytes are gone is a thing to render, not
- * an error to handle.
+ * Synchronous when the packet still has them, which is every frame in the
+ * newest 25,000 and no frame before that (`evictOldBytes`). Falls back to a
+ * read, and to an empty array when the store cannot supply them either - never
+ * a throw, because a frame whose bytes are gone is a thing to render, not an
+ * error to handle.
  */
 export async function packetBytes(packet: Packet): Promise<Uint8Array> {
   if (hasBytes(packet)) return packet.rawBytes;

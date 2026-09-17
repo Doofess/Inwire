@@ -63,7 +63,7 @@ export const ALERT_DESCRIPTION_NAMES: Record<number, string> = {
   115: 'Unknown PSK Identity', 116: 'Certificate Required', 120: 'No Application Protocol',
 };
 
-export const EXTENSION_NAMES: Record<number, string> = {
+const EXTENSION_NAMES: Record<number, string> = {
   0: 'server_name', 1: 'max_fragment_length', 2: 'client_certificate_url', 3: 'trusted_ca_keys',
   4: 'truncated_hmac', 5: 'status_request', 6: 'user_mapping', 7: 'client_authz', 8: 'server_authz',
   9: 'cert_type', 10: 'supported_groups', 11: 'ec_point_formats', 12: 'srp', 13: 'signature_algorithms',
@@ -84,7 +84,7 @@ export const EXTENSION_NAMES: Record<number, string> = {
   0xffce: 'encrypted_server_name',
 };
 
-export const GROUP_NAMES: Record<number, string> = {
+const GROUP_NAMES: Record<number, string> = {
   1: 'sect163k1', 2: 'sect163r1', 3: 'sect163r2', 4: 'sect193r1', 5: 'sect193r2', 6: 'sect233k1',
   7: 'sect233r1', 8: 'sect239k1', 9: 'sect283k1', 10: 'sect283r1', 11: 'sect409k1', 12: 'sect409r1',
   13: 'sect571k1', 14: 'sect571r1', 15: 'secp160k1', 16: 'secp160r1', 17: 'secp160r2', 18: 'secp192k1',
@@ -99,7 +99,7 @@ export const GROUP_NAMES: Record<number, string> = {
   0xff01: 'arbitrary_explicit_prime_curves', 0xff02: 'arbitrary_explicit_char2_curves',
 };
 
-export const SIGNATURE_ALGORITHM_NAMES: Record<number, string> = {
+const SIGNATURE_ALGORITHM_NAMES: Record<number, string> = {
   0x0201: 'rsa_pkcs1_sha1', 0x0203: 'ecdsa_sha1', 0x0401: 'rsa_pkcs1_sha256', 0x0403: 'ecdsa_secp256r1_sha256',
   0x0501: 'rsa_pkcs1_sha384', 0x0503: 'ecdsa_secp384r1_sha384', 0x0601: 'rsa_pkcs1_sha512',
   0x0603: 'ecdsa_secp521r1_sha512', 0x0804: 'rsa_pss_rsae_sha256', 0x0805: 'rsa_pss_rsae_sha384',
@@ -115,7 +115,7 @@ export const EC_POINT_FORMAT_NAMES: Record<number, string> = {
 
 export const PSK_KEY_EXCHANGE_MODE_NAMES: Record<number, string> = { 0: 'PSK-only', 1: 'PSK with (EC)DHE' };
 
-export const CIPHER_SUITE_NAMES: Record<number, string> = {
+const CIPHER_SUITE_NAMES: Record<number, string> = {
   0x0000: 'TLS_NULL_WITH_NULL_NULL',
   0x0004: 'TLS_RSA_WITH_RC4_128_MD5', 0x0005: 'TLS_RSA_WITH_RC4_128_SHA',
   0x000a: 'TLS_RSA_WITH_3DES_EDE_CBC_SHA', 0x002f: 'TLS_RSA_WITH_AES_128_CBC_SHA',

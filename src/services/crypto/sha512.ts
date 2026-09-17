@@ -57,7 +57,7 @@ const H384 = new Uint32Array([
 ]);
 
 const BLOCK_SIZE = 128;
-export const SHA512_DIGEST_LENGTH = 64;
+const SHA512_DIGEST_LENGTH = 64;
 export const SHA384_DIGEST_LENGTH = 48;
 
 const w = new Uint32Array(160);

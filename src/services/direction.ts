@@ -128,13 +128,10 @@ export const DIRECTION_LABEL: Record<Direction, string> = {
   [Direction.Transit]: 'Transit',
 };
 
-/** The glyph the packet list draws. Deliberately not a colour: see below. */
-export const DIRECTION_GLYPH: Record<Direction, string> = {
-  [Direction.Unknown]: '·',
-  [Direction.Out]: '↑',
-  [Direction.In]: '↓',
-  [Direction.Transit]: '↔',
-};
+/* The mark the packet list draws is `components/packet-list/DirectionMark.tsx`,
+   not a table of characters here: the app's own font has no `↔` at all, so
+   the transit glyph was the only one of the four coming from whatever Windows
+   substituted. The reasoning is with the drawing. */
 
 export const SIGNAL_LABEL: Record<DirectionSignal, string> = {
   [DirectionSignal.None]: 'not determined',
@@ -172,7 +169,7 @@ export const NO_HOST: HostIdentity = {
   macs: new Set(), addresses: new Set(), inferred: false, confidence: 0,
 };
 
-export const BROADCAST_MAC = 'ff:ff:ff:ff:ff:ff';
+const BROADCAST_MAC = 'ff:ff:ff:ff:ff:ff';
 
 /** The all-zero MAC, which is a placeholder rather than an address. */
 export const ZERO_MAC = '00:00:00:00:00:00';

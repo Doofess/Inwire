@@ -49,9 +49,11 @@ export interface BlockFile {
   /**
    * Pushes writes to durable storage.
    *
-   * Rarely, and on purpose. A `write()` that has returned already survives a
-   * tab crash or a refresh - it is in the browser's file layer, not in this
-   * page. `flush()` defends only against power loss, so calling it per batch
+   * Rarely, and on purpose. **This is the whole durability rule, and the two
+   * callers below defer to it.** A `write()` that has returned is already out
+   * of this process - it is in the operating system's page cache, so it
+   * survives the store process dying, the renderer dying and the app being
+   * killed. `flush()` defends only against power loss, so calling it per batch
    * would buy 30 durability barriers a second against the one failure nobody
    * in this design is worried about.
    */

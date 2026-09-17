@@ -1,5 +1,35 @@
 # Inwire — Network Decoding & Agent Specification, v3
 
+> ## Historic. Do not implement the transport described below.
+>
+> Written 2026-09-04, against the tree at commit `ed511e3` — **when Inwire was a
+> web page**. The Electron migration landed after it and reversed every
+> architectural premise it makes about how the app and the agent talk. This
+> document is kept because Part A's measurements and Part C's *dissector* phases
+> are the record of how the dissection engine got here and are still worth
+> reading; nothing in it is a plan any more.
+>
+> **Four things it prescribes are things the current build deliberately does not
+> have.** Each is a line item in `CLAUDE.md`'s "Must not come back" banner, which
+> is the status of record — re-adding any of them undoes a decision rather than
+> completing this spec:
+>
+> | This spec says | What is true now |
+> |---|---|
+> | A **pairing token**, passed as a WebSocket subprotocol (§ around line 243, 283, 370) | Deleted. The named pipe's security descriptor is the authentication — the kernel answers the question the token was asked to answer (**ADR 0029**). `authenticate`, `authRequired`, `auth_required` and `auth_failed` are gone with it. |
+> | An **origin allowlist** / `is_origin_allowed` origin check (§ around line 283) | Deleted on Windows. Same reason: ADR 0029. |
+> | **Binary batched WebSocket frames** as the transport (§0.4, § around line 735) | On Windows the only transport is the named pipe `\\.\pipe\inwire-agent`, with our own framing (`src/services/agentFraming.ts` / `local-agent/pipe_frame.py`). The record layout above the framing *did* survive unchanged and is still accurate. macOS and Linux keep a WebSocket agent; there is no desktop app for them. |
+> | The agent **listening on port 8999** (§ around line 347, 932) | The port is not opened at all on Windows. `scripts/electron/shell.ts` asserts `8999` is absent from the CSP, because a `connect-src` entry nothing dials is a hole with no user. |
+>
+> Two more things it assumes are also gone: there is no browser build, no
+> `server.ts` and no `config.json`; and the capture lives in real files under
+> `%LOCALAPPDATA%` rather than in a browser database (**ADRs 0025, 0027**).
+>
+> Read `CLAUDE.md` for what the architecture is, `docs/decisions/` for why, and
+> `docs/decisions/0029-the-app-and-the-agent-talk-over-a-named-pipe.md` first if
+> you came here for the agent protocol. `inwire-network-decoding-spec-v2.md`,
+> which the next paragraph replaces, is itself deleted.
+
 **What this is.** A validated, re-ordered replacement for the v2 specification
 (`inwire-network-decoding-spec-v2.md`), written to be handed to Claude Code one phase at
 a time. Validated on 2026-09-04 against the tree at commit `ed511e3` plus uncommitted

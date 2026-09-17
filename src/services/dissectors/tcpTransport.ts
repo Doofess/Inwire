@@ -171,7 +171,7 @@ export function dissectTcpTransport(
   const storedChecksum = (rawBytes[transportOffset + 16] << 8) | rawBytes[transportOffset + 17];
   const checksum = checksumVerdict(pseudoHeader, rawBytes, transportOffset,
     l4SegmentLen !== undefined && l4SegmentLen >= tcpHeaderLen ? transportOffset + l4SegmentLen : rawBytes.length,
-    storedChecksum, false, sentByUs);
+    storedChecksum, sentByUs);
 
   // TLS payloads are encrypted from essentially the first byte - never
   // scan them, since any "match" there would be a false positive.

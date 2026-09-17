@@ -1,27 +1,36 @@
 /**
- * The two-phase dissection contract (docs/decisions/0001-packet-data-model.md).
+ * The types the dissection pass hands back: a transport decoder's result, an
+ * info patch, and the link types the front door distinguishes.
  *
- * Dissection is split into what every frame needs on arrival - the column
- * values, the filterable fields, the analysis flags, and the tracker updates
- * that only make sense in arrival order - and what only the selected frame
- * needs: the protocol tree. The first is `dissectSummary`, run once per frame
- * and the only place trackers may be advanced. The second is `dissectTree`,
- * run on demand, which may read what the summary recorded but never touches a
- * tracker, because by the time someone clicks a row the trackers have moved on.
+ * ## What this file used to hold, and why it does not
  *
- * `decodeRawEthernetPacket` still does both at once for every dissector that
- * has not been migrated. Migration happens dissector by dissector as the spec's
- * phases touch them (TLS in 4, TCP in 5, L2/L3 in 6, DNS in 7, QUIC in 8); no
- * new dissector is written on the old shape. Until then `dissectSummary` runs
- * the old path and keeps its tree on `legacyLayers`, so `dissectTree` can hand
- * it back without decoding twice or re-running trackers.
+ * ADR 0001 specified a **two-phase dissector**: `dissectSummary`, run once per
+ * frame and the only place trackers may be advanced, and `dissectTree`, run on
+ * demand for the one frame someone clicked. The interfaces for it were written
+ * here - `DissectSummary` (with `offsets`, an `ExpertItem[]` and a
+ * `legacyLayers` escape hatch) and `DissectInput` - and **the migration was
+ * never done**: `decodeRawEthernetPacket` builds the full `ProtocolLayer[]` for
+ * every frame, and every dissector added since is written on that shape.
  *
- * Nothing in this directory may import React or touch the DOM: the whole
- * pipeline moves into a Worker in Phase 11 unchanged
- * (docs/decisions/0003-worker-boundary.md), and an assertion script checks
- * the imports.
+ * ADR 0011 measured it before anyone finished it, and the measurement went the
+ * other way: the tree is **~6% of dissection**, not the 90 the plan assumed.
+ * So the split *"remains the right contract - the tree is 89% of a buffer's
+ * memory (ADR 0007) and the Worker already discards most of them - so it stays
+ * a memory and design argument, not a speed one"*, and **anyone picking it up
+ * should not expect it to move the frame rate**.
+ *
+ * The interfaces are gone because a type nothing implements is not a contract,
+ * it is a claim that the work is underway. `git show` at
+ * `docs/decisions/0011-dissection-cost-is-not-the-tree.md` is where the shape
+ * lives now. Two traps if it is ever revived: `ExpertItem` here collided by
+ * name with the live, differently-shaped `ExpertItem` in `services/expertInfo.ts`,
+ * and a `legacyLayers` field is how a half-finished migration hides.
+ *
+ * Nothing in this directory may import React or touch the DOM
+ * (docs/decisions/0003-worker-boundary.md): the pipeline runs in a Worker,
+ * `src/workers/pipeline.worker.ts`, and an assertion script checks the imports.
  */
-import type { ExpertCategory, Packet, ProtocolLayer, ProtocolType } from '../../types/packet';
+import type { Packet, ProtocolLayer } from '../../types/packet';
 
 /** pcap/pcapng link types this dissector distinguishes (LINKTYPE_* values). */
 export const LINKTYPE = {
@@ -31,57 +40,6 @@ export const LINKTYPE = {
   LINUX_SLL: 113,
   LINUX_SLL2: 276,
 } as const;
-
-export interface DissectInput {
-  /** Captured bytes. A view over a larger buffer whenever possible - never copied to be dissected. */
-  bytes: Uint8Array;
-  /** Wire length; equals `bytes.length` unless a snaplen truncated the capture. */
-  origLen: number;
-  linktype: number;
-  /** 1-based frame number within the capture. */
-  frameNo: number;
-  /** Epoch microseconds. Exact as a JS number until the year 2255. */
-  tsUs: number;
-  /** Index into the capture's interface list; 0 for a single-interface capture. */
-  iface: number;
-}
-
-export interface ExpertItem {
-  /** What the reader should conclude - see `types/packet.ts`. */
-  category: ExpertCategory;
-  message: string;
-}
-
-/**
- * Everything the list, the filters, the colour rules, the aggregates and the
- * trackers need, and nothing the tree needs on its own.
- */
-export interface DissectSummary {
-  source: string;
-  destination: string;
-  srcPort?: number;
-  dstPort?: number;
-  protocol: ProtocolType;
-  protocolLabel?: string;
-  info: string;
-  length: number;
-  /** Keyed by registry abbrev (fieldRegistry.ts). */
-  fields: Record<string, string | number | boolean>;
-  frameProtocols: string[];
-  analysisFlags?: string[];
-  expert?: ExpertItem[];
-  streamId?: number;
-  /**
-   * Header positions the summary pass established, so the tree pass never
-   * re-walks encapsulation to find them. `vlanDepth` counts 802.1Q/QinQ tags.
-   */
-  offsets: { l2: number; l3?: number; l4?: number; payload?: number; vlanDepth: number };
-  /**
-   * The eagerly built tree, present only while a frame's dissectors are
-   * un-migrated. Deleted when the last one moves to `dissectTree`.
-   */
-  legacyLayers?: ProtocolLayer[];
-}
 
 /**
  * What a transport decoder returns.

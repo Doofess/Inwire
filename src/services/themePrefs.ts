@@ -9,7 +9,7 @@ import { packetColorSet, type PacketColorSet } from './packetThemes';
  * theme (it is what puts a class on <html> before first paint), while this
  * records that the concrete theme was CHOSEN FOR the user and should keep being
  * re-chosen. Collapsing them would mean "System" could not stay selected in the
- * picker - the moment it resolved, the stored value would say Day or Midnight.
+ * picker - the moment it resolved, the stored value would say Day or Night.
  *
  * See useSystemThemePreference, which owns the resolving.
  */

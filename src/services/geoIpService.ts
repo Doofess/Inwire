@@ -514,9 +514,11 @@ export function resetNameResolutionForTests(): void {
  *
  * Memoized as a promise, not as a value, so that concurrent callers share one
  * request and - more importantly - so that a component unmounting and
- * remounting does not re-ask. The geo map is unmounted whenever the dashboard
- * is minimized, and without this every toggle of that control would be another
- * request to a third-party geolocation service.
+ * remounting does not re-ask. The map is rendered only while the Routing Map
+ * view is active (`view === 'geo'` in `App.tsx`), so it is unmounted every time
+ * somebody looks at the packet list and back - and without this, each of those
+ * trips through the rail would be another request to a third-party
+ * geolocation service.
  *
  * A failure is not memoized: the promise is cleared so the next caller retries,
  * which matches how a retryable failure is handled for ordinary lookups.

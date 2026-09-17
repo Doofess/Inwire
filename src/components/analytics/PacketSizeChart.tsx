@@ -7,8 +7,11 @@ import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
  *
  * Lifted out of the Statistics modal, which is gone. It was a real measurement
  * sitting behind a modal reachable only from a maximize button on another
- * widget, which is roughly the least discoverable place in the app - so it is a
- * widget now, addable like any other.
+ * widget, which is roughly the least discoverable place in the app. It became a
+ * dock widget, and when the dock went it landed where it belonged all along:
+ * the **Graphs tab of the Statistics pane**, beside the traffic timeline and in
+ * the same pane as the tables that aggregate the same buffer. `GraphsTab` is
+ * the only thing that renders it, and carries the argument for the placement.
  *
  * The buckets are the ones that modal used, and they are not arbitrary: 64 is
  * the Ethernet minimum, 1518 the classic MTU-plus-header maximum, and the last

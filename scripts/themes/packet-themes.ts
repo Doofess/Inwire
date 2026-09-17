@@ -44,7 +44,7 @@ import {
   type RuleRole,
 } from '../../src/services/packetThemes';
 import { PALETTE_BY_THEME, HUES, themePalette } from '../../src/services/themePalettes';
-import { deltaE76, chroma, toLabColor, mixHex } from '../../src/lib/colorMix';
+import { deltaE76, chroma, mixHex } from '../../src/lib/colorMix';
 import { THEME_OPTIONS } from '../../src/lib/themeOptions';
 
 let failures = 0;
@@ -158,7 +158,7 @@ check('a missing stored set falls back to Default', packetColorSet(undefined), '
 check('a real set is kept', packetColorSet('colorblind'), 'colorblind');
 
 // Two sets that produce the same list are a picker entry that does nothing.
-// Compared on Graphite, the default theme, and on the fills rather than the
+// Compared on Night, the default theme, and on the fills rather than the
 // accents - the accents are derived from the hue directly and so are identical
 // between Default and Vibrant by design.
 {
@@ -195,7 +195,7 @@ for (const { theme, set, label } of COMBOS) {
   // An unmatched row is text on the theme's own ground, and there are plenty
   // of those - the chain deliberately has no catch-all. The ground belongs to
   // the theme, not to the set, which is exactly what makes a colour set safe to
-  // combine with all four themes.
+  // combine with every theme rather than being one.
   const surfaceRatio = contrastRatio(packet.surface.foreground, packet.surface.background);
   checkTrue(
     `${label}: unmatched rows are legible on the ground (${surfaceRatio.toFixed(2)}:1)`,
@@ -310,9 +310,9 @@ for (const { theme, set, label } of COMBOS) {
  * The ceiling on how loud a row may be, in any theme.
  *
  * This replaced a check that Mono - a deliberately monochrome theme - stayed
- * quieter than the others. With four themes there is no designated quiet one,
- * because the whole list is quiet now: CHROMA_SCALE came down from 0.42 to
- * 0.24 and the separation it gave up moved onto the lightness axis
+ * quieter than the others. Mono is deleted and there is no designated quiet
+ * theme any more, because the whole list is quiet: CHROMA_SCALE came down from
+ * 0.42 to 0.24 and the separation it gave up moved onto the lightness axis
  * (LIGHTNESS_BY_HUE in packetThemes.ts).
  *
  * So the restraint is asserted per SET rather than globally. Default keeps the
@@ -412,95 +412,34 @@ for (const theme of THEMES) {
   );
 }
 
-// --- Accents: the same colours, as text on a panel ----------------------------
-
-/**
- * The frame number in the inspection pane, the byte count in the hex pane and
- * the title of the detail window are all painted in the selected frame's own
- * accent, so that a header names a frame in the colour its row was drawn in.
- *
- * That only works if two things hold at once, and they pull against each other:
- * the accent has to be READABLE on a card (which a pale row fill is not), and
- * it has to still LOOK LIKE the row's colour (which a contrast-first
- * derivation would not). Both are checked here.
- */
-for (const { theme, set, label } of COMBOS) {
-  const packet = getPacketThemeForApp(theme, set);
-  const palette = PALETTE_BY_THEME[theme];
-  if (!palette) continue;
-  const card = palette.surface.card;
-  // The set's own hues where it supplies them, the theme's otherwise - the same
-  // resolution `getPacketThemeForApp` does, and the accents have to be measured
-  // against whichever nine they were actually derived from.
-  const hues = PACKET_COLOR_SET_SPECS[set].hues ?? palette.hues;
-
-  check(`${label}: every rule has an accent`,
-    REQUIRED_RULE_IDS.filter((id) => !packet.accents[id]), []);
-  check(`${label}: every accent is a hex triple`,
-    Object.entries(packet.accents)
-      .map(([id, c]) => (isHex(c) ? null : `${id}=${c}`))
-      .filter(Boolean),
-    []);
-  checkTrue(`${label}: the unmatched-frame accent is a hex triple`, isHex(packet.accentFallback));
-
-  const unreadable = [...Object.entries(packet.accents), ['fallback', packet.accentFallback] as const]
-    .map(([id, c]) => ({ id, ratio: contrastRatio(c, card) }))
-    .filter((r) => r.ratio < AA)
-    .map((r) => `${r.id} (${r.ratio.toFixed(2)}:1)`);
-  check(`${label}: every accent clears WCAG AA on the card it sits on`, unreadable, []);
-
-  // The half that keeps the feature honest. Only the L axis may move, so an
-  // accent must stay on its hue's own axis in Lab - otherwise "the colour of
-  // the selected packet" quietly becomes "some readable colour".
-  //
-  // Measured against the HUE rather than against the row fill, because the two
-  // are deliberately far apart in lightness; what has to match is the
-  // direction, not the value. Near-neutral palette entries are exempt because
-  // an angle means nothing at zero chroma - Okabe-Ito's black is one.
-  const HUE_ANGLE_TOLERANCE_DEG = 12;
-  const angleOf = (hex: string) => {
-    const [, a, b] = toLabColor(hex);
-    return (Math.atan2(b, a) * 180) / Math.PI;
-  };
-  const drifted: string[] = [];
-  for (const id of REQUIRED_RULE_IDS) {
-    const hue = hues[HUE_BY_ROLE[ROLE_BY_RULE_ID[id]]];
-    const accent = packet.accents[id];
-    if (chroma(hue) < 8 || chroma(accent) < 8) continue;
-    let delta = Math.abs(angleOf(accent) - angleOf(hue));
-    if (delta > 180) delta = 360 - delta;
-    if (delta > HUE_ANGLE_TOLERANCE_DEG) {
-      drifted.push(`${id}: ${delta.toFixed(1)} deg from ${hue}`);
-    }
-  }
-  check(`${label}: every accent stays on its own hue's axis`, drifted, []);
-}
-
-/**
- * And the accents must be as separable from each other as the fills are - a
- * header that names every frame in the same near-black is exactly the failure
- * the app accent already had.
- *
- * Threshold is well under what the fills are held to, because these are single
- * short labels seen one at a time rather than adjacent rows compared at a
- * glance, and two roles (`warn` and `notice`) deliberately share a hue.
- */
-const MIN_ACCENT_DELTA_E = 6;
-for (const { theme, set, label } of COMBOS) {
-  const packet = getPacketThemeForApp(theme, set);
-  const distinct = [...new Set(Object.values(packet.accents))];
-  let worst = { pair: '', delta: Infinity };
-  for (let i = 0; i < distinct.length; i++) {
-    for (let j = i + 1; j < distinct.length; j++) {
-      const delta = deltaE76(distinct[i], distinct[j]);
-      if (delta < worst.delta) worst = { pair: `${distinct[i]} vs ${distinct[j]}`, delta };
-    }
-  }
-  checkTrue(
-    `${label}: accents stay distinguishable (worst ${worst.delta.toFixed(1)} deltaE, ${worst.pair})`,
-    worst.delta >= MIN_ACCENT_DELTA_E,
-  );
-}
+// --- Accents: deleted, and this is the note it left --------------------------
+//
+// `PacketTheme` used to carry an `accents` table beside `rules` - the same nine
+// hues taken at text strength instead of as a row fill - and about eighty
+// assertions stood here holding it to three things at once: readable on a card,
+// still on its own hue's axis in Lab, and separable from the other eight.
+//
+// Nothing renders it any more. The inspection pane, the hex pane and the detail
+// window pushed the selected frame's accent down as a `--primary` override so
+// every accent in them took the colour of the row the frame came from; that is
+// reverted, and those panes are the app's own accent again. See the note where
+// `getPacketAccent` was, in `src/services/colorRules.ts`.
+//
+// The three requirements are recorded because they are the non-obvious part and
+// a future session restoring the feature would otherwise rediscover them:
+//
+//   - **Readable on `surface.card`.** A row fill is chosen to sit UNDER small
+//     text; the same value used AS text on a card is invisible.
+//   - **Only the L axis may move.** Buy contrast by moving lightness alone, or
+//     "the colour of the selected packet" quietly becomes "some readable
+//     colour" - the tolerance that held was 12 degrees in Lab, measured against
+//     the HUE rather than the fill, with near-neutral entries exempt because an
+//     angle means nothing at zero chroma.
+//   - **Separable from each other**, at a floor of 6 deltaE - well under the
+//     fills' floor, because these are single labels seen one at a time rather
+//     than adjacent rows compared at a glance.
+//
+// The fills above are still held to all of it. Only the panel-text copy is gone.
 
 // --- No drift between the palettes and index.css -----------------------------
 

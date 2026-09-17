@@ -97,10 +97,20 @@ export class FilterEngine {
         return { isValid: false, errorMessage: `Unknown field ${names} in filter expression` };
       }
 
-      const notDissected = unknown.filter(u => u.kind !== 'field').map(u => u.name);
-      return notDissected.length > 0
-        ? { isValid: true, warnings: notDissected.map(n => `${n} is not dissected by Inwire - this can never match`) }
-        : { isValid: true };
+      // Three outcomes, not two. A tree-only field is spelled correctly and is
+      // on screen in the detail tree - it is simply not published to the filter
+      // - so it is neither a typo to reject nor "not dissected", which would be
+      // false about a value the user can see. Saying which of the three it is
+      // is the whole point of the split.
+      const treeOnly = unknown.filter(u => u.kind === 'tree-only').map(u => u.name);
+      const notDissected = unknown.filter(u => u.kind === 'undissected' || u.kind === 'protocol')
+        .map(u => u.name);
+      const warnings = [
+        ...treeOnly.map(n => `${n} is shown in the packet detail tree but is not a `
+          + 'filterable field in this build - this can never match'),
+        ...notDissected.map(n => `${n} is not dissected by Inwire - this can never match`),
+      ];
+      return warnings.length > 0 ? { isValid: true, warnings } : { isValid: true };
     } catch (e) {
       const message = e instanceof FilterSyntaxError
         ? `${e.message} (at character ${e.pos + 1})`

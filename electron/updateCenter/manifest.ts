@@ -32,7 +32,7 @@
  * `services/agentProtocol.ts` already uses on the other untrusted input.
  */
 import type { Available, ComponentId, ComponentKind } from './components';
-import { isVersion } from './components';
+import { COMPONENT_IDS, isVersion } from './components';
 
 /**
  * Where the feed lives.
@@ -71,7 +71,6 @@ export const DOWNLOAD_HOSTS: Record<ComponentId, readonly string[] | null> = {
 };
 
 const KINDS: readonly ComponentKind[] = ['inwire-installer', 'vendor-installer', 'database'];
-const IDS: readonly ComponentId[] = ['inwire', 'agent', 'npcap', 'oui', 'geoip'];
 
 /** 512 MB. Larger than any installer we ship and far larger than any we do not. */
 export const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
@@ -172,7 +171,11 @@ export function parseManifest(text: string, feedUrl: string): Manifest | null {
 
   const components: Partial<Record<ComponentId, Available>> = {};
   for (const [key, value] of Object.entries(rawComponents as Record<string, unknown>)) {
-    if (!IDS.includes(key as ComponentId)) continue;
+    // `COMPONENT_IDS` from `components.ts` rather than a second literal list
+    // here, which is what this was: two copies of the same five ids, and the
+    // one that would have gone stale is this one, because a new component is
+    // declared over there.
+    if (!COMPONENT_IDS.includes(key as ComponentId)) continue;
     const row = readRow(key as ComponentId, value, feedUrl);
     if (row === null) return null;
     components[key as ComponentId] = row;

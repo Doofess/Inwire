@@ -38,7 +38,7 @@ import type { ReplayFrame } from './protocol';
  * incomplete tree rather than a click that hangs; at ~180us a frame this is
  * about three and a half seconds of Worker time, spent off the main thread.
  */
-export const MAX_REPLAY_FRAMES = 20000;
+const MAX_REPLAY_FRAMES = 20000;
 
 export interface ReplayResult {
   layers: ProtocolLayer[];

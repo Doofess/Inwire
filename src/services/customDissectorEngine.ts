@@ -1,6 +1,6 @@
 import { CustomDissectorRule, ProtocolLayer, ProtocolField } from '../types/packet';
 
-export const DEFAULT_CUSTOM_DISSECTORS: CustomDissectorRule[] = [
+const DEFAULT_CUSTOM_DISSECTORS: CustomDissectorRule[] = [
   {
     id: 'dissector-proto-iot',
     name: 'Industrial IoT Telemetry (Proto-IoT)',

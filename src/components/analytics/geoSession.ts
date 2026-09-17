@@ -1,13 +1,13 @@
 import type { GeoLocation } from '../../services/geoIpService';
-import type { GeoPlace } from './GeoLocationCounter';
+import type { GeoPlace } from './geoRoutes';
 
 /**
  * What the geo map has learned this session, held outside the component.
  *
- * The map is now unmounted whenever the dashboard is minimized or the widget is
- * switched off, and everything it had accumulated used to go with it: the set
- * of places seen, which addresses had already been asked about, and how far
- * into the packet buffer the scan had got.
+ * The map is unmounted whenever the Routing Map is not the active view, and
+ * everything it had accumulated used to go with it: the set of places seen,
+ * which addresses had already been asked about, and how far into the packet
+ * buffer the scan had got.
  *
  * That was wrong in two separate ways.
  *
@@ -15,7 +15,7 @@ import type { GeoPlace } from './GeoLocationCounter';
  * talked to this machine THIS SESSION" and is deliberately monotonic - the
  * counter it feeds is not supposed to fall when old traffic ages out of the
  * buffer. Rebuilding it on every remount quietly redefines "this session" as
- * "since you last expanded the dashboard", which is a different question with a
+ * "since you last opened the Routing Map", which is a different question with a
  * smaller answer, and nothing on screen would say so.
  *
  * The second is cost. With the scan cursor reset, the next render re-scans the
@@ -30,7 +30,7 @@ import type { GeoPlace } from './GeoLocationCounter';
  * stops it changing.
  *
  * The camera is kept for the same reason at a human scale: someone who flew the
- * map to a city and then collapsed the dashboard should not find themselves
+ * map to a city and then switched to another view should not find themselves
  * back at the world view.
  */
 

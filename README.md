@@ -69,11 +69,16 @@ network, not anonymous callers. Nothing to pair, no secret to paste, no port ope
 - **Statistics** — conversations, endpoints, protocol hierarchy, devices, expert
   info, processes, resolved addresses — where every row applies the filter that
   selects its own frames.
-- **A Network panel** putting what the OS says beside what the capture shows
-  (gateway, resolvers, DHCP lease, IPv6 router, LLDP neighbour) and flagging
-  where they disagree.
-- **A widget dashboard**: protocol mix, traffic timeline, packet sizes,
-  conversation matrix, and a geographic map of remote endpoints.
+- **A Network report** (`Settings → Network`) putting what the OS says beside what
+  the capture shows (gateway, resolvers, DHCP lease, IPv6 router, LLDP neighbour)
+  and flagging where they disagree. It sits in Settings rather than being a view,
+  because it describes the machine and nothing in it changes when a packet arrives.
+- **A routing map**, one of the five views: every arc on it is a conversation in
+  the buffer, and it redraws as packets arrive. Pins are real geometry standing on
+  the globe rather than icons pasted over it.
+- **Charts inside Statistics**: a throughput plot and a packet-size distribution,
+  each with its own metric, interval and overlay filter — the overlay draws a
+  second series without touching the display filter the packet list is using.
 - **Passive name resolution.** Every name comes out of the capture — DNS and mDNS
   answers, TLS and QUIC server names, DHCP, LLDP — and is a rendering choice
   only, so filters and exports still see addresses.
@@ -83,8 +88,9 @@ network, not anonymous callers. Nothing to pair, no secret to paste, no port ope
   capture taught us, and what the capture missed.
 - **Anonymise** on export: addresses prefix-preserving so the file is still a
   network, MACs keeping their OUI, everything above the transport header zeroed.
-- **Four themes** (Day, Paper, Graphite, Midnight), packet row colours derived
-  per theme and held to contrast and separation floors in CI.
+- **Two themes**, Day and Night, plus System — which is a rule for choosing
+  between them rather than a third palette. Packet row colours are derived per
+  theme and held to contrast and separation floors in CI.
 - **The capture lives on disk**, in `%LOCALAPPDATA%\Inwire\captures`, one
   directory per capture — bounded by the disk rather than by memory, surviving a
   restart or a crash with at most the trailing chunk lost and nothing before it,
@@ -214,6 +220,8 @@ dist-electron/   built main, preload and store, as .cjs (not tracked)
 scripts/         assertion scripts, run as a set by `npm run check`
 docs/decisions/  numbered architecture decisions, with the measurements behind them
 docs/ideas/      notes on things that are not built, each banner-marked as such
+docs/specs/      historic specifications; read the banner at the top of each first
+docs/verification.md  what only a person can check, and what each failure looks like
 test/fixtures/   the parity captures and the acceptance floors
 local-agent/     the Python capture agent, its tests and its PyInstaller build
 installer/       the unified Inno Setup installer

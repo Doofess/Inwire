@@ -40,7 +40,7 @@ export const AGENT_PIPE_PATH = '\\\\.\\pipe\\inwire-agent';
  * The retry moved here with the handle, and the cadence did not move with it:
  * the header's "connecting…" is meant to behave exactly as it did.
  */
-export const RECONNECT_MS = 3000;
+const RECONNECT_MS = 3000;
 
 /**
  * A connection this short did not do any work.

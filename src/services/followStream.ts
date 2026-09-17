@@ -10,7 +10,7 @@
  * A stream is identified by its five-tuple instead. For TCP that selects the
  * same frames the stream index did, retransmissions included, and for UDP it
  * needs no numbering to exist. The TCP stream index is carried along anyway,
- * because it is what the window's title should say.
+ * because it is what the view's own heading should say.
  */
 
 import { Packet } from '../types/packet';

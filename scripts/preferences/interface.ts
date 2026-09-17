@@ -159,8 +159,19 @@ for (const [name, fn] of [
 }
 
 {
+  // 0.9, and back to 0.9: it was 0.5 for as long as the map was a third pane
+  // in that row, because a details pane at 0.9 would then have left a tenth of
+  // the row for the dump AND the map together. The map is a view and nothing
+  // else now, so the ceiling is the hex dump's tenth again.
+  //
+  // There were three more checks here and they went with the map: the same
+  // clamp on `geoPaneRatio` at both ends, and the rule that the two shares are
+  // stored INDEPENDENTLY with the interaction applied at the point of use. One
+  // share has no interaction, so the ceiling is the whole clamp.
   const out = normalizeLayout({ ...LAYOUT_DEFAULTS, detailsPaneRatio: 4 });
-  check('a ratio beyond the split limits is clamped', out?.detailsPaneRatio, 0.9);
+  check('a details ratio beyond the split limits is clamped', out?.detailsPaneRatio, 0.9);
+  const small = normalizeLayout({ ...LAYOUT_DEFAULTS, detailsPaneRatio: 0 });
+  check('...at the bottom end too', small?.detailsPaneRatio, 0.1);
 }
 
 {
@@ -212,7 +223,10 @@ for (const [name, fn] of [
 // --- A round trip changes nothing ------------------------------------------
 
 {
-  const value = { bottomPaneHeight: 341, detailsPaneRatio: 0.42, panes: false, arrangement: 'stacked' };
+  const value = {
+    bottomPaneHeight: 341, detailsPaneRatio: 0.42,
+    panes: false, arrangement: 'stacked',
+  };
   check('a valid layout survives a round trip unchanged',
     normalizeLayout(JSON.parse(JSON.stringify(value))), value);
 }

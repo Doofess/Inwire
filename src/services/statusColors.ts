@@ -141,7 +141,8 @@ function statusFill(base: string, whiteText: boolean): string {
 /**
  * Themes whose status hues are not simply their palette's green/orange/red.
  *
- * Two, both for stated reasons rather than taste:
+ * One, for a stated reason rather than taste. There were three - the other two
+ * went with the themes that needed them; the note in the table itself says why.
  *
  * **light** is pinned to the exact Tailwind shades all three controls used
  * before any of this existed. The light theme is the reference the others are
@@ -160,17 +161,17 @@ const OVERRIDES: Record<string, Partial<Pick<StatusColors,
     danger: '#f43f5e',  // rose-500
     dangerStrong: '#be123c', // rose-700
   },
-  // Two themes accent on the warm side of the wheel, and `warning` is derived
-  // from `hues.orange` everywhere. Left alone, "check this" would be the same
-  // colour as every ordinary button, badge and link in those themes - a status
-  // that is indistinguishable from chrome is not a status. The caution
-  // convention has two halves and the other one is unclaimed in both.
-  dark: {
-    warning: '#facc15', // yellow-400, against Graphite's orange accent
-  },
-  paper: {
-    warning: '#8a6d09', // Paper's own yellow, against its rust accent
-  },
+  // There were two more entries here, and both went with the themes that
+  // needed them. Graphite and Paper accented on the warm side of the wheel, and
+  // `warning` is derived from `hues.orange` everywhere - so left alone, "check
+  // this" was the same colour as every ordinary button, badge and link in those
+  // two, and a status indistinguishable from chrome is not a status.
+  //
+  // Night does not have that problem: it accents cool, so its orange is already
+  // nothing else in the theme, and an override would have been a second colour
+  // solving a problem it does not have. Removing them was not tidying - with
+  // `.midnight` renamed to `.dark` the Graphite entry would have applied to
+  // Night, which is what `scripts/themes/status.ts` caught.
 };
 
 /** How far `dangerStrong` sits from `danger` in lightness, when not pinned. */

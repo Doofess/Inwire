@@ -39,7 +39,7 @@ export type Predicate = (p: Packet) => boolean;
 const ALWAYS_FALSE: Predicate = () => false;
 
 /** A decimal or 0x-prefixed hex integer, or null when the text is neither. */
-export function parseNumericLiteral(text: string): number | null {
+function parseNumericLiteral(text: string): number | null {
   const t = text.trim();
   if (/^[+-]?0x[0-9a-f]+$/i.test(t)) {
     const negative = t.startsWith('-');
@@ -290,7 +290,7 @@ export interface FilterIssue {
    *   not decode (`ospf.msg`, `sctp.chunk_type`). Legitimate, matches nothing.
    * `protocol` - a bareword presence test for something unrecognised.
    */
-  kind: 'field' | 'undissected' | 'protocol';
+  kind: 'field' | 'undissected' | 'protocol' | 'tree-only';
 }
 
 /**
@@ -310,7 +310,16 @@ export function unknownNames(node: Node): FilterIssue[] {
       if (f.name.startsWith('tcp.analysis.')) return;
       if (layerPresence(f.name)) return;
     }
-    if (resolveField(f.name).known) return;
+    const res = resolveField(f.name);
+    if (res.known) return;
+    // Registered but tree-only is its own answer, and not a typo: the name is
+    // spelled correctly and the field is on screen in the detail tree. Telling
+    // someone "unknown field" about a name they just read off a packet would be
+    // the app calling itself a liar.
+    if (res.treeOnly === true) {
+      out.push({ name: f.name, pos: f.pos, kind: 'tree-only' });
+      return;
+    }
     out.push({ name: f.name, pos: f.pos, kind: isUndissected(f.name) ? 'undissected' : kind });
   };
 

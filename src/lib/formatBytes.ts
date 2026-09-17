@@ -2,18 +2,26 @@
  * A byte count as a person reads it.
  *
  * There were four of these, in four files, producing four different answers to
- * the same question - and one of them was wrong. `NetworkMatrix` formatted
- * inline with no MB tier at all, so a 40 MB conversation in Top Talkers read
- * `40960.0K`. The others disagreed on spacing (`1.5M` against `1.5 MB`) and on
- * precision (`ExportPanel` used one decimal for MB and none for KB).
+ * the same question - and one of them was wrong. `NetworkMatrix` (deleted since,
+ * with the Top talkers widget) formatted inline with no MB tier at all, so a
+ * 40 MB conversation read `40960.0K`. The others disagreed on spacing (`1.5M`
+ * against `1.5 MB`) and on precision (`ExportPanel` used one decimal for MB and
+ * none for KB).
  *
  * One tiering rule, then, and two presentations of it, because both are
  * deliberate rather than accidental drift:
  *
- *   - **compact** (`842B`, `1.5K`, `40.0M`) for the dashboard cards, where a
- *     row is 352px wide and shares it with two addresses and a protocol.
  *   - **spaced** (`842 B`, `2 KB`, `1.5 MB`) everywhere there is room, which
- *     is what the export panel and the settings readouts use.
+ *     is what the export panel and the settings readouts use. This is the
+ *     default and, today, the only one any caller asks for.
+ *   - **compact** (`842B`, `1.5K`, `40.0M`) for a cell too narrow for the
+ *     space and the second letter. It was the dashboard cards, where a row was
+ *     352px wide and shared it with two addresses and a protocol; those are
+ *     deleted and **nothing in `src/` passes `compact` any more**. Kept rather
+ *     than removed because the tiering is the part that was wrong before, and
+ *     `scripts/analytics/format-bytes.ts` exercises the whole ladder through
+ *     this branch - including the `40 MB is not 40960K` case the consolidation
+ *     existed to prevent. Delete the option and that assertion goes with it.
  *
  * 1024, not 1000: this counts memory and wire bytes, and every other size in
  * the app - the buffer budget, the storage budget, the pcap writer - is binary.

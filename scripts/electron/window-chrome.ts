@@ -40,7 +40,7 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  DEFAULT_WINDOW_THEME, isHexColor, resolveWindowBackground,
+  DEFAULT_WINDOW_THEME, isHexColor, resolveWindowBackground, resolveWindowIsDark,
 } from '../../electron/windowColors';
 import {
   TITLE_BAR_HEIGHT, WINDOW_CONTROL_COUNT, WINDOW_CONTROL_HEIGHT, WINDOW_CONTROL_WIDTH,
@@ -97,11 +97,44 @@ console.log('--- the ground a window opens on, per theme ---\n');
       tokenIn(selectorFor(value), '--background').toLowerCase());
   }
 
-  // Every theme, not just the four that exist today: the loop above is driven
-  // by THEME_OPTIONS, so a theme added without a palette entry would silently
-  // not be checked rather than fail.
+  // Every theme, not just the two that exist today: the loop above is driven by
+  // THEME_OPTIONS, so a theme added without a palette entry would silently not
+  // be checked rather than fail. The floor is the picker's real contents - Day
+  // and Night - and `scripts/themes/registry.ts` is what holds that to exactly
+  // one of each.
   check('every theme in the picker was checked',
-    THEME_OPTIONS.length >= 4, true);
+    THEME_OPTIONS.length >= 2, true);
+}
+
+console.log('\n--- the theme the quit confirm is drawn in ---\n');
+
+{
+  // `showMessageBox` is drawn by the OS and follows `nativeTheme`, so the app in
+  // Night on a machine set to light threw a white box over a dark window on the
+  // way out. `guardClose` sets `themeSource` from this, and the decision has to
+  // agree with the theme's own declared mode - a palette dark enough to need a
+  // dark dialog is exactly a palette whose `mode` is `dark`. That agreement is
+  // the whole reason the decision could be derived from luminance rather than
+  // from a second list of theme names kept in main.
+  for (const { value, label, mode } of THEME_OPTIONS) {
+    check(`${label} wants a ${mode} dialog`, resolveWindowIsDark(value), mode === 'dark');
+  }
+  // Same fallback as the ground it is derived from: a stored name from a build
+  // that retired a theme must not decide this by accident.
+  check('an unresolvable name falls back to dark', resolveWindowIsDark('nope'), true);
+  check('...and so does a missing one', resolveWindowIsDark(undefined), true);
+
+  // The override is held only while the dialog is up. A standing one would pin
+  // `prefers-color-scheme` in the renderer, and `useSystemThemePreference` reads
+  // exactly that media query - so the app would be following itself, and an OS
+  // theme change would never be seen at all. Asserted on the source because the
+  // failure is a MISSING restore, which has no runtime signature until somebody
+  // changes their OS theme and nothing happens.
+  const main = readFileSync('electron/main.ts', 'utf8');
+  checkTrue('guardClose sets themeSource for the dialog',
+    main.includes('nativeTheme.themeSource = windowIsDark'));
+  checkTrue('...and puts it back afterwards',
+    main.includes('nativeTheme.themeSource = restore'));
 }
 
 console.log('\n--- a name it cannot resolve still opens a window ---\n');
@@ -170,10 +203,23 @@ console.log('\n--- the reserve and the controls agree ---\n');
   checkTrue('...and a control is that wide',
     controls.includes(`w-[${WINDOW_CONTROL_WIDTH}px]`));
 
-  // 32 in a 40px row. Not centred by accident: Windows' own caption buttons are
-  // full-height, and these are not, so the 8px has to be somewhere deliberate.
-  check('a control is shorter than the row it sits in',
-    WINDOW_CONTROL_HEIGHT < TITLE_BAR_HEIGHT, true);
+  // **This check was `WINDOW_CONTROL_HEIGHT < TITLE_BAR_HEIGHT` and it is
+  // equality now**, which is a reversal rather than a loosening and is worth the
+  // paragraph.
+  //
+  // It was 32 in a 40px row, and the comment here read: "Windows' own caption
+  // buttons are full-height, and these are not, so the 8px has to be somewhere
+  // deliberate." The premise was right and the conclusion was backwards. A
+  // caption button that reaches the window's own top edge is the easiest target
+  // on the screen when maximised - you throw the pointer at the corner and it
+  // cannot overshoot - and that is exactly why Windows draws its own that way.
+  // The air above and below was spending the one property the position buys.
+  //
+  // So the row came down to the buttons rather than the buttons staying short of
+  // the row, and 32 is now the floor for both: anything shorter means redrawing
+  // controls whose size is Windows' metric rather than this app's choice.
+  check('a control fills the row it sits in',
+    WINDOW_CONTROL_HEIGHT === TITLE_BAR_HEIGHT, true);
   checkTrue('...at the height the constant says',
     controls.includes(`h-${WINDOW_CONTROL_HEIGHT / 4}`));
 }
@@ -192,7 +238,9 @@ console.log('\n--- close keeps the colour people already know ---\n');
     (controls.match(/hover:bg-accent/g)?.length ?? 0) === 2);
 
   // And nothing else in the app's chrome hardcodes a colour. The themes are
-  // tokens; an exception that spread would be four themes' worth of drift.
+  // tokens; an exception that spread would be one hand-kept copy per theme, and
+  // the count is not what makes that bad - a literal simply does not follow the
+  // cascade, so it is wrong on every theme but the one it was picked against.
   const hardcoded = controls.match(/#[0-9a-f]{6}/gi) ?? [];
   check('close\'s red is the only literal colour in the controls',
     [...new Set(hardcoded.map((c) => c.toLowerCase()))], ['#c42b1c']);

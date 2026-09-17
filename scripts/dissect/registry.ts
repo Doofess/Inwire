@@ -62,8 +62,36 @@ const NOT_FIELDS = new Set<string>([]);
 
 const written = new Set<string>();
 const writersByKey = new Map<string, string[]>();
+/**
+ * Keys written into the `fields` bag by an indexed assignment.
+ *
+ * ## Why this is matched positively, and the shape that proved it necessary
+ *
+ * The scan above counts every `'layer.field'` literal as a writer, which is why
+ * 35 fields could sit registered, autocompleting in the filter bar and matching
+ * nothing, while "every registered field has a writer" reported green:
+ * `abbrev: 'dns.cname'` satisfied it. The script's own note calls that state
+ * "a filter that validates, matches nothing, and never says why".
+ *
+ * The first attempt at a fix excluded tree rows by looking for the `abbrev:`
+ * property name. That is not enough, and three fields proved it in the first
+ * run: `dns.flags.authoritative`, `.truncated` and `.recdesired` reach their
+ * tree rows as the last POSITIONAL argument to a local `row(...)` helper, so
+ * nothing in the text says `abbrev`. Recognising tree-row syntax means
+ * recognising every dissector's private helpers, which is unbounded.
+ *
+ * So the test is inverted. A bag write has exactly one shape -
+ * `fields['x'] = ...` - and that is what is matched here. Everything else is
+ * left alone. This set is deliberately NOT used to relax the writer check
+ * above; it answers one narrow question, below: has a field marked `treeOnly`
+ * quietly become filterable?
+ */
+const bagWrites = new Set<string>();
 for (const file of DISSECTION_SOURCES) {
   const text = readFileSync(file, 'utf8');
+  for (const m of text.matchAll(/\[\s*'([a-z][a-z0-9_]*\.[A-Za-z0-9_.-]+)'\s*\]\s*=/g)) {
+    bagWrites.add(m[1]);
+  }
   // The tail allows upper case for the same reason the identifier check below
   // does: `ptp.v2.mm.managementId` is the reference analyzer's own spelling.
   for (const m of text.matchAll(/'([a-z][a-z0-9_]*\.[A-Za-z0-9_.-]+)'/g)) {
@@ -102,8 +130,33 @@ for (const file of DISSECTION_SOURCES) {
 check('every field a dissector writes is registered',
   [...written].filter((k) => !FIELD_ABBREVS.has(k)).sort(), []);
 
-check('...and every registered field has a writer',
-  FIELDS.map((f) => f.abbrev).filter((k) => !written.has(k)).sort(), []);
+// A field marked `treeOnly` is exempt from needing a bag writer - that is what
+// the mark means. Everything else must have one.
+//
+// **This check is still the weak one, and the weakness is worth stating rather
+// than papering over.** It counts any `'layer.field'` literal as a writer, so a
+// NEW field registered with only a tree row would pass it exactly as the 35 did.
+// Tightening it to `bagWrites` below was tried and does not work: 177 of the 385
+// non-tree-only fields reach the bag through a helper rather than an indexed
+// assignment (`tcp.srcport`, `eth.dst`, most of the dense columns), so the
+// narrow pattern would reject half the registry.
+//
+// What closes the loop today is the pair of checks: this one, plus the precise
+// one below that catches the mark becoming a lie. What would close it properly
+// is a single spelling for a bag write that a scanner can match - which is a
+// change to the dissectors, not to this script.
+check('...and every registered field that is not tree-only has a writer',
+  FIELDS.filter((f) => f.treeOnly !== true).map((f) => f.abbrev)
+    .filter((k) => !written.has(k)).sort(), []);
+
+// The other direction, and the one that keeps the mark honest. A `treeOnly`
+// field that gains a bag write IS filterable, so the mark has become a lie and
+// the filter bar is refusing a name that would work. Making one filterable is
+// meant to be a two-line change - add the bag write, drop the mark - and this
+// is what stops the second line being forgotten.
+check('...and no tree-only field is written into the bag',
+  FIELDS.filter((f) => f.treeOnly === true).map((f) => f.abbrev)
+    .filter((k) => bagWrites.has(k)).sort(), []);
 
 check('abbrevs are unique', FIELDS.length, FIELD_ABBREVS.size);
 

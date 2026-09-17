@@ -31,8 +31,22 @@
  * of these two captures - one browsing session and one idle machine - and
  * pinning them would be pinning the captures, not the code.
  *
- * A measurement with two assertions, so it needs the fixtures: `check.ts` skips
- * it by name, and it skips itself cleanly if they are not there.
+ * A measurement with two assertions, so it needs the fixtures - and it skips
+ * ITSELF when they are not there, exiting 0 rather than failing.
+ *
+ * It is deliberately **not** in `check.ts`'s `NOT_TESTS`, and the comment here
+ * used to claim it was. That claim was wrong and the arrangement it described
+ * would be worse: a `NOT_TESTS` entry stops a script running at all, so the two
+ * assertions would never fire even on a machine that HAS the fixtures - which is
+ * the machine they exist for. Self-skipping is the stronger shape, and it is
+ * what `scripts/parity/synthetic.ts` and the other fixture-dependent scripts do.
+ *
+ * The cost is worth stating plainly. On a clone without the fixtures this says
+ * `SKIP` on its own stdout - but `check.ts` prints a failing script's output and
+ * discards a passing one's, so the roll-up shows a bare `PASS` having asserted
+ * nothing. Read a green line here as "nothing to say" rather than as "the expert
+ * categories are sound", and run it directly - it prints the per-category table -
+ * when the answer matters.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';

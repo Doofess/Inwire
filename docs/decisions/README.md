@@ -5,38 +5,50 @@ phase depends on, taken before dissector work multiplies the cost of changing th
 One file per decision, numbered, never edited after acceptance - a reversal is a new
 file that supersedes the old one.
 
+**That spec is historic and carries a banner saying so.** It was written while
+Inwire was a web page, and the transport it prescribes - a pairing token, an
+origin allowlist, WebSocket frames, port 8999 - is the transport `CLAUDE.md`'s
+banner says must not come back. 0029 is what replaced it. Follow the link for
+the dissector reasoning, never for a plan.
+
+**The Status column records supersessions too.** An ADR is never edited after
+acceptance, so this index and the forward banner on each superseded file are the
+only places that say a decision has been overtaken - and a reader scanning the
+column is the reader most likely to act on a stale one. It agrees with
+`CLAUDE.md` §11, which is the same ledger in the same words.
+
 | # | Decision | Status |
 |---|---|---|
-| [0001](0001-packet-data-model.md) | Two-phase packet model: summary on arrival, tree on demand | Accepted 2026-09-04 |
+| [0001](0001-packet-data-model.md) | Two-phase packet model: summary on arrival, tree on demand | Accepted 2026-09-04; **re-scoped by 0011** |
 | [0002](0002-field-registry.md) | One field registry feeds the tree, the filter engine and the columns | Accepted 2026-09-04 |
-| [0003](0003-worker-boundary.md) | Keep dissection synchronous; move the whole pipeline into one Worker | Accepted 2026-09-04 |
+| [0003](0003-worker-boundary.md) | Keep dissection synchronous; move the whole pipeline into one Worker | Accepted 2026-09-04; **corrected by 0007** |
 | [0004](0004-fixtures-and-privacy.md) | Fixture captures stay untracked; only aggregate counts are committed | Accepted 2026-09-04 |
-| [0005](0005-agent-wire-format.md) | Agent wire format: `seq`, `iface`, `ts_us`, `capture_stats`, ownership, token | Accepted 2026-09-04 |
+| [0005](0005-agent-wire-format.md) | Agent wire format: `seq`, `iface`, `ts_us`, `capture_stats`, ownership, token | Accepted 2026-09-04; **authentication half superseded by 0029** |
 | [0006](0006-pcapng-writer-scope.md) | pcapng writer scope and the pcap fallback | Accepted 2026-09-04 |
 | [0007](0007-what-crosses-the-worker-boundary.md) | What crosses the worker boundary: bytes yes, tree no — **corrects 0003** | Accepted 2026-09-04 |
-| [0008](0008-key-material.md) | Where TLS key material lives, and where it does not | Accepted 2026-09-04 |
+| [0008](0008-key-material.md) | Where TLS key material lives, and where it does not | Accepted 2026-09-04; **weakened** — its "as old as the tab" premise, by 0027 |
 | [0009](0009-off-wire-enrichment.md) | Facts that did not come off the wire | Accepted 2026-09-04 |
 | [0010](0010-raw-frame-capture.md) | The agent receives raw frames and dissects nothing | Accepted 2026-09-05 |
 | [0011](0011-dissection-cost-is-not-the-tree.md) | Dissection's cost was not the tree — **re-scopes 0001** | Accepted 2026-09-05 |
-| [0012](0012-stored-captures-persist.md) | A stored capture is discarded only when the user asks | Accepted 2026-09-05 |
-| [0013](0013-what-a-million-frames-actually-cost.md) | What a million frames actually cost — **re-targets the buffer work** | Accepted 2026-09-05 |
+| [0012](0012-stored-captures-persist.md) | A stored capture is discarded only when the user asks | Accepted 2026-09-05; **mechanism superseded by 0025** |
+| [0013](0013-what-a-million-frames-actually-cost.md) | What a million frames actually cost — **re-targets the buffer work** | Accepted 2026-09-05; **superseded by 0025** |
 | [0014](0014-bounding-the-trackers.md) | Bounding the trackers — per connection, not per frame — **extends 0013** | Accepted 2026-09-05 |
 | [0015](0015-the-colour-index.md) | The colour index, and a strip that fills rather than blocks | Accepted 2026-09-05 |
 | [0016](0016-pooling-the-per-frame-lists.md) | Pooling the per-frame lists — **continues 0013** | Accepted 2026-09-05 |
-| [0017](0017-the-dense-sparse-split.md) | Dense columns and a sparse bag — **corrects 0013's conclusion** | Measured 2026-09-05 |
+| [0017](0017-the-dense-sparse-split.md) | Dense columns and a sparse bag — **corrects 0013's conclusion** | Measured 2026-09-05; **implemented by 0018**, which corrects its central number |
 | [0018](0018-implementing-the-field-split.md) | Implementing the field split — **corrects 0017's central number** | Accepted 2026-09-05 |
 | [0019](0019-packet-direction.md) | Which way the frame went | Accepted 2026-09-06 |
-| [0020](0020-the-leaf-protocols.md) | The leaf protocols, and where cheap stops | Accepted 2026-09-06 |
+| [0020](0020-the-leaf-protocols.md) | The leaf protocols, and where cheap stops | Accepted 2026-09-06; **corrected by 0022** |
 | [0021](0021-where-the-parity-chase-stops.md) | Where the parity chase stops, and what is left is not a defect | Accepted 2026-09-07 |
 | [0022](0022-a-stream-protocol-is-not-expensive-any-more.md) | A stream protocol is not expensive any more — **corrects 0020** | Accepted 2026-09-07 |
 | [0023](0023-decomposing-the-parser.md) | Decomposing the parser — **unblocks 0020's tunnels** | Accepted 2026-09-07 |
 | [0024](0024-carrying-a-message-across-segments.md) | Carrying a message across segments — **closes 0020's fourth protocol**, and why DCERPC is not next | Accepted 2026-09-10 |
-| [0025](0025-the-capture-lives-on-disk.md) | The capture lives on disk — **supersedes 0012's mechanism and 0013's storage**, and nothing deletes a frame to make room any more | Accepted 2026-09-11 |
-| [0026](0026-one-capture-on-disk.md) | One capture on disk — **closes 0025 §4**: no library, no launch prompt, and why a 5 GB capture makes the previous one worth less | Accepted 2026-09-11 |
+| [0025](0025-the-capture-lives-on-disk.md) | The capture lives on disk — **supersedes 0012's mechanism and 0013's storage**, and nothing deletes a frame to make room any more | Accepted 2026-09-11; **Decision 1's mechanism superseded by 0027** |
+| [0026](0026-one-capture-on-disk.md) | One capture on disk — **closes 0025 §4**: no library, no launch prompt, and why a 5 GB capture makes the previous one worth less | Accepted 2026-09-11; **its quota arithmetic is void on a real disk** (0027) |
 | [0027](0027-the-app-is-a-desktop-app.md) | The app is a desktop app — **supersedes 0025 Decision 1's mechanism** and dissolves the quota 0026 reasons from | Accepted 2026-09-12 |
 | [0028](0028-where-the-capture-store-runs.md) | Where the capture store runs, and what the boundary costs — the measurement 0025 asked for: **the crossing is 16%** | Accepted 2026-09-12 |
 | [0029](0029-the-app-and-the-agent-talk-over-a-named-pipe.md) | The app and the agent talk over a named pipe — **supersedes 0005's authentication half and deletes it**: the kernel answers the question the token was asked to answer | Accepted 2026-09-11 |
-| [0030](0030-one-installer-two-destinations.md) | One installer, two destinations, and the app never elevates — signing and updates deliberately **not** decided | Accepted 2026-09-12 |
+| [0030](0030-one-installer-two-destinations.md) | One installer, two destinations, and the app never elevates — signing and updates deliberately **not** decided | Accepted 2026-09-12; **its Npcap paragraph is voided by 0032** |
 | [0031](0031-a-filter-answers-over-the-whole-capture.md) | A display filter answers over the whole capture — **completes 0025**: one evaluator, a bitmap, and the boundary is the window | Accepted 2026-09-12 |
 | [0032](0032-the-update-center.md) | Npcap is a prerequisite the app manages, not a payload the installer ships — **corrects 0030**: no silent install, a feed instead of a `#define`, and the version is not in `wpcap.dll` | Accepted 2026-09-12 |
 | [0033](0033-the-agent-stays-a-separate-service.md) | The agent stays a separate LocalSystem service, and Npcap should be installed admin-only — the browser reason is gone and three better ones replace it | Accepted 2026-09-12 |
@@ -45,6 +57,13 @@ file that supersedes the old one.
 
 The review agrees with Part C of the spec with two changes, recorded here so the spec
 itself stays as approved.
+
+> **Historic, like the spec it amends.** This is what the review decided on
+> 2026-09-04 and is kept as that record, not as outstanding work. Phase 2b's
+> "token auth" never shipped and must not: 0029 deleted the token and the origin
+> check, and the pipe's ACL answers for both. The macOS/Linux downloads it
+> mentions are no longer hidden behind that phase - those platforms have a
+> tarball agent and no desktop app at all.
 
 1. **Phase 2 is split.** 2a (Windows correctness: `state` broadcast, `capture_stats`,
    `seq`/`iface`, installer fixes, rebuild and republish 3.1.0) ships before any
@@ -73,4 +92,12 @@ Revised order: 1 -> 1b -> 2a -> 3 -> 4 -> 5 -> (2b alongside) -> 6 -> 7 -> 8 -> 
   itself define (0020, enforced by `scripts/dissect/wireshark-abbrevs.ts`).
 - No new `async` in the dissection path (0003).
 - No fixture bytes, names or addresses in the diff (0004).
-- Agent protocol change => version bumped in all three places (`test_protocol.py`).
+- Agent protocol change => version bumped in all **four** places: `local-agent/agent.py`,
+  `REQUIRED_AGENT_VERSION` in `src/services/agentProtocol.ts`, and `MyAgentVersion` in
+  **both** `installer/setup.iss` (the one that ships) and `local-agent/installer/setup.iss`
+  (the legacy agent-only one). It was three until the unified installer carried the stamp
+  too. Two things enforce it and only one of them runs on every gate:
+  `local-agent/test_protocol.py` reads the legacy `.iss` and fires only when somebody runs
+  it, because `scripts/check.ts` discovers TypeScript; `scripts/agent/installer-versions.ts`
+  covers both `.iss` files and runs under `npm run check`. `AGENT_VERSION` is an ordering
+  and only ever climbs - reset it and an older agent reads as newer than required.

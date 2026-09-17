@@ -6,7 +6,7 @@
  * Three controls - the Interfaces button, Start/Stop capture, and the fault
  * panel - used to carry raw Tailwind shades, so they rendered identically under
  * every theme - emerald and rose sitting in the header of a warm-accented UI,
- * from a palette none of the four themes contains.
+ * from a palette no theme in this app contains.
  *
  * They now read per-theme tokens derived from each theme's own palette. The
  * values live in index.css because they must be right before first paint, which
@@ -276,10 +276,13 @@ for (const theme of THEMES) {
 // row draws the banner that says why capture cannot start. Replacing the entry
 // rather than dropping it matters - the check is only worth having on whichever
 // file currently owns the decision.
+// `NetworkMatrix.tsx` was the fourth and is gone with the Top talkers widget.
+// Dropped rather than replaced, unlike the header above: it owned no decision
+// that moved somewhere else - it drew a ranked table of conversations, and the
+// table went with it.
 const GUARDED_FILES = [
   'src/components/common/ActivityRail.tsx',
   'src/components/common/FilterRow.tsx',
-  'src/components/analytics/NetworkMatrix.tsx',
   'src/components/analytics/TrafficTimelineChart.tsx',
 ];
 const RAW_SHADE = /\b(?:bg|text|border|shadow|ring)-(?:rose|emerald|amber|red|green)-\d{2,3}\b/g;

@@ -83,6 +83,38 @@ const DELIBERATELY_ABSENT = new Map<string, string>([
   // same way round for the same reason: an AppMenu.tsx coming back would mean a
   // second navigation surface beside the rail had.
   ['AppMenu.tsx', 'deleted with the hamburger menu; its entries are rail buttons and Settings rows'],
+  // The dock and its whole apparatus. Named the same way round as the three
+  // above and for the strongest version of the same reason: any of these coming
+  // back would mean a widget column had, and the shell section says what each of
+  // the six widgets became instead.
+  //
+  // `dashboardPrefs.ts` was left off this list while nothing named it, and the
+  // rail section names it again - it is where `DASHBOARD_RAIL_WIDTH` went, which
+  // is the other half of a sentence about why the rail is 56 and not 48. Listed
+  // rather than unnamed, because the entry is worth more as a guard than the
+  // mention is worth removing.
+  ['components/dock/', 'deleted with the dock; its widgets are a view and a Statistics tab'],
+  ['dockPrefs.ts', 'deleted with the dock; the pane shares live in interfacePrefs.ts'],
+  ['dashboardPrefs.ts', 'deleted with the dock; it held DASHBOARD_RAIL_WIDTH and the widget config'],
+  ['dashboardWidgets.tsx', 'deleted with the dock; there is no widget registry'],
+  // The application's bottom bar, which lived for one revision. Named the same
+  // way round as the four above, and for a reason that is specific rather than
+  // structural: the whole apparatus that made it work - the readout's inset, the
+  // two-block row, `--details-pane-size` being read from outside the panes, and
+  // `hoveredByte` derived in `App` from a range the protocol tree also publishes
+  // - existed only to make a window-spanning bar look like it belonged under one
+  // pane. A StatusBar.tsx coming back would mean all of that had.
+  ['components/common/StatusBar.tsx', 'deleted; the byte inspector is the Hex View pane’s own footer again'],
+  // The pairing token's config file. `--init-config` minted a token and wrote
+  // this so the installer could read it back; the branch is deleted and the
+  // token is the FIRST item in the root banner. Named the same way round as the
+  // five above: a `config.json` coming back would mean the token had.
+  //
+  // This entry is the cheapest kind of proof there is - the guard note that
+  // names the file is what made this check fail, which is the check working. A
+  // note recording a deletion has to name the thing it deleted, so every such
+  // note lands here by construction.
+  ['config.json', 'deleted with the pairing token; unix mints its own inline (ADR 0029)'],  ['scripts/session/dock.ts', 'deleted with the dock; scripts/session/view.ts covers the rail'],
 ]);
 
 /**

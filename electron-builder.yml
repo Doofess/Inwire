@@ -58,5 +58,18 @@ files:
 afterPack: electron/afterPack.cjs
 
 win:
+  # The app executable's icon. Before this the key was absent, and
+  # `directories.buildResources` above points at a folder that did not exist - so
+  # `Inwire.exe` shipped with **Electron's default icon**, which nothing in the
+  # suite could see because there was nothing to compare it against.
+  #
+  # Named explicitly rather than left to electron-builder's default lookup. Two
+  # of this file's defaults already collided silently with directories this repo
+  # uses; a third is not worth the four characters it saves.
+  #
+  # Written by `scripts/brand/render-icons.ts` from the same buffer as
+  # `local-agent/icon.ico`, and `scripts/brand/icon.ts` asserts the two are
+  # byte-identical.
+  icon: electron/resources/icon.ico
   target:
     - dir

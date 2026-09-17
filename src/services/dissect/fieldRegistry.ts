@@ -35,6 +35,42 @@ export type FieldType =
   | 'proto';    // a protocol name; equality only
 
 export interface FieldDef {
+  /**
+   * Registered, shown in the protocol tree, and NOT filterable in this build.
+   *
+   * ## Why a field would be in that state at all
+   *
+   * A dissector can publish a value two ways: into `Packet.fields`, the bag a
+   * filter reads, or as a `ProtocolField` row on a layer, which is what the
+   * detail tree draws. Most fields do both. These do only the second - the
+   * value is on screen, and nothing in the bag answers for it.
+   *
+   * ## Why they are marked rather than fixed or removed
+   *
+   * **Not fixed**, because writing 35 more keys into every matching frame's bag
+   * is per-frame cost, and driving that down is a standing rule here - it is
+   * what ADRs 0016, 0017 and 0018 are about. These are long, low-value strings
+   * (a CNAME target, a TXT record, an SNMP value); the tree shows them on demand
+   * for one frame, which is the right place to pay for them.
+   *
+   * **Not removed**, because the registration is doing real work: it carries the
+   * Wireshark abbreviation that `scripts/dissect/wireshark-abbrevs.ts` holds
+   * against `tshark -G fields`, and it is what names the row in the tree.
+   *
+   * ## What the flag changes
+   *
+   * `filter/fields.ts` resolves them as NOT known, so the filter bar says so
+   * instead of returning an empty list. Before this they validated, autocompleted
+   * and matched nothing - `dns.cname` was unfilterable while `dns.a`, two cases
+   * along in the same switch, worked. The registry's own header names that exact
+   * state as the thing it exists to prevent: "visible but not filterable".
+   *
+   * Making one filterable is a one-line change here plus a bag write in its
+   * dissector, and `scripts/dissect/registry.ts` enforces the pairing in both
+   * directions - a flagged field that gains a bag write fails, and an unflagged
+   * one without a bag write fails.
+   */
+  treeOnly?: true;
   /** Filter name: `tcp.flags.syn`. Unique. */
   abbrev: string;
   /** What the tree and a column header call it: `Syn`. */
@@ -82,6 +118,14 @@ const str = (abbrev: string, label: string, layer: LayerToken, column?: FieldDef
   ({ abbrev, label, type: 'string', layer, ...(column ? { column } : {}) });
 const bool = (abbrev: string, label: string, layer: LayerToken): FieldDef =>
   ({ abbrev, label, type: 'bool', layer });
+/**
+ * Wraps a definition to say the tree shows it and a filter cannot read it.
+ *
+ * A wrapper rather than a fourth parameter on each helper, so the fact is
+ * visible at the CALL SITE - `treeOnly(str('dns.cname', ...))` reads as the
+ * exception it is, where a trailing `true` would not.
+ */
+const treeOnly = (def: FieldDef): FieldDef => ({ ...def, treeOnly: true });
 
 export const FIELDS: readonly FieldDef[] = [
   // --- VXLAN --------------------------------------------------------------------
@@ -137,7 +181,7 @@ export const FIELDS: readonly FieldDef[] = [
   bool('ip.flags.mf', 'More fragments', 'ip'),
   uint('ip.frag_offset', 'Fragment Offset', 'ip'),
   uint('ip.opt.type', 'Option type', 'ip'),
-  str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip'),
+  treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
   uint('ipv6.reassembled', 'Reassembled IPv6 fragments', 'ipv6'),
 
   // --- NTP / STUN ------------------------------------------------------------
@@ -308,9 +352,9 @@ export const FIELDS: readonly FieldDef[] = [
   // The SSRC is the join key: it is what ties a control packet to the media
   // stream it reports on, and the filter anyone tracing one call types.
   uint('rtcp.version', 'Version', 'rtcp'),
-  bool('rtcp.padding', 'Padding', 'rtcp'),
+  treeOnly(bool('rtcp.padding', 'Padding', 'rtcp')),
   uint('rtcp.pt', 'Packet type', 'rtcp'),
-  uint('rtcp.length', 'Length', 'rtcp'),
+  treeOnly(uint('rtcp.length', 'Length', 'rtcp')),
   uint('rtcp.senderssrc', 'Sender SSRC', 'rtcp', { label: 'RTCP SSRC', align: 'right' }),
   uint('rtcp.timestamp.rtp', 'RTP timestamp', 'rtcp'),
   uint('rtcp.sender.packetcount', "Sender's packet count", 'rtcp'),
@@ -413,7 +457,7 @@ export const FIELDS: readonly FieldDef[] = [
   uint('ospf.hello.router_dead_interval', 'Router Dead Interval', 'ospf'),
   str('ospf.hello.designated_router', 'Designated Router', 'ospf'),
   str('ospf.hello.backup_designated_router', 'Backup Designated Router', 'ospf'),
-  str('ospf.hello.active_neighbor', 'Active Neighbor', 'ospf'),
+  treeOnly(str('ospf.hello.active_neighbor', 'Active Neighbor', 'ospf')),
   uint('ospf.hello.neighbor_count', 'Neighbor count', 'ospf'),
   uint('ospf.db.interface_mtu', 'Interface MTU', 'ospf'),
   uint('ospf.db.dd_sequence', 'DD Sequence', 'ospf'),
@@ -426,11 +470,11 @@ export const FIELDS: readonly FieldDef[] = [
   // analyzer gives both.
   uint('rip.command', 'Command', 'rip'),
   uint('rip.version', 'Version', 'rip'),
-  uint('rip.family', 'Address Family', 'rip'),
+  treeOnly(uint('rip.family', 'Address Family', 'rip')),
   str('rip.ip', 'IP Address', 'rip'),
-  str('rip.netmask', 'Netmask', 'rip'),
-  str('rip.next_hop', 'Next Hop', 'rip'),
-  uint('rip.route_tag', 'Route Tag', 'rip'),
+  treeOnly(str('rip.netmask', 'Netmask', 'rip')),
+  treeOnly(str('rip.next_hop', 'Next Hop', 'rip')),
+  treeOnly(uint('rip.route_tag', 'Route Tag', 'rip')),
   uint('rip.metric', 'Metric', 'rip', { label: 'RIP Metric', align: 'right' }),
   uint('rip.route_count', 'Route count', 'rip'),
 
@@ -471,7 +515,7 @@ export const FIELDS: readonly FieldDef[] = [
   uint('snmp.error_status', 'Error Status', 'snmp'),
   uint('snmp.error_index', 'Error Index', 'snmp'),
   str('snmp.name', 'Object Name', 'snmp', { label: 'SNMP OID', align: 'left' }),
-  str('snmp.value', 'Value', 'snmp'),
+  treeOnly(str('snmp.value', 'Value', 'snmp')),
   str('snmp.enterprise', 'Enterprise', 'snmp'),
 
   // --- GRE -------------------------------------------------------------------
@@ -557,8 +601,8 @@ export const FIELDS: readonly FieldDef[] = [
   uint('radius.length', 'Length', 'radius'),
   { abbrev: 'radius.authenticator', label: 'Authenticator', type: 'bytes', layer: 'radius' },
   str('radius.User_Name', 'User-Name', 'radius', { label: 'RADIUS user', align: 'left' }),
-  uint('radius.avp.type', 'AVP Type', 'radius'),
-  uint('radius.avp.length', 'AVP Length', 'radius'),
+  treeOnly(uint('radius.avp.type', 'AVP Type', 'radius')),
+  treeOnly(uint('radius.avp.length', 'AVP Length', 'radius')),
 
   // --- NBNS ------------------------------------------------------------------
   //
@@ -576,11 +620,11 @@ export const FIELDS: readonly FieldDef[] = [
   uint('nbns.count.auth_rr', 'Authority RRs', 'nbns'),
   uint('nbns.count.add_rr', 'Additional RRs', 'nbns'),
   str('nbns.name', 'Name', 'nbns', { label: 'NetBIOS name', align: 'left' }),
-  uint('nbns.type', 'Type', 'nbns'),
-  uint('nbns.class', 'Class', 'nbns'),
-  uint('nbns.ttl', 'Time to live', 'nbns'),
-  uint('nbns.data_length', 'Data length', 'nbns'),
-  str('nbns.nb_flags', 'Name flags', 'nbns'),
+  treeOnly(uint('nbns.type', 'Type', 'nbns')),
+  treeOnly(uint('nbns.class', 'Class', 'nbns')),
+  treeOnly(uint('nbns.ttl', 'Time to live', 'nbns')),
+  treeOnly(uint('nbns.data_length', 'Data length', 'nbns')),
+  treeOnly(str('nbns.nb_flags', 'Name flags', 'nbns')),
   { abbrev: 'nbns.addr', label: 'Addr', type: 'ipv4', layer: 'nbns' },
 
   // --- DNS -------------------------------------------------------------------
@@ -588,29 +632,29 @@ export const FIELDS: readonly FieldDef[] = [
   uint('dns.flags', 'Flags', 'dns'),
   bool('dns.flags.response', 'Response', 'dns'),
   uint('dns.flags.opcode', 'Opcode', 'dns'),
-  bool('dns.flags.authoritative', 'Authoritative', 'dns'),
-  bool('dns.flags.truncated', 'Truncated', 'dns'),
-  bool('dns.flags.recdesired', 'Recursion desired', 'dns'),
+  treeOnly(bool('dns.flags.authoritative', 'Authoritative', 'dns')),
+  treeOnly(bool('dns.flags.truncated', 'Truncated', 'dns')),
+  treeOnly(bool('dns.flags.recdesired', 'Recursion desired', 'dns')),
   uint('dns.flags.rcode', 'Reply code', 'dns'),
   uint('dns.count.queries', 'Questions', 'dns'),
   uint('dns.count.answers', 'Answer RRs', 'dns'),
   str('dns.qry.name', 'Name', 'dns', { label: 'DNS name', align: 'left' }),
   uint('dns.qry.type', 'Type', 'dns'),
-  str('dns.resp.name', 'Name', 'dns'),
-  uint('dns.resp.type', 'Type', 'dns'),
-  uint('dns.resp.ttl', 'Time to live', 'dns'),
+  treeOnly(str('dns.resp.name', 'Name', 'dns')),
+  treeOnly(uint('dns.resp.type', 'Type', 'dns')),
+  treeOnly(uint('dns.resp.ttl', 'Time to live', 'dns')),
   { abbrev: 'dns.a', label: 'Address', type: 'ipv4', layer: 'dns' },
   { abbrev: 'dns.aaaa', label: 'AAAA Address', type: 'ipv6', layer: 'dns' },
-  str('dns.cname', 'CNAME', 'dns'),
-  str('dns.ns', 'Name Server', 'dns'),
-  str('dns.ptr.domain_name', 'Domain Name', 'dns'),
-  str('dns.txt', 'TXT', 'dns'),
-  uint('dns.srv.port', 'Port', 'dns'),
-  str('dns.srv.target', 'Target', 'dns'),
-  uint('dns.svcb.svcpriority', 'SvcPriority', 'dns'),
-  str('dns.svcb.svcparam.alpn', 'SvcParam alpn', 'dns'),
-  uint('dns.rr.udp_payload_size', 'UDP payload size', 'dns'),
-  bool('dns.resp.z.do', 'DO bit', 'dns'),
+  treeOnly(str('dns.cname', 'CNAME', 'dns')),
+  treeOnly(str('dns.ns', 'Name Server', 'dns')),
+  treeOnly(str('dns.ptr.domain_name', 'Domain Name', 'dns')),
+  treeOnly(str('dns.txt', 'TXT', 'dns')),
+  treeOnly(uint('dns.srv.port', 'Port', 'dns')),
+  treeOnly(str('dns.srv.target', 'Target', 'dns')),
+  treeOnly(uint('dns.svcb.svcpriority', 'SvcPriority', 'dns')),
+  treeOnly(str('dns.svcb.svcparam.alpn', 'SvcParam alpn', 'dns')),
+  treeOnly(uint('dns.rr.udp_payload_size', 'UDP payload size', 'dns')),
+  treeOnly(bool('dns.resp.z.do', 'DO bit', 'dns')),
   { abbrev: 'dns.response_to', label: 'Request In', type: 'uint', layer: 'dns', generated: true },
   { abbrev: 'dns.response_in', label: 'Response In', type: 'uint', layer: 'dns', generated: true },
 
@@ -634,9 +678,9 @@ export const FIELDS: readonly FieldDef[] = [
   str('dhcpv6.client_domain', 'Client Domain', 'dhcpv6'),
 
   // --- IPv6 extension headers ------------------------------------------------
-  uint('ipv6.fraghdr.offset', 'Fragment Offset', 'ipv6'),
-  bool('ipv6.fraghdr.more', 'More Fragments', 'ipv6'),
-  str('ipv6.opt.router_alert', 'Router Alert', 'ipv6'),
+  treeOnly(uint('ipv6.fraghdr.offset', 'Fragment Offset', 'ipv6')),
+  treeOnly(bool('ipv6.fraghdr.more', 'More Fragments', 'ipv6')),
+  treeOnly(str('ipv6.opt.router_alert', 'Router Alert', 'ipv6')),
 
   // --- Inwire's own ----------------------------------------------------------
   // Wireshark has no single field for "the worst thing any dissector said about

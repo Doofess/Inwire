@@ -1,5 +1,12 @@
 # 0025 — The capture lives on disk, and the disk stops deleting
 
+> **Decision 1's mechanism is superseded by**
+> **[0027](0027-the-app-is-a-desktop-app.md)** - the app is an Electron app, so
+> the capture is in real files rather than the browser storage this file reasons
+> about, and the quota arithmetic here is void on a real disk. Everything else
+> stands, and [0031](0031-a-filter-answers-over-the-whole-capture.md) completes
+> it: one evaluator, a bitmap over capture ordinals.
+
 **Status:** accepted. Supersedes the *mechanism* of `0012` and the storage half
 of `0013`; `0012`'s rule survives intact and is strengthened.
 

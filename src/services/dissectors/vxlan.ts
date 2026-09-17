@@ -61,7 +61,7 @@ export function isVxlanPort(srcPort: number, dstPort: number): boolean {
 
 /** The fixed VXLAN header, and the inner Ethernet frame's own header. */
 export const VXLAN_HEADER_LENGTH = 8;
-export const ETHERNET_HEADER_LENGTH = 14;
+const ETHERNET_HEADER_LENGTH = 14;
 
 export interface VxlanHeader {
   vni: number;

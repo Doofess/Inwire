@@ -3,6 +3,23 @@
 **Status:** proposed. Sub-project 3 of `docs/decisions/0009-off-wire-enrichment.md`.
 Nothing is built yet; this exists to be argued with first.
 
+> **The transport below is void, not merely unbuilt — and those are different
+> things.** This was written while Inwire was a web page, so its delivery
+> mechanism assumes one: `externally_connectable`, a content script that
+> `window.postMessage`s **to the page**, and an endpoint on `localhost`. None of
+> that is reachable now. The renderer is served from `app://inwire` inside a
+> sandboxed Electron window — an extension cannot declare
+> `externally_connectable` against that origin, there is no page for a content
+> script to post to, and no localhost listener exists (the agent speaks over a
+> named pipe and the port is not opened at all; ADR 0029, and `CLAUDE.md`'s
+> banner).
+>
+> **What survives is the part worth keeping**: *why* this is the only way to
+> learn what a program asked for over TLS, and the privacy argument about paths
+> in §"Why the obvious approach does not work" onward. A real version would have
+> to re-answer the transport question against the named pipe or a listener in
+> main, and that is a decision this file has not made.
+
 ## What it is for
 
 Inwire can now say *which program* sent a frame. It cannot say **what that

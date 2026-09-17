@@ -9,8 +9,11 @@
  * other and undo the split.
  *
  * Every member is optional. The renderer must keep working when the bridge is
- * absent, because it is absent in every one of the 119 assertion scripts, which
- * import `src/` modules directly under plain Node.
+ * absent, because it is absent in every assertion script under `scripts/` -
+ * they import `src/` modules directly under plain Node, with no Electron and
+ * no preload. No count here on purpose: the number was written out in three
+ * files, each maintained by hand, and all three had drifted apart by the time
+ * anybody compared them.
  */
 export {};
 
@@ -121,7 +124,7 @@ declare global {
        * colour: `electron/windowColors.ts` owns the hex and explains why
        * resolving it in the renderer is always one frame behind the cascade.
        *
-       * Pass `resolvedTheme`, never `theme` - the picker's fifth entry, System,
+       * Pass `resolvedTheme`, never `theme` - the picker's third entry, System,
        * is a rule for choosing between two themes and has no palette of its own.
        */
       setWindowTheme?(theme: string): void;

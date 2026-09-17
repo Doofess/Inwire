@@ -137,8 +137,8 @@ export function usePacketBuffer({
   // is visible rather than the capture appearing to have stopped for no
   // reason. Cleared by anything that makes room or deliberately restarts.
   const [bufferAutoPaused, setBufferAutoPaused] = useState(false);
-  // Packets arrive one WebSocket message at a time but are committed to state
-  // in batches - see the ingest comment in the socket handler below.
+  // Packets arrive one agent batch at a time but are committed to state in
+  // flushes - see `queueFrames` and the flush effect below.
   const pendingPacketsRef = useRef<Packet[]>([]);
   // ICMP replies patch an EARLIER packet's info text. Collected alongside the
   // new packets so the patch is applied once per flush over one array pass,

@@ -230,9 +230,20 @@ try {
   // The fresh profile opens the first-run tour over everything.
   await driven.getByRole('button', { name: 'Skip' }).first().click().catch(() => {});
   await driven.waitForTimeout(500);
-  await driven.keyboard.press('Control+k');
-  await driven.waitForTimeout(500);
-  await driven.getByText('Settings', { exact: true }).first().click();
+  // The rail's Settings button, by its accessible name.
+  //
+  // This was `keyboard.press('Control+k')` followed by
+  // `getByText('Settings', { exact: true })`, and neither half works any more.
+  // Ctrl+K opened the command palette; `cmdk` was deleted with the hamburger
+  // menu and nothing in the app binds that chord - `useKeyboardNavigation`
+  // handles `Ctrl+1..5` and nothing else. And the only rendered "Settings" text
+  // in the app is the heading INSIDE `SettingsModal`, so the text click could
+  // only have worked once the modal it was supposed to open was already open.
+  //
+  // Everything below this line - the Npcap row, the up-to-date/offer pair, the
+  // driver-access row - was therefore unreachable, and silently: this script is
+  // in `check.ts`'s NOT_TESTS and only runs by hand.
+  await driven.getByRole('button', { name: 'Settings', exact: true }).click();
   await driven.waitForTimeout(800);
   await driven.getByRole('button', { name: 'Updates' }).click();
   await driven.waitForTimeout(800);

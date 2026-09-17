@@ -5,8 +5,10 @@ import { useEffect, useSyncExternalStore } from 'react';
  *
  * Three things cross to main, and each is here because only one side knows it:
  *
- *  - the **resolved theme**, so main can colour the native window buttons. Main
- *    owns the hex (`electron/titleBarColors.ts`); this sends a name.
+ *  - the **resolved theme**, so main knows what ground to open the NEXT window
+ *    on and what to draw the quit confirm in. Main owns the hex
+ *    (`electron/windowColors.ts`); this sends a name. Nothing here colours a
+ *    window button - those are ours, in CSS, and follow the cascade.
  *  - the **title**, because only this side knows the adapter's name and whether
  *    frames are arriving.
  *  - **maximized and focused**, which travel the other way: they are facts the
@@ -16,13 +18,20 @@ import { useEffect, useSyncExternalStore } from 'react';
  * Every call is guarded on `window.inwire?.`, which is not defensive styling -
  * `src/types/desktop.d.ts` declares the whole bridge optional because the
  * assertion scripts import `src/` under plain Node with no preload at all. A
- * title row that threw without it would take 137 scripts down with it.
+ * title row that threw without it would take the whole suite down with it.
  */
 
 export interface WindowChromeState {
   /** Maximized, so the layout can stop avoiding the frame's rounded corners. */
   maximized: boolean;
-  /** Focused, so the chrome can dim. Main mirrors this into the overlay. */
+  /**
+   * Focused, so the chrome can dim.
+   *
+   * The dim is `opacity` on the title row, in CSS - main mirrors nothing, and
+   * there is no overlay to mirror into. That was the deleted
+   * `mixHex`/`setTitleBarOverlay` apparatus, which pre-composited a colour in
+   * main and pushed it over IPC.
+   */
   focused: boolean;
 }
 
@@ -88,8 +97,9 @@ export function useWindowChrome(): WindowChromeState {
  * the right `backgroundColor`, which is the one colour decision that happens
  * before a renderer exists to make it.
  *
- * Takes `resolvedTheme`, never `theme`: the picker's fifth entry, System, is a
- * rule for choosing between two themes rather than a theme, and has no palette.
+ * Takes `resolvedTheme`, never `theme`: the picker's third entry, System, is a
+ * rule for choosing between the two themes rather than a theme, and has no
+ * palette.
  * Skips the undefined tick next-themes has before its mount effect runs - main
  * already opened the window on the cached ground, so saying nothing is better
  * than saying the wrong thing and correcting it.
@@ -137,12 +147,25 @@ export function windowTitleFor(
 ): string {
   if (capturing && adapter !== null) return `${adapter} - capturing - Inwire`;
   if (capturing) return 'Capturing - Inwire';
-  // **No packet count.** This used to read "2,224 packets - Inwire" once a
-  // capture stopped, and it was wrong in two ways at once: the title row is the
-  // one strip a person cannot look away from, so a number that changes is the
-  // most distracting thing that could be put in it - and the count was already
-  // on screen, in the filter bar, against the filter that produced it. A second
-  // copy with no filter attached answered a different question in the same
-  // words. The count is a dock widget now.
+  // **No packet count IN THIS STRING**, which is no longer the same thing as no
+  // packet count in the title row.
+  //
+  // It used to read "2,224 packets - Inwire" once a capture stopped, and that
+  // was wrong in two ways at once: a number that changes is the most
+  // distracting thing that can go in the one strip a person cannot look away
+  // from, and the count was already on screen in the filter bar, against the
+  // filter that produced it - so a second copy with no filter attached answered
+  // a different question in the same words.
+  //
+  // The second half has since stopped being true. The filter bar's badge is
+  // gone and so is the dock widget that replaced it, so the counter is now the
+  // title row's centre and the only copy there is - see
+  // `components/common/PacketCountsReadout.tsx`. The first half still stands,
+  // and is the accepted cost of putting it there.
+  //
+  // What this string is for is the part that never wanted a count: the OS.
+  // `useWindowTitle` sends it to main, and it names the window in the taskbar,
+  // in Alt-Tab and in the window list - places a figure that ticks ten times a
+  // second has no business being.
   return 'Inwire';
 }

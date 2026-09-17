@@ -1,5 +1,10 @@
 # 0001 - Two-phase packet model: summary on arrival, tree on demand
 
+> **Re-scoped by [0011](0011-dissection-cost-is-not-the-tree.md).** The two-phase
+> split below is still how the app works, but the reason given for it was wrong:
+> 0011 measured the cost and it was not the tree. Read 0011 before using this as
+> an argument for anything.
+
 **Status:** Accepted 2026-09-04
 
 ## Context

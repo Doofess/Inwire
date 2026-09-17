@@ -12,9 +12,10 @@
  * It lived there, next to the dissector that produces the patches, which read
  * naturally and cost more than it looked. `captureWriter.ts` applies patches to
  * rows still inside its staging horizon, so importing this pulled the whole
- * 1,334-line parser - and everything it reaches - into the **capture store
- * process**, which has no business knowing how to dissect anything and no DOM
- * to satisfy the types that come with it.
+ * parser - and everything it reaches - into the **capture store process**,
+ * which has no business knowing how to dissect anything and no DOM to satisfy
+ * the types that come with it. (A line count stood here and went stale within
+ * two commits; "the whole parser" is the part that was load-bearing.)
  *
  * Fifteen lines that need `Packet` and `InfoPatch` and nothing else. Beside the
  * type it implements is where they belong. `pcapParser.ts` re-exports it, so

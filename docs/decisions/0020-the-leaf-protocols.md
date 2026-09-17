@@ -1,5 +1,12 @@
 # 0020 — The leaf protocols, and where cheap stops
 
+> **Corrected by [0022](0022-a-stream-protocol-is-not-expensive-any-more.md)**,
+> whose measurement reverses this file's central claim about what a TCP stream
+> protocol costs. The cost argument is then completed by
+> [0023](0023-decomposing-the-parser.md), which unblocks the tunnels named here,
+> and [0024](0024-carrying-a-message-across-segments.md), which closes the fourth
+> protocol and says why DCERPC is not next.
+
 **Status:** accepted
 
 ## Context

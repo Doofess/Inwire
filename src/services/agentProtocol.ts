@@ -406,7 +406,7 @@ function isValidCaptureStats(entries: unknown): entries is AgentCaptureInterface
  * untyped legacy messages"). Anything that doesn't parse as one of the known
  * shapes - including the old shape with no `type` at all - returns null
  * rather than throwing, so a single malformed message can't take down the
- * WebSocket handler.
+ * handler draining the link.
  */
 export function parseAgentMessage(raw: string): AgentMessage | null {
   let data: unknown;
