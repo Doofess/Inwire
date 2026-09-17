@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { TbAlertCircle, TbCheck, TbX } from 'react-icons/tb';
+import { CircleAlert, Check, X } from 'lucide-react';
 import { FilterEngine } from '../../services/filterEngine';
 
 interface FilterPresetEditorProps {
@@ -94,7 +94,7 @@ export const FilterPresetEditor: React.FC<FilterPresetEditorProps> = ({
         />
         {filter.trim() && !validation.isValid && validation.errorMessage ? (
           <div className="flex items-center gap-1.5 text-[11px] text-rose-600 dark:text-rose-400">
-            <TbAlertCircle className="w-3.5 h-3.5 shrink-0" />
+            <CircleAlert className="w-3.5 h-3.5 shrink-0" />
             <span>{validation.errorMessage}</span>
           </div>
         ) : !filter.trim() ? (
@@ -125,14 +125,14 @@ export const FilterPresetEditor: React.FC<FilterPresetEditorProps> = ({
             canSubmit ? 'hover:bg-primary/90 cursor-pointer' : 'opacity-50 cursor-not-allowed'
           }`}
         >
-          <TbCheck className="w-3.5 h-3.5" />
+          <Check className="w-3.5 h-3.5" />
           {submitLabel}
         </button>
         <button
           onClick={onCancel}
           className="flex items-center gap-1.5 px-3 py-1 rounded bg-secondary hover:bg-accent text-foreground text-xs font-medium transition-colors cursor-pointer"
         >
-          <TbX className="w-3.5 h-3.5" />
+          <X className="w-3.5 h-3.5" />
           Cancel
         </button>
       </div>

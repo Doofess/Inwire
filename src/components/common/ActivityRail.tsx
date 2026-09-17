@@ -1,67 +1,118 @@
 import React from 'react';
 import {
-  TbPlayerPlay,
-  TbPlayerStop,
-  TbNetwork,
-  TbAlertTriangle,
-  TbClock,
-  TbListDetails,
-  TbChartHistogram,
-  TbArrowsLeftRight,
-  TbSettings,
-  TbFileExport,
-  TbSearch,
-  TbChevronLeft,
-  TbChevronRight,
-} from 'react-icons/tb';
+  Play,
+  Square,
+  EthernetPort,
+  TriangleAlert,
+  Clock,
+  List,
+  ChartNoAxesCombined,
+  Map as MapIcon,
+  ArrowLeftRight,
+  Settings,
+  FileOutput,
+  ListTree,
+} from 'lucide-react';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
 import { CaptureSchedulePicker } from './CaptureSchedulePicker';
-import { FindPacketPopover } from './FindPacketPopover';
 import { isScheduleEmpty, type CaptureSchedule, type SchedulePreset } from '../../services/captureSchedule';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
-import { WIDGET_RENDERERS } from '../analytics/dashboardWidgets';
-import { WIDGET_TYPE_IDS, widgetTitle, type WidgetInstance, type WidgetTypeId } from '../../services/dashboardPrefs';
 import type { Capabilities } from '../../types/packet';
 import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
 
 /**
  * The one strip of chrome that is always there.
  *
- * Four groups, and the grouping is the only thing saying that two of them
+ * Three groups, and the grouping is the only thing saying that two of them
  * behave differently: the views are a radio - one active at a time, switching
- * what fills the window - and the widgets are checkboxes, each contributing a
- * panel to the dock. A divider alone does not convey that, and no app in the
- * reference class mixes the two in one rail (VS Code's activity bar is purely
- * view-switching; its panel toggles are elsewhere). So the active states are
- * deliberately different shapes:
+ * what fills the window - while the adapter, the schedule and Start/Stop are
+ * controls that are simply on or off. A divider alone does not convey that, so
+ * the active states are deliberately different shapes:
  *
- *  - a view carries a **2px left accent edge and a filled background** - VS
- *    Code's "you are here" marker, which people already read;
- *  - a widget carries a **dot and an outline only**.
+ *  - a view carries a **translucent fill in the theme's own accent** -
+ *    `--primary` at 20%, with `--foreground` on the glyph;
+ *  - a control that is on carries an **outline only**, and a dot where it has
+ *    something to report.
  *
- * Neither appears on hover. The edge is the strongest indicator in the UI, and
- * firing it on hover flashes it four times as a pointer crosses the rail, with a
- * moment where two items read as active.
+ * **The view marker used to be two things: a 2px left accent edge over an
+ * `--accent` fill.** That was VS Code's "you are here" pair, and the fill was
+ * the weaker half - `--accent` is one step off the rail's own ground, so the
+ * edge was doing the work and the fill was barely a tint. Tinting with the
+ * accent HUE inverts that: the fill carries the state on its own, and an edge in
+ * the same colour drawn against a button already filled with it is a second mark
+ * for one fact.
+ *
+ * **20%, and the glyph is `--foreground` rather than `--primary`.** Both of
+ * those are Day's doing. A solid `--primary` fill was tried first and reads as
+ * a button rather than a selection; translucent is the right weight. But
+ * `--primary` on a tint of ITSELF cannot reach 4.5:1 in Day at any alpha - it
+ * peaks at 3.97 and falls from there, because `#0b6bcb` is a mid-blue and the
+ * tint lightens toward it. So the accent-on-accent-tint pattern is out, and the
+ * glyph takes `--foreground`: 11.1:1 in Day, 8.4:1 in Night. The progression
+ * from inactive is then two things at once, `--muted-foreground` to
+ * `--foreground` and no fill to a blue one.
+ *
+ * At 20% the fill sits 15.4 (Day) / 17.7 (Night) deltaE from the rail's ground
+ * and 12.4 / 15.1 from the HOVER state, which is the pair that actually matters:
+ * an active marker a hover can be mistaken for is not a marker.
+ * `scripts/themes/registry.ts` holds all four of those numbers, and reads the
+ * alpha out of this file so the two cannot drift.
+ *
+ * Neither appears on hover. The active marker is the strongest indicator in the
+ * UI, and firing it on hover flashes it five times as a pointer crosses the
+ * rail, with a moment where two items read as active.
  *
  * ## Why 56px when everything else is 48
  *
- * `DASHBOARD_RAIL_WIDTH` and `FrameMetaRail` are both 48, and index.css's own
+ * `FrameMetaRail` is 48, and index.css's own
  * comment says two icon strips that disagree by a few pixels is "something you
  * only notice when they are on screen together". This one is 56 anyway, as a
- * deliberate and accepted choice: it carries four groups rather than one, and at
+ * deliberate and accepted choice: it carries three groups rather than one, and at
  * 48 a 20px glyph has 14px of air around it. A future session should not "fix"
  * the disagreement by narrowing it.
  *
  * ## Height
  *
- * 15 icons at 36px, three dividers, the dock's 20px collapse control and the
- * bottom group's padding come to **630px** against a 640px minimum window
- * height. It fits, with 10px of slack. **The rail is full** - not "nearly", not
- * "for now": there is no room for a sixteenth icon, and the collapse control
- * went into the widgets divider's slot rather than beside them precisely
- * because there was already no room for it.
+ * 10 icons at 44px, two dividers and the bottom group's padding come to
+ * **494px** against the 648px the rail gets - a 680px minimum window, less the
+ * 32px title row that spans the full width above it. It fits, with 154px of
+ * slack - room for three more. **The window minimum carries that row so this
+ * number did not have to move**: the rail sits below the title row, and taking
+ * those pixels out of the rail's budget instead would have pushed Settings off
+ * the bottom edge.
+ *
+ * ## How it got from 630 to 494 while the icons got BIGGER
+ *
+ * That is the part worth writing down, because the two halves pull opposite
+ * ways and a future session reading only one of them will draw the wrong
+ * conclusion.
+ *
+ * **Six icons were deleted.** Packet counts stopped being a widget - the counter
+ * is a fixture of the title row now - then Protocol breakdown and Top talkers
+ * went outright, and finally the dock itself took the last three widget icons
+ * and its own 20px collapse header with it. The map came back as a fourth
+ * **view**, so the views group grew by one.
+ *
+ * **Then every target grew from 36px to 44px**, and the glyph from 20 to 24.
+ * That costs 8px an icon and it is what the deletions paid for: the strip was
+ * full at 630 against 640, which is why nothing in it could be made larger
+ * before.
+ *
+ * Moving an icon between groups is **free**, which is the one piece of this
+ * arithmetic that surprises people. Both groups gap the same, so when Find
+ * packet moved from the bottom group into the capture group, `group(4) -
+ * group(3)` and `group(3) - group(2)` were both 38 and they cancelled exactly.
+ * Only adding or deleting changes the total.
+ *
+ * **494 has since survived a swap, for the same reason.** Find packet was
+ * deleted from the capture group and Frame Detail added to the views group -
+ * `group(4) - group(3)` against `group(5) - group(4)`, both 46 - so the strip is
+ * the same height with a different set of icons in it. That is a coincidence of
+ * this particular change rather than a rule, and the number is checked rather
+ * than assumed: `scripts/session/view.ts` adds up the groups as they actually
+ * are.
  *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that
@@ -70,10 +121,11 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * the bottom group's `pb-2`. A height budget nothing checks is a height budget
  * that has already drifted.
  *
- * So if a sixth widget ever arrives, **the widgets group is the one that
- * scrolls** - capture, the views and the bottom group have to stay reachable
- * without one, and the bottom group is pinned with `mt-auto`, so an overflow
- * does not scroll anything: it pushes Settings off the bottom edge.
+ * **If the slack is ever spent, the views group is the one that scrolls.** It
+ * used to be the widgets group and there is no widgets group; capture has to
+ * stay reachable because it is how a capture starts, and the bottom group is
+ * pinned with `mt-auto`, so an overflow there does not scroll anything - it
+ * pushes Settings off the bottom edge.
  *
  * The slack came back, and it is worth knowing where from. Deleting the
  * hamburger menu pushed this to 617px - Export/Import and Custom Dissectors took
@@ -81,33 +133,51 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * Dissectors went to Settings beside Decryption, and **Network stopped being a
  * view at all**: it described the machine rather than the capture, which is why
  * the filter row had to be hidden above it and nowhere else, so it became a
- * Settings tab next to Driver Info. That is two icons back, and `Ctrl+3` now
- * opens Follow Stream.
+ * Settings tab next to Driver Info. That is two icons back. Every digit below it
+ * has shifted twice since - Network leaving, then Frame Detail arriving second -
+ * and the current assignment is Packets `Ctrl+1`, Frame Detail `Ctrl+2`,
+ * Statistics `Ctrl+3`, Routing Map `Ctrl+4`, Follow Stream `Ctrl+5`. None of
+ * that is written down twice: `APP_VIEWS` order IS the numbering, which is the
+ * whole reason a view can be inserted without a second table to update.
  *
- * Find packet took the other: it was an expanding field in the filter bar,
- * beside the display filter, which implied a relationship the two do not have -
- * the filter is compiled and answered over the whole capture on disk, and the
- * search is a substring match over the rows already in hand. It is in the
- * bottom group because that group holds **actions** rather than places.
+ * Find packet took the other, and has since been **deleted** rather than moved
+ * again: it was a substring match over the rows already in hand, which is the
+ * weaker of two overlapping answers - the display filter is compiled and
+ * answered over the whole capture on disk. What replaced it is not a smaller
+ * search but a different control, the Frame Detail view's go-to box, which takes
+ * a frame number and nothing else.
  *
  * The capture group took one of those back: the schedule picker was a labelled
  * button in the filter row, and it is a capture control - it decides when a
  * capture starts and stops - so it sits with Start/Stop and the adapter. The
- * group reads top to bottom in the order it is used: **start, what to listen
- * on, when.**
+ * group reads top to bottom in the order it is used - **start, what to listen
+ * on, and when.**
  *
- * The last 40px came from **deleting the top cell**. It held the brand mark,
- * aligned to the title row; the mark is centred in the title row itself now,
- * which is where a desktop window keeps its identity rather than in a page's
- * top-left corner. An empty cell would have been 40px spent on nothing.
- *
- * What has not changed is the rule for the next one: if a sixth widget arrives,
- * **the widgets group is the one that scrolls**.
+ * A further 40px came from **deleting the top cell**. It held the brand mark,
+ * aligned to the title row; the mark is in the title row itself now - beside
+ * the wordmark, which leads it - and an empty cell would have been 40px spent
+ * on nothing.
  */
 
-/** 32px was the old rail's target in a 48px strip; 36 is this one's in 56. */
-const TARGET = 'w-9 h-9';
-const GLYPH = 'w-5 h-5';
+/**
+ * The button's hit target, and the glyph inside it.
+ *
+ * 32px was the old rail's target in a 48px strip, then 36 in this one's 56. It
+ * is **44 in 56 now** - 79% of the strip's width against the 64% it was - with
+ * the glyph up from 20 to 24.
+ *
+ * What paid for it is the same thing that paid for the slack: six deleted
+ * icons. At 36px the rail was 630 against 640 and there was no room to make
+ * anything bigger; the widgets group and its collapse control are gone now, so
+ * the icons could take the space instead of the strip carrying more of them.
+ *
+ * 44 is also the touch-target floor every platform guideline names, which is not
+ * why it was chosen - there is no touch here - but it is the reason nothing
+ * larger was: past 44 the glyph starts floating in a button whose edges are the
+ * rail's own, and the strip reads as a column of boxes rather than of icons.
+ */
+const TARGET = 'w-11 h-11';
+const GLYPH = 'w-6 h-6';
 
 const GROUP = 'flex flex-col items-center gap-0.5 shrink-0';
 
@@ -119,11 +189,11 @@ const GROUP = 'flex flex-col items-center gap-0.5 shrink-0';
  * separator announced between them would be noise on top of that.
  */
 const RailDivider: React.FC = () => (
-  // `border` on `card` is a small delta on the dark themes - measured on
-  // Graphite it is #292524 on #1c1917 - and at 1px by 24px the line was very
-  // nearly invisible, which left the grouping carried by the active states
-  // alone. Wider, and `muted-foreground` at low opacity so it reads on all four
-  // grounds rather than on the two light ones.
+  // `border` on `card` is a small delta on a dark theme - on Night it is
+  // #3c3c3c on #222222 - and at 1px by 24px the line was very nearly
+  // invisible, which left the grouping carried by the active states alone.
+  // Wider, and `muted-foreground` at low opacity so it reads on both grounds
+  // rather than on the light one.
   <div aria-hidden className="my-1.5 h-px w-7 shrink-0 bg-muted-foreground/30" />
 );
 
@@ -134,16 +204,23 @@ function railButton(active: boolean, kind: 'view' | 'toggle'): string {
     + 'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring';
   if (!active) return `${base} text-muted-foreground hover:bg-accent hover:text-foreground`;
   return kind === 'view'
-    // The filled state plus the accent edge, drawn by the caller's ::before.
-    ? `${base} bg-accent text-foreground`
-    // Outline only: a widget is on, not "where you are".
+    // The theme's own accent, at a fifth. See the note above the group for what
+    // this replaced, why the edge went with it, and why the glyph is
+    // `--foreground` rather than the accent itself.
+    ? `${base} bg-primary/20 text-foreground`
+    // Outline only: a control that is ON, not "where you are".
     : `${base} text-foreground ring-1 ring-inset ring-border`;
 }
 
 const VIEW_ICONS: Record<AppView, React.ComponentType<{ className?: string }>> = {
-  packets: TbListDetails,
-  statistics: TbChartHistogram,
-  stream: TbArrowsLeftRight,
+  packets: List,
+  // The same glyph the pane's own header wears, which is the whole of why it is
+  // this one: the rail icon and the thing it opens should be recognisably one
+  // surface, and a tree is what the view actually shows.
+  detail: ListTree,
+  statistics: ChartNoAxesCombined,
+  geo: MapIcon,
+  stream: ArrowLeftRight,
 };
 
 export interface ActivityRailProps {
@@ -180,26 +257,21 @@ export interface ActivityRailProps {
   /* --- views ------------------------------------------------------------ */
   view: AppView;
   onViewChange: (view: AppView) => void;
-  /** Follow Stream is disabled until something is being followed. */
+  /**
+   * Whether Follow Stream has anything to follow: the selected frame sits on a
+   * stream, or one is already open.
+   *
+   * It used to be the second half alone, which disabled the button in exactly
+   * the state a user reaches it from - a frame selected, nothing followed yet.
+   */
   streamAvailable: boolean;
 
-  /* --- widgets ---------------------------------------------------------- */
-  /** The dock's list: every type, each with whether it is open. */
-  dockItems: { type: WidgetTypeId; open: boolean }[];
-  onToggleWidget: (type: WidgetTypeId) => void;
-  /**
-   * The dock is hidden, leaving only these icons.
-   *
-   * It changes what a widget icon does rather than only how it looks: shown, an
-   * icon toggles that widget in the dock; hidden, it opens that widget's
-   * overlay. `onToggleWidget` is the same callback either way - App branches -
-   * so this is here to get the *marker* right. A dot meaning "in the dock"
-   * would be a lie about a dock nobody can see.
-   */
-  dockMinimized: boolean;
-  onToggleDockMinimized: () => void;
-  /** `inwire.dashboard`, for the custom titles the tooltips show. */
-  widgets: WidgetInstance[];
+  // **There was a widgets group here and it is gone with the dock.** Five
+  // props - the item list, a toggle, the minimized flag, its toggle, and the
+  // stored titles for the tooltips - driving six icons that switched panels in a
+  // column. The three surviving widgets are surfaces of their own now: the map
+  // is a VIEW in the group above, and the two charts are a tab of the Statistics
+  // pane.
 
   /* --- bottom ----------------------------------------------------------- */
   onOpenSettings: () => void;
@@ -215,15 +287,6 @@ export interface ActivityRailProps {
    */
   onOpenExport: () => void;
 
-  /**
-   * Find packet - a substring match over the rows the display filter selected.
-   *
-   * Not the display filter, which is compiled and answered over the whole
-   * capture on disk. It was an expanding field in the filter bar, which put the
-   * two side by side and implied a relationship they do not have.
-   */
-  packetSearchText: string;
-  onPacketSearchChange: (text: string) => void;
 }
 
 export const ActivityRail: React.FC<ActivityRailProps> = ({
@@ -231,8 +294,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces, onSelectInterface,
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
-  dockItems, widgets, onToggleWidget, dockMinimized, onToggleDockMinimized,
-  onOpenSettings, onOpenExport, packetSearchText, onPacketSearchChange,
+  onOpenSettings, onOpenExport,
   schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
   scheduleSummary, scheduleNow,
 }) => {
@@ -261,9 +323,6 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   // signal and the tooltip carries the detail.
   const scheduleSet = !isScheduleEmpty(schedule);
 
-  // Local, like the discard prompt above it: which popover is open is not a
-  // setting, and `dockPrefs`' rule about one key per writer would make it one.
-  const [findOpen, setFindOpen] = React.useState(false);
   const adapterTitle = attention && 'summary' in agentHealth
     ? `${agentHealth.summary}. Settings > Driver Info has the detail.`
     : selected === null
@@ -328,9 +387,6 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
     onStartCapture();
   };
 
-  const enabled = new Set(dockItems.filter((i) => i.open).map((i) => i.type));
-  const byType = new Map(widgets.map((w) => [w.type, w] as const));
-
   /**
    * Arrow keys move focus within the rail, and must not leave it.
    *
@@ -367,18 +423,23 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       aria-orientation="vertical"
       aria-label="Activity"
       onKeyDown={onRailKeyDown}
-      className="w-14 shrink-0 flex flex-col items-center border-r border-border bg-card
-        text-card-foreground select-none"
+      className="w-14 shrink-0 flex flex-col items-center bg-secondary
+        text-secondary-foreground select-none"
     >
-      {/* No top cell. It was 40px holding the brand mark, aligned to the title
-          row - and the mark is in the title row itself now, which is where a
-          desktop window keeps its identity. An empty 40px cell would have been
-          40px of rail height spent on nothing, and this rail has none to spare.
+      {/* No top cell, and the mark is not in one. The rail starts below the
+          title row rather than beside it, so the window's top-left corner is
+          the ROW's - which is where the mark sits. A cell here would put it
+          40px below the corner it is meant to occupy and cost 40px this rail
+          does not have.
 
-          It also carried `.app-drag`, so the window could be grabbed by the
-          top-left corner. That is gone with it: the title row is drag region
-          across its whole width bar the controls, which is where a window is
-          grabbed. The rail is now entirely no-drag. */}
+          The rail shares the row's `bg-card` and the row draws no bottom
+          border, so the two read as one surface into that corner. The radius
+          is Windows', not ours; see `TitleRow.tsx`.
+
+          The cell also carried `.app-drag`, so the window could be grabbed by
+          the top-left corner. That is gone with it: the title row is drag
+          region across its whole width bar the controls, which is where a
+          window is grabbed. The rail is now entirely no-drag. */}
       <div className={`${GROUP} pt-1`} role="group" aria-label="Capture">
         {/* The capture button and its discard prompt. `relative` so the prompt
             anchors here; it opens to the right, because there is no room below
@@ -422,8 +483,8 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
                 list, the one control that says whether it is recording should
                 change on the frame it is clicked. */}
             {isCapturing
-              ? <TbPlayerStop className={`${GLYPH} fill-current text-danger`} />
-              : <TbPlayerPlay className={GLYPH} />}
+              ? <Square className={`${GLYPH} fill-current text-danger`} />
+              : <Play className={GLYPH} />}
           </button>
 
           {/* Opens to the RIGHT, not below: a 56px strip has no room under a
@@ -437,7 +498,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
                 shadow-2xl bg-popover border-border text-popover-foreground"
             >
               <div className="flex items-start gap-2">
-                <TbAlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-warning" />
+                <TriangleAlert className="w-4 h-4 mt-0.5 shrink-0 text-warning" />
                 <div className="text-[11px] leading-relaxed text-muted-foreground">
                   <span className="font-bold text-foreground">
                     Discard {bufferedPackets.toLocaleString()} captured packets?
@@ -469,7 +530,6 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
             </div>
           )}
         </div>
-      </div>
 
         {agentInterfaces.length === 0 ? (
           // A dead end by design: there is no adapter list to open, and a button
@@ -536,9 +596,28 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
                 className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"
               />
             )}
-            <TbClock className={GLYPH} />
+            <Clock className={GLYPH} />
           </button>
         </CaptureSchedulePicker>
+
+        {/* **Find packet was here and is deleted.**
+
+            A substring match over the rows already in hand, with a popover, a
+            stored query and a dot on this button to say the list was quietly
+            short of rows. What replaced it is not a smaller version of it: the
+            Frame Detail view's go-to box takes a frame NUMBER and nothing else.
+
+            Those are different features and the swap is a real reduction, said
+            plainly rather than sold as an upgrade. What is gone is searching by
+            protocol, address or info text over the buffer. What is left is the
+            display filter, which answers the same questions in a language that
+            says what it means (`ip.addr == 10.0.0.1`, `http.host contains
+            "cdn"`) and - unlike the search - is compiled and answered over the
+            WHOLE capture on disk rather than the rows the window happens to
+            hold. The search was the weaker of the two overlapping answers, and
+            two search boxes in one window is the thing the rail was built to
+            stop. */}
+      </div>
 
       <RailDivider />
 
@@ -553,7 +632,14 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           const active = view === id;
           // Follow Stream needs something to follow. Disabled rather than
           // hidden: a group that changes length moves the divider and the
-          // widgets below it every time a stream is opened or cleared.
+          // group below it every time a stream is opened or cleared.
+          //
+          // `streamAvailable` is now about the SELECTION - does the selected
+          // frame sit on a stream - rather than about a stream already being
+          // open, which is what it used to mean and what made this button read
+          // as a place rather than a verb. `App` holds the rule; see
+          // `handleViewChange` there for the three symptoms that came of the
+          // old one.
           const unavailable = id === 'stream' && !streamAvailable;
           return (
             <button
@@ -563,135 +649,59 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
               aria-pressed={active}
               aria-label={label}
               title={unavailable
-                ? `${label} - follow a stream from a packet's context menu first`
+                ? `${label} - select a frame on a TCP or UDP stream first`
                 : `${label} (${shortcut})`}
               className={`${railButton(active, 'view')} ${
                 unavailable ? 'opacity-40 cursor-not-allowed' : ''
               }`}
             >
-              {/* The 2px edge. A child rather than a border so it does not
-                  change the button's box, and only on the active one. */}
-              {active && (
-                <span
-                  aria-hidden
-                  className="absolute left-0 top-1 bottom-1 w-0.5 rounded-full bg-primary"
-                />
-              )}
+              {/* **The 2px accent edge was here and is deleted.** It was a
+                  child rather than a border so it did not change the button's
+                  box, and it was the stronger half of a two-part marker - VS
+                  Code's "you are here" rule, an edge plus a `--accent` fill.
+                  The fill is the theme's own accent now and carries the state on
+                  its own; an edge in the same colour, against a button already
+                  filled with it, is a second mark for one fact. */}
               <Icon className={GLYPH} />
             </button>
           );
         })}
       </div>
+      {/* **The widgets group was here, and so was the dock's collapse control.**
+          Six icons switching panels in a column, plus a 20px group header in
+          this divider's slot that hid and showed the column - the only way back
+          from a hidden dock, since every widget icon opened an overlay there.
 
-      {/* The widgets group's divider, with a job.
-          
-          This is where the collapse control has to be, and the constraint is
-          arithmetic: the rail is 615px against a 640px minimum window, so there
-          is no room for another 36px icon. A 20px group header in the slot the
-          divider already occupied costs 15px, and it reads as what it is - the
-          head of the group it collapses - rather than as a fifteenth peer to
-          the fourteen icons around it.
+          All of it went with the dock. What the three surviving widgets became:
+          the map is a view in the group above, and the traffic timeline and the
+          packet-size chart are a tab of the Statistics pane. None of them needed
+          an open flag, a pin, a drag-reorder or an overlay.
 
-          It is also the ONLY way back. Minimized, every widget icon opens an
-          overlay rather than toggling the dock, so none of them can restore it. */}
-      <button
-        onClick={onToggleDockMinimized}
-        aria-pressed={dockMinimized}
-        aria-label={dockMinimized ? 'Show the widget panel' : 'Hide the widget panel'}
-        title={dockMinimized
-          ? 'Show the widget panel. Icons toggle widgets in it.'
-          : 'Hide the widget panel. Icons open widgets in their own window.'}
-        className="my-1 h-5 w-7 shrink-0 flex items-center justify-center rounded
-          text-muted-foreground hover:bg-accent hover:text-foreground transition-colors
-          cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1
-          focus-visible:outline-ring"
-      >
-        {dockMinimized
-          ? <TbChevronRight className="w-3.5 h-3.5" />
-          : <TbChevronLeft className="w-3.5 h-3.5" />}
-      </button>
+          The 20px header is worth one line of its own, because it was an
+          arithmetic workaround that outlived the arithmetic: at 630px against
+          640 there was no room for a thirteenth 36px icon, so the control went
+          into a divider slot for 15px instead. The rail has room now, and there
+          is nothing left for it to collapse. */}
 
-      <div className={GROUP} role="group" aria-label="Widgets">
-        {WIDGET_TYPE_IDS.map((type) => {
-          const Icon = WIDGET_RENDERERS[type].icon;
-          const on = enabled.has(type);
-          const instance = byType.get(type);
-          const label = instance ? widgetTitle(instance) : type;
-          // Minimized, `on` describes a dock nobody can see - so the marker and
-          // the active fill are suppressed rather than showing a state with no
-          // visible consequence, and the tooltip says what the click will
-          // actually do. `aria-pressed` goes with them: it would be announcing
-          // a toggle that is not what this button is right now.
-          const marked = on && !dockMinimized;
-          return (
-            <button
-              key={type}
-              onClick={() => onToggleWidget(type)}
-              aria-pressed={dockMinimized ? undefined : on}
-              aria-label={label}
-              title={dockMinimized
-                ? `Open ${label} in its own window`
-                : on ? `Hide ${label}` : `Show ${label}`}
-              className={railButton(marked, 'toggle')}
-            >
-              {/* The dot, not an edge: many can be on at once, so this says
-                  "showing" rather than "you are here". */}
-              {marked && (
-                <span
-                  aria-hidden
-                  className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"
-                />
-              )}
-              <Icon className={GLYPH} />
-            </button>
-          );
-        })}
-      </div>
 
       {/* Pinned to the bottom, where every app in the reference class keeps its
           settings. `mt-auto` rather than absolute positioning so the groups
           above can grow without overlapping it. */}
       <div className={`${GROUP} mt-auto pb-2`} role="group" aria-label="Application">
         <RailDivider />
-        {/* `TbFileExport` rather than the menu's `TbDownload`, and deliberately
-            not `TbArrowsExchange`: an exchange glyph would sit five icons below
-            Follow Stream's `TbArrowsLeftRight` and read as the same control
+        {/* `FileOutput` rather than the menu's `Download`, and deliberately
+            not `ArrowRightLeft`: an exchange glyph would sit five icons below
+            Follow Stream's `ArrowLeftRight` and read as the same control
             twice. That mistake has been made in this strip once already - the
-            brand mark opened as a `TbNetwork`, identical to the adapter button
+            brand mark opened as an `EthernetPort`, identical to the adapter button
             42px under it, and only a screenshot found it. */}
-        {/* The dot says the list is narrowed by something that is not the
-            filter bar. Without it a search left in the box is invisible from
-            here and the packet list is quietly short of rows. */}
-        <FindPacketPopover
-          open={findOpen}
-          onOpenChange={setFindOpen}
-          text={packetSearchText}
-          onTextChange={onPacketSearchChange}
-        >
-          <button
-            onClick={() => setFindOpen((wasOpen) => !wasOpen)}
-            aria-haspopup="dialog"
-            aria-expanded={findOpen}
-            aria-label={packetSearchText === '' ? 'Find packet' : `Find packet - ${packetSearchText}`}
-            title="Find packet"
-            className={railButton(findOpen, 'toggle')}
-          >
-            {packetSearchText !== '' && (
-              <span
-                aria-hidden
-                className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"
-              />
-            )}
-            <TbSearch className={GLYPH} />
-          </button>
-        </FindPacketPopover>
         <button
           onClick={onOpenExport}
           aria-label="Export or import a capture"
           title="Export / Import PCAP"
           className={railButton(false, 'toggle')}
         >
-          <TbFileExport className={GLYPH} />
+          <FileOutput className={GLYPH} />
         </button>
         <button
           onClick={onOpenSettings}
@@ -699,7 +709,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           title="Settings"
           className={railButton(false, 'toggle')}
         >
-          <TbSettings className={GLYPH} />
+          <Settings className={GLYPH} />
         </button>
       </div>
     </div>
@@ -716,9 +726,9 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
  */
 const AdapterGlyph: React.FC<{ attention: boolean }> = ({ attention }) => (
   <>
-    <TbNetwork className={`${GLYPH} ${attention ? 'text-warning' : ''}`} />
+    <EthernetPort className={`${GLYPH} ${attention ? 'text-warning' : ''}`} />
     {attention && (
-      <TbAlertTriangle
+      <TriangleAlert
         aria-hidden
         className="absolute -right-0.5 -bottom-0.5 w-3 h-3 text-warning fill-card"
       />

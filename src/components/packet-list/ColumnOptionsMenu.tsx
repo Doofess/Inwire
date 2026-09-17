@@ -1,5 +1,5 @@
 import React from 'react';
-import { TbAdjustmentsHorizontal } from 'react-icons/tb';
+import { SlidersHorizontal } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -75,7 +75,7 @@ export const ColumnOptionsMenu: React.FC<ColumnOptionsMenuProps> = ({
           title="Column options"
           className="p-0.5 rounded shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
         >
-          <TbAdjustmentsHorizontal className="w-3.5 h-3.5" />
+          <SlidersHorizontal className="w-3.5 h-3.5" />
         </button>
       </DropdownMenuTrigger>
 

@@ -2,14 +2,14 @@ import React, { useState } from 'react';
 import { CustomDissectorRule, CustomDissectorFieldDef, Capabilities } from '../../types/packet';
 import { CustomDissectorEngine } from '../../services/customDissectorEngine';
 import {
-  TbPlus,
-  TbTrash,
-  TbCheck,
-  TbPlayerPlay,
-  TbShield,
-  TbChevronUp,
-  TbChevronDown,
-} from 'react-icons/tb';
+  Plus,
+  Trash,
+  Check,
+  Play,
+  Shield,
+  ChevronUp,
+  ChevronDown,
+} from 'lucide-react';
 
 /**
  * Custom dissectors, as a Settings section.
@@ -220,7 +220,7 @@ export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
                           className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:pointer-events-none"
                           title="Higher precedence"
                         >
-                          <TbChevronUp className="w-3 h-3" />
+                          <ChevronUp className="w-3 h-3" />
                         </button>
                         <button
                           onClick={e => {
@@ -231,7 +231,7 @@ export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
                           className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:pointer-events-none"
                           title="Lower precedence"
                         >
-                          <TbChevronDown className="w-3 h-3" />
+                          <ChevronDown className="w-3 h-3" />
                         </button>
                       </div>
                     )}
@@ -253,12 +253,12 @@ export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
                 }}
                 className="mt-3 w-full py-2 px-3 rounded-lg bg-primary hover:bg-primary/90 text-zinc-950 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm"
               >
-                <TbPlus className="w-4 h-4" />
+                <Plus className="w-4 h-4" />
                 <span>Create New Dissector</span>
               </button>
             ) : (
               <div className={`mt-3 p-2 rounded bg-secondary/60 ${"text-muted-foreground"} text-[10px] flex items-center gap-1.5`}>
-                <TbShield className="w-3.5 h-3.5 text-foreground shrink-0" />
+                <Shield className="w-3.5 h-3.5 text-foreground shrink-0" />
                 <span>Dissector editing disabled for current user role</span>
               </div>
             )}
@@ -357,7 +357,7 @@ export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
                       onClick={handleAddField}
                       className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-primary hover:bg-primary/90 text-zinc-950 font-semibold"
                     >
-                      <TbPlus className="w-3 h-3" />
+                      <Plus className="w-3 h-3" />
                       Add Field
                     </button>
                   </div>
@@ -405,7 +405,7 @@ export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
                           onClick={() => handleRemoveField(idx)}
                           className="p-1 text-foreground hover:text-foreground/70"
                         >
-                          <TbTrash className="w-3.5 h-3.5" />
+                          <Trash className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     ))}
@@ -447,7 +447,7 @@ export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
                       className="p-1.5 rounded text-foreground hover:bg-accent transition-colors"
                       title="Delete Dissector"
                     >
-                      <TbTrash className="w-4 h-4" />
+                      <Trash className="w-4 h-4" />
                     </button>
                   )}
                 </div>
@@ -474,7 +474,7 @@ export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
                 <div className="border border-border rounded-lg p-3 bg-background/80 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-400">
-                      <TbPlayerPlay className="w-3.5 h-3.5 fill-current text-foreground" />
+                      <Play className="w-3.5 h-3.5 fill-current text-foreground" />
                       <span>Live Dissection Sandbox & Hex Evaluator</span>
                     </div>
                     <button
@@ -500,7 +500,7 @@ export const CustomDissectorsPanel: React.FC<CustomDissectorsPanelProps> = ({
                   {testDissectionResult && (
                     <div className="p-3 rounded bg-muted/90 border border-emerald-500/40 space-y-2">
                       <div className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
-                        <TbCheck className="w-4 h-4 text-emerald-400" />
+                        <Check className="w-4 h-4 text-emerald-400" />
                         <span>Dissection Successful ({testDissectionResult.matchedDissector?.protocolName})</span>
                       </div>
 

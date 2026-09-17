@@ -1,8 +1,16 @@
 import React, { useState } from 'react';
 import {
-  TbAlertCircle, TbArrowDown, TbArrowUp, TbCheck, TbInfoCircle,
-  TbPencil, TbPlus, TbRestore, TbTrash, TbX,
-} from 'react-icons/tb';
+  CircleAlert,
+  ArrowDown,
+  ArrowUp,
+  Check,
+  Info,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Trash,
+  X,
+} from 'lucide-react';
 
 import { ColorRule } from '../../types/packet';
 import { FilterEngine } from '../../services/filterEngine';
@@ -95,14 +103,14 @@ export const ColorRulesPanel: React.FC<ColorRulesPanelProps> = ({ rules, onChang
               onClick={() => setDraft({ id: null, name: '', filter: '' })}
               className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
             >
-              <TbPlus className="w-3.5 h-3.5" /> New rule
+              <Plus className="w-3.5 h-3.5" /> New rule
             </button>
             <button
               onClick={() => onChange(defaultColorRules())}
               title="Restore the shipped chain"
               className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
             >
-              <TbRestore className="w-3.5 h-3.5" /> Reset
+              <RotateCcw className="w-3.5 h-3.5" /> Reset
             </button>
           </div>
         )}
@@ -123,14 +131,14 @@ export const ColorRulesPanel: React.FC<ColorRulesPanelProps> = ({ rules, onChang
               className="p-1.5 rounded-md bg-primary text-primary-foreground disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               aria-label="Save rule"
             >
-              <TbCheck className="w-3.5 h-3.5" />
+              <Check className="w-3.5 h-3.5" />
             </button>
             <button
               onClick={() => setDraft(null)}
               className="p-1.5 rounded-md hover:bg-accent text-muted-foreground cursor-pointer"
               aria-label="Cancel"
             >
-              <TbX className="w-3.5 h-3.5" />
+              <X className="w-3.5 h-3.5" />
             </button>
           </div>
           <input
@@ -144,13 +152,13 @@ export const ColorRulesPanel: React.FC<ColorRulesPanelProps> = ({ rules, onChang
               saved as a rule that can never match. */}
           {validation && !validation.isValid && (
             <div className="flex items-center gap-1.5 text-[11px] text-rose-500">
-              <TbAlertCircle className="w-3.5 h-3.5 shrink-0" />
+              <CircleAlert className="w-3.5 h-3.5 shrink-0" />
               <span>{validation.errorMessage}</span>
             </div>
           )}
           {validation?.warnings?.map((w) => (
             <div key={w} className="flex items-center gap-1.5 text-[11px] text-amber-500">
-              <TbInfoCircle className="w-3.5 h-3.5 shrink-0" />
+              <Info className="w-3.5 h-3.5 shrink-0" />
               <span>{w}</span>
             </div>
           ))}
@@ -188,7 +196,7 @@ export const ColorRulesPanel: React.FC<ColorRulesPanelProps> = ({ rules, onChang
                     title={rule.enabled ? 'Disable' : 'Enable'}
                     className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
                   >
-                    {rule.enabled ? <TbCheck className="w-3.5 h-3.5" /> : <TbX className="w-3.5 h-3.5" />}
+                    {rule.enabled ? <Check className="w-3.5 h-3.5" /> : <X className="w-3.5 h-3.5" />}
                   </button>
                   <button
                     onClick={() => move(index, -1)}
@@ -196,7 +204,7 @@ export const ColorRulesPanel: React.FC<ColorRulesPanelProps> = ({ rules, onChang
                     title="Move up"
                     className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                   >
-                    <TbArrowUp className="w-3.5 h-3.5" />
+                    <ArrowUp className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => move(index, 1)}
@@ -204,14 +212,14 @@ export const ColorRulesPanel: React.FC<ColorRulesPanelProps> = ({ rules, onChang
                     title="Move down"
                     className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                   >
-                    <TbArrowDown className="w-3.5 h-3.5" />
+                    <ArrowDown className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => setDraft({ id: rule.id, name: rule.name, filter: rule.filter })}
                     title="Edit"
                     className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
                   >
-                    <TbPencil className="w-3.5 h-3.5" />
+                    <Pencil className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => onChange(rules.filter((r) => r.id !== rule.id))}
@@ -219,7 +227,7 @@ export const ColorRulesPanel: React.FC<ColorRulesPanelProps> = ({ rules, onChang
                     title={rules.length === 1 ? 'The chain cannot be emptied' : 'Delete'}
                     className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-rose-500 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                   >
-                    <TbTrash className="w-3.5 h-3.5" />
+                    <Trash className="w-3.5 h-3.5" />
                   </button>
                 </div>
               )}

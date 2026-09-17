@@ -1,11 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { usePacketDetail } from '../../lib/usePacketDetail';
-import { motion } from 'motion/react';
+import type { PacketDetailState } from '../../lib/usePacketDetail';
 import { targetForPacket, type StreamTarget } from '../../services/followStream';
 import { Packet, Capabilities } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
-import type { PacketTheme } from '../../services/packetThemes';
-import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { loadPreference, useDebouncedPreference } from '../../services/preferences';
 import { useMediaQuery } from '../../lib/useMediaQuery';
 import { useSplitRatio } from '../../lib/useSplitRatio';
@@ -15,20 +12,14 @@ import { FrameNumberBox } from './FrameNumberBox';
 import { LayerRail } from './LayerRail';
 import { ByteInspector, HexDumpView } from './HexDumpView';
 import { hasBytes } from '../../services/packetBytes';
-import { HexCopyButtons } from './HexViewer';
+import { HexCopyMenu } from './HexViewer';
 import { ExpertFindings } from './ExpertFindings';
-import { packetAccentStyle } from '../../lib/packetAccent';
 import {
   buildFrameSummary,
   collectRelatedFrames,
   findPacketIndexById,
 } from './packetDetailModel';
-import {
-  TbX,
-  TbChevronLeft,
-  TbChevronRight,
-  TbBinaryTree,
-} from 'react-icons/tb';
+import { ChevronLeft, ChevronRight, ListTree } from 'lucide-react';
 
 const DETAIL_LAYOUT_KEY = 'inwire.packetDetailLayout';
 
@@ -138,37 +129,33 @@ function bytesPerRowFor(paneWidthPx: number): number {
 /** Which shape the meta rail is in right now. */
 type RailMode = 'full' | 'icons' | 'hidden';
 
-interface PacketDetailModalProps {
+interface PacketDetailPaneProps {
   /** The whole capture buffer. Frames are addressed by number against this. */
   packets: Packet[];
-  /** The frame to show. */
-  packetId: number;
+  /**
+   * The frame being read, with its tree and bytes filled in, or null when the
+   * selection is empty.
+   *
+   * Handed in rather than fetched here, which is the one substantive change the
+   * move out of a modal forced. The modal was mounted only while it was open,
+   * so its own `usePacketDetail` was the only one running; a pane sits beside a
+   * packet list that is hidden rather than unmounted, and that list's own panes
+   * are already asking for exactly this frame. Two hooks on one frame would be
+   * two replay requests for one tree.
+   */
+  packet: Packet | null;
+  /** Whether the tree and bytes are here, coming, or gone (`usePacketDetail`). */
+  detailState: PacketDetailState;
   /** Frames the current display filter admits, for the filtered-out notice. */
   filteredPackets: Packet[];
-  onClose: () => void;
   onShowFrame: (frameNumber: number) => void;
   onFollowStream: (target: StreamTarget) => void;
   colorEngine: ColorRulesEngine;
-  /**
-   * The packet palette in force, so this window can label a frame in the colour
-   * the list painted its row. Resolved here rather than passed in as a colour
-   * because the frame changes under this window's own navigation.
-   */
-  packetTheme: PacketTheme;
   permissions: Capabilities;
-  /**
-   * True when another window is open on top of this one.
-   *
-   * Escape and the arrow keys are registered on `window` in the capture phase,
-   * so without this they keep firing underneath whatever is covering them -
-   * pressing Escape to dismiss the stream window would close THIS window
-   * instead and leave the stream floating over the packet list.
-   */
-  obscured?: boolean;
 }
 
 /**
- * A full-window view of one packet.
+ * The Frame Detail view: one packet, in full.
  *
  * Organised by HOW EACH PART IS USED rather than by what it is, which is the
  * distinction the previous layout missed. It stacked six full-width bands -
@@ -178,7 +165,7 @@ interface PacketDetailModalProps {
  * those bands wrapped, so that leftover changed with the window width and with
  * how long the values happened to be.
  *
- * Three regions now, each with a permanent home:
+ * Three regions, each with a permanent home:
  *
  *   - THE META RAIL, at a fixed width down the left. Everything glanced at and
  *     never scrolled: the frame's timing, its own facts, what is wrong with it,
@@ -192,30 +179,54 @@ interface PacketDetailModalProps {
  *   - THE FOOTER, one bar under both, for the byte under the cursor and the
  *     position in the buffer.
  *
- * Chrome is now constant-height at every window size - header and footer only -
- * so the window is the same shape every time it opens.
+ * ## What changed when it stopped being a modal
+ *
+ * It was a `fixed inset-0` backdrop with a 92vh panel inside it, opened by a
+ * double-click on a row and dismissed with Escape or an X. Four things follow
+ * from it being a view instead, and each of them is a deletion:
+ *
+ *  - **No backdrop, no panel, no motion.** The pane fills the view slot the way
+ *    Statistics and the Routing Map do. `modalBackdropMotion` and
+ *    `modalPanelMotion` are gone with it.
+ *  - **No close button, and no Escape of its own.** `App` already returns any
+ *    non-Packets view to Packets on Escape, in the bubble phase, last in the
+ *    chain. This still listens - but only for the one thing that is genuinely
+ *    inside it, the summoned meta rail, which it claims with `stopPropagation`
+ *    so the view does not also change underneath it. That is the layering rule
+ *    every other popover in this app follows.
+ *  - **No `obscured` prop.** Nothing opens on top of a pane.
+ *  - **No frame of its own.** The selection is the app's, so leaving for the
+ *    packet list and coming back lands on the same frame, and stepping with the
+ *    arrows here moves the list's selection too. The modal kept a separate
+ *    `detailPacketId`, which is why closing it used to drop you somewhere else.
+ *
+ * ## The empty state is the way in
+ *
+ * A view with a rail button has to be openable with nothing selected, and the
+ * answer is the frame-number box - which already existed in the meta rail, as
+ * one of several ways to leave a frame. Given nothing to show, the pane puts
+ * that box in the middle of an empty canvas instead, which is the whole of
+ * "go to packet": a frame number, and nothing else to type.
  *
  * Only HexDumpView, ByteInspector and AnomalyBanners are shared with the
  * workspace's bottom panes, because those are content rather than layout.
  */
-export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
+export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
   packets,
-  packetId,
+  packet,
+  detailState,
   filteredPackets,
-  onClose,
   onShowFrame,
   onFollowStream,
   colorEngine,
-  packetTheme,
   permissions,
-  obscured = false,
 }) => {
   /**
-   * This window's own byte highlight.
+   * This pane's own byte highlight.
    *
    * Deliberately not shared with App's `activeByteRange`: hovering a field in
-   * here should light up bytes in this window's dump and leave whatever the
-   * main window was showing untouched underneath.
+   * here should light up bytes in THIS dump and leave the packet list's bottom
+   * panes - which are hidden rather than unmounted - showing whatever they were.
    */
   const [activeByteRange, setActiveByteRange] = useState<[number, number] | null>(null);
   /**
@@ -323,12 +334,13 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
 
   // Lookup by id on demand. Nothing here scans the buffer, which matters
   // because `packets` changes identity on every 100ms flush during capture.
-  const index = useMemo(() => findPacketIndexById(packets, packetId), [packets, packetId]);
-  // Frames in the buffer carry no protocol tree - it is fetched for the one
-  // frame being looked at (docs/decisions/0007). Everything above the tree
-  // renders from the frame itself and is there immediately.
-  const { packet, state: detailState } = usePacketDetail(
-    index === -1 ? null : packets[index], packets,
+  // -1 for no selection and -1 for a frame the buffer has since dropped are the
+  // same answer, and both mean the same thing to everything below: there is no
+  // previous or next frame to step to.
+  const packetId = packet?.id ?? null;
+  const index = useMemo(
+    () => (packetId === null ? -1 : findPacketIndexById(packets, packetId)),
+    [packets, packetId],
   );
 
   const summary = useMemo(() => (packet ? buildFrameSummary(packet) : null), [packet]);
@@ -338,17 +350,6 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
     [packet, colorEngine],
   );
 
-  /**
-   * The colour the packet list painted this frame's row.
-   *
-   * Recomputed as the window navigates, so paging through frames with the arrow
-   * keys retints the window where the protocol changes - which is the same
-   * signal the list gives, restated in a window that has no rows.
-   */
-  const accentColor = useMemo(
-    () => (packet ? colorEngine.getPacketAccent(packet, packetTheme) : null),
-    [packet, colorEngine, packetTheme],
-  );
   // Asks the same sorted-order question the buffer lookup does rather than
   // calling .some(), since the filtered set can also be large.
   const hiddenByFilter = useMemo(
@@ -409,39 +410,51 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
   };
 
   /**
-   * Escape closes and the arrows step, matching the other modals. Registered
-   * in the capture phase so it wins over the app's own window handler
-   * underneath; typing in the frame box is exempt, since the arrows belong to
-   * the caret there.
+   * The arrows step frames, and Escape is claimed only for the summoned rail.
+   *
+   * ## Why Escape is still here at all
+   *
+   * It used to close this window. Nothing closes now - `App` sends any
+   * non-Packets view back to Packets on Escape, in the BUBBLE phase, explicitly
+   * last in the chain. So the only Escape this pane has any business taking is
+   * the one belonging to the thing it has open over itself: the meta rail
+   * summoned across the canvas on a window too narrow to keep it in flow.
+   * Capture phase and `stopPropagation`, which is the same contract the filter
+   * presets dropdown and the geo overlay keep - the innermost open thing gets
+   * the key, and the view does not change out from under it.
+   *
+   * ## Why the arrows do not collide
+   *
+   * `useKeyboardNavigation` binds Up and Down, to move the packet list's
+   * selection. This binds Left and Right. They step the SAME selection, because
+   * the frame shown here is the app's selected frame - so the two handlers
+   * agree rather than needing to be kept apart, which is what the modal's
+   * `detailPacketId` gate existed to do.
    *
    * The handler reads its moving parts through a ref rather than taking them
    * as dependencies. `packets` changes identity on every 100ms flush during
    * capture, so a dependency on it would tear down and re-register this
-   * listener ten times a second for the life of the window.
+   * listener ten times a second for the life of the view.
    */
-  const navRef = useRef({ index, packets, onClose, onShowFrame, obscured, railOverlay });
-  navRef.current = { index, packets, onClose, onShowFrame, obscured, railOverlay };
+  const navRef = useRef({ index, packets, onShowFrame, railOverlay });
+  navRef.current = { index, packets, onShowFrame, railOverlay };
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const nav = navRef.current;
-      // Something is open over this window; the keyboard is not ours.
-      if (nav.obscured) return;
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
       if (e.key === 'Escape') {
+        if (!nav.railOverlay) return;
         e.preventDefault();
-        // The summoned rail is the innermost thing open, so it goes first -
-        // the same courtesy the `obscured` prop does for the stream window.
-        if (nav.railOverlay) {
-          setRailOverlay(false);
-          return;
-        }
-        nav.onClose();
+        e.stopPropagation();
+        setRailOverlay(false);
         return;
       }
       if (typing) return;
       const step = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
       if (step === 0) return;
+      // -1 is "no frame on screen", and there is nothing to step from.
+      if (nav.index === -1) return;
       e.preventDefault();
       const target = nav.index + step;
       if (target < 0 || target >= nav.packets.length) return;
@@ -518,7 +531,7 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
               : detailState === 'unavailable' ? 'not stored' : 'reading…'}
           </span>
         </span>
-        {hasBytes(packet) && <HexCopyButtons packet={packet} />}
+        {hasBytes(packet) && <HexCopyMenu packet={packet} />}
       </div>
 
       {/* Three reasons there may be no dump, and they are different answers.
@@ -555,77 +568,88 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
   ) : null;
 
   return (
-    <motion.div
-      {...modalBackdropMotion}
-      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-    >
-      <motion.div
-        {...modalPanelMotion}
-        className="w-full max-w-[100rem] h-[92vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground overflow-hidden"
-        // Retints the whole window to this frame - the protocol chip, the
-        // layer rail's bars, the field table's active row, the raw-bytes
-        // rule, the selected byte, the divider. See packetAccent.ts.
-        style={packetAccentStyle(accentColor)}
-      >
-        {/* Identity and frame-to-frame navigation. Nothing else - the frame
-            box moved into the rail, where it sits with the other ways of
-            leaving this frame, and where it no longer squeezes the title. */}
-        <div className="px-5 py-3 border-b border-border flex items-center gap-4 shrink-0">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <TbBinaryTree className="w-7 h-7 shrink-0 text-primary" />
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 font-bold text-base">
-                <span className="whitespace-nowrap">Frame {packet ? packet.id : '—'}</span>
-                {packet && (
-                  <span className="text-xs px-2 py-0.5 rounded bg-primary/20 text-primary font-mono whitespace-nowrap">
-                    {packet.protocolLabel ?? packet.protocol}
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-muted-foreground font-mono truncate">
-                {packet ? packet.info : 'No frame loaded'}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex-1" />
-
-          <div className="flex items-center gap-1 shrink-0">
-            <button
-              onClick={() => goToIndex(index - 1)}
-              disabled={!hasPrev}
-              className={`p-1.5 rounded-md transition-colors ${
-                hasPrev ? 'hover:bg-accent text-foreground cursor-pointer' : 'opacity-30 cursor-not-allowed text-muted-foreground'
-              }`}
-              title="Previous frame (←)"
-            >
-              <TbChevronLeft className="w-5 h-5" />
-            </button>
-            <button
-              onClick={() => goToIndex(index + 1)}
-              disabled={!hasNext}
-              className={`p-1.5 rounded-md transition-colors ${
-                hasNext ? 'hover:bg-accent text-foreground cursor-pointer' : 'opacity-30 cursor-not-allowed text-muted-foreground'
-              }`}
-              title="Next frame (→)"
-            >
-              <TbChevronRight className="w-5 h-5" />
-            </button>
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer ml-1"
-              title="Close (Esc)"
-            >
-              <TbX className="w-5 h-5" />
-            </button>
-          </div>
+    // The view slot, the same shape Statistics and the Routing Map fill. No
+    // backdrop and no panel: `bg-card` against the workspace's `--background`
+    // is the pane's only edge, and `<main>`'s own `rounded-tl-xl` draws the
+    // corner it sits in.
+    <section className="flex-1 min-w-0 flex flex-col overflow-hidden bg-card text-card-foreground">
+      {/* Identity and frame-to-frame navigation. Nothing else - the frame box
+          lives in the meta rail, where it sits with the other ways of leaving
+          this frame, and where it does not squeeze the title. There is no close
+          button: Escape returns to Packets, which is what every other view
+          does, and the rail is how you leave for a different one. */}
+      <div className="h-9 shrink-0 px-4 border-b border-border flex items-center gap-4">
+        <div className="flex items-center gap-2 min-w-0">
+          <ListTree className="w-4 h-4 shrink-0 text-primary" />
+          <span className="text-xs font-mono font-bold text-muted-foreground uppercase tracking-tighter shrink-0">
+            Frame
+          </span>
+          <span className="text-xs font-mono font-bold text-primary shrink-0">
+            {packet ? packet.id.toLocaleString() : '—'}
+          </span>
+          {packet && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/20 text-primary font-mono whitespace-nowrap shrink-0">
+              {packet.protocolLabel ?? packet.protocol}
+            </span>
+          )}
+          <span className="text-[11px] text-muted-foreground font-mono truncate min-w-0">
+            {packet ? packet.info : 'No frame selected'}
+          </span>
         </div>
 
-        {!packet || !summary ? (
-          <div className="flex-1 flex items-center justify-center text-muted-foreground font-mono text-xs">
-            Frame {packetId} is no longer in the buffer.
+        <div className="flex-1" />
+
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            onClick={() => goToIndex(index - 1)}
+            disabled={!hasPrev}
+            className={`p-1 rounded transition-colors ${
+              hasPrev ? 'hover:bg-accent text-foreground cursor-pointer' : 'opacity-30 cursor-not-allowed text-muted-foreground'
+            }`}
+            title="Previous frame (←)"
+            aria-label="Previous frame"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => goToIndex(index + 1)}
+            disabled={!hasNext}
+            className={`p-1 rounded transition-colors ${
+              hasNext ? 'hover:bg-accent text-foreground cursor-pointer' : 'opacity-30 cursor-not-allowed text-muted-foreground'
+            }`}
+            title="Next frame (→)"
+            aria-label="Next frame"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* **The empty state IS the go-to-packet feature.**
+
+          A view with a rail button can be opened with nothing selected, so this
+          is not an edge case to apologise for - it is the view's front door, and
+          the only thing it asks for is a frame number. `FrameNumberBox` is the
+          same control the meta rail carries, and it reports its three refusals -
+          not a number, out of range, not in the buffer - inline under the input
+          rather than as a band that pushes this whole block down and back up
+          again while somebody is typing. */}
+      {!packet || !summary ? (
+        <div className="flex-1 flex items-center justify-center p-8">
+          <div className="flex flex-col items-center gap-4 text-center">
+            <ListTree className="w-8 h-8 text-muted-foreground/60" />
+            <div className="flex flex-col items-center gap-1">
+              <span className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
+                No frame selected
+              </span>
+              <span className="text-[11px] text-muted-foreground/70">
+                Go to a frame by number, or pick a row in the packet list.
+              </span>
+            </div>
+            {frameBox}
           </div>
-        ) : (
+        </div>
+      ) : (
           <>
             {/* Too narrow for a rail of any kind. The facts fold into one line
                 that opens into the same grouped list, rather than being
@@ -637,7 +661,7 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
                   className="shrink-0 flex items-center gap-2 px-5 py-1.5 border-b border-border bg-secondary/30 text-[10px] font-mono text-muted-foreground hover:bg-accent/40 cursor-pointer"
                   aria-expanded={narrowFactsOpen}
                 >
-                  <TbChevronRight
+                  <ChevronRight
                     className={`w-3 h-3 shrink-0 transition-transform ${narrowFactsOpen ? 'rotate-90' : ''}`}
                   />
                   <span className="truncate">
@@ -775,16 +799,27 @@ export const PacketDetailModal: React.FC<PacketDetailModalProps> = ({
               </div>
             </div>
 
-            {/* One status bar under the whole window. */}
+            {/* One status bar under the whole pane, and it is this pane's own.
+                There was briefly an app-wide `StatusBar` spanning the window
+                under the rail; it is deleted, and the byte inspector lives in
+                the pane that owns the bytes - here, and in `HexViewer`'s footer
+                for the Packets view. Each reads its own dump's hover, which is
+                the point: a bar spanning the window is a claim about the
+                window. */}
             <div className="px-5 py-1.5 border-t border-border bg-secondary/50 text-[10px] font-mono text-muted-foreground flex items-center justify-between shrink-0">
               <ByteInspector packet={packet} hoveredByteIndex={hoveredByteIndex} />
               <span className="uppercase tracking-wider whitespace-nowrap">
-                Frame {index + 1} of {packets.length.toLocaleString()}
+                {/* A frame the buffer has since dropped is still readable - the
+                    store gives its bytes back - but it has no position in the
+                    buffer any more, and `index + 1` would print "Frame 0 of
+                    178,200" rather than saying so. */}
+                {index === -1
+                  ? 'No longer in the buffer'
+                  : `Frame ${(index + 1).toLocaleString()} of ${packets.length.toLocaleString()}`}
               </span>
             </div>
           </>
         )}
-      </motion.div>
-    </motion.div>
+    </section>
   );
 };

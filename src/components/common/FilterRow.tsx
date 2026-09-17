@@ -1,5 +1,5 @@
 import React from 'react';
-import { TbAlertTriangle } from 'react-icons/tb';
+import { TriangleAlert } from 'lucide-react';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
 
@@ -10,28 +10,31 @@ import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealt
  * controls went into the rail, and **the schedule picker followed them there**:
  * it decides when a capture starts and when it stops, which makes it a capture
  * control rather than something that belongs above the packet list. What is
- * left here is the display filter, the capturing readout, the restore progress,
- * and the banner.
+ * left here is the display filter, the restore progress, and the banner.
  *
  * It is NOT an accent bar. The header it replaces was painted in a saturated
  * `--chrome` and everything in it took `--chrome-foreground`; this row sits on
  * the app's own `--background` beside the packet list, so its text is ordinary
  * foreground. Those tokens no longer exist - see the Colourful deletion.
  *
- * ## Two things that never drop under pressure
+ * ## The capturing readout is gone, and it was a third copy
  *
- * The capturing prefix and the banner are state, not decoration. When the row is
- * short of space the restore readout goes first, because it is transient. Those
- * are `FilterBar`'s and this component's own; the two below stay put.
+ * A `Capturing on Ethernet 2` prefix used to sit at the end of this row. It
+ * said nothing that was not already on screen twice: the rail's glyph says a
+ * capture is running, and `windowTitleFor` puts the adapter in the title row
+ * as `Ethernet 2 - capturing - Inwire`, one strip above this one. That is the
+ * rule the hamburger menu was deleted under - nothing that duplicates a
+ * visible control survives - turned on this row. `captureAdapter` stays in
+ * `App.tsx` because the title still needs it; nothing here does.
+ *
+ * ## What never drops under pressure
+ *
+ * The banner is state, not decoration. When the row is short of space the
+ * restore readout goes first, because it is transient.
  */
 export interface FilterRowProps {
   /** `<FilterBar/>`, passed in so this stays a layout component. */
   filterSlot: React.ReactNode;
-
-  isCapturing: boolean;
-  /** The adapter's short label, for the capturing prefix. Null if none. */
-  captureAdapter: string | null;
-
 
   restoreProgress?: { done: number; total: number } | null;
 
@@ -43,8 +46,7 @@ export interface FilterRowProps {
 }
 
 export const FilterRow: React.FC<FilterRowProps> = ({
-  filterSlot, isCapturing, captureAdapter,
-  restoreProgress, agentHealth, agentLinkEnabled, onOpenDriverInfo,
+  filterSlot, restoreProgress, agentHealth, agentLinkEnabled, onOpenDriverInfo,
 }) => {
   /**
    * The banner appears only when capture cannot start, and says what to do.
@@ -67,7 +69,7 @@ export const FilterRow: React.FC<FilterRowProps> = ({
           className="flex items-center gap-2 px-3 py-1.5 border-b border-warning/30
             bg-warning/10 text-[11px] leading-snug"
         >
-          <TbAlertTriangle className="w-3.5 h-3.5 shrink-0 text-warning" />
+          <TriangleAlert className="w-3.5 h-3.5 shrink-0 text-warning" />
           <span className="font-semibold text-foreground">{agentSilentLabel(agentHealth)}</span>
           <span className="min-w-0 truncate text-muted-foreground">
             {'summary' in agentHealth ? agentHealth.summary : 'The capture agent is not answering.'}
@@ -89,23 +91,6 @@ export const FilterRow: React.FC<FilterRowProps> = ({
       <div className="h-11 px-3 flex items-center gap-3">
         {/* The filter takes the row. Its own `flex-1` does the work. */}
         {filterSlot}
-
-        {/* Capturing, and on what. The rail's glyph says that capture is
-            running; this says which adapter, which is the half an analyst with
-            four windows open actually needs. No animation on the dot: a pulsing
-            light beside a list that is already visibly filling is saying the same
-            thing twice, and it is the kind of motion that becomes irritating in
-            the sixth hour. */}
-        {isCapturing && (
-          <span
-            className="shrink-0 flex items-center gap-1.5 text-[10px] font-mono font-bold
-              uppercase tracking-wider text-success whitespace-nowrap"
-            title={captureAdapter === null ? 'Capturing' : `Capturing on ${captureAdapter}`}
-          >
-            <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-success" />
-            <span>{captureAdapter === null ? 'Capturing' : `Capturing on ${captureAdapter}`}</span>
-          </span>
-        )}
 
         {restoreProgress && (
           <span

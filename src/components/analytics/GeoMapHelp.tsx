@@ -1,5 +1,5 @@
 import React from 'react';
-import { TbHelp } from 'react-icons/tb';
+import { CircleQuestionMark } from 'lucide-react';
 import { Popover, PopoverArrow, PopoverContent, PopoverTrigger } from '../ui/popover';
 
 /**
@@ -16,8 +16,10 @@ import { Popover, PopoverArrow, PopoverContent, PopoverTrigger } from '../ui/pop
  * The credit is still here, at the bottom, because it is a licence condition
  * rather than a nicety - OpenStreetMap's terms require it and OpenFreeMap
  * serves these tiles for nothing. Shortened to the two names that have to
- * appear: a full copyright line in a 256px card was three wrapped lines of
- * legal text sitting where the map should be.
+ * appear: the full copyright line was three wrapped lines of legal text where
+ * the map should be, which it had to be short enough to survive at the 256px
+ * card size this panel once also had to fit. There is one map size now and the
+ * short form is still the right one.
  */
 
 const GESTURES: [string, string][] = [
@@ -42,7 +44,7 @@ export const GeoMapHelp: React.FC = () => (
           + 'transition-colors hover:bg-accent hover:text-foreground active:scale-95 cursor-pointer'
         }
       >
-        <TbHelp className="h-4 w-4" />
+        <CircleQuestionMark className="h-4 w-4" />
       </button>
     </PopoverTrigger>
     <PopoverContent side="bottom" align="end" className="w-72 p-3.5">

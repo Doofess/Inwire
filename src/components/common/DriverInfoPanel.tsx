@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AgentHealth } from '../../services/agentHealth';
-import { TbTrash, TbPlugConnected, TbPlugConnectedX, TbRefresh } from 'react-icons/tb';
+import { Trash, Plug, Unplug, RefreshCw } from 'lucide-react';
 import type { AgentLogEntry, CaptureDropStats } from '../../services/agentProtocol';
 import { describeLink, type LinkChange, type LinkContext } from '../../services/linkContext';
 
@@ -389,7 +389,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
             title={agentLinkEnabled ? 'Already connected' : 'Reconnect to the driver'}
             className={DRIVER_ACTION_BUTTON_CLASS}
           >
-            <TbPlugConnected className="w-3.5 h-3.5" />
+            <Plug className="w-3.5 h-3.5" />
             <span>Connect</span>
           </button>
 
@@ -403,7 +403,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
             }
             className={DRIVER_ACTION_BUTTON_CLASS}
           >
-            <TbPlugConnectedX className="w-3.5 h-3.5" />
+            <Unplug className="w-3.5 h-3.5" />
             <span>Disconnect</span>
           </button>
 
@@ -417,7 +417,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
             }
             className={DRIVER_ACTION_BUTTON_CLASS}
           >
-            <TbRefresh className="w-3.5 h-3.5" />
+            <RefreshCw className="w-3.5 h-3.5" />
             <span>Restart Driver</span>
           </button>
         </div>
@@ -447,7 +447,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
             onClick={handleClear}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
           >
-            <TbTrash className="w-3.5 h-3.5" />
+            <Trash className="w-3.5 h-3.5" />
             Clear
           </button>
         </div>

@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { TbAlertTriangle, TbFileX, TbRefresh, TbX } from 'react-icons/tb';
+import { TriangleAlert, FileX, RefreshCw, X } from 'lucide-react';
 
 import { ImportFailure } from '../../services/exportSchema';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
@@ -83,7 +83,7 @@ export const ImportErrorDialog: React.FC<ImportErrorDialogProps> = ({
       >
         <div className="px-5 py-3.5 border-b border-border flex items-start justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
-            <TbAlertTriangle className="w-6 h-6 shrink-0 text-amber-500" />
+            <TriangleAlert className="w-6 h-6 shrink-0 text-amber-500" />
             <div className="min-w-0">
               <div id="import-error-title" className="font-bold text-base">
                 {headlineFor(failure)}
@@ -98,7 +98,7 @@ export const ImportErrorDialog: React.FC<ImportErrorDialogProps> = ({
             className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground shrink-0"
             aria-label="Close"
           >
-            <TbX className="w-5 h-5" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
@@ -157,7 +157,7 @@ export const ImportErrorDialog: React.FC<ImportErrorDialogProps> = ({
 
           {failure.kind === 'no-table' && (
             <div className="rounded-lg border border-border bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed flex gap-2">
-              <TbFileX className="w-4 h-4 shrink-0 mt-0.5" />
+              <FileX className="w-4 h-4 shrink-0 mt-0.5" />
               <span>
                 PDF import reads only the reports Inwire itself generates. Any other PDF has no reliable
                 table structure to read, and guessing at one would produce packets that were never on a wire.
@@ -177,7 +177,7 @@ export const ImportErrorDialog: React.FC<ImportErrorDialogProps> = ({
             onClick={onRetry}
             className="px-4 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 font-medium transition-colors text-xs flex items-center gap-1.5"
           >
-            <TbRefresh className="w-3.5 h-3.5" />
+            <RefreshCw className="w-3.5 h-3.5" />
             Choose another file
           </button>
         </div>

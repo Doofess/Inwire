@@ -1,10 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import {
-  TbAlertCircle,
-  TbX,
-  TbBookmark,
-  TbInfoCircle,
-} from 'react-icons/tb';
+import { CircleAlert, X, Bookmark, Info } from 'lucide-react';
 import { FilterEngine, FilterValidationResult } from '../../services/filterEngine';
 import { allPresets } from '../../services/filterPresets';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
@@ -12,17 +7,23 @@ import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
 /**
  * Which surface this bar is standing on.
  *
- * A named variant rather than a `compact` boolean, matching `WidgetVariant` in
- * `dashboardWidgets.tsx`: the two differ in more than size, and a boolean
- * called "compact" would be answering the wrong question by the second thing
- * it had to control.
+ * A named variant rather than a `compact` boolean: the two differ in more than
+ * size, and a boolean called "compact" would be answering the wrong question by
+ * the second thing it had to control.
  *
- * `header` is the app header - the full bar, with the packet-search field and
- * the PACKETS count beside it. `compact` is inside a dialog: the same filter
- * field, the same presets, the same validation, and nothing else. The search
- * field is dropped because it filters what is *displayed* in the packet list,
- * which an export knows nothing about, and the count is dropped because the
- * export panel states its own - "412 of 5,231" against a different total.
+ * `header` is the filter row above the packet list - the full bar, and the name
+ * is older than the surface, from when this sat in a 64px app header. `compact`
+ * is inside a dialog: the same filter field, the same presets, the same
+ * validation, and nothing else.
+ *
+ * What `compact` drops is smaller than it was, because the full bar has lost
+ * most of what it had to drop. It carried a packet-search field and a PACKETS
+ * count; the search is deleted outright and the count is the title row's
+ * readout now, so the two variants differ mainly in padding and in the bookmark
+ * button. The distinction is kept because the reason it existed still holds -
+ * a dialog must not edit preset state it does not own (`onSaveCurrentFilter` is
+ * simply omitted), and the export panel states its own totals, "412 of 5,231"
+ * against a different denominator entirely.
  */
 export type FilterBarVariant = 'header' | 'compact';
 
@@ -31,14 +32,6 @@ interface FilterBarProps {
   onFilterChange: (filter: string) => void;
   onApplyFilter: (newFilter?: string) => void;
   variant?: FilterBarVariant;
-  /**
-   * Both counts are over the CAPTURE, not the RAM window.
-   *
-   * The same numbers on a capture that fits in memory, and different ones the
-   * moment it does not - which is the whole point: "412 / 5,231" while four
-   * million frames sit on disk unexamined is an answer to a question nobody
-   * asked. `App.tsx` derives them; see `matchesBeforeWindow`.
-   */
   /**
    * The preset library, owned by App.tsx and edited in
    * Settings > Display Filters. Read-only here apart from the bookmark button,
@@ -167,8 +160,10 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   // Escape closes the presets list from anywhere, which the input's own keydown
   // handler cannot do: the list is opened from a button, so the field often does
   // not have focus while it is up. Registered only while open, and stopped from
-  // propagating so one Escape dismisses one thing - without that, the same key
-  // would also reach the packet detail window's window-level handler underneath.
+  // propagating so one Escape dismisses one thing. That is the house rule every
+  // popover in the app keeps - the innermost open thing takes the key, and the
+  // view does not change out from under it - and it is why this is a capture-
+  // phase listener: App's view-level Escape is deliberately last in the chain.
   useEffect(() => {
     if (!showPresetsDropdown) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -275,7 +270,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   className={filterActionClass}
                   title="Clear filter"
                 >
-                  <TbX className="w-3 h-3" />
+                  <X className="w-3 h-3" />
                 </button>
               )}
 
@@ -285,7 +280,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   className={filterActionClass}
                   title="Save current filter expression"
                 >
-                  <TbBookmark className="w-3 h-3" />
+                  <Bookmark className="w-3 h-3" />
                 </button>
               )}
             </div>
@@ -365,7 +360,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
           {/* Syntax Error Notice */}
           {!validation.isValid && validation.errorMessage && (
             <div className="absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 text-[11px] border border-rose-300 dark:border-rose-800 shadow-lg">
-              <TbAlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              <CircleAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
               <span>{validation.errorMessage}</span>
             </div>
           )}
@@ -375,28 +370,31 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               is not an error: the filter is correct, the dissector is missing. */}
           {validation.isValid && validation.warnings && !showSuggestions && (
             <div className="absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 text-[11px] border border-amber-300 dark:border-amber-800 shadow-lg">
-              <TbInfoCircle className="w-3.5 h-3.5 shrink-0" />
+              <Info className="w-3.5 h-3.5 shrink-0" />
               <span>{validation.warnings[0]}</span>
             </div>
           )}
         </div>
 
         {/* Find packet used to be here - a magnifier that grew a 224px input.
-            It is a rail control now, in the bottom group beside Export/Import
-            and Settings, because it is an action rather than part of the filter
-            expression. Keeping it adjacent to the display filter implied a
-            relationship the two do not have: the filter is compiled and
-            answered over the whole capture on disk, and the search is a
-            substring match over the rows already in hand. */}
+            It went to the rail, and has since been **deleted outright**: it was
+            a substring match over the rows already in hand, which is the weaker
+            of two overlapping answers, because the display filter beside it is
+            compiled and answered over the whole capture on disk. Keeping it
+            adjacent to the filter implied a relationship the two never had. See
+            `ActivityRail` for the full argument, and the Frame Detail view's
+            go-to-frame box for what replaced it - which is a different control,
+            not a smaller search. */}
 
-        {/* The packet counter used to be here, and it is a dock widget now -
-            `counts`, which subscribes to `services/packetCounts.ts` for itself.
+        {/* The packet counter used to be here, and it is the title row's
+            readout now - `PacketCountsReadout`, which subscribes to
+            `services/packetCounts.ts` for itself rather than taking props.
 
             It left for the same reason find-packet did: the row above the list
-            had become the place everything went that had nowhere else to be. A
-            count is something you glance at while reading, which is what a dock
-            card is for, and having it here meant it was always on screen at
-            12px whether or not anybody was looking at it. */}
+            had become the place everything went that had nowhere else to be.
+            Here it was on screen at 12px whether or not anybody was looking at
+            it, and only while the Packets view was up - this row is gone in
+            every other view. The title row is on screen in all five. */}
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import React from 'react';
-import { TbChevronLeft, TbChevronRight } from 'react-icons/tb';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 /**
  * A month grid and a time field, drawn by this app rather than by the browser.
@@ -98,7 +98,7 @@ export const DateTimeCalendar: React.FC<DateTimeCalendarProps> = ({
           className="p-1 rounded-sm text-muted-foreground hover:text-foreground cursor-pointer"
           onClick={() => shiftMonth(-1)}
         >
-          <TbChevronLeft className="w-3.5 h-3.5" />
+          <ChevronLeft className="w-3.5 h-3.5" />
         </button>
         <span className="text-[11px] font-bold tracking-wide">
           {MONTH_LABELS[view.month]} {view.year}
@@ -109,7 +109,7 @@ export const DateTimeCalendar: React.FC<DateTimeCalendarProps> = ({
           className="p-1 rounded-sm text-muted-foreground hover:text-foreground cursor-pointer"
           onClick={() => shiftMonth(1)}
         >
-          <TbChevronRight className="w-3.5 h-3.5" />
+          <ChevronRight className="w-3.5 h-3.5" />
         </button>
       </div>
 

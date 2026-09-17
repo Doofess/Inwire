@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { TbChevronRight, TbCircle } from "react-icons/tb"
+import { ChevronRight, Circle } from "lucide-react"
 import { ContextMenu as ContextMenuPrimitive } from "radix-ui"
 
 import { cn } from "@/src/lib/utils"
@@ -127,7 +127,7 @@ function ContextMenuSubTrigger({
       {...props}
     >
       {children}
-      <TbChevronRight className="ml-auto size-3.5" />
+      <ChevronRight className="ml-auto size-3.5" />
     </ContextMenuPrimitive.SubTrigger>
   )
 }
@@ -177,7 +177,7 @@ function ContextMenuRadioItem({
         <ContextMenuPrimitive.ItemIndicator>
           {/* Mounts only once checked, so it plays on select rather than on
               open. Keyframes live in index.css. */}
-          <TbCircle className="size-2 fill-current nv-indicator" />
+          <Circle className="size-2 fill-current nv-indicator" />
         </ContextMenuPrimitive.ItemIndicator>
       </span>
       {children}

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { Packet } from '../../types/packet';
 import { CATEGORY_LABELS, categoryOfPacket, isFaultCategory } from '../../services/expertInfo';
-import { TbAlertTriangle } from 'react-icons/tb';
+import { TriangleAlert } from 'lucide-react';
 import { ZoomControls } from './ZoomControls';
 import { useElementSize } from '../../lib/useElementSize';
 import { prefersReducedMotion } from '../../lib/motion';
@@ -612,7 +612,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
             )}
             {hoveredBucket.hasAnomaly && (
               <div className="text-danger-muted font-bold text-[10px] mt-0.5 flex items-center gap-1">
-                <TbAlertTriangle className="w-3 h-3 text-danger" />
+                <TriangleAlert className="w-3 h-3 text-danger" />
                 {hoveredBucket.anomalyTitle}
               </div>
             )}

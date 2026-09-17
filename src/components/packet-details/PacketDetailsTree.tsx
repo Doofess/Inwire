@@ -1,20 +1,12 @@
 import React, { useState } from 'react';
 import { Packet } from '../../types/packet';
-import { TbStack2 } from 'react-icons/tb';
+import { Layers } from 'lucide-react';
 import { ProtocolTreeView } from './ProtocolTreeView';
 import { ExpertFindings } from './ExpertFindings';
-import { packetAccentStyle } from '../../lib/packetAccent';
+import { PaneHeader } from '../common/PaneHeader';
 
 interface PacketDetailsTreeProps {
   packet: Packet | null;
-  /**
-   * The colour the packet list painted this frame's row, at text strength.
-   *
-   * Retints this whole pane rather than any one element - see packetAccent.ts.
-   * Optional, so a caller with no packet theme to hand gets the app's own
-   * accent rather than an uncoloured pane.
-   */
-  accentColor?: string | null;
   onHoverByteRange: (range: [number, number] | null) => void;
   activeByteRange: [number, number] | null;
   /** Follows a cross-packet reference such as `[Response In: 11]`. */
@@ -37,7 +29,6 @@ interface PacketDetailsTreeProps {
  */
 export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
   packet,
-  accentColor,
   onHoverByteRange,
   activeByteRange,
   onSelectFrame,
@@ -60,7 +51,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
     return (
       <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
         <div className="flex flex-col items-center gap-1.5">
-          <TbStack2 className="w-6 h-6 text-muted-foreground/70 mb-1" />
+          <Layers className="w-6 h-6 text-muted-foreground/70 mb-1" />
           <span className="uppercase tracking-wider">No packet selected</span>
           <span className="text-[10px] text-muted-foreground/70">
             Select any packet from the list above for deep protocol dissection
@@ -71,21 +62,30 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
   }
 
   return (
-    // Everything below that was drawn in the app accent is now drawn in this
-    // frame's colour, down to the tree's layer headings and its
-    // cross-reference links.
-    <div className="h-full flex flex-col overflow-hidden select-none" style={packetAccentStyle(accentColor)}>
-      <div className="px-4 py-2 border-b flex items-center justify-between transition-colors bg-card border-border text-card-foreground shadow-sm">
-        <div className="flex items-center gap-2 text-xs font-mono font-bold min-w-0">
-          <span className="text-muted-foreground uppercase tracking-tighter shrink-0">Packet Inspection</span>
-          <span className="text-primary shrink-0">#Frame {packet.id} ({packet.length} bytes)</span>
-        </div>
+    // Every accent in here is the APP's `--primary`, the same on every frame.
+    //
+    // It was the matched colour rule's hue for a while, pushed down as a
+    // `--primary` override on this element so the tree's layer headings, the
+    // cross-reference links, the protocol chip, the layer rail's bars and the
+    // hex dump's selected byte all took the colour of the row the frame was
+    // selected from. That is reverted: the pane is one surface and the app has
+    // one accent, and a heading that changes hue with the frame under the
+    // cursor makes the accent mean "this frame" in a pane that is only ever
+    // showing one frame.
+    //
+    // The row colouring itself is untouched - the packet list still paints by
+    // rule, which is where that information belongs.
+    <div className="h-full flex flex-col overflow-hidden select-none">
+      <PaneHeader
+        title="Packet Inspection"
+        detail={`#Frame ${packet.id} (${packet.length} bytes)`}
+      >
         {hoveredField && (
-          <span className="text-[11px] font-mono text-muted-foreground truncate pl-3" title={hoveredField}>
+          <span className="text-[11px] font-mono text-muted-foreground truncate" title={hoveredField}>
             {hoveredField}
           </span>
         )}
-      </div>
+      </PaneHeader>
 
       <ExpertFindings packet={packet} className="p-3 pb-0" />
 

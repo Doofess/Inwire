@@ -25,8 +25,8 @@ import { windowControl } from '../../lib/windowChrome';
  *
  * ## Why the glyphs are paths and not an icon font
  *
- * `react-icons/tb` has no window-control set, and the nearest shapes (`TbMinus`,
- * `TbSquare`, `TbX`) are drawn on a 24px grid with a 2px stroke - at 10px they
+ * `lucide-react` has no window-control set, and the nearest shapes (`Minus`,
+ * `Square`, `X`) are drawn on a 24px grid with a 2px stroke - at 10px they
  * come out heavy and slightly off-centre against each other. These are three
  * one-line paths on a 10px grid, which is the whole of what a caption button is.
  */

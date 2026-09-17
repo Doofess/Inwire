@@ -10,12 +10,12 @@ import {
   GeoLocation,
   isLocatable,
 } from "../../services/geoIpService";
-import { TbMapPinFilled, TbMapPinOff } from "react-icons/tb";
+import { MapPin, MapPinOff } from "lucide-react";
 import { useThemeToken } from '../../lib/themeColor';
 import { protocolColor } from '../../services/protocolColors';
 import { greatCircleArc, splitAtAntimeridian } from '../../lib/greatCircle';
 import { ArcLayer, type Arc } from './arcLayer';
-import { addPacketToPairs, aggregateRoutes, type AddressPair, type Route } from './geoRoutes';
+import { addPacketToPairs, aggregateRoutes, type AddressPair, type Route, type GeoPlace } from './geoRoutes';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
 import {
   applySkin,
@@ -30,7 +30,6 @@ import {
 import { probeRenderTier, TIER_SETTINGS } from './renderTier';
 import { PinLayer, type Pin } from './pinLayer';
 import { themePalette } from '../../services/themePalettes';
-import { GeoLocationCounter, type GeoPlace } from './GeoLocationCounter';
 import { GeoMapHelp } from './GeoMapHelp';
 import { geoSession, onGeoSessionReset } from './geoSession';
 import { prefersReducedMotion } from '../../lib/motion';
@@ -38,14 +37,25 @@ import { nameResolutionStore } from '../../services/interfacePrefs';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
 import {
   arcProtocolColorStore,
-  mapProjectionStore,
   mapSkinStore,
-  type MapProjectionMode,
   type MapSkin,
 } from '../../services/mapPrefs';
-import type { WidgetVariant } from './dashboardWidgets';
+/**
+ * **There was a `GeoMapVariant` here, and there is one size.**
+ *
+ * It was `WidgetVariant`, from the widget registry, back when this was a dock
+ * widget with a shared overlay for its full size; it outlived the registry
+ * because the two sizes were about THIS component - `card` decided whether a
+ * marker opened a popup or a popover, and whether the places list, the help
+ * card and the zoom buttons appeared at all.
+ *
+ * `card` was the map's pane in the Packets view's bottom row, and that pane is
+ * deleted. What the prop is worth keeping a note of is what it was ARBITRATING:
+ * every one of those decisions was "is there room for this?", and with one
+ * surface the answer is yes. A second size arriving later is a reason to bring
+ * the prop back, not a reason to keep a two-valued union with one value.
+ */
 import { ZoomControls } from './ZoomControls';
-import { ProjectionSwitcher } from './ProjectionSwitcher';
 
 /**
  * Where maplibre's tile worker actually is.
@@ -180,25 +190,23 @@ const STYLE_WAIT_RETRY_MS = 50;
 // How many points to sample along each great circle. Enough that the curve is
 // smooth at continental scale without turning sixty routes into thousands of
 // coordinates the source has to re-serialise on every sync.
-/**
- * The camera pen, and why it only applies to one projection.
+/*
+ * **`MERCATOR_BOUNDS` was here and went with the flat map.** It penned the flat
+ * projection inside +/-85 latitude (where Web Mercator ends - the poles are at
+ * infinity in it) and +/-179.9 longitude.
  *
- * +/-85, not +/-90, because that is where Web Mercator ends - the poles sit at
- * infinity in this projection.
+ * That second number is the one worth keeping written down, because it is a
+ * live maplibre-gl bug rather than a fact about projections: a longitude range
+ * spanning the full 360 degrees crashes maplibre-gl 6.5.0 outright with
+ * "Cannot read properties of null (reading '0')" out of
+ * `Transform._calcMatrices` during the first resize, taking the whole React
+ * tree with it. Verified by bisection - the throw depends only on the span
+ * reaching 360. Anything that sets `maxBounds` here again has to know that.
  *
- * +/-179.9, not +/-180, because a longitude range spanning the full 360 degrees
- * crashes maplibre-gl 6.5.0 outright: "Cannot read properties of null
- * (reading '0')" out of Transform._calcMatrices during the first resize, which
- * takes the whole React tree down with it. Verified by bisection - the throw
- * depends only on the longitude span reaching 360.
- *
- * A globe has no such extent to be penned inside and must be free to spin all
- * the way round, so it runs with no bounds at all; see applyProjectionMode.
+ * The globe never had an extent: it must be free to spin all the way round, so
+ * `applyProjectionMode` clears bounds and never sets them.
  */
-const MERCATOR_BOUNDS: [[number, number], [number, number]] = [
-  [-179.9, -85],
-  [179.9, 85],
-];
+
 
 /*
  * Far-side occlusion used to be MapLibre's own `opacityWhenCovered`, set to 0
@@ -211,9 +219,6 @@ const MERCATOR_BOUNDS: [[number, number], [number, number]] = [
 
 /** Globe: close enough that the planet fills the frame rather than floating in it. */
 const GLOBE_MIN_ZOOM = 1.9;
-
-/** Flat: pulled in from the old 0.6, but nothing like as far as the globe. */
-const MERCATOR_MIN_ZOOM = 1.1;
 
 /**
  * Degrees of bearing per pixel dragged, matching MapLibre's own feel.
@@ -240,23 +245,33 @@ const ARC_STEPS = 48;
 const ARC_CURVATURE = 0.5;
 
 /**
- * Puts the map into one projection or the other.
+ * Puts the map into the globe.
  *
- * Written as a plain function over a map instance rather than an effect body,
- * because it has two callers that must not drift: the mode effect below, and
- * map creation, where the same settings have to be applied to a brand new
- * instance.
+ * **There was a flat projection and it is gone.** `mapProjectionStore` offered
+ * `mercator` or `globe`, with a switcher in the zoom stack; this function
+ * branched on it, and half of what it did was undoing the other half - clearing
+ * `maxBounds` on the way into globe and restoring them on the way out, swapping
+ * the zoom anchor between centre and pointer, and carrying two different
+ * minimum zooms because the two projections fail differently at the far end.
  *
- * `maxBounds` is the load-bearing part. It exists to stop the flat map being
- * dragged off into empty space (there are no world copies to pan into), but a
- * bounded globe cannot be rotated past its own edge - so entering globe clears
- * it and returning to flat puts it back. Clearing it is also the reason the
- * crash documented on MERCATOR_BOUNDS has to be re-checked in globe: this is
- * the code path that removes the workaround.
+ * The globe was always the default and always the better answer for what this
+ * map draws: a sphere has no edge for a route to be cut in half by, and no
+ * Mercator distortion making a northern hop look like a continental crossing.
+ * The flat map's own justification was the whole world at once, which the globe
+ * gives at `GLOBE_MIN_ZOOM` anyway.
+ *
+ * **What has NOT been removed is Mercator arithmetic**, and the distinction
+ * matters before somebody deletes more: `arcLayer.ts` and `pinLayer.ts` work in
+ * Web Mercator coordinates because that is the space MapLibre's shaders use,
+ * and the globe itself crossfades into a flat projection at high zoom. Those
+ * are MapLibre's internals, not a user-facing mode.
+ *
+ * Still a plain function over a map instance rather than an effect body,
+ * because it has two callers that must not drift: the effect below, and map
+ * creation, where the same settings have to reach a brand new instance.
  */
 function applyProjectionMode(
   map: maplibregl.Map,
-  mode: MapProjectionMode,
   styleReady: boolean,
 ): void {
   // Where a zoom is anchored.
@@ -267,25 +282,20 @@ function applyProjectionMode(
   // sitting in a corner of the frame with empty space around it. On a sphere
   // the thing being zoomed IS the subject, so the zoom is anchored to the
   // centre and the globe stays put.
-  //
-  // Restored to the default in mercator rather than left set, since the two
-  // projections genuinely want different behaviour here.
-  const zoomAnchor = mode === 'globe' ? { around: 'center' as const } : undefined;
+  const zoomAnchor = { around: 'center' as const };
   map.scrollZoom.enable(zoomAnchor);
   map.touchZoomRotate.enable(zoomAnchor);
 
-  // How far back the camera may pull, per projection.
-  //
-  // These are floors on zoom, so a HIGHER number means less zooming out. The
-  // two projections fail differently at the far end and so need different
-  // limits: a globe recedes into a small ball adrift in empty space, which is
-  // both useless and unflattering, while a flat map merely starts repeating
-  // its own margins. The globe is held much closer for that reason.
-  map.setMinZoom(mode === 'globe' ? GLOBE_MIN_ZOOM : MERCATOR_MIN_ZOOM);
-  // Bounds are cleared BEFORE projecting and restored AFTER, so the camera is
-  // never penned inside an extent that does not apply to the projection it is
-  // currently in.
-  if (mode === 'globe') map.setMaxBounds(null);
+  // A floor on zoom, so a HIGHER number means less zooming out. A globe pulled
+  // too far back recedes into a small ball adrift in empty space, which is both
+  // useless and unflattering.
+  map.setMinZoom(GLOBE_MIN_ZOOM);
+  // Always cleared, never set. A bounded globe cannot be rotated past its own
+  // edge, and the extent this used to restore belonged to the flat map - which
+  // needed it because there are no world copies to pan into. Kept as an
+  // explicit call rather than dropped: `setStyle` on a theme change does not
+  // reset bounds, so a stale extent from any other source would survive.
+  map.setMaxBounds(null);
 
   // `setProjection` is style state and throws "Style is not done loading"
   // outright if the style is not ready - which, on a freshly constructed map,
@@ -305,14 +315,7 @@ function applyProjectionMode(
   //
   // Skipping is safe rather than lossy: `style.load` calls this again, and has
   // to anyway, since setStyle resets the projection on every theme change.
-  if (styleReady) map.setProjection({ type: mode });
-
-  if (mode === 'mercator') {
-    map.setMaxBounds(MERCATOR_BOUNDS);
-    // Pitch is kept on in both modes, but a flat map tilted to 85 degrees at
-    // low zoom is mostly horizon. Ease it back rather than forbidding it.
-    if (map.getPitch() > 60) map.setPitch(60);
-  }
+  if (styleReady) map.setProjection({ type: 'globe' });
 }
 
 /**
@@ -420,29 +423,16 @@ interface GeoMapProps {
   /** See TrafficTimelineChart: forces a redraw when the theme changes, which
    *  isDark cannot signal between two dark themes. */
   themeKey?: string;
-  /**
-   * How much room this has been given.
-   *
-   * `card` is the dashboard column: a 256px panel with an expand button.
-   *
-   * `full` means a full-screen frame - which is now always a `WidgetOverlay`,
-   * whether this component opened it from its own expand button or the icon
-   * rail opened it from outside. Both render exactly this branch, which is what
-   * makes the two doors lead to the same window.
-   */
-  variant?: WidgetVariant;
-  /**
-   * Open this widget in the dashboard's shared overlay.
-   *
-   * The card draws the button; the DASHBOARD owns the window it opens. That
-   * split is the point: this component used to own an expanded panel of its
-   * own, so the map you got from the card and the map you got from the icon
-   * rail were two different windows built from two sets of class names. There
-   * is one now, and neither door can drift from it.
-   *
-   * Absent in `full` - the window is already open - and absent wherever the
-   * parent has nowhere to put it.
-   */
+  // **There was a `variant` here and there is one size.** See the note at the
+  // top of the file: it chose between the Routing Map view and a pane-sized
+  // copy in the Packets view's bottom row, and that pane is deleted.
+  //
+  // **There was an `onExpand` here and there is no expand button any more.**
+  // The card drew one and the dock owned the overlay it opened. Both are gone:
+  // the map is a rail VIEW now (`AppView` 'geo', Ctrl+4), which is a pane rather
+  // than a modal and is the only size there is - so there is nothing to expand
+  // INTO. A button that reopened the same drawing larger was already the thing
+  // `hasFullView` existed to ration.
 }
 
 const escapeHtml = (value: string) =>
@@ -498,7 +488,6 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   packets,
   isDark,
   themeKey,
-  variant = 'card',
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -526,7 +515,6 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   /** The pin the pointer is currently over, so the popup is not rebuilt per frame. */
   const hoveredPinRef = useRef<string | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
-  const isExpandedRef = useRef(false);
   /** What `arcsForSync` needs to build a frame's worth of arcs. */
   interface ArcInput {
     routes: Route[];
@@ -655,10 +643,9 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    * count is still just its size, so the two cannot disagree.
    */
   // All of this lives in a module-level session rather than in the component,
-  // because this component is unmounted whenever the dashboard is minimized or
-  // the widget is switched off. See geoSession for what that used to cost.
+  // because this component is unmounted whenever the Routing Map is not the
+  // active view. See geoSession for what that costs when it is not.
   const [nameResolution] = usePreferenceStore(nameResolutionStore);
-  const [projectionMode, setProjectionMode] = usePreferenceValue(mapProjectionStore);
 
   const sessionRef = useRef(geoSession());
   /**
@@ -711,13 +698,6 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   const hostnamesRef = useRef(hostnames);
   hostnamesRef.current = hostnames;
   const [ispLocation, setIspLocation] = useState<GeoLocation | null>(null);
-  useEffect(() => {
-    // Tracks "has room for a popup", not "is expanded" - a map filling the
-    // dashboard overlay has just as much room as one this component expanded
-    // itself, and the marker handlers that read this cannot tell the
-    // difference from where they sit.
-    isExpandedRef.current = variant === 'full';
-  }, [variant]);
 
   /**
    * Re-scan everything when a lookup is switched back on.
@@ -772,8 +752,8 @@ export const GeoMap: React.FC<GeoMapProps> = ({
 
   // This machine's own public location, from the service rather than a fetch
   // here. The request is memoized there, so this component mounting again -
-  // which it does every time the dashboard is un-minimized - reuses the answer
-  // instead of asking a third party where the user is a second time.
+  // which it does every time the Routing Map view is returned to - reuses the
+  // answer instead of asking a third party where the user is a second time.
   useEffect(() => {
     let cancelled = false;
     resolveSelfLocation().then((loc) => {
@@ -1103,24 +1083,24 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   }, [routes, themeKey, arcProtocolColors, accent]);
 
   /**
-   * Follows the projection preference, including when another surface changes
-   * it.
+   * Puts a map into the globe, and levels the camera.
    *
-   * Keyed on `mapEpoch` as well as the mode, for the same reason the marker
-   * effects are: a rebuilt map is a new instance that has never been told which
-   * projection it is in.
+   * It followed a projection PREFERENCE until there was only one projection, so
+   * what is left is the half that still has work to do: `mapEpoch`. A rebuilt
+   * map - a lost GPU context, a theme change that calls `setStyle` - is a new
+   * instance that has never been told which projection it is in, and
+   * `setProjection` is style state that does not survive a `setStyle`.
    *
-   * The camera move is separate from the projection change and deliberately
-   * modest - flattening the pitch and squaring the bearing, not flying
-   * anywhere. Entering globe from a tilted, rotated flat view is disorienting
-   * enough without also being moved across the world, and the whole point of
-   * `geoSession`'s stored camera is that the map stays where you left it.
+   * The camera move is separate from the projection and deliberately modest -
+   * flattening the pitch and squaring the bearing, not flying anywhere. The
+   * whole point of `geoSession`'s stored camera is that the map stays where you
+   * left it.
    */
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    applyProjectionMode(map, projectionMode, styleReadyRef.current);
+    applyProjectionMode(map, styleReadyRef.current);
 
     const settled = { pitch: 0, bearing: 0 };
     // Already level: nothing to fly to. Without this check every run of this
@@ -1134,7 +1114,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     if (prefersReducedMotion()) map.jumpTo(settled);
     else map.easeTo({ ...settled, duration: 600 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectionMode, mapEpoch]);
+  }, [mapEpoch]);
 
   /**
    * Drag to rotate, with the bearing reversed.
@@ -1249,13 +1229,16 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // that is pure cost for an effect nobody is watching.
       fadeDuration: tier.fadeDuration,
       // Where the map was last pointing, if it has been open before this
-      // session. Someone who flew to a city and then collapsed the dashboard
+      // session. Someone who flew to a city and then left for another view
       // should not come back to the world view.
       center: geoSession().camera?.center ?? [15, 20],
       zoom: geoSession().camera?.zoom ?? 1,
-      // Replaced per projection by applyProjectionMode; this is only what the
-      // map is built with before it knows which projection it is in.
-      minZoom: MERCATOR_MIN_ZOOM,
+      // `applyProjectionMode` sets the real floor a moment later; this is
+      // only what the map is constructed with, before its style exists. Kept
+      // looser than `GLOBE_MIN_ZOOM` deliberately - a constructor value that
+      // was already the final floor would silently hide a failure to call
+      // `applyProjectionMode` at all.
+      minZoom: 1.1,
       maxZoom: 14,
       // One world, not an endless ribbon of them. MapLibre repeats the map
       // horizontally by default, so panning east just kept handing back
@@ -1286,13 +1269,11 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     });
 
     // No AttributionControl. The credit is a licence condition, not a widget,
-    // and it now lives in GeoMapHelp, which only renders in the EXPANDED map -
-    // so the 256px card shows tiles with no visible credit on it. That is a
-    // deliberate call rather than an oversight: OpenStreetMap asks that the
-    // credit be visible or reachable, and from the card it is one click away
-    // through the card's own expand control. If that reading is ever judged too
-    // thin, the fix is a single muted line along the card's bottom edge rather
-    // than bringing this control back.
+    // and it lives in GeoMapHelp, which renders on every map there is - which
+    // is what deleting the pane-sized copy settled. The old note here was an
+    // argument for why a 256px card could show tiles with no visible credit on
+    // it (one click away, through its own expand control); there is no card and
+    // no click, so the credit is simply on screen.
     //
     // and MapLibre's compact control could only ever say that one thing - in
     // the corner where a question mark is far more use. It lives in
@@ -1331,7 +1312,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // Projection is a property of the style, not of the map, so a theme
       // change resets it to Mercator. Reapplied here for the same reason the
       // sky and the connection layers are.
-      applyProjectionMode(map, mapProjectionStore.get(), true);
+      applyProjectionMode(map, true);
       syncConnectionsLayer();
       // The pins are a custom layer, so they go the way of every other one on a
       // style reload. Added LAST, after the arcs, because a pin standing on the
@@ -1351,6 +1332,63 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       syncConnectionsLayer();
     });
 
+    /**
+     * The GPU context can go away under a running map, and the style goes with
+     * it.
+     *
+     * A driver reset, a GPU process crash, a laptop switching graphics adapter:
+     * Chromium reports it to the renderer as a lost context, and the log line
+     * that gives it away in a terminal is `command_buffer_proxy_impl.cc ... GPU
+     * state invalid`. MapLibre handles the WebGL half itself and handles it
+     * well - `_contextLost` calls `preventDefault()` so the browser will
+     * restore, snapshots the style, and `_contextRestored` puts it back with
+     * `setStyle(..., { diff: false })`. That reload fires `style.load`, which is
+     * this component's existing recovery path: the skin, the declutter, the land
+     * wall, the sky, the projection, the arcs, and a fresh `PinLayer`. So the
+     * map really does come back on its own.
+     *
+     * **What MapLibre cannot know is that this component caches the answer.**
+     * `_contextLost` ends with `style.destroy(); this.style = null`, and every
+     * "may I touch the style?" question here is asked of `styleReadyRef`, not of
+     * MapLibre. Left true across the gap, each guard waves through a call
+     * against a style that no longer exists.
+     *
+     * That is not theoretical. `_contextRestored` calls `resize()` before the
+     * new style has loaded; `resize()` fires `moveend`; the handler directly
+     * above calls `syncConnectionsLayer()`; and `addLayer` throws **Style is
+     * not done loading.** - out of `_contextRestored` itself, so MapLibre's own
+     * restore is abandoned partway, before its closing `_update()`.
+     *
+     * **Be accurate about what that costs, because it is narrower than it
+     * looks.** The layers still come back: `style.load` fires from the
+     * `setStyle` regardless, and its handler re-adds the arcs and builds a new
+     * `PinLayer`. Measured by losing the context a second time and reading
+     * which custom layers MapLibre names, both are present either way. What the
+     * stale flag actually buys is an uncaught exception in the renderer on
+     * every GPU recovery, and the tail of MapLibre's restore not running. Worth
+     * fixing; not worth describing as lost data.
+     *
+     * Setting it false is the whole fix. `syncConnectionsLayer` already knows
+     * what to do with a style that is not ready - it reschedules - and
+     * `style.load` sets this back to true when the reload lands.
+     */
+    map.on("webglcontextlost", () => {
+      styleReadyRef.current = false;
+      // The pin layer went with the style: `style.destroy()` ran its
+      // `onRemove`, and `style.load` builds a new one. Dropped here for exactly
+      // the reason the unmount path drops it - a pin sync that found this ref
+      // populated would write into a disposed renderer.
+      //
+      // The ARC layer is deliberately kept. It survives a style swap the same
+      // way, holding its geometry while `onAdd` rebuilds the GL buffer, which
+      // is what the theme-change path already relies on; re-adding it is enough.
+      pinLayerRef.current = null;
+      hoveredPinRef.current = null;
+      // A gesture in flight when the context went never delivers its `moveend`,
+      // and this flag latching true makes every later sync a no-op.
+      isCameraMovingRef.current = false;
+    });
+
     popupRef.current = new maplibregl.Popup({
       closeButton: false,
       closeOnClick: false,
@@ -1366,7 +1404,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // constant, so the branch and the global vanish together.
     if (import.meta.env.DEV) (window as unknown as { __inwireMap?: maplibregl.Map }).__inwireMap = map;
     // Bounds and pitch for whichever projection the constructor just opened in.
-    applyProjectionMode(map, mapProjectionStore.get(), styleReadyRef.current);
+    applyProjectionMode(map, styleReadyRef.current);
     // A fresh instance. The marker effects key on this rather than on
     // `mapRef`, which cannot wake them.
     setMapEpoch((n) => n + 1);
@@ -1474,13 +1512,13 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   // MapLibre does not notice its container resizing - the canvas stays clipped
   // to whatever size it was built at - so something has to tell it.
   //
-  // A ResizeObserver rather than an effect keyed on the expanded flag. The flag
-  // only knows about the two sizes this component chooses for itself, and the
-  // container now also changes when the dashboard overlay opens around it, when
-  // the pane divider is dragged, and while any of those animate. Watching the
-  // element covers every one of those, including the ones nobody has thought of
-  // yet, and it replaces a single post-expand frame with a correct answer at
-  // every intermediate size.
+  // A ResizeObserver rather than an effect keyed on a size flag. There was such
+  // a flag - it knew about the two sizes this component chose for itself and
+  // nothing else - and the container changes for reasons it could not see: the
+  // window resizing, the rail's view switching, an animation in flight. Watching
+  // the element covers every one of those, including the ones nobody has thought
+  // of yet, and it answers correctly at every intermediate size rather than on
+  // one frame at the end.
   //
   // Resized AND repainted in the same frame, which is the whole trick.
   //
@@ -1586,9 +1624,9 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       const layer = pinLayerRef.current;
       const popup = popupRef.current;
       if (!layer || !popup) return;
-      // Popups only in the expanded view, as before: at card size the popup is
-      // wider than the map it is covering.
-      if (!isExpandedRef.current) return;
+      // There used to be an `isExpandedRef` guard here - popups only at full
+      // size, because at card size the popup was wider than the map it covered.
+      // There is no card size.
 
       const hit = layer.hitTest(e.point.x, e.point.y);
       if (!hit) {
@@ -1657,10 +1695,8 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   if (!nameResolution.geoIp) {
     return (
       <div className="w-full h-full flex flex-col bg-card text-card-foreground">
-        {/* No heading of its own: WidgetCard draws one for every widget now,
-            and this used to be the second on the same card. */}
         <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
-          <TbMapPinOff className="w-8 h-8 text-muted-foreground/50" />
+          <MapPinOff className="w-8 h-8 text-muted-foreground/50" />
           <p className="text-[11px] text-muted-foreground leading-snug max-w-xs">
             Location lookup is off. Inwire can show where the public addresses in your capture are
             by sending them to <span className="font-mono">get.geojs.io</span>.
@@ -1680,14 +1716,14 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     );
   }
 
-  const roomy = variant === 'full';
+
 
   /**
    * Picking a place, and the camera move that goes with it.
    *
-   * Shared by the card's popover and the expanded view's side panel, because
-   * they are the same list - the only difference is that expanded there is
-   * room to leave it open.
+   * Called from the side panel's place list. It was shared with a popover on
+   * the pane-sized copy of this map, which is what "the same list at two sizes"
+   * bought; there is one size, and the list simply stays open.
    */
   const flyToPlace = (place: { latitude: number; longitude: number }) => {
     // Zoom 5 is city scale - close enough that the place is the subject rather
@@ -1750,59 +1786,36 @@ export const GeoMap: React.FC<GeoMapProps> = ({
           all. See spaceColorFor. */}
       <div ref={containerRef} className="w-full h-full" style={{ background: spaceColorFor(isDark) }} />
 
-      {/* One stack, one corner, one visual language.
-          Expanded, the map's furniture used to be scattered across three
-          corners of a 1500px panel - close top-right, locations bottom-left,
-          zoom and projection bottom-right - with a void between them. The place
-          list has moved into the side panel, which leaves this the only thing
-          floating over the map.
+      {/* One stack, one corner, one visual language. The map's furniture used to
+          be scattered across three corners of a 1500px panel - close top-right,
+          locations bottom-left, zoom and projection bottom-right - with a void
+          between them. The place list has moved into the side panel, which
+          leaves these the only things floating over the map.
 
-          Zoom buttons still only when expanded: the card shows the whole world,
-          so there is nothing there to look closer at, and three stacked buttons
-          would be a third of its height. Which projection the map is in is
-          worth deciding without expanding first, so that stays at both sizes. */}
-      {/* Top-right, where MapLibre's (i) used to be - the corner people
-          already look in to find out what a map is.
+          Both used to be conditional, and the condition was size: the 256px
+          card showed the whole world, so there was nothing on it to look closer
+          at and three stacked buttons would have been a third of its height.
+          One surface, one answer - there is room. */}
 
-          Expanded only, for the same reason the zoom buttons are: the card is
-          256px tall and already carries the location counter, and a second
-          floating control on it would be furniture in most of a panel whose
-          whole content is the map. The gestures it documents are also gestures
-          worth having room to try.
+      {/* Top-right, where MapLibre's (i) used to be - the corner people already
+          look in to find out what a map is. The licence credit goes with it;
+          see the note where the AttributionControl used to be added. */}
+      <GeoMapHelp />
 
-          The licence credit goes with it, which is the one thing worth being
-          deliberate about - see the note where the AttributionControl used to
-          be added. */}
-      {roomy && <GeoMapHelp />}
-
+      {/* The projection switcher was `leading` here, on the argument that
+          "which projection the map is in is worth deciding without expanding
+          first". There is one projection now. */}
       <ZoomControls
-        onZoomIn={roomy ? () => mapRef.current?.zoomIn() : undefined}
-        onZoomOut={roomy ? () => mapRef.current?.zoomOut() : undefined}
-        leading={<ProjectionSwitcher mode={projectionMode} onChange={setProjectionMode} />}
+        onZoomIn={() => mapRef.current?.zoomIn()}
+        onZoomOut={() => mapRef.current?.zoomOut()}
       />
 
-      {/* On the card the counter sits on the map, because there is nowhere else
-          for it to go. Expanded it is the side panel's heading instead. */}
-      {!roomy && (
-        <GeoLocationCounter
-          places={geoStats.places}
-          unresolved={geoStats.unresolved}
-          expandable={false}
-          onSelectPlace={flyToPlace}
-        />
-      )}
+      {/* **A floating locations counter was here**, and then a pane title bar
+          carried the count, and now neither does: both belonged to the copy of
+          this map that sat in the Packets view's bottom row. The side panel's
+          heading is where the number lives. */}
     </div>
   );
-
-  // The card is the map and nothing else. Its title, icon and expand control
-  // belong to WidgetCard now, like every other widget - this component used to
-  // draw a header bar of its own, which alongside the shared card would have
-  // been a second heading on the same card. What that bar also carried, the ISP
-  // readout, is in the expanded view's side panel, where it has room for a
-  // label instead of being a pin and a truncated city name.
-  if (!roomy) {
-    return <div className="w-full h-full flex flex-col bg-card text-card-foreground">{map}</div>;
-  }
 
   /**
    * Expanded: a side panel, and the globe in what is left.
@@ -1825,7 +1838,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
             This machine
           </div>
           <div className="flex items-center gap-1.5 text-primary mt-1 min-w-0">
-            <TbMapPinFilled className="w-4 h-4 shrink-0" />
+            <MapPin className="w-4 h-4 shrink-0 fill-current" />
             <span className="text-xs truncate">{ispLabel ?? 'Location unknown'}</span>
           </div>
         </div>
@@ -1863,9 +1876,9 @@ export const GeoMap: React.FC<GeoMapProps> = ({
                     className="w-full flex items-center gap-1.5 px-1 py-1 rounded text-[11px] text-left transition-colors hover:bg-accent disabled:hover:bg-transparent disabled:cursor-default cursor-pointer"
                   >
                     {place.precision === 'country' ? (
-                      <TbMapPinOff className="w-3.5 h-3.5 shrink-0 text-muted-foreground/60" />
+                      <MapPinOff className="w-3.5 h-3.5 shrink-0 text-muted-foreground/60" />
                     ) : (
-                      <TbMapPinFilled className="w-3.5 h-3.5 shrink-0 text-primary" />
+                      <MapPin className="w-3.5 h-3.5 shrink-0 text-primary fill-current" />
                     )}
                     <span className="truncate text-foreground/90">{place.label}</span>
                     <span className="ml-auto shrink-0 font-mono text-muted-foreground">

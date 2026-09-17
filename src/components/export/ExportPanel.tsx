@@ -1,14 +1,15 @@
 import React, { useMemo, useState } from 'react';
 import {
-  TbAlertCircle, TbCheck,
-  TbDownload,
-  TbFileCode,
-  TbFileSpreadsheet,
-  TbFileText,
-  TbLoader2,
-  TbPhoto,
-  TbShield,
-} from 'react-icons/tb';
+  CircleAlert,
+  Check,
+  Download,
+  FileCode,
+  FileSpreadsheet,
+  FileText,
+  LoaderCircle,
+  Image as ImageIcon,
+  Shield,
+} from 'lucide-react';
 
 import { FilterPresetLibrary, Packet, Capabilities } from '../../types/packet';
 import { FilterEngine } from '../../services/filterEngine';
@@ -247,7 +248,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
       id: 'pcap',
       title: 'Libpcap (.pcap)',
       body: 'Standard binary libpcap 2.4 file, readable by tcpdump and any standard capture tool',
-      icon: <TbDownload className="w-4 h-4" />,
+      icon: <Download className="w-4 h-4" />,
       accent: isDark
         ? 'bg-sky-950/30 border-sky-600/50 hover:bg-sky-900/40 text-sky-200'
         : 'bg-sky-50 border-sky-300 hover:bg-sky-100 text-sky-900',
@@ -258,7 +259,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
       id: 'pcapng',
       title: 'pcapng (.pcapng)',
       body: 'The modern capture format: keeps which adapter each frame came from, nanosecond timestamps, the names this capture taught us, and what it dropped',
-      icon: <TbDownload className="w-4 h-4" />,
+      icon: <Download className="w-4 h-4" />,
       accent: isDark
         ? 'bg-indigo-950/30 border-indigo-600/50 hover:bg-indigo-900/40 text-indigo-200'
         : 'bg-indigo-50 border-indigo-300 hover:bg-indigo-100 text-indigo-900',
@@ -281,7 +282,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
       id: 'xlsx',
       title: 'Excel Workbook',
       body: 'Packets, protocol hierarchy and alerts as four sheets, with a frozen header row',
-      icon: <TbFileSpreadsheet className="w-4 h-4" />,
+      icon: <FileSpreadsheet className="w-4 h-4" />,
       accent: isDark
         ? 'bg-emerald-950/30 border-emerald-700/50 hover:bg-emerald-900/40 text-emerald-200'
         : 'bg-emerald-50 border-emerald-300 hover:bg-emerald-100 text-emerald-900',
@@ -294,7 +295,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
       id: 'csv',
       title: 'Spreadsheet CSV',
       body: 'Tabular packet summary for reports, Excel, and SIEM pipelines',
-      icon: <TbFileText className="w-4 h-4" />,
+      icon: <FileText className="w-4 h-4" />,
       accent: 'bg-muted border-border hover:bg-accent text-foreground',
       onClick: () => runExport('csv', 'csv', () => buildCsv(outgoing, includeRawBytes)),
     },
@@ -302,7 +303,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
       id: 'json',
       title: 'JSON Telemetry',
       body: 'Structured packet metadata with decoded protocol layer fields',
-      icon: <TbFileCode className="w-4 h-4" />,
+      icon: <FileCode className="w-4 h-4" />,
       accent: 'bg-muted border-border hover:bg-accent text-foreground',
       onClick: () =>
         runExport('json', 'json', () =>
@@ -315,7 +316,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
       id: 'pdf',
       title: 'PDF Report',
       body: 'Formatted document with stats, alerts, and the most recent 100 packets',
-      icon: <TbPhoto className="w-4 h-4" />,
+      icon: <ImageIcon className="w-4 h-4" />,
       accent: isDark
         ? 'bg-red-950/30 border-red-900/50 hover:bg-red-900/40 text-red-200'
         : 'bg-red-50 border-red-300 hover:bg-red-100 text-red-900',
@@ -333,7 +334,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
     <div className="space-y-5 text-xs">
       {!permissions.canExportPcap && (
         <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 flex items-center gap-2">
-          <TbShield className="w-4 h-4 shrink-0" />
+          <Shield className="w-4 h-4 shrink-0" />
           <span>Exporting raw captures is restricted for the Auditor / Guest role.</span>
         </div>
       )}
@@ -480,7 +481,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-bold text-xs">{card.title}</span>
                   {busy === card.id ? (
-                    <TbLoader2 className="w-4 h-4 animate-spin shrink-0" />
+                    <LoaderCircle className="w-4 h-4 animate-spin shrink-0" />
                   ) : (
                     <span className="shrink-0">{card.icon}</span>
                   )}
@@ -494,7 +495,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
 
       {error && (
         <div className="flex items-center gap-1.5 text-rose-500 font-medium">
-          <TbAlertCircle className="w-4 h-4 shrink-0" />
+          <CircleAlert className="w-4 h-4 shrink-0" />
           <span>{error}</span>
         </div>
       )}
@@ -504,7 +505,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
         // usual trick for ellipsising a path at the FRONT, which is the half
         // nobody needs - the filename is what identifies the file.
         <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium min-w-0">
-          <TbCheck className="w-4 h-4 shrink-0" />
+          <Check className="w-4 h-4 shrink-0" />
           <span className="truncate" dir="rtl" title={savedTo}>{savedTo}</span>
         </div>
       )}

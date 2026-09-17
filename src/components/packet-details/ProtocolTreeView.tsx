@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Packet, ProtocolField } from '../../types/packet';
-import { TbChevronRight, TbChevronDown, TbCopy, TbCheck } from 'react-icons/tb';
+import { ChevronRight, ChevronDown, Copy, Check } from 'lucide-react';
 import { renderBitfield } from '../../lib/bitfield';
+import { copyText } from '../ui/CopyButton';
 import { CATEGORY_TEXT } from '../../services/expertInfo';
 import {
   ContextMenu,
@@ -94,8 +95,11 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
   const toggleLayer = (layerIndex: number) =>
     setExpandedLayers(prev => ({ ...prev, [layerIndex]: !(prev[layerIndex] ?? true) }));
 
-  const copyFieldValue = (name: string, val: string | number | boolean) => {
-    navigator.clipboard.writeText(String(val));
+  // `copyText` rather than `navigator.clipboard` directly - it is the one home
+  // for the execCommand fallback, and it reports failure so the tick below is
+  // not shown for a copy that did not happen. See `ui/CopyButton`.
+  const copyFieldValue = async (name: string, val: string | number | boolean) => {
+    if (!(await copyText(String(val)))) return;
     setCopiedField(name);
     setTimeout(() => setCopiedField(null), 1500);
   };
@@ -184,7 +188,7 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
                 className="shrink-0 cursor-pointer text-muted-foreground hover:text-foreground"
                 title={isOpen ? 'Collapse' : 'Expand'}
               >
-                {isOpen ? <TbChevronDown className="w-3 h-3" /> : <TbChevronRight className="w-3 h-3" />}
+                {isOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
               </button>
             ) : (
               // Keeps every label on the same left edge whether or not the row
@@ -231,14 +235,14 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
 
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
-              onClick={() => copyFieldValue(field.name, field.value)}
+              onClick={() => { void copyFieldValue(field.name, field.value); }}
               className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
               title="Copy field value"
             >
               {copiedField === field.name ? (
-                <TbCheck className="w-3 h-3 text-emerald-400" />
+                <Check className="w-3 h-3 text-emerald-400" />
               ) : (
-                <TbCopy className="w-3 h-3" />
+                <Copy className="w-3 h-3" />
               )}
             </button>
           </div>
@@ -292,9 +296,9 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
             >
               <div className="flex items-center gap-2 truncate">
                 {isExpanded ? (
-                  <TbChevronDown className="w-3.5 h-3.5 text-primary shrink-0" />
+                  <ChevronDown className="w-3.5 h-3.5 text-primary shrink-0" />
                 ) : (
-                  <TbChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                  <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                 )}
                 <span className="font-semibold truncate text-foreground">{layer.summary}</span>
               </div>
@@ -343,18 +347,18 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
 
           <ContextMenuSeparator />
 
-          <ContextMenuItem onSelect={() => navigator.clipboard.writeText(String(menuTarget.field.value))}>
+          <ContextMenuItem onSelect={() => void copyText(String(menuTarget.field.value))}>
             Copy Value
           </ContextMenuItem>
           <ContextMenuItem
             disabled={!menuTarget.field.abbrev}
-            onSelect={() => menuTarget.field.abbrev && navigator.clipboard.writeText(menuTarget.field.abbrev)}
+            onSelect={() => { if (menuTarget.field.abbrev) void copyText(menuTarget.field.abbrev); }}
           >
             Copy Field Name
           </ContextMenuItem>
           <ContextMenuItem
             disabled={!menuTarget.term}
-            onSelect={() => menuTarget.term && navigator.clipboard.writeText(menuTarget.term)}
+            onSelect={() => { if (menuTarget.term) void copyText(menuTarget.term); }}
           >
             Copy as Filter
           </ContextMenuItem>

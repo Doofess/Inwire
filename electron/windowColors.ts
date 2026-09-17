@@ -15,9 +15,11 @@
  *
  * ## Why that is not just a constant
  *
- * It used to be - `WINDOW_BACKGROUND`, `#09090b`, a near-black picked to match
- * `index.html`'s own class. That was survivable while the flash was a plain
- * window with a native caption above it. It is not survivable now: a frameless
+ * It used to be - a `WINDOW_BACKGROUND` constant in `window.ts`, `#09090b`, a
+ * near-black picked to match `index.html`'s own class; it is deleted, and the
+ * note there says why it must not come back. That was survivable while the
+ * flash was a plain window with a native caption above it. It is not
+ * survivable now: a frameless
  * window IS the app's surface, so opening one in near-black and repainting it
  * to Day's `#f6f7f9` a beat later is a full-window flash rather than a dark
  * rectangle that happens to be the right colour already.
@@ -57,9 +59,11 @@ export const DEFAULT_WINDOW_THEME = 'dark';
 /**
  * The window ground for a resolved theme name.
  *
- * Takes `resolvedTheme`, never `theme` - the picker has a fifth entry, System,
- * which is a rule for choosing between two themes rather than a theme, so the
- * unresolved value can be the literal string `system` and has no palette.
+ * Takes `resolvedTheme`, never `theme` - the picker carries System alongside the
+ * two real themes, and System is a rule for choosing between them rather than a
+ * theme, so the unresolved value can be the literal string `system` and has no
+ * palette. Stated without an ordinal on purpose: it was "the fifth entry" while
+ * Paper and Graphite existed, and outlived them by two cuts.
  *
  * An unknown name falls back to the default rather than throwing: this runs
  * while a window is being created, and a stored name from a build that had a
@@ -69,6 +73,37 @@ export function resolveWindowBackground(resolvedTheme: string | undefined): stri
   const palette = PALETTE_BY_THEME[resolvedTheme ?? '']
     ?? PALETTE_BY_THEME[DEFAULT_WINDOW_THEME];
   return palette.surface.background;
+}
+
+/**
+ * Whether that ground is a dark one.
+ *
+ * Derived from the colour rather than from a second table of theme names. The
+ * app already declares each theme's mode in `src/lib/themeOptions.ts`, but that
+ * module imports React and `lucide-react`, and main is not dragging a component
+ * library in to answer a yes/no question. A duplicated list here would be the
+ * other option, and it would be one more thing to forget when a theme is added
+ * or retired - which has happened twice.
+ *
+ * Luminance cannot drift out of agreement with the palette, because it IS the
+ * palette. The two grounds are nowhere near the threshold: Day's `#f6f7f9`
+ * reads 0.93 and Night's `#161616` reads 0.008, so a 0.5 cut is not a close
+ * call for any theme this app could plausibly ship.
+ *
+ * Its one consumer is `nativeTheme.themeSource` around the quit confirm - see
+ * `guardClose` in `main.ts` for why that is set for the dialog and put back
+ * immediately afterwards.
+ */
+export function resolveWindowIsDark(resolvedTheme: string | undefined): boolean {
+  const hex = resolveWindowBackground(resolvedTheme);
+  const channel = (pair: string): number => {
+    const c = Number.parseInt(pair, 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = 0.2126 * channel(hex.slice(1, 3))
+    + 0.7152 * channel(hex.slice(3, 5))
+    + 0.0722 * channel(hex.slice(5, 7));
+  return luminance < 0.5;
 }
 
 /**

@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTheme } from 'next-themes';
-import { TbCheck } from 'react-icons/tb';
+import { Check } from 'lucide-react';
 import { SYSTEM_THEME_OPTION, THEME_OPTIONS } from '../../lib/themeOptions';
 import { Switch } from '../ui/switch';
 import { Segmented } from '../ui/segmented';
@@ -84,13 +84,18 @@ export const AppearanceSettingsPanel: React.FC = () => {
         <div className="py-2.5">
           <div className="text-xs font-semibold text-foreground">App theme</div>
           <p className="text-[11px] text-muted-foreground mt-0.5 mb-2 leading-snug">
-            The window, panels and charts. System follows your OS setting, choosing Day or Midnight.
+            The window, panels and charts. System follows your OS setting, choosing Day or Night.
           </p>
-          {/* Five across: the four themes plus System, which is a mode over
-              them rather than a fifth palette - see useSystemThemePreference.
+          {/* Three across: the two themes plus System, which is a mode over
+              them rather than a third palette - see useSystemThemePreference.
               Picking a theme by name turns following off, because choosing one
-              IS saying "not whatever the OS says". */}
-          <div className="grid grid-cols-5 gap-2">
+              IS saying "not whatever the OS says".
+
+              The count tracks THEME_OPTIONS and has to be corrected by hand
+              when that list changes: it was `grid-cols-5` for four themes, and
+              cutting two left three buttons laid out across five columns, so
+              the right 40% of a `max-w-5xl` row was empty. */}
+          <div className="grid grid-cols-3 gap-2">
             {[...THEME_OPTIONS, SYSTEM_THEME_OPTION].map(({ value, label, icon: Icon }) => {
               const isSystem = value === SYSTEM_THEME_OPTION.value;
               const isActive = isSystem ? followsSystem : !followsSystem && theme === value;
@@ -107,7 +112,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
                       : 'border-border bg-muted/40 text-muted-foreground hover:bg-accent hover:text-foreground'
                   }`}
                 >
-                  {isActive && <TbCheck className="w-3.5 h-3.5 absolute top-1.5 right-1.5" />}
+                  {isActive && <Check className="w-3.5 h-3.5 absolute top-1.5 right-1.5" />}
                   <Icon className="w-5 h-5" />
                   <span className="text-center leading-tight">{label}</span>
                 </button>

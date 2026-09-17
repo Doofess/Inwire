@@ -1,8 +1,17 @@
 import React, { useMemo, useState } from 'react';
 import {
-  TbNetwork, TbRefresh, TbEye, TbEyeOff, TbDeviceDesktop, TbAddressBook,
-  TbRouter, TbClock, TbWorld, TbPlugConnected, TbShield,
-} from 'react-icons/tb';
+  EthernetPort,
+  RefreshCw,
+  Eye,
+  EyeOff,
+  Monitor,
+  BookUser,
+  Router,
+  Clock,
+  Globe,
+  Plug,
+  Shield,
+} from 'lucide-react';
 import { useNameResolutionPreference } from '../../lib/nameResolution';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { networkPanelStore } from '../../services/interfacePrefs';
@@ -47,14 +56,14 @@ type NetworkSection =
 const SECTIONS: {
   id: NetworkSection; label: string; icon: React.ComponentType<{ className?: string }>;
 }[] = [
-  { id: 'adapter', label: 'Adapter', icon: TbDeviceDesktop },
-  { id: 'addresses', label: 'Addresses', icon: TbAddressBook },
-  { id: 'gateway', label: 'Gateway & DNS', icon: TbRouter },
-  { id: 'dhcp', label: 'DHCP', icon: TbClock },
-  { id: 'router', label: 'IPv6 router', icon: TbWorld },
-  { id: 'neighbour', label: 'Neighbour', icon: TbPlugConnected },
+  { id: 'adapter', label: 'Adapter', icon: Monitor },
+  { id: 'addresses', label: 'Addresses', icon: BookUser },
+  { id: 'gateway', label: 'Gateway & DNS', icon: Router },
+  { id: 'dhcp', label: 'DHCP', icon: Clock },
+  { id: 'router', label: 'IPv6 router', icon: Globe },
+  { id: 'neighbour', label: 'Neighbour', icon: Plug },
   // Last, and the only one that asks anybody anything.
-  { id: 'public', label: 'Public identity', icon: TbShield },
+  { id: 'public', label: 'Public identity', icon: Shield },
 ];
 
 interface NetworkPaneProps {
@@ -124,21 +133,29 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
   const setHidden = (next: boolean) => setPanel({ ...panel, hideSensitive: next });
 
   /*
-   * A pane, not a dialog. Same conversion as Statistics: the `fixed inset-0`
-   * scrim, the centred 90vh panel, its border, shadow and entrance animation, and
-   * the close button are all gone.
+   * **A Settings tab, and it went there by failing the test the view list
+   * applies.** It was briefly a rail view of its own, converted out of a modal
+   * the way Statistics was - the `fixed inset-0` scrim, the centred 90vh panel,
+   * its border, shadow, entrance animation and close button are all still gone,
+   * and this renders as a plain flex column filling whatever it is given.
    *
-   * The filter row above is hidden while this view is active, which is App's
-   * decision rather than this component's: a display filter acts on the capture,
-   * and this surface is about the machine - so the control would have been a
-   * control with nothing in view to act on.
+   * What it could not answer is "is this a way of looking at the capture?"
+   * Network describes the MACHINE - its adapters, its DNS, its public identity -
+   * and nothing in it changes when a packet arrives. The tell was the filter
+   * row, which had to be hidden above this view and above no other, because a
+   * display filter here was a control with nothing in view to act on. So it sits
+   * beside Driver Info now, which is the other read-only report about this
+   * machine, and `SettingsModal` is the only thing that renders it.
+   *
+   * `services/viewPrefs.ts` carries the full argument and the clamp that lands
+   * a stored `'network'` back on Packets.
    */
   return (
     <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-card text-card-foreground">
 
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
-            <TbNetwork className="w-7 h-7 shrink-0 text-primary" />
+            <EthernetPort className="w-7 h-7 shrink-0 text-primary" />
             <div className="min-w-0">
               <div className="font-bold text-base">Network</div>
               <p className="text-xs text-muted-foreground truncate">
@@ -154,13 +171,13 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
               title={hidden ? 'Show addresses and MACs' : 'Hide addresses and MACs'}
               className={`p-1.5 rounded-md transition-colors ${hidden
                 ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground'}`}>
-              {hidden ? <TbEyeOff className="w-4 h-4" /> : <TbEye className="w-4 h-4" />}
+              {hidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
             <button onClick={onRefresh} disabled={!agentConnected}
               title={agentConnected ? 'Re-read from this machine' : 'The agent is not connected'}
               className="p-1.5 rounded-md hover:bg-accent text-muted-foreground
                 hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed">
-              <TbRefresh className="w-4 h-4" />
+              <RefreshCw className="w-4 h-4" />
             </button>
             {/* The close button stood here, beside Refresh. */}
           </div>

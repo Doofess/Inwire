@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { TbCheck, TbCircle } from "react-icons/tb"
+import { Check, Circle } from "lucide-react"
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui"
 
 import { cn } from "@/src/lib/utils"
@@ -95,7 +95,7 @@ function DropdownMenuCheckboxItem({
     >
       <span className="pointer-events-none absolute left-2 flex size-3.5 items-center justify-center">
         <DropdownMenuPrimitive.ItemIndicator>
-          <TbCheck className="size-4" />
+          <Check className="size-4" />
         </DropdownMenuPrimitive.ItemIndicator>
       </span>
       {children}
@@ -132,7 +132,7 @@ function DropdownMenuRadioItem({
         <DropdownMenuPrimitive.ItemIndicator>
           {/* The indicator only mounts once checked, so this plays on select
               rather than on open. Keyframes live in index.css. */}
-          <TbCircle className="size-2 fill-current nv-indicator" />
+          <Circle className="size-2 fill-current nv-indicator" />
         </DropdownMenuPrimitive.ItemIndicator>
       </span>
       {children}

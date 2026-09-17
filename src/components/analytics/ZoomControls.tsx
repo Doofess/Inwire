@@ -1,5 +1,5 @@
 import React from 'react';
-import { TbPlus, TbMinus, TbRotate } from 'react-icons/tb';
+import { Plus, Minus, RotateCw } from 'lucide-react';
 
 interface ZoomControlsProps {
   /** Omit a handler to leave that button out. */
@@ -62,17 +62,17 @@ export const ZoomControls: React.FC<ZoomControlsProps> = ({ onZoomIn, onZoomOut,
       {leading}
       {onZoomIn && (
         <button type="button" onClick={onZoomIn} aria-label="Zoom in" title="Zoom in" className={buttonClass}>
-          <TbPlus className="h-4 w-4" />
+          <Plus className="h-4 w-4" />
         </button>
       )}
       {onZoomOut && (
         <button type="button" onClick={onZoomOut} aria-label="Zoom out" title="Zoom out" className={buttonClass}>
-          <TbMinus className="h-4 w-4" />
+          <Minus className="h-4 w-4" />
         </button>
       )}
       {onReset && (
         <button type="button" onClick={onReset} aria-label="Reset zoom" title="Reset zoom" className={buttonClass}>
-          <TbRotate className="h-4 w-4" />
+          <RotateCw className="h-4 w-4" />
         </button>
       )}
     </div>
