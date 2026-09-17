@@ -1,5 +1,5 @@
 import React from 'react';
-import { TbRefresh, TbAlertTriangle } from 'react-icons/tb';
+import { RefreshCw, TriangleAlert } from 'lucide-react';
 import { Switch } from '../ui/switch';
 import { Section, SettingRow } from './settingsLayout';
 import { DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
@@ -20,13 +20,12 @@ import {
  *
  * ## Why a Settings section and not a tab of its own
  *
- * There is no top-level tab bar to add a tab to - the top level is the header,
- * the packet-list grid and a stack of modals, and every "tab" in this app is
- * already a section of one. Driver Info is the hardware section and the
- * driver-missing banner that links here lives in it, so this sits directly
- * after it. `AppMenu`'s own rule settles the remaining option: the menu holds
- * "only what has no permanent control elsewhere", and this is a permanent
- * control.
+ * There is no top-level tab bar to add a tab to - the top level is the title
+ * row, the activity rail and whichever view is filling the window, and the rail
+ * is a strip of ten icons with a height budget. Driver Info is the hardware
+ * section and the driver-missing banner that links here lives in it, so this
+ * sits directly after it: the row that says a driver is missing and the row that
+ * installs one belong within scrolling distance of each other.
  *
  * ## The panel decides nothing
  *
@@ -318,14 +317,14 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
             disabled={busy}
             className={DRIVER_ACTION_BUTTON_CLASS}
           >
-            <TbRefresh className="w-3.5 h-3.5" />
+            <RefreshCw className="w-3.5 h-3.5" />
             <span>Check now</span>
           </button>
         </div>
       </Section>
 
       <p className="text-[11px] text-muted-foreground leading-snug flex gap-2">
-        <TbAlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+        <TriangleAlert className="w-3.5 h-3.5 shrink-0 mt-0.5" />
         <span>
           Npcap is downloaded from npcap.com and installed by its own installer, which shows its
           own licence. Inwire never installs it silently, and uninstalling Inwire leaves it alone -

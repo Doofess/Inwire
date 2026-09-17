@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { TbShield } from 'react-icons/tb';
+import { Shield } from 'lucide-react';
 import { Row, Section, Empty, Value } from './rows';
 
 /**
@@ -80,7 +80,7 @@ export const PublicIdentity: React.FC<PublicIdentityProps> = ({ allowed, hidden,
     return (
       <Section title="Public identity">
         <div className="text-center py-8 px-6">
-          <TbShield className="w-9 h-9 mx-auto mb-3 text-muted-foreground" />
+          <Shield className="w-9 h-9 mx-auto mb-3 text-muted-foreground" />
           <p className="font-semibold text-sm text-foreground">This section has to ask the internet</p>
           <p className="text-xs mt-2 text-muted-foreground max-w-md mx-auto leading-relaxed">
             Nothing from your capture is sent. The request itself is the disclosure:{' '}

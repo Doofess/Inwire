@@ -1,4 +1,4 @@
-import { TbSun, TbBook, TbMoon, TbMoonStars, TbDeviceDesktop } from 'react-icons/tb';
+import { Sun, Moon, Monitor } from 'lucide-react';
 
 /**
  * Every app theme, and whether it is a light or a dark one.
@@ -27,37 +27,37 @@ export interface ThemeOption {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   /**
-   * Required. It was optional only because `system` had no mode of its own,
-   * and `system` is gone - every theme now names a real palette, so nothing
-   * has to resolve to one at runtime.
+   * Required. It was optional only because `system` was once an entry in this
+   * array and had no mode of its own. It is out of the array now - still very
+   * much in the picker, as `SYSTEM_THEME_OPTION` below - so every entry here
+   * names a real palette and nothing in this list resolves to another at
+   * runtime.
    */
   mode: 'light' | 'dark';
 }
 
 export const THEME_OPTIONS: ThemeOption[] = [
-  { value: 'light', label: 'Day', icon: TbSun, mode: 'light' },
-  { value: 'paper', label: 'Paper', icon: TbBook, mode: 'light' },
-  { value: 'dark', label: 'Graphite', icon: TbMoon, mode: 'dark' },
-  // Labelled "Dark" and stored as `midnight`, which is the one place in this
-  // file where a label and an id deliberately disagree by more than wording.
-  // The id cannot be `dark` - that belongs to Graphite, and next-themes only
-  // writes `color-scheme` for the literal strings "light" and "dark", so moving
-  // it would cost native scrollbars and form controls their light/dark side for
-  // the theme most people will now be on. The label is free; the id is not.
-  // Renaming it also stopped describing a colour: it was blue-black, and it is
-  // a neutral #1e1e1e ground now.
-  { value: 'midnight', label: 'Dark', icon: TbMoonStars, mode: 'dark' },
+  { value: 'light', label: 'Day', icon: Sun, mode: 'light' },
+  { value: 'dark', label: 'Night', icon: Moon, mode: 'dark' },
 ];
 
 /**
- * The ids are `light` and `dark` while the labels are Day and Graphite, and
- * that is on purpose.
+ * Two themes and a rule, where there were four and a rule.
  *
- * next-themes only writes `color-scheme` onto the document when the stored
- * value is literally `"light"` or `"dark"` - which is what keeps native
+ * Paper and Graphite are gone. Paper was the warm light one and Graphite the
+ * warm dark one, and each existed as a counterweight to the other survivor -
+ * "one warm and one cool is a real choice" was the argument, and it was a good
+ * argument for four. It is not an argument for keeping a second of each when
+ * what is wanted is Day, Night and System.
+ *
+ * **Night took the `dark` id from Graphite, and that is the part worth
+ * knowing.** next-themes writes `color-scheme` onto the document only for the
+ * literal strings `"light"` and `"dark"`, which is what keeps native
  * scrollbars, text selection and form controls on the right side of the
- * light/dark divide. Renaming the two defaults would cost that for the two
- * themes most people use, to gain nothing a label cannot express.
+ * light/dark divide. While the neutral dark theme was stored as `midnight` it
+ * did not get that - the id belonged to Graphite. Deleting Graphite freed it,
+ * so the cut fixed something rather than only removing two entries, and every
+ * stored `midnight` lands on it through `RETIRED_THEMES`.
  */
 
 /**
@@ -72,18 +72,27 @@ export const THEME_OPTIONS: ThemeOption[] = [
  * `dark:` utilities do not apply, and the settings picker shows nothing
  * selected. Mixed and broken, which is worse than either extreme.
  *
- * Each retired theme goes to the survivor closest to it, not to a default:
- * the two warm lights become Paper, the three cool/low-contrast darks become
- * Dark (stored as `midnight`), and Colorblind Safe - which was a light theme -
- * becomes Day.
+ * Each retired theme goes to the survivor closest to it, not to a default -
+ * which with two survivors means every light one lands on Day and every dark
+ * one on Night.
+ *
+ * `paper` and `midnight` are in here as ids this build once shipped, and they
+ * are the two that matter most: `midnight` is where most people's dark theme
+ * is currently stored, and it must land on `dark` rather than on the fallback
+ * for the same reason as everything else here - a stored name with no class
+ * block behind it puts `class="midnight"` on <html> against the light `:root`
+ * baseline while `themePalette()` returns the dark palette. Mixed and broken,
+ * which is worse than either extreme.
  */
 export const RETIRED_THEMES: Record<string, string> = {
-  'solarized-light': 'paper',
-  'gruvbox-light': 'paper',
+  'paper': 'light',
+  'solarized-light': 'light',
+  'gruvbox-light': 'light',
   'colorblind-safe': 'light',
-  'solarized-dark': 'midnight',
-  'dracula': 'midnight',
-  'mono': 'midnight',
+  'midnight': 'dark',
+  'solarized-dark': 'dark',
+  'dracula': 'dark',
+  'mono': 'dark',
 };
 
 /**
@@ -100,31 +109,31 @@ export function normalizeThemeName(stored: string | null | undefined): string {
 }
 
 /**
- * The picker's fifth entry, which is not a theme.
+ * The picker's third entry, which is not a theme.
  *
  * Deliberately outside THEME_OPTIONS: everything downstream of that list - the
  * CSS class blocks, `isDarkTheme`, the palettes, the assertion scripts -
  * assumes each entry names a real set of colours, and `system` names a rule for
- * choosing between two of them. next-themes is never handed this value; see
+ * choosing between the two. next-themes is never handed this value; see
  * useSystemThemePreference.
  */
 export const SYSTEM_THEME_OPTION = {
   value: 'system',
   label: 'System',
-  icon: TbDeviceDesktop,
+  icon: Monitor,
 } as const;
 
 /**
  * Which two themes "System" chooses between.
  *
- * Dark - stored as `midnight` - rather than Graphite, which is why next-themes'
- * own `enableSystem` is not used: it would resolve to the theme whose id is
- * literally `dark`, which is Graphite, which is the warm one. Which dark theme
- * suits someone who has asked for "whatever the OS says" is a product decision,
- * and this is where it is made. It is also why the neutral theme is the one
- * labelled "Dark": it is what the OS setting already selected.
+ * Now that there are exactly two, this pair is every theme there is - but it
+ * stays a declared pair rather than being inferred from THEME_OPTIONS, and
+ * next-themes' own `enableSystem` stays unused. Both for the same reason: which
+ * theme someone who asked for "whatever the OS says" should land on is a
+ * product decision, and a third theme would otherwise silently make it by
+ * position in a list.
  */
-export const SYSTEM_THEME_PAIR = { light: 'light', dark: 'midnight' } as const;
+export const SYSTEM_THEME_PAIR = { light: 'light', dark: 'dark' } as const;
 
 /** Every theme next-themes is allowed to resolve to. */
 export const THEME_NAMES: string[] = THEME_OPTIONS.map((t) => t.value);

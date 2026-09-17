@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { TbCheck, TbInfoCircle, TbLoader2, TbUpload } from 'react-icons/tb';
+import { Check, Info, LoaderCircle, Upload } from 'lucide-react';
 
 import { Packet } from '../../types/packet';
 import { ImportFailure } from '../../services/exportSchema';
@@ -125,9 +125,9 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
           } ${dragging ? 'border-primary bg-primary/10' : 'border-border hover:border-sky-500 bg-muted/30'}`}
         >
           {busy ? (
-            <TbLoader2 className="w-8 h-8 text-foreground mb-2 animate-spin" />
+            <LoaderCircle className="w-8 h-8 text-foreground mb-2 animate-spin" />
           ) : (
-            <TbUpload className="w-8 h-8 text-foreground mb-2" />
+            <Upload className="w-8 h-8 text-foreground mb-2" />
           )}
           <span className="font-semibold text-foreground">
             {dragging ? 'Drop to import' : 'Click to upload, or drag & drop'}
@@ -160,7 +160,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
 
       {status && (
         <div className="text-emerald-500 flex items-start gap-1.5 font-medium">
-          <TbCheck className="w-4 h-4 shrink-0 mt-0.5" />
+          <Check className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{status}</span>
         </div>
       )}
@@ -171,7 +171,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
         <ul className="space-y-1.5">
           {notes.map((note, i) => (
             <li key={i} className="flex items-start gap-1.5 text-amber-600 dark:text-amber-400">
-              <TbInfoCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <Info className="w-4 h-4 shrink-0 mt-0.5" />
               <span className="leading-relaxed">{note}</span>
             </li>
           ))}

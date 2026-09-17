@@ -1,14 +1,14 @@
 import React, { useRef, useState } from 'react';
 import {
-  TbChevronDown,
-  TbChevronRight,
-  TbFolderPlus,
-  TbGripVertical,
-  TbPencil,
-  TbPlus,
-  TbRestore,
-  TbTrash,
-} from 'react-icons/tb';
+  ChevronDown,
+  ChevronRight,
+  FolderPlus,
+  GripVertical,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Trash,
+} from 'lucide-react';
 import { FilterPresetLibrary } from '../../types/packet';
 import {
   DEFAULT_FILTER_PRESET_LIBRARY,
@@ -231,7 +231,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                   title="Drag to reorder group"
                   className="p-0.5 text-muted-foreground hover:text-foreground cursor-grab active:cursor-grabbing"
                 >
-                  <TbGripVertical className="w-3.5 h-3.5" />
+                  <GripVertical className="w-3.5 h-3.5" />
                 </span>
 
                 <button
@@ -240,9 +240,9 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                   title={isCollapsed ? 'Expand group' : 'Collapse group'}
                 >
                   {isCollapsed ? (
-                    <TbChevronRight className="w-3.5 h-3.5" />
+                    <ChevronRight className="w-3.5 h-3.5" />
                   ) : (
-                    <TbChevronDown className="w-3.5 h-3.5" />
+                    <ChevronDown className="w-3.5 h-3.5" />
                   )}
                 </button>
 
@@ -296,7 +296,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                   className={iconButton}
                   title="Add a filter to this group"
                 >
-                  <TbPlus className="w-3.5 h-3.5" />
+                  <Plus className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={() => {
@@ -306,14 +306,14 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                   className={iconButton}
                   title="Rename group"
                 >
-                  <TbPencil className="w-3.5 h-3.5" />
+                  <Pencil className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={() => handleDeleteGroup(group.id, group.presets.length)}
                   className={`${iconButton} hover:text-rose-500`}
                   title="Delete group"
                 >
-                  <TbTrash className="w-3.5 h-3.5" />
+                  <Trash className="w-3.5 h-3.5" />
                 </button>
                   </>
                 )}
@@ -380,7 +380,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                           title="Drag to reorder or move to another group"
                           className="p-0.5 text-muted-foreground hover:text-foreground cursor-grab active:cursor-grabbing shrink-0"
                         >
-                          <TbGripVertical className="w-3.5 h-3.5" />
+                          <GripVertical className="w-3.5 h-3.5" />
                         </span>
 
                         <div className="flex-1 min-w-0">
@@ -404,14 +404,14 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                             className={iconButton}
                             title="Edit filter"
                           >
-                            <TbPencil className="w-3.5 h-3.5" />
+                            <Pencil className="w-3.5 h-3.5" />
                           </button>
                           <button
                             onClick={() => onChange(deletePreset(library, preset.id))}
                             className={`${iconButton} hover:text-rose-500`}
                             title="Delete filter"
                           >
-                            <TbTrash className="w-3.5 h-3.5" />
+                            <Trash className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
@@ -440,7 +440,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
           onClick={handleAddGroup}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-secondary hover:bg-accent text-foreground text-xs font-medium transition-colors cursor-pointer"
         >
-          <TbFolderPlus className="w-3.5 h-3.5" />
+          <FolderPlus className="w-3.5 h-3.5" />
           New group
         </button>
 
@@ -471,7 +471,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent text-xs font-medium transition-colors cursor-pointer"
             title="Discard your changes and restore the filters Inwire ships with"
           >
-            <TbRestore className="w-3.5 h-3.5" />
+            <RotateCcw className="w-3.5 h-3.5" />
             Restore defaults
           </button>
         )}

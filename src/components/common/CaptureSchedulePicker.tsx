@@ -1,5 +1,5 @@
 import React from 'react';
-import { TbTrash, TbAlertTriangle } from 'react-icons/tb';
+import { Trash, TriangleAlert } from 'lucide-react';
 
 import { DateTimeCalendar } from './DateTimeCalendar';
 import {
@@ -61,9 +61,9 @@ const rowLabelActiveClass =
  *
  * A tinted accent ground, accent text, and a bar that scales out of the left
  * edge - so a selection reads as MOVING between rows rather than appearing on
- * one. Copied deliberately: the two menus sit beside each other in the header
- * and "this is the one you picked" should not be said two different ways a
- * centimetre apart.
+ * one. Copied deliberately: the two menus hang off adjacent buttons in the
+ * capture group of the rail, and "this is the one you picked" should not be said
+ * two different ways a centimetre apart.
  */
 const selectedRowClass = 'bg-primary/15 text-primary font-semibold';
 const accentBarClass =
@@ -73,9 +73,10 @@ const accentBarClass =
 /**
  * The Schedule capture dropdown: a start time, a stop time, and presets.
  *
- * Built from the same primitives as `CaptureInterfacePicker`, and rendered from
- * the same button class in the header, so the two controls beside each other
- * read as one pair rather than two designs.
+ * Built from the same primitives as `CaptureInterfacePicker`, and triggered
+ * from the same `railButton` shape, so the two controls sitting one above the
+ * other in the rail read as one pair rather than two designs. The trigger is
+ * passed in as `children`, which is what lets the rail own that shape.
  *
  * ## Two fields, one answer
  *
@@ -211,7 +212,7 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
 
           {startMissed && (
             <p className="flex items-start gap-1 text-[10px] leading-tight text-destructive">
-              <TbAlertTriangle className="w-3 h-3 shrink-0 mt-px" />
+              <TriangleAlert className="w-3 h-3 shrink-0 mt-px" />
               <span>
                 That time has already passed, so nothing will start. Pick one more than{' '}
                 {Math.round(START_GRACE_MS / 60_000)} minutes ahead.
@@ -220,7 +221,7 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
           )}
           {willDiscard && !startMissed && (
             <p className="flex items-start gap-1 text-[10px] leading-tight text-amber-500">
-              <TbAlertTriangle className="w-3 h-3 shrink-0 mt-px" />
+              <TriangleAlert className="w-3 h-3 shrink-0 mt-px" />
               <span>
                 {bufferedPackets.toLocaleString()} captured packet
                 {bufferedPackets === 1 ? '' : 's'} will be discarded when this starts.
@@ -311,7 +312,7 @@ export const CaptureSchedulePicker: React.FC<CaptureSchedulePickerProps> = ({
               className="p-1 rounded-sm text-muted-foreground hover:text-destructive cursor-pointer"
               onClick={() => removePreset(preset.id)}
             >
-              <TbTrash className="w-3.5 h-3.5" />
+              <Trash className="w-3.5 h-3.5" />
             </button>
           </div>
           );

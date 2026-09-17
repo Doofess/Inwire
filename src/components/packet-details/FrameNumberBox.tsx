@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { TbArrowRight } from 'react-icons/tb';
+import { ArrowRight } from 'lucide-react';
 import { Packet } from '../../types/packet';
 import { lookupFrame } from './packetDetailModel';
 
@@ -67,7 +67,7 @@ export const FrameNumberBox: React.FC<FrameNumberBoxProps> = ({ packets, onShowF
           }`}
           title="Load this frame"
         >
-          <TbArrowRight className="w-3.5 h-3.5" />
+          <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>
 

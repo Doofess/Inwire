@@ -5,7 +5,7 @@ import { arrayRowSource, packetAt, rowSlice } from '../../lib/rowSource';
 import { useCaptureRows, type CaptureFilterView } from '../../lib/useCaptureRows';
 import type { CaptureFilterState } from '../../lib/useCaptureFilter';
 import {
-  Direction, DirectionSignal, DIRECTION_GLYPH, DIRECTION_LABEL, SIGNAL_LABEL,
+  Direction, DirectionSignal, DIRECTION_LABEL, SIGNAL_LABEL,
   directionOf, signalOf,
 } from '../../services/direction';
 import { ColorRulesEngine } from '../../services/colorRules';
@@ -13,19 +13,20 @@ import type { PacketTheme } from '../../services/packetThemes';
 import { SENDER_INK_ALPHA } from '../../services/packetThemes';
 import { PacketListMinimap } from './PacketListMinimap';
 import { PlaceholderRow } from './PlaceholderRow';
+import { DirectionMark } from './DirectionMark';
+import { copyText } from '../ui/CopyButton';
 import {
-  TbArrowsSort,
-  TbArrowUp,
-  TbArrowDown,
-  TbMessage,
-  TbArrowsExchange,
-  TbFilter,
-  TbCopy,
-} from 'react-icons/tb';
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  MessageSquare,
+  ArrowRightLeft,
+  Funnel,
+  Copy,
+} from 'lucide-react';
 import { packetHexDump } from '../../services/pcapParser';
 import { hasBytes, packetBytes } from '../../services/packetBytes';
 import { fieldValue } from '../../services/dissect/fieldAccess';
-import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { minimapStore, packetListStore } from '../../services/interfacePrefs';
 import { formatTimeColumn } from '../../lib/formatTimeColumn';
 import { ColumnOptionsMenu } from './ColumnOptionsMenu';
@@ -116,11 +117,10 @@ interface PacketListProps {
   filterScan: CaptureFilterState;
   selectedPacket: Packet | null;
   onSelectPacket: (packet: Packet) => void;
-  /** Double-clicking a row opens the full-window view of that frame. */
+  /** Double-clicking a row opens the Frame Detail view on that frame. */
   onInspectPacket?: (packet: Packet) => void;
   onFollowStream: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
   onQuickFilter: (filter: string) => void;
-  searchText: string;
   /**
    * Frames the buffer has dropped since this capture began, or 0.
    *
@@ -279,7 +279,6 @@ export const PacketList: React.FC<PacketListProps> = ({
   onInspectPacket,
   onFollowStream,
   onQuickFilter,
-  searchText,
   droppedBuffer = 0,
   colorEngine,
   packetTheme,
@@ -454,35 +453,18 @@ export const PacketList: React.FC<PacketListProps> = ({
   const effectiveSortField = visibleSortField(sortField as ColumnSortField, columns);
 
   /**
-   * Quick-find, once typing settles.
+   * **The quick-find search is deleted, and this is what it cost to run.**
    *
-   * The scan below lowercases four strings for every frame in the buffer, and
-   * it ran on every keystroke - so each intermediate prefix of what someone is
-   * typing cost a full pass, for results replaced before they could be read.
-   *
-   * Clearing the box is exempt and lands at once. It is the one change whose
-   * answer the user already knows - the whole list - and making them wait
-   * 150 ms to get their list back would be the delay showing rather than
-   * hiding.
+   * It lowercased four strings for every frame in the buffer on every
+   * keystroke, which is why it was debounced by 150 ms and why clearing the box
+   * was exempted from the debounce. The display filter answers the same
+   * questions over the WHOLE capture rather than the rows in hand, so what went
+   * with it is a second, weaker search box - see `ActivityRail` for the full
+   * argument.
    */
-  const settledSearch = useDebouncedValue(searchText, 150);
-  const activeSearch = searchText.trim() === '' ? '' : settledSearch;
 
   const sortedPackets = React.useMemo(() => {
-    let processedPackets = packets;
-
-    // Apply quick-find search (from the FilterBar's "Find packet" control)
-    if (activeSearch.trim()) {
-      const lowerSearch = activeSearch.toLowerCase();
-      processedPackets = processedPackets.filter(
-        p =>
-          p.protocol.toLowerCase().includes(lowerSearch) ||
-          p.source.toLowerCase().includes(lowerSearch) ||
-          p.destination.toLowerCase().includes(lowerSearch) ||
-          p.info.toLowerCase().includes(lowerSearch) ||
-          p.id.toString().includes(lowerSearch)
-      );
-    }
+    const processedPackets = packets;
 
     if (!effectiveSortField) return processedPackets;
 
@@ -514,7 +496,7 @@ export const PacketList: React.FC<PacketListProps> = ({
       }
       return sortOrder === 'asc' ? valA - valB : valB - valA;
     });
-  }, [packets, effectiveSortField, sortOrder, activeSearch]);
+  }, [packets, effectiveSortField, sortOrder]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -652,17 +634,20 @@ export const PacketList: React.FC<PacketListProps> = ({
   // column, it shows what is in memory and says so; otherwise it addresses the
   // whole capture and reads the rows below the RAM window back from disk.
   const unfiltered = packets === allPackets;
-  // The capture in order: no quick-find, and either unsorted or sorted the way
-  // it was captured. A search or a sort by any other column is a view of what
-  // is in memory, and a source claiming the rows below it would put unsorted
-  // rows in a sorted list.
+  // The capture in order: either unsorted, or sorted the way it was captured. A
+  // sort by any other column is a view of what is in memory, and a source
+  // claiming the rows below it would put unsorted rows in a sorted list.
+  //
+  // The quick-find search was the other disqualifier here and is deleted; it
+  // filtered the window without touching the rows on disk, so any search at all
+  // meant this list could only honestly address what it held.
   //
   // A display filter used to disqualify it too, and no longer does - that is
   // what `filterScan` is. It still disqualifies it while the scan is running
   // or if it failed, because until the bitmap lands the only frames this list
   // can honestly show are the ones in hand.
-  const capturedInOrder = activeSearch === ''
-    && (!effectiveSortField || (effectiveSortField === 'id' && sortOrder === 'asc'));
+  const capturedInOrder =
+    !effectiveSortField || (effectiveSortField === 'id' && sortOrder === 'asc');
   const filterView = React.useMemo<CaptureFilterView | null>(
     () => (unfiltered || filterScan.status !== 'ready'
       ? null
@@ -921,13 +906,20 @@ export const PacketList: React.FC<PacketListProps> = ({
    *
    * The column-options button sits in the strip above the minimap, which is a
    * SIBLING of the table rather than a cell in it - so it was drawing on
-   * whatever was behind it while the header row beside it drew `--secondary`.
+   * whatever was behind it while the header row beside it drew its own ground.
    * Two surfaces that are meant to read as one bar, defined in two places, is
    * a mismatch that reappears every time either one is themed. There is one
    * definition now and both render it.
+   *
+   * **It is `--card`, which is what every other titled surface in the app is.**
+   * It was `--secondary`, one step brighter, which made this the only column
+   * header in the window that did not match the pane headers under it -
+   * `PaneHeader` is `bg-card`, and so is the Frame Detail pane's own header.
+   * A table's header row is the same kind of thing as a pane's title bar: the
+   * strip that names what is below it.
    */
   const HEADER_CHROME =
-    'bg-secondary border-b border-border text-muted-foreground transition-colors';
+    'bg-card border-b border-border text-muted-foreground transition-colors';
 
   // Where the text sits, per column. Every column is settable now - see
   // ColumnAlignMap for why the numeric three no longer have to be excluded.
@@ -952,11 +944,11 @@ export const PacketList: React.FC<PacketListProps> = ({
   );
 
   const renderSortIcon = (field: SortField) => {
-    if (effectiveSortField !== field) return <TbArrowsSort className="w-3 h-3 text-muted-foreground opacity-30 group-hover:opacity-100 transition-opacity" />;
+    if (effectiveSortField !== field) return <ArrowUpDown className="w-3 h-3 text-muted-foreground opacity-30 group-hover:opacity-100 transition-opacity" />;
     return sortOrder === 'asc' ? (
-      <TbArrowUp className="w-3 h-3 text-primary" />
+      <ArrowUp className="w-3 h-3 text-primary" />
     ) : (
-      <TbArrowDown className="w-3 h-3 text-primary" />
+      <ArrowDown className="w-3 h-3 text-primary" />
     );
   };
 
@@ -1217,7 +1209,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               <tr>
                 <td colSpan={visibleColumnCount} className="text-center py-16 text-muted-foreground">
                   <div className="flex flex-col items-center justify-center gap-1">
-                    <TbFilter className="w-6 h-6 text-muted-foreground/70 mb-1" />
+                    <Funnel className="w-6 h-6 text-muted-foreground/70 mb-1" />
                     <span>
                       {/* Against the BUFFER, not the filtered view. `packets`
                           is empty in both cases and they are not the same
@@ -1363,11 +1355,11 @@ export const PacketList: React.FC<PacketListProps> = ({
                     {columns.direction && (
                     <td className={`px-2 ${density.cell} whitespace-nowrap ${cellAlign('direction')}`}
                       title={directionTitle(packet.direction)}>
-                      <span className={directionOf(packet.direction) === Direction.Unknown
-                        ? 'opacity-40' : undefined}>
-                        {DIRECTION_GLYPH[directionOf(packet.direction)]}
+                      <span className={`inline-flex items-center ${
+                        directionOf(packet.direction) === Direction.Unknown ? 'opacity-40' : ''}`}>
+                        <DirectionMark direction={directionOf(packet.direction)} />
                         {signalOf(packet.direction) === DirectionSignal.InferredHost && (
-                          <span className="text-[9px] align-super opacity-60">*</span>
+                          <span className="text-[9px] self-start opacity-60">*</span>
                         )}
                       </span>
                     </td>
@@ -1538,7 +1530,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                 onClick={() => onFollowStream(target)}
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
               >
-                <TbMessage className="w-3.5 h-3.5 text-foreground" />
+                <MessageSquare className="w-3.5 h-3.5 text-foreground" />
                 <span>
                   Follow {target.kind.toUpperCase()} Stream
                   {target.streamId !== undefined ? ` (#${target.streamId})` : ''}
@@ -1559,7 +1551,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                 onClick={() => onFollowStream(target, 'ladder')}
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
               >
-                <TbArrowsExchange className="w-3.5 h-3.5 text-foreground" />
+                <ArrowRightLeft className="w-3.5 h-3.5 text-foreground" />
                 <span>Show conversation</span>
               </button>
             );
@@ -1569,7 +1561,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             onClick={() => onQuickFilter(`ip.src == "${contextMenu.packet.source}"`)}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
-            <TbFilter className="w-3.5 h-3.5" />
+            <Funnel className="w-3.5 h-3.5" />
             <span>Filter by Source ({contextMenu.packet.source})</span>
           </button>
 
@@ -1577,7 +1569,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             onClick={() => onQuickFilter(`ip.dst == "${contextMenu.packet.destination}"`)}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
-            <TbFilter className="w-3.5 h-3.5" />
+            <Funnel className="w-3.5 h-3.5" />
             <span>Filter by Destination ({contextMenu.packet.destination})</span>
           </button>
 
@@ -1585,7 +1577,7 @@ export const PacketList: React.FC<PacketListProps> = ({
             onClick={() => onQuickFilter(`proto == ${contextMenu.packet.protocol.toLowerCase()}`)}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
-            <TbFilter className="w-3.5 h-3.5" />
+            <Funnel className="w-3.5 h-3.5" />
             <span>Filter by Protocol ({contextMenu.packet.protocol})</span>
           </button>
 
@@ -1602,16 +1594,16 @@ export const PacketList: React.FC<PacketListProps> = ({
               // copying an empty string (docs/decisions/0013).
               const target = contextMenu.packet;
               if (hasBytes(target)) {
-                void navigator.clipboard.writeText(packetHexDump(target));
+                void copyText(packetHexDump(target));
                 return;
               }
               void packetBytes(target).then((rawBytes) => {
-                void navigator.clipboard.writeText(packetHexDump({ ...target, rawBytes }));
+                void copyText(packetHexDump({ ...target, rawBytes }));
               });
             }}
             className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
           >
-            <TbCopy className="w-3.5 h-3.5 text-foreground" />
+            <Copy className="w-3.5 h-3.5 text-foreground" />
             <span>Copy Raw Hex Stream</span>
           </button>
         </div>

@@ -4,9 +4,20 @@ import type { CaptureDropStats } from '../../services/agentProtocol';
 import type { LinkChange, LinkContext } from '../../services/linkContext';
 import { motion } from 'motion/react';
 import {
-  TbSettings, TbX, TbPalette, TbActivity, TbFilter, TbTrash, TbEraser, TbLayoutBoard, TbAccessible, TbKey,
-  TbDownload, TbCode, TbNetwork,
-} from 'react-icons/tb';
+  Settings,
+  X,
+  Palette,
+  Activity,
+  Funnel,
+  Trash,
+  Eraser,
+  LayoutGrid,
+  Accessibility,
+  Key,
+  Download,
+  Code,
+  EthernetPort,
+} from 'lucide-react';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
 import { UpdateCenterPanel } from './UpdateCenterPanel';
@@ -45,29 +56,29 @@ type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters' 
   | 'dissectors' | 'decryption' | 'network' | 'driver' | 'updates';
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: 'appearance', label: 'Appearance', icon: TbPalette },
+  { id: 'appearance', label: 'Appearance', icon: Palette },
   // Second, next to Appearance: the two are the "how it looks" pair, and
   // Appearance owns colour while this owns everything else about the UI.
-  { id: 'interface', label: 'Interface', icon: TbLayoutBoard },
+  { id: 'interface', label: 'Interface', icon: LayoutGrid },
   // Third, closing the "how it looks and behaves" run before the tabs turn
   // to data and hardware. It is not a colour tab and not a layout tab: what
   // is in here is what somebody needs in order to use the app at all.
-  { id: 'accessibility', label: 'Accessibility', icon: TbAccessible },
-  { id: 'filters', label: 'Display Filters', icon: TbFilter },
+  { id: 'accessibility', label: 'Accessibility', icon: Accessibility },
+  { id: 'filters', label: 'Display Filters', icon: Funnel },
   // Beside Display Filters, because a colouring rule IS a display filter with
   // a colour on it - the same expression, the same validator, the same
   // autocomplete. Splitting them across the panel would ask the reader to
   // learn the language twice.
-  { id: 'colors', label: 'Colouring Rules', icon: TbPalette },
+  { id: 'colors', label: 'Colouring Rules', icon: Palette },
   // Beside Decryption, and before it, because the two are the pair that changes
   // what the dissector can READ rather than what is shown: one adds a protocol,
   // the other supplies the keys to see inside one. It was a full-screen modal
   // off the hamburger menu until that menu was deleted.
-  { id: 'dissectors', label: 'Custom Dissectors', icon: TbCode },
+  { id: 'dissectors', label: 'Custom Dissectors', icon: Code },
   // After the two filter tabs and before the hardware one: a key log changes
   // what the dissector can read, which is the same kind of setting as a rule
   // that changes what is shown - and nothing to do with the driver.
-  { id: 'decryption', label: 'Decryption', icon: TbKey },
+  { id: 'decryption', label: 'Decryption', icon: Key },
   // The first of the three that describe this MACHINE rather than configure the
   // app, and deliberately first of them: Network says how this computer is
   // connected, Driver Info says what the capture driver is doing on it, Updates
@@ -75,13 +86,13 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // Ctrl+3 - and the thing that made it odd there was that it never described
   // the capture, so the filter row had to be hidden above it. Nothing in it
   // changes when a packet arrives.
-  { id: 'network', label: 'Network', icon: TbNetwork },
-  { id: 'driver', label: 'Driver Info', icon: TbActivity },
+  { id: 'network', label: 'Network', icon: EthernetPort },
+  { id: 'driver', label: 'Driver Info', icon: Activity },
   // Last, directly after Driver Info, because the two answer halves of one
   // question. Driver Info says what the capture driver is doing; this says
   // which version of it you have and where a newer one comes from - and the
   // banner for "there is no driver" points from one to the other.
-  { id: 'updates', label: 'Updates', icon: TbDownload },
+  { id: 'updates', label: 'Updates', icon: Download },
 ];
 
 interface SettingsModalProps {
@@ -208,7 +219,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <TbSettings className="w-7 h-7 shrink-0 text-primary" />
+            <Settings className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <div className="font-bold text-base">Settings</div>
               <p className="text-xs text-muted-foreground">Appearance and application preferences</p>
@@ -216,7 +227,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           <button onClick={onClose} className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground">
-            <TbX className="w-5 h-5" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
@@ -365,7 +376,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         disabled={totalPacketsCount === 0}
                         className={DRIVER_ACTION_BUTTON_CLASS}
                       >
-                        <TbEraser className="w-3.5 h-3.5" />
+                        <Eraser className="w-3.5 h-3.5" />
                         <span>Clear View</span>
                       </button>
                       <button
@@ -373,7 +384,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         disabled={captureStorage.bytesOnDisk === 0 && totalPacketsCount === 0}
                         className={DRIVER_ACTION_BUTTON_CLASS}
                       >
-                        <TbTrash className="w-3.5 h-3.5" />
+                        <Trash className="w-3.5 h-3.5" />
                         <span>Discard Capture</span>
                       </button>
                     </div>

@@ -1,0 +1,96 @@
+/**
+ * Assertion tests for the icon set.
+ *
+ *   npx tsx scripts/themes/icon-set.ts
+ *
+ * Every icon in the app comes from one set, lucide-react, imported where it is
+ * used. It lives in themes/ because that is where the checks on visual
+ * consistency already are - registry.ts beside it reads ActivityRail.tsx for
+ * the same reason.
+ *
+ * The failure this exists to catch is the two-set end state: a file left on
+ * react-icons by a rebase, or a new component written from muscle memory
+ * against the set that was here for two years. Nothing at runtime complains -
+ * both sets render - so the only symptom is a glyph whose corners and
+ * terminals do not quite match its neighbours, and nobody notices until a
+ * screenshot.
+ *
+ * The alias rule is here for a quieter reason. Two Lucide names, `Map` and
+ * `Image`, are also globals. Importing either bare shadows the global for the
+ * whole module, `new Map()` becomes a React component, and tsc says nothing
+ * because both are valid values. So both are always imported `as MapIcon` and
+ * `as ImageIcon`, in every file, whether or not that file uses the global.
+ */
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const text = (p: string) => readFileSync(join(root, p), 'utf8');
+
+let failures = 0;
+function check(name: string, actual: unknown, expected: unknown) {
+  const pass = JSON.stringify(actual) === JSON.stringify(expected);
+  if (!pass) failures++;
+  console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}`);
+  if (!pass) {
+    console.log(`        expected ${JSON.stringify(expected)}`);
+    console.log(`        actual   ${JSON.stringify(actual)}`);
+  }
+}
+
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(join(root, dir))) {
+    const rel = `${dir}/${entry}`;
+    if (statSync(join(root, rel)).isDirectory()) out.push(...walk(rel));
+    else if (/\.tsx?$/.test(entry)) out.push(rel.split(sep).join('/'));
+  }
+  return out;
+}
+const sources = walk('src');
+
+const pkg = JSON.parse(text('package.json')) as { dependencies?: Record<string, string> };
+const deps = pkg.dependencies ?? {};
+
+// --- One set, installed ----------------------------------------------------------
+
+check('lucide-react is a dependency', 'lucide-react' in deps, true);
+check('react-icons is not', 'react-icons' in deps, false);
+check('@heroicons/react is not', '@heroicons/react' in deps, false);
+
+// --- One set, imported -------------------------------------------------------------
+
+const importsFrom = (src: string, pkgName: string) =>
+  new RegExp(`from\\s*["']${pkgName.replace('/', '\\/')}(?:\\/[^"']*)?["']`).test(src);
+
+const onReactIcons = sources.filter((f) => importsFrom(text(f), 'react-icons'));
+const onHeroicons = sources.filter((f) => importsFrom(text(f), '@heroicons/react'));
+const onLucide = sources.filter((f) => importsFrom(text(f), 'lucide-react'));
+
+check('no source file imports from react-icons', onReactIcons, []);
+check('no source file imports from @heroicons/react', onHeroicons, []);
+// A sanity floor rather than a count to maintain: if this ever reads 0 the
+// walk is looking at the wrong tree, and every rule above passed vacuously.
+check('at least twenty files import from lucide-react', onLucide.length >= 20, true);
+
+// --- The two globals are aliased -------------------------------------------------
+
+const bareGlobals: string[] = [];
+for (const f of onLucide) {
+  for (const m of text(f).matchAll(/import\s*\{([^}]*)\}\s*from\s*["']lucide-react["']/g)) {
+    const specifiers = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+    for (const spec of specifiers) {
+      if (spec === 'Map' || spec === 'Image') bareGlobals.push(`${f}: ${spec}`);
+    }
+  }
+}
+check('Map and Image are never imported bare from lucide-react', bareGlobals, []);
+
+console.log();
+if (failures) {
+  console.log(`${failures} check(s) FAILED`);
+  process.exit(1);
+}
+console.log('All icon-set checks passed.');
+process.exit(0);

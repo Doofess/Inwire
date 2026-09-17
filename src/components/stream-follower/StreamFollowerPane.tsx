@@ -1,6 +1,13 @@
 import React, { useState } from 'react';
 import { Packet } from '../../types/packet';
-import { TbMessage, TbCopy, TbCheck, TbDownload, TbAlertTriangle, TbLoader2 } from 'react-icons/tb';
+import {
+  MessageSquare,
+  Copy,
+  Check,
+  Download,
+  TriangleAlert,
+  LoaderCircle,
+} from 'lucide-react';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 import { saveGeneratedBlob } from '../../lib/saveFile';
 import {
@@ -11,6 +18,7 @@ import { portLabel } from '../../services/portServices';
 import { useHydratedBytes } from '../../lib/useHydratedBytes';
 import { Segmented } from '../ui/segmented';
 import { LadderView } from '../ladder/LadderView';
+import { copyText } from '../ui/CopyButton';
 
 /**
  * One conversation's payload, both directions, in order.
@@ -88,14 +96,16 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
    * window stands down while covered - so without it the topmost thing on screen
    * was the one key that dismissed nothing.
    *
-   * It is gone, and the inversion is why. This is a pane now, so the detail
-   * window opens on top of IT rather than underneath, and App's view-level
-   * handler owns Escape in the bubble phase. That ordering is correct without
-   * anything here: the detail window still claims Escape in the capture phase, so
-   * while it is open Escape closes it, and only once nothing else has claimed the
-   * key does the view fall back to Packets. A capture-phase listener here would
-   * have made this pane the FIRST to see it and navigated out from under the
-   * window above.
+   * It is gone, and nothing replaced it. Both surfaces are VIEWS now - `stream`
+   * and `detail` are sibling `AppView`s, so exactly one of them is mounted at a
+   * time and neither can ever sit on top of the other. There is no covered pane
+   * to stand down, which is the whole of what that listener existed to manage.
+   *
+   * App's view-level handler owns Escape in the bubble phase, explicitly last in
+   * the chain, and returns any non-Packets view to Packets. A capture-phase
+   * listener here would make this pane the FIRST to see the key and navigate out
+   * from under whatever popover this pane itself has open - which is the rule
+   * every inner consumer in the app keeps, not a fact about the detail view.
    */
 
   // Hydrated, because every view below reads the frames' bytes and a buffer
@@ -149,7 +159,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     return p.streamPayload?.payloadText || packetAsciiDump(p);
   };
 
-  const handleCopyStream = () => {
+  const handleCopyStream = async () => {
     const fullDialogue = streamPackets
       .map(p => {
         const prefix = isFromClient(p, client) ? `[CLIENT -> SERVER (${p.source})]` : `[SERVER -> CLIENT (${p.source})]`;
@@ -157,7 +167,10 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
       })
       .join('\n');
 
-    navigator.clipboard.writeText(fullDialogue);
+    // Through `copyText` rather than `navigator.clipboard` directly: it carries
+    // the execCommand fallback for contexts that refuse the async API, and it
+    // reports failure - so the tick is not shown for a copy that did not happen.
+    if (!(await copyText(fullDialogue))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -191,7 +204,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
         {/* Pane header */}
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <TbMessage className="w-7 h-7 shrink-0 text-primary" />
+            <MessageSquare className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <div className="flex items-center gap-2 font-bold text-sm">
                 <span>
@@ -258,11 +271,11 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             </div>
 
             <button
-              onClick={handleCopyStream}
+              onClick={() => { void handleCopyStream(); }}
               className="p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 border-border hover:bg-accent text-foreground/80"
               title="Copy conversation dialogue to clipboard"
             >
-              {copied ? <TbCheck className="w-4 h-4 text-emerald-400" /> : <TbCopy className="w-4 h-4" />}
+              {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
             </button>
 
             <button
@@ -270,7 +283,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               className="p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 border-border hover:bg-accent text-foreground/80"
               title="Download stream text file"
             >
-              <TbDownload className="w-4 h-4 text-foreground" />
+              <Download className="w-4 h-4 text-foreground" />
             </button>
 
             {/* The X stood here. The footer's control is the one that returns,
@@ -299,7 +312,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             should be read, and neither is visible in it. */}
         {client.basis === 'first-speaker' && (
           <div className="px-4 py-2 border-b border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[11px] flex items-start gap-2">
-            <TbAlertTriangle className="w-4 h-4 shrink-0 mt-px" />
+            <TriangleAlert className="w-4 h-4 shrink-0 mt-px" />
             <span>
               The start of this conversation is not in the capture, and neither port
               is a well-known one — so <strong>client and server are assumed</strong> from
@@ -310,7 +323,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
         )}
         {hydrating && (
           <div className="px-4 py-2 border-b border-border bg-muted/40 text-muted-foreground text-[11px] flex items-center gap-2">
-            <TbLoader2 className="w-4 h-4 shrink-0 animate-spin" />
+            <LoaderCircle className="w-4 h-4 shrink-0 animate-spin" />
             <span>Reading this stream’s bytes back from the stored capture…</span>
           </div>
         )}

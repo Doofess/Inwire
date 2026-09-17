@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { TbCheck, TbCopy } from 'react-icons/tb';
+import { Check, Copy } from 'lucide-react';
 
 /**
  * Copy one value to the clipboard, with the tick that says it worked.
  *
- * There was no general one of these: `HexCopyButtons` had the only careful
- * implementation and the other half-dozen call sites each wrote
+ * There was no general one of these: the hex viewer's copy buttons had the only
+ * careful implementation and the other half-dozen call sites each wrote
  * `navigator.clipboard.writeText` inline, which quietly does nothing in a
  * sandboxed frame. The Network panel puts a copy control on every value it
  * shows, so this is where a shared one earns its place.
@@ -16,6 +16,18 @@ import { TbCheck, TbCopy } from 'react-icons/tb';
  * is worse than one that is absent. And the **confirmation**, because copying
  * produces no visible change anywhere on screen - without a tick the only way
  * to know it worked is to go and paste it somewhere.
+ *
+ * **Every copy in the app goes through `copyText` now.** `HexCopyMenu` was
+ * first, giving up its own copy of the fallback; the rest followed - the
+ * protocol tree and its context menu, the frame field table, the packet list's
+ * "copy as hex dump", the Statistics filter menu and the stream dialogue. A
+ * grep for `navigator.clipboard.writeText` should find exactly one hit, the
+ * line below. If it finds two, the careful implementation has grown a second
+ * home again and the new one is missing the fallback.
+ *
+ * The call sites that show a tick take the boolean: `if (!(await copyText(x)))
+ * return;` before setting it, so a copy that did not happen does not claim it
+ * did. The fire-and-forget ones are `void copyText(x)`.
  */
 export async function copyText(text: string): Promise<boolean> {
   try {
@@ -76,8 +88,8 @@ export const CopyButton: React.FC<CopyButtonProps> = ({ value, label, className 
         hover:text-foreground hover:bg-accent cursor-pointer ${className ?? ''}`}
     >
       {copied
-        ? <TbCheck className="w-3.5 h-3.5 text-emerald-500" />
-        : <TbCopy className="w-3.5 h-3.5" />}
+        ? <Check className="w-3.5 h-3.5 text-emerald-500" />
+        : <Copy className="w-3.5 h-3.5" />}
     </button>
   );
 };

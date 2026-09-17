@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { TbKey, TbTrash, TbUpload } from 'react-icons/tb';
+import { Key, Trash, Upload } from 'lucide-react';
 import { keyLog, type KeyLogStats } from '../../services/tls/keyLog';
 import { pipeline } from '../../services/pipelineClient';
 
@@ -83,7 +83,7 @@ export const DecryptionSettingsPanel: React.FC = () => {
           onClick={() => inputRef.current?.click()}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
         >
-          <TbUpload className="w-3.5 h-3.5" />
+          <Upload className="w-3.5 h-3.5" />
           Load key log
         </button>
         {stats.connections > 0 && (
@@ -92,7 +92,7 @@ export const DecryptionSettingsPanel: React.FC = () => {
             onClick={clear}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold border border-border text-foreground hover:bg-muted transition-colors"
           >
-            <TbTrash className="w-3.5 h-3.5" />
+            <Trash className="w-3.5 h-3.5" />
             Clear
           </button>
         )}
@@ -101,7 +101,7 @@ export const DecryptionSettingsPanel: React.FC = () => {
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
         <dt className="text-muted-foreground">Connections covered</dt>
         <dd className="font-mono flex items-center gap-1.5">
-          <TbKey className="w-3.5 h-3.5 text-muted-foreground" />
+          <Key className="w-3.5 h-3.5 text-muted-foreground" />
           {stats.connections.toLocaleString()}
         </dd>
         <dt className="text-muted-foreground">Secrets</dt>

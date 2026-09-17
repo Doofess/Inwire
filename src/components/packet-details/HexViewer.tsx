@@ -1,17 +1,29 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Packet, Capabilities } from '../../types/packet';
-import { TbBinary, TbCopy, TbCheck, TbShield, TbLoader2, TbDatabaseOff } from 'react-icons/tb';
+import {
+  Binary,
+  Check,
+  ChevronDown,
+  Shield,
+  LoaderCircle,
+  DatabaseX,
+} from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuItem,
+} from '../ui/dropdown-menu';
+import { copyText } from '../ui/CopyButton';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 import { ByteInspector, HexDumpView } from './HexDumpView';
-import { packetAccentStyle } from '../../lib/packetAccent';
 import { hasBytes } from '../../services/packetBytes';
 import type { PacketDetailState } from '../../lib/usePacketDetail';
+import { PaneHeader } from '../common/PaneHeader';
 
 interface HexViewerProps {
   packet: Packet | null;
-  /** The colour the packet list painted this frame's row. Retints the pane -
-   *  see packetAccent.ts. */
-  accentColor?: string | null;
   activeByteRange: [number, number] | null;
   onHoverByte: (byteIndex: number | null) => void;
   permissions: Capabilities;
@@ -49,61 +61,105 @@ export function formatPacketBytes(packet: Packet, format: CopyFormat): string {
 }
 
 /**
- * The HEX / C-ARRAY / PY copy controls.
+ * A copy icon drawn here rather than taken from the set.
  *
- * Shared so the bottom pane and the packet detail window offer the same
- * exports from the same code, rather than one growing a format the other
- * lacks.
+ * `Copy` was two identical outlined squares, which is what every icon set
+ * ships and what a reader's eye slides off: two outlines of equal weight
+ * overlapping read as a diagram of two squares, not as a sheet in front of a
+ * sheet. The one below says the same thing with **asymmetric weight** - the
+ * sheet behind is a corner bracket at less than half opacity, the sheet in
+ * front is the only closed shape - so depth is what carries the metaphor and
+ * there is exactly one outline for the eye to follow.
  */
-export const HexCopyButtons: React.FC<{ packet: Packet }> = ({ packet }) => {
+const CopyMark: React.FC<{ className?: string }> = ({ className }) => (
+  <svg
+    viewBox="0 0 16 16"
+    className={className}
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.5}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path
+      d="M5.75 4.25V3A1.75 1.75 0 0 1 7.5 1.25h5A1.75 1.75 0 0 1 14.25 3v5a1.75 1.75 0 0 1-1.75 1.75h-1.25"
+      opacity="0.45"
+    />
+    <rect x="1.75" y="4.25" width="9.5" height="10" rx="1.75" />
+  </svg>
+);
+
+const COPY_FORMATS: { key: CopyFormat; label: string; hint: string }[] = [
+  { key: 'hex', label: 'Hex dump', hint: 'Offsets, bytes and ASCII' },
+  { key: 'c_array', label: 'C array', hint: 'unsigned char pkt[n]' },
+  { key: 'python', label: 'Python bytes', hint: 'b"\x00\x01"' },
+];
+
+/**
+ * One control for every shape the frame's bytes can leave in.
+ *
+ * It was three buttons - HEX, C-ARRAY, PY - side by side in the pane's title
+ * bar, which spent the widest part of a 36px bar on three choices of which a
+ * reader wants one, and read as three separate actions rather than one action
+ * with three shapes. A menu says what is actually true: the verb is *copy*,
+ * and the format is an argument to it.
+ *
+ * Shared so the bottom pane and the packet detail pane offer the same exports
+ * from the same code, rather than one growing a format the other lacks.
+ */
+export const HexCopyMenu: React.FC<{ packet: Packet }> = ({ packet }) => {
   const [copied, setCopied] = useState<CopyFormat | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The menu closes on the click that copies, so the confirmation has to live
+  // on the trigger - and the trigger can be unmounted inside the 1.5s window
+  // by a frame being deselected.
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
   const copy = async (format: CopyFormat) => {
-    const text = formatPacketBytes(packet, format);
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // Clipboard API is unavailable in some sandboxed frames; fall back to a
-      // hidden textarea and execCommand, which still works there.
-      const textArea = document.createElement('textarea');
-      textArea.value = text;
-      textArea.style.position = 'fixed';
-      textArea.style.left = '-999999px';
-      document.body.appendChild(textArea);
-      textArea.select();
-      try {
-        document.execCommand('copy');
-      } catch (e) {
-        console.error('Copy failed', e);
-        textArea.remove();
-        return;
-      }
-      textArea.remove();
-    }
+    if (!(await copyText(formatPacketBytes(packet, format)))) return;
     setCopied(format);
-    setTimeout(() => setCopied(null), 1500);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(null), 1500);
   };
 
-  const formats: { key: CopyFormat; label: string; title: string }[] = [
-    { key: 'hex', label: 'HEX', title: 'Copy raw hex sequence' },
-    { key: 'c_array', label: 'C-ARRAY', title: 'Copy as C array' },
-    { key: 'python', label: 'PY', title: 'Copy as Python bytes' },
-  ];
+  // Naming the format that was copied, not just "copied": the choice was made
+  // in a menu that is no longer on screen, so the tick alone would confirm an
+  // action without confirming which one.
+  const confirmed = COPY_FORMATS.find(f => f.key === copied);
 
   return (
-    <div className="flex items-center gap-1.5">
-      {formats.map(f => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
         <button
-          key={f.key}
-          onClick={() => copy(f.key)}
-          className="px-2 py-0.5 rounded text-[10px] font-mono border transition-colors flex items-center gap-1 cursor-pointer border-border hover:bg-accent text-foreground bg-secondary/50"
-          title={f.title}
+          type="button"
+          title="Copy this frame's bytes"
+          aria-label="Copy this frame's bytes"
+          className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wide border
+            transition-colors flex items-center gap-1 cursor-pointer border-border
+            hover:bg-accent text-foreground bg-secondary/50
+            data-[state=open]:bg-accent"
         >
-          {copied === f.key ? <TbCheck className="w-3 h-3 text-emerald-400" /> : <TbCopy className="w-3 h-3" />}
-          <span>{f.label}</span>
+          {confirmed
+            ? <Check className="w-3 h-3 text-emerald-500" />
+            : <CopyMark className="w-3.5 h-3.5" />}
+          <span>{confirmed ? confirmed.label : 'Copy'}</span>
+          <ChevronDown className="w-3 h-3 opacity-60" />
         </button>
-      ))}
-    </div>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-52">
+        <DropdownMenuLabel className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
+          Copy {packet.rawBytes.length} bytes as
+        </DropdownMenuLabel>
+        {COPY_FORMATS.map(f => (
+          <DropdownMenuItem key={f.key} onSelect={() => { void copy(f.key); }} className="gap-3">
+            <span className="flex-1 text-xs">{f.label}</span>
+            <span className="text-[10px] font-mono text-muted-foreground">{f.hint}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 };
 
@@ -115,7 +171,6 @@ export const HexCopyButtons: React.FC<{ packet: Packet }> = ({ packet }) => {
  */
 export const HexViewer: React.FC<HexViewerProps> = ({
   packet,
-  accentColor,
   activeByteRange,
   onHoverByte,
   permissions,
@@ -127,7 +182,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
     return (
       <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
         <div className="flex flex-col items-center gap-1.5">
-          <TbBinary className="w-6 h-6 text-muted-foreground/70 mb-1" />
+          <Binary className="w-6 h-6 text-muted-foreground/70 mb-1" />
           <span className="uppercase tracking-wider">Hex Dump Inspector</span>
           <span className="text-[10px] text-muted-foreground/70">Select a frame to inspect raw hexadecimal &amp; ASCII dump</span>
         </div>
@@ -144,8 +199,8 @@ export const HexViewer: React.FC<HexViewerProps> = ({
       <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
         <div className="flex flex-col items-center gap-1.5 max-w-xs">
           {gone
-            ? <TbDatabaseOff className="w-6 h-6 text-muted-foreground/70 mb-1" />
-            : <TbLoader2 className="w-6 h-6 text-muted-foreground/70 mb-1 animate-spin" />}
+            ? <DatabaseX className="w-6 h-6 text-muted-foreground/70 mb-1" />
+            : <LoaderCircle className="w-6 h-6 text-muted-foreground/70 mb-1 animate-spin" />}
           <span className="uppercase tracking-wider">
             {gone ? `Frame ${packet.id} bytes not stored` : `Reading frame ${packet.id}`}
           </span>
@@ -168,26 +223,25 @@ export const HexViewer: React.FC<HexViewerProps> = ({
   };
 
   return (
-    // Carries the frame's colour into the dump itself: the selected byte, the
-    // range highlight and the byte inspector's readout were all the app accent.
-    <div
-      className="h-full flex flex-col overflow-hidden select-none font-mono text-xs"
-      style={packetAccentStyle(accentColor)}
-    >
-      <div className="px-4 py-2 border-b flex items-center justify-between transition-colors bg-card border-border text-card-foreground shadow-sm">
-        <div className="flex items-center gap-2 font-semibold">
-          <span className="text-muted-foreground uppercase tracking-tighter">Hex View</span>
-          <span className="text-primary font-mono">({packet.rawBytes.length} bytes)</span>
-        </div>
-        <HexCopyButtons packet={packet} />
-      </div>
+    // The selected byte, the range highlight and the byte inspector's readout
+    // are the app's own accent. They carried the matched rule's hue for a while,
+    // retinted from the pane above; see `PacketDetailsTree` for why that was
+    // reverted.
+    <div className="h-full flex flex-col overflow-hidden select-none font-mono text-xs">
+      {/* The copy control is ~20px and the text beside it ~16, which is
+          exactly why `PaneHeader` fixes its own height instead of padding to
+          fit: this bar used to be four pixels taller than the two either side
+          of it. */}
+      <PaneHeader title="Hex View" detail={`(${packet.rawBytes.length} bytes)`}>
+        <HexCopyMenu packet={packet} />
+      </PaneHeader>
 
       {/* HexDumpView owns the scrolling, because it virtualizes its rows and
           needs the scroll position to decide which ones exist. */}
       <div className="flex-1 flex flex-col min-h-0">
         {!permissions.canViewPayloads && (
           <div className="m-3 mb-0 p-2 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px] flex items-center gap-2 shrink-0">
-            <TbShield className="w-4 h-4 text-foreground shrink-0" />
+            <Shield className="w-4 h-4 text-foreground shrink-0" />
             <span>Auditor / Guest Role Active: Payload inspection sanitized according to compliance policy.</span>
           </div>
         )}
@@ -201,9 +255,39 @@ export const HexViewer: React.FC<HexViewerProps> = ({
         />
       </div>
 
-      <div className="px-4 py-1.5 border-t text-[10px] font-mono flex items-center justify-between transition-colors bg-secondary/50 border-border text-muted-foreground shadow-inner">
-        <ByteInspector packet={packet} hoveredByteIndex={hoveredByteIdx} />
-        <span className="text-[10px] text-muted-foreground font-mono uppercase">Byte Dump</span>
+      {/* The byte inspector, in this pane's own footer.
+
+          **It spent one revision as the application's bottom bar** - the same
+          strip, class for class, spanning the window under the rail as well as
+          the panes, with its text indented to this pane's left edge by a CSS
+          length built from `--details-pane-size`. The argument for that was the
+          row's bottom edge: a bordered strip on one pane of the row and none on
+          the other beside it. The argument against it is the stronger one and is
+          why it is back - **this is a readout about the hex dump**, and a bar
+          spanning the window is a claim about the window. Indenting it to line
+          up under the dump was the tell: a full-width bar that has to be pushed
+          sideways to look like it belongs somewhere narrower is a bar in the
+          wrong place, and the mechanism that did it - a custom property on the
+          ROOT element, read by a component two levels away from the panes it
+          describes - was load-bearing for nothing else.
+
+          The ragged edge is accepted rather than fixed, because the two panes
+          are different things and the divider between them already says so.
+
+          `hoveredByteIdx` is this pane's own state, which is the other thing
+          that came back. As a window-spanning bar it had to be fed from `App`,
+          derived from `activeByteRange` - and that range is also what the
+          protocol tree publishes for a one-byte field, so the bar answered
+          "this byte" for a hover in a pane that is not this one. Back in here
+          it reads the dump's hover and nothing else. */}
+      <div
+        className="border-t px-4 py-1.5 text-[10px] font-mono flex items-center
+          transition-colors bg-secondary/50 border-border text-muted-foreground
+          shadow-inner shrink-0"
+      >
+        <div className="min-w-0 truncate">
+          <ByteInspector packet={packet} hoveredByteIndex={hoveredByteIdx} />
+        </div>
       </div>
     </div>
   );

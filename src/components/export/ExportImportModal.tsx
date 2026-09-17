@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { TbDownload, TbUpload, TbX } from 'react-icons/tb';
+import { Download, Upload, X } from 'lucide-react';
 
 import { FilterPresetLibrary, Packet, Capabilities } from '../../types/packet';
 import { ImportFailure } from '../../services/exportSchema';
@@ -82,7 +82,7 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
-            <TbDownload className="w-7 h-7 shrink-0 text-primary" />
+            <Download className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <div className="font-bold text-base">Capture Import &amp; Export Center</div>
               <p className="text-xs text-muted-foreground">
@@ -96,18 +96,18 @@ export const ExportImportModal: React.FC<ExportImportModalProps> = ({
             className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground"
             aria-label="Close"
           >
-            <TbX className="w-5 h-5" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Tabs */}
         <div className="px-5 py-2 border-b border-border flex items-center gap-2 text-xs shrink-0">
           <button onClick={() => setTab('export')} className={tabClass('export')}>
-            <TbDownload className="w-3.5 h-3.5" />
+            <Download className="w-3.5 h-3.5" />
             <span>Export</span>
           </button>
           <button onClick={() => setTab('import')} className={tabClass('import')}>
-            <TbUpload className="w-3.5 h-3.5" />
+            <Upload className="w-3.5 h-3.5" />
             <span>Import</span>
           </button>
         </div>

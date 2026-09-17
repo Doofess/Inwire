@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { TbChevronDown, TbChevronUp } from 'react-icons/tb';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 
 /**
  * The sortable table the statistics tabs are made of.
@@ -108,7 +108,7 @@ export function StatTable<T>({
                   >
                     <span>{c.label}</span>
                     {sortKey === c.key &&
-                      (descending ? <TbChevronDown className="w-3 h-3" /> : <TbChevronUp className="w-3 h-3" />)}
+                      (descending ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />)}
                   </button>
                 ) : (
                   c.label

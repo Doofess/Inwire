@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
-import { TbCopy, TbCheck } from 'react-icons/tb';
+import { Copy, Check } from 'lucide-react';
 import { renderBitfield } from '../../lib/bitfield';
+import { copyText } from '../ui/CopyButton';
 import { CATEGORY_TEXT } from '../../services/expertInfo';
 
 /**
@@ -48,8 +49,11 @@ export const FrameFieldTable: React.FC<FrameFieldTableProps> = ({
   // reads when you have opened it deliberately to look at it.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
-  const copyValue = (path: string, value: string | number | boolean) => {
-    navigator.clipboard.writeText(String(value));
+  // `copyText` rather than `navigator.clipboard` directly - it is the one home
+  // for the execCommand fallback, and it reports failure so the tick below is
+  // not shown for a copy that did not happen. See `ui/CopyButton`.
+  const copyValue = async (path: string, value: string | number | boolean) => {
+    if (!(await copyText(String(value)))) return;
     setCopied(path);
     setTimeout(() => setCopied(null), 1500);
   };
@@ -163,11 +167,11 @@ export const FrameFieldTable: React.FC<FrameFieldTableProps> = ({
               </span>
             )}
             <button
-              onClick={() => copyValue(path, field.value)}
+              onClick={() => { void copyValue(path, field.value); }}
               className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
               title="Copy value"
             >
-              {copied === path ? <TbCheck className="w-3 h-3 text-emerald-400" /> : <TbCopy className="w-3 h-3" />}
+              {copied === path ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
             </button>
           </div>
         </div>,

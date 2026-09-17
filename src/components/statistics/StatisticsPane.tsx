@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { TbChartBar, TbChevronDown, TbChevronRight } from 'react-icons/tb';
+import { ChartColumn, ChevronDown, ChevronRight } from 'lucide-react';
 
 import { Packet } from '../../types/packet';
 import {
@@ -17,7 +17,9 @@ import {
   type ExpertGroupRow, type ExpertLookup,
 } from '../../services/expertInfo';
 import { portLabel } from '../../services/portServices';
+import { copyText } from '../ui/CopyButton';
 import { StatTable, bitrate, bytes, count, seconds, type StatColumn } from './StatTable';
+import { GraphsTab } from './GraphsTab';
 import {
   ContextMenu, ContextMenuTrigger, ContextMenuContent,
   ContextMenuLabel, ContextMenuItem, ContextMenuSeparator,
@@ -37,7 +39,8 @@ import {
  * so the row and the filter can never disagree about what the row meant.
  */
 
-type Tab = 'hierarchy' | 'conversations' | 'endpoints' | 'devices' | 'processes' | 'expert' | 'names';
+type Tab = 'hierarchy' | 'conversations' | 'endpoints' | 'devices' | 'processes'
+  | 'graphs' | 'expert' | 'names';
 
 const CONVERSATION_TABS: { id: ConversationKind; label: string }[] = [
   { id: 'eth', label: 'Ethernet' },
@@ -84,6 +87,17 @@ interface StatisticsPaneProps {
    * to close.
    */
   onReturnToPackets: () => void;
+  /**
+   * Passed through to the Graphs tab, which is the only thing in this pane that
+   * draws rather than tabulates.
+   *
+   * `themeKey` is not used for styling. The timeline's D3 draw is imperative, so
+   * it needs something in its dependency list that changes on a theme switch -
+   * and `isDark` alone cannot do it if two themes of the same polarity are ever
+   * added back, which they have been before.
+   */
+  isDark: boolean;
+  themeKey?: string;
 }
 
 export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
@@ -97,6 +111,8 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   onSelectFrame,
   droppedBuffer = 0,
   onReturnToPackets,
+  isDark,
+  themeKey,
 }) => {
   const [tab, setTab] = useState<Tab>('hierarchy');
   const [kind, setKind] = useState<ConversationKind>('ipv4');
@@ -226,7 +242,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
     <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-card text-card-foreground">
         <div className="px-5 py-3.5 border-b border-border flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
-            <TbChartBar className="w-7 h-7 shrink-0 text-primary" />
+            <ChartColumn className="w-7 h-7 shrink-0 text-primary" />
             <div>
               <div className="font-bold text-base">Capture Statistics</div>
               <p className="text-xs text-muted-foreground">
@@ -263,6 +279,12 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
           <button onClick={() => setTab('processes')} className={tabClass('processes')}>
             Processes{processRows.length > 0 ? ` (${processRows.length})` : ''}
           </button>
+          {/* Between the tables and the findings, deliberately. Everything to
+              the left of it is an aggregate of the capture and this is the same
+              aggregate drawn rather than tabulated; Expert Information and
+              Resolved Addresses to the right are lists of things FOUND in the
+              capture, which is a different kind of answer. */}
+          <button onClick={() => setTab('graphs')} className={tabClass('graphs')}>Graphs</button>
           <button onClick={() => setTab('expert')} className={tabClass('expert')}>
             Expert Information{expert.size > 0 ? ` (${count(expert.size)})` : ''}
           </button>
@@ -281,6 +303,14 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
           )}
         </div>
 
+        {/* The Graphs tab owns its own height and must not be inside a
+            scroller: `TrafficTimelineChart` measures its container, so a parent
+            that grows to fit its child would let the SVG size itself from a box
+            it is itself defining. Every other tab is a table and wants exactly
+            the opposite. */}
+        {tab === 'graphs' ? (
+          <GraphsTab packets={packets} isDark={isDark} themeKey={themeKey} />
+        ) : (
         <div className="flex-1 overflow-y-auto custom-scrollbar px-5 py-3">
           {tab === 'hierarchy' && (
             <HierarchyTable
@@ -528,7 +558,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
                     Go to First Frame
                   </ContextMenuItem>
                   <ContextMenuSeparator />
-                  <ContextMenuItem onSelect={() => navigator.clipboard.writeText(menuRow.filter)}>
+                  <ContextMenuItem onSelect={() => void copyText(menuRow.filter)}>
                     Copy as Filter
                   </ContextMenuItem>
                 </ContextMenuContent>
@@ -559,6 +589,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
             </>
           )}
         </div>
+        )}
     </div>
   );
 };
@@ -604,7 +635,7 @@ const HierarchyTable: React.FC<{
                   className="shrink-0 text-muted-foreground hover:text-foreground cursor-pointer"
                   aria-label={open ? 'Collapse' : 'Expand'}
                 >
-                  {open ? <TbChevronDown className="w-3 h-3" /> : <TbChevronRight className="w-3 h-3" />}
+                  {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                 </button>
               ) : (
                 <span className="w-3 shrink-0" />

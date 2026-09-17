@@ -1,15 +1,15 @@
 import React from 'react';
 import type { StreamTarget } from '../../services/followStream';
 import {
-  TbClock,
-  TbRuler2,
-  TbAlertTriangle,
-  TbArrowRight,
-  TbEyeOff,
-  TbMessage,
-  TbLayoutSidebarLeftCollapse,
-  TbLayoutSidebarLeftExpand,
-} from 'react-icons/tb';
+  Clock,
+  Ruler,
+  TriangleAlert,
+  ArrowRight,
+  EyeOff,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from 'lucide-react';
 import { FrameSummary, RelatedFrame } from './packetDetailModel';
 
 /**
@@ -140,7 +140,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
           aria-label="Show frame details"
           className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
         >
-          <TbLayoutSidebarLeftExpand className="w-4 h-4" />
+          <PanelLeftOpen className="w-4 h-4" />
         </button>
 
         {/* Not buttons: the strip is a reminder of what is behind it, and every
@@ -148,13 +148,13 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
             its place by being the one thing worth knowing is there while the
             rail is shut. */}
         <div className="mt-1 flex flex-col items-center gap-3 text-muted-foreground">
-          <TbClock className="w-3.5 h-3.5" />
-          <TbRuler2 className="w-3.5 h-3.5" />
+          <Clock className="w-3.5 h-3.5" />
+          <Ruler className="w-3.5 h-3.5" />
           {hasAnalysis && (
-            <TbAlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+            <TriangleAlert className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
           )}
           {(streamTarget !== null || related.length > 0) && (
-            <TbArrowRight className="w-3.5 h-3.5" />
+            <ArrowRight className="w-3.5 h-3.5" />
           )}
         </div>
       </div>
@@ -173,19 +173,19 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
           aria-label="Hide frame details"
           className="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground cursor-pointer"
         >
-          <TbLayoutSidebarLeftCollapse className="w-4 h-4" />
+          <PanelLeftClose className="w-4 h-4" />
         </button>
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
-        <MetaGroup label="Timing" icon={TbClock}>
+        <MetaGroup label="Timing" icon={Clock}>
           <MetaItem label="Arrived" value={summary.localTime} />
           <MetaItem label="UTC" value={summary.utcTime} />
           <MetaItem label="Since start" value={`${summary.relativeTime}s`} />
           <MetaItem label="Δ previous" value={`${summary.timeDelta}s`} />
         </MetaGroup>
 
-        <MetaGroup label="Frame" icon={TbRuler2}>
+        <MetaGroup label="Frame" icon={Ruler}>
           <MetaItem
             label="Length"
             value={
@@ -204,7 +204,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
         {/* Omitted entirely rather than rendered empty - a clean frame should
             not carry a heading announcing that nothing is wrong with it. */}
         {hasAnalysis && (
-          <MetaGroup label="Analysis" icon={TbAlertTriangle}>
+          <MetaGroup label="Analysis" icon={TriangleAlert}>
             {summary.analysisFlags.length > 0 && (
               <div className="flex flex-wrap gap-1">
                 {summary.analysisFlags.map(flag => (
@@ -226,14 +226,14 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
                 className="flex items-start gap-1.5 text-[10px] font-mono leading-snug text-muted-foreground"
                 title="This frame does not match the active display filter, so it is not in the list behind this window."
               >
-                <TbEyeOff className="w-3 h-3 shrink-0 mt-0.5" />
+                <EyeOff className="w-3 h-3 shrink-0 mt-0.5" />
                 <span>Hidden by display filter</span>
               </div>
             )}
           </MetaGroup>
         )}
 
-        <MetaGroup label="Go to" icon={TbArrowRight}>
+        <MetaGroup label="Go to" icon={ArrowRight}>
           {frameBox}
 
           {streamTarget !== null && (
@@ -241,7 +241,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
               onClick={() => onFollowStream(streamTarget)}
               title={`Follow this ${streamTarget.kind.toUpperCase()} stream`}
             >
-              <TbMessage className="w-3 h-3 shrink-0" />
+              <MessageSquare className="w-3 h-3 shrink-0" />
               <span className="truncate">
                 {streamTarget.kind.toUpperCase()} stream
                 {streamTarget.streamId !== undefined ? ` ${streamTarget.streamId}` : ''}
