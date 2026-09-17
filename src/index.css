@@ -1,31 +1,9 @@
 @import "tailwindcss";
 
-/* Self-hosted rather than pulled from fonts.googleapis.com: Inwire is often
-   pointed at an isolated or offline network, and an analyzer that blocks on a
-   third-party font request would both render unstyled and show up in its own
-   capture.
-
-   One family, two cuts. IBM Plex Sans ships as a variable font - one file
-   covering every weight - and IBM Plex Mono does not: IBM never released a
-   variable Plex Mono, and `@fontsource-variable/ibm-plex-mono` does not exist.
-   So the mono is imported a weight at a time. Every @fontsource file is
-   unicode-range subset, so the browser fetches only the latin slice of only
-   the weights something is actually set in; four imports here cost what the
-   one file would have. */
-@import "@fontsource-variable/ibm-plex-sans";
-@import "@fontsource/ibm-plex-mono/400.css";
-@import "@fontsource/ibm-plex-mono/500.css";
-@import "@fontsource/ibm-plex-mono/600.css";
-@import "@fontsource/ibm-plex-mono/700.css";
-
-/* The mono italic. Without a real italic the browser synthesises one by
-   shearing the roman, which visibly distorts the letterforms. What reaches it
-   is the italic used for generated fields and empty states inside the protocol
-   tree and the packet tables, which render in mono. Regular weight only:
-   nothing sets mono italic at another weight, and the subsetting means an
-   import nothing uses costs no request either way. No sans italic is imported,
-   which is what was true of Geist too. */
-@import "@fontsource/ibm-plex-mono/400-italic.css";
+/* No webfont is imported. The app is set in the two faces Windows ships -
+   Segoe UI Variable for the chrome, Cascadia Mono for the data - so there is
+   nothing to self-host, nothing to fetch, and no swap from a fallback on a
+   cold start. The tokens in @theme name them, and the reasoning is there. */
 
 /* Tailwind v4 has no JS config file, so class-based dark mode (toggled by
    next-themes adding/removing .dark on <html>) is opted into here instead
@@ -122,26 +100,59 @@
      `font-sans` in the app - and the body default - from one place, rather
      than editing the 168 utilities spread across 44 components.
 
-     One family in two cuts, and that is the decision: IBM Plex Sans for the
-     chrome, IBM Plex Mono for the data. The two tokens used to name two
-     unrelated families - Geist and JetBrains Mono - chosen independently, and
-     the seam showed wherever a sans label sat over a mono value, which in this
-     app is every table header and every field name. Plex was drawn as a
-     superfamily, so the mono shares the sans's skeleton and proportions and
-     there is no seam to show. Plex also carries real tabular figures and a
-     slashed zero, which `body`'s font-feature-settings asks for.
+     The faces are the ones Windows ships, and that is the decision: Segoe UI
+     Variable for the chrome, Cascadia Mono for the data. This is a Windows
+     desktop app, so "the system font" is not a stack that resolves differently
+     per platform - it is one face, hand-hinted for exactly the 12px at 100%
+     scaling that most of this UI is set in, and the face every other window
+     on the desktop wears. IBM Plex sat on these two tokens for a day and was
+     retired on taste: square and dated beside the rest of the desktop. Geist
+     and JetBrains Mono, chosen independently, sat here before that, and the
+     seam between them showed under every table header. Segoe and Cascadia are
+     both Microsoft's, drawn for the same screen, and the seam does not show.
+
+     Three facts about how Chromium sees these faces, each measured against
+     DirectWrite rather than read off a spec sheet:
+
+     - `"Segoe UI Variable"` does not resolve. DirectWrite exposes the file as
+       three optical-size families - Display, Text and Small - each with five
+       named weights, and Chromium sees no axis. Small is the cut drawn for
+       captions of 12px and under, and `text-xs` is 135 of the renderer's 162
+       named text sizes, so Small leads. `"Segoe UI"` follows for Windows 10,
+       and `system-ui` after it is the same face by another name.
+     - Weight 500 snaps UP to Semibold, in both faces: no named instance sits
+       at 500, `font-variation-settings` is ignored, and DirectWrite resolves
+       the tie toward the heavier neighbour. `--font-weight-medium` below is
+       what answers that.
+     - Segoe UI Variable's default figures are proportional - a 1 is narrower
+       than a 0 - and `tnum` makes them tabular. `body` asks for it, and the
+       title row's counter is the first place that would drift without it.
 
      The mono is not a preference. The packet list, hex dump and protocol tree
-     are column-aligned and MUST stay monospaced.
+     are column-aligned and MUST stay monospaced. Cascadia MONO rather than
+     Cascadia Code: Code ligates `->`, `==` and `!=`, and an Info column that
+     draws `Seq=0` with a real arrow is lying about the bytes. Consolas is the
+     fallback for a machine without it. Both carry a slashed zero by default.
+     Windows ships no Cascadia Mono Italic, so the mono italic in the protocol
+     tree is a sheared roman; accepted, at 11px, over importing a webfont for
+     one style.
 
      Both tokens are the last word. There used to be a typeface picker on the
      Accessibility tab that rewrote `--font-sans` on <html> at runtime; it is
      deleted, and scripts/accessibility/fonts.ts fails the build if anything
-     writes either token or names a family anywhere but here. */
-  --font-sans: "IBM Plex Sans Variable", "IBM Plex Sans", ui-sans-serif,
-    system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas,
-    "Liberation Mono", monospace;
+     writes either token, imports a webfont, or names a family anywhere but
+     here. */
+  --font-sans: "Segoe UI Variable Small", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+
+  /* `font-medium` is Regular here, deliberately. Neither face has a 500, and
+     Chromium resolves 500 to Semibold - so left alone, the 45 `font-medium`
+     labels and the 63 `font-semibold` headings would be one weight, and the
+     heavier one. Fluent's own ramp has no medium step: body is Regular and
+     emphasis is Semibold. This keeps that ramp and keeps the class names
+     saying what their authors meant. Delete this line and nothing fails
+     except the hierarchy, which is why fonts.ts asserts it. */
+  --font-weight-medium: 400;
 }
 
 @layer base {

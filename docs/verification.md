@@ -204,25 +204,38 @@ buttons are elements. Under the old overlay it had to come from
 
 ### One typeface, one icon set
 
-The app is set in IBM Plex — Sans on the chrome, Mono on the data — and draws
-every icon from Lucide. Both replaced a pair chosen independently (Geist with
-JetBrains Mono; Tabler), and both fail silently: a face that did not load falls
-back to Segoe UI and looks fine on its own, and a glyph from the wrong set
-matches nothing beside it and looks fine on its own.
+The app is set in the faces Windows ships — Segoe UI Variable Small on the
+chrome, Cascadia Mono on the data — and draws every icon from Lucide. Nothing
+is downloaded and nothing is self-hosted, so a font failure here is not a
+missed load: it is a family name DirectWrite does not resolve, which falls
+through the stack silently to `sans-serif` (Arial) or `monospace` (Courier
+New). Both look like fonts rather than like bugs, which is why this is here.
 
 - [ ] In **Day** and **Night**, at **100%**, **150%** and **200%**: the title
       row's counter, the rail tooltips, the Settings tabs and the packet list
-      header are one face. The tell for a failed load is Segoe UI's wider `a`
-      and open-tailed `g`; Plex's `g` is closed.
+      header are one face, and it is the face of the Windows Settings app open
+      beside it. The tell for a fallen-through stack is Arial: its `a` has a
+      spur at the bottom right and its `R` a straight leg; Segoe's `a` has no
+      spur and its `R` a curved one.
 - [ ] The hex dump's 16-byte rows and the packet list's columns line up under
-      Plex Mono — every glyph the same advance, the ASCII gutter a straight
-      edge, no row wrapping.
-- [ ] Timestamps in the packet list line up digit for digit (`tnum`), and
-      zeros in the hex dump carry a slash or dot (`zero`). Plex has both
-      features; the check is that `body`'s `font-feature-settings` reaches them.
-- [ ] Generated fields and empty states in the protocol tree render in a true
-      mono italic, not a sheared roman — `400-italic.css` is the only italic
-      imported, so a bold italic anywhere in mono would be synthesised.
+      Cascadia Mono — every glyph the same advance, the ASCII gutter a straight
+      edge, no row wrapping. Consolas is a legitimate fallback and reads
+      narrower and squarer; Courier New is not, and reads thin and serifed.
+- [ ] Timestamps in the packet list line up digit for digit, and so does the
+      title row's counter as it climbs. Segoe UI Variable's figures are
+      **proportional by default** — a `1` narrower than a `0` — so a counter
+      that jitters sideways means `body`'s `font-feature-settings` did not
+      reach it. Zeros in the hex dump carry a slash, which is Cascadia's own.
+- [ ] Settings row labels (`font-medium`) are **Regular**, and section
+      headings (`font-semibold`) are visibly heavier than them. If the two are
+      one weight, the `--font-weight-medium` override in `index.css` is gone
+      and Chromium has snapped 500 up to Semibold.
+- [ ] No `->`, `==` or `!=` in an Info column or the hex dump's ASCII gutter
+      is drawn as a single joined glyph. That is Cascadia *Code* leaking in;
+      the token names Cascadia *Mono*, which has no ligatures.
+- [ ] Generated fields and empty states in the protocol tree are italic and
+      **sheared** — Windows ships no Cascadia Mono Italic, and the synthesised
+      slant is accepted at 11px over importing a webfont for one style.
 - [ ] Every icon in the rail, the filter row, the Settings tabs and the packet
       list toolbar is the same stroke weight. Lucide and Tabler are both 2px on
       a 24 grid, so a survivor from the old set is hard to see — look for

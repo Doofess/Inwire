@@ -3,25 +3,30 @@
  *
  *   npx tsx scripts/accessibility/fonts.ts
  *
- * The app is set in one type family, IBM Plex, in two cuts: Plex Sans on
- * `--font-sans` for the chrome, Plex Mono on `--font-mono` for the data. That
- * is the whole of the typography, and every rule here exists to keep it the
- * whole of it.
+ * The app is set in the two faces Windows ships: Segoe UI Variable on
+ * `--font-sans` for the chrome, Cascadia Mono on `--font-mono` for the data.
+ * No webfont is imported. That is the whole of the typography, and every rule
+ * here exists to keep it the whole of it.
  *
- * This script used to police a typeface picker - three faces on the
- * Accessibility tab, rewriting `--font-sans` on <html> at runtime - and its
- * rules were about keeping the picker's three lists in sync. The picker is
- * deleted, and with it the one thing that could set the sans and the mono from
- * different families. Atkinson Hyperlegible went with it; that is a real
- * low-vision accommodation lost and is recorded in CLAUDE.md rather than
- * glossed. What replaces the old rules is their inverse: nothing offers a
- * face, nothing writes a token, and no component names a family of its own.
+ * Two things sat on these tokens before, and each left a rule behind. Geist
+ * with JetBrains Mono, chosen independently, was a seam under every table
+ * header - hence "one family, two cuts", and the rule that nothing outside
+ * index.css names a family. IBM Plex closed the seam for one day and was
+ * retired on taste, and taking a webfont out is what showed how much of the
+ * old script was about webfonts: which packages, which weights, which
+ * imports. None of that survives. The system faces bring three traps of their
+ * own, each measured against Chromium's DirectWrite path and each recorded
+ * on the tokens in index.css: `"Segoe UI Variable"` is not a family name
+ * Chromium resolves (the optical-size cuts are), weight 500 snaps UP to
+ * Semibold, and Segoe's figures are proportional until `tnum` says otherwise.
+ * The checks below are those three facts, plus the inverse of the picker
+ * this script used to police: nothing offers a face, nothing writes a token.
  *
  * Each failure this catches is silent. A stray `font-family` in a component
  * renders in whatever it names and looks fine on its own - the seam only shows
- * beside its neighbours. A runtime write to `--font-sans` is the picker coming
- * back one setting at a time. A retired package left in `dependencies` ships
- * a megabyte of woff2 nothing loads.
+ * beside its neighbours. A lost `--font-weight-medium` override makes 45
+ * labels Semibold and nothing throws. A webfont imported back in ships bytes
+ * and a cold-start swap that the tokens' comment says are gone.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
@@ -42,8 +47,11 @@ function check(name: string, actual: unknown, expected: unknown) {
 }
 
 const css = text('src/index.css');
-const pkg = JSON.parse(text('package.json')) as { dependencies?: Record<string, string> };
-const deps = pkg.dependencies ?? {};
+const pkg = JSON.parse(text('package.json')) as {
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+};
+const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
 
 /** Every source file under src/, as a posix-separated path relative to root. */
 function walk(dir: string): string[] {
@@ -57,27 +65,34 @@ function walk(dir: string): string[] {
 }
 const sources = walk('src');
 
-// --- The two packages ----------------------------------------------------------
+/**
+ * The source with its comments blanked. Block comments become spaces so line
+ * numbers survive; a `//` comment is dropped from the first `//` that follows
+ * whitespace or starts the line, which leaves `https://…` inside a string
+ * alone. Prose that names a token or a package is not a declaration or an
+ * import, and this suite's comments are dense enough that scanning them was
+ * a recurring false positive.
+ */
+function withoutComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|\s)\/\/.*$/gm, '$1');
+}
 
-const WANTED = ['@fontsource-variable/ibm-plex-sans', '@fontsource/ibm-plex-mono'];
-const RETIRED = [
-  '@fontsource-variable/geist',
-  '@fontsource-variable/jetbrains-mono',
-  '@fontsource/atkinson-hyperlegible',
-  '@fontsource-variable/nunito',
-];
+// --- No webfont ----------------------------------------------------------------
 
-check('both Plex packages are imported by index.css',
-  WANTED.filter((p) => !css.includes(`@import "${p}`)), []);
+// The faces are the ones Windows ships, so there is nothing to install and
+// nothing to import. Any @fontsource package - not a list of retired ones,
+// any - is a webfont coming back; so is an @font-face anywhere under src/,
+// which is the other way to self-host one.
+check('no @fontsource package is installed',
+  Object.keys(deps).filter((d) => d.startsWith('@fontsource')), []);
 
-check('both Plex packages are installed',
-  WANTED.filter((p) => !(p in deps)), []);
+check('index.css imports no font package',
+  withoutComments(css).split('\n').filter((l) => /@import\s+["']@fontsource/.test(l)), []);
 
-check('no retired face is still imported by index.css',
-  RETIRED.filter((p) => css.includes(`@import "${p}`)), []);
-
-check('no retired face is still installed',
-  RETIRED.filter((p) => p in deps), []);
+check('no @font-face is declared anywhere under src/',
+  sources.filter((f) => /@font-face/.test(withoutComments(text(f)))), []);
 
 // --- The two tokens ------------------------------------------------------------
 
@@ -93,28 +108,41 @@ function tokenValue(name: string): string {
 const sans = tokenValue('--font-sans');
 const mono = tokenValue('--font-mono');
 
-check('--font-sans is IBM Plex Sans', sans.startsWith('"IBM Plex Sans Variable", "IBM Plex Sans"'), true);
-check('--font-mono is IBM Plex Mono', mono.startsWith('"IBM Plex Mono"'), true);
+// The optical-size cut is the family name, because `"Segoe UI Variable"` on
+// its own resolves to nothing in Chromium - measured, not read: DirectWrite
+// exposes the file as Display / Text / Small and no axis. Small is the cut for
+// 12px and under. `"Segoe UI"` behind it is Windows 10's face and the one
+// `system-ui` resolves to anyway.
+check('--font-sans leads with Segoe UI Variable Small, then Segoe UI',
+  sans.startsWith('"Segoe UI Variable Small", "Segoe UI"'), true);
+
+// MONO, not Code: Cascadia Code ligates `->`, `==` and `!=`, and an Info
+// column that draws an arrow is drawing something that is not in the bytes.
+check('--font-mono leads with Cascadia Mono, then Consolas',
+  mono.startsWith('"Cascadia Mono", Consolas'), true);
+check('--font-mono never names Cascadia Code', /Cascadia Code/.test(mono), false);
 
 // A stack that does not end in a generic family falls back to the browser's
-// default serif when the woff2 fails to load - which on an air-gapped machine
-// with a cold cache is not hypothetical.
+// default serif on a machine missing every named face.
 check('--font-sans ends in a generic family', sans.endsWith('sans-serif'), true);
 check('--font-mono ends in a generic family', mono.endsWith('monospace'), true);
 
-/**
- * The source with its comments blanked. Block comments become spaces so line
- * numbers survive; a `//` comment is dropped from the first `//` that follows
- * whitespace or starts the line, which leaves `https://…` inside a string
- * alone. Prose that names a token or a package is not a declaration or an
- * import, and this suite's comments are dense enough that scanning them was
- * a recurring false positive.
- */
-function withoutComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/(^|\s)\/\/.*$/gm, '$1');
-}
+// --- The two traps the system faces bring --------------------------------------
+
+// Neither face has a 500, and Chromium resolves 500 to Semibold, not Regular -
+// measured: the ink at 500 equals the ink at 600 in every cut. Left alone,
+// `font-medium` and `font-semibold` are one weight, and the heavier one.
+// Fluent's own ramp is Regular and Semibold with no step between, so medium
+// is mapped to Regular in @theme. Deleting the line fails nothing but this.
+check('--font-weight-medium is remapped to 400', tokenValue('--font-weight-medium'), '400');
+
+// Segoe UI Variable's figures are proportional by default - a 1 is narrower
+// than a 0 - and only `tnum` lines a column of them up. Static Segoe UI was
+// tabular by default, so the day the stack falls through to it this stops
+// mattering, which is exactly the kind of thing that lets the feature get
+// deleted and not missed until the machine changes.
+const bodyRule = css.match(/^\s*body\s*\{[\s\S]*?^\s*\}/m)?.[0] ?? '';
+check('body asks for tabular figures', /font-feature-settings:[^;]*"tnum"\s*1/.test(bodyRule), true);
 
 // --- Nothing else names a family -----------------------------------------------
 
