@@ -204,8 +204,11 @@ buttons are elements. Under the old overlay it had to come from
 
 ### One typeface, one icon set
 
-The app is set in the faces Windows ships — Segoe UI Variable Small on the
-chrome, Cascadia Mono on the data — and draws every icon from Lucide. Nothing
+The app is set in the faces the OS ships — on Windows, Segoe UI Variable Small
+on the chrome and Cascadia Mono on the data — and draws every icon from Lucide.
+This section is written for Windows, the only desktop today; when the macOS
+and Linux desktops arrive it needs a pass on each with the machine in hand,
+because every tell below names a Windows glyph. Nothing
 is downloaded and nothing is self-hosted, so a font failure here is not a
 missed load: it is a family name DirectWrite does not resolve, which falls
 through the stack silently to `sans-serif` (Arial) or `monospace` (Courier
@@ -228,7 +231,8 @@ New). Both look like fonts rather than like bugs, which is why this is here.
       reach it. Zeros in the hex dump carry a slash, which is Cascadia's own.
 - [ ] Settings row labels (`font-medium`) are **Regular**, and section
       headings (`font-semibold`) are visibly heavier than them. If the two are
-      one weight, the `--font-weight-medium` override in `index.css` is gone
+      one weight, either the `html[data-platform="win32"]` rule in `index.css`
+      is gone or `<html>` carries no `data-platform` — check it in DevTools —
       and Chromium has snapped 500 up to Semibold.
 - [ ] No `->`, `==` or `!=` in an Info column or the hex dump's ASCII gutter
       is drawn as a single joined glyph. That is Cascadia *Code* leaking in;

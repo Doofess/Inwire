@@ -3,10 +3,12 @@
  *
  *   npx tsx scripts/accessibility/fonts.ts
  *
- * The app is set in the two faces Windows ships: Segoe UI Variable on
- * `--font-sans` for the chrome, Cascadia Mono on `--font-mono` for the data.
- * No webfont is imported. That is the whole of the typography, and every rule
- * here exists to keep it the whole of it.
+ * The app is set in the faces the host OS ships. On Windows, the only desktop
+ * today, that is Segoe UI Variable on `--font-sans` for the chrome and
+ * Cascadia Mono on `--font-mono` for the data; the stacks fall through to
+ * `system-ui` and `ui-monospace` for the macOS and Linux desktops that are
+ * coming. No webfont is imported. That is the whole of the typography, and
+ * every rule here exists to keep it the whole of it.
  *
  * Two things sat on these tokens before, and each left a rule behind. Geist
  * with JetBrains Mono, chosen independently, was a seam under every table
@@ -81,7 +83,7 @@ function withoutComments(src: string): string {
 
 // --- No webfont ----------------------------------------------------------------
 
-// The faces are the ones Windows ships, so there is nothing to install and
+// The faces are the ones the OS ships, so there is nothing to install and
 // nothing to import. Any @fontsource package - not a list of retired ones,
 // any - is a webfont coming back; so is an @font-face anywhere under src/,
 // which is the other way to self-host one.
@@ -129,12 +131,26 @@ check('--font-mono ends in a generic family', mono.endsWith('monospace'), true);
 
 // --- The two traps the system faces bring --------------------------------------
 
-// Neither face has a 500, and Chromium resolves 500 to Semibold, not Regular -
-// measured: the ink at 500 equals the ink at 600 in every cut. Left alone,
-// `font-medium` and `font-semibold` are one weight, and the heavier one.
-// Fluent's own ramp is Regular and Semibold with no step between, so medium
-// is mapped to Regular in @theme. Deleting the line fails nothing but this.
-check('--font-weight-medium is remapped to 400', tokenValue('--font-weight-medium'), '400');
+// Neither Windows face has a 500, and Chromium resolves 500 to Semibold, not
+// Regular - measured: the ink at 500 equals the ink at 600 in every cut. Left
+// alone, `font-medium` and `font-semibold` are one weight, and the heavier
+// one. Fluent's own ramp is Regular and Semibold with no step between, so
+// medium is mapped to Regular - ON WINDOWS. The fact is DirectWrite's; SF Pro
+// under Core Text has a real Medium, so the remap lives under the platform
+// attribute main.tsx stamps and never in @theme, where it would flatten a Mac.
+// Deleting the rule fails nothing but this.
+const win32Rule = css.match(/^html\[data-platform="win32"\]\s*\{[\s\S]*?^\}/m)?.[0] ?? '';
+check('--font-weight-medium is remapped to 400 under html[data-platform="win32"]',
+  /--font-weight-medium:\s*400;/.test(win32Rule), true);
+
+const themeBlock = css.match(/^@theme\b[^{]*\{[\s\S]*?^\}/m)?.[0] ?? '';
+check('the remap is not in @theme, where it would apply to every OS',
+  /--font-weight-medium/.test(themeBlock), false);
+
+const entry = withoutComments(text('src/main.tsx'));
+check('main.tsx stamps data-platform from the bridge before rendering',
+  /documentElement\.dataset\.platform\s*=\s*window\.inwire\?\.platform/.test(entry)
+    && entry.indexOf('dataset.platform') < entry.indexOf('createRoot('), true);
 
 // Segoe UI Variable's figures are proportional by default - a 1 is narrower
 // than a 0 - and only `tnum` lines a column of them up. Static Segoe UI was
