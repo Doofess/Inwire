@@ -1,29 +1,39 @@
 import React from 'react';
-import { MARK_SIZE, brandMarkPaths } from '../../lib/brandMark';
+import { MARK_SIZE, brandMarkPaths, tierForSize, type MarkTier } from '../../lib/brandMark';
 
 /**
- * The app's mark: two nested chevrons, each a band folded once.
+ * The app's mark: one ribbon spiralling around a sphere.
  *
- * Monochrome and painted in `currentColor`, so it takes the colour of whatever
- * it sits in - which is how one drawing serves four themes with no per-theme
- * work at all. The header sets that colour once on the lockup, so the mark and
- * the wordmark beside it cannot end up different colours.
+ * **It carries its own colours, and that reverses an old rule.** The mark was
+ * monochrome `currentColor` for exactly as long as it was two flat chevrons, and
+ * the argument then was good - one drawing served every theme with no per-theme
+ * work. The drawing is a shaded form now, so its colours ARE the drawing, and
+ * inheriting one would flatten it to a silhouette. What survives of the old rule
+ * is the part that mattered: the colours still live in one place, and it is not
+ * here. See `lib/brandMark.ts` for why a single ramp still serves both themes.
  *
- * Deliberately NOT drawn in the house icon style. Everything else in this app
- * is `react-icons/tb` - a 24 viewBox, `fill="none"`, `stroke-width="2"`, round
- * caps - and the pull to match it is strong and wrong. A brand mark that looks
- * like one more toolbar glyph has failed at being a brand mark. This is a
- * filled form, at its own weight, and it sits beside that set rather than in
- * it.
+ * **The tier is not optional in practice.** The drawing sheds turns as the box
+ * shrinks, and picking the wrong one is not a subtle error: the full tier at
+ * 16px is a smudge. `size` is the honest way to ask for it - callers know how
+ * big they are rendering it, not which of three internal drawings they want.
  *
- * The geometry lives in `lib/brandMark.ts` because the favicon, the PNGs and
- * the Windows `.ico` are all generated from the same call - see
+ * Deliberately NOT in the house icon style. Everything else in this app is
+ * `lucide-react` - a 24 viewBox, `fill="none"`, `stroke-width="2"`, round caps
+ * - and the pull to match it is strong and wrong. A brand mark that looks like
+ * one more toolbar glyph has failed at being a brand mark.
+ *
+ * The geometry lives in `lib/brandMark.ts` because the icon, the PNGs and the
+ * Windows `.ico` are all generated from the same call - see
  * `scripts/brand/render-icons.ts`.
  */
-export const BrandMark: React.FC<{ className?: string; title?: string }> = ({
-  className,
-  title,
-}) => (
+export const BrandMark: React.FC<{
+  className?: string;
+  title?: string;
+  /** Rendered size in CSS pixels, which is what picks the drawing. */
+  size?: number;
+  /** Escape hatch for a caller that genuinely knows better. */
+  tier?: MarkTier;
+}> = ({ className, title, size = 16, tier }) => (
   <svg
     viewBox={`0 0 ${MARK_SIZE} ${MARK_SIZE}`}
     className={className}
@@ -32,10 +42,12 @@ export const BrandMark: React.FC<{ className?: string; title?: string }> = ({
     role={title ? 'img' : undefined}
     aria-hidden={title ? undefined : true}
     aria-label={title}
-    fill="currentColor"
   >
-    {brandMarkPaths().map((run) => (
-      <path key={run.d} d={run.d} fillOpacity={run.opacity} />
+    {brandMarkPaths(tier ?? tierForSize(size)).map((p, i) => (
+      // The runs are ordered back to front and overlap by design, so the index
+      // IS the identity here - two segments can share a `d` and must both draw.
+      // eslint-disable-next-line react/no-array-index-key
+      <path key={i} d={p.d} fill={p.fill} />
     ))}
   </svg>
 );

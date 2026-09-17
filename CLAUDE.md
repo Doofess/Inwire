@@ -71,7 +71,10 @@ never lives in the process that parses hostile bytes. ADR 0033.
   tested.
 - `npm run start:app` — build and launch Electron against `app://` **without
   packaging**. The only way short of a full pack to exercise the protocol
-  handler and everything downstream of it.
+  handler and everything downstream of it. It goes through
+  `electron/start.cjs` rather than `electron .` for one reason: `devFeed.cjs`,
+  so a launch does not open by failing DNS against a domain nobody has
+  registered. Same `dist/`, same handler.
 - `npm run build` — Vite builds the renderer into `dist/`, then
   `electron/build.cjs` esbuilds `main`, `preload` and the store entry into
   `dist-electron/` as **`.cjs`**.
@@ -160,7 +163,7 @@ lifetime. Every decision worth testing is in a module beside it: `appPaths.ts`,
 `pipeTransport.ts`, `agentService.ts`, `windowColors.ts`.
 
 **The window is frameless and draws its own controls.** `frame: false`, and a
-40px title row carrying the app's own minimize / maximize / close. This reverses
+32px title row carrying the app's own minimize / maximize / close. This reverses
 an earlier decision; the banner says which options must never come back and why.
 
 **The premise the old decision rested on was two-thirds wrong**, which is worth
@@ -249,8 +252,26 @@ Settings: the two passive name-resolution switches to `Interface` beside the two
 outbound lookups already there, and Custom Dissectors to a tab of its own beside
 Decryption - the pair that change what the dissector can **read** rather than
 what is shown. Nothing that duplicated a visible control survived, which was the
-menu's own stated rule turned on itself. The title row holds **no control at
-all** now, and `cmdk` left `dependencies` with it.
+menu's own stated rule turned on itself. The title row holds **no navigation**
+now, and `cmdk` left `dependencies` with it.
+
+**Its centre is the packet counter, and that is the one control it has.** The
+row used to show `windowTitleFor(...)` there - `Inwire` idle,
+`Ethernet - capturing - Inwire` capturing. That string is unchanged and still
+names the window for the OS through `useWindowTitle`, so the taskbar and Alt-Tab
+are as they were; what it stopped doing is spending the centre of the one strip
+nobody can look away from on the app's own name, which the mark at the corner
+already gives. `components/common/PacketCountsReadout.tsx` took the slot, and
+with it the **`+N UNSEARCHED` rescan button** - the only way in the app to re-run
+a whole-capture filter scan, which deleting the counts widget would otherwise
+have deleted. It carries `app-no-drag` itself; without it the button moves the
+window and never fires.
+
+`windowChrome.ts` argues against exactly this and the comment is kept: a number
+that changes is the most distracting thing that can go in a title bar. Its second
+half - "the count is already on screen, in the filter bar" - is what stopped
+being true, twice over: the filter bar's badge went, and then so did the widget
+that replaced it.
 
 **Network left the rail too, and for a reason worth keeping.** It was the third
 view, on Ctrl+3, and it failed the test the view list applies: a view is a way of
@@ -259,30 +280,265 @@ identity - and nothing in it changes when a packet arrives. The tell was the
 filter row, which had to be hidden above Network and nowhere else, because a
 display filter there was a control with nothing in view to act on. It is a
 Settings tab now, next to Driver Info, which is the other read-only report about
-this machine. `scripts/session/view.ts` carries the inverted rule: **no view
-hides the filter row**, so a future one that wants to has to answer the question
-Network never did.
+this machine. `scripts/session/view.ts` has carried three versions of that rule
+and now holds the third: **the filter row is rendered by naming Packets**, never
+by excluding the views that do not want it. Version two was "no view hides the
+filter row", written the day Network stopped being a view - and being an
+exclusion rule, every view added afterwards inherited the row without anybody
+deciding it should. Four did, and all four fail Network's own test: Statistics is
+handed `packets` rather than `filteredPackets` deliberately, the Routing Map
+draws the throttled feed, Follow Stream reads one conversation, and Frame Detail
+shows the one selected frame. The filter narrowed nothing on screen in any of
+them.
 
 Settings widened from `max-w-3xl` to `max-w-5xl` to take the dissector editor,
 which is two columns rather than a list of setting rows.
 
+**The map is a view and the charts are a Statistics tab**, which is where the
+dock's contents went. Both placements answer the same question the view list
+already asks - *is this a way of looking at the capture?* The map is: every arc
+on it is a conversation in the buffer and it changes when a packet arrives,
+which is exactly what Network could not say about itself before it became a
+Settings tab. The throughput plot and the size distribution are too, but they
+are the same aggregate the tables beside them already compute, drawn rather than
+tabulated - so they are a tab of `StatisticsPane`
+(`components/statistics/GraphsTab.tsx`)
+rather than a fourth view.
+
+One thing follows from that and is easy to undo by accident: **`GraphsTab`
+renders outside the pane's scroller.** Every other tab is a table and wants
+`overflow-y-auto`; `TrafficTimelineChart` measures its own container, so a
+parent that grows to fit its child would size the SVG from a box the SVG is
+itself defining.
+
+There was a second, and it is worth reading as a rule rather than as history:
+the map had a small copy in the packets view's bottom row, guarded on
+`view === 'packets'`, because `display: none` hides a MapLibre instance without
+unmounting it. **That copy is deleted.** The map is the view and nothing else,
+so "exactly one map is ever live" is a fact about the component tree instead of
+a condition somebody has to keep true - which is the strongest form the answer
+could take, and the reason to prefer deleting a surface over guarding it.
+
+**The packet detail window is a view too, and it is the last modal that was a
+place.** It was `fixed inset-0`, a scrim and a 92vh panel, opened by
+double-clicking a row and dismissed with Escape or an X - which meant the one
+surface that shows a frame in full could only be reached from the one surface
+that shows frames in summary, and was *dismissed* rather than *left*. It passes
+the same test the map passed: it is a way of looking at the capture, and what it
+looks at is one of the frames in the buffer.
+
+Four things fell out of the move, and each of them is a deletion rather than a
+port:
+
+- **No `detailPacketId`.** The modal kept a frame of its own, separate from the
+  list's selection, which is why closing it dropped you wherever the list had
+  been left. The pane reads `selectedPacket` like the bottom panes do, so
+  stepping frames in it moves the list, and leaving and coming back lands on the
+  frame being read.
+- **No second `usePacketDetail`.** The modal was mounted only while open, so its
+  own hook was the only one running; a pane sits beside a packet list that is
+  *hidden rather than unmounted*, whose panes already ask for exactly this
+  frame. `App` passes `selectedPacketDetail` in, because two hooks on one frame
+  would be two replay requests for one tree.
+- **No keyboard gate.** `useKeyboardNavigation` used to bail out entirely while
+  the modal was open. The hook binds Up/Down and the pane binds Left/Right, on
+  the same selection, so there is nothing to keep apart.
+- **No Escape of its own,** except one. `App` returns any non-Packets view to
+  Packets on Escape, in the bubble phase, last in the chain. The pane still
+  listens in the capture phase for exactly one thing - the meta rail summoned
+  over the canvas on a narrow window - and claims that key with
+  `stopPropagation`, which is the layering contract every popover here keeps.
+
+**Its empty state is the feature that replaced Find packet.** A view with a rail
+button can be opened with nothing selected, so the pane's no-frame state is its
+front door rather than an apology: `FrameNumberBox`, the same control the meta
+rail carries, asking for a frame number and nothing else. That is what makes
+`detail` restorable where `stream` is not - it needs nothing handed to it - and
+`scripts/session/view.ts` ties those two facts together, so a view rendered
+without a second condition has to be one `restoredView` will hand back.
+
+`services/graphPrefs.ts` (`inwire.graphs`) holds what the two charts are drawing.
+It is the surviving half of `inwire.dashboard`, and a new key rather than a
+rename because the old one was a `Record<string, string | number>` config bag
+validated against a widget catalogue - shaped that way so a settings list could
+be generated from it. There is no catalogue and no generated list; the fields are
+fields.
+
 ```
-┌──────┬─────────────────────────────────────────────────┐
-│      │ 40px TitleRow            title · overlay       │
-│ rail ├─────────────────────────────────────────────────┤
-│ 56px │ FilterRow  (banner, filter, capturing)          │
-│      ├────────────┬────────────────────────────────────┤
-│      │ dock       │ packets (hidden, never unmounted)  │
-│      │ 240-640px  │ statistics | stream                │
-└──────┴────────────┴────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  ◉   32px TitleRow        packet counter    ─ □ ✕       │
+├ ─ ─ ─┬──────────────────────────────────────────────────┤
+│ rail │ FilterRow (banner, filter, restore)              │
+│ 56px ├──────────────────────────────────────────────────┤
+│      │ packets (hidden, never unmounted)                │
+│      │   ├─ packet list                                 │
+│      │   └─ INSPECTION │ HEX VIEW                      │
+│      │ detail | statistics | geo | stream               │
+├──────┴──────────────────────────────────────────────────┤
+│ (no bottom bar - the byte inspector is Hex View's footer)│
+└─────────────────────────────────────────────────────────┘
 ```
-`ActivityRail.tsx` is 56px and spans the full window height, starting at the very
-top - there is no cell above the first group, because the brand mark that filled
-one is in the title row now. Four groups: **capture** (Start/Stop, adapter,
-schedule - in the order they are used), **views** (Packets, Statistics, Follow
-Stream), **widgets** (the six dashboard types, under a collapse control), and a
-bottom group of actions (Find packet, Export/Import, Settings) pinned with
-`mt-auto`.
+**`<main>` is a column again, and there is no dock.** It was a row for exactly
+one revision - the dock ran the pane's full height with the filter row beside
+it - and that arrangement existed to say that a widget summarising the whole
+capture had no business sitting under a row that narrows the list. Deleting the
+dock answered the same question by removing the thing that raised it.
+
+**The packets view's bottom row is two panes: the tree and the hex dump.** One
+divider, resizing the pane to its LEFT, and the tree's share is stored as a
+fraction with the dump taking the remainder (`detailsPaneRatio` in
+`interfacePrefs.ts`). The dump is the remainder because it is the pane with no
+minimum content width worth defending - the tree truncates field names, but a
+dump narrower than its own 16-byte row wraps into nonsense, so `flex-1` means it
+absorbs window resizes while the tree keeps the width the user chose.
+
+**There was a third pane at the head of the row, and it was the map.** It ran
+widest subject to narrowest - the map is the whole conversation between two
+places, the tree is one frame of it decoded, the dump is that frame's bytes - and
+deleting it takes back everything that arrangement cost: `geoPaneRatio`, the
+second divider, the render-time clamp that kept two independent shares from
+adding past 1, and the `view === 'packets'` guard that kept a second MapLibre
+instance from being built behind a hidden section. `detailsPaneRatio` is 0.5 with
+a 0.9 ceiling again, which is what it was before the map took a third of the row.
+
+**The packet table's own header row wears the same ground as those bars.** It
+was `--secondary`, one step brighter, which made it the only column header in the
+window that did not match the pane titles under it; `HEADER_CHROME` in
+`PacketList.tsx` is `bg-card` now. A table's header row is the same kind of thing
+as a pane's title bar - the strip that names what is below it - and `--secondary`
+is the chrome's colour rather than a content surface's.
+
+**Both wear one title bar, and it is a component rather than a copied class
+string.** `components/common/PaneHeader.tsx`, fixed at `h-9`. They carried
+identical `px-4 py-2` headers and still sat at different heights, because
+vertical padding sizes a box from its CONTENTS: Hex View's bar holds copy
+buttons (~20px), the other holds 12px text (~16px). Four pixels, on adjacent
+panes, with a divider between them. The height is fixed here and the padding is
+horizontal only. The map wore the same bar for exactly as long as it was in the
+row; the Routing Map view has a side panel instead, which is where its located
+count lives.
+
+**The byte inspector is Hex View's own footer, and there is no application
+bottom bar.** It spent one revision as `components/common/StatusBar.tsx` -
+outside the rail-and-panes row, spanning the window, the footer's class list
+unchanged - on the argument that a bordered strip under one pane of the row and
+none under the one beside it made the row's bottom edge ragged.
+
+**The indent is what argued it back.** A full-width bar's natural left edge is
+the window's, and a line about the hex dump starting under the rail, a pane away
+from the thing it describes, is wrong - so the readout was pushed sideways with
+a CSS length built from `--details-pane-size`, and the bar was a row of two
+blocks so that a percentage would resolve against `<main>`'s content box rather
+than the window. All of that machinery existed to make a window-spanning bar
+look like it belonged somewhere narrower, which is the definition of a bar in
+the wrong place. The ragged edge is accepted instead; the divider between the
+two panes already says they are different things.
+
+The `hoveredByte` derivation in `App` went with it, and that is the part worth
+keeping in mind. The bar could not read `HexViewer`'s local hover state, so it
+was handed a byte derived from `activeByteRange` - which is **also** what the
+protocol tree publishes for a one-byte field, so the bar answered "this byte"
+for a hover in a pane that was not the dump. That conflation was deliberate and
+documented and is simply gone: the footer reads the dump's own hover.
+
+`--details-pane-size` stays on the **root** element even though only the panes
+read it now. It was moved there so the bar could resolve against the same base;
+keeping it costs nothing, and moving it back would be a second layout change
+made for tidiness alone.
+
+Moving the properties to the root fixed a bug as well as enabling the bar:
+`--geo-pane-size` had never been in the React style object at all, only in the
+imperative drag path, so the map pane had no width until somebody dragged
+something. The bar is gone and that fix is not. That property is gone with the pane; the trap it records is that a
+layout custom property written only by the drag path has no value until a drag.
+
+**The title row spans the window and the rail hangs below it**, which is what
+puts the app's mark at the true top-left corner. The dashed segment is the one
+edge that is deliberately **not drawn**: the row and the rail are both
+`bg-secondary` and the row has no bottom border, so the ground runs unbroken from
+the mark down into the rail and into Windows' own rounded corner - which is the
+OS's radius, not one this app draws (`roundedCorners` defaults true and is never
+set).
+
+**That chrome is `--secondary`, one step brighter than the panes.** It was
+`--card`, the same ground every titled surface uses, and the split is worth
+having: `--card` against `--background` is a 4/255 delta in Night, so the notch
+`<main>`'s `rounded-tl-xl` cuts out of the chrome was invisible and the 1px
+border was the only thing the eye could follow round the corner. At `--secondary`
+the delta is 13/255 and the corner reads on its own. The border stays, because it
+is what carries the edge in Day.
+
+**The `INWIRE` wordmark in the corner is deleted, and the mark took the rail's
+axis back.** The word named the app in a caption that already names it twice -
+`windowTitleFor(...)` still goes to main through `useWindowTitle`, so the taskbar
+and Alt-Tab are unchanged. With it gone the mark is centred in a `w-14` block, so
+it sits directly above the column of rail icons rather than 8px to their left;
+that alignment is why the mark used to live in a rail cell, and losing it was the
+stated cost of letting the word lead.
+
+**`<main>` is inset into the corner that L makes, with `rounded-tl-xl` on its
+top-left and square on the other three** - the other three run into the window's
+own edges, and a radius there would be the second curve inside Windows' that
+`TitleRow.tsx` refuses to draw. Two things make it work and both are easy to
+undo by accident. The 1px border is **on the pane, not on the rail** - which is
+why `ActivityRail.tsx` no longer carries `border-r`, since two lines in one place
+is one line too many. At `--secondary` the corner reads on its own (the paragraph
+above has the deltas) and the border is what carries the edge in Day; while the
+chrome was `--card` the border was the *only* thing the eye could follow round
+it, which is the state that argued the border onto the pane in the first place.
+And `overflow-hidden` is load-bearing
+rather than tidy: `FilterRow` paints its own `bg-background` straight into that
+corner, so without the clip the curve is drawn and then covered by the child
+sitting in it.
+
+`ActivityRail.tsx` is 56px and starts below that row - there is no cell above
+its first group, because a cell would put the mark below the corner it is meant
+to occupy and cost height the rail has not got. **Three groups**: **capture**
+(Start/Stop, adapter, schedule - in the order they are used), **views**
+(Packets, Frame Detail, Statistics, Routing Map, Follow Stream), and a bottom
+group of actions (Export/Import, Settings) pinned with `mt-auto`.
+
+**There was a fourth group and it was the widgets.** Six icons toggling panels
+in the dock, with a 20px collapse header in the divider slot above them. All of
+it went with the dock; of the three widgets that were left, the map became a
+**view** in the group above and the traffic timeline and packet-size charts
+became a **tab of the Statistics pane**. None of them needed an open flag, a
+pin, a drag-reorder or an overlay.
+
+**The rail's Follow Stream button follows the SELECTION**, which is the one
+entry in the view group that is a verb rather than a place. It was wired like the
+other four - `streamAvailable` meant "a stream is already open" and the click was
+a bare `setView('stream')` - and that produced three symptoms which are all the
+same bug: selecting a frame on a TCP stream left the button disabled, following
+one from the Frame Detail pane enabled it, and from then on it reopened *that*
+stream for ever because nothing it read ever changed with the selection. It is
+`handleViewChange` in `App.tsx` now, which intercepts `stream` and routes it
+through `handleFollowStream` with the selected frame's target. **`Ctrl+5` goes
+through the same handler**, which is why that handler sits above
+`useKeyboardNavigation` rather than with the rest of the stream state: a `const`
+cannot be read before it is declared, and the alternative was the shortcut and
+the button meaning two different things.
+
+The button stays enabled while a stream is open even if the selection has none,
+so the view is reachable while reading a conversation, and so the icon does not
+flicker as somebody arrows past an ARP. The selection wins when both are true.
+
+**Find packet is deleted, and Frame Detail is a view.** Those are one change:
+the rail lost an icon from the capture group and gained one in the views group,
+and because both groups gap the same the two deltas are 46px each and cancel -
+the strip is still 494px with a different set of icons in it. `Ctrl+2` is Frame
+Detail now and Statistics, the Routing Map and Follow Stream each moved a key,
+which follows from `APP_VIEWS` order being the numbering rather than from a
+second table.
+
+What was lost is worth stating rather than glossing: Find packet was a substring
+match over protocol, addresses, info and id across the rows in hand, and the
+go-to-frame box that replaced it takes **a frame number and nothing else**. The
+argument for the trade is that the display filter already answers those questions
+in a language that says what it means, and answers them over the **whole capture
+on disk** rather than over the window - so the search was the weaker of two
+overlapping answers, and two search boxes in one window is what the rail exists
+to prevent. `inwire.packetSearch` is in `RETIRED_PREFERENCE_KEYS`.
 
 **There was an Updates button and it was a second Settings button.**
 `onOpenUpdates` and `onOpenSettings` were the same handler, and `updateAvailable`
@@ -291,38 +547,60 @@ Export/Import took the slot. The Update Center is unchanged and still lives wher
 ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs a
 real `updateAvailable` first, and Settings is the icon to hang it on.
 
-15 icons at 36px, three dividers, the 20px collapse control and the bottom
-group's padding come to **630px** against the 640px minimum window height - 10px
-of slack. **The rail is full.** `scripts/session/view.ts` adds that up from the
-Tailwind classes, holds each class to what the sum assumes, and prints "the rail
-is FULL" when the answer is no more icons.
+10 icons at **44px**, two dividers and the bottom group's padding come to
+**494px** against the 648px the rail gets - a **680px** minimum window, less the
+32px title row above it - 154px of slack. `scripts/session/view.ts` adds that up
+from the Tailwind classes, holds each class to what the sum assumes, and prints
+"the rail is FULL" when the answer is no more icons.
 
-That arithmetic has decided three design questions rather than merely recording
+**The icons got bigger because six of them were deleted, and the two halves of
+that nearly cancel.** The target went 36 → 44 (79% of the 56px strip, against
+64%) and the glyph 20 → 24, which costs 8px an icon; six deleted icons and a
+20px header paid for it several times over. At 630 against 640 nothing in the
+strip could be made larger at all, which is why it had not been.
+
+That arithmetic has decided real design questions rather than merely recording
 them. It is why the two name-resolution switches went to Settings rather than the
-rail (four icons in the bottom group would have been 693px, 53px over). It is
-why the brand mark's 40px cell was reclaimed rather than left empty. And it is
-why the dock's collapse control is a 20px group header in the widgets divider's
-slot rather than a sixteenth icon: at 615px there was no room for one, and the
-header costs 15px.
+rail, and why the brand mark lives in the title row and not in a rail cell. Both
+still hold on their own arguments now that the number no longer forces them.
 
-If anything else ever needs a permanent home, **the widgets group is the one that
-scrolls**: the bottom group is pinned with `mt-auto`, so an overflow does not
-scroll anything, it pushes Settings off the bottom edge.
+**If the slack is ever spent, the views group is the one that scrolls.** It used
+to be the widgets group and there is no widgets group; capture has to stay
+reachable because it is how a capture starts, and the bottom group is pinned with
+`mt-auto`, so an overflow there does not scroll anything - it pushes Settings off
+the bottom edge.
 
-Two behaviours in one strip, so the active states are deliberately different
-shapes: a view carries a **2px left accent edge plus a filled background**, a
-widget carries a **dot and an outline**. Neither appears on hover.
+The active state is a **translucent fill in the theme's own accent** -
+`--primary` at 20%, `--foreground` on the glyph - and it never appears on hover:
+the active marker is the strongest indicator in the UI, and firing it on hover
+flashes it five times as a pointer crosses the rail. **It was two things, an
+`--accent` fill under a 2px left edge**, and the fill was the weaker half:
+`--accent` is one step off the rail's ground, so the edge did the work and the
+fill was barely a tint - weaker still once the rail moved to `--secondary`.
+Tinting with the accent HUE inverts that, and an edge in the same colour drawn
+over a button already filled with it is a second mark for one fact.
 
-**A widget icon means two things, and which one is in force is persisted.** With
-the dock shown it toggles that widget in it; with the dock hidden it opens that
-widget's overlay instead, and the dot and fill are suppressed because they would
-describe a dock nobody can see. Every icon does something in both states: the
-overlay renders any widget at full size, so there is no "iff it has one". What
-*is* gated is the expand button on a dock card - `hasFullView`, true for the map
-alone, because a button that reopens the same drawing larger promises what it
-does not deliver. 56 disagrees
-with `DASHBOARD_RAIL_WIDTH` and `FrameMetaRail`, both 48, and that is accepted
-rather than overlooked.
+Two numbers decided the details and both are Day's doing. A **solid** `--primary`
+fill reads as a button rather than a selection, so it is translucent. And
+`--primary` on a tint of ITSELF cannot reach 4.5:1 in Day at any alpha - it peaks
+at 3.97 and falls from there, because `#0b6bcb` is a mid-blue and the tint
+lightens toward it - so the accent-on-accent-tint pattern is out and the glyph
+takes `--foreground` instead. That is a fact about this palette rather than about
+the floor, which is why the glyph changed and the floor did not.
+`scripts/themes/registry.ts` reads the alpha **out of `ActivityRail.tsx`** and
+holds four numbers to it: the glyph's contrast on the composite, and the fill's
+deltaE from both the rail's ground and its own hover - the second being the pair
+that matters, since an active marker a hover can be mistaken for is not a
+marker. There used to be a third shape - a dot and
+an outline, for a widget that was open in the dock - and with the dock gone every
+icon in the strip is a view or an action, so one shape is all there is to say
+**for a view**. The pair survives on the two
+controls that are neither: the adapter and the schedule take
+`railButton(active, 'toggle')`, which is the outline, and the schedule carries
+the dot when one is set. Find packet was the third and is deleted; what was
+deleted before it was the widget icons, not the vocabulary. 56 disagrees with `FrameMetaRail`'s 48, and that is accepted
+rather than overlooked - `DASHBOARD_RAIL_WIDTH` was the other half of that
+sentence and went with `dashboardPrefs.ts`.
 
 **The drag-region rule.** The title row is `.app-drag` and everything
 interactive in it is `.app-no-drag`; **the rail is entirely no-drag**, and has
@@ -333,7 +611,7 @@ closed, so `scripts/electron/window-chrome.ts` asserts the class is on the
 shared button class rather than on each button. Both classes are in `index.css`
 and deliberately not `:root` custom properties: that block is the theme baseline
 and `scripts/themes/registry.ts` requires every token in it to be redeclared by
-all four themes, which a layout constant has no business being.
+every theme, which a layout constant has no business being.
 
 `viewPrefs.ts` holds the active view, persisted — which argues against
 `DashboardAside`'s rule that "'which panel did I have open' is not a setting",
@@ -345,52 +623,51 @@ for every view out of `App.tsx` and asserts that the one view needing a second
 condition to render - `stream`, which needs a target - is exactly the one
 `restoredView` refuses.
 
-**The dock replaced the right-hand column.** `components/dock/Dock.tsx` sits
-between the rail and the content and stacks whichever widgets are open;
-`DashboardAside` and its collapse-to-a-rail morph are deleted. `services/dockPrefs.ts`
-is the furniture - `inwire.dock`, holding the width, `minimized`, and an `items`
-list that is a permutation of every widget type with `open` and `pinned` flags,
-so a widget closed and reopened returns **where it was**. `inwire.dashboard` keeps what is
-still true of a widget wherever it is drawn, its `title` and its `config`; its
-`mode` and `width` are no longer read, and are deliberately **not** deleted from
-storage, because `seedFromDashboard()` reads that raw key once to migrate.
+**The dock is deleted, and so is everything under it.** It replaced a right-hand
+column, which had replaced a `DashboardAside` with a collapse-to-a-rail morph;
+what went with it this time is the whole apparatus rather than another
+relocation - `components/dock/`, `WidgetCard`, `WidgetOverlay`,
+`RenderedWidget`, `dashboardWidgets.tsx`, `DashboardWidgetList`, both preference
+keys (`inwire.dock`, `inwire.dashboard`), and the two assertion scripts that
+covered them.
 
-Four things about it worth knowing before touching it:
+The question that answers is the one the dock kept re-raising in a new shape:
+**what is a widget, if every widget that survives has somewhere better to be?**
+Six existed. Packet counts became the title row's readout; Protocol breakdown and
+Top talkers were deleted outright; the map became a view; and the traffic
+timeline and packet-size charts became a Statistics tab. Each of those is a
+surface with one home and its own controls, which is what a widget was
+simulating with an open flag, a pin, a drag-reorder, a per-widget config bag and
+a shared overlay.
 
-- **The migration runs once per user and cannot be repeated.** `inwire.dock` is
-  absent and the old data is under a different name, so a normaliser never gets
-  the chance - the seed happens at module scope, before `createPreferenceStore`
-  reads. A stored `'full'` column carries its enabled widgets across; `'icons'` or
-  `'hidden'` opens **nothing**, because a collapsed user was not looking at any of
-  them and honouring the list would open five widgets nobody asked for. It is the
-  single highest-value thing `scripts/session/dock.ts` covers.
-- **`LIST_RESERVE` is 640 and does not fit every column.** Measured: the fixed
-  columns take ~785px. It is still right, for a reason about the window rather
-  than the columns - a reserve large enough to keep every column would mean the
-  dock **cannot open at all** at the 1024 minimum. The list already scrolls
-  horizontally by design; the reserve guarantees it keeps its identity, the frame
-  number, the time and both addresses.
-- **The width is stored unclamped.** `clampDockWidth` applies at the point of use,
-  against the window, so narrowing shrinks an open dock and widening gives back
-  the width the user chose. A width clamped on the way out would never grow back.
-- **`minimized` is not a revival of `DashboardMode`.** That was three modes and
-  a morph gesture on a right-hand column that became a 48px strip as you dragged
-  it narrower; this is one boolean on a left-hand dock whose rail already exists.
-  The migration does not carry the old `mode` across either - `icons` and
-  `hidden` are already answered by opening nothing, and collapsing on top of
-  that would hand somebody a rail whose every widget icon opened an overlay,
-  with no sign the dock existed.
-- **`Dock` is behind `React.memo`, and it is the application's only memo
-  boundary.** App re-renders ~10x a second during a capture and every widget does
-  a full pass over the buffer. `DashboardAside` was memoised for this; Step 5 of
-  the rail work did not carry that across and handed every one of those renders to
-  the charts. Nothing failed - it was only slower, visible in a profile. An inline
-  arrow in any of the six callbacks App passes it silently defeats it. So does a
-  fast-changing field in `DashboardWidgetContext`, which is why the packet
-  counter publishes through `services/packetCounts.ts` and the `counts` card
-  subscribes for itself: a frame count in that context would change its identity
-  on every 100ms flush and re-render all six widgets for a number one of them
-  shows.
+Three things the dock knew that are worth not rediscovering:
+
+- **`LIST_RESERVE` was 640 and did not fit every column.** Measured: the fixed
+  columns take ~785px, so Protocol, Length and Info were off-screen at the
+  reserve and the list scrolled horizontally to reach them. It was still right,
+  for a reason about the window rather than the columns - a reserve large enough
+  to keep every column would have meant the dock could not open **at all** at the
+  1024 minimum. The constant is gone with the dock; the reasoning is the general
+  form of "guarantee the identity - frame number, time, both addresses - and let
+  the rest scroll".
+- **A width or a share is stored unclamped and clamped at the point of use.**
+  `clampDockWidth` applied against the window, so narrowing shrank an open dock
+  and widening gave back the width the user chose; a width clamped on the way out
+  would never have grown back. That rule outlived the dock, and then outlived
+  the thing it applied to: it was two shares while the map was a pane in that
+  row - `detailsPaneRatio` and `geoPaneRatio`, stored independently with the
+  interaction ("the hex dump keeps at least a tenth") applied at the point of use
+  in `App.tsx`. One share has no interaction to defer, so the 0.1..0.9 ceiling in
+  the normalizer is the whole clamp again and `MIN_PANE_PX` is what stops either
+  pane being dragged to nothing.
+- **`Dock` was the application's only `React.memo` boundary**, and there is no
+  longer one. App re-renders ~10x a second during a capture and every widget did
+  a full pass over the buffer, so the dock had to absorb that; the surviving
+  surfaces are unmounted unless their view is active, which is a stronger version
+  of the same guarantee. What survives unchanged is `services/packetCounts.ts`:
+  the counter publishes and its readout subscribes, because threading a
+  ten-times-a-second number down through props was the regression that shipped
+  once already (`b0ce1fc`).
 
 `lib/windowChrome.ts` is the renderer's half of the bridge: it reports the
 resolved theme and the window title to main, and subscribes once at module scope
@@ -620,6 +897,35 @@ first reply arrived; everything after did not — it works on the handshake,
 which is what gets tested, and stops on the traffic. `local-agent/pipe_server.py`
 now gives every operation its own `OVERLAPPED` with its own event.
 
+**A cached "is the style ready?" that a lost GPU context invalidated.** The
+tell in a terminal is Chromium's own `command_buffer_proxy_impl.cc ... GPU state
+invalid after WaitForGetOffsetInRange` - a driver reset, a GPU process crash or
+a laptop changing adapter, reaching the renderer as a lost WebGL context.
+
+MapLibre handles the WebGL half well: `_contextLost` calls `preventDefault()` so
+the browser will restore, snapshots the style, then **destroys it and sets
+`map.style = null`**; `_contextRestored` puts it back with `setStyle(...,
+{ diff: false })`, whose `style.load` is already `GeoMap`'s recovery path for a
+theme change - skin, declutter, land wall, sky, projection, arcs, a fresh
+`PinLayer`. What MapLibre cannot know is that `GeoMap` caches the answer to "may
+I touch the style?" in `styleReadyRef`, deliberately, because `isStyleLoaded()`
+asks a different and much slower question.
+
+Left true across the gap, every guard waved through a call against a style that
+no longer existed - and `_contextRestored` calls `resize()` before its own style
+has loaded, `resize()` fires `moveend`, `GeoMap` answers that with
+`syncConnectionsLayer()`, and `addLayer` threw **Style is not done loading.**
+out of MapLibre's restore, abandoning it before its closing `_update()`.
+
+**The cost was narrower than it first looked, and saying so is the point.** The
+layers do come back either way: `style.load` fires from the `setStyle`
+regardless. That was established by losing the context a second time and reading
+which custom layers MapLibre names in its own warning - both, with the bug in or
+out. What the stale flag bought was an uncaught exception on every GPU recovery,
+not lost data. The fix is one line in a `webglcontextlost` handler, because
+`syncConnectionsLayer` already reschedules when the style is not ready.
+`scripts/electron/gpu-restore-drive.ts`.
+
 **A `queue.shift()` inside a `find` predicate.** The dock's drag-reorder read
 
 ```ts
@@ -638,10 +944,16 @@ It was also **persisted**: `createPreferenceStore`'s `set` does not normalise, o
 because `normalizeItems` skips those and appends the missing types closed - which
 is the whole argument for repairing rather than rejecting, arriving unasked.
 
-The arithmetic is `reorderItems` in `dockPrefs.ts` now, beside `dockOrder`, where
-`scripts/session/dock.ts` can reach it; every refusal returns the list unchanged
-rather than asserting. Put the bug back and the script throws the same
-`Cannot read properties of undefined` the renderer did.
+The arithmetic was moved out to `reorderItems` in `dockPrefs.ts`, beside
+`dockOrder`, where `scripts/session/dock.ts` could reach it and every refusal
+returned the list unchanged rather than asserting - and putting the bug back made
+that script throw the same `Cannot read properties of undefined` the renderer
+did. **Both files went with the dock and neither is here to run**; the entry is
+kept for the shape, which outlives its subject: a `shift()` inside a predicate
+runs once per *comparison*, not once per match, and a non-null assertion over a
+`find` is where `undefined` gets into a list. The general lesson is the one above
+it - a `useCallback` in `App.tsx` is unreachable from this suite, so arithmetic
+worth testing has to be lifted somewhere a script can import it.
 
 **`readSync` returns short counts.** Not an error, a partial read. `readExact`
 threw on short and recovery read that as a torn tail. `nodeBlockFile.ts` loops;
@@ -700,11 +1012,10 @@ prints `PASS`/`FAIL` lines and exits non-zero.
 
 **`docs/verification.md` is the other half**, and it is a real document rather
 than an aspiration: everything this repository knows to check and cannot check by
-itself - the window's own chrome against all four themes and three scaling
-factors, Snap Layouts, the drag regions, the dock at its 240px floor, the
-once-per-user dock migration against a real profile, the pipe's security
-descriptor taking effect (which needs a second Windows account), and the UAC
-prompt. Each item says what a failure *looks like*, because everything in it
+itself - the window's own chrome against both themes and three scaling
+factors, Snap Layouts, the drag regions, the two bottom panes and their
+divider, the pipe's security descriptor taking effect (which needs a second
+Windows account), and the UAC prompt. Each item says what a failure *looks like*, because everything in it
 fails silently - which is the reason it is there and not in a script.
 
 Three rules keep it that way, and all three are now checked:
@@ -785,6 +1096,14 @@ Still true of an import: the file is read with one `arrayBuffer()`, and the
 dissection blocks the main thread. Streaming changed where the frames end up,
 not who does the work.
 
+**`scripts/electron/gpu-restore-drive.ts` reaches the GPU.** It loses a real
+WebGL context under the running map and restores it, which is the one failure in
+this app that needs a live GL context to exist at all - so it cannot be a plain
+`tsx` script like everything else. In `NOT_TESTS`; run it by hand after anything
+touching GeoMap's style or layer lifecycle. It skips rather than fails on a
+machine with no map on screen, because the map only exists once geo-IP lookup
+has been consented to.
+
 **`scripts/electron/disk-drive.ts` and `import-drive.ts` reach the disk.** `smoke.ts` captures a
 few thousand frames, which fit in the RAM buffer, so it never touches a stored
 row; one drives a capture past the 128 MB budget until the window trims, then
@@ -816,7 +1135,7 @@ nothing to click.
 
 ## 8. Migration status
 
-*As of 2026-09-13.*
+*As of 2026-09-15.*
 
 Phases 1–5 of the Electron migration are done, and so is 7 but for its last
 item. The plan is
@@ -849,6 +1168,17 @@ with it** — `src/components/analytics/renderTier.ts`, two tiers rather than
 three, asserted by `scripts/perf/render-tier.ts`. What remains of the phase is
 the **offline basemap**: `tiles.openfreemap.org` is still in `OUTBOUND_HOSTS`
 (`electron/csp.ts`) and there is no `d3-geo`. See **Direction**.
+
+**The shell had a second pass after that date, and §3 is where it is described,
+not here.** This table is a record of what landed when, so its Phase 7 row still
+names the dock - which was built in that phase and deleted after it. What changed
+since: the dock and its whole widget apparatus deleted, **Frame Detail promoted
+from a modal to a view** (so `Ctrl+2` is it and the three views after it each
+moved a key), **Find packet deleted** in favour of that view's go-to-frame box,
+the app-wide status bar reverted to `HexViewer`'s own footer, the filter row
+scoped to Packets alone, and the chrome moved from `--card` to `--secondary` with
+the `INWIRE` wordmark deleted. Read §3 for the result; read this row for the
+order things happened in.
 
 **The Npcap question is answered rather than blocking.** It was "does the
 silent install need an OEM licence", and the answer is yes - so the installer
@@ -1094,9 +1424,28 @@ works but kills a service the app deliberately has no rights to stop.
 
 One JSON document at `UPDATE_FEED_URL` — `https://updates.inwire.app/manifest.json`,
 overridable by `INWIRE_UPDATE_FEED` in dev. **The domain does not resolve
-yet**, so every check is a quiet no-op until it does, which is the same path
-an offline machine takes and is already the ordinary case rather than an
-error. It is the
+yet** — it is not registered — so every check is a quiet no-op until it does,
+which is the same path an offline machine takes and is already the ordinary
+case rather than an error.
+
+**Development does not take that path any more.** `npm run dev` and
+`npm run start:app` stand up `electron/devFeed.cjs` on a loopback port and
+point `INWIRE_UPDATE_FEED` at it, so a launch reaches a feed that answers
+instead of printing `net::ERR_NAME_NOT_RESOLVED` on every run — the shape that
+teaches somebody to stop reading their own log. An `INWIRE_UPDATE_FEED`
+already in the environment wins and no server is started.
+
+Its default manifest **offers nothing, and that is a constraint rather than a
+choice**: `DOWNLOAD_HOSTS` is `null` for `inwire`, `agent`, `oui` and `geoip`,
+meaning "the host the feed came from", and `hostOf` returns null for anything
+that is not https. A loopback feed is http, so those four rows can never
+validate there — and one malformed row for a known id rejects the *whole*
+document, which would trade `not reachable` for `could not be read`. Npcap is
+the exception, because its allowlist names npcap.com outright, so
+`--npcap <version>` is the one row that can be served. Every row then rests at
+`unknown`, exactly where an unreachable feed left it.
+
+It is the
 only remote input in this repository that can nominate an executable to be run
 elevated, so it is validated strictly and **rejected whole** — the opposite of
 how preferences are read, because a defaulted field here could mean "download
@@ -1184,7 +1533,24 @@ answers already chosen or available: `printToPDF` for reports, `net.fetch` for
 the updater, `dialog` for file I/O, `powerMonitor` for sleep gaps. The current
 `dependencies` list still carries `jspdf`, `jspdf-autotable`, `pdfjs-dist`,
 `exceljs` and `three` — the pass that weighs each against a platform API has
-**not** happened.
+**not** happened. All five are genuinely imported and reachable from
+`src/main.tsx`, which is the distinction that matters: they are **unweighed, not
+unused**, and a census is what establishes that rather than a reading of this
+paragraph.
+
+**One was unused and is gone: `@heroicons/react`.** Installed, 15 MB, imported by
+nothing anywhere in `src/`, `electron/` or `scripts/`. It came back for an
+afternoon as the candidate to replace Tabler and left again on evidence — no
+outline cut below 24px, in an app that draws most of its icons at 12 and 14,
+and 15 of 76 glyphs with no equivalent at all. **The icon set is
+`lucide-react`**: 76 distinct glyphs across 41 files, imported where they are
+used, held to one set by `scripts/themes/icon-set.ts` — which also insists
+`Map` and `Image` are aliased, because both shadow globals and `tsc` will not
+say so. It is worth the paragraph because it is the failure mode the dependency
+rule does not catch: the rule asks whether a dependency beats the platform, and
+a dependency nothing imports never gets asked. The cheap census is a grep per
+entry in `dependencies`, and it is worth repeating before any pass that weighs
+the five above.
 
 **Cross-origin isolation is in place** (see Invariants) but nothing uses it.
 `scripts/electron/smoke.ts` already asserts `crossOriginIsolated` against
@@ -1211,16 +1577,16 @@ plan a bump roughly every other release.
 | 0005 | Agent wire format | **authentication half superseded by 0029** |
 | 0006 | pcapng writer scope | accepted |
 | 0007 | Bytes cross the worker boundary, trees do not | accepted |
-| 0008 | Where TLS key material lives | accepted; weakened — see below |
+| 0008 | Where TLS key material lives | accepted; **weakened by 0027** — see below |
 | 0009 | Facts that did not come off the wire | accepted |
 | 0010 | The agent captures raw frames and dissects nothing | accepted |
 | 0011 | Dissection's cost was not the tree | accepted |
-| 0012 | Stored captures persist until the user says otherwise | accepted |
+| 0012 | Stored captures persist until the user says otherwise | accepted; **mechanism superseded by 0025** (the rule stands) |
 | 0013 | What a million frames actually cost | superseded by 0025 |
 | 0014 | Bounding the trackers | accepted |
 | 0015 | The colour index | accepted |
 | 0016 | Pooling the per-frame lists | accepted |
-| 0017 | The dense/sparse split | accepted |
+| 0017 | The dense/sparse split | measured; **implemented by 0018** |
 | 0018 | Implementing the field split | accepted |
 | 0019 | Packet direction | accepted |
 | 0020 | The leaf protocols | corrected by 0022 |
@@ -1228,22 +1594,25 @@ plan a bump roughly every other release.
 | 0022 | A stream protocol is not expensive any more | accepted |
 | 0023 | Decomposing the parser | accepted |
 | 0024 | Carrying a message across segments | accepted |
-| 0025 | The capture lives on disk | accepted |
+| 0025 | The capture lives on disk | accepted; **Decision 1's mechanism superseded by 0027** |
 | 0026 | One capture on disk | accepted; its quota arithmetic is void on a real disk |
 | 0027 | The app is a desktop app | accepted |
 | 0028 | Where the capture store runs, and what the boundary costs | accepted |
 | 0029 | The app and the agent talk over a named pipe | accepted |
-| 0030 | One installer, two destinations, the app never elevates | accepted |
+| 0030 | One installer, two destinations, the app never elevates | accepted; **its Npcap paragraph voided by 0032** |
 | 0031 | A display filter answers over the whole capture | accepted |
 | 0032 | Npcap is managed by the app, not shipped by the installer | accepted; **voids 0030's Npcap paragraph** |
 | 0033 | The agent stays a separate service, and Npcap should be admin-only | accepted |
 
-**ADR 0008 weakened and it is not written down there yet.** Its argument was
-that key material "is exactly as old as the tab"; a desktop app open for days
-breaks that. `crashReporter` stays **off** for the same reason — a renderer
-minidump is a copy of `KeyLogStore`, so the usual advice to enable it with
-`uploadToServer: false` for local dumps conflicts with 0008 and is declined
-until the key-lifetime question is reopened.
+**ADR 0008 weakened, and it now says so itself.** Its argument was that key
+material "is exactly as old as the tab"; a desktop app open for days breaks
+that. That is a banner on the ADR rather than a note only here, which is the
+point — a reader who follows the pointer is the one who needed telling. The
+decision still stands; what moved is the bound, and the question is recorded as
+reopened rather than answered. `crashReporter` stays **off** for the same
+reason — a renderer minidump is a copy of `KeyLogStore`, so the usual advice to
+enable it with `uploadToServer: false` for local dumps conflicts with 0008 and
+is declined until the key-lifetime question is reopened.
 
 ---
 
@@ -1263,8 +1632,12 @@ The old exclusion rule was correct only while nothing else in the window was
 focusable; with a dozen rail buttons, Space on a focused one both activated it
 and ran this handler's `preventDefault`, so the button's own activation was
 suppressed and capture toggled anyway. Scoped positively, every control added
-from here on is safe by default rather than by being remembered. `Ctrl+1..3`
-switch views, and `APP_VIEWS` order **is** the numbering. `hooks/usePacketBuffer.ts` holds the buffer — the arrival
+from here on is safe by default rather than by being remembered. `Ctrl+1..5`
+switch views, and `APP_VIEWS` order **is** the numbering. **There is no
+detail-window gate any more**: this hook used to bail out entirely while
+`detailPacketId` was set, because a modal covered the window. Frame Detail is a
+view, so the hook binds Up and Down and the pane binds Left and Right, and both
+move the same selection. `hooks/usePacketBuffer.ts` holds the buffer — the arrival
 queues, the accounting, the dense-field writer, the flush.
 `hooks/useAgentConnection.ts` owns the agent link: status, version, interfaces,
 capture state, drop counters, adapters, the agent's own log, and the health
@@ -1338,14 +1711,76 @@ the adapter, keep nanosecond timestamps, carry the names the capture taught us,
 and record what the capture missed. `services/anonymise.ts` is
 prefix-preserving over Crypto-PAn; MACs keep their OUI.
 
-Theming is four themes declared in `src/lib/themeOptions.ts`, each with a
-complete token block in `src/index.css` and a palette entry in
-`src/services/themePalettes.ts`. **There is no Colourful setting**: the four
+**Typography is one family, IBM Plex, in two cuts** — Plex Sans Variable on
+`--font-sans` for the chrome, Plex Mono on `--font-mono` for the data, both
+declared once in `src/index.css` and nowhere else. The two tokens used to name
+Geist and JetBrains Mono, chosen independently, and the seam showed under every
+table header; Plex was drawn as a superfamily so there is no seam. The mono is
+the static package because IBM never shipped a variable Plex Mono —
+`@fontsource-variable/ibm-plex-mono` does not exist — so it is imported a weight
+at a time. **There is no
+typeface picker.** The Accessibility tab used to offer Geist / Atkinson
+Hyperlegible / Nunito and rewrite `--font-sans` at runtime; it is deleted
+because a setting that moved the sans and not the mono put the seam back for
+exactly the readers who reached for it. **Atkinson Hyperlegible went with it,
+and that is a real loss, taken knowingly**: it was drawn to separate I/l/1 and
+O/0 for low-vision readers, Plex does not do that job, and nothing replaced it.
+Reopening that question means a picker where every option carries a matched
+mono. `scripts/accessibility/fonts.ts` holds the rest: both packages in, the
+four retired ones out, no `font-family` outside `index.css` that is not a
+token, and nothing writing either token at runtime. The one mix that survives
+is the map's place names, baked into openfreemap's glyph atlases where no CSS
+reaches; `.maplibregl-map` in `index.css` says so.
+
+Theming is **two** themes declared in `src/lib/themeOptions.ts` - Day and Night
+- each with a complete token block in `src/index.css` and a palette entry in
+`src/services/themePalettes.ts`, plus System, which is a rule for choosing
+between them rather than a third palette. Paper and Graphite were cut: each
+existed as the other survivor's warm counterweight, which was an argument for
+four and not one for keeping a spare of each. **Night took the `dark` id from
+Graphite**, and that was the cut paying for itself - next-themes writes
+`color-scheme` only for the literal strings `light` and `dark`, so while the
+neutral dark theme was stored as `midnight` the native scrollbars and form
+controls stayed on the light side of the divide for the theme most people use.
+`RETIRED_THEMES` lands every stored `midnight` and `paper` on a real one. **There is no Colourful setting**: the four
 `--chrome*` tokens painted a 64px accent header and a menu drawer that are both
 deleted, and by the end the only thing the switch still changed was making the
 brand mark invisible - white on white in Day and Paper. Its checks in
 `scripts/themes/registry.ts` went on passing throughout, because they measured
-the mark against `--chrome`, the bar it had stopped sitting on. Run `npm run check` after any colour edit —
+the mark against `--chrome`, the bar it had stopped sitting on.
+
+**The brand mark is outside all of this, and that is new.** It is a shaded form -
+one ribbon spiralling round a sphere, `src/lib/brandMark.ts` - and it carries its
+own two colours rather than taking `currentColor`, because a form given one
+colour is a silhouette. The rule that replaced the old one is narrower and still
+worth keeping: the colours live with the geometry, and `BrandMark.tsx` holds
+none. Two consequences are deliberate. **One ramp serves both themes** - checked,
+not assumed, and the obvious alternative of lightening the far end for Night
+measurably flattens the form, because the sense of depth IS the distance between
+the ramp's ends. And **there is no second half to match**: the `INWIRE` wordmark
+is deleted (§3), so the question this paragraph used to answer at length -
+whether a lockup's two halves may carry different colours - has no subject. The
+mark stands alone and carries its own, which is the whole rule now.
+
+**The mark is tiered**, which is the other thing a colour edit can break without
+noticing. `full` is 3½ turns for 256/192/180, `compact` 2.6 for 48/32/24, `micro`
+2.1 for 16 - and 16 is what the title row's own mark renders at. `BrandMark`
+takes a `size` rather than a tier so callers say what they know;
+`scripts/brand/icon.ts` measures coverage and bounds **once per tier**, because
+the ceiling is what `full` has to stay under and the floor is what `micro` has to
+clear. The shading is a hundred and forty flat fills rather than a
+`<linearGradient>`, so the no-gradient rule survives intact and the bounds stay
+readable off the path data.
+
+**`Inwire.exe` had no icon at all until this landed** - `electron-builder.yml`
+had no `win.icon` and `directories.buildResources` pointed at a folder that did
+not exist, so the packaged app shipped Electron's default and nothing in the
+suite could see it. It is `electron/resources/icon.ico` now, named explicitly,
+written from the same buffer as `local-agent/icon.ico` with `icon.ts` asserting
+the two are byte-identical. `BrowserWindow` takes the same file, which is what
+`npm run dev` and `npm run start:app` show.
+
+Run `npm run check` after any colour edit —
 `scripts/themes/` enforces token completeness, contrast and CSS-vs-palette
 drift.
 
@@ -1362,7 +1797,9 @@ directory handles and electron-builder finishes a pack by **renaming**
 ### Env vars
 
 `vite.config.ts` reads `DISABLE_HMR`; `electron/main.ts` reads
-`INWIRE_DEV_SERVER`, set by `npm run dev`. Both have working defaults. There is
+`INWIRE_DEV_SERVER`, set by `npm run dev`. `updateCenter/manifest.ts` reads
+`INWIRE_UPDATE_FEED`, set by both dev commands to the loopback feed and read
+once rather than baked into a build. All have working defaults. There is
 no `.env` of any kind. The root-level `security_spec.md` that described a
 Firebase backend is gone; what was worth keeping - the twelve denial tests any
 future sharing feature would have to pass - is
