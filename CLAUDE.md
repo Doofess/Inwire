@@ -1711,23 +1711,38 @@ the adapter, keep nanosecond timestamps, carry the names the capture taught us,
 and record what the capture missed. `services/anonymise.ts` is
 prefix-preserving over Crypto-PAn; MACs keep their OUI.
 
-**Typography is one family, IBM Plex, in two cuts** — Plex Sans Variable on
-`--font-sans` for the chrome, Plex Mono on `--font-mono` for the data, both
-declared once in `src/index.css` and nowhere else. The two tokens used to name
-Geist and JetBrains Mono, chosen independently, and the seam showed under every
-table header; Plex was drawn as a superfamily so there is no seam. The mono is
-the static package because IBM never shipped a variable Plex Mono —
-`@fontsource-variable/ibm-plex-mono` does not exist — so it is imported a weight
-at a time. **There is no
-typeface picker.** The Accessibility tab used to offer Geist / Atkinson
-Hyperlegible / Nunito and rewrite `--font-sans` at runtime; it is deleted
-because a setting that moved the sans and not the mono put the seam back for
-exactly the readers who reached for it. **Atkinson Hyperlegible went with it,
-and that is a real loss, taken knowingly**: it was drawn to separate I/l/1 and
-O/0 for low-vision readers, Plex does not do that job, and nothing replaced it.
-Reopening that question means a picker where every option carries a matched
-mono. `scripts/accessibility/fonts.ts` holds the rest: both packages in, the
-four retired ones out, no `font-family` outside `index.css` that is not a
+**Typography is the two faces Windows ships** — Segoe UI Variable on
+`--font-sans` for the chrome, Cascadia Mono on `--font-mono` for the data,
+declared once in `src/index.css` and nowhere else, and **no webfont is
+imported at all**. This is a Windows desktop app, so the system face is one
+face rather than a per-platform stack: hand-hinted for the 12px most of the UI
+is set in, and the face every other window on the desktop wears. The tokens
+carried IBM Plex for one day (`7b4dded`) and Geist with JetBrains Mono before
+that. Plex closed the seam the unrelated pair showed under every table header
+and was retired on taste — square and dated beside the desktop — and Segoe
+with Cascadia closes the same seam, being Microsoft's two faces drawn for the
+same screen. Three facts were **measured against Chromium's DirectWrite path**
+rather than assumed, and `index.css` records them on the tokens:
+`"Segoe UI Variable"` does not resolve — DirectWrite exposes three
+optical-size families with five named weights each and no axis, so **Small**
+leads, being the cut for 12px and under; weight **500 snaps up to Semibold**
+in both faces, so `--font-weight-medium` is 400 in `@theme` and `font-medium`
+means Regular, which is Fluent's own ramp; and Segoe UI Variable's figures are
+proportional until `tnum` asks otherwise, which `body` does. **Cascadia Mono,
+not Cascadia Code** — Code ligates `->` and `==`, and an Info column is a
+place where the bytes must be drawn as written. Windows ships no Cascadia Mono
+Italic, so the mono italic in the protocol tree is a sheared roman; accepted.
+**There is no typeface picker.** The Accessibility tab used to offer Geist /
+Atkinson Hyperlegible / Nunito and rewrite `--font-sans` at runtime; it is
+deleted because a setting that moved the sans and not the mono put the seam
+back for exactly the readers who reached for it. **Atkinson Hyperlegible went
+with it, and that is a real loss, taken knowingly**: it was drawn to separate
+I/l/1 and O/0 for low-vision readers, Segoe does not do that job, and nothing
+replaced it. Reopening that question means a picker where every option
+carries a matched mono. `scripts/accessibility/fonts.ts` holds the rest: no
+`@fontsource` package installed or imported and no `@font-face`, the tokens
+leading with the named faces and ending in a generic, the medium remap
+present, `tnum` on `body`, no `font-family` outside `index.css` that is not a
 token, and nothing writing either token at runtime. The one mix that survives
 is the map's place names, baked into openfreemap's glyph atlases where no CSS
 reaches; `.maplibregl-map` in `index.css` says so.

@@ -27,8 +27,6 @@
     "clean": "node -e \"for (const d of ['dist','dist-electron','release','build','installer/output','local-agent/build','local-agent/dist','local-agent/installer/output']) require('node:fs').rmSync(d,{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@fontsource-variable/ibm-plex-sans": "^5.3.0",
-    "@fontsource/ibm-plex-mono": "^5.3.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "d3": "^7.9.0",

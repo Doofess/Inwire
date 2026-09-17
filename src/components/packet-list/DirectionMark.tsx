@@ -55,9 +55,10 @@ export const DirectionMark: React.FC<{ direction: Direction }> = ({ direction })
     className="w-3 h-3 inline-block align-middle"
     fill="none"
     stroke="currentColor"
-    // 1.75 of 16 is 1.31px at the 12px the mark renders at, which is where a
-    // JetBrains Mono stem sits at this list's text sizes. Thinner reads as a
-    // hairline against the digits in the columns either side.
+    // 1.75 of 16 is 1.31px at the 12px the mark renders at, which is about
+    // where a Regular mono stem sits at this list's text sizes - Cascadia
+    // Mono now, JetBrains Mono when this was drawn, both land there. Thinner
+    // reads as a hairline against the digits in the columns either side.
     strokeWidth={1.75}
     strokeLinecap="round"
     strokeLinejoin="round"

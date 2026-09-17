@@ -533,15 +533,18 @@ export const PacketList: React.FC<PacketListProps> = ({
   // incoming packet while auto-scrolled), and doing this measurement on
   // every one of those was itself measured as the single largest forced-
   // reflow cost in the app once the earlier full-DOM freeze was fixed.
-  // One more measurement, once the webfont has actually landed.
+  // One more measurement, once the fonts have settled.
   //
-  // The latch below deliberately measures once, and on a cold load that once is
-  // too early: rows are laid out in the fallback font, which here happens to be
-  // exactly the 21px fallback, so the measurement agrees with the guess and the
-  // real 20.641px height that arrives with JetBrains Mono is never seen. The
-  // list then believes every row is a third of a pixel taller than it is, which
-  // across a full buffer puts the last rows out of reach of the scroll position
-  // that should land on them.
+  // The latch below deliberately measures once, and while the app shipped a
+  // webfont that once was too early on a cold load: rows were laid out in the
+  // fallback font, which happened to be exactly the 21px fallback, so the
+  // measurement agreed with the guess and the real 20.641px height that
+  // arrived with JetBrains Mono was never seen. The list then believed every
+  // row was a third of a pixel taller than it is, which across a full buffer
+  // put the last rows out of reach of the scroll position that should land on
+  // them. The faces are system fonts now and `document.fonts.ready` resolves
+  // at once, so this costs one layout and is kept: it is what makes a webfont
+  // safe to bring back.
   //
   // Bumping state rather than only clearing the latch, because the ref callback
   // fires on render and an idle list is not rendering.
