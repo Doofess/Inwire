@@ -38,6 +38,7 @@ __pycache__/
 # of how a change was arrived at, but they are scratch, not project docs, and
 # they go stale the moment the code moves past them.
 docs/superpowers/
+.superpowers/
 scripts/brand/.raster.html
 
 # Parity fixtures: real captures with personal names and addresses inside (docs/decisions/0004).

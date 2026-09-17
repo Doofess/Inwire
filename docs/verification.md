@@ -74,9 +74,42 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       the rail is entirely no-drag now that the brand mark and its 40px cell have
       gone to the title row. Every rail button still presses; a control that
       forgot `.app-no-drag` has exactly one symptom, a click that does nothing.
-- [ ] The **brand mark and the window name are centred** in the title row, and
-      the mark is legible in all four themes (it takes `--card-foreground`; under
-      the deleted Colourful setting it was white-on-white in Day).
+- [ ] **The top-left corner is one continuous surface.** The title row spans the
+      whole window and the rail starts below it, both on `--secondary`, with no
+      border between them - so no horizontal line cuts across the corner and the ground
+      runs unbroken from the mark down into the rail. A line there means somebody
+      put `border-b` back on the title row.
+- [ ] **The content pane is inset into that corner with a rounded top-left**, and
+      its 1px edge follows the curve all the way round - down the rail's side and
+      across under the title row. In **Night** the ground either side of that edge
+      now differs by 13/255 rather than 4 — the chrome moved to `--secondary` —
+      so the curve should read on its own; the border is still what carries it in
+      **Day**, where the two are much closer. A *straight* line running
+      past the corner instead means the rail got its `border-r` back and is
+      drawing over the curve.
+- [ ] Its other three corners are **square**. A radius on any of them is a second
+      curve inside the one Windows already draws on the window itself.
+- [ ] **The brand mark is at the top-left corner**, centred on the rail's 56px
+      axis so it lines up with the icons below it. It is the spiral sphere, drawn
+      at its **micro** tier because the lockup is 16 CSS pixels — two turns of
+      the band, not three and a half. The full tier here is a smudge, and it is
+      the single most likely thing to be wrong after any edit to `BrandMark`.
+- [ ] **It is legible on both chromes.** The mark carries its own two colours
+      rather than inheriting one, and a single ramp serves Day and Night: check
+      the dark end has not sunk into `--secondary` on Night, which is the failure
+      that a lighter far colour would fix at the cost of flattening the form.
+      The ground under it moved from `--card` to `--secondary` — a step brighter
+      — so this is worth a fresh look rather than a remembered pass.
+- [ ] **`INWIRE` is gone.** No word beside the mark, in either theme. The window
+      still names itself in the **taskbar and Alt-Tab** — hover the taskbar entry
+      and start a capture: it reads `Ethernet - capturing - Inwire`. That string
+      is what the wordmark was duplicating, and it is the thing to check is still
+      working, because nothing in the window shows it.
+- [ ] The corner block is still **138px** and the packet counter is still centred
+      in the **window**, not in the space left beside the mark. Maximize and
+      restore: the counter stays on the window's centre line.
+- [ ] **Drag the window by the mark.** It moves: the corner block is inside the
+      drag region and carries no `app-no-drag`.
 - [ ] **Double-click the empty title row** → maximizes; again → restores. **Check
       this first.** It is the one caption behaviour that is neither clearly kept
       nor clearly lost with `frame: false` — Chromium is supposed to handle it
@@ -97,8 +130,8 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
 
 - [ ] **Win+Left / Win+Right.** On a 1920px display this gives a 960px window,
       which is **below** `MIN_WINDOW_WIDTH` of 1024 — Windows allows that and the
-      layout must survive it. The dock clamps to its floor; the packet list
-      scrolls horizontally. Nothing overlaps the window controls.
+      layout must survive it. The two bottom panes hold their share and the
+      packet list scrolls horizontally. Nothing overlaps the window controls.
 - [ ] Hovering the maximize button does **not** open Snap Layouts. Expected; see
       the top of this section.
 
@@ -117,8 +150,19 @@ the target size and spacing are what muscle memory aims at.
       The button calls `window.close()`, never `destroy()`; destroying would skip
       this box and discard a capture on one click. (No automated test can answer
       it, which is why `smoke.ts` clears `setUnsavedCapture` before closing.)
-- [ ] In **Settings → Appearance**, switch through all four themes — Day, Paper,
-      Graphite, Dark. The buttons follow, because they are CSS.
+- [ ] In **Settings → Appearance**, switch through both themes — Day and Night.
+      The buttons follow, because they are CSS. Paper and Graphite are gone; the
+      picker's third entry is System, which is a rule rather than a palette.
+- [ ] **The quit confirm is drawn in the app's theme.** With frames in the
+      buffer, in **Night**, press close: the "Quit Inwire?" box is **dark**. In
+      **Day** it is light. It is a native dialog, so it follows `nativeTheme`
+      rather than the cascade, and nothing in the suite can see it.
+- [ ] **...and System still follows the OS afterwards.** Turn System on, cancel a
+      quit confirm, then change Windows' own app theme (Settings → Personalisation
+      → Colours). Inwire follows within a second. `guardClose` holds the
+      `themeSource` override only while the box is up for exactly this reason: a
+      standing one pins `prefers-color-scheme` in the renderer, which is what
+      `useSystemThemePreference` reads, and the app would be following itself.
 - [ ] **Hover close** → Windows' red `#c42b1c`, white glyph, in every theme.
       Hover the other two → the theme's accent.
 - [ ] **Click another window so Inwire loses focus.** The whole title row dims,
@@ -156,7 +200,42 @@ buttons are elements. Under the old overlay it had to come from
 - [ ] The glyphs are **sharp, not blurred** — they are 1px axis-aligned SVG
       strokes with `shapeRendering="crispEdges"`, and half-pixel placement is
       what would soften them.
-- [ ] At 200% the window still meets its 1024x640 minimum in *logical* pixels.
+- [ ] At 200% the window still meets its 1024x680 minimum in *logical* pixels.
+
+### One typeface, one icon set
+
+The app is set in IBM Plex — Sans on the chrome, Mono on the data — and draws
+every icon from Lucide. Both replaced a pair chosen independently (Geist with
+JetBrains Mono; Tabler), and both fail silently: a face that did not load falls
+back to Segoe UI and looks fine on its own, and a glyph from the wrong set
+matches nothing beside it and looks fine on its own.
+
+- [ ] In **Day** and **Night**, at **100%**, **150%** and **200%**: the title
+      row's counter, the rail tooltips, the Settings tabs and the packet list
+      header are one face. The tell for a failed load is Segoe UI's wider `a`
+      and open-tailed `g`; Plex's `g` is closed.
+- [ ] The hex dump's 16-byte rows and the packet list's columns line up under
+      Plex Mono — every glyph the same advance, the ASCII gutter a straight
+      edge, no row wrapping.
+- [ ] Timestamps in the packet list line up digit for digit (`tnum`), and
+      zeros in the hex dump carry a slash or dot (`zero`). Plex has both
+      features; the check is that `body`'s `font-feature-settings` reaches them.
+- [ ] Generated fields and empty states in the protocol tree render in a true
+      mono italic, not a sheared roman — `400-italic.css` is the only italic
+      imported, so a bold italic anywhere in mono would be synthesised.
+- [ ] Every icon in the rail, the filter row, the Settings tabs and the packet
+      list toolbar is the same stroke weight. Lucide and Tabler are both 2px on
+      a 24 grid, so a survivor from the old set is hard to see — look for
+      rounder corners or square terminals.
+- [ ] `LoaderCircle` spins during an export and during an import.
+- [ ] In the Routing Map's side panel, a located row shows a **filled** pin and
+      an unlocated one a hollow pin with a slash. `fill-current` on `MapPin` is
+      what keeps that, and it is the one call site the swap changed beyond the
+      name.
+- [ ] The rail's Stop button, while capturing, is a **filled** red square.
+- [ ] The rail's adapter button is an Ethernet port, not a tree; Frame Detail's
+      is a tree. They were `TbNetwork` and `TbBinaryTree` and are `EthernetPort`
+      and `ListTree` — the two judgement calls in the mapping.
 
 ### Still there after all of it
 
@@ -168,30 +247,66 @@ buttons are elements. Under the old overlay it had to come from
 - [ ] Maximize and restore, and look at the padding along the top edge in both.
       A maximized window has no rounded corners to avoid; a restored one must not
       paint into them.
-- [ ] The window title carries **no packet count** — it is the adapter while
-      capturing and `Inwire` otherwise. A number there is the most distracting
-      thing that can be put in a title bar, and the count is a dock widget now.
-- [ ] The window title tracks the state, in the taskbar as well as the title row:
-      `<adapter> - capturing - Inwire` while capturing, `Inwire` otherwise. It is
-      set from the renderer, which is the only side that knows the adapter's name.
+- [ ] The title row's **centre is the packet counter**, not the window's name —
+      `2,224 / 2,224` and a percentage badge, in the app's mono face. It is the
+      only copy of those figures in the app now; the filter bar's badge and the
+      counts widget are both gone.
+- [ ] **The window name still exists and is the OS's.** Check the **taskbar** and
+      **Alt-Tab**, not the row: `<adapter> - capturing - Inwire` while capturing,
+      `Inwire` otherwise. It is set from the renderer, which is the only side
+      that knows the adapter's name. A row that shows the counter and a taskbar
+      that shows nothing means `useWindowTitle` stopped being called.
+- [ ] **The counter is legible against the row's dim.** Blur the window: the
+      whole row goes to `opacity-60`, including the figures. They must still be
+      readable, and the badge must not become the brightest thing in a blurred
+      window.
+- [ ] **Drag the window by the row, starting on the counter's figures.** It must
+      move — the numbers are inside the drag region and carry no `app-no-drag`.
+- [ ] **Then drag starting on the `+N UNSEARCHED` button**, with one on screen
+      (see the disk section). It must **not** move the window, and a click must
+      re-run the scan. That button is the one control in the title row and the
+      only rescan affordance in the app; if it drags instead of firing, its
+      `app-no-drag` has been lost and the only symptom is a click that does
+      nothing.
 
 ---
 
 ## 2. The rail
 
-Thirteen icons, 36px targets, four groups, 579px against a 640px minimum window
-height. `scripts/session/view.ts` holds that arithmetic; what it cannot see is
-whether the strip reads as two kinds of control.
+Ten icons, **44px** targets, three groups, 494px against the 648px the rail gets
+- a 680px minimum window, less the 32px title row above it. The rail was full at
+630 with 36px targets; six deleted icons paid for both the slack and the larger
+ones. `scripts/session/view.ts` holds that arithmetic; what it cannot see is
+whether 44px in a 56px strip reads as icons or as boxes.
 
-- [ ] At **1024×640** — the smallest allowed window — every group is visible and
-      Settings is not cut off at the bottom. 61px of slack is one icon's worth.
-- [ ] The active **view** carries a 2px left accent edge *and* a filled
-      background. The active **widget** carries a dot *and* an outline. They are
-      deliberately different shapes, because one is a radio and one is a checkbox.
-- [ ] **Neither marker appears on hover.** Sweep the pointer down the rail: hover
-      is a background tint only. If the accent edge fires on hover, two items read
-      as active at once.
-- [ ] **Ctrl+1..4** switch views, and each tooltip names the key that opens it.
+- [ ] At **1024×680** — the smallest allowed window, and 680 rather than 640
+      because the full-width title row takes 32px off the top before the rail
+      starts — every group is visible and Settings is not cut off at the bottom.
+      There are 154px of slack now, so this is no longer the tight case it was.
+- [ ] **The icons are 44px in a 56px strip**, glyphs 24px. Judge it against the
+      window buttons and the packet rows: the buttons should read as icons with
+      6px of rail either side, not as a column of boxes whose edges are the
+      rail's own. This is the one thing the arithmetic cannot tell you.
+- [ ] The active **view** is a **translucent wash of the theme's accent** —
+      `--primary` at 20%, so a blue tint rather than a solid blue button — with
+      the glyph in `--foreground`. There must be **no 2px edge** down its left
+      side: that was the other half of the old marker and an edge in the fill's
+      own colour over the fill is a second mark for one fact.
+- [ ] **Active and hover are not the same thing.** Hover the icon next to the
+      active one: the tint under the pointer is neutral grey, the active one is
+      blue. `scripts/themes/registry.ts` holds them 12.4 deltaE apart in Day and
+      15.1 in Night, but whether they read as *different kinds of thing* is the
+      part a number cannot tell you.
+- [ ] **The glyph is readable on the wash** — 11.1:1 in Day, 8.4:1 in Night. The
+      glyph is `--foreground` and not the accent, because `--primary` on a tint
+      of itself cannot clear 4.5:1 in Day at any alpha.
+- [ ] **The rail and title row are one step brighter than the panes** and read as
+      one surface with each other. In Night the strip is `#232323` against the
+      panes' `#1a1a1a`; in Day it is a light grey against white.
+- [ ] **The marker does not appear on hover.** Sweep the pointer down the rail:
+      hover is a background tint only. If the accent fill fires on hover, two
+      items read as active at once.
+- [ ] **Ctrl+1..5** switch views, and each tooltip names the key that opens it.
 - [ ] **Tab** into the rail, then **arrow keys**: focus moves through the buttons
       and stops at the ends; **Home**/**End** jump. **Space** and **Enter**
       activate.
@@ -207,23 +322,24 @@ whether the strip reads as two kinds of control.
       anything is scheduled, which is the failure the adapter's badge exists to
       avoid. Its summary ("Stops in 14:58") is the tooltip now; there is no room
       for a label in 56px.
-- [ ] **Find packet** (bottom group) opens a popover to the right, focused and
-      typeable immediately. Type something: the packet list narrows and the rail
-      button grows a dot.
-- [ ] Click into the packet list **with text in the find box**. The popover stays
-      open - closing it would undo the thing being looked at. Clear the box, then
-      click out: it closes.
-- [ ] **Escape in the find box clears it first**, and closes it on a second
-      press. Neither press should also send you back to Packets from another
-      view - that would be the missing `stopPropagation`.
+- [ ] **There is no Find packet button.** The capture group is three icons.
+      Anything left over from it — a popover opening off the schedule, a dot on a
+      rail button, a packet list quietly short of rows — is a revert that did not
+      finish.
 - [ ] With no stream being followed, **Follow Stream is disabled** and its tooltip
       says why. It is disabled rather than hidden: a group that changes length
-      would move the divider and every widget below it.
-- [ ] The group dividers are visible **in all four themes**. On Graphite, `border`
-      on `card` is #292524 on #1c1917 and was very nearly invisible at 1px — this
-      is a real defect that shipped and was found only by looking.
-- [ ] The brand mark at the top is **not** the same glyph as the adapter button
-      42px below it. (It was, in the first version.)
+      would move the divider and the bottom group below it.
+- [ ] The group dividers are visible **in both themes**. On Night, `border` on
+      `card` is #343434 on #1a1a1a and was very nearly invisible at 1px — this is
+      a real defect that shipped and was found only by looking.
+- [ ] The brand mark in the title row is **not** read as the same glyph as the
+      **Start capture** button below it. **They are on the same axis again** —
+      the wordmark is deleted, so the mark is centred in a `w-14` block and sits
+      directly above the rail's column of icons — which makes this **more** likely
+      than it was, not less: a chevron above a play triangle is two arrows, and if
+      it reads as one control repeated, the mark is the one that has to change.
+      This item was written the other way round while the word led the mark; the
+      thing it warns about is the cost of having taken that word out.
 - [ ] Disconnect the agent (stop `serveStub.ts`): the adapter icon takes a status
       tint **and** a warning badge, and a one-line banner appears at the top of
       the filter row with the diagnosis and its action. Tint alone fails for a
@@ -237,89 +353,108 @@ whether the strip reads as two kinds of control.
 
 ---
 
-## 3. The dock
+## 3. The two panes under the packet list
 
-`inwire.dock`, 240–640px, 260 default, `scripts/session/dock.ts` holds the
-arithmetic and the migration. What needs a person is the gesture and whether
-each widget is readable at the floor.
+The bottom row is PACKET INSPECTION | HEX VIEW, one draggable divider, the
+tree's share stored as `detailsPaneRatio` with the hex dump taking the
+remainder. There was a third pane - a pane-sized copy of the Routing Map,
+leading the row - and it is deleted, which took `geoPaneRatio`, the second
+divider and the "one map, never two" section below with it.
+`scripts/preferences/interface.ts` holds the clamping; what needs a person is
+the dragging and the bars lining up.
 
-- [ ] **The collapse control** sits above the widgets group, where the divider
-      was. Press it: the dock disappears and the packet list takes the width
-      back. Press it again: the dock returns with the same widgets open.
-- [ ] **While hidden, every widget icon opens that widget's own window** - all
-      six, not just the map. None should be inert, and none should show a dot or
-      an active fill, because there is no dock for them to be "in".
-- [ ] The map's window is its **richer full-size map**; the other five are the
-      same card, larger. That is expected - the overlay is generic.
-- [ ] **Restart while hidden.** It comes back hidden, and the first widget icon
-      you press still opens a window rather than toggling.
-- [ ] **The expand button inside a dock card appears only on the map.** Any other
-      card showing one would be a control that reopens the same drawing larger.
-- [ ] **Packet counts** is the sixth widget. Open it during a capture: the
-      figures track the list, and the percentage reads 100% with no filter
-      applied and 0% on an empty capture. It has **no expand button**, by design.
-- [ ] Watch the other five widgets while the counter is ticking. They must
-      **not** redraw on every flush - the counter subscribes for itself precisely
-      so the dock's memo boundary holds.
-- [ ] **Zero widgets open**: no dock at all, and no empty column. Close the last
-      one and its rail icon goes dark — there is no hidden-but-toggled state.
-- [ ] **One widget.** **Two.** **All five.** The stack scrolls if it has to; the
-      packet list keeps the frame number, the time and both addresses.
-- [ ] **Drag the resize handle.** The charts reflow live. The packet list gives up
-      width; it does not jump. No motion on the width — 0ms, deliberately.
-- [ ] Drag it to both extremes at **1024** wide: it stops at 240 and at 328, and
-      both ends accept the drag rather than refusing it.
-- [ ] Focus the handle and use **arrow keys**, **Home**, **End**. It is a
-      `role="separator"` with real aria values.
-- [ ] **Narrow the window** with a wide dock open: the dock shrinks. **Widen it
-      again**: the dock returns to the width you chose. The stored value is
-      deliberately not clamped.
-- [ ] **All five widgets at the 240px floor.** Each renders its real self; there
-      is no compact form and deliberately never will be. **Geo map is the one to
-      look at hardest** — its `aspect-[11/8]` gives a 163px-tall map there.
-- [ ] The title truncates to `TRAFFI…` at 260px. That is accepted, not a defect;
-      do not "fix" it without reopening the width decision.
-- [ ] **Drag an item by its grip.** Only the grip drags — a drag inside
-      live-scrolling chart content would compete for the pointer. The dragged item
-      goes to 0.4 opacity, a **placeholder gap** opens, and a 2px insertion line
-      follows the pointer's half of the row. Never a live swap.
-- [ ] **Restart.** The order survives.
-- [ ] **Pin** an item. It moves to the top, stays above everything unpinned, and
-      cannot be dragged out of that position. There is **no close-all control** —
-      the plan gave `pinned` a second meaning it does not have yet; see
-      `dockPrefs.ts`.
-- [ ] A pinned item that is **closed** (from its rail icon) stays closed on
-      restart. Pin holds a position; it does not open anything.
-- [ ] **Geo map's expand window** opens from inside the dock and closes back into
-      it. Escape closes the overlay before it touches the view.
-- [ ] While capturing at a real rate, watch a chart in the dock and the packet
-      list together. The charts redraw on their own throttles (100ms element size,
-      150ms timeline, one rAF for the map) — **those throttles must not be
-      removed**, and a dock that stutters the list means one has been.
+- [ ] **The packet table's header row is the same ground as the pane titles
+      below it** — all three `--card`. It used to be a step brighter, which is the
+      chrome's colour, and it was the only column header in the window that did
+      not match the bars under it.
+- [ ] **The two title bars line up**, to the pixel, across the divider. This is
+      the item with a real bug behind it: they carried identical classes and
+      still differed by 4px, because Hex View's bar holds copy buttons and the
+      other holds text. `PaneHeader` fixes the height at `h-9`; a bar that
+      drifts again means somebody padded instead of using it.
+- [ ] **The divider resizes the pane on its LEFT**, and the dump absorbs the
+      difference. Drag it: the tree changes width, and the dump takes what is
+      left over.
 
-### The migration, which runs once and cannot be repeated
+### The byte inspector
 
-`seedFromDashboard()` reads `inwire.dashboard` and writes `inwire.dock` before the
-store's first read. It runs **once per user**, on first launch of this build.
+It was the application's bottom bar for one revision, spanning the window with
+its text inset to line up under this pane. It is Hex View's own footer again.
 
-- [ ] On a profile that used a previous build with the right-hand column
-      **expanded**, the widgets that were enabled are open, in the order they were
-      in.
-- [ ] On a profile whose column was **collapsed to icons or hidden**, the dock
-      opens **empty** and the tour explains the rail. The selection underneath a
-      collapsed column is discarded deliberately — honouring it would open up to
-      five widgets nobody asked for.
-- [ ] On a fresh profile, **Traffic Timeline alone** is open.
-- [ ] Custom widget titles and per-widget config survive — those stay in
-      `inwire.dashboard`, which is why `normalizeDashboard` stops *reading*
-      `mode`/`width` but does not delete them.
+- [ ] **There is no window-spanning bar.** Nothing runs under the rail; the
+      strip is inside the Hex View pane and stops at that pane's left edge.
+      A full-width strip that survived the revert is the bug.
+- [ ] **Hover a byte in the dump**: the footer fills with offset, decimal, hex,
+      bits and ASCII.
+- [ ] **Hover a one-byte field in the protocol tree**: the footer does **not**
+      react. That is the change — the bar used to, because it read a range
+      derived in `App` that the tree also publishes, and the footer reads this
+      pane's own hover.
+- [ ] **Drag the divider.** The footer is inside the pane, so it resizes with it
+      and there is nothing to keep in step by hand.
+- [ ] **Turn the detail panes off** (Settings → Interface): the footer goes with
+      the pane. In the **stacked** arrangement it sits under the dump.
+- [ ] The **Frame Detail** view's own footer is unaffected — it always had one,
+      spanning that pane and carrying the buffer position at its right end.
 
----
+- [ ] **The divider drags**, and the hex dump absorbs the change: widen the
+      details tree and the dump narrows, and back again.
+- [ ] **Right-click, double-click and Enter** on the divider reset it to its
+      default, which is 0.5 — an even split, and the value it had before the map
+      spent a third of the row.
+- [ ] **Keyboard**: tab to the divider and use the arrows; Home and End go to
+      the limits, which are 0.1 and 0.9 again. There was a second divider with
+      **mirrored** arrows, because the map sat on the far side of it; there is
+      one divider and no mirroring.
+- [ ] **Drag the tree as wide as it goes.** The hex dump keeps a tenth, and that
+      is now the normalizer's ceiling rather than a rule applied at render time -
+      the render-time clamp existed because two shares could add past 1.
+- [ ] **Narrow the window to 1024** with both open. The dump absorbs it; the
+      stored share does not change, so widening gives back exactly what you set.
+- [ ] **Stacked arrangement** (Settings → Interface): both stack, and the
+      divider's arrows flip to up/down.
+- [ ] **Turn the panes off** (Settings → Interface, "Detail panes"): both go.
+
+### One map, and it is the view
+
+There were two copies of the map - the Routing Map view and a pane in this row -
+and the rule was that exactly one could ever be live, because a hidden MapLibre
+instance is still a WebGL context and a tile fetcher. The pane is deleted, so
+the rule is a fact about the tree rather than something to check. What is left
+is worth a look after anything touching the view list:
+
+- [ ] Open **Routing Map** from the rail (Ctrl+4 — Frame Detail took Ctrl+2 and
+      pushed it along). It fills the pane, like Statistics — **not a modal**: no
+      scrim, nothing floating, and Escape returns to Packets rather than closing
+      an overlay.
+- [ ] **There is no map in the Packets view at all** — the bottom row is two
+      panes, and nothing in it re-initialises when you come back from the map.
+- [ ] Switch Packets → Routing Map → Statistics → Packets a few times. No leaked
+      context warnings in the console, and the packet list's scroll offset and
+      selection survive throughout.
+- [ ] The map carries its **zoom buttons, its help panel and the OSM credit** in
+      the bottom-right and top-right corners. All three used to be conditional on
+      size, and the condition was the 256px pane that no longer exists.
+
+### No dock, and nothing left of it
+
+- [ ] **The rail has no widgets group and no collapse chevron.** Three groups:
+      capture, views, and the bottom pair.
+- [ ] **Settings → Interface has no Widgets list.** The two controls that stood
+      there — the old three-way Dashboard mode, then the reorderable widget list
+      — are both gone.
+- [ ] On a profile that had `inwire.dock` and `inwire.dashboard` in
+      `localStorage`, nothing reads them and nothing breaks. They are left in
+      place rather than cleared; no code path touches either key.
+
 
 ## 4. The views
 
-- [ ] **Ctrl+1..4** and the rail reach all four. Each is a pane, not a modal:
-      there is no scrim and nothing is full-screen.
+- [ ] **Ctrl+1..5** and the rail reach all five — Packets, Frame Detail,
+      Statistics, Routing Map, Follow Stream. Each is a pane, not a modal: there
+      is no scrim and nothing is full-screen. Frame Detail took Ctrl+2 and the
+      three after it each moved a key; `APP_VIEWS` order is the numbering, so the
+      rail's tooltips must agree.
 - [ ] Scroll the packet list deep, select a frame, go to **Statistics**, come
       back. **The scroll offset and the selection are exactly where you left
       them** — Packets stays mounted, hidden with `display:none`.
@@ -329,15 +464,114 @@ store's first read. It runs **once per user**, on first launch of this build.
       scroll return to the originating packet.
 - [ ] Clear the followed stream while the view is open: it returns to Packets
       rather than showing an empty pane.
-- [ ] The filter row is **hidden in Network** and shown in Statistics. Network
-      describes the machine, not the capture.
-- [ ] **Escape**, innermost first: a focused input blurs; then the palette, the
-      filter presets dropdown, the discard popover; then the geo overlay; then a
-      non-Packets view returns to Packets. Escape on Packets with nothing focused
-      does nothing.
+- [ ] **The rail's Follow Stream button follows the selection.** With nothing
+      followed yet, select a TCP or UDP frame: the icon **enables**, and pressing
+      it (or `Ctrl+5`) opens *that frame's* conversation. Select a frame on a
+      different stream and press it again: the pane shows the **new** stream.
+      All three of those were broken together — the button read "a stream is
+      already open" rather than "the selection has one".
+- [ ] Select an **ARP or a broadcast** — a frame with no stream — while a stream
+      is open. The icon stays **enabled** and reopens the stream already being
+      read. It must not flicker disabled as you arrow down the list.
+- [ ] With nothing followed and a non-stream frame selected, the icon is
+      **disabled** and its tooltip names the condition: select a frame on a TCP
+      or UDP stream.
+- [ ] The filter row is shown in **Packets and nowhere else**. Switch through
+      Statistics, the Routing Map, Follow Stream and Frame Detail: each pane
+      starts directly under the title row, and the pane above it does not shift
+      down by a row's height on the way back to Packets. It used to show in all
+      five, where it narrowed nothing on screen — Statistics counts the whole
+      capture on purpose, and the other three read a feed, a conversation and a
+      single frame.
+- [ ] **Escape**, innermost first: a focused input blurs; then the filter presets
+      dropdown, the discard popover; then a non-Packets view
+      returns to Packets. Escape on Packets with nothing focused does nothing.
+      There is no command palette in that chain — `cmdk` left `dependencies` with
+      the hamburger menu.
+      There is no geo overlay in that chain any more — the map is a view, so it
+      leaves by the same door every other view does.
+
+### Frame Detail
+
+It was a modal over the packet list, opened by double-clicking a row and
+dismissed with Escape or an X. Everything here is a consequence of it being a
+view, and every item fails silently.
+
+- [ ] **Double-click a row.** The Frame Detail view opens on that frame, and the
+      packet list's own selection is on it too — go back to Packets (Ctrl+1) and
+      the row is selected and in view.
+- [ ] **Open Frame Detail with nothing selected** — a fresh window, Ctrl+2. The
+      pane shows the go-to-frame box and the capture's frame range as the input's
+      placeholder. This is the view's front door; an empty pane here is the bug.
+- [ ] Type a frame number and press the arrow. The pane fills, and the packet
+      list's selection moved with it.
+- [ ] Type **a word**, a number outside the range, and a number inside the range
+      the buffer has dropped. Each reports inline **under the input** — not as a
+      band that pushes the block down and pulls it back up as you type.
+- [ ] **← and → step frames** and move the packet list's selection with them.
+      **↑ and ↓ still work on the packet list** when you go back — the modal used
+      to disable the app's whole keyboard handler while it was open, and nothing
+      does that now.
+- [ ] **Escape returns to Packets**, like every other view. On a window narrow
+      enough that the meta rail is an icon strip, summon the rail: Escape puts
+      the rail away and **does not also leave the view** — that is the
+      `stopPropagation`, and it is the one Escape this pane still claims.
+- [ ] **Space does not start or stop a capture** while a field or the frame box
+      has focus. It is scoped positively — body, or inside `[role="grid"]`.
+- [ ] Select a frame, switch to Frame Detail, switch back. **The bottom panes
+      show the same frame** and did not re-fetch its tree — one `usePacketDetail`
+      serves both, and a second would be a second replay request.
+- [ ] Widen and narrow the window across ~1234px of canvas: fields and bytes go
+      from two columns with a draggable divider to one stacked document, and the
+      divider's position survives the round trip.
+
+### Statistics → Graphs
+
+The tab that replaced the Traffic timeline and Packet sizes widgets. The charts
+are the same components; what is new is that every control they had is inline
+instead of in Settings.
+
+- [ ] **Both charts are there**, throughput above frame sizes, each taking half
+      the height, and neither is inside a scroller — the timeline measures its
+      own container, so a parent that grew to fit it would size the SVG from a
+      box the SVG is defining.
+- [ ] **Every control changes the chart and sticks.** Metric, chart type and
+      interval on the throughput plot; bars/table on the sizes. Switch the tab
+      away and back, then restart the app: each is where you left it
+      (`inwire.graphs`).
+- [ ] **The overlay filter is the one worth exercising.** Type `tcp.port == 443`
+      into it during a capture: a second series appears over the total, and the
+      total does **not** change — that is the whole point of it not being the
+      app's display filter. Clear it and the second series goes.
+- [ ] The charts count the **whole buffer**, not the filtered view, like every
+      other tab here. Apply a display filter in the packet list and the throughput
+      plot must not move.
+- [ ] **Switch theme with the tab open.** The timeline is an imperative D3 draw,
+      so it redraws from `themeKey` rather than from CSS — a chart still in the
+      old accent means that prop stopped arriving.
 - [ ] Close the app in **Statistics** and relaunch: it opens on Statistics. Close
       it in **Follow Stream** and relaunch: it opens on **Packets**, because the
       conversation it named lived in a buffer that is being rebuilt.
+
+### The inspection panes are the app's accent, not the frame's
+
+The packet list still paints rows by colour rule; the panes that describe one
+frame no longer borrow that hue. Nothing in `scripts/` can see this — the check
+that held the accents to a card, a hue axis and each other went with them.
+
+- [ ] Select a **TCP** frame, then a **DNS** frame, then one the rules do not
+      match at all. In the inspection pane and the hex pane, every accent —
+      the `#Frame N` label, the tree's layer headings, the cross-reference
+      links, the byte count, the selected byte in the dump — must be **the same
+      colour on all three**: the theme's own accent, `#38bdf8` in Night.
+- [ ] **Step through frames in the Frame Detail view with ← and →.** The pane
+      must not change hue as the protocol changes. It used to, which is the
+      behaviour being removed.
+- [ ] The **rows themselves are unchanged** — still a fill per matched rule, and
+      the Frame Detail pane still names the rule in words. If the rows went flat, the
+      wrong thing was deleted: `getPacketStyle` is the list's, `getPacketAccent`
+      was the panes'.
+- [ ] Both themes. Day's accent is its own blue, not Night's.
 
 ---
 
