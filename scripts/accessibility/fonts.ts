@@ -81,9 +81,13 @@ check('no retired face is still installed',
 
 // --- The two tokens ------------------------------------------------------------
 
-/** The value of one `--token:` declaration in index.css, whitespace collapsed. */
+/**
+ * The value of one `--token:` declaration in index.css, whitespace collapsed.
+ * Anchored to a line start so a comment quoting a stack (`--font-sans: Geist, …;`)
+ * is never mistaken for the declaration.
+ */
 function tokenValue(name: string): string {
-  const m = css.match(new RegExp(`${name}:\\s*([^;]+);`));
+  const m = css.match(new RegExp(`^\\s*${name}:\\s*([^;]+);`, 'm'));
   return m ? m[1].replace(/\s+/g, ' ').trim() : '';
 }
 const sans = tokenValue('--font-sans');
@@ -97,6 +101,20 @@ check('--font-mono is IBM Plex Mono', mono.startsWith('"IBM Plex Mono"'), true);
 // with a cold cache is not hypothetical.
 check('--font-sans ends in a generic family', sans.endsWith('sans-serif'), true);
 check('--font-mono ends in a generic family', mono.endsWith('monospace'), true);
+
+/**
+ * The source with its comments blanked. Block comments become spaces so line
+ * numbers survive; a `//` comment is dropped from the first `//` that follows
+ * whitespace or starts the line, which leaves `https://…` inside a string
+ * alone. Prose that names a token or a package is not a declaration or an
+ * import, and this suite's comments are dense enough that scanning them was
+ * a recurring false positive.
+ */
+function withoutComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|\s)\/\/.*$/gm, '$1');
+}
 
 // --- Nothing else names a family -----------------------------------------------
 
@@ -112,7 +130,7 @@ const DECLARES_A_FAMILY = /(?:font-family|fontFamily)\s*[:=](?!=)|['"]font-famil
 const namesAFamily: string[] = [];
 for (const file of sources) {
   if (file === 'src/index.css') continue;
-  const lines = text(file).split('\n');
+  const lines = withoutComments(text(file)).split('\n');
   lines.forEach((line, i) => {
     if (!DECLARES_A_FAMILY.test(line)) return;
     if (/var\(--font-(sans|mono)\)/.test(line)) return;
@@ -129,7 +147,7 @@ check('every font-family declared outside index.css is a token, not a family nam
 const writesAToken: string[] = [];
 for (const file of sources) {
   if (!/\.tsx?$/.test(file)) continue;
-  const stripped = text(file).replace(/var\(--font-(sans|mono)\)/g, '');
+  const stripped = withoutComments(text(file)).replace(/var\(--font-(sans|mono)\)/g, '');
   if (/--font-(sans|mono)/.test(stripped)) writesAToken.push(file);
 }
 check('no source file names --font-sans or --font-mono outside a var()', writesAToken, []);

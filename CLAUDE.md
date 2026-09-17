@@ -1538,7 +1538,7 @@ the updater, `dialog` for file I/O, `powerMonitor` for sleep gaps. The current
 unused**, and a census is what establishes that rather than a reading of this
 paragraph.
 
-**One was unused and is gone: `@heroicons/react`.** Installed, 15 MB, imported by
+**One was unused and is gone: `@heroicons/react`.** It was installed, 15 MB, imported by
 nothing anywhere in `src/`, `electron/` or `scripts/`. It came back for an
 afternoon as the candidate to replace Tabler and left again on evidence — no
 outline cut below 24px, in an app that draws most of its icons at 12 and 14,

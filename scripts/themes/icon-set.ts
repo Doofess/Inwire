@@ -61,12 +61,29 @@ check('@heroicons/react is not', '@heroicons/react' in deps, false);
 
 // --- One set, imported -------------------------------------------------------------
 
-const importsFrom = (src: string, pkgName: string) =>
-  new RegExp(`from\\s*["']${pkgName.replace('/', '\\/')}(?:\\/[^"']*)?["']`).test(src);
+/**
+ * The source with its comments blanked. Block comments become spaces so line
+ * numbers survive; a `//` comment is dropped from the first `//` that follows
+ * whitespace or starts the line, which leaves `https://…` inside a string
+ * alone. Prose that names a token or a package is not a declaration or an
+ * import, and this suite's comments are dense enough that scanning them was
+ * a recurring false positive.
+ */
+function withoutComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|\s)\/\/.*$/gm, '$1');
+}
 
-const onReactIcons = sources.filter((f) => importsFrom(text(f), 'react-icons'));
-const onHeroicons = sources.filter((f) => importsFrom(text(f), '@heroicons/react'));
-const onLucide = sources.filter((f) => importsFrom(text(f), 'lucide-react'));
+/** `from 'pkg'`, `from 'pkg/sub'`, `import 'pkg'`, `import('pkg')` and `require('pkg')`. */
+const importsFrom = (src: string, pkgName: string) =>
+  new RegExp(
+    `(?:\\bfrom\\s*|\\bimport\\s*\\(?\\s*|\\brequire\\s*\\(\\s*)["']${pkgName.replace('/', '\\/')}(?:\\/[^"']*)?["']`,
+  ).test(src);
+
+const onReactIcons = sources.filter((f) => importsFrom(withoutComments(text(f)), 'react-icons'));
+const onHeroicons = sources.filter((f) => importsFrom(withoutComments(text(f)), '@heroicons/react'));
+const onLucide = sources.filter((f) => importsFrom(withoutComments(text(f)), 'lucide-react'));
 
 check('no source file imports from react-icons', onReactIcons, []);
 check('no source file imports from @heroicons/react', onHeroicons, []);
@@ -78,7 +95,7 @@ check('at least twenty files import from lucide-react', onLucide.length >= 20, t
 
 const bareGlobals: string[] = [];
 for (const f of onLucide) {
-  for (const m of text(f).matchAll(/import\s*\{([^}]*)\}\s*from\s*["']lucide-react["']/g)) {
+  for (const m of withoutComments(text(f)).matchAll(/import\s*\{([^}]*)\}\s*from\s*["']lucide-react["']/g)) {
     const specifiers = m[1].split(',').map((s) => s.trim()).filter(Boolean);
     for (const spec of specifiers) {
       if (spec === 'Map' || spec === 'Image') bareGlobals.push(`${f}: ${spec}`);
