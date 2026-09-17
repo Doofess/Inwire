@@ -40,6 +40,23 @@ function migrateStoredTheme(): void {
 migrateStoredTheme();
 
 /**
+ * The host OS, on <html>, for the stylesheet.
+ *
+ * `data-platform` carries `process.platform` as the preload reports it -
+ * `win32`, `darwin`, `linux` - so a rule can be true of one OS and not the
+ * others. The one consumer today is index.css's `--font-weight-medium` remap,
+ * which encodes a fact about DirectWrite and has no business applying to Core
+ * Text. Read from the bridge rather than sniffed from `navigator`, for the
+ * reason preload.ts gives: main simply knows. Module scope, before `render`,
+ * so the first paint is already in the right weights.
+ */
+function stampPlatform(): void {
+  document.documentElement.dataset.platform = window.inwire?.platform ?? 'unknown';
+}
+
+stampPlatform();
+
+/**
  * The app's motion setting, in the form motion/react wants.
  *
  * The mapping is an INVERSION, not the one-to-one this used to claim: the

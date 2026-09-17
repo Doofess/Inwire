@@ -1,9 +1,11 @@
 @import "tailwindcss";
 
-/* No webfont is imported. The app is set in the two faces Windows ships -
-   Segoe UI Variable for the chrome, Cascadia Mono for the data - so there is
-   nothing to self-host, nothing to fetch, and no swap from a fallback on a
-   cold start. The tokens in @theme name them, and the reasoning is there. */
+/* No webfont is imported. The app is set in the faces the host OS ships -
+   on Windows, Segoe UI Variable for the chrome and Cascadia Mono for the
+   data; on macOS and Linux, whatever `system-ui` and `ui-monospace` resolve
+   to - so there is nothing to self-host, nothing to fetch, and no swap from a
+   fallback on a cold start. The tokens in @theme name them, and the
+   reasoning is there. */
 
 /* Tailwind v4 has no JS config file, so class-based dark mode (toggled by
    next-themes adding/removing .dark on <html>) is opted into here instead
@@ -100,19 +102,24 @@
      `font-sans` in the app - and the body default - from one place, rather
      than editing the 168 utilities spread across 44 components.
 
-     The faces are the ones Windows ships, and that is the decision: Segoe UI
-     Variable for the chrome, Cascadia Mono for the data. This is a Windows
-     desktop app, so "the system font" is not a stack that resolves differently
-     per platform - it is one face, hand-hinted for exactly the 12px at 100%
-     scaling that most of this UI is set in, and the face every other window
-     on the desktop wears. IBM Plex sat on these two tokens for a day and was
+     The faces are the ones the OS ships, and that is the decision: on
+     Windows, Segoe UI Variable for the chrome and Cascadia Mono for the data.
+     The system face is hand-hinted for exactly the 12px at 100% scaling that
+     most of this UI is set in, and it is the face every other window on the
+     desktop wears. Windows is the only desktop today; macOS and Linux are
+     coming, and the stacks are written for that: the named Windows faces
+     lead, and a machine without them falls through to `system-ui` and
+     `ui-monospace` - SF Pro and Menlo on a Mac, fontconfig's answer on
+     Linux - which is the same decision in that OS's own words. The two
+     Windows-specific facts below are labelled as such, and the one that is
+     code is scoped to `data-platform="win32"`. IBM Plex sat on these two tokens for a day and was
      retired on taste: square and dated beside the rest of the desktop. Geist
      and JetBrains Mono, chosen independently, sat here before that, and the
      seam between them showed under every table header. Segoe and Cascadia are
      both Microsoft's, drawn for the same screen, and the seam does not show.
 
-     Three facts about how Chromium sees these faces, each measured against
-     DirectWrite rather than read off a spec sheet:
+     Three facts about how Chromium sees the Windows faces, each measured
+     against DirectWrite rather than read off a spec sheet:
 
      - `"Segoe UI Variable"` does not resolve. DirectWrite exposes the file as
        three optical-size families - Display, Text and Small - each with five
@@ -122,8 +129,9 @@
        and `system-ui` after it is the same face by another name.
      - Weight 500 snaps UP to Semibold, in both faces: no named instance sits
        at 500, `font-variation-settings` is ignored, and DirectWrite resolves
-       the tie toward the heavier neighbour. `--font-weight-medium` below is
-       what answers that.
+       the tie toward the heavier neighbour. The `html[data-platform="win32"]`
+       rule after this block is what answers that, and it is scoped because
+       the fact is DirectWrite's: Core Text renders a true Medium from SF Pro.
      - Segoe UI Variable's default figures are proportional - a 1 is narrower
        than a 0 - and `tnum` makes them tabular. `body` asks for it, and the
        title row's counter is the first place that would drift without it.
@@ -144,14 +152,23 @@
      here. */
   --font-sans: "Segoe UI Variable Small", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
 
-  /* `font-medium` is Regular here, deliberately. Neither face has a 500, and
-     Chromium resolves 500 to Semibold - so left alone, the 45 `font-medium`
-     labels and the 63 `font-semibold` headings would be one weight, and the
-     heavier one. Fluent's own ramp has no medium step: body is Regular and
-     emphasis is Semibold. This keeps that ramp and keeps the class names
-     saying what their authors meant. Delete this line and nothing fails
-     except the hierarchy, which is why fonts.ts asserts it. */
+/* On Windows, `font-medium` is Regular, deliberately. Neither Windows face
+   has a 500, and Chromium resolves 500 to Semibold - so left alone, the 45
+   `font-medium` labels and the 63 `font-semibold` headings would be one
+   weight, and the heavier one. Fluent's own ramp has no medium step: body is
+   Regular and emphasis is Semibold. This keeps that ramp and keeps the class
+   names saying what their authors meant.
+
+   Scoped to the platform because the fact is DirectWrite's, not the app's:
+   SF Pro under Core Text has a real Medium, and a Mac should get it. main.tsx
+   stamps `data-platform` from the bridge before the first render. The
+   attribute selector out-specifies Tailwind's `:root` theme declaration and
+   the property inherits, so every `font-medium` below <html> reads 400.
+   Delete this rule and nothing fails except the hierarchy, which is why
+   fonts.ts asserts it. */
+html[data-platform="win32"] {
   --font-weight-medium: 400;
 }
 
