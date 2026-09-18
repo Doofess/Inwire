@@ -122,6 +122,11 @@ const DELIBERATELY_ABSENT = new Map<string, string>([
   // note recording a deletion has to name the thing it deleted, so every such
   // note lands here by construction.
   ['config.json', 'deleted with the pairing token; unix mints its own inline (ADR 0029)'],  ['scripts/session/dock.ts', 'deleted with the dock; scripts/session/view.ts covers the rail'],
+  // The row, the 44px strip and the agent banner, all one deletion. The filter
+  // is in the title row's centre and the banner's fault is named once, in the
+  // status bar. Named in the guidance because a deletion note has to say what
+  // it deleted, which is how every entry in this table gets here.
+  ['FilterRow.tsx', 'deleted with the filter row; the filter is the title row centre slot'],
 ]);
 
 /**

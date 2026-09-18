@@ -140,6 +140,14 @@ export interface TitleRowProps {
    */
   backLabel: string | null;
   onBack: () => void;
+  /**
+   * What sits in the middle of the row. The display filter, today.
+   *
+   * A slot rather than the filter's own props, because this row has no
+   * business knowing what a display filter is - it decides where the centre is
+   * and how wide it may get, and `App` decides what goes in it.
+   */
+  center?: React.ReactNode;
 }
 
 /**
@@ -149,7 +157,7 @@ export interface TitleRowProps {
  * would have to carry its own.
  */
 export const TitleRow: React.FC<TitleRowProps> = ({
-  focused, maximized, panesVisible, onTogglePanes, backLabel, onBack,
+  focused, maximized, panesVisible, onTogglePanes, backLabel, onBack, center,
 }) => (
   <header
     className={`h-8 shrink-0 flex items-center
@@ -251,7 +259,34 @@ export const TitleRow: React.FC<TitleRowProps> = ({
         The row now holds no control at all, which makes the drag-region rule
         below vacuous here rather than delicate: there is nothing inside it that
         needs `app-no-drag`. */}
-    <div className="flex-1 min-w-0" />
+    {/* **The centre, and the display filter is in it.**
+
+        It was empty, and before that it held the packet counter - which
+        `windowChrome.ts` argued against for as long as it was there, on the
+        grounds that a number changing ten times a second is the most
+        distracting thing that can go in a title bar. A search field is not a
+        changing number, and it is the one control this app is used through
+        most, so this is the slot finally doing something worth its position.
+
+        **It had its own 44px row and does not need one.** A filter expression
+        is at most a line of text; a strip spanning the window to hold one was
+        44px of height spent on air either side of it. `max-w-[26rem]` is about
+        what a two-clause expression needs, and the flex spacers either side
+        keep it centred in the WINDOW rather than in the space left over
+        between the corner and the controls - which are 138px and ~210px, so
+        centring on the leftover would be visibly off.
+
+        **One `app-no-drag` wrapper covers everything inside.** The filter
+        carries a text field, a clear button, a save button and a preset list,
+        and every one of them would otherwise drag the window instead of
+        working. Opting the slot out once is what makes that unconditional:
+        whatever goes in here is safe by construction rather than by each
+        control remembering. */}
+    <div className="flex-1 min-w-0 flex justify-center px-2">
+      {center !== undefined && (
+        <div className="app-no-drag w-full max-w-[26rem] min-w-0">{center}</div>
+      )}
+    </div>
 
     {/* **The detail panes, on and off.** It was a switch in
         `Settings -> Interface`, and this is where every editor puts its layout

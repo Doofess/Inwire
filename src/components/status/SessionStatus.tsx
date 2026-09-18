@@ -96,6 +96,15 @@ export interface SessionStatusProps {
   captureStats: CaptureDropStats | null;
   droppedBuffer: number;
   bufferAutoPaused: boolean;
+  /**
+   * How far the previous session's capture has got being read back, if one is.
+   *
+   * From `FilterRow`, which is deleted. It is session state and transient -
+   * exactly what the left group is - where in that row it was the thing that
+   * dropped first when space ran short, which is a strange fate for the only
+   * indication that the app is busy doing something the user asked for.
+   */
+  restoreProgress: { done: number; total: number } | null;
 }
 
 export const SessionStatus: React.FC<SessionStatusProps> = ({
@@ -107,6 +116,7 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
   captureStats,
   droppedBuffer,
   bufferAutoPaused,
+  restoreProgress,
 }) => {
   const elapsed = useElapsed(isCapturing ? captureStartedAt : null);
   const attention = agentNeedsAttention(agentHealth);
@@ -176,6 +186,22 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
         >
           <span className={LIVE_DOT} aria-hidden />
           <span className="tabular-nums">{elapsedLabel(elapsed)}</span>
+        </StatusItem>
+      )}
+
+      {/* Restoring, which is transient and comes first while it lasts: until
+          it finishes there is no capture for anything to the right of it to
+          describe. */}
+      {restoreProgress !== null && (
+        <StatusItem
+          tone="attention"
+          title="Reading back the capture from your previous session"
+        >
+          <LoaderCircle className={`${GLYPH} animate-spin`} aria-hidden />
+          <span className="tabular-nums">
+            Restoring {restoreProgress.done.toLocaleString()}/
+            {restoreProgress.total.toLocaleString()}
+          </span>
         </StatusItem>
       )}
 

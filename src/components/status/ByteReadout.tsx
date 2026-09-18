@@ -50,13 +50,28 @@ export const ByteReadout: React.FC = () => {
         + `decimal ${byte.dec}, hex ${byte.hex}, bits 0b${byte.bits}, ASCII ${ascii}`
       }
     >
+      {/* **Five figures separated by emphasis, not by hue.**
+
+          The bits were `text-emerald-400` and the ASCII `text-amber-400` -
+          raw Tailwind shades, which is what `scripts/themes/status.ts` guards
+          against and caught here. Two things were wrong with them. They are
+          fixed shades, so they do not move between Day and Night the way every
+          token in this bar does; and green and amber are the app's success and
+          warning colours, spent on a readout where nothing has succeeded or
+          gone wrong.
+
+          What separates them instead is weight: the offset and the hex are the
+          two you look for, so they take `--foreground` and `--primary`, and
+          the rest sit at the item's muted default. That is the same vocabulary
+          `StatusItem`'s three tones use, rather than a sixth colour system
+          living in one cell. */}
       <span>@<b className="text-foreground">{byte.offset}</b></span>
       <span className="text-primary">{byte.hex}</span>
       <span>{byte.dec}</span>
       {/* The bits are the widest of the five and the least often read at a
           glance, so they are the first thing to go when the window is narrow. */}
-      <span className="hidden lg:inline text-emerald-400">0b{byte.bits}</span>
-      <span className="text-amber-400">{ascii}</span>
+      <span className="hidden lg:inline">0b{byte.bits}</span>
+      <span className="text-foreground">{ascii}</span>
     </StatusItem>
   );
 };

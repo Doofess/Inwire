@@ -243,7 +243,7 @@ service workers, every permission request denied. The preload is a **single
 CommonJS file** — a sandboxed preload cannot be ESM and cannot `require` a
 relative module, so `electron/build.cjs` bundles it.
 
-**The shell is a rail, a title row and a filter row, and there is no menu.**
+**The shell is a rail and a title row, and there is no menu and no filter row.**
 `Header.tsx` is deleted and its contents are split three ways; `AppMenu.tsx` -
 the hamburger drawer that hung off the title row - is deleted too. Of its seven
 entries, **three already had a rail button** (Capture Statistics, Network,
@@ -273,6 +273,33 @@ existed in one view's footer and nowhere else. What it did that was worth
 keeping - landing on the frame the stream was followed from - belongs to LEAVING
 a stream rather than to a button, so both ways out do it now and the script
 counts them.
+
+**The display filter is in the title row's centre, and there is no filter
+row.** That strip was 44px spanning the window to hold one line of text, and the
+rule it carried had been rewritten three times - "only Network hides it", then
+"no view hides it", then "it is rendered by NAMING Packets". All three argued
+about where to put a ROW; none asked why a filter had to live somewhere a view
+could hide it. It does not act on what is in view - `captureScan` answers it over
+the whole capture on disk - so it belongs to the app. **Applying a filter goes to
+Packets**, which answers the objection the other way round: a control that takes
+you to its subject is not a control with nothing to act on. Clearing does not
+navigate, because the empty filter selects the whole capture and every view
+already shows that.
+
+The field is `max-w-[26rem]`, centred in the WINDOW rather than in the space
+between the corner and the controls - those are 138 and ~210px, so centring on
+the leftover would read as off. `FILTER:` became a glyph and the placeholder
+became `e.g. tcp.port == 443`: it was three clauses of real syntax with nothing
+marking them as a sample, so an empty field read as a filter already applied.
+The content stays an EXPRESSION rather than becoming a prompt, because an
+expression is what goes in the box.
+
+**The banner went with the row**, and `FilterRow.tsx` with it. It named the agent
+fault above the packet list while the status bar names it below; one fault wants
+one place. The restore readout moved into the status bar's left group, which is
+where session state lives - in that row it was the first thing dropped when space
+ran short, which is a strange fate for the only sign the app is busy doing what
+it was asked.
 
 **The title row holds two controls: that back step and the detail panes'
 toggle.**
