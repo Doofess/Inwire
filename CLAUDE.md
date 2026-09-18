@@ -369,7 +369,7 @@ fields.
 │  ◉   32px TitleRow                          ─ □ ✕       │
 ├──────┬──────────────────────────────────────────────────┤
 │ rail │ FilterRow (banner, filter, restore)              │
-│ 52px ├──────────────────────────────────────────────────┤
+│ 44px ├──────────────────────────────────────────────────┤
 │      │ packets (hidden, never unmounted)                │
 │      │   ├─ packet list                                 │
 │      │   └─ INSPECTION │ HEX VIEW                      │
@@ -445,7 +445,7 @@ each load-bearing for the others:
 - **The rail draws all four of its borders and `<main>` gives up its
   `border-l`.** VS Code's reason is arithmetic and carries over exactly: `w-14`
   under `border-box` is 54px of interior between two 1px borders, which centres
-  a 44px target on whole pixels, where handing the facing border to the
+  a 36px target on whole pixels, where handing the facing border to the
   neighbour leaves 55.
 
 **Neither strip draws an edge of its own, and that is arithmetic too.**
@@ -572,7 +572,7 @@ without the clip the curve was drawn and then covered by the child sitting in
 it. With the corner square, what keeps it is that every child of the column
 scrolls inside it and their scrollers resolve against this box.
 
-`ActivityRail.tsx` is 52px and starts below that row - there is no cell above
+`ActivityRail.tsx` is 44px and starts below that row - there is no cell above
 its first group, because a cell would put the mark below the corner it is meant
 to occupy and cost height the rail has not got. **Three groups**: **capture**
 (Start/Stop, adapter, schedule - in the order they are used), **views**
@@ -606,8 +606,9 @@ flicker as somebody arrows past an ARP. The selection wins when both are true.
 
 **Find packet is deleted, and Frame Detail is a view.** Those are one change:
 the rail lost an icon from the capture group and gained one in the views group,
-and because both groups gap the same the two deltas are 46px each and cancel -
-the strip is still 494px with a different set of icons in it. `Ctrl+2` is Frame
+and because both groups gap the same the two deltas are one icon plus one gap
+each and cancel - the strip is the same height with a different set of icons in
+it. `Ctrl+2` is Frame
 Detail now and Statistics, the Routing Map and Follow Stream each moved a key,
 which follows from `APP_VIEWS` order being the numbering rather than from a
 second table.
@@ -628,10 +629,10 @@ Export/Import took the slot. The Update Center is unchanged and still lives wher
 ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs a
 real `updateAvailable` first, and Settings is the icon to hang it on.
 
-10 icons at **44px**, two dividers and the bottom group's padding come to
-**494px** against the 618px the rail gets - a **680px** minimum window, less the
+10 icons at **36px**, two dividers and the bottom group's padding come to
+**414px** against the 618px the rail gets - a **680px** minimum window, less the
 32px title row above it, the **24px status bar** below, the cluster's 4px bottom
-gutter, and the card's own two 1px borders - 124px of slack.
+gutter, and the card's own two 1px borders - 204px of slack.
 `scripts/session/view.ts` adds that up from the Tailwind classes, holds each
 class to what the sum assumes, and prints "the rail is FULL" when the answer is
 no more icons. **The two strips are funded differently and that is deliberate**:
@@ -640,13 +641,14 @@ when it arrived; the rail's own slack carries the status bar, because by then si
 deleted icons had left 154px and raising the minimum to 704 would have cost every
 small laptop 24px of window for a strip that fits without it.
 
-**The icons got bigger because six of them were deleted, and the two halves of
-that nearly cancel.** The target went 36 → 44 and the glyph 20 → 24, which
-costs 8px an icon; six deleted icons and a 20px header paid for it several times
-over. The strip was 56 then and is 52 now, so the target has gone from 64% of it
-to 85% - the number worth quoting is the leftover, which is **3px of air either
-side** inside the card's two borders. At 630 against 640 nothing in the
-strip could be made larger at all, which is why it had not been.
+**The icons got bigger when six of them were deleted, and smaller again when
+the rail was narrowed.** The target went 36 → 44 → 36 and the glyph 20 → 24 →
+20, at 8px an icon each way. Six deleted icons and a 20px header paid for the
+first; the second is what a 44px rail costs, since a 44px target inside it would
+leave the button's edges touching the card's own. **The constant through all of
+it is 3px of air either side**, inside the card's two borders - that is the
+number to reason from, not the outer width, and 32-in-48, 36-in-56, 44-in-56 and
+36-in-44 are four points on the one line.
 
 That arithmetic has decided real design questions rather than merely recording
 them. It is why the two name-resolution switches went to Settings rather than the
@@ -687,8 +689,9 @@ icon in the strip is a view or an action, so one shape is all there is to say
 controls that are neither: the adapter and the schedule take
 `railButton(active, 'toggle')`, which is the outline, and the schedule carries
 the dot when one is set. Find packet was the third and is deleted; what was
-deleted before it was the widget icons, not the vocabulary. 52 disagrees with
-`FrameMetaRail`'s 48 - it was 8px out and is now 4 - and that is accepted rather
+deleted before it was the widget icons, not the vocabulary. 44 disagrees with
+`FrameMetaRail`'s 48 - this rail was 8px wider and is now 4px narrower, so the
+disagreement changed sign rather than went away - and that is accepted rather
 than overlooked: one is a group of icons inside a pane, the other is three groups
 in the window's chrome. `DASHBOARD_RAIL_WIDTH` was the other half of that
 sentence and went with `dashboardPrefs.ts`.
@@ -1252,7 +1255,7 @@ they ship to. The installer compiles; the fuses are still to flip, and must land
 **before** signing. Read the row as a choice, not a gap.
 
 **Phase 7 landed on 2026-09-13**, in the thirteen commits that row spans: the
-window's own title bar, the activity rail (56px then, 52 now), the dock that replaced the
+window's own title bar, the activity rail (56px then, 44 now), the dock that replaced the
 right-hand column, the hamburger's deletion, and Custom Dissectors and Network
 becoming Settings tabs. §3 describes the result. Its **no-GPU fallback landed
 with it** — `src/components/analytics/renderTier.ts`, two tiers rather than

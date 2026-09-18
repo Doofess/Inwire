@@ -232,12 +232,13 @@ console.log('\n--- the rail fits the smallest window ---\n');
   const classIs = (name: string, needle: string): void =>
     checkTrue(`${name} is still \`${needle}\``, rail.includes(needle));
 
-  classIs('the button target', "const TARGET = 'w-11 h-11'");
+  classIs('the button target', "const TARGET = 'w-9 h-9'");
+  classIs('the glyph inside it', "const GLYPH = 'w-5 h-5'");
   classIs('the gap inside a group', 'gap-0.5');
   classIs('the divider', 'my-1.5 h-px w-7');
   classIs('the capture group\'s top padding', '${GROUP} pt-1');
   classIs('the bottom group\'s padding', '${GROUP} mt-auto pb-2');
-  classIs('the rail\'s own width', 'w-13 shrink-0');
+  classIs('the rail\'s own width', 'w-11 shrink-0');
   // The rail starts at the top now: the 40px cell that held the brand mark went
   // with the mark, which is in the title row. An `h-10` cell coming back here
   // would be 40px of rail height spent on nothing, and there is not 40px spare.
@@ -254,9 +255,9 @@ console.log('\n--- the rail fits the smallest window ---\n');
   classIs('the rail is a bordered card', 'border border-border rounded-l-lg');
 
   // The facing edge belongs to the RAIL. VS Code's reason is arithmetic and it
-  // carries over exactly: `w-13` under `border-box` leaves 50px of interior
-  // between two 1px borders, which centres a 44px target on whole pixels. Hand
-  // that border to the neighbour instead and the interior is 55.
+  // carries over exactly: `w-11` under `border-box` leaves 42px of interior
+  // between two 1px borders, which centres a 36px target on whole pixels. Hand
+  // that border to the neighbour instead and the interior is 43.
   const app = code('src/App.tsx');
   checkTrue('...and `<main>` gives up its facing border to it',
     !/\bborder-l\b/.test(app));
@@ -289,7 +290,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
     [markBlock?.[1], /bg-secondary pl-(\d+)/.exec(app)?.[1]],
     ['1', '1']);
 
-  const TARGET = 44;        // w-11
+  const TARGET = 36;        // w-9
   const GAP = 2;            // gap-0.5
   const DIVIDER = 6 + 1 + 6; // my-1.5 + h-px
   const group = (items: number): number => items * TARGET + Math.max(0, items - 1) * GAP;
@@ -355,9 +356,9 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // and deleting the `counts` widget took the widgets group from six icons to
   // five. This is the line that says what each of those cost.
   //
-  // 630 -> 592 -> 516 -> 494, and two different things are happening in that
-  // sequence. (494 has since held through a fourth change that moved nothing:
-  // Find packet out of the capture group, Frame Detail into the views group.)
+  // 630 -> 592 -> 516 -> 494 -> 414, and three different things are happening
+  // in that sequence. (494 held through a change that moved nothing: Find
+  // packet out of the capture group, Frame Detail into the views group.)
   //
   // **The first three steps are deleted widgets**, all at a 36px target. Find
   // packet moving from the bottom group up under the schedule contributed
@@ -365,14 +366,18 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // group(2)` are both 38 and they cancel. Moving an icon between two groups is
   // free; only adding or deleting one is not.
   //
-  // **The last step is two changes that nearly cancel**, which is why 516 -> 494
-  // is only 22px for a great deal of churn. The dock went, taking the last three
-  // widget icons and the 20px collapse header (-160); the map came back as a
-  // fourth VIEW (+46); and every target grew from 36 to 44 (+8 each over 12
-  // icons, +96, less the icons that no longer exist). The rail is shorter AND
-  // its icons are a fifth larger, because deleting six icons buys a lot more
-  // than enlarging ten costs.
-  check('the rail is as tall as it says it is', total, 494);
+  // **516 -> 494 is two changes that nearly cancel**, which is why a great deal
+  // of churn moved 22px. The dock went, taking the last three widget icons and
+  // the 20px collapse header (-160); the map came back as a fourth VIEW (+46);
+  // and every target grew from 36 to 44 (+8 each over 12 icons, +96, less the
+  // icons that no longer exist).
+  //
+  // **494 -> 414 is the target going back to 36**, which is the same 8px an
+  // icon read the other way - the rail was narrowed to 44px and a 44px target
+  // does not fit inside it. Nothing was deleted and nothing moved; this step is
+  // purely the size of the button, which is why it is the cleanest number in
+  // the sequence: exactly 8 times the ten icons.
+  check('the rail is as tall as it says it is', total, 414);
   // The raw file, not `code()`: the figure lives in the header comment, which is
   // the first thing `code()` throws away. The point of this one is that the
   // prose and the arithmetic cannot part company again.
