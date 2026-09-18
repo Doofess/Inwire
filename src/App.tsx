@@ -2554,7 +2554,17 @@ export default function App() {
           deliberately does not read it, and `scripts/session/status-bar.ts`
           fails if it ever starts - which turns a stale note into the marker for
           the rule. */}
-      <StatusBar />
+      <StatusBar
+        agentHealth={agentHealth}
+        interfaces={agentInterfaces}
+        selectedInterfaces={selectedInterfaces}
+        isCapturing={isCapturing}
+        captureStartedAt={captureStartedAtRef.current}
+        captureStats={captureStats}
+        droppedBuffer={droppedBuffer}
+        bufferAutoPaused={bufferAutoPaused}
+        onOpenSettings={() => setShowSettingsModal(true)}
+      />
 
       {/* **The geo map's expanded window was here.** A `WidgetOverlay`, fixed
           and rendered at the top level so the dock's own overflow could never

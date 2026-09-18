@@ -23,9 +23,22 @@ import React from 'react';
  */
 export type StatusTone = 'normal' | 'attention' | 'accent';
 
+/**
+ * **A tone colours the TEXT, and the warning hue is deliberately not here.**
+ *
+ * `--warning` on the chrome"s `--secondary` measures 4.06:1 in Day, under the
+ * 4.5 floor `scripts/themes/registry.ts` holds text to - so an item that needs
+ * to raise a hand puts the hue on its GLYPH and takes `attention` for its text,
+ * which is full-strength rather than muted. That is the rail"s own answer to
+ * the identical problem: it found `--primary` on a tint of itself peaks at 3.97
+ * in Day and moved the colour off the text rather than lowering the floor.
+ *
+ * Shape plus colour, never colour alone - which is also why every attention
+ * state in this bar carries a glyph that differs in outline, not just in hue.
+ */
 const TONE: Record<StatusTone, string> = {
   normal: 'text-muted-foreground',
-  attention: 'text-warning',
+  attention: 'text-secondary-foreground',
   accent: 'text-primary',
 };
 

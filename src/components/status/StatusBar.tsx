@@ -1,5 +1,6 @@
 import React from 'react';
 import { ByteReadout } from './ByteReadout';
+import { SessionStatus, type SessionStatusProps } from './SessionStatus';
 import { PacketCountsReadout } from '../common/PacketCountsReadout';
 
 /**
@@ -62,8 +63,18 @@ import { PacketCountsReadout } from '../common/PacketCountsReadout';
  * top, left and bottom. A border here would cut across the corner where this
  * meets the rail, which is the same mistake `TitleRow` refuses to make at the
  * top.
+ *
+ * ## What may be threaded through it
+ *
+ * **Session state and handlers, and nothing derived from the packet buffer.**
+ * The two items that change at capture rate - the packet counter and the byte
+ * readout - subscribe to their own stores and take no props at all, which is
+ * what keeps this bar off `App`'s ten-times-a-second render path. An item that
+ * would need the buffer is an item that belongs in a pane.
  */
-export const StatusBar: React.FC = () => (
+export type StatusBarProps = SessionStatusProps;
+
+export const StatusBar: React.FC<StatusBarProps> = (session) => (
   <footer
     className="h-6 shrink-0 flex items-center justify-between
       bg-secondary text-secondary-foreground
@@ -73,7 +84,7 @@ export const StatusBar: React.FC = () => (
     {/* Left: is this thing working? Session state, in the order it fails in -
         the link before the capture, because a capture cannot run without one. */}
     <div className="min-w-0 flex items-center">
-      {/* SessionStatus lands here. */}
+      <SessionStatus {...session} />
     </div>
 
     {/* Right: what am I looking at? Context for the frame in hand.
