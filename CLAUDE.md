@@ -255,7 +255,19 @@ what is shown. Nothing that duplicated a visible control survived, which was the
 menu's own stated rule turned on itself. The title row holds **no navigation**
 now, and `cmdk` left `dependencies` with it.
 
-**Its centre is the packet counter, and that is the one control it has.** The
+**The title row holds one control, and it is the detail panes' toggle.**
+`PanelBottom` beside the caption buttons, `w-9` rather than the 46px those take,
+because 46 is Windows' caption metric and a control of ours borrowing it claims
+to be part of that set. It was a switch in `Settings -> Interface`, and the
+distinction that moved it is the one that panel exists to make: a SETTING is
+chosen once, a CONTROL is reached for mid-task. The pane ARRANGEMENT stays in
+Settings, and still greys out when the panes are off, which is the only trace of
+the switch left there. `scripts/electron/window-chrome.ts` asserts the button
+carries `app-no-drag` - beside `WindowControls` rather than inside it, so it
+inherits nothing from that group's shared class - and that Settings has no second
+way in.
+
+**Its centre WAS the packet counter, and that is the one control it had.** The
 row used to show `windowTitleFor(...)` there - `Inwire` idle,
 `Ethernet - capturing - Inwire` capturing. That string is unchanged and still
 names the window for the OS through `useWindowTitle`, so the taskbar and Alt-Tab
@@ -489,10 +501,19 @@ dump and never a tree.
 
 **The left group is the session and the right group is the frame.** Left: the
 agent link, the adapter, capture state with elapsed time, and dropped frames -
-in the order they fail in, and each one a click into the Settings tab that fixes
-it. Two of those were previously reachable only through a hover tooltip or a
-Settings tab, which is the gap `DriverInfoPanel` was written to close and this
-closes ambiently. Right: the byte readout, the packet counter, and an indicator
+in the order they fail in. Two of those were previously reachable only through a
+hover tooltip or a Settings tab, which is the gap `DriverInfoPanel` was written
+to close and this closes ambiently.
+
+**Nothing in the bar is pressable.** Each item opened the Settings tab that
+fixes what it reports, and that is gone: the bar is a readout. `StatusItem`
+renders a `<span>` and has no `onClick` at all, so putting one back is the
+decision rather than a prop. The one real control in the strip is the packet
+counter's `+N UNSEARCHED` rescan, which is not a `StatusItem` - and a bar where
+most things react to a click is worse at advertising the one that does something
+than a bar where nothing does. `scripts/session/status-bar.ts` greps the whole
+directory, because the easy way to reintroduce a button is to skip the shared
+cell. Right: the byte readout, the packet counter, and an indicator
 for the app's own outbound lookups. An item renders nothing at all when its
 subject is absent, rather than showing a zero that was never measured -
 `droppedKernel` is `null` when the driver's counters could not be read and must

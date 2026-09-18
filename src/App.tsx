@@ -1025,6 +1025,25 @@ export default function App() {
   const stacked = arrangement === "stacked";
   usePreferenceSync(layoutStore.key, layoutStore.normalize, layoutStore.accept);
 
+  /**
+   * The detail panes on and off, from the title row rather than from Settings.
+   *
+   * It was a switch in `Settings -> Interface` and is a control in the window's
+   * own chrome now, beside the caption buttons - which is where every editor
+   * puts its layout toggles, and which matters because this one is used while
+   * looking at a capture rather than while configuring the app. A setting you
+   * reach for mid-task is a control in the wrong place.
+   *
+   * The preference is unchanged and still persists: what moved is the way in,
+   * not the state. `Settings -> Interface` keeps the pane ARRANGEMENT, which is
+   * a real setting - it is chosen once and not toggled - and it still greys out
+   * when the panes are off, which is now the only trace of the switch there.
+   */
+  const togglePanes = useCallback(
+    () => patchLayout({ panes: !showPanes }),
+    [patchLayout, showPanes],
+  );
+
   const isDraggingRef = useRef(false);
   const isDraggingColumnRef = useRef(false);
   const bottomPaneRef = useRef<HTMLDivElement>(null);
@@ -2098,7 +2117,12 @@ export default function App() {
           the row, the rail's own slack carries the bar. `scripts/session/view.ts`
           does that sum and is the only place it is worth trusting - the numbers
           were quoted here as 40 / 640 / 630 long after all three had moved. */}
-      <TitleRow focused={windowFocused} maximized={windowMaximized} />
+      <TitleRow
+        focused={windowFocused}
+        maximized={windowMaximized}
+        panesVisible={showPanes}
+        onTogglePanes={togglePanes}
+      />
 
       {/* **The cluster band, and its ground is the shell backdrop.** The rail
           and <main> are two cards floating in here, inset by the 4px gutter
@@ -2603,7 +2627,6 @@ export default function App() {
         droppedBuffer={droppedBuffer}
         bufferAutoPaused={bufferAutoPaused}
         nameResolution={nameResolution}
-        onOpenSettings={() => setShowSettingsModal(true)}
       />
 
       {/* **The geo map's expanded window was here.** A `WidgetOverlay`, fixed

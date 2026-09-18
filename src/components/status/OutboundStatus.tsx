@@ -32,7 +32,6 @@ import { StatusItem } from './StatusItem';
 export interface OutboundStatusProps {
   geoIp: boolean;
   reverseDns: boolean;
-  onOpenSettings: () => void;
 }
 
 const GLYPH = 'w-3 h-3 shrink-0';
@@ -40,18 +39,16 @@ const GLYPH = 'w-3 h-3 shrink-0';
 export const OutboundStatus: React.FC<OutboundStatusProps> = ({
   geoIp,
   reverseDns,
-  onOpenSettings,
 }) => {
   const on = [geoIp && 'geo-IP', reverseDns && 'reverse DNS'].filter(Boolean) as string[];
 
   if (on.length === 0) {
     return (
       <StatusItem
-        onClick={onOpenSettings}
         label="No outbound lookups are enabled"
         title={
           'No lookups leave this machine: geo-IP and reverse DNS are both off. '
-          + 'Opens Interface settings. (The Routing Map’s basemap tiles are '
+          + '(The Routing Map’s basemap tiles are '
           + 'the exception and load whenever that view is shown.)'
         }
       >
@@ -62,12 +59,11 @@ export const OutboundStatus: React.FC<OutboundStatusProps> = ({
 
   return (
     <StatusItem
-      onClick={onOpenSettings}
       tone="attention"
       label={`Outbound lookups enabled: ${on.join(' and ')}`}
       title={
         `${on.join(' and ')} ${on.length === 1 ? 'is' : 'are'} enabled, so this app `
-        + 'makes requests that will appear in your own capture. Opens Interface settings.'
+        + 'makes requests that will appear in your own capture.'
       }
     >
       {/* The hue rides the glyph, not the label - see `StatusItem`'s TONE. */}

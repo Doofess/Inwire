@@ -4,22 +4,33 @@ import React from 'react';
  * One cell of the status bar.
  *
  * Every item in the bar goes through here, so the bar's texture - height,
- * padding, hover, focus, the disabled-looking muted default - is decided once
- * rather than copied into six components that drift. `ActivityRail` learned the
+ * padding, and the muted default - is decided once rather than copied into six
+ * components that drift. `ActivityRail` learned the
  * same lesson with `railButton`.
  *
- * **It renders a `<button>` only when it has somewhere to go.** A status item
- * that is purely a readout is a `<span>`: giving it a button's role and a
- * focus stop would put six tab stops in the way of the keyboard user for six
- * things that cannot be pressed. The ones that DO go somewhere are real
- * buttons, because "clicking the link indicator opens Driver Info" has to be
- * reachable without a mouse.
+ * **Every item is a `<span>`, and none of them is pressable.** They were
+ * buttons: each one opened the Settings tab that fixes what it was reporting -
+ * the link into Driver Info, the adapter and the outbound indicator into
+ * Interface. That is gone on request, and the bar is a readout.
  *
- * The hover is `foreground/10` rather than a named token on purpose: the bar
- * sits on `--secondary`, and every ground one step off it in this palette is
- * either the rail's active fill or a content surface's. A translucent wash of
- * the text colour is the one treatment that reads correctly on both themes
- * without claiming to be either of those things.
+ * What it buys is worth writing down, because the argument for the buttons was
+ * a good one and somebody will make it again. Six items meant six tab stops
+ * ahead of the workspace for a keyboard user, and six things that look
+ * pressable in a strip where the one genuinely pressable control - the packet
+ * counter's `+N UNSEARCHED` rescan - is NOT a `StatusItem` and does not go
+ * through here. A bar where most things react to a click and one of them does
+ * something is worse at advertising that one than a bar where nothing does.
+ *
+ * So there is no `onClick` and this renders one element. Adding the prop back
+ * is not a small change: it is the decision above, and it would need the
+ * focus-ring and hover styling that went with it.
+ *
+ * **There is no hover treatment left**, and that is the point rather than an
+ * omission: nothing here responds to a pointer because nothing here does
+ * anything. The wash it used was `foreground/10` rather than a named token,
+ * because the bar sits on `--secondary` and every ground one step off it in
+ * this palette is either the rail's active fill or a content surface's - worth
+ * keeping in the note in case a pressable thing ever lands in this strip.
  */
 export type StatusTone = 'normal' | 'attention' | 'accent';
 
@@ -44,8 +55,6 @@ const TONE: Record<StatusTone, string> = {
 
 export interface StatusItemProps {
   children: React.ReactNode;
-  /** Where this item goes when pressed. Omit for a pure readout. */
-  onClick?: () => void;
   /** The native tooltip. Say what the item means, not what it says. */
   title?: string;
   tone?: StatusTone;
@@ -55,33 +64,13 @@ export interface StatusItemProps {
   label?: string;
 }
 
-/** Shared by both branches, so the two can never drift apart. */
+/** The one shape every item in the bar takes. */
 const CELL = 'h-6 px-2 shrink-0 flex items-center gap-1.5 whitespace-nowrap';
 
 export const StatusItem: React.FC<StatusItemProps> = ({
-  children, onClick, title, tone = 'normal', className = '', label,
-}) => {
-  const classes = `${CELL} ${TONE[tone]} ${className}`;
-
-  if (!onClick) {
-    return (
-      <span className={classes} title={title} aria-label={label}>
-        {children}
-      </span>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      aria-label={label}
-      className={`${classes} hover:bg-foreground/10 focus-visible:outline-none
-        focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset
-        transition-colors`}
-    >
-      {children}
-    </button>
-  );
-};
+  children, title, tone = 'normal', className = '', label,
+}) => (
+  <span className={`${CELL} ${TONE[tone]} ${className}`} title={title} aria-label={label}>
+    {children}
+  </span>
+);

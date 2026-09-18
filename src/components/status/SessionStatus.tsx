@@ -96,7 +96,6 @@ export interface SessionStatusProps {
   captureStats: CaptureDropStats | null;
   droppedBuffer: number;
   bufferAutoPaused: boolean;
-  onOpenSettings: () => void;
 }
 
 export const SessionStatus: React.FC<SessionStatusProps> = ({
@@ -108,7 +107,6 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
   captureStats,
   droppedBuffer,
   bufferAutoPaused,
-  onOpenSettings,
 }) => {
   const elapsed = useElapsed(isCapturing ? captureStartedAt : null);
   const attention = agentNeedsAttention(agentHealth);
@@ -130,11 +128,10 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
           badge and the filter row's banner cannot disagree about the same
           fault. */}
       <StatusItem
-        onClick={onOpenSettings}
         tone={attention ? 'attention' : 'normal'}
         title={
           agentHealth.kind === 'connected'
-            ? 'The capture agent is connected. Opens Driver Info.'
+            ? 'The capture agent is connected.'
             : agentHealth.kind === 'connecting'
               ? 'Connecting to the capture agent.'
               : `${agentHealth.summary} - ${agentHealth.detail}`
@@ -158,11 +155,10 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
           app declining to say so. The rail's picker is still the richer
           control; this names the state and hands off. */}
       <StatusItem
-        onClick={onOpenSettings}
         className="min-w-0"
         title={
           selected.length === 0
-            ? 'No capture adapter is selected. Opens Interface settings.'
+            ? 'No capture adapter is selected.'
             : `Capturing on ${selected.map((i) => i.label || i.name).join(', ')}`
         }
       >
@@ -189,7 +185,6 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
           stopped itself is a different problem from one that is losing frames. */}
       {(dropped > 0 || bufferAutoPaused) && (
         <StatusItem
-          onClick={onOpenSettings}
           tone="attention"
           title={
             (bufferAutoPaused
