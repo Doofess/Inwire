@@ -369,7 +369,7 @@ fields.
 │  ◉   32px TitleRow                          ─ □ ✕       │
 ├──────┬──────────────────────────────────────────────────┤
 │ rail │ FilterRow (banner, filter, restore)              │
-│ 56px ├──────────────────────────────────────────────────┤
+│ 52px ├──────────────────────────────────────────────────┤
 │      │ packets (hidden, never unmounted)                │
 │      │   ├─ packet list                                 │
 │      │   └─ INSPECTION │ HEX VIEW                      │
@@ -536,10 +536,13 @@ always about two grounds meeting rather than about a curve.
 **The `INWIRE` wordmark in the corner is deleted, and the mark took the rail's
 axis back.** The word named the app in a caption that already names it twice -
 `windowTitleFor(...)` still goes to main through `useWindowTitle`, so the taskbar
-and Alt-Tab are unchanged. With it gone the mark is centred in a `w-14` block, so
-it sits directly above the column of rail icons rather than 8px to their left;
-that alignment is why the mark used to live in a rail cell, and losing it was the
-stated cost of letting the word lead.
+and Alt-Tab are unchanged. With it gone the mark sits directly above the column
+of rail icons rather than 8px to their left; that alignment is why the mark used
+to live in a rail cell, and losing it was the stated cost of letting the word
+lead. Its block is `ml-1 w-13` - the rail's width AND the band's gutter, because
+the rail is a card and its axis is `gutter + width / 2` rather than half its own
+width. Matching only the width put the mark 4px off for one commit, so
+`scripts/session/view.ts` reads both halves out of the source.
 
 **`<main>` is inset into the corner that L makes, and all four of its corners
 are square.** Three of them always were - they run into the window's own edges,
@@ -569,7 +572,7 @@ without the clip the curve was drawn and then covered by the child sitting in
 it. With the corner square, what keeps it is that every child of the column
 scrolls inside it and their scrollers resolve against this box.
 
-`ActivityRail.tsx` is 56px and starts below that row - there is no cell above
+`ActivityRail.tsx` is 52px and starts below that row - there is no cell above
 its first group, because a cell would put the mark below the corner it is meant
 to occupy and cost height the rail has not got. **Three groups**: **capture**
 (Start/Stop, adapter, schedule - in the order they are used), **views**
@@ -638,9 +641,11 @@ deleted icons had left 154px and raising the minimum to 704 would have cost ever
 small laptop 24px of window for a strip that fits without it.
 
 **The icons got bigger because six of them were deleted, and the two halves of
-that nearly cancel.** The target went 36 → 44 (79% of the 56px strip, against
-64%) and the glyph 20 → 24, which costs 8px an icon; six deleted icons and a
-20px header paid for it several times over. At 630 against 640 nothing in the
+that nearly cancel.** The target went 36 → 44 and the glyph 20 → 24, which
+costs 8px an icon; six deleted icons and a 20px header paid for it several times
+over. The strip was 56 then and is 52 now, so the target has gone from 64% of it
+to 85% - the number worth quoting is the leftover, which is **3px of air either
+side** inside the card's two borders. At 630 against 640 nothing in the
 strip could be made larger at all, which is why it had not been.
 
 That arithmetic has decided real design questions rather than merely recording
@@ -682,8 +687,10 @@ icon in the strip is a view or an action, so one shape is all there is to say
 controls that are neither: the adapter and the schedule take
 `railButton(active, 'toggle')`, which is the outline, and the schedule carries
 the dot when one is set. Find packet was the third and is deleted; what was
-deleted before it was the widget icons, not the vocabulary. 56 disagrees with `FrameMetaRail`'s 48, and that is accepted
-rather than overlooked - `DASHBOARD_RAIL_WIDTH` was the other half of that
+deleted before it was the widget icons, not the vocabulary. 52 disagrees with
+`FrameMetaRail`'s 48 - it was 8px out and is now 4 - and that is accepted rather
+than overlooked: one is a group of icons inside a pane, the other is three groups
+in the window's chrome. `DASHBOARD_RAIL_WIDTH` was the other half of that
 sentence and went with `dashboardPrefs.ts`.
 
 **The drag-region rule.** The title row is `.app-drag` and everything
@@ -1245,7 +1252,7 @@ they ship to. The installer compiles; the fuses are still to flip, and must land
 **before** signing. Read the row as a choice, not a gap.
 
 **Phase 7 landed on 2026-09-13**, in the thirteen commits that row spans: the
-window's own title bar, the 56px activity rail, the dock that replaced the
+window's own title bar, the activity rail (56px then, 52 now), the dock that replaced the
 right-hand column, the hamburger's deletion, and Custom Dissectors and Network
 becoming Settings tabs. §3 describes the result. Its **no-GPU fallback landed
 with it** — `src/components/analytics/renderTier.ts`, two tiers rather than

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256" role="img" aria-label="InWire">
+  <title>InWire — layered stack</title>
+  <path d="M50 48 L90 68 L50 88 L10 68 Z" fill="#06386A"/>
+  <path d="M50 39 L90 59 L50 79 L10 59 Z" fill="#0957A4"/>
+  <path d="M50 30 L90 50 L50 70 L10 50 Z" fill="#0C75DF"/>
+  <path d="M50 21 L90 41 L50 61 L10 41 Z" fill="#3494F4"/>
+  <path d="M50 12 L90 32 L50 52 L10 32 Z" fill="#6EB2F7"/>
+</svg>
