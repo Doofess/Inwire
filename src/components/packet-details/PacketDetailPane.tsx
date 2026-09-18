@@ -11,7 +11,7 @@ import { FrameFieldTable } from './FrameFieldTable';
 import { FrameMetaRail } from './FrameMetaRail';
 import { FrameNumberBox } from './FrameNumberBox';
 import { LayerRail } from './LayerRail';
-import { ByteInspector, HexDumpView } from './HexDumpView';
+import { HexDumpView } from './HexDumpView';
 import { hasBytes } from '../../services/packetBytes';
 import { HexCopyMenu } from './HexViewer';
 import { ExpertFindings } from './ExpertFindings';
@@ -833,15 +833,23 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
               </div>
             </div>
 
-            {/* One status bar under the whole pane, and it is this pane's own.
-                There was briefly an app-wide `StatusBar` spanning the window
-                under the rail; it is deleted, and the byte inspector lives in
-                the pane that owns the bytes - here, and in `HexViewer`'s footer
-                for the Packets view. Each reads its own dump's hover, which is
-                the point: a bar spanning the window is a claim about the
-                window. */}
-            <div className="px-5 py-1.5 border-t border-border bg-secondary/50 text-[10px] font-mono text-muted-foreground flex items-center justify-between shrink-0">
-              <ByteInspector packet={packet} hoveredByteIndex={hoveredByteIndex} />
+            {/* This pane's own footer, and all it carries now is the frame's
+                position in the buffer.
+
+                **The byte inspector was the other half and it is in the
+                application status bar.** That bar is back - it existed for one
+                revision, carrying the readout with its text indented to line up
+                under a dump, which is what got it deleted. What changed is the
+                alignment rather than the verdict: a status bar groups its items
+                by priority and never by correspondence with the pane above
+                them, so nothing in it is inset and nothing in it reads a pane's
+                size. See `components/status/StatusBar.tsx`.
+
+                This readout stays here because it is genuinely about this pane:
+                it is where the frame being read sits in the buffer, and there
+                is a second dump - the Packets view's - whose position would be
+                a different number. */}
+            <div className="px-5 py-1.5 border-t border-border bg-secondary/50 text-[10px] font-mono text-muted-foreground flex items-center justify-end shrink-0">
               <span className="uppercase tracking-wider whitespace-nowrap">
                 {/* A frame the buffer has since dropped is still readable - the
                     store gives its bytes back - but it has no position in the

@@ -1,6 +1,5 @@
 import React from 'react';
 import { BrandMark } from './BrandMark';
-import { PacketCountsReadout } from './PacketCountsReadout';
 import { WindowControls } from './WindowControls';
 
 /**
@@ -176,14 +175,24 @@ export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
       </div>
     </div>
 
-    {/* Centred in the WINDOW, because the 138px corner above balances the three
-        46px buttons opposite - which is the whole reason that block is a fixed
-        width rather than shrink-to-fit. The counter grows and shrinks with the
-        capture, so it is the flexible half: `min-w-0` lets it truncate into the
-        space it has instead of pushing the controls off the right edge. */}
-    <div className="flex-1 min-w-0 flex items-center justify-center px-2">
-      <PacketCountsReadout />
-    </div>
+    {/* Empty, and that is the finished state.
+
+        **The packet counter was here and is in the status bar now.**
+        `lib/windowChrome.ts` argued against it being here for as long as it was:
+        a number that changes is the most distracting thing that can go in a
+        title bar, and it sat here only because nothing better existed. A status
+        bar is what "something better" turned out to be, and it took the
+        `+N UNSEARCHED` rescan button with it.
+
+        The 138px corner above still balances the three 46px buttons opposite,
+        and this spacer is what holds them apart - without it `WindowControls`
+        slides left and the mark loses the corner it exists to occupy.
+        `scripts/electron/window-chrome.ts` asserts that 138.
+
+        The row now holds no control at all, which makes the drag-region rule
+        below vacuous here rather than delicate: there is nothing inside it that
+        needs `app-no-drag`. */}
+    <div className="flex-1 min-w-0" />
 
     <WindowControls maximized={maximized} />
   </header>

@@ -1,4 +1,6 @@
 import React from 'react';
+import { ByteReadout } from './ByteReadout';
+import { PacketCountsReadout } from '../common/PacketCountsReadout';
 
 /**
  * The application's status bar: the chrome's bottom edge.
@@ -29,8 +31,12 @@ import React from 'react';
  * place.** The first bar could not read `HexViewer`'s local hover, so it was
  * fed from `activeByteRange` derived up in `App` - which the protocol tree ALSO
  * publishes. The bar therefore answered "this byte" for a hover in a pane that
- * was not the dump. The replacement is `services/hoveredByte.ts`, a store with
- * one publisher, and the script asserts that there is exactly one.
+ * was not the dump. The replacement is `services/hoveredByte.ts`, a store
+ * carrying the byte's VALUE rather than its index - so the only code that can
+ * publish one is code that already had the bytes in hand, which is a dump and
+ * never a tree. There are exactly two publishers, one per dump, and the script
+ * names both: a tree has a range and nothing to offer, so the conflation is
+ * unrepresentable rather than merely avoided.
  *
  * ## Why it is not a drag region
  *
@@ -61,7 +67,7 @@ export const StatusBar: React.FC = () => (
   <footer
     className="h-6 shrink-0 flex items-center justify-between
       bg-secondary text-secondary-foreground
-      text-[10px] font-mono select-none overflow-hidden"
+      text-[11px] font-mono select-none overflow-hidden"
     aria-label="Status"
   >
     {/* Left: is this thing working? Session state, in the order it fails in -
@@ -70,11 +76,21 @@ export const StatusBar: React.FC = () => (
       {/* SessionStatus lands here. */}
     </div>
 
-    {/* Right: what am I looking at? Context for the frame in hand. Reversed
-        priority - the rightmost item is the most stable, so the items that come
-        and go do not shove the ones that stay. */}
-    <div className="min-w-0 flex items-center justify-end">
-      {/* ByteReadout, PacketCountsReadout and the outbound dot land here. */}
+    {/* Right: what am I looking at? Context for the frame in hand.
+
+        **This group does not truncate, and that inverts the obvious rule.**
+        The left group is labels, which survive an ellipsis - "Ethernet Cont…"
+        is still an adapter you recognise. This group is NUMBERS, and "178,2…"
+        is a wrong number rather than a shortened one. So the left group is
+        `min-w-0` and gives up width first; this one is `shrink-0` and the items
+        inside it hide whole rather than clipping.
+
+        Ordered with the most changeable furthest from the edge: the byte
+        readout comes and goes with the pointer, so it sits inboard where its
+        arrival does not shove the counter sideways. */}
+    <div className="shrink-0 flex items-center justify-end">
+      <ByteReadout />
+      <PacketCountsReadout />
     </div>
   </footer>
 );

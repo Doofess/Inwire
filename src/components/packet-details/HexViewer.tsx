@@ -18,7 +18,7 @@ import {
 } from '../ui/dropdown-menu';
 import { copyText } from '../ui/CopyButton';
 import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
-import { ByteInspector, HexDumpView } from './HexDumpView';
+import { HexDumpView } from './HexDumpView';
 import { hasBytes } from '../../services/packetBytes';
 import type { PacketDetailState } from '../../lib/usePacketDetail';
 import { PaneHeader } from '../common/PaneHeader';
@@ -293,40 +293,34 @@ export const HexViewer: React.FC<HexViewerProps> = ({
         />
       </div>
 
-      {/* The byte inspector, in this pane's own footer.
+      {/* **The byte inspector was this pane's footer and is the status bar's
+          right-hand group now.**
 
-          **It spent one revision as the application's bottom bar** - the same
-          strip, class for class, spanning the window under the rail as well as
-          the panes, with its text indented to this pane's left edge by a CSS
-          length built from `--details-pane-size`. The argument for that was the
-          row's bottom edge: a bordered strip on one pane of the row and none on
-          the other beside it. The argument against it is the stronger one and is
-          why it is back - **this is a readout about the hex dump**, and a bar
-          spanning the window is a claim about the window. Indenting it to line
-          up under the dump was the tell: a full-width bar that has to be pushed
-          sideways to look like it belongs somewhere narrower is a bar in the
-          wrong place, and the mechanism that did it - a custom property on the
-          ROOT element, read by a component two levels away from the panes it
-          describes - was load-bearing for nothing else.
+          It spent one revision as the application's bottom bar before that -
+          the same strip, class for class, spanning the window with its text
+          indented to this pane's left edge by a CSS length built from
+          `--details-pane-size` - and the indent was what argued it back in here:
+          a full-width bar that has to be pushed sideways to look like it
+          belongs somewhere narrower is a bar in the wrong place.
 
-          The ragged edge is accepted rather than fixed, because the two panes
-          are different things and the divider between them already says so.
+          **What changed is the alignment, not the verdict.** A status bar
+          groups its items left and right by priority and never by
+          correspondence with the pane above them, so the readout is an ordinary
+          right-group item with no inset and no custom property anywhere near
+          it. `components/status/StatusBar.tsx` carries both rules and
+          `scripts/session/status-bar.ts` holds it to them.
 
-          `hoveredByteIdx` is this pane's own state, which is the other thing
-          that came back. As a window-spanning bar it had to be fed from `App`,
-          derived from `activeByteRange` - and that range is also what the
-          protocol tree publishes for a one-byte field, so the bar answered
-          "this byte" for a hover in a pane that is not this one. Back in here
-          it reads the dump's hover and nothing else. */}
-      <div
-        className="border-t px-4 py-1.5 text-[10px] font-mono flex items-center
-          transition-colors bg-secondary/50 border-border text-muted-foreground
-          shadow-inner shrink-0"
-      >
-        <div className="min-w-0 truncate">
-          <ByteInspector packet={packet} hoveredByteIndex={hoveredByteIdx} />
-        </div>
-      </div>
+          The footer went with the readout rather than being left empty. A
+          bordered strip under one pane of this row and none under the one
+          beside it is what made the row's bottom edge ragged - the complaint
+          that argued for a window-spanning bar in the first place - so the
+          dump's last row now sits directly above `<main>`'s own bottom border,
+          which is the same line the rail and the title row meet.
+
+          `hoveredByteIdx` stays this pane's own state, because it is what draws
+          the highlight here. What the bar gets from `handleHover` is the byte's
+          VALUE, which is the one thing a protocol tree cannot offer - see
+          `services/hoveredByte.ts`. */}
     </div>
   );
 };
