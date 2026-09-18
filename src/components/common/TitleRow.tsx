@@ -154,12 +154,19 @@ export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
         carry `windowTitleFor(...)`, which `useWindowTitle` still sends to main
         and which this row never showed.
 
-        **The mark is back on the rail's 56px axis**, which is what the wordmark
-        cost and what deleting it returns. It is centred in a `w-14` block - the
-        rail's own width - so it sits directly above the column of icons below
-        it rather than 8px to their left. That alignment is the reason the mark
-        used to be in a rail cell at all, and the reason the note about losing it
-        was in this comment for as long as the word led.
+        **The mark is back on the rail's axis**, which is what the wordmark cost
+        and what deleting it returns. It sits directly above the column of icons
+        below it rather than 8px to their left, and that alignment is the reason
+        the mark used to be in a rail cell at all.
+
+        **Its block has to track the rail's GEOMETRY, not just its width.** The
+        rail is a card now, inset from the window by the cluster band's 4px
+        gutter, so its centre is at 4 + 52/2 = 30 rather than at half its own
+        width. `ml-1 w-13` puts this block over exactly that span. Matching only
+        the width - which is what was here when the card landed, and was wrong
+        for a commit - leaves the mark 4px left of the icons it is meant to
+        crown. `scripts/session/view.ts` holds both halves now, because the two
+        numbers live in three different files.
 
         The mark carries no `title` and is decorative, which is `BrandMark`'s
         own default and its own stated reason. With the word gone that stops
@@ -170,7 +177,7 @@ export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
       {/* 16 CSS pixels, which is what picks the drawing: the mark is tiered and
           the full one is a smudge at this size. Passing the size rather than the
           tier keeps the caller saying what it knows. */}
-      <div className="w-14 shrink-0 flex items-center justify-center">
+      <div className="ml-1 w-13 shrink-0 flex items-center justify-center">
         <BrandMark className="w-4 h-4 shrink-0" size={16} />
       </div>
     </div>

@@ -237,7 +237,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
   classIs('the divider', 'my-1.5 h-px w-7');
   classIs('the capture group\'s top padding', '${GROUP} pt-1');
   classIs('the bottom group\'s padding', '${GROUP} mt-auto pb-2');
-  classIs('the rail\'s own width', 'w-14 shrink-0');
+  classIs('the rail\'s own width', 'w-13 shrink-0');
   // The rail starts at the top now: the 40px cell that held the brand mark went
   // with the mark, which is in the title row. An `h-10` cell coming back here
   // would be 40px of rail height spent on nothing, and there is not 40px spare.
@@ -254,7 +254,7 @@ console.log('\n--- the rail fits the smallest window ---\n');
   classIs('the rail is a bordered card', 'border border-border rounded-l-lg');
 
   // The facing edge belongs to the RAIL. VS Code's reason is arithmetic and it
-  // carries over exactly: `w-14` under `border-box` leaves 54px of interior
+  // carries over exactly: `w-13` under `border-box` leaves 50px of interior
   // between two 1px borders, which centres a 44px target on whole pixels. Hand
   // that border to the neighbour instead and the interior is 55.
   const app = code('src/App.tsx');
@@ -271,6 +271,23 @@ console.log('\n--- the rail fits the smallest window ---\n');
     app.includes('bg-secondary pl-1 pr-1 pb-1'));
   checkTrue('...and the outer card carries the matching radius',
     app.includes('rounded-r-lg'));
+
+  // **The brand mark rides the rail's axis, and the axis is not half the rail's
+  // width.** The card is inset by the band's gutter, so the icon column is
+  // centred at `gutter + width / 2` - and the mark's block in the title row has
+  // to span the same range or it sits a gutter's worth to the left of the icons
+  // it crowns. That went wrong for exactly one commit, when the gutter was
+  // added and the title row was not looked at, which is why both halves are
+  // read out of the source here rather than trusted to agree.
+  const railWidth = /className="w-(\d+) shrink-0 flex flex-col/.exec(rail)?.[1];
+  const markBlock = /className="ml-(\d+) w-(\d+) shrink-0 flex items-center justify-center"/
+    .exec(code('src/components/common/TitleRow.tsx'));
+  check('the mark block is the rail\'s width', markBlock?.[2], railWidth);
+  // `pl-1` on the band and `ml-1` on the block: the same step on Tailwind's
+  // scale, which is what makes the two spans identical rather than merely close.
+  check('...offset by the same gutter the band applies',
+    [markBlock?.[1], /bg-secondary pl-(\d+)/.exec(app)?.[1]],
+    ['1', '1']);
 
   const TARGET = 44;        // w-11
   const GAP = 2;            // gap-0.5

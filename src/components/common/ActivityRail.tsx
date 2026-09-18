@@ -64,14 +64,26 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * UI, and firing it on hover flashes it five times as a pointer crosses the
  * rail, with a moment where two items read as active.
  *
- * ## Why 56px when everything else is 48
+ * ## Why 52px, and what the air is for
  *
- * `FrameMetaRail` is 48, and index.css's own
- * comment says two icon strips that disagree by a few pixels is "something you
- * only notice when they are on screen together". This one is 56 anyway, as a
- * deliberate and accepted choice: it carries three groups rather than one, and at
- * 48 a 20px glyph has 14px of air around it. A future session should not "fix"
- * the disagreement by narrowing it.
+ * `w-13`. The interior is what this number is really about: two 1px borders
+ * leave 50px for a 44px target, so each icon has **3px of air** either side.
+ * That is the figure to reason from if it moves again - the outer width on its
+ * own says nothing once the card has borders.
+ *
+ * It was 56 for a long time, on the argument that this rail carries three
+ * groups rather than one and needs the breathing room. Narrowed on request, and
+ * the thing that made 4px cheap is that the icons did not move: the target is
+ * still 44 and the glyph still 24, so what was spent is air rather than a
+ * touch target. Going further is where it stops being free - 48 would leave a
+ * single pixel between the active fill and the card's own border, which reads
+ * as a mistake rather than as a tighter rail.
+ *
+ * `FrameMetaRail` is 48, and index.css's own comment says two icon strips that
+ * disagree by a few pixels is "something you only notice when they are on
+ * screen together". The disagreement is 4px now rather than 8. It is still a
+ * disagreement, and still accepted: that rail is one group of icons inside a
+ * pane, this one is three groups in the window's chrome.
  *
  * ## The card it sits in
  *
@@ -85,8 +97,8 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * single hairline between them is drawn HERE. VS Code's reason is the one that
  * applies: the rail has to draw it, or its visible interior runs past its own
  * edge to the neighbour's border and the icon column ends up on a half pixel.
- * At `w-14` with `border-box` that is exact - 56 less two 1px borders is 54, an
- * even interior for a 44px target. Give the border away and it is 55.
+ * At `w-13` with `border-box` that is exact - 52 less two 1px borders is 50, an
+ * even interior for a 44px target. Give the border away and it is 51.
  *
  * **Rounded on the window side, square on the neighbour's**: `rounded-l-lg`,
  * 8px, which is `--vscode-cornerRadius-large`. The right corners stay square so
@@ -459,7 +471,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       aria-orientation="vertical"
       aria-label="Activity"
       onKeyDown={onRailKeyDown}
-      className="w-14 shrink-0 flex flex-col items-center bg-secondary
+      className="w-13 shrink-0 flex flex-col items-center bg-secondary
         text-secondary-foreground select-none
         border border-border rounded-l-lg"
     >
