@@ -2,20 +2,22 @@ import React from 'react';
 import { MARK_SIZE, brandMarkPaths, tierForSize, type MarkTier } from '../../lib/brandMark';
 
 /**
- * The app's mark: one ribbon spiralling around a sphere.
+ * The app's mark: a head-on RJ45 connector.
  *
- * **It carries its own colours, and that reverses an old rule.** The mark was
- * monochrome `currentColor` for exactly as long as it was two flat chevrons, and
- * the argument then was good - one drawing served every theme with no per-theme
- * work. The drawing is a shaded form now, so its colours ARE the drawing, and
- * inheriting one would flatten it to a silhouette. What survives of the old rule
- * is the part that mattered: the colours still live in one place, and it is not
- * here. See `lib/brandMark.ts` for why a single ramp still serves both themes.
+ * **It carries its own colours, and that reverses a rule from two marks ago.**
+ * The mark was monochrome `currentColor` for exactly as long as it was two flat
+ * chevrons, and the argument then was good - one drawing served every theme with
+ * no per-theme work. Every drawing since has been a shaded form, so its colours
+ * ARE the drawing and inheriting one would flatten it to a silhouette. What
+ * survives of the old rule is the part that mattered: the colours still live in
+ * one place, and it is not here. See `lib/brandMark.ts`.
  *
- * **The tier is not optional in practice.** The drawing sheds turns as the box
- * shrinks, and picking the wrong one is not a subtle error: the full tier at
- * 16px is a smudge. `size` is the honest way to ask for it - callers know how
- * big they are rendering it, not which of three internal drawings they want.
+ * **The tier is not optional in practice.** The drawing sheds detail as the box
+ * shrinks, and picking the wrong one is not a subtle error: the primary mark's
+ * eight contacts merge into a single blue bar below about 48px, which says
+ * something untrue about the object rather than merely losing detail. `size` is
+ * the honest way to ask - callers know how big they are rendering it, not which
+ * internal drawing they want.
  *
  * Deliberately NOT in the house icon style. Everything else in this app is
  * `lucide-react` - a 24 viewBox, `fill="none"`, `stroke-width="2"`, round caps
