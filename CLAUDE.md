@@ -484,8 +484,12 @@ and a radius there would be the second curve inside Windows' that
 `TitleRow.tsx` refuses to draw. The top-left carried `rounded-tl-xl` on the
 argument that it is the one corner where two chrome edges meet rather than an
 edge of the window, so it was allowed to curve. **It is square now**, which
-makes the rule general instead of nearly-general: this app draws no radius, and
-the only curve in the window is the one Windows puts on the window.
+makes the shell's rule general instead of nearly-general: no surface that meets
+the window draws a corner of its own, and the only curve at the window's edge is
+the one Windows puts there. This is a rule about the SHELL - the title row, the
+rail, this pane. Radii inside the workspace are untouched by it and are
+everywhere: 242 `rounded-*` utilities across the renderer, on buttons, cards,
+popovers and pills.
 
 The 1px border is **on the pane, not on the rail** - which is why
 `ActivityRail.tsx` no longer carries `border-r`, since two lines in one place is
