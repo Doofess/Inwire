@@ -33,6 +33,8 @@ import { GeoMap } from "./components/analytics/GeoMap";
 import { shortInterfaceLabel } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
+import { StatusBar } from "./components/status/StatusBar";
+import { clearHoveredByte } from "./services/hoveredByte";
 import { FilterRow } from "./components/common/FilterRow";
 import {
   useWindowChrome, useWindowTheme, useWindowTitle, windowTitleFor,
@@ -423,6 +425,25 @@ export default function App() {
     setViewState(next);
     patchViewPrefs({ view: next });
   }, [patchViewPrefs]);
+
+  // **The status bar's byte readout, cleared on a view change.**
+  //
+  // The packets section is HIDDEN rather than unmounted (`display: none`, so a
+  // MapLibre instance and a scroll position survive a detour), which means
+  // `HexViewer` stays mounted and its unmount cleanup never fires. A byte
+  // hovered just before switching to Frame Detail would otherwise sit in the
+  // bar describing a dump nobody is looking at. Chromium does not reliably fire
+  // `pointerleave` when an ancestor becomes `display: none`, so the pointer path
+  // cannot cover this one.
+  //
+  // `App` may EXTINGUISH the bar's byte and may never light one - the whole
+  // reason this store exists is that the first bottom bar was fed a byte
+  // DERIVED up here from a range the protocol tree also published.
+  // `scripts/session/status-bar.ts` asserts that asymmetry: `clearHoveredByte`
+  // is allowed in this file and `publishHoveredByte` is not.
+  useEffect(() => {
+    clearHoveredByte('packets-hex');
+  }, [view]);
 
   // **The dock's whole state block was here and is gone.** Two preference keys
   // (`inwire.dock`, `inwire.dashboard`), nine callbacks, and the expanded-widget
@@ -2051,10 +2072,12 @@ export default function App() {
           them - read as one surface running into Windows' own rounded corner.
 
           It costs `TITLE_BAR_HEIGHT` (32px) of rail height, which is why
-          `MIN_WINDOW_HEIGHT` is 680: the subtraction leaves the rail 648, and
-          its icons come to 494. `scripts/session/view.ts` does that sum and is
-          the only place it is worth trusting - the numbers were quoted here as
-          40 / 640 / 630 long after all three had moved. */}
+          `MIN_WINDOW_HEIGHT` is 680, and `STATUS_BAR_HEIGHT` (24px) costs the
+          rail 24 more - so the rail gets 624 and its icons come to 494. The two
+          strips are funded differently on purpose: the window minimum carries
+          the row, the rail's own slack carries the bar. `scripts/session/view.ts`
+          does that sum and is the only place it is worth trusting - the numbers
+          were quoted here as 40 / 640 / 630 long after all three had moved. */}
       <TitleRow focused={windowFocused} maximized={windowMaximized} />
 
       {/* **`bg-secondary`, and it must track the rail and the title row.** It is
@@ -2143,7 +2166,7 @@ export default function App() {
             beside it; both the constant and the file are deleted, and nothing
             competes with the list for horizontal space in this row any more. */}
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden
-          border-l border-t border-border bg-background">
+          border-l border-t border-b border-border bg-background">
           {/* **The filter row belongs to the Packets view, and only to it.**
 
               This reverses the rule that was here, and the reversal is the
@@ -2510,19 +2533,28 @@ export default function App() {
         </main>
       </div>
 
-      {/* **The application's bottom bar was here and is deleted.** It spanned the
-          window under the rail and the panes, carrying the byte inspector with
-          its text pushed sideways to line up under the Hex View pane. That
-          indent is the whole argument against it: a full-width bar that has to
-          be inset to look like it belongs somewhere narrower belongs there
-          instead. The readout is `HexViewer`'s footer again, where it reads that
-          pane's own hover rather than a range derived up here.
+      {/* **The application's bottom bar, second attempt.** The first spanned
+          the window under the rail and the panes carrying the byte inspector,
+          with its text pushed sideways to line up under the Hex View pane - and
+          that indent was the whole argument against it: a full-width bar that
+          has to be inset to look like it belongs somewhere narrower belongs
+          there instead. It was deleted and the readout went back to
+          `HexViewer`'s own footer.
 
-          `--details-pane-size` stays on the ROOT element, and now only the panes
-          read it. That placement was chosen so the bar could resolve a
-          percentage against the same base the panes are sized by; it costs
-          nothing to keep, and moving it back onto the pane would be a second
-          layout change made for tidiness alone. */}
+          What was wrong was the ALIGNMENT, not the bar. A status bar does not
+          line its items up with the panes above them - `Ln 56, Col 2` sits at
+          the window's right edge in every editor that has one, not above the
+          cursor - so the byte readout is an ordinary right-group item here with
+          no inset at all. `StatusBar.tsx` carries the two rules that keep it
+          that way.
+
+          `--details-pane-size` stays on the ROOT element, and only the panes
+          read it. That placement was chosen so the FIRST bar could resolve a
+          percentage against the same base the panes are sized by. This one
+          deliberately does not read it, and `scripts/session/status-bar.ts`
+          fails if it ever starts - which turns a stale note into the marker for
+          the rule. */}
+      <StatusBar />
 
       {/* **The geo map's expanded window was here.** A `WidgetOverlay`, fixed
           and rendered at the top level so the dock's own overflow could never

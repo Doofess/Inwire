@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { clearHoveredByte, publishHoveredByte } from '../../services/hoveredByte';
 import type { PacketDetailState } from '../../lib/usePacketDetail';
 import { targetForPacket, type StreamTarget } from '../../services/followStream';
 import { Packet, Capabilities } from '../../types/packet';
@@ -211,6 +212,9 @@ interface PacketDetailPaneProps {
  * Only HexDumpView, ByteInspector and AnomalyBanners are shared with the
  * workspace's bottom panes, because those are content rather than layout.
  */
+/** This view's dump in the hovered-byte store; `HexViewer` is the other. */
+const HOVER_SOURCE = 'frame-detail-hex' as const;
+
 export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
   packets,
   packet,
@@ -234,6 +238,27 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
    * a bar spanning the full width beneath both columns.
    */
   const [hoveredByteIndex, setHoveredByteIndex] = useState<number | null>(null);
+
+  // This view's dump is the store's second publisher; the Packets view's
+  // `HexViewer` is the first. Both can be mounted at once - the packets section
+  // stays mounted behind `display: none` - so every clear names its source and
+  // the store ignores one from a pane that does not currently own the value.
+  const publishByte = useCallback((byteIdx: number | null) => {
+    if (!packet || byteIdx === null || byteIdx >= packet.rawBytes.length) {
+      clearHoveredByte(HOVER_SOURCE);
+      return;
+    }
+    publishHoveredByte({
+      source: HOVER_SOURCE,
+      index: byteIdx,
+      value: packet.rawBytes[byteIdx],
+      frameId: packet.id,
+    });
+  }, [packet]);
+
+  // The frame changing under a stationary pointer, and this view unmounting.
+  useEffect(() => { clearHoveredByte(HOVER_SOURCE); }, [packet?.id]);
+  useEffect(() => () => clearHoveredByte(HOVER_SOURCE), []);
   /**
    * The layer isolated in the rail, or null for the whole frame.
    *
@@ -557,6 +582,7 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
           onHoverByte={byteIdx => {
             setHoveredByteIndex(byteIdx);
             setActiveByteRange(byteIdx === null ? null : [byteIdx, byteIdx]);
+            publishByte(byteIdx);
           }}
           scrollRef={twoColumn ? undefined : bodyScrollRef}
           // HexDumpView adds its own overflow-y-auto whenever scrollRef is
@@ -766,7 +792,15 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
                       packet={packet}
                       layers={visibleLayers}
                       activeByteRange={activeByteRange}
-                      onHoverByteRange={range => { setActiveByteRange(range); setHoveredByteIndex(null); }}
+                      // The tree clears the bar's byte and never sets one.
+                      // It has a RANGE, not a value, and the first bottom bar
+                      // answering "this byte" for a tree hover is the bug this
+                      // store exists to make unrepresentable.
+                      onHoverByteRange={range => {
+                        setActiveByteRange(range);
+                        setHoveredByteIndex(null);
+                        clearHoveredByte(HOVER_SOURCE);
+                      }}
                       onSelectFrame={showFrame}
                       className="py-3"
                     />

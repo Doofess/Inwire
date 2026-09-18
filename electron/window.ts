@@ -121,9 +121,17 @@ export const MIN_WINDOW_WIDTH = 1024;
  * overflow there does not scroll.
  *
  * So the minimum carries the row: 680 - `TITLE_BAR_HEIGHT` (32, declared just
- * below) leaves the rail 648, against the 494 its icons come to - 154 of slack.
- * `scripts/session/view.ts` does that subtraction rather than assuming it, and
- * the width is untouched for the half-screen-snapping reason above.
+ * below) leaves 648 below it.
+ *
+ * **The status bar is funded differently, and the difference is deliberate.**
+ * `STATUS_BAR_HEIGHT` (24) comes out of that 648 rather than out of this
+ * minimum, so the rail's budget is 624 and its 494 of icons keep 130 of slack.
+ * The row could not be paid for that way because the rail had no slack to spare
+ * when it arrived; the bar can, because six deleted icons left 154. Raising the
+ * minimum to 704 instead would have cost every 1366x768 laptop 24px of window
+ * for a strip that fits without it. `scripts/session/view.ts` does both
+ * subtractions rather than assuming them, and the width is untouched for the
+ * half-screen-snapping reason above.
  *
  * Those numbers were 40 / 640 / 630 here for a while, which disagreed with the
  * `TITLE_BAR_HEIGHT` fifteen lines down and with the rail itself. Six deleted
@@ -190,10 +198,26 @@ export const WINDOW_IS_FRAMELESS = true;
  * precisely what Windows does with its own caption. The 2px was costing the
  * thing it was meant to protect.
  *
- * `MIN_WINDOW_HEIGHT` has not moved through any of it. The rail gets
- * 680 - 32 = 648 now - see the arithmetic in `scripts/session/view.ts`.
+ * `MIN_WINDOW_HEIGHT` has not moved through any of it, and did not move for the
+ * status bar either - see the arithmetic in `scripts/session/view.ts`.
  */
 export const TITLE_BAR_HEIGHT = 32;
+
+/**
+ * The height of the app's own status bar, at the window's bottom edge.
+ *
+ * **24, which is shorter than the title row on purpose.** The title row is
+ * chrome you act on - it drags the window and it holds the caption buttons,
+ * whose 32px is Windows' own metric. The status bar is chrome you read. VS Code
+ * runs its own at 22; 24 is a step up from that for this app's denser figures,
+ * and it is a multiple of the 4px rhythm every other measurement here follows.
+ *
+ * Unlike the title row, this comes out of the rail's slack rather than out of
+ * `MIN_WINDOW_HEIGHT` - the reasoning is on that constant above. The rail is
+ * left with 624 against its 494, and `scripts/session/view.ts` fails if that
+ * stops being true.
+ */
+export const STATUS_BAR_HEIGHT = 24;
 
 /**
  * One window control's hit target, and how many there are.

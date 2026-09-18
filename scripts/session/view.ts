@@ -33,7 +33,7 @@ import {
   APP_VIEWS, isAppView, normalizeViewPrefs, restoredView, viewStore, VIEW_DEFAULTS,
   type AppView,
 } from '../../src/services/viewPrefs';
-import { MIN_WINDOW_HEIGHT, TITLE_BAR_HEIGHT } from '../../electron/window';
+import { MIN_WINDOW_HEIGHT, STATUS_BAR_HEIGHT, TITLE_BAR_HEIGHT } from '../../electron/window';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -270,17 +270,22 @@ console.log('\n--- the rail fits the smallest window ---\n');
     ['bottom: Export/Import, Settings', DIVIDER + GAP + group(2) + 8],
   ] as const;
 
-  // What the rail actually gets. The title row spans the full window width, so
-  // the rail starts BELOW it - the window minimum is not the rail's budget, and
-  // reading it as one is how Settings ends up under the bottom edge.
+  // What the rail actually gets. The title row spans the full window width and
+  // the status bar spans it below, so the rail starts BELOW one and stops ABOVE
+  // the other - the window minimum is not the rail's budget, and reading it as
+  // one is how Settings ends up under the bottom edge.
   //
-  // 680 - 32 = **648**. The 680 was chosen to return the rail the 640 it had
-  // when this row was `h-10`; the row has since come down to `h-8` - the window
-  // buttons are 46x32, Windows' own caption metric, so at 32 they fill it
-  // exactly - and the window minimum did not follow it down. That is 8px the
-  // rail gained for nothing, which is why it is derived here rather than
-  // written down: the subtraction stays right through a change to either.
-  const RAIL_BUDGET = MIN_WINDOW_HEIGHT - TITLE_BAR_HEIGHT;
+  // 680 - 32 - 24 = **624**. The 680 was chosen to return the rail the 640 it
+  // had when the title row was `h-10`; the row has since come down to `h-8` -
+  // the window buttons are 46x32, Windows' own caption metric, so at 32 they
+  // fill it exactly - and the window minimum did not follow it down. That is
+  // 8px the rail gained for nothing. The status bar then took 24 of the slack,
+  // which is the first time anything has been funded that way rather than by
+  // raising the minimum, and the reasoning is on `MIN_WINDOW_HEIGHT` itself.
+  //
+  // All of which is why the budget is DERIVED here rather than written down:
+  // two subtractions that stay right through a change to any of the three.
+  const RAIL_BUDGET = MIN_WINDOW_HEIGHT - TITLE_BAR_HEIGHT - STATUS_BAR_HEIGHT;
 
   let total = 0;
   for (const [name, height] of blocks) {

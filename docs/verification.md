@@ -296,16 +296,17 @@ New). Both look like fonts rather than like bugs, which is why this is here.
 
 ## 2. The rail
 
-Ten icons, **44px** targets, three groups, 494px against the 648px the rail gets
-- a 680px minimum window, less the 32px title row above it. The rail was full at
-630 with 36px targets; six deleted icons paid for both the slack and the larger
-ones. `scripts/session/view.ts` holds that arithmetic; what it cannot see is
-whether 44px in a 56px strip reads as icons or as boxes.
+Ten icons, **44px** targets, three groups, 494px against the 624px the rail gets
+- a 680px minimum window, less the 32px title row above it and the 24px status
+bar below. The rail was full at 630 with 36px targets; six deleted icons paid for
+the larger ones, the slack, and the status bar out of what was left.
+`scripts/session/view.ts` holds that arithmetic; what it cannot see is whether
+44px in a 56px strip reads as icons or as boxes.
 
 - [ ] At **1024×680** — the smallest allowed window, and 680 rather than 640
       because the full-width title row takes 32px off the top before the rail
       starts — every group is visible and Settings is not cut off at the bottom.
-      There are 154px of slack now, so this is no longer the tight case it was.
+      There are 130px of slack now, so this is no longer the tight case it was.
 - [ ] **The icons are 44px in a 56px strip**, glyphs 24px. Judge it against the
       window buttons and the packet rows: the buttons should read as icons with
       6px of rail either side, not as a column of boxes whose edges are the

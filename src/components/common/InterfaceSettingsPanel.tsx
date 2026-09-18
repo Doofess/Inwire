@@ -208,9 +208,9 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
           **The number that used to justify that no longer does.** The rail was
           630px against the 640 it gets, leaving 10px and no room for an icon;
-          it is 494 against 648 now - six icons were deleted - so there is room
-          for three more. `scripts/session/view.ts` holds that arithmetic and
-          prints the slack.
+          it is 494 against 624 now - six icons were deleted, and the status bar
+          took 24 of what they freed - so there is room for two more.
+          `scripts/session/view.ts` holds that arithmetic and prints the slack.
 
           The placement stands on its own argument, which is the one below: the
           other half of name resolution is already here, and these two belong
