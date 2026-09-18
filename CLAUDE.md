@@ -1866,51 +1866,69 @@ brand mark invisible - white on white in Day and Paper. Its checks in
 `scripts/themes/registry.ts` went on passing throughout, because they measured
 the mark against `--chrome`, the bar it had stopped sitting on.
 
-**The brand mark is outside all of this.** It is a head-on RJ45 connector -
-body, latch, cavity, eight contacts, `src/lib/brandMark.ts` - and it carries its
-own colours rather than taking `currentColor`, because a form given one colour is
-a silhouette. The rule that replaced the old one is narrower and still worth
-keeping: the colours live with the geometry, and `BrandMark.tsx` holds none. Two
+**The brand mark is outside all of this.** It is a stack of five isometric
+plates - `src/lib/brandMark.ts`, ported from `logo/inwire-layers.svg` - and it
+carries its own colours rather than taking `currentColor`, because a stack given
+one colour is a silhouette of a hexagon. The rule is narrow and worth keeping:
+the colours live with the geometry, and `BrandMark.tsx` holds none. Two
 consequences are deliberate. **One ramp serves both themes**, so there is no
 per-theme mark to keep in step. And **there is no second half to match**: the
 `INWIRE` wordmark is deleted (§3), so the question this paragraph used to answer
 at length - whether a lockup's two halves may carry different colours - has no
 subject.
 
-**The tones are derived rather than picked**, which is what makes the facets read
-as one object lit from one side. Every face is one of the app's own two brand
-colours shifted in LIGHTNESS only - the steel faces from `--secondary`, the
-contacts from `--primary` `#0b6bcb` - so hue and saturation stay the app's.
+**The box is 100 and the numbers are the author's.** `MARK_SIZE` was 256 while
+the mark was drawn at that size; this one is authored in a 100 box, so the box
+followed the art. The point is that the coordinates in the module read straight
+against `logo/inwire-layers.svg` with no arithmetic in between - scaling them to
+keep the old constant would have made every number a decimal.
+
+**Every plate is `--primary` at a different lightness.** `#0b6bcb`, hue 210,
+saturation 0.90, with L at 0.22 / 0.34 / 0.46 / 0.58 / 0.70. That is what makes
+five flat shapes read as one object rather than as five coloured tiles, and
+`scripts/brand/icon.ts` measures it rather than trusting it: it converts every
+fill and holds its hue and saturation to `MARK_ACCENT`'s own, so moving the
+accent moves the rule. The order is load-bearing too, and also asserted -
+darkest first, because the plates overlap and painter's order IS the depth.
 `#c42b1c` is deliberately absent: it is the close button's red and stays the
-alarm, and an icon that shares a hue with "this went wrong" spends it. Do not
-nudge one face by hand; a tone moved on its own flattens the corner it belongs
-to.
+alarm, and an icon that shares a hue with "this went wrong" spends it.
 
-**The mark is tiered**, and the boundary is a hard edge rather than a taste.
-`primary` has all eight contacts and is used at **48px and up**; `small` has four,
-drops the cavity's bevelled walls and opens the spacing, and is used **below 48**
-- which is what the title row's own 16px mark gets. 48 is where eight contacts
-stop resolving: below it they merge into a single blue bar, which says something
-untrue about the object rather than merely losing detail. `BrandMark` takes a
-`size` rather than a tier so callers say what they know, and
-`scripts/brand/icon.ts` checks bounds **once per tier** along with the two things
-a drawn mark actually gets wrong - the tiers drifting apart, and a face picking
-up a colour from outside the ramp.
+**The mark is tiered**, and the boundary is measured rather than chosen.
+`primary` is five plates at **32px and up**; `small` is **every other plate** -
+three - and is used **below 32**, which is what the title row's own 16px mark
+gets. 32 is where five plates stop resolving: the gap is 9 in a 100 box, so
+2.9px at 32 and 1.4px at 16, and at 1.4px the stack is one blue lump. Taking
+every other plate rather than redrawing is what keeps the two tiers one mark:
+same span, same ends of the ramp, twice the gap - so `small` is three bands at
+the same 2.9px that works at 32. `icon.ts` asserts all of that, including that
+the two tiers fill the identical box.
 
-**The shading is flat facets rather than a `<linearGradient>`**, so the
-no-gradient rule survives intact and the bounds stay readable off the path data.
-That rule is not style: every artefact below is rasterised from this one source
-down to 16px, where a gradient is mush.
+**Flat fills, no gradient**, so the no-gradient rule survives intact and the
+bounds stay readable off the path data. That rule is not style: every artefact
+below is rasterised from this one source down to 16px, where a gradient is mush.
 
-**The mark before this one was generated rather than drawn** - one ribbon
-spiralling round a sphere, a spiral spec and a projection emitting about 140
-flat fills per tier, in three tiers. It is worth a sentence because of what
-changed and what did not. `brandMark.ts` holds the art now instead of computing
-it, but its JOB is unchanged: one source, every icon generated from it, colours
-here and not in the component. What that cost is the old coverage check, which
-flattened each run into a polygon and counted painted cells on a grid - a drawn
-mark has curves and arcs and no polygons to flatten, so a point-in-path test
-would have meant writing a renderer.
+**There is no background behind the icon, anywhere.** Every PNG is RGBA with
+alpha 0 in the corners and in the gaps between the plates, and the `.ico`
+payloads are those PNGs verbatim. The mark before this one painted an opaque
+`#0c0a09` square behind itself, on the argument that Windows composites against
+grounds nobody can predict - which is true, and is an argument for a mark that
+reads on any ground rather than for shipping a black tile into the taskbar,
+Alt-Tab and Explorer. `icon.ts` decodes the top-left pixel of every committed
+raster and asserts alpha 0; it can do that in ten lines rather than with a PNG
+decoder because on the first pixel of the first row every PNG filter type
+reduces to the identity.
+
+**Two marks came before this one and both are worth a sentence.** The first was
+generated rather than drawn - one ribbon spiralling round a sphere, a spiral spec
+and a projection emitting about 140 flat fills per tier. The second was a head-on
+RJ45 connector, drawn, with eight contacts and a bevelled cavity. What has not
+changed across all three is the module's JOB: one source, every icon generated
+from it, colours there and not in the component - which is why the art is ported
+into `brandMark.ts` each time rather than committed as the artist's `.ico`. A
+binary dropped in beside the pipeline is exactly the drift the
+regenerate-and-compare check exists to catch. `logo/` holds the author's
+originals and nothing builds from them; `icon.ts` asserts that
+`electron-builder.yml` names a file this pipeline writes.
 
 **`Inwire.exe` had no icon at all until this landed** - `electron-builder.yml`
 had no `win.icon` and `directories.buildResources` pointed at a folder that did

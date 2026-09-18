@@ -2,22 +2,22 @@ import React from 'react';
 import { MARK_SIZE, brandMarkPaths, tierForSize, type MarkTier } from '../../lib/brandMark';
 
 /**
- * The app's mark: a head-on RJ45 connector.
+ * The app's mark: a stack of five isometric plates.
  *
- * **It carries its own colours, and that reverses a rule from two marks ago.**
+ * **It carries its own colours, and that reverses a rule from three marks ago.**
  * The mark was monochrome `currentColor` for exactly as long as it was two flat
  * chevrons, and the argument then was good - one drawing served every theme with
- * no per-theme work. Every drawing since has been a shaded form, so its colours
- * ARE the drawing and inheriting one would flatten it to a silhouette. What
- * survives of the old rule is the part that mattered: the colours still live in
- * one place, and it is not here. See `lib/brandMark.ts`.
+ * no per-theme work. Every drawing since has needed more than one tone, and this
+ * one is five steps of a single ramp: given one colour it would be a silhouette
+ * of a hexagon. What survives of the old rule is the part that mattered: the
+ * colours still live in one place, and it is not here. See `lib/brandMark.ts`.
  *
- * **The tier is not optional in practice.** The drawing sheds detail as the box
- * shrinks, and picking the wrong one is not a subtle error: the primary mark's
- * eight contacts merge into a single blue bar below about 48px, which says
- * something untrue about the object rather than merely losing detail. `size` is
- * the honest way to ask - callers know how big they are rendering it, not which
- * internal drawing they want.
+ * **The tier is not optional in practice.** The drawing sheds plates as the box
+ * shrinks, and picking the wrong one is not a subtle error: five plates merge
+ * into a single blue lump below about 32px, which says something untrue about
+ * the object rather than merely losing detail. `size` is the honest way to
+ * ask - callers know how big they are rendering it, not which internal drawing
+ * they want.
  *
  * Deliberately NOT in the house icon style. Everything else in this app is
  * `lucide-react` - a 24 viewBox, `fill="none"`, `stroke-width="2"`, round caps
@@ -46,8 +46,9 @@ export const BrandMark: React.FC<{
     aria-label={title}
   >
     {brandMarkPaths(tier ?? tierForSize(size)).map((p, i) => (
-      // The runs are ordered back to front and overlap by design, so the index
-      // IS the identity here - two segments can share a `d` and must both draw.
+      // The plates are ordered back to front and overlap by design, so the
+      // index IS the identity here - the order is the depth, and nothing else
+      // about a plate distinguishes it from the one behind it.
       // eslint-disable-next-line react/no-array-index-key
       <path key={i} d={p.d} fill={p.fill} />
     ))}

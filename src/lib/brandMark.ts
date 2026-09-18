@@ -1,11 +1,10 @@
 /**
- * The app's mark: a head-on RJ45 connector.
+ * The app's mark: a stack of five isometric plates.
  *
- * Body, latch, cavity, contacts. **Flat-facet shading** - depth comes from one
- * solid tone per face, with no gradients, no highlights and no drop shadow.
- * That is the same constraint the drawing this replaced worked under, and it is
- * kept for the same reason: a gradient at 16px is mush, and every artefact
- * below is rasterised from this one source down to 16.
+ * Flat fills, one per plate, no gradients and no strokes. That constraint has
+ * outlived three drawings now and is kept for the same reason each time: every
+ * artefact below is rasterised from this one source down to 16px, and a
+ * gradient at 16px is mush.
  *
  * ## What this module is
  *
@@ -15,43 +14,59 @@
  * the committed files still match what this would produce, so a change here
  * that is not re-rendered fails the suite rather than shipping a stale icon.
  *
- * **It used to generate rather than declare.** The previous mark was one ribbon
- * spiralling round a sphere, computed - a spiral spec, a projection, a taper
- * function, and about 140 flat fills emitted per tier. This one is drawn art,
- * so the module holds the art. What survives is the module's JOB, which was
- * never the arithmetic: one source, every output generated from it, and the
- * colours living here rather than in the component.
+ * That job has survived every redraw, and it is the reason the art is ported
+ * into this file rather than committed as the artist's `.ico`: a binary dropped
+ * in beside the pipeline is exactly the drift the regenerate-and-compare check
+ * exists to catch.
  *
- * ## Two tiers, and the rule is a hard edge rather than a taste
+ * ## The box is 100, and the numbers are the author's
  *
- * **`primary` at 48px and up, `small` below it.** The primary mark has eight
- * contacts; below about 48px eight contacts stop resolving and read as a single
- * blue band, which is worse than fewer contacts because it says something
- * untrue about the object. The small mark has four, drops the cavity's bevelled
- * walls, and opens up the spacing.
+ * `MARK_SIZE` was 256 while the mark was drawn at that size. This one is
+ * authored in a 100 box - `logo/inwire-layers.svg` and `logo/README.md` - so
+ * the box follows the art. The point is that the coordinates below can be read
+ * straight against the source SVG with no arithmetic in between; scaling them
+ * by 2.56 to keep an old constant would have made every number a decimal and
+ * every comparison a calculation.
  *
- * The previous mark had three tiers for a related reason - it shed turns of the
- * spiral as the box shrank - so the mechanism is unchanged and only the count
- * moved. `tierForSize` is still the honest way to ask: a caller knows how big
- * it is drawing, not which internal drawing it wants.
+ * The drawing spans x 10..90 and y 12..88, so it carries about 10% optical
+ * margin of its own. Do not add more - the raster targets are tight boxes and
+ * the OS adds its own padding in most of the places this appears.
  *
- * ## The colours are derived, not picked
+ * ## Two tiers, and the boundary is measured rather than chosen
  *
- * Every tone is one of the app's own two brand colours shifted in LIGHTNESS
- * only, so hue and saturation stay the app's: the steel faces come from
- * `--secondary`, the contacts from `--primary` (`#0b6bcb`). `#c42b1c` is
- * deliberately absent - it is the close button's colour and stays the alarm.
+ * **`primary` at 32px and up, `small` below it.** Five plates need five
+ * distinguishable bands; the gap is 9 in a 100 box, which is 2.9px at 32 and
+ * 1.4px at 16 - and at 1.4px the five plates render as one blue lump, which
+ * says something untrue about the object rather than merely losing detail.
+ * `small` takes every other plate, so it is three bands at 2.9px in a 16px
+ * icon: the same band width that works at 32, which is why the two tiers look
+ * like one mark at their own sizes.
  *
- * **Do not recolour a face by hand.** The ramp is what makes the facets read as
- * one object lit from one side; a tone nudged on its own flattens the corner it
- * belongs to. Change `MARK_BODY` or `MARK_ACCENT` and regenerate the ramp.
+ * Taking every OTHER plate is what keeps them one mark. The three it keeps are
+ * both ends of the ramp and its middle, over the same 12..88 span, so the small
+ * tier is the large one with the in-between steps dropped rather than a second
+ * drawing that happens to look similar.
+ *
+ * ## The colours are one ramp, and the ramp is `--primary`
+ *
+ * Every plate is `#0b6bcb` - the app's own accent - moved in LIGHTNESS only.
+ * Hue stays 210 and saturation stays 0.90 across all five, which is what makes
+ * a stack of flat shapes read as one object rather than as five coloured
+ * tiles. `scripts/brand/icon.ts` measures that rather than trusting it: it
+ * converts every fill and holds its hue and saturation to `MARK_ACCENT`'s own.
+ *
+ * **Do not recolour a plate by hand.** Move it along L, or move `MARK_ACCENT`
+ * and rebuild the ramp. A plate nudged off the hue is the one failure here that
+ * looks fine in isolation and wrong in the stack.
+ *
+ * `#c42b1c` is deliberately absent - it is the close button's red and stays the
+ * alarm, and an icon that shares a hue with "this went wrong" spends it.
  */
 
 /** The viewBox both tiers are drawn in. Square, so no size can distort it. */
-export const MARK_SIZE = 256;
+export const MARK_SIZE = 100;
 
-/** The two colours every face is derived from. */
-export const MARK_BODY = '#1e2632';
+/** `--primary`. Every plate is this colour at a different lightness. */
 export const MARK_ACCENT = '#0b6bcb';
 
 export type MarkTier = 'primary' | 'small';
@@ -59,11 +74,11 @@ export type MarkTier = 'primary' | 'small';
 /**
  * Which drawing a given rendered size gets.
  *
- * 48 is where eight contacts stop resolving. Below it the primary mark's
- * contact block reads as one blue bar - see the 16px magnification in the
- * mark's own contact sheet, which is what set this number.
+ * 32 is where five plates stop resolving: below it the 9-unit gap is under two
+ * device pixels and the stack reads as a single blue shape. The title row's own
+ * 16px mark is therefore the small tier, and so is anything in a tray.
  */
-export const tierForSize = (px: number): MarkTier => (px >= 48 ? 'primary' : 'small');
+export const tierForSize = (px: number): MarkTier => (px >= 32 ? 'primary' : 'small');
 
 export interface MarkPath {
   d: string;
@@ -71,88 +86,45 @@ export interface MarkPath {
 }
 
 /**
- * A rounded rectangle as path data.
+ * The ramp, darkest first - which is also back-to-front.
  *
- * The art is authored with `<rect rx>` for the body and the contacts, and this
- * flattens those to paths so the mark is ONE kind of shape everywhere. That
- * matters downstream rather than here: `BrandMark` maps over a single list,
- * `brandMarkSvg` emits one element type, and `markBounds` has one thing to
- * measure. A second shape kind would have to be handled in all three.
+ * L = 0.22, 0.34, 0.46, 0.58, 0.70 off `MARK_ACCENT`'s hue and saturation. The
+ * order is load-bearing twice over: the plates overlap, so painter's order IS
+ * the depth, and the lightest plate has to be painted last or the stack reads
+ * as lit from underneath.
  */
-function roundedRect(x: number, y: number, w: number, h: number, r: number): string {
-  const rx = Math.min(r, w / 2, h / 2);
-  return [
-    `M${x + rx} ${y}`,
-    `H${x + w - rx}`,
-    `A${rx} ${rx} 0 0 1 ${x + w} ${y + rx}`,
-    `V${y + h - rx}`,
-    `A${rx} ${rx} 0 0 1 ${x + w - rx} ${y + h}`,
-    `H${x + rx}`,
-    `A${rx} ${rx} 0 0 1 ${x} ${y + h - rx}`,
-    `V${y + rx}`,
-    `A${rx} ${rx} 0 0 1 ${x + rx} ${y}`,
-    'Z',
-  ].join(' ');
-}
-
-/** Eight contacts, evenly spaced, as one row. */
-function contacts(
-  count: number, x0: number, step: number, y: number,
-  w: number, h: number, r: number, fill: string,
-): MarkPath[] {
-  return Array.from({ length: count }, (_, i) => ({
-    d: roundedRect(x0 + i * step, y, w, h, r),
-    fill,
-  }));
-}
+const RAMP = ['#06386A', '#0957A4', '#0C75DF', '#3494F4', '#6EB2F7'] as const;
 
 /**
- * The full mark. 48px and up.
+ * One plate, from the y of its top vertex.
  *
- * Ordered back to front, because the faces overlap and the painter's order IS
- * the depth: the latch is behind the body, the cavity is cut into the body's
- * front face, and the contacts sit inside the cavity.
+ * A rhombus on the 2:1 isometric diagonal - 80 wide, 40 tall, centred on x 50.
+ * Every command is absolute, because `markBounds` reads the coordinate pairs
+ * straight out of the path data and a relative command there would be measured
+ * as a position.
  */
-const PRIMARY: MarkPath[] = [
-  // The latch, behind the body. Its front face first, then the lit top edge.
-  { d: 'M94 104 L102 46 C103 38 109 33 117 33 L139 33 C147 33 153 38 154 46 L162 104 Z', fill: '#212936' },
-  { d: 'M102 46 C103 38 109 33 117 33 L139 33 C147 33 153 38 154 46 L146 48 C145 42 143 40 138 40 L118 40 C113 40 111 42 110 48 Z', fill: '#5E779C' },
+const plate = (top: number, fill: string): MarkPath => ({
+  d: `M50 ${top} L90 ${top + 20} L50 ${top + 40} L10 ${top + 20} Z`,
+  fill,
+});
 
-  // The body, and the one lit face on it - the top, catching the same light as
-  // the latch's crown.
-  { d: roundedRect(34, 90, 188, 126, 18), fill: '#151B23' },
-  { d: 'M52 90 H204 A18 18 0 0 1 221 102 H35 A18 18 0 0 1 52 90 Z', fill: '#60799F' },
+/** The gap between one plate's top vertex and the next. */
+const GAP = 9;
 
-  // The cavity's four bevelled walls. Four tones off one ramp, darkest at the
-  // top where least light reaches and lightest at the bottom sill.
-  { d: 'M44 108 H212 L204 114 H52 Z', fill: '#0A0C10' },
-  { d: 'M212 108 V186 L204 172 V114 Z', fill: '#171D26' },
-  { d: 'M44 108 V186 L52 172 V114 Z', fill: '#212936' },
-  { d: 'M44 186 H212 L204 172 H52 Z', fill: '#303D50' },
+/** The top vertex of the bottom-most plate. Its foot lands on y 88. */
+const FLOOR = 48;
 
-  // The cavity floor, then the contacts standing in it.
-  { d: roundedRect(52, 114, 152, 58, 0), fill: '#090B0E' },
-  ...contacts(8, 56, 19, 118, 11, 48, 5.5, '#479EF5'),
-  // The contacts' tips, where they meet the floor and fall out of the light.
-  ...contacts(8, 56, 19, 157, 11, 9, 4.5, '#06386A'),
-];
+/** Five plates. 32px and up. */
+const PRIMARY: MarkPath[] = RAMP.map((fill, i) => plate(FLOOR - i * GAP, fill));
 
 /**
- * The simplified mark. Below 48px.
+ * Three plates. Below 32px.
  *
- * Four contacts rather than eight, no cavity bevels, and a slightly larger body
- * - at 16px the bevels are sub-pixel and the extra contacts merge, so drawing
- * them spends detail on mush. What is left is the silhouette that identifies
- * the object: a latch above a dark rectangle with blue bars in it.
+ * Every other plate of the tier above: same span, same ends of the ramp, twice
+ * the gap. Nothing here is a separate drawing - change `PRIMARY` and this
+ * follows, which is what stops the two tiers drifting into different marks.
  */
-const SMALL: MarkPath[] = [
-  { d: 'M92 104 L100 44 C101 36 108 30 116 30 L140 30 C148 30 155 36 156 44 L164 104 Z', fill: '#2E3A4C' },
-  { d: 'M100 44 C101 36 108 30 116 30 L140 30 C148 30 155 36 156 44 L147 46 C146 40 144 38 139 38 L117 38 C112 38 110 40 109 46 Z', fill: '#5E779C' },
-  { d: roundedRect(28, 92, 200, 132, 20), fill: '#191F29' },
-  { d: 'M48 92 H208 A20 20 0 0 1 227 105 H29 A20 20 0 0 1 48 92 Z', fill: '#60799F' },
-  { d: roundedRect(40, 112, 176, 76, 8), fill: '#0A0C10' },
-  ...contacts(4, 50, 38, 120, 24, 52, 12, '#258CF3'),
-];
+const SMALL: MarkPath[] = PRIMARY.filter((_, i) => i % 2 === 0);
 
 const TIERS: Record<MarkTier, MarkPath[]> = { primary: PRIMARY, small: SMALL };
 
@@ -163,21 +135,16 @@ export function brandMarkPaths(tier: MarkTier): MarkPath[] {
 /**
  * The drawing's extent inside the viewBox.
  *
- * Read off every coordinate pair in the path data, which is **approximate on
- * the two curved faces**: a cubic's control points can lie outside the curve,
- * so a box measured this way is never tighter than the truth. That is the safe
- * direction for what reads it - `scripts/brand/icon.ts` asserts the mark stays
- * INSIDE the box and fills most of it, and an over-estimate can only fail those
- * checks, never pass one it should not.
+ * Read off every coordinate pair in the path data, which is exact here: the
+ * mark is straight lines with absolute commands, so there are no control points
+ * to overestimate from. `scripts/brand/icon.ts` asserts the mark stays INSIDE
+ * the box and fills most of it.
  */
 export function markBounds(tier: MarkTier) {
   let minX = Infinity; let minY = Infinity;
   let maxX = -Infinity; let maxY = -Infinity;
 
   for (const { d } of brandMarkPaths(tier)) {
-    // Every command in this file is absolute and its operands are plain
-    // numbers, so the pairs fall out in order. The arc flags are 0/1 and land
-    // harmlessly inside the box they are already inside.
     const nums = (d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
     for (let i = 0; i + 1 < nums.length; i += 2) {
       minX = Math.min(minX, nums[i]);
@@ -193,18 +160,19 @@ export function markBounds(tier: MarkTier) {
 /**
  * The mark as a standalone SVG document.
  *
- * `background` is for the rasters only: Windows composites them against
- * surfaces nobody can predict, and a mark on an unknown ground is a mark nobody
- * can see. It is a plain square - no rounded corners, no gradient - because the
- * OS applies its own mask.
+ * **There is no `background` option and that is the point.** Every raster this
+ * produces is RGBA with transparent corners AND transparent gaps between the
+ * plates, so the mark sits on the taskbar, in Explorer and in Alt-Tab as a
+ * shape rather than as a tile. The previous mark painted an opaque square
+ * behind itself, on the argument that Windows composites against surfaces
+ * nobody can predict - which is true, and is an argument for a mark that reads
+ * on any ground rather than for shipping a black square. This one is saturated
+ * blue with no thin strokes, so it does.
  */
-export function brandMarkSvg(tier: MarkTier, options: { background?: string } = {}): string {
-  const ground = options.background
-    ? `<rect width="${MARK_SIZE}" height="${MARK_SIZE}" fill="${options.background}"/>`
-    : '';
+export function brandMarkSvg(tier: MarkTier): string {
   const shapes = brandMarkPaths(tier)
     .map((p) => `<path d="${p.d}" fill="${p.fill}"/>`)
     .join('');
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${MARK_SIZE} ${MARK_SIZE}" `
-    + `width="${MARK_SIZE}" height="${MARK_SIZE}">${ground}${shapes}</svg>`;
+    + `width="${MARK_SIZE}" height="${MARK_SIZE}">${shapes}</svg>`;
 }
