@@ -2067,9 +2067,17 @@ export default function App() {
       className="h-screen w-screen flex flex-col font-sans overflow-hidden transition-colors bg-background text-foreground"
     >
       {/* The title row spans the WINDOW, and the rail hangs below it. That is
-          what puts the app's mark at the true top-left corner, and what lets
-          the row and the rail - both `bg-secondary`, with no border between
-          them - read as one surface running into Windows' own rounded corner.
+          what puts the app's mark at the true top-left corner, and what keeps
+          the row and the rail one `bg-secondary` surface running into Windows'
+          own rounded corner.
+
+          **There is a 1px rule between them now, and this row does not draw
+          it.** The band below does - `border-t` on the rail and on `<main>`,
+          collinear, so one line crosses the whole window - which is what wraps
+          the rail in an outline of its own without costing this row a pixel.
+          A `border-b` here would come out of its own `h-8` under `border-box`
+          and leave 31px for caption buttons that are 46x32 because Windows'
+          are. Same argument for the status bar's missing `border-t`.
 
           It costs `TITLE_BAR_HEIGHT` (32px) of rail height, which is why
           `MIN_WINDOW_HEIGHT` is 680, and `STATUS_BAR_HEIGHT` (24px) costs the
@@ -2080,18 +2088,18 @@ export default function App() {
           were quoted here as 40 / 640 / 630 long after all three had moved. */}
       <TitleRow focused={windowFocused} maximized={windowMaximized} />
 
-      {/* **`bg-secondary`, and it must track the rail and the title row.** It is
-          never seen except in one place: the notch left by the rounded corner
-          below. The row is covered edge to edge by the rail and <main>, so this
-          is the colour that shows THROUGH that curve - which is what makes the
-          pane look cut out of the chrome rather than laid on top of it.
+      {/* **`bg-secondary`, and it must track the rail and the title row.** The
+          rail and <main> cover this row edge to edge, so with the top-left
+          corner square there is nothing for it to show through any more: it was
+          the colour inside the notch `rounded-tl-xl` cut out of the chrome, and
+          that notch is gone.
 
-          It was `bg-card` and the chrome moved to `bg-secondary` without it,
-          which put a wedge of the WRONG grey in the one curve the whole
-          arrangement is about. Nothing catches that: it is a few dozen pixels,
-          it is only visible against the rounded corner, and both colours are
-          plausible greys. If the chrome's ground changes again, this changes
-          with it. */}
+          It stays the chrome's colour anyway, because it is the ground this
+          row's children are composited against. It was `bg-card` while the
+          chrome moved to `bg-secondary` without it, which put a wedge of the
+          WRONG grey in the one curve the whole arrangement was about - a few
+          dozen pixels, two plausible greys, and nothing in the suite that could
+          see it. If the chrome's ground changes again, this changes with it. */}
       <div className="flex-1 flex min-h-0 overflow-hidden bg-secondary">
         <ActivityRail
           isCapturing={isCapturing}
@@ -2139,14 +2147,22 @@ export default function App() {
             everywhere: buttons, cards, popovers and pills all carry one. The
             rule is about the shell's own edges, not about the app.
 
-            **The border is on this pane and not on the rail.** That was the
-            whole reason the curve was visible, and it outlives the curve: it is
-            the line between the chrome and the workspace, and at `--secondary`
+            **The VERTICAL line is on this pane and not on the rail.** It is
+            the edge between the chrome and the workspace, and at `--secondary`
             against `--background` the two grounds differ by 13/255 in Night, so
-            the edge reads on its own and the border carries it in Day. The
-            rail's `border-r` used to draw that line straight past this point,
-            so the two cannot both exist - it went when this arrived, and a
-            second line here is what a returning `border-r` looks like.
+            the edge reads on its own and this border carries it in Day. The
+            rail's `border-r` used to draw the same line a pixel to the left, so
+            the two cannot both exist - it went when this arrived, and a
+            returning `border-r` is what a 2px seam down that column means.
+
+            **The two HORIZONTAL lines are shared with the rail**, which draws
+            its own `border-t` and `border-b` to carry them across its 56px.
+            The three edges together wrap the rail: a rule under the title row,
+            one above the status bar, and this pane's left edge joining them.
+            That is the outline VS Code puts around its activity bar, and it is
+            the only thing separating the rail from the strips above and below
+            it - the ground is `--secondary` on both sides of every one of
+            those lines.
 
             `overflow-hidden` stays, though its original argument went with the
             radius - it was there so the FILTER ROW, which paints its own

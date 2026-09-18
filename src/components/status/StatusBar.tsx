@@ -58,12 +58,21 @@ import { PacketCountsReadout } from '../common/PacketCountsReadout';
  *
  * ## The ground
  *
- * `bg-secondary` with **no top border**, which is what makes the chrome one
- * continuous surface: the title row, the rail and this bar are the same ground,
- * and the only line in the shell is the one on `<main>` tracing the workspace's
- * top, left and bottom. A border here would cut across the corner where this
- * meets the rail, which is the same mistake `TitleRow` refuses to make at the
- * top.
+ * `bg-secondary`, the same ground as the title row and the rail - the three
+ * strips are one surface and the shell's colour scheme is unchanged by the
+ * outline described next.
+ *
+ * **This bar draws no `border-t`, and the line above it is still there.** It
+ * is drawn by the two elements in the band above - `border-b` on the rail and
+ * on `<main>` - which is what lets the rule run the full width of the window
+ * from one element's edge to the next, and what keeps this strip's 24px whole:
+ * `border-box` would take a border out of the height rather than adding to it.
+ * `TitleRow` declines its `border-b` for the same reason and a sharper one,
+ * since 1px off an `h-8` row clips 32px caption buttons.
+ *
+ * So a `border-t` appearing here is not a second opinion about the design, it
+ * is the same line drawn twice - 2px in Day, and the bar a pixel shorter than
+ * `STATUS_BAR_HEIGHT` says. `scripts/session/status-bar.ts` fails on one.
  *
  * ## What may be threaded through it
  *

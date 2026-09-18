@@ -247,6 +247,19 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // buttons that move the window instead of being pressed.
   checkTrue('the rail is entirely no-drag', !rail.includes('app-drag'));
 
+  // **The outline**, and it is three sides rather than four. The rail draws its
+  // own top and bottom edge, because nothing else does: the title row and the
+  // status bar are the same `--secondary` ground, so without these the rail
+  // runs into both with no edge at all. The right edge is `<main>`'s
+  // `border-l`, already there, which is why a `border-r` here is the one that
+  // must never come back - two 1px rules in the same column, which reads as a
+  // thick line in Day and as nothing at all in Night. The left edge is the
+  // window's, and the shell draws nothing against that.
+  classIs('the rail draws its own horizontal edges', 'border-t border-b border-border');
+  checkTrue('...and not the vertical one `<main>` already draws',
+    !/\bborder-r\b/.test(rail));
+  checkTrue('...which `<main>` still does', code('src/App.tsx').includes('border-l'));
+
   const TARGET = 44;        // w-11
   const GAP = 2;            // gap-0.5
   const DIVIDER = 6 + 1 + 6; // my-1.5 + h-px
@@ -275,7 +288,14 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // the other - the window minimum is not the rail's budget, and reading it as
   // one is how Settings ends up under the bottom edge.
   //
-  // 680 - 32 - 24 = **624**. The 680 was chosen to return the rail the 640 it
+  // 680 - 32 - 24 - 2 = **622**. The last term is the outline: the rail draws
+  // a 1px seam against the row above it and another against the bar below, and
+  // `border-box` takes both out of its own height. They are drawn HERE rather
+  // than by the two strips for that same reason - a `border-b` on the `h-8`
+  // title row would leave 31px for caption buttons that are 46x32 because
+  // Windows' are.
+  //
+  // The 680 was chosen to return the rail the 640 it
   // had when the title row was `h-10`; the row has since come down to `h-8` -
   // the window buttons are 46x32, Windows' own caption metric, so at 32 they
   // fill it exactly - and the window minimum did not follow it down. That is
@@ -285,7 +305,8 @@ console.log('\n--- the rail fits the smallest window ---\n');
   //
   // All of which is why the budget is DERIVED here rather than written down:
   // two subtractions that stay right through a change to any of the three.
-  const RAIL_BUDGET = MIN_WINDOW_HEIGHT - TITLE_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+  const SEAMS = 2; // border-t + border-b, the outline's two horizontal edges
+  const RAIL_BUDGET = MIN_WINDOW_HEIGHT - TITLE_BAR_HEIGHT - STATUS_BAR_HEIGHT - SEAMS;
 
   let total = 0;
   for (const [name, height] of blocks) {

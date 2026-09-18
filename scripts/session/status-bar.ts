@@ -154,12 +154,18 @@ console.log('\n--- the indent cannot come back ---\n');
 
   checkTrue(`the bar is ${STATUS_BAR_HEIGHT}px`, bar.includes(`h-${STATUS_BAR_HEIGHT / 4}`));
 
-  // One `--secondary` surface with the rail and the title row, and the only
-  // line in the shell is the one on `<main>`. A border here would cut across
-  // the corner where the bar meets the rail - the same mistake `TitleRow`
-  // refuses to make at the top.
+  // One `--secondary` surface with the rail and the title row. The outline
+  // that separates them is a line, not a second ground.
   checkTrue('...on the chrome own ground', bar.includes('bg-secondary'));
-  checkTrue('...with no border cutting it off from the rail', !bar.includes('border-t'));
+
+  // **The line above this bar exists and is not drawn here.** The band above
+  // draws it - `border-b` on the rail and on `<main>` - so it runs the whole
+  // width of the window and neither strip pays for it out of its own height,
+  // which `border-box` is what makes that distinction real. A `border-t` here
+  // is therefore the same line twice AND a 23px bar.
+  checkTrue('...and drawing no line of its own', !bar.includes('border-t'));
+  checkTrue('...because the band above it draws that line',
+    code('src/components/common/ActivityRail.tsx').includes('border-t border-b border-border'));
 
   // The shell draws no corner of its own; the window's bottom-left is Windows'.
   checkTrue('...and no radius of its own', !/\brounded/.test(bar));

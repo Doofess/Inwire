@@ -366,8 +366,8 @@ fields.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  ◉   32px TitleRow        packet counter    ─ □ ✕       │
-├ ─ ─ ─┬──────────────────────────────────────────────────┤
+│  ◉   32px TitleRow                          ─ □ ✕       │
+├──────┬──────────────────────────────────────────────────┤
 │ rail │ FilterRow (banner, filter, restore)              │
 │ 56px ├──────────────────────────────────────────────────┤
 │      │ packets (hidden, never unmounted)                │
@@ -375,7 +375,7 @@ fields.
 │      │   └─ INSPECTION │ HEX VIEW                      │
 │      │ detail | statistics | geo | stream               │
 ├──────┴──────────────────────────────────────────────────┤
-│ (no bottom bar - the byte inspector is Hex View's footer)│
+│ ● Capturing 04:12  Ethernet     0x42 'B'  44/178,200 ◍  │
 └─────────────────────────────────────────────────────────┘
 ```
 **`<main>` is a column again, and there is no dock.** It was a row for exactly
@@ -420,9 +420,26 @@ count lives.
 
 **There is an application status bar, and it is the second attempt.** 24px at
 the window's bottom edge, `components/status/StatusBar.tsx`. The chrome is a
-**C** now: the title row across the top, the rail down the left, the bar across
-the bottom, all one `--secondary` ground with no seam between them, and the
-single 1px border on `<main>` tracing the workspace's top, left and bottom.
+**C**: the title row across the top, the rail down the left, the bar across the
+bottom, all one `--secondary` ground.
+
+**The rail is outlined inside that C**, the way VS Code outlines its activity
+bar. Three edges: `border-t` and `border-b` on `ActivityRail.tsx`, and
+`<main>`'s `border-l` down its right side. The fourth is the window's own and
+nothing draws against it, which is the same rule that keeps every corner square.
+The rail's two horizontal edges are collinear with `<main>`'s, so each reads as
+one rule crossing the whole window - under the title row, and above the status
+bar.
+
+**Neither strip draws its own edge, and that is arithmetic rather than taste.**
+`border-box` takes a border out of the element's height, so a `border-b` on the
+`h-8` title row leaves 31px for caption buttons that are 46x32 because Windows'
+are, and a `border-t` on the `h-6` bar makes it 23. Drawn from the band between
+them instead, both strips keep their full height and the line still spans the
+window. The cost is 2px off the rail's own budget, which is why
+`scripts/session/view.ts` subtracts them: 680 - 32 - 24 - 2 = **622**.
+`scripts/session/status-bar.ts` fails if the bar grows a `border-t`, because
+that is the same line drawn twice AND a short bar.
 
 **The first attempt is why the second one is shaped the way it is**, so the
 post-mortem is kept rather than replaced. It carried the byte inspector, and a
@@ -484,12 +501,14 @@ something. The bar is gone and that fix is not. That property is gone with the p
 layout custom property written only by the drag path has no value until a drag.
 
 **The title row spans the window and the rail hangs below it**, which is what
-puts the app's mark at the true top-left corner. The dashed segment is the one
-edge that is deliberately **not drawn**: the row and the rail are both
-`bg-secondary` and the row has no bottom border, so the ground runs unbroken from
-the mark down into the rail and into Windows' own rounded corner - which is the
-OS's radius, not one this app draws (`roundedCorners` defaults true and is never
-set).
+puts the app's mark at the true top-left corner. The segment under it is a 1px
+rule and **the row does not draw it** - the rail and `<main>` each draw their own
+`border-t`, which is what lets one line cross the whole window while the `h-8`
+row keeps all 32 of its pixels for caption buttons that are 46x32 because
+Windows' are. The ground is unbroken across it either way: the row and the rail
+are both `bg-secondary`, and it runs from the mark down into the rail and into
+Windows' own rounded corner - the OS's radius, not one this app draws
+(`roundedCorners` defaults true and is never set).
 
 **That chrome is `--secondary`, one step brighter than the panes.** It was
 `--card`, the same ground every titled surface uses, and the split is worth
@@ -522,13 +541,19 @@ rail, this pane. Radii inside the workspace are untouched by it and are
 everywhere: 242 `rounded-*` utilities across the renderer, on buttons, cards,
 popovers and pills.
 
-The 1px border is **on the pane, not on the rail** - which is why
-`ActivityRail.tsx` no longer carries `border-r`, since two lines in one place is
-one line too many. That was what made the curve visible and it is what makes the
-edge visible: at `--secondary` the grounds differ by 13/255 in Night (the
-paragraph above has the deltas) and the border carries it in Day. While the
-chrome was `--card` the border was the *only* thing the eye could follow, which
-is the state that argued it onto the pane in the first place.
+The **vertical** line is on the pane, not on the rail - which is why
+`ActivityRail.tsx` carries no `border-r`, since two lines in one place is one
+line too many. That was what made the curve visible and it is what makes the edge
+visible: at `--secondary` the grounds differ by 13/255 in Night (the paragraph
+above has the deltas) and the border carries it in Day. While the chrome was
+`--card` the border was the *only* thing the eye could follow, which is the state
+that argued it onto the pane in the first place.
+
+The **horizontal** lines are the rail's `border-t` / `border-b` continued across
+`<main>`'s own, and they are what turns that one edge into an outline wrapping
+the rail. `scripts/session/view.ts` asserts both, and asserts the absence of the
+`border-r` in the same breath - the outline has three sides, and which three is
+the whole content of the rule.
 
 `overflow-hidden` stays and its reason changed. It was load-bearing for the
 curve - `FilterRow` paints its own `bg-background` straight into that corner, so
@@ -593,8 +618,9 @@ ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs 
 real `updateAvailable` first, and Settings is the icon to hang it on.
 
 10 icons at **44px**, two dividers and the bottom group's padding come to
-**494px** against the 624px the rail gets - a **680px** minimum window, less the
-32px title row above it and the **24px status bar** below - 130px of slack.
+**494px** against the 622px the rail gets - a **680px** minimum window, less the
+32px title row above it, the **24px status bar** below, and the 2px of outline it
+draws against the two of them - 128px of slack.
 `scripts/session/view.ts` adds that up from the Tailwind classes, holds each
 class to what the sum assumes, and prints "the rail is FULL" when the answer is
 no more icons. **The two strips are funded differently and that is deliberate**:
