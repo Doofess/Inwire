@@ -432,8 +432,11 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           40px below the corner it is meant to occupy and cost 40px this rail
           does not have.
 
-          The rail shares the row's `bg-card` and the row draws no bottom
-          border, so the two read as one surface into that corner. The radius
+          The rail shares the row's `bg-secondary` and the row draws no bottom
+          border, so the two read as one surface into that corner. Anything
+          that paints its own patch of ground on this rail - the adapter
+          badge's `fill-secondary` is the only one - has to name that token
+          too, or it reads as a darker square in Night. The radius
           is Windows', not ours; see `TitleRow.tsx`.
 
           The cell also carried `.app-drag`, so the window could be grabbed by
@@ -730,7 +733,7 @@ const AdapterGlyph: React.FC<{ attention: boolean }> = ({ attention }) => (
     {attention && (
       <TriangleAlert
         aria-hidden
-        className="absolute -right-0.5 -bottom-0.5 w-3 h-3 text-warning fill-card"
+        className="absolute -right-0.5 -bottom-0.5 w-3 h-3 text-warning fill-secondary"
       />
     )}
   </>

@@ -93,7 +93,7 @@ const CopyMark: React.FC<{ className?: string }> = ({ className }) => (
 const COPY_FORMATS: { key: CopyFormat; label: string; hint: string }[] = [
   { key: 'hex', label: 'Hex dump', hint: 'Offsets, bytes and ASCII' },
   { key: 'c_array', label: 'C array', hint: 'unsigned char pkt[n]' },
-  { key: 'python', label: 'Python bytes', hint: 'b"\x00\x01"' },
+  { key: 'python', label: 'Python bytes', hint: 'b"\\x00\\x01"' },
 ];
 
 /**

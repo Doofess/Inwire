@@ -151,7 +151,14 @@ export const GraphsTab: React.FC<GraphsTabProps> = ({ packets, isDark, themeKey 
             a set of pills and because it is the control that changes what the
             chart IS. Uncontrolled-looking but controlled: the store is written
             on every keystroke, and `createPreferenceStore` debounces the write
-            to disk itself, so there is no second debounce needed here. */}
+            to disk itself.
+
+            That disk debounce is the only one that belongs here. The one that
+            matters is on the WORK, and it lives where the work is: the chart
+            debounces the compile of this string, because the compiled matcher
+            resets an aggregate that re-folds the whole buffer. Debouncing the
+            field instead would make the box drop characters. See
+            `TrafficTimelineChart`'s `settledOverlayFilter`. */}
         <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border shrink-0">
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground shrink-0">
             Overlay
