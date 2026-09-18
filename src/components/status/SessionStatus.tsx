@@ -11,7 +11,7 @@ import type { AgentInterface, CaptureDropStats } from '../../services/agentProto
 import {
   type AgentHealth,
   agentNeedsAttention,
-  agentSilentLabel,
+  agentStatusLabel,
 } from '../../services/agentHealth';
 
 /**
@@ -146,7 +146,7 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
           : attention
             ? <TriangleAlert className={`${GLYPH} text-warning`} aria-hidden />
             : <Plug className={GLYPH} aria-hidden />}
-        <span className="truncate">{agentSilentLabel(agentHealth)}</span>
+        <span className="truncate">{agentStatusLabel(agentHealth)}</span>
       </StatusItem>
 
       {/* **The adapter, and it is deliberately never hidden either** - including

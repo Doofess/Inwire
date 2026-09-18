@@ -14,7 +14,7 @@ import {
   ListTree,
 } from 'lucide-react';
 import type { AgentHealth } from '../../services/agentHealth';
-import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
+import { agentNeedsAttention, agentStatusLabel } from '../../services/agentHealth';
 import { CaptureInterfacePicker } from './CaptureInterfacePicker';
 import { CaptureSchedulePicker } from './CaptureSchedulePicker';
 import { isScheduleEmpty, type CaptureSchedule, type SchedulePreset } from '../../services/captureSchedule';
@@ -367,7 +367,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
    * the state follows it.
    */
   const adapterDetail = attention
-    ? agentSilentLabel(agentHealth)
+    ? agentStatusLabel(agentHealth)
     : selected === null
       ? 'none selected'
       : shortInterfaceLabel(selected.label);

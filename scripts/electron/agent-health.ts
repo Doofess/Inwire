@@ -16,7 +16,7 @@
  */
 import { parseStartType, provesAbsent, readAgentService } from '../../electron/agentService';
 import {
-  CRASH_LOOP_CONNECTIONS, diagnoseAgent,
+  CRASH_LOOP_CONNECTIONS, agentNeedsAttention, agentStatusLabel, diagnoseAgent,
   type AgentHealth, type AgentHealthInput, type AgentServiceFacts,
 } from '../../src/services/agentHealth';
 
@@ -208,6 +208,48 @@ console.log('\n--- before anything is known ---\n');
       && 'detail' in s && s.detail.length > 0));
   checkTrue('...and no two of them say the same thing',
     new Set(states.map((s) => ('summary' in s ? s.summary : ''))).size === states.length);
+}
+
+// **The labels, which nothing here checked until one of them shipped wrong.**
+//
+// `agentSilentLabel` was a `Partial<Record<...>>` of the five silent kinds with
+// `?? 'Agent not reachable'` behind it. Its two callers at the time only asked
+// while the agent WAS silent, so the missing `connected` entry was unreachable
+// - until the status bar's link item asked unconditionally, and a healthy agent
+// read "Agent not reachable" in the bar while capture ran perfectly.
+//
+// The record is total now and the fallback is gone, so a new kind cannot
+// compile without a label. These hold the part a type cannot: that the healthy
+// states do not READ as faults, and that the text agrees with the glyph.
+{
+  const kinds: AgentHealth[] = [
+    { kind: 'connected' },
+    { kind: 'connecting' },
+    diagnose({}),
+    diagnose({ service: { installed: true, startType: 'disabled' } }),
+    diagnose({ service: { installed: false, startType: 'unknown' } }),
+    diagnose({ shortConnections: CRASH_LOOP_CONNECTIONS }),
+    diagnose({ service: null }),
+  ];
+  const labels = kinds.map(agentStatusLabel);
+
+  checkTrue('every state has a label', labels.every((l) => l.length > 0));
+  check('...and no two states share one', new Set(labels).size, labels.length);
+
+  // The bug, named. A healthy agent must not be described in the vocabulary of
+  // a broken one.
+  check('connected does not read as a fault',
+    agentStatusLabel({ kind: 'connected' }), 'Agent connected');
+
+  // The pair that has to agree: `agentNeedsAttention` decides whether a warning
+  // glyph is drawn and the label decides what is written beside it. A label
+  // announcing a fault with no glyph, or a glyph with reassuring text, is the
+  // state this file exists to keep straight.
+  const faultWord = /\bnot\b|missing|disabled|crash/i;
+  const disagree = kinds
+    .filter((k) => agentNeedsAttention(k) !== faultWord.test(agentStatusLabel(k)))
+    .map((k) => k.kind);
+  check('the label and the warning glyph agree on every state', disagree, []);
 }
 
 console.log(failures === 0

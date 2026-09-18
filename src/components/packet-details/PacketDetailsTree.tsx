@@ -76,9 +76,15 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
     // The row colouring itself is untouched - the packet list still paints by
     // rule, which is where that information belongs.
     <div className="h-full flex flex-col overflow-hidden select-none">
+      {/* **The frame number, and not its length.** The length was here as
+          `(N bytes)` and it is in Hex View's own header a pane away, on the
+          surface whose whole subject is those bytes. Two copies of one figure
+          in one row is a row that has to be checked for agreement; this pane's
+          subject is the frame's STRUCTURE, so its header names which frame and
+          stops. */}
       <PaneHeader
         title="Packet Inspection"
-        detail={`#Frame ${packet.id} (${packet.length} bytes)`}
+        detail={`#Frame ${packet.id}`}
       >
         {hoveredField && (
           <span className="text-[11px] font-mono text-muted-foreground truncate" title={hoveredField}>
