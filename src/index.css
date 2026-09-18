@@ -274,7 +274,7 @@ html[data-platform="win32"] {
    it to be redeclared by both theme blocks - correctly, since a colour
    declared only there is silently inherited. A layout constant has no business
    in that set. The two sizes it would have held are Tailwind's own scale
-   already: the rail is `w-13` (52px) and the title row `h-8` (32px, and
+   already: the rail is `w-11` (44px) and the title row `h-8` (32px, and
    `scripts/electron/shell.ts` asserts that 32 against `TITLE_BAR_HEIGHT`). */
 
 /* Drags the window. Applied to the title row, and to nothing else: the rail is

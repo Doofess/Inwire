@@ -161,8 +161,8 @@ export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
 
         **Its block has to track the rail's GEOMETRY, not just its width.** The
         rail is a card now, inset from the window by the cluster band's 4px
-        gutter, so its centre is at 4 + 52/2 = 30 rather than at half its own
-        width. `ml-1 w-13` puts this block over exactly that span. Matching only
+        gutter, so its centre is at 4 + 44/2 = 26 rather than at half its own
+        width. `ml-1 w-11` puts this block over exactly that span. Matching only
         the width - which is what was here when the card landed, and was wrong
         for a commit - leaves the mark 4px left of the icons it is meant to
         crown. `scripts/session/view.ts` holds both halves now, because the two
@@ -177,7 +177,7 @@ export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
       {/* 16 CSS pixels, which is what picks the drawing: the mark is tiered and
           the full one is a smudge at this size. Passing the size rather than the
           tier keeps the caller saying what it knows. */}
-      <div className="ml-1 w-13 shrink-0 flex items-center justify-center">
+      <div className="ml-1 w-11 shrink-0 flex items-center justify-center">
         <BrandMark className="w-4 h-4 shrink-0" size={16} />
       </div>
     </div>

@@ -64,26 +64,26 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * UI, and firing it on hover flashes it five times as a pointer crosses the
  * rail, with a moment where two items read as active.
  *
- * ## Why 52px, and what the air is for
+ * ## Why 44px, and what the air is for
  *
- * `w-13`. The interior is what this number is really about: two 1px borders
- * leave 50px for a 44px target, so each icon has **3px of air** either side.
+ * `w-11`. The interior is what this number is really about: two 1px borders
+ * leave 42px for a 36px target, so each icon has **3px of air** either side.
  * That is the figure to reason from if it moves again - the outer width on its
- * own says nothing once the card has borders.
+ * own says nothing once the card has borders, and 3px is the constant every
+ * width this rail has had came out at.
  *
- * It was 56 for a long time, on the argument that this rail carries three
- * groups rather than one and needs the breathing room. Narrowed on request, and
- * the thing that made 4px cheap is that the icons did not move: the target is
- * still 44 and the glyph still 24, so what was spent is air rather than a
- * touch target. Going further is where it stops being free - 48 would leave a
- * single pixel between the active fill and the card's own border, which reads
- * as a mistake rather than as a tighter rail.
+ * It was 56, then 52, and the first of those two steps was free: the icons did
+ * not move, so what was spent was air. This one was not free and was taken
+ * knowingly - 52 was still too wide, and the only thing left to give at 3px of
+ * air is the button. The target went back to 36 and the glyph to 20, which is
+ * what this rail was before six deleted icons left the room to enlarge them.
  *
  * `FrameMetaRail` is 48, and index.css's own comment says two icon strips that
  * disagree by a few pixels is "something you only notice when they are on
- * screen together". The disagreement is 4px now rather than 8. It is still a
- * disagreement, and still accepted: that rail is one group of icons inside a
- * pane, this one is three groups in the window's chrome.
+ * screen together". This rail was 8px WIDER than that one and is now 4px
+ * narrower, so the disagreement has changed sign rather than gone away. Still
+ * accepted, and for the reason it always was: that rail is one group of icons
+ * inside a pane, this one is three groups in the window's chrome.
  *
  * ## The card it sits in
  *
@@ -97,8 +97,8 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * single hairline between them is drawn HERE. VS Code's reason is the one that
  * applies: the rail has to draw it, or its visible interior runs past its own
  * edge to the neighbour's border and the icon column ends up on a half pixel.
- * At `w-13` with `border-box` that is exact - 52 less two 1px borders is 50, an
- * even interior for a 44px target. Give the border away and it is 51.
+ * At `w-11` with `border-box` that is exact - 44 less two 1px borders is 42, an
+ * even interior for a 36px target. Give the border away and it is 43.
  *
  * **Rounded on the window side, square on the neighbour's**: `rounded-l-lg`,
  * 8px, which is `--vscode-cornerRadius-large`. The right corners stay square so
@@ -117,11 +117,11 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 10 icons at 44px, two dividers and the bottom group's padding come to
- * **494px** against the 618px the rail gets - a 680px minimum window, less the
+ * 10 icons at 36px, two dividers and the bottom group's padding come to
+ * **414px** against the 618px the rail gets - a 680px minimum window, less the
  * 32px title row above it, the 24px status bar below, the cluster's 4px bottom
- * gutter, and this card's own two 1px borders. It fits, with 124px of slack -
- * room for two more.
+ * gutter, and this card's own two 1px borders. It fits, with 204px of slack -
+ * room for five more.
  *
  * **The two strips are funded differently, and that is the thing to carry
  * forward.** The window minimum carries the title row, so this number did not
@@ -210,22 +210,25 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
 /**
  * The button's hit target, and the glyph inside it.
  *
- * 32px was the old rail's target in a 48px strip, then 36 in this one's 56. It
- * is **44 in 56 now** - 79% of the strip's width against the 64% it was - with
- * the glyph up from 20 to 24.
+ * **36 in a 44px rail**, with a 20px glyph. The ratio is the thing to hold:
+ * the glyph is 56% of the target and the target leaves 3px of air either side
+ * inside the card's borders, which is what every previous size of this rail has
+ * also done. 32-in-48, 36-in-56, 44-in-56 and now 36-in-44 are four points on
+ * one line.
  *
- * What paid for it is the same thing that paid for the slack: six deleted
- * icons. At 36px the rail was 630 against 640 and there was no room to make
- * anything bigger; the widgets group and its collapse control are gone now, so
- * the icons could take the space instead of the strip carrying more of them.
+ * It went 36 -> 44 once, when six deleted icons left the height to spend, and
+ * came back when the rail was narrowed on request: a 44px target cannot fit a
+ * rail this narrow without the button's edges becoming the rail's own, which is
+ * the state that reads as a column of boxes rather than of icons.
  *
- * 44 is also the touch-target floor every platform guideline names, which is not
- * why it was chosen - there is no touch here - but it is the reason nothing
- * larger was: past 44 the glyph starts floating in a button whose edges are the
- * rail's own, and the strip reads as a column of boxes rather than of icons.
+ * **44 is the touch-target floor every platform guideline names, and giving it
+ * up is deliberate.** There is no touch here - this is a desktop window with a
+ * pointer - and 36 is what Windows' own command bars use. It is also 4 more
+ * than the 32 the caption buttons beside it are, so nothing in the chrome is
+ * harder to hit than the close button.
  */
-const TARGET = 'w-11 h-11';
-const GLYPH = 'w-6 h-6';
+const TARGET = 'w-9 h-9';
+const GLYPH = 'w-5 h-5';
 
 const GROUP = 'flex flex-col items-center gap-0.5 shrink-0';
 
@@ -471,7 +474,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       aria-orientation="vertical"
       aria-label="Activity"
       onKeyDown={onRailKeyDown}
-      className="w-13 shrink-0 flex flex-col items-center bg-secondary
+      className="w-11 shrink-0 flex flex-col items-center bg-secondary
         text-secondary-foreground select-none
         border border-border rounded-l-lg"
     >
