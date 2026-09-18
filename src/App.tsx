@@ -2105,24 +2105,27 @@ export default function App() {
         />
 
         {/* The content pane, tucked into the corner the title row and the rail
-            make. Its top-left is rounded and the other three are square: this is
-            the only corner where two `--card` edges meet, and rounding a corner
-            that runs into the window's own edge would be a second curve inside
-            Windows' radius - the thing `TitleRow.tsx` refuses to draw.
+            make. **All four corners are square**, and the top-left was the one
+            exception: `rounded-tl-xl`, on the argument that the one corner where
+            two chrome edges meet is not an edge of the window and may curve.
+            It is square now because the app draws no radius anywhere - the only
+            curve in this window is the one Windows puts on the window itself,
+            which is `roundedCorners` defaulting true and never being set.
 
-            **The border is on this pane and not on the rail**, and that is the
-            whole reason the curve is visible. `--card` against `--background` is
-            a 4/255 delta in Night, so a notch cut out of the ground shows
-            nothing at all; the 1px edge is what the eye actually follows round
-            the corner. The rail's `border-r` used to draw that line straight
-            past this point, so the two cannot both exist - it went when this
-            arrived.
+            **The border is on this pane and not on the rail.** That was the
+            whole reason the curve was visible, and it outlives the curve: it is
+            the line between the chrome and the workspace, and at `--secondary`
+            against `--background` the two grounds differ by 13/255 in Night, so
+            the edge reads on its own and the border carries it in Day. The
+            rail's `border-r` used to draw that line straight past this point,
+            so the two cannot both exist - it went when this arrived, and a
+            second line here is what a returning `border-r` looks like.
 
-            `overflow-hidden` is what makes it work rather than decoration:
-            whichever child lands in that corner paints its own `bg-background`
-            straight into it, so without the clip the curve would be drawn and
-            then covered by the thing sitting in it. That child is the FILTER
-            ROW, which is `bg-background`.
+            `overflow-hidden` stays, though its original argument went with the
+            radius - it was there so the FILTER ROW, which paints its own
+            `bg-background`, could not fill the curve back in. What keeps it is
+            plainer: every child of this column scrolls inside it, and their
+            scrollers resolve against this box.
 
             **This is a column, and it was a row for exactly one revision.** The
             dock ran the pane's full height with the filter row beside it, so
@@ -2136,7 +2139,7 @@ export default function App() {
             beside it; both the constant and the file are deleted, and nothing
             competes with the list for horizontal space in this row any more. */}
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden
-          rounded-tl-xl border-l border-t border-border bg-background">
+          border-l border-t border-border bg-background">
           {/* **The filter row belongs to the Packets view, and only to it.**
 
               This reverses the rule that was here, and the reversal is the

@@ -462,11 +462,13 @@ set).
 
 **That chrome is `--secondary`, one step brighter than the panes.** It was
 `--card`, the same ground every titled surface uses, and the split is worth
-having: `--card` against `--background` is a 4/255 delta in Night, so the notch
-`<main>`'s `rounded-tl-xl` cuts out of the chrome was invisible and the 1px
-border was the only thing the eye could follow round the corner. At `--secondary`
-the delta is 13/255 and the corner reads on its own. The border stays, because it
-is what carries the edge in Day.
+having: `--card` against `--background` is a 4/255 delta in Night, so the seam
+where the chrome meets `<main>` was invisible and the 1px border was the only
+thing the eye could follow along it. At `--secondary` the delta is 13/255 and
+the edge reads on its own. The border stays, because it is what carries the edge
+in Day. That argument was first made about a rounded notch cut out of the
+chrome; the corner is square now and the deltas are unchanged, because they were
+always about two grounds meeting rather than about a curve.
 
 **The `INWIRE` wordmark in the corner is deleted, and the mark took the rail's
 axis back.** The word named the app in a caption that already names it twice -
@@ -476,20 +478,28 @@ it sits directly above the column of rail icons rather than 8px to their left;
 that alignment is why the mark used to live in a rail cell, and losing it was the
 stated cost of letting the word lead.
 
-**`<main>` is inset into the corner that L makes, with `rounded-tl-xl` on its
-top-left and square on the other three** - the other three run into the window's
-own edges, and a radius there would be the second curve inside Windows' that
-`TitleRow.tsx` refuses to draw. Two things make it work and both are easy to
-undo by accident. The 1px border is **on the pane, not on the rail** - which is
-why `ActivityRail.tsx` no longer carries `border-r`, since two lines in one place
-is one line too many. At `--secondary` the corner reads on its own (the paragraph
-above has the deltas) and the border is what carries the edge in Day; while the
-chrome was `--card` the border was the *only* thing the eye could follow round
-it, which is the state that argued the border onto the pane in the first place.
-And `overflow-hidden` is load-bearing
-rather than tidy: `FilterRow` paints its own `bg-background` straight into that
-corner, so without the clip the curve is drawn and then covered by the child
-sitting in it.
+**`<main>` is inset into the corner that L makes, and all four of its corners
+are square.** Three of them always were - they run into the window's own edges,
+and a radius there would be the second curve inside Windows' that
+`TitleRow.tsx` refuses to draw. The top-left carried `rounded-tl-xl` on the
+argument that it is the one corner where two chrome edges meet rather than an
+edge of the window, so it was allowed to curve. **It is square now**, which
+makes the rule general instead of nearly-general: this app draws no radius, and
+the only curve in the window is the one Windows puts on the window.
+
+The 1px border is **on the pane, not on the rail** - which is why
+`ActivityRail.tsx` no longer carries `border-r`, since two lines in one place is
+one line too many. That was what made the curve visible and it is what makes the
+edge visible: at `--secondary` the grounds differ by 13/255 in Night (the
+paragraph above has the deltas) and the border carries it in Day. While the
+chrome was `--card` the border was the *only* thing the eye could follow, which
+is the state that argued it onto the pane in the first place.
+
+`overflow-hidden` stays and its reason changed. It was load-bearing for the
+curve - `FilterRow` paints its own `bg-background` straight into that corner, so
+without the clip the curve was drawn and then covered by the child sitting in
+it. With the corner square, what keeps it is that every child of the column
+scrolls inside it and their scrollers resolve against this box.
 
 `ActivityRail.tsx` is 56px and starts below that row - there is no cell above
 its first group, because a cell would put the mark below the corner it is meant

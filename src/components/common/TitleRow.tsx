@@ -48,11 +48,13 @@ import { WindowControls } from './WindowControls';
  * **They were `bg-card` and are one step brighter.** That is a lighter grey in
  * Night (#232323 against #1a1a1a) and a grey rather than white in Day, and it
  * does something the old pair could not: `--card` against `--background` is a
- * 4/255 delta in Night, so the notch `<main>`'s `rounded-tl-xl` cuts out of this
- * surface was invisible and the 1px border was the only thing the eye could
- * follow round the corner. At `--secondary` the delta is 13/255 and the corner
- * reads on its own. The border stays anyway - it is what carries the edge in
- * Day, where the two are much closer.
+ * 4/255 delta in Night, so the seam where this surface meets `<main>` was
+ * invisible and the 1px border was the only thing the eye could follow along
+ * it. At `--secondary` the delta is 13/255 and the edge reads on its own. The
+ * border stays anyway - it is what carries the edge in Day, where the two are
+ * much closer. That argument was first made about a rounded notch `<main>` cut
+ * out of this surface; the corner is square now and the deltas are unchanged,
+ * because they were always about two grounds meeting rather than about a curve.
  *
  * It costs `TITLE_BAR_HEIGHT` of window rather than of rail: `MIN_WINDOW_HEIGHT`
  * is 680, so 680 - 32 leaves the rail 648 against the 494 its icons come to.

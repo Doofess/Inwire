@@ -570,8 +570,8 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
   return (
     // The view slot, the same shape Statistics and the Routing Map fill. No
     // backdrop and no panel: `bg-card` against the workspace's `--background`
-    // is the pane's only edge, and `<main>`'s own `rounded-tl-xl` draws the
-    // corner it sits in.
+    // is the pane's only edge, and `<main>`'s own border draws the corner it
+    // sits in - square, like every corner this app draws.
     <section className="flex-1 min-w-0 flex flex-col overflow-hidden bg-card text-card-foreground">
       {/* Identity and frame-to-frame navigation. Nothing else - the frame box
           lives in the meta rail, where it sits with the other ways of leaving
