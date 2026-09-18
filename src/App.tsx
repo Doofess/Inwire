@@ -2169,26 +2169,30 @@ export default function App() {
             title row and the status bar, which still run edge to edge and are
             still square.
 
-            **This pane has no `border-l`, and the rail is why.** The two are
-            cards in one cluster, meeting flush, and VS Code's Modern UI gives
-            the facing edge to the RAIL - `.part.sidebar.left` in
-            `floatingPanels.css` drops its border and its left corners for
-            exactly this. The reason carries over unchanged: a rail that hands
-            its facing border to the neighbour has a 55px interior for a 44px
-            icon, so the column lands on a half pixel. Put a `border-l` back
-            here and there are two hairlines in that seam, not one.
+            **This pane is a card in its own right and the rail is another,
+            with a gap between them.** They met flush for a revision, sharing
+            one seam that the rail drew - which is VS Code's arrangement when a
+            side bar sits against the activity bar. There is no side bar here,
+            and `floatingPanels.css` covers that case too: with nothing to
+            connect to, the rail "closes up as a standalone panel with every
+            corner rounded". So each card now draws its own complete outline,
+            and the question of who owns the seam does not arise.
 
-            **The three edges this pane does draw are the cluster's outside**,
-            which is why they carry the radius the rail's left corners carry.
-            `rounded-r-lg` is 8px, `--vscode-cornerRadius-large`, and it is
-            legal for the same reason the rail's is: the band's 4px gutter
-            holds this pane off the window, so the shell's no-corner-against-
-            the-window rule is not engaged. The gutter and the radius move
-            together or not at all.
+            **`ml-1` is the gap and it belongs to this pane**, not to the rail.
+            Also VS Code's convention - a left-hand rail gets its gap from the
+            leading margin of the card beside it - and it is worth keeping
+            rather than splitting: one margin means one number to change, where
+            a margin on each side is two that have to agree.
+
+            `rounded-lg` is 8px, `--vscode-cornerRadius-large`, and it is legal
+            for the same reason the rail's is: the band's 4px gutter holds this
+            pane off the window, so the shell's no-corner-against-the-window
+            rule is not engaged. The gutter and the radius move together or not
+            at all.
 
             At `--secondary` against `--background` the two grounds differ by
-            13/255 in Night, so the cluster's edge half-reads on its own and
-            these borders carry it in Day.
+            13/255 in Night, so each card's edge half-reads on its own and the
+            borders carry it in Day.
 
             `overflow-hidden` is load-bearing again, and for its ORIGINAL
             reason: the filter row paints its own `bg-background` straight into
@@ -2208,8 +2212,8 @@ export default function App() {
             `dockPrefs.ts` guaranteed the packet list a width while a column sat
             beside it; both the constant and the file are deleted, and nothing
             competes with the list for horizontal space in this row any more. */}
-        <main className="flex-1 flex flex-col min-w-0 overflow-hidden
-          border-t border-r border-b border-border rounded-r-lg bg-background">
+        <main className="ml-1 flex-1 flex flex-col min-w-0 overflow-hidden
+          border border-border rounded-lg bg-background">
           {/* **The filter row belongs to the Packets view, and only to it.**
 
               This reverses the rule that was here, and the reversal is the

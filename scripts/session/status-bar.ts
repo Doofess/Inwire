@@ -176,8 +176,8 @@ console.log('\n--- the indent cannot come back ---\n');
   // click that does nothing.
   checkTrue('the bar is not a drag region', !/\bapp-drag\b/.test(bar));
 
-  checkTrue('...and <main> closes the other half of it',
-    code('src/App.tsx').includes('border-t border-r border-b border-border'));
+  checkTrue('...and <main> closes its own, being the other card in that band',
+    code('src/App.tsx').includes('border border-border rounded-lg'));
 }
 
 console.log('\n--- one publisher per dump, and none anywhere else ---\n');
