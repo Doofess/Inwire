@@ -8,6 +8,7 @@ import { useElementSize } from '../../lib/useElementSize';
 import { prefersReducedMotion } from '../../lib/motion';
 import { useThemeToken } from '../../lib/themeColor';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
+import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { FilterEngine } from '../../services/filterEngine';
 
 export type TimelineMetric = 'packets' | 'bytes';
@@ -159,23 +160,45 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
    * which restarts the fold, moves the axis with it.
    */
   /**
-   * The overlay's predicate, compiled once per filter string.
+   * The overlay's predicate, compiled once per SETTLED filter string.
    *
    * An expression that does not compile yields null rather than throwing, and
-   * the chart then draws one series - the same as an empty filter. A widget
-   * setting is typed a character at a time, so most of what this sees is an
-   * incomplete expression, and a chart that vanished while a filter was being
-   * written would be unusable.
+   * the chart then draws one series - the same as an empty filter. The filter
+   * is typed a character at a time, so most of what this sees is an incomplete
+   * expression, and a chart that vanished while a filter was being written
+   * would be unusable.
+   *
+   * The debounce is what keeps that tolerance cheap, and it is on the WORK
+   * rather than on the field: `GraphsTab` writes the store and renders the
+   * input on every keystroke, so the box never drops a character. What waits
+   * is the compile and everything downstream of it.
+   *
+   * Downstream is the expensive half. This matcher is a reset dependency of
+   * `useIncrementalAggregate` below, and a reset re-folds the entire buffer
+   * from zero, synchronously, during render - 16.6ms at a 21,903-frame buffer,
+   * more at the 50,000 cap, on the main thread while a capture flushes at
+   * 10Hz. Undebounced, every prefix of `tcp.port == 443` that happens to
+   * compile pays that in full: `tcp`, `tcp.port`, `tcp.port == 4`, and so on.
+   * Prefixes that do NOT compile are free, because two nulls are the same
+   * identity and the memo's consumer never sees a change - which is why the
+   * cost is invisible on a filter typed slowly and obvious on one typed
+   * fluently.
+   *
+   * 250ms because it has to outlast the gap between keystrokes inside a
+   * typed phrase while staying under what reads as lag once the typing stops.
+   * The draw is throttled at 150ms further down, so a settled filter reaches
+   * the screen within one frame budget of that.
    */
+  const settledOverlayFilter = useDebouncedValue(overlayFilter, 250);
   const overlayMatcher = React.useMemo(() => {
-    const trimmed = overlayFilter.trim();
+    const trimmed = settledOverlayFilter.trim();
     if (!trimmed) return null;
     try {
       return FilterEngine.compileFilter(trimmed);
     } catch {
       return null;
     }
-  }, [overlayFilter]);
+  }, [settledOverlayFilter]);
 
   const { buckets, maxTime } = useIncrementalAggregate(
     packets,
