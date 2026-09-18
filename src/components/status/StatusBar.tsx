@@ -1,5 +1,6 @@
 import React from 'react';
 import { ByteReadout } from './ByteReadout';
+import { OutboundStatus } from './OutboundStatus';
 import { SessionStatus, type SessionStatusProps } from './SessionStatus';
 import { PacketCountsReadout } from '../common/PacketCountsReadout';
 
@@ -72,9 +73,12 @@ import { PacketCountsReadout } from '../common/PacketCountsReadout';
  * what keeps this bar off `App`'s ten-times-a-second render path. An item that
  * would need the buffer is an item that belongs in a pane.
  */
-export type StatusBarProps = SessionStatusProps;
+export interface StatusBarProps extends SessionStatusProps {
+  /** The two switches that let this app make requests of its own. */
+  nameResolution: { geoIp: boolean; reverseDns: boolean };
+}
 
-export const StatusBar: React.FC<StatusBarProps> = (session) => (
+export const StatusBar: React.FC<StatusBarProps> = ({ nameResolution, ...session }) => (
   <footer
     className="h-6 shrink-0 flex items-center justify-between
       bg-secondary text-secondary-foreground
@@ -102,6 +106,14 @@ export const StatusBar: React.FC<StatusBarProps> = (session) => (
     <div className="shrink-0 flex items-center justify-end">
       <ByteReadout />
       <PacketCountsReadout />
+      {/* Furthest right because it is the most stable thing in the bar: it
+          changes only when somebody changes a setting, so nothing it does
+          shoves the numbers beside it. */}
+      <OutboundStatus
+        geoIp={nameResolution.geoIp}
+        reverseDns={nameResolution.reverseDns}
+        onOpenSettings={session.onOpenSettings}
+      />
     </div>
   </footer>
 );
