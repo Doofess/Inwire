@@ -366,10 +366,39 @@ const CHROME_PAIRS: readonly [string, string, string][] = [
   ['--secondary-foreground', '--secondary', 'TitleRow / ActivityRail text'],
   // The rail's idle icons, which are `text-muted-foreground` on that ground.
   ['--muted-foreground', '--secondary', 'ActivityRail idle icons'],
+  // The status bar shares that ground - it is the third face of the same
+  // continuous chrome - so its quiet items ride the two pairs above. Its
+  // elapsed clock is its own, and it clears the text floor on both themes.
+  ['--primary', '--secondary', 'StatusBar capture elapsed'],
+];
+
+/**
+ * The same thing for GLYPHS, at 3:1.
+ *
+ * **This is a different floor rather than a lower one, and the distinction is
+ * the point.** WCAG holds text to 4.5:1 and non-text graphics to 3:1, because a
+ * letterform has to be told apart from twenty-five others at 11px while an icon
+ * has only to be seen. Measured here rather than assumed, because the pair that
+ * put this list in the file failed the text floor: `--warning` on
+ * `--secondary` is 4.06:1 in Day.
+ *
+ * What that failure bought is the rule the rail already follows and the status
+ * bar now does too - the hue goes on the glyph and the label stays at
+ * `--secondary-foreground`, so the state is carried by SHAPE plus colour and
+ * never by colour alone. An entry here is therefore a promise that something
+ * else says the same thing: the triangle differs in outline from the plug it
+ * replaces, and the dropped count says the word "dropped".
+ */
+const GLYPH_PAIRS: readonly [string, string, string][] = [
+  ['--warning', '--secondary', 'StatusBar warning glyph'],
 ];
 
 for (const t of THEME_OPTIONS) {
   if (!t.mode) continue;
+  for (const [ink, ground, what] of GLYPH_PAIRS) {
+    const ratio = contrastRatio(hexOf(t.value, ink), hexOf(t.value, ground));
+    checkTrue(`${t.value}: ${what} (${ratio.toFixed(2)}:1, graphic)`, ratio >= 3);
+  }
   for (const [ink, ground, what] of CHROME_PAIRS) {
     const ratio = contrastRatio(hexOf(t.value, ink), hexOf(t.value, ground));
     checkTrue(`${t.value}: ${what} (${ratio.toFixed(2)}:1)`, ratio >= 4.5);
