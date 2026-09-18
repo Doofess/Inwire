@@ -29,16 +29,6 @@ import { brandMarkSvg, tierForSize } from '../../src/lib/brandMark';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /**
- * The ground under the raster icons.
- *
- * They keep an opaque background because Windows composites them against
- * surfaces neither we nor they can predict, and a mark on an unknown ground is a
- * mark nobody can see. This is NOT the app tile coming back: the file is a plain
- * square, no rounded corners and no gradient, and the OS applies its own mask.
- */
-export const RASTER_BG = '#0c0a09';
-
-/**
  * The icon in a browser tab.
  *
  * Drawn at the SMALL tier because a favicon is 16 CSS pixels. It carries no
@@ -107,7 +97,7 @@ export function packIco(images: { size: number; png: Buffer }[]): Buffer {
  */
 export function rasterPage(sizes: number[]): string {
   const bySize = Object.fromEntries(
-    sizes.map((size) => [size, brandMarkSvg(tierForSize(size), { background: RASTER_BG })]),
+    sizes.map((size) => [size, brandMarkSvg(tierForSize(size))]),
   );
   return `<!doctype html><meta charset="utf-8"><body><script>
     window.__render = async () => {
@@ -119,6 +109,11 @@ export function rasterPage(sizes: number[]): string {
         await new Promise((ok, no) => { img.onload = ok; img.onerror = no; img.src = url; });
         const c = document.createElement('canvas');
         c.width = c.height = size;
+        // Never cleared to a colour and never filled: a fresh canvas is fully
+        // transparent, and drawing an SVG with no background rect onto it keeps
+        // it that way. That is the whole of "no square behind the icon" - the
+        // PNG comes out RGBA with alpha 0 in the corners AND in the gaps
+        // between the plates, and \`packIco\` copies those bytes verbatim.
         const g = c.getContext('2d');
         g.imageSmoothingEnabled = true;
         g.imageSmoothingQuality = 'high';

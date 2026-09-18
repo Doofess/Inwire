@@ -91,20 +91,27 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       is the app drawing a curve inside the one Windows already draws. Buttons,
       cards and popovers inside the workspace are rounded and always were; the
       rule is about the shell's edges.
-- [ ] **The brand mark is at the top-left corner**, centred on the rail's 56px
-      axis so it lines up with the icons below it. It is the RJ45 connector,
-      drawn at its **small** tier because the mark is 16 CSS pixels — **four**
-      contacts, not eight. Count them if you can; eight at this size merge into
-      one blue bar, and that is the single most likely thing to be wrong after
-      any edit to `BrandMark`.
+- [ ] **The brand mark is at the top-left corner**, on the rail's axis so it
+      lines up with the icons below it — which is `gutter + width / 2`, not half
+      the rail's width, since the rail is an inset card. It is the layered
+      stack, drawn at its **small** tier because the mark is 16 CSS pixels —
+      **three** plates, not five. Count them if you can; five at this size merge
+      into one blue lump, and that is the single most likely thing to be wrong
+      after any edit to `BrandMark`.
 - [ ] **It is legible on both chromes.** The mark carries its own colours rather
       than inheriting one, and a single ramp serves Day and Night: check the
-      body's dark front face has not sunk into `--secondary` on Night, and that
-      the steel top face still separates the latch from the body in Day.
-- [ ] **The taskbar and Alt-Tab show the same drawing**, at 32px — four contacts
-      there too. Explorer at "extra large" shows the 256px entry, which is the
-      eight-contact primary. If the taskbar icon looks like a blue smear, the
-      `.ico` was packed with the wrong tier per size.
+      darkest plate has not sunk into `--secondary` on Night, and that the
+      lightest is still distinct from the chrome in Day.
+- [ ] **The taskbar and Alt-Tab show five plates**, at 32px — that is the
+      primary tier, and 32 is exactly where it starts. Explorer at "extra large"
+      shows the 256px entry, also five. If the taskbar icon looks like a blue
+      smear, the `.ico` was packed with the wrong tier per size.
+- [ ] **Nothing is behind the mark.** This is the one to check on a light
+      wallpaper and a dark one: in the taskbar, in Alt-Tab, and in Explorer, the
+      plates sit on whatever is behind them with **no square, no tile and no
+      halo** — including in the gaps between plates, which are transparent too,
+      not filled. A dark rectangle around the icon means an opaque ground came
+      back into the rasteriser.
       The ground under it moved from `--card` to `--secondary` — a step brighter
       — so this is worth a fresh look rather than a remembered pass.
 - [ ] **`INWIRE` is gone.** No word beside the mark, in either theme. The window
