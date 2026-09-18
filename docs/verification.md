@@ -79,16 +79,16 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       border between them - so no horizontal line cuts across the corner and the ground
       runs unbroken from the mark down into the rail. A line there means somebody
       put `border-b` back on the title row.
-- [ ] **The content pane is inset into that corner with a rounded top-left**, and
-      its 1px edge follows the curve all the way round - down the rail's side and
-      across under the title row. In **Night** the ground either side of that edge
-      now differs by 13/255 rather than 4 — the chrome moved to `--secondary` —
-      so the curve should read on its own; the border is still what carries it in
-      **Day**, where the two are much closer. A *straight* line running
-      past the corner instead means the rail got its `border-r` back and is
-      drawing over the curve.
-- [ ] Its other three corners are **square**. A radius on any of them is a second
-      curve inside the one Windows already draws on the window itself.
+- [ ] **The content pane is inset into that corner and the corner is SHARP**, and
+      its 1px edge runs down the rail's side and across under the title row,
+      meeting at a right angle. In **Night** the ground either side of that edge
+      differs by 13/255 — the chrome is `--secondary` — so the edge should read
+      on its own; the border is still what carries it in **Day**, where the two
+      are much closer. A second line running past the corner means the rail got
+      its `border-r` back and is drawing beside the pane's.
+- [ ] **All four of its corners are square**, this one included. Any radius
+      anywhere is the app drawing a curve inside the one Windows already draws
+      on the window itself, which is the only curve in this window.
 - [ ] **The brand mark is at the top-left corner**, centred on the rail's 56px
       axis so it lines up with the icons below it. It is the spiral sphere, drawn
       at its **micro** tier because the lockup is 16 CSS pixels — two turns of
