@@ -130,6 +130,15 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
 - [ ] **It does not navigate.** Open Statistics, then Settings, then close it —
       you are back in Statistics, not in Packets. That is what makes it a sheet
       rather than a view.
+- [ ] **Choosing a view from inside Settings works.** Open Settings, then click
+      any view icon in the rail: the pane closes and that view is on screen.
+      Same with `Ctrl+1..5`. This shipped broken — the rail's marker moved and
+      the pane stayed up, so every icon looked dead and the back step was the
+      only way out.
+- [ ] **Applying a filter from inside Settings works too.** Open Settings, type
+      `tcp` in the title row's field and press Enter: the pane closes and you
+      land in Packets. **Clearing it leaves Settings open**, because clearing
+      navigates nowhere.
 - [ ] **Escape closes Settings before anything else.** With Settings open over
       Frame Detail, one Escape closes Settings and leaves you in Frame Detail; a
       second returns you to Packets.
@@ -154,11 +163,15 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
 - [ ] **Restoring shows in the status bar.** Relaunch with a stored capture: a
       spinner and `Restoring n/m` appear at the left of the bar and go when it
       finishes.
-- [ ] **The back step appears only where there is somewhere to go.** In
-      **Packets**, **Statistics** and the **Routing Map** the corner shows the
-      mark and nothing else. In **Frame Detail** a chevron appears beside it
-      reading "Back to Packets"; in **Follow Stream** it reads "Back to Frame
-      Detail". Its appearing and disappearing must not move the mark.
+- [ ] **The back step appears only where there is somewhere to go.** It sits
+      **immediately left of the filter field**, not in the corner beside the
+      mark. In **Packets**, **Statistics** and the **Routing Map** nothing is
+      there. In **Frame Detail** a chevron appears reading "Back to Packets"; in
+      **Follow Stream** it reads "Back to Frame Detail".
+- [ ] **The filter field does not move when it appears.** Step between Packets
+      and Frame Detail and watch the field's left edge: a `w-9` spacer mirrors
+      the button on the right, so only the chevron appears. If the field slides
+      18px, that spacer is gone.
 - [ ] **It is a step, not the exit.** From Follow Stream press it once: you land
       in Frame Detail, not in the packet list. Press it again for Packets.
       **Escape from Follow Stream goes straight to Packets** in one hop — the
@@ -603,11 +616,17 @@ performance fix could have broken a behaviour:
 - [ ] The **packet counter is here, not in the title row**, and the title row's
       centre is empty. The `+N UNSEARCHED` rescan button came with it and still
       re-runs a whole-capture scan.
-- [ ] The **outbound indicator** is at the far right. With geo-IP and reverse
-      DNS both off it is a quiet shield; turn either on in Settings → Interface
-      and it becomes a coloured globe naming which. This is the one item that
-      is deliberately visible in its quiet state, because "nothing is going out"
-      is the claim worth confirming in a packet analyzer.
+- [ ] The **outbound indicator** sits between the byte readout and the counter,
+      and it is words rather than a glyph. With geo-IP and reverse DNS both off
+      it reads `no lookups`; turn either on in Settings → Interface and it names
+      them — `geo-IP`, `rDNS`, or both — at full strength rather than muted. It
+      must read the same in greyscale, which is the check: the state is the
+      text, never the colour. This is the one item that is deliberately visible
+      in its quiet state, because "nothing is going out" is the claim worth
+      confirming in a packet analyzer.
+- [ ] **The two ends of the bar match.** The agent link at the left starts 8px
+      in and the packet counter at the right stops 8px short — the counter is
+      not a `StatusItem` and brings no padding, so the group supplies it.
 
 - [ ] **The divider drags**, and the hex dump absorbs the change: widen the
       details tree and the dump narrows, and back again.

@@ -1,5 +1,4 @@
 import React from 'react';
-import { Globe, ShieldCheck } from 'lucide-react';
 import { StatusItem } from './StatusItem';
 
 /**
@@ -14,14 +13,24 @@ import { StatusItem } from './StatusItem';
  *
  * An indicator that only appears when the answer is bad is not a claim, it is
  * an alarm - and the useful thing here is the claim. "Nothing is going out" is
- * what somebody watching their own wire wants confirmed, and confirming it
- * costs one muted glyph.
+ * what somebody watching their own wire wants confirmed.
+ *
+ * **It says it in words, and it carries no glyph.** It was a globe when a
+ * lookup was on and a shield when none was, which is two pictures for a fact
+ * that is three short words - and a glyph in a strip where every other item
+ * spells out what it means made the one item about *this app's* behaviour the
+ * one item you had to hover to read. So the state is the TEXT: `no lookups`
+ * against `geo-IP`, `rDNS` or both. That also keeps the bar's rule that a state
+ * is never carried by hue alone, now that there is no glyph to put the warning
+ * colour on - the two states differ in what they say, not in what colour they
+ * say it in. See `StatusItem`'s `TONE`.
  *
  * Two switches, two endpoints, and they are genuinely independent:
  * `geoIp` gates get.geojs.io and ipapi.co, `reverseDns` gates the DoH resolver
- * at cloudflare-dns.com. The tooltip names whichever are on rather than
+ * at cloudflare-dns.com. The visible text names whichever are on rather than
  * summarising, because "lookups enabled" does not tell you which third party
- * is learning an address.
+ * is learning an address. The abbreviations are the bar's width budget at the
+ * 1024px minimum; the tooltip spells both out.
  *
  * The basemap tiles are the one outbound thing this cannot speak for: they load
  * whenever the Routing Map is shown, behind neither switch. That gap is
@@ -34,13 +43,12 @@ export interface OutboundStatusProps {
   reverseDns: boolean;
 }
 
-const GLYPH = 'w-3 h-3 shrink-0';
-
 export const OutboundStatus: React.FC<OutboundStatusProps> = ({
   geoIp,
   reverseDns,
 }) => {
-  const on = [geoIp && 'geo-IP', reverseDns && 'reverse DNS'].filter(Boolean) as string[];
+  const on = [geoIp && 'geo-IP', reverseDns && 'rDNS'].filter(Boolean) as string[];
+  const spelt = [geoIp && 'geo-IP', reverseDns && 'reverse DNS'].filter(Boolean) as string[];
 
   if (on.length === 0) {
     return (
@@ -52,7 +60,7 @@ export const OutboundStatus: React.FC<OutboundStatusProps> = ({
           + 'the exception and load whenever that view is shown.)'
         }
       >
-        <ShieldCheck className={GLYPH} aria-hidden />
+        no lookups
       </StatusItem>
     );
   }
@@ -60,15 +68,13 @@ export const OutboundStatus: React.FC<OutboundStatusProps> = ({
   return (
     <StatusItem
       tone="attention"
-      label={`Outbound lookups enabled: ${on.join(' and ')}`}
+      label={`Outbound lookups enabled: ${spelt.join(' and ')}`}
       title={
-        `${on.join(' and ')} ${on.length === 1 ? 'is' : 'are'} enabled, so this app `
+        `${spelt.join(' and ')} ${spelt.length === 1 ? 'is' : 'are'} enabled, so this app `
         + 'makes requests that will appear in your own capture.'
       }
     >
-      {/* The hue rides the glyph, not the label - see `StatusItem`'s TONE. */}
-      <Globe className={`${GLYPH} text-warning`} aria-hidden />
-      <span className="hidden xl:inline">{on.join(' · ')}</span>
+      {on.join(' · ')}
     </StatusItem>
   );
 };

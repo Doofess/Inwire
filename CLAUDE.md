@@ -314,6 +314,15 @@ carries `app-no-drag` - beside `WindowControls` rather than inside it, so it
 inherits nothing from that group's shared class - and that Settings has no second
 way in.
 
+**The back step sits immediately left of the filter field, with a `w-9` spacer
+mirroring it on the right.** It was in the 138px corner beside the mark, which
+is where an application usually puts one and is the argument it lost: the corner
+is the app's identity, a control appearing and disappearing there reads as part
+of the mark's block, and it was as far from the row's only other navigation as
+the row allows. The mirrored spacer is what keeps the field still - without it
+the centred group would be button plus field, so the filter would shift 18px on
+every view change that gained or lost a back step.
+
 **Its centre WAS the packet counter, and that is the one control it had.** The
 row used to show `windowTitleFor(...)` there - `Inwire` idle,
 `Ethernet - capturing - Inwire` capturing. That string is unchanged and still
@@ -401,6 +410,20 @@ is a toggle carrying the same active marker a view does, because from the rail's
 side "this is what is on screen" is the same fact. The X and the Close button
 were the modal's and neither survived - a surface with four doors is one nobody
 knows how to leave. `scripts/session/view.ts` holds all of it.
+
+**Landing on a view closes it, and that shipped broken.** The sheet renders
+INSTEAD of the view stack, so a rail click from inside Settings moved `view`
+underneath it and the active marker with it, and changed nothing on screen -
+every icon in the rail looked dead and the back step was the only way out. The
+close belongs to the TRANSITION rather than to the pane, and for the reason the
+sheet exists: the view underneath is deliberately untouched while Settings is
+open, so the only code that can know a view is being *chosen* is the code that
+chooses it. `handleViewChange` closes it - which covers the rail and `Ctrl+1..5`
+together, being the one door both go through - and so does `applyFilter`, whose
+field is in the title row and therefore reachable with the sheet up: it
+navigates to Packets, and a navigation nobody can see is the identical bug.
+Clearing navigates nowhere and so closes nothing. Both are asserted, because
+both fail silently.
 
 **The packet detail window is a view too, and it was the modal before that.** It was `fixed inset-0`, a scrim and a 92vh panel, opened by
 double-clicking a row and dismissed with Escape or an X - which meant the one
@@ -580,7 +603,21 @@ counter.** The counter had the corner and the indicator sat between; they were
 swapped so the numbers are at the edge, which is what makes them findable
 without reading the bar. The trade is real either way - a right-aligned group
 shifts left as its widest member grows, so whichever item is not at the edge is
-the one that moves when the counts gain a digit.
+the one that moves when the counts gain a digit. **The counter brings no cell
+padding**, being `PacketCountsReadout` moved here whole rather than a
+`StatusItem`, so the group carries `pr-2` - without it the numbers sat flush
+against the window while every item on the left had 8px, and the strip's two
+ends did not match.
+
+**The outbound indicator carries no glyph, and says `no lookups` or names
+them.** It was a shield when nothing was going out and a globe when something
+was, with the names hidden below `xl` - so the one item in the bar about *this
+app's own* behaviour was the one you had to hover to read, in a strip where
+everything else spells itself out. The state is the text now: `no lookups`
+against `geo-IP`, `rDNS` or both, spelt out in the tooltip. That also keeps
+`StatusItem`'s rule with no glyph to hang it on - the two states differ in what
+they SAY rather than in hue, which is why the warning colour is not on the text
+(`--warning` on `--secondary` is 4.06:1, under the floor).
 
 **The counter's share badge is deleted**, and `filterPercentage` with it. It
 read `100%` beside `2,224 / 2,224`, which is one figure said twice in the weaker

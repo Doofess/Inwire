@@ -1614,13 +1614,30 @@ export default function App() {
    * same reason `APP_VIEWS` order IS the numbering.
    */
   const handleViewChange = useCallback((next: AppView) => {
-    if (next !== 'stream') { setView(next); return; }
+    /**
+     * **Landing on a view closes Settings**, because Settings is a sheet over
+     * the workspace rather than a view in the list - it renders INSTEAD of the
+     * view stack, so setting `view` underneath it changed the rail's active
+     * marker and nothing on screen. Every way in went through here, so the one
+     * way out was the back step: the rail's own icons looked broken.
+     *
+     * It belongs on the transition rather than on the pane, for the reason the
+     * sheet exists: the view underneath is untouched while Settings is open,
+     * so the only thing that can know a view is being CHOSEN is the code that
+     * chooses it. `applyFilter` closes it for the same reason - it navigates
+     * to Packets, and a navigation nobody can see is the identical bug.
+     */
+    const land = (v: AppView) => { setShowSettingsPane(false); setView(v); };
+    if (next !== 'stream') { land(next); return; }
     const target = selectedPacketRef.current !== null
       ? targetForPacket(selectedPacketRef.current) : null;
     // No stream on the selection: fall back to whatever is already open. The
     // rail disables the button when neither is true, so this is reachable only
-    // by the shortcut.
-    if (target === null) { if (streamToFollow !== null) setView('stream'); return; }
+    // by the shortcut. Nothing to land on means nothing happens at all -
+    // including to Settings, because a shortcut that did nothing visible should
+    // not have closed the surface you were reading.
+    if (target === null) { if (streamToFollow !== null) land('stream'); return; }
+    setShowSettingsPane(false);
     handleFollowStream(target);
   }, [setView, streamToFollow, handleFollowStream]);
 
@@ -1911,7 +1928,11 @@ export default function App() {
   const applyFilter = useCallback((next?: string) => {
     const expression = next !== undefined ? next : filterText;
     setAppliedFilter(expression);
-    if (expression.trim() !== '') setView('packets');
+    // Applying navigates to Packets, so it closes Settings for the same reason
+    // `handleViewChange` does: the filter field is in the title row and stays
+    // reachable while the sheet is open, and a navigation the sheet covers is a
+    // control that looks broken. Clearing does not navigate and so does not.
+    if (expression.trim() !== '') { setShowSettingsPane(false); setView('packets'); }
   }, [filterText, setView]);
 
   /**

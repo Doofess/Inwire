@@ -113,7 +113,14 @@ export const StatusBar: React.FC<StatusBarProps> = ({ nameResolution, ...session
         Ordered with the most changeable furthest from the edge: the byte
         readout comes and goes with the pointer, so it sits inboard where its
         arrival does not shove the numbers sideways. */}
-    <div className="shrink-0 flex items-center justify-end">
+    {/* `pr-2` because the counter is the one item in the bar that is not a
+        `StatusItem` - it is `PacketCountsReadout`, moved here whole, and it
+        brings no cell padding with it. Without this the numbers sat flush
+        against the window's right edge while every item in the left group had
+        8px, so the strip's two ends did not match. The padding is on the GROUP
+        rather than on that component, because the gutter belongs to the bar
+        and the readout has another home to answer to. */}
+    <div className="shrink-0 flex items-center justify-end pr-2">
       <ByteReadout />
       {/* The outbound indicator sits between the two, which is a swap: it was
           furthest right, on the argument that it is the most stable thing in

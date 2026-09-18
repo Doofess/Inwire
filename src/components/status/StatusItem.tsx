@@ -44,8 +44,11 @@ export type StatusTone = 'normal' | 'attention' | 'accent';
  * the identical problem: it found `--primary` on a tint of itself peaks at 3.97
  * in Day and moved the colour off the text rather than lowering the floor.
  *
- * Shape plus colour, never colour alone - which is also why every attention
- * state in this bar carries a glyph that differs in outline, not just in hue.
+ * Shape plus colour, never colour alone - so an attention state has to differ
+ * in something other than its hue. A glyph that differs in OUTLINE is one way
+ * and the left group takes it; WORDS that differ are the other, which is what
+ * `OutboundStatus` does now that it carries no glyph at all: `no lookups`
+ * against `geo-IP · rDNS` reads the same in greyscale.
  */
 const TONE: Record<StatusTone, string> = {
   normal: 'text-muted-foreground',
