@@ -159,10 +159,16 @@ console.log('\n--- the window is frameless and draws its own controls ---\n');
   // The HEIGHT moved 640 -> 680 when the title row went full width: the rail
   // sits below it now, so the window has to carry the row on top of the 640 the
   // rail needed at the time. The row has since come down 40 -> 32 and the
-  // minimum did not follow, so the rail's budget is 648.
-  // `scripts/session/view.ts` is the check with teeth - it derives that
-  // subtraction and adds the rail up against it; this one only stops the pair
-  // drifting silently.
+  // minimum did not follow.
+  //
+  // **The status bar did NOT move it again**, and this check is what says so.
+  // Its 24px came out of the rail's slack instead, leaving the budget 624 - so
+  // a session that adds a strip and reaches for this constant should read the
+  // reasoning on `MIN_WINDOW_HEIGHT` before changing it. Raising the minimum is
+  // the expensive way to pay for chrome and it is not how the bar was paid for.
+  // `scripts/session/view.ts` is the check with teeth - it derives both
+  // subtractions and adds the rail up against them; this one only stops the
+  // pair drifting silently.
   check('the window minimum is unchanged', [MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT], [1024, 680]);
 }
 

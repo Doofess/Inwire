@@ -97,14 +97,21 @@ const DELIBERATELY_ABSENT = new Map<string, string>([
   ['dockPrefs.ts', 'deleted with the dock; the pane shares live in interfacePrefs.ts'],
   ['dashboardPrefs.ts', 'deleted with the dock; it held DASHBOARD_RAIL_WIDTH and the widget config'],
   ['dashboardWidgets.tsx', 'deleted with the dock; there is no widget registry'],
-  // The application's bottom bar, which lived for one revision. Named the same
-  // way round as the four above, and for a reason that is specific rather than
-  // structural: the whole apparatus that made it work - the readout's inset, the
-  // two-block row, `--details-pane-size` being read from outside the panes, and
-  // `hoveredByte` derived in `App` from a range the protocol tree also publishes
-  // - existed only to make a window-spanning bar look like it belonged under one
-  // pane. A StatusBar.tsx coming back would mean all of that had.
-  ['components/common/StatusBar.tsx', 'deleted; the byte inspector is the Hex View pane’s own footer again'],
+  // **The application's bottom bar was named here and the entry is retired**,
+  // because the thing it asserted is no longer the thing that matters.
+  //
+  // It read: a StatusBar.tsx coming back would mean the whole apparatus had -
+  // the readout's inset, the two-block row, `--details-pane-size` read from
+  // outside the panes, and a hovered byte derived in `App` from a range the
+  // protocol tree also publishes. That was true of the bar that was deleted,
+  // and it is the wrong test for the one that replaced it: the bar is back at
+  // `components/status/StatusBar.tsx` and carries none of that apparatus.
+  //
+  // Naming a FILE was always a proxy for naming the apparatus, and the proxy
+  // stopped tracking the moment the file could come back without it.
+  // `scripts/session/status-bar.ts` asserts the real invariants instead - no
+  // layout custom property in the bar, no inline width, one publisher for the
+  // hovered byte - which is what this entry was reaching for.
   // The pairing token's config file. `--init-config` minted a token and wrote
   // this so the installer could read it back; the branch is deleted and the
   // token is the FIRST item in the root banner. Named the same way round as the

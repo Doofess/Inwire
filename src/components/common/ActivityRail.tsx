@@ -76,12 +76,17 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * ## Height
  *
  * 10 icons at 44px, two dividers and the bottom group's padding come to
- * **494px** against the 648px the rail gets - a 680px minimum window, less the
- * 32px title row that spans the full width above it. It fits, with 154px of
- * slack - room for three more. **The window minimum carries that row so this
- * number did not have to move**: the rail sits below the title row, and taking
- * those pixels out of the rail's budget instead would have pushed Settings off
- * the bottom edge.
+ * **494px** against the 624px the rail gets - a 680px minimum window, less the
+ * 32px title row above it and the 24px status bar below. It fits, with 130px of
+ * slack - room for two more.
+ *
+ * **The two strips are funded differently, and that is the thing to carry
+ * forward.** The window minimum carries the title row, so this number did not
+ * have to move when the row arrived: taking those 32px out of the rail instead
+ * would have pushed Settings off the bottom edge, back when there was no slack
+ * to take them from. The status bar came later, by which time six deleted icons
+ * had left 154px spare, so it comes out of that slack and the minimum stays
+ * 680 - which is 24px of window every small laptop keeps.
  *
  * ## How it got from 630 to 494 while the icons got BIGGER
  *

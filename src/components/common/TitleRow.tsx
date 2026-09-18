@@ -57,11 +57,17 @@ import { WindowControls } from './WindowControls';
  * because they were always about two grounds meeting rather than about a curve.
  *
  * It costs `TITLE_BAR_HEIGHT` of window rather than of rail: `MIN_WINDOW_HEIGHT`
- * is 680, so 680 - 32 leaves the rail 648 against the 494 its icons come to.
- * Taking it from the rail instead would eat into that, and an overflow there
- * does not scroll - the bottom group is pinned with `mt-auto`, so Settings goes
- * off the bottom edge. `scripts/session/view.ts` does the sum; the numbers were
- * quoted here as 40 / 640 / 630 long after all three had moved.
+ * is 680, so the row comes off the top without the rail paying for it. Taking it
+ * from the rail instead would have eaten into a budget that had nothing spare at
+ * the time, and an overflow there does not scroll - the bottom group is pinned
+ * with `mt-auto`, so Settings goes off the bottom edge.
+ *
+ * **The status bar at the other end was funded the opposite way**, and the
+ * contrast is the point: by the time it arrived the rail had 154px of slack, so
+ * its 24px came out of that and the window minimum stayed 680. Rail budget is
+ * 680 - 32 - 24 = 624 against the 494 its icons come to.
+ * `scripts/session/view.ts` does the sum; the numbers were quoted here as
+ * 40 / 640 / 630 long after all three had moved.
  *
  * **There is no lockup any more, only the mark.** The wordmark is deleted, so
  * the question the previous three paragraphs here answered at length - whether

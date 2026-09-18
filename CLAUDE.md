@@ -418,33 +418,64 @@ horizontal only. The map wore the same bar for exactly as long as it was in the
 row; the Routing Map view has a side panel instead, which is where its located
 count lives.
 
-**The byte inspector is Hex View's own footer, and there is no application
-bottom bar.** It spent one revision as `components/common/StatusBar.tsx` -
-outside the rail-and-panes row, spanning the window, the footer's class list
-unchanged - on the argument that a bordered strip under one pane of the row and
-none under the one beside it made the row's bottom edge ragged.
+**There is an application status bar, and it is the second attempt.** 24px at
+the window's bottom edge, `components/status/StatusBar.tsx`. The chrome is a
+**C** now: the title row across the top, the rail down the left, the bar across
+the bottom, all one `--secondary` ground with no seam between them, and the
+single 1px border on `<main>` tracing the workspace's top, left and bottom.
 
-**The indent is what argued it back.** A full-width bar's natural left edge is
-the window's, and a line about the hex dump starting under the rail, a pane away
-from the thing it describes, is wrong - so the readout was pushed sideways with
-a CSS length built from `--details-pane-size`, and the bar was a row of two
-blocks so that a percentage would resolve against `<main>`'s content box rather
-than the window. All of that machinery existed to make a window-spanning bar
-look like it belonged somewhere narrower, which is the definition of a bar in
-the wrong place. The ragged edge is accepted instead; the divider between the
-two panes already says they are different things.
+**The first attempt is why the second one is shaped the way it is**, so the
+post-mortem is kept rather than replaced. It carried the byte inspector, and a
+full-width bar's natural left edge is the window's - while a line about the hex
+dump, a pane away from the thing it describes, starts under the rail. So the
+readout was pushed sideways with a CSS length built from `--details-pane-size`,
+and the bar was a row of two blocks so that a percentage would resolve against
+`<main>`'s content box rather than the window. All of that machinery existed to
+make a window-spanning bar look like it belonged somewhere narrower, which is
+the definition of a bar in the wrong place. It was deleted and the readout went
+back to Hex View's own footer.
 
-The `hoveredByte` derivation in `App` went with it, and that is the part worth
-keeping in mind. The bar could not read `HexViewer`'s local hover state, so it
-was handed a byte derived from `activeByteRange` - which is **also** what the
-protocol tree publishes for a one-byte field, so the bar answered "this byte"
-for a hover in a pane that was not the dump. That conflation was deliberate and
-documented and is simply gone: the footer reads the dump's own hover.
+**What was wrong was the alignment, not the bar.** A status bar groups its items
+left and right by PRIORITY and never by correspondence with what sits above
+them - `Ln 56, Col 2` is at the window's right edge in every editor that has
+one, and nobody expects it over the cursor. Adopting that rule deletes the
+machinery instead of rebuilding it: the byte readout is an ordinary right-group
+item with no inset, and there is no length anywhere in the bar built from a
+pane's size.
+
+The second failure is the one worth remembering, because it is subtler than the
+indent. The bar could not read `HexViewer`'s local hover state, so it was handed
+a byte derived from `activeByteRange` - which is **also** what the protocol tree
+publishes for a one-byte field, so the bar answered "this byte" for a hover in a
+pane that was not the dump. The replacement is `services/hoveredByte.ts`, a
+store carrying the byte's **value** rather than an index. That choice is what
+makes the conflation impossible rather than merely avoided: the only code that
+can put a byte in the bar is code that already had the bytes in hand, which is a
+dump and never a tree.
+
+**The left group is the session and the right group is the frame.** Left: the
+agent link, the adapter, capture state with elapsed time, and dropped frames -
+in the order they fail in, and each one a click into the Settings tab that fixes
+it. Two of those were previously reachable only through a hover tooltip or a
+Settings tab, which is the gap `DriverInfoPanel` was written to close and this
+closes ambiently. Right: the byte readout, the packet counter, and an indicator
+for the app's own outbound lookups. An item renders nothing at all when its
+subject is absent, rather than showing a zero that was never measured -
+`droppedKernel` is `null` when the driver's counters could not be read and must
+never be folded into a total as 0.
+
+**The packet counter moved here from the title row**, which is where
+`windowChrome.ts` always argued it did not belong: a number that changes is the
+most distracting thing that can go in a title bar, and it was there only because
+nothing better existed. The title row's centre is empty now. `useWindowTitle`
+still sends `windowTitleFor(...)` to main, so the taskbar and Alt-Tab are
+unchanged.
 
 `--details-pane-size` stays on the **root** element even though only the panes
-read it now. It was moved there so the bar could resolve against the same base;
-keeping it costs nothing, and moving it back would be a second layout change
-made for tidiness alone.
+read it. It was moved there so the FIRST bar could resolve against the same
+base; the second deliberately does not read it, and
+`scripts/session/status-bar.ts` fails if it ever starts - which turns a stale
+note into the marker for the rule.
 
 Moving the properties to the root fixed a bug as well as enabling the bar:
 `--geo-pane-size` had never been in the React style object at all, only in the
@@ -562,10 +593,15 @@ ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs 
 real `updateAvailable` first, and Settings is the icon to hang it on.
 
 10 icons at **44px**, two dividers and the bottom group's padding come to
-**494px** against the 648px the rail gets - a **680px** minimum window, less the
-32px title row above it - 154px of slack. `scripts/session/view.ts` adds that up
-from the Tailwind classes, holds each class to what the sum assumes, and prints
-"the rail is FULL" when the answer is no more icons.
+**494px** against the 624px the rail gets - a **680px** minimum window, less the
+32px title row above it and the **24px status bar** below - 130px of slack.
+`scripts/session/view.ts` adds that up from the Tailwind classes, holds each
+class to what the sum assumes, and prints "the rail is FULL" when the answer is
+no more icons. **The two strips are funded differently and that is deliberate**:
+the window minimum carries the title row, because the rail had no slack to spare
+when it arrived; the rail's own slack carries the status bar, because by then six
+deleted icons had left 154px and raising the minimum to 704 would have cost every
+small laptop 24px of window for a strip that fits without it.
 
 **The icons got bigger because six of them were deleted, and the two halves of
 that nearly cancel.** The target went 36 → 44 (79% of the 56px strip, against

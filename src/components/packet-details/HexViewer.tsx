@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Packet, Capabilities } from '../../types/packet';
+import { clearHoveredByte, publishHoveredByte } from '../../services/hoveredByte';
 import {
   Binary,
   Check,
@@ -169,6 +170,11 @@ export const HexCopyMenu: React.FC<{ packet: Packet }> = ({ packet }) => {
  * The dump rows and the inspector live in HexDumpView so the packet detail
  * window can arrange the same parts differently without duplicating them.
  */
+/** This dump's name in the hovered-byte store. The other one is the Frame
+    Detail view's, and a clear names its source so neither can blank the other's
+    byte while both are mounted. */
+const HOVER_SOURCE = 'packets-hex' as const;
+
 export const HexViewer: React.FC<HexViewerProps> = ({
   packet,
   activeByteRange,
@@ -177,6 +183,21 @@ export const HexViewer: React.FC<HexViewerProps> = ({
   bytesState = 'ready',
 }) => {
   const [hoveredByteIdx, setHoveredByteIdx] = useState<number | null>(null);
+
+  // **Both effects sit above the early returns below, deliberately.** This
+  // component returns before its main body for a frame that is missing or whose
+  // bytes are not stored, and a hook declared after those returns would run on
+  // some renders and not others.
+  //
+  // They cover the two exits a pointer event cannot: the frame changing under a
+  // stationary pointer, and this pane unmounting - a view change, or the detail
+  // panes being switched off in Settings. The clear is ownership-checked inside
+  // the store, so neither can blank a byte the Frame Detail dump published.
+  useEffect(() => {
+    clearHoveredByte(HOVER_SOURCE);
+  }, [packet?.id]);
+
+  useEffect(() => () => clearHoveredByte(HOVER_SOURCE), []);
 
   if (!packet) {
     return (
@@ -218,8 +239,25 @@ export const HexViewer: React.FC<HexViewerProps> = ({
   }
 
   const handleHover = (byteIndex: number | null) => {
+    // The dump's OWN highlight stays local state. Round-tripping it through the
+    // store would put every pointer move on a subscriber's render path for a
+    // highlight this component draws itself.
     setHoveredByteIdx(byteIndex);
     onHoverByte(byteIndex);
+
+    // The status bar gets the byte's VALUE rather than its index, which is the
+    // whole design - `services/hoveredByte.ts` says why. Reading it here is what
+    // makes a protocol tree unable to publish one.
+    if (byteIndex === null || byteIndex >= packet.rawBytes.length) {
+      clearHoveredByte(HOVER_SOURCE);
+    } else {
+      publishHoveredByte({
+        source: HOVER_SOURCE,
+        index: byteIndex,
+        value: packet.rawBytes[byteIndex],
+        frameId: packet.id,
+      });
+    }
   };
 
   return (
