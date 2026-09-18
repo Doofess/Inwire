@@ -116,6 +116,22 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       back into the rasteriser.
       The ground under it moved from `--card` to `--secondary` — a step brighter
       — so this is worth a fresh look rather than a remembered pass.
+- [ ] **The back step appears only where there is somewhere to go.** In
+      **Packets**, **Statistics** and the **Routing Map** the corner shows the
+      mark and nothing else. In **Frame Detail** a chevron appears beside it
+      reading "Back to Packets"; in **Follow Stream** it reads "Back to Frame
+      Detail". Its appearing and disappearing must not move the mark.
+- [ ] **It is a step, not the exit.** From Follow Stream press it once: you land
+      in Frame Detail, not in the packet list. Press it again for Packets.
+      **Escape from Follow Stream goes straight to Packets** in one hop — the
+      two keys are deliberately different and this is the pair to check
+      together.
+- [ ] **Either way out of a stream lands on the frame it was followed from.**
+      Follow a stream from frame N, leave by the back step, and the selection is
+      N; do it again and leave with Escape, same answer. If the capture has
+      since dropped frame N from the buffer you get the refusal toast rather
+      than a silent wrong frame.
+- [ ] **Follow Stream's footer has no button** — just the totals line.
 - [ ] **The detail-panes toggle is beside the caption buttons**, left of
       minimize, with a small gap. Press it: the protocol tree and hex dump go
       and come back, and the packet list takes the height. It is narrower than

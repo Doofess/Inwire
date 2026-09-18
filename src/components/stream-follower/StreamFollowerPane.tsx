@@ -42,17 +42,6 @@ interface StreamFollowerPaneProps {
   target: StreamTarget | null;
   packets: Packet[];
   /**
-   * Leaves for the packet list, and lands on the frame this was opened from.
-   *
-   * Unlike Statistics' version of this, it has a destination: a stream is always
-   * entered from one packet - a row's context menu, the detail window, a
-   * conversation table - and the thing you were looking at before is the thing
-   * you want back. App records the origin and restores the selection.
-   */
-  onReturnToPackets: () => void;
-  /** The frame the stream was opened from, named on the control that returns. */
-  originFrame?: number | null;
-  /**
    * The frame selected in the packet list, and how to change it.
    *
    * This window used to print `Frame #N` as plain text and have no way back to
@@ -76,8 +65,6 @@ interface StreamFollowerPaneProps {
 export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   target,
   packets,
-  onReturnToPackets,
-  originFrame = null,
   selectedId,
   onSelectFrame,
   initialTab = 'dialogue',
@@ -382,19 +369,17 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
         </div>
         )}
 
-        {/* Modal Footer */}
-        <div className="px-4 py-2.5 border-t border-border flex items-center justify-between text-xs">
+        {/* **The "Back to frame N" button was here and is in the chrome.**
+            It was this pane's own way out, which made going back a thing you
+            found in the footer of one view and nowhere else. The title row
+            carries a back control for every view that has somewhere to go, so
+            the step out of a stream is in the same place as the step out of
+            Frame Detail - and it still lands on the frame the stream was opened
+            from, because `App` restores that on the way. */}
+        <div className="px-4 py-2.5 border-t border-border flex items-center text-xs">
           <span className="text-muted-foreground font-mono">
             Total {streamPackets.length} Packets ({totalClientBytes + totalServerBytes} bytes exchanged)
           </span>
-          {/* Named, because it is navigation rather than dismissal: it goes back
-              to the list and lands on the frame this stream was opened from. */}
-          <button
-            onClick={onReturnToPackets}
-            className="px-4 py-1.5 rounded-md bg-secondary hover:bg-accent text-foreground font-medium transition-colors cursor-pointer"
-          >
-            {originFrame === null ? 'Back to packets' : `Back to frame ${originFrame.toLocaleString()}`}
-          </button>
         </div>
       </>
     </div>

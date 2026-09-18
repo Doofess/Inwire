@@ -255,7 +255,27 @@ what is shown. Nothing that duplicated a visible control survived, which was the
 menu's own stated rule turned on itself. The title row holds **no navigation**
 now, and `cmdk` left `dependencies` with it.
 
-**The title row holds one control, and it is the detail panes' toggle.**
+**The views are a drill-down and the title row has a back step.** `Packets` is
+the capture, `Frame Detail` is one frame of it, `Follow Stream` is one
+conversation that frame belongs to - each reached from the surface above it, so
+each has a place to come back to and it is not always `Packets`. `backTargetFor`
+in `viewPrefs.ts` is that chain, as a TOTAL record so a new view cannot be added
+without deciding whether it is a root. Statistics and the Routing Map are roots:
+nothing drills into them, they are chosen from the rail, and a back step there
+would have to invent a destination.
+
+**Escape is a different key and stays one hop** - any non-Packets view to
+Packets, which is the exit rather than a step. That is why `stream` has two
+answers, and `scripts/session/view.ts` holds both.
+
+**Follow Stream's own "Back to frame N" is deleted.** It was a way out that
+existed in one view's footer and nowhere else. What it did that was worth
+keeping - landing on the frame the stream was followed from - belongs to LEAVING
+a stream rather than to a button, so both ways out do it now and the script
+counts them.
+
+**The title row holds two controls: that back step and the detail panes'
+toggle.**
 `PanelBottom` beside the caption buttons, `w-9` rather than the 46px those take,
 because 46 is Windows' caption metric and a control of ours borrowing it claims
 to be part of that set. It was a switch in `Settings -> Interface`, and the

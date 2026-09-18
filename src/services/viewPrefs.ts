@@ -81,6 +81,51 @@ export interface AppViewSpec {
  * and `useKeyboardNavigation` cannot disagree about which key opens what.
  * Digits were entirely unbound before this, which is why they were available.
  */
+/**
+ * Where a step BACK from each view lands, or null at the root.
+ *
+ * The views are not a flat set: `Packets` is the capture, `Frame Detail` is one
+ * frame of it, and `Follow Stream` is one conversation that frame belongs to.
+ * That is a drill-down, and each step down is taken from the surface above it -
+ * a frame is chosen in the list, a stream is followed from a frame - so there
+ * is a place to come back to and it is not always `Packets`.
+ *
+ * `Statistics` and the `Routing Map` are deliberately roots. Nothing drills
+ * into them and they are not reached from another view; they are other ways of
+ * looking at the whole capture, chosen from the rail. A back step there would
+ * have to invent a destination.
+ *
+ * **Escape is a different key and keeps its own rule.** It returns ANY
+ * non-Packets view to Packets, in one hop - it is the exit. This is the step.
+ * A reader who conflates them will wonder why `stream` has two answers.
+ *
+ * Total rather than `Partial`, so a new view cannot be added without deciding
+ * whether it is a root. That is not style: the same file's agent labels shipped
+ * a `Partial` record whose missing key rendered as a confident wrong answer.
+ */
+const VIEW_BACK: Record<AppView, AppView | null> = {
+  packets: null,
+  detail: 'packets',
+  statistics: null,
+  geo: null,
+  stream: 'detail',
+};
+
+/** The view a back step lands on, or null when there is nowhere to go. */
+export function backTargetFor(view: AppView): AppView | null {
+  return VIEW_BACK[view];
+}
+
+/**
+ * A view's name, from the same list the rail and the shortcuts read.
+ *
+ * So a control that names a view - the back button's "Back to Frame Detail" -
+ * cannot call it something the rail's tooltip does not.
+ */
+export function viewLabel(view: AppView): string {
+  return APP_VIEWS.find((v) => v.id === view)?.label ?? view;
+}
+
 export const APP_VIEWS: readonly AppViewSpec[] = [
   { id: 'packets', label: 'Packets', shortcut: 'Ctrl+1' },
   // Directly after the list, because it is the list's own second half: a row

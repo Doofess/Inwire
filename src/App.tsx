@@ -41,7 +41,7 @@ import {
   useWindowChrome, useWindowTheme, useWindowTitle, windowTitleFor,
 } from "./lib/windowChrome";
 import {
-  restoredView, viewStore, type AppView,
+  backTargetFor, restoredView, viewLabel, viewStore, type AppView,
 } from "./services/viewPrefs";
 import { isDarkTheme } from "./lib/themeOptions";
 import { getPacketThemeForApp } from "./services/packetThemes";
@@ -1634,15 +1634,25 @@ export default function App() {
    * only ever sees an Escape that nothing else claimed. Registering it in the
    * capture phase instead would make it the FIRST to see the key and navigate
    * out from under an open popover.
+   *
+   * **Leaving a stream restores the frame it was followed from**, which is what
+   * `leaveStream` used to do for the pane's own "Back to frame N" button. That
+   * button is gone and the behaviour is not: it belongs to LEAVING a stream
+   * rather than to one control, so it is here and in `goBack`, which are the
+   * only two ways out. `goToFrame` rather than a bare `setSelectedPacket`,
+   * because it refuses a frame that has left the buffer and says so - a real
+   * case, since a long capture can drop the origin while the stream is read.
    */
   useEffect(() => {
     if (view === 'packets') return;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setView('packets');
+      if (e.key !== 'Escape') return;
+      if (view === 'stream' && streamOrigin !== null) goToFrame(streamOrigin);
+      setView('packets');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [view, setView]);
+  }, [view, setView, streamOrigin, goToFrame]);
 
   // Window-level keyboard shortcuts - see hooks/useKeyboardNavigation.ts.
   useKeyboardNavigation({
@@ -1867,16 +1877,26 @@ export default function App() {
 
 
   /**
-   * Leaves the stream pane, landing on the frame it was opened from.
+   * One step back up the view hierarchy, or nothing at a root.
    *
-   * `goToFrame` rather than a bare `setSelectedPacket`: it refuses a frame that
-   * has left the buffer and says so, which is a real case here - a long capture
-   * can drop the origin while the stream is being read.
+   * `backTargetFor` in `viewPrefs.ts` holds the shape - Follow Stream is one
+   * conversation belonging to a frame, Frame Detail is one frame of the
+   * capture, and Statistics and the Routing Map are neither, so they are roots
+   * with no step to take.
+   *
+   * **This is not Escape.** Escape returns any non-Packets view to Packets in
+   * one hop, which is the exit; this is one step, so leaving a stream lands on
+   * the frame it was followed from rather than back in the list. That is also
+   * why the origin restore lives here and not only in `leaveStream`: the frame
+   * the stream came from is exactly what Frame Detail should be showing when
+   * the step completes.
    */
-  const leaveStream = useCallback(() => {
-    setView('packets');
-    if (streamOrigin !== null) goToFrame(streamOrigin);
-  }, [setView, streamOrigin, goToFrame]);
+  const backTarget = backTargetFor(view);
+  const goBack = useCallback(() => {
+    if (backTarget === null) return;
+    if (view === 'stream' && streamOrigin !== null) goToFrame(streamOrigin);
+    setView(backTarget);
+  }, [backTarget, view, streamOrigin, goToFrame, setView]);
 
   /**
    * A stream that goes away takes its view with it.
@@ -2122,6 +2142,8 @@ export default function App() {
         maximized={windowMaximized}
         panesVisible={showPanes}
         onTogglePanes={togglePanes}
+        backLabel={backTarget === null ? null : viewLabel(backTarget)}
+        onBack={goBack}
       />
 
       {/* **The cluster band, and its ground is the shell backdrop.** The rail
@@ -2579,8 +2601,6 @@ export default function App() {
               <StreamFollowerPane
                 target={streamToFollow}
                 packets={packets}
-                onReturnToPackets={leaveStream}
-                originFrame={streamOrigin}
                 initialTab={streamView}
                 selectedId={selectedPacket?.id}
                 // The pane stays open. Selecting a frame from in here is usually
