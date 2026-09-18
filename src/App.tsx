@@ -35,6 +35,7 @@ import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
 import { StatusBar } from "./components/status/StatusBar";
 import { clearHoveredByte } from "./services/hoveredByte";
+import { resetByteRange } from "./services/byteRange";
 import { FilterRow } from "./components/common/FilterRow";
 import {
   useWindowChrome, useWindowTheme, useWindowTitle, windowTitleFor,
@@ -87,8 +88,7 @@ import {
 // UI Components
 import { FilterBar } from "./components/common/FilterBar";
 import { PacketList } from "./components/packet-list/PacketList";
-import { PacketDetailsTree } from "./components/packet-details/PacketDetailsTree";
-import { HexViewer } from "./components/packet-details/HexViewer";
+import { LinkedDetailsTree, LinkedHexViewer } from "./components/packet-details/LinkedDetailPanes";
 import { PacketDetailPane } from "./components/packet-details/PacketDetailPane";
 import { StreamFollowerPane } from "./components/stream-follower/StreamFollowerPane";
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
@@ -327,17 +327,22 @@ export default function App() {
     [],
   );
   const selectionRestoredRef = useRef(false);
-  const [activeByteRange, setActiveByteRange] = useState<
-    [number, number] | null
-  >(null);
+  /* **Neither the hovered byte nor the highlighted range is state here, and
+     they left for different reasons.**
 
-  /* **There is no `hoveredByte` here any more.** It was the one byte under the
-     pointer, derived from `activeByteRange` and handed to the window-spanning
-     bottom bar. The byte inspector is back inside the Hex View pane and reads
-     that pane's own hover state, which is the narrower and more truthful of the
-     two: `activeByteRange` is also what the protocol tree publishes for a
-     one-byte field, so the derivation answered "this byte" for a hover in a
-     different pane. See `HexViewer`'s footer. */
+     `hoveredByte` was the one byte under the pointer, DERIVED from
+     `activeByteRange` - which the protocol tree also publishes for a one-byte
+     field, so the derivation answered "this byte" for a hover in a pane that
+     was not the dump. `services/hoveredByte.ts` carries the byte's VALUE
+     instead, which only a dump can supply.
+
+     `activeByteRange` was ordinary App state and correct as such: it is the
+     cross-highlight between two SIBLING panes, and sibling state belongs in the
+     common parent. The common parent is this component, so a pointer moving
+     across a large frame's dump re-rendered the whole application once per
+     byte. `services/byteRange.ts` has the measurements;
+     `components/packet-details/LinkedDetailPanes.tsx` is what subscribes. This
+     file is no longer on that path and must not go back onto it. */
 
   // Filter State
   // Seeded from the last session rather than blank, so a refresh does not
@@ -546,15 +551,22 @@ export default function App() {
    * It is still threaded to the components rather than inlined at each gate,
    * because the sixteen `permissions.*` reads are where a real one would
    * plug in.
+   *
+   * **`useMemo` with no deps, on an object whose fields are all literals.**
+   * That looks like ceremony and is load-bearing: this is a prop of the memoized
+   * hex pane, and a fresh object each render is a changed prop, which defeats
+   * the memo on every one of App's ten renders a second during a capture. The
+   * empty dep list is the honest description of what it is today, and the
+   * moment a real gate arrives it becomes the list of what that gate reads.
    */
-  const permissions: Capabilities = {
+  const permissions: Capabilities = useMemo(() => ({
     canCapture: true,
     canExportPcap: true,
     canViewPayloads: true,
     canEditDissectors: true,
     canChangeColorRules: true,
     canClearBuffer: true,
-  };
+  }), []);
 
   // Same reasoning, for the Space shortcut: its handler is registered once and
   // needs to know whether there is a buffer that starting would discard. A ref
@@ -1751,7 +1763,7 @@ export default function App() {
     // (`handleDiscardCapture`), named as what it does
     // (docs/decisions/0012-stored-captures-persist.md).
     setSelectedPacket(null);
-    setActiveByteRange(null);
+    resetByteRange();
   };
 
   /**
@@ -1765,7 +1777,7 @@ export default function App() {
   const handleDiscardCapture = useCallback(async () => {
     await clearSession();
     setSelectedPacket(null);
-    setActiveByteRange(null);
+    resetByteRange();
     // The Worker's trackers describe streams from a capture that no longer
     // exists, and the next frame must not be numbered after frames that are
     // gone - the same reset Clear does.
@@ -2367,7 +2379,7 @@ export default function App() {
 
                 {/* Protocol Layers Inspection Tree */}
                 <div
-                  // On the container, not inside PacketDetailsTree - that renders
+                  // On the container, not inside the tree pane - that renders
                   // two different trees for "a packet" and "no packet", and the
                   // tour needs one anchor that exists in both states.
                   data-tour="detail"
@@ -2377,11 +2389,9 @@ export default function App() {
                       : "w-[var(--details-pane-size)] h-full"
                   }`}
                 >
-                  <PacketDetailsTree
+                  <LinkedDetailsTree
                     packet={selectedPacketDetail}
-                    onHoverByteRange={setActiveByteRange}
                     onSelectFrame={goToFrame}
-                    activeByteRange={activeByteRange}
                     onFieldFilter={handleFieldFilter}
                     currentFilter={filterText}
                     onAddColumn={handleAddColumn}
@@ -2430,15 +2440,9 @@ export default function App() {
                 <div
                   className="block w-full flex-1 h-full min-w-0 overflow-hidden"
                 >
-                  <HexViewer
+                  <LinkedHexViewer
                     packet={selectedPacketDetail}
                     bytesState={selectedDetailState}
-                    activeByteRange={activeByteRange}
-                    onHoverByte={(byteIdx) => {
-                      if (byteIdx !== null)
-                        setActiveByteRange([byteIdx, byteIdx]);
-                      else setActiveByteRange(null);
-                    }}
                     permissions={permissions}
                   />
                 </div>

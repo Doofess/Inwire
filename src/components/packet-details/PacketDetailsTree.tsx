@@ -5,7 +5,7 @@ import { ProtocolTreeView } from './ProtocolTreeView';
 import { ExpertFindings } from './ExpertFindings';
 import { PaneHeader } from '../common/PaneHeader';
 
-interface PacketDetailsTreeProps {
+export interface PacketDetailsTreeProps {
   packet: Packet | null;
   onHoverByteRange: (range: [number, number] | null) => void;
   activeByteRange: [number, number] | null;

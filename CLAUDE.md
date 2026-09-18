@@ -754,11 +754,43 @@ Three things the dock knew that are worth not rediscovering:
   in `App.tsx`. One share has no interaction to defer, so the 0.1..0.9 ceiling in
   the normalizer is the whole clamp again and `MIN_PANE_PX` is what stops either
   pane being dragged to nothing.
-- **`Dock` was the application's only `React.memo` boundary**, and there is no
-  longer one. App re-renders ~10x a second during a capture and every widget did
-  a full pass over the buffer, so the dock had to absorb that; the surviving
-  surfaces are unmounted unless their view is active, which is a stronger version
-  of the same guarantee. What survives unchanged is `services/packetCounts.ts`:
+- **`Dock` was the application's only `React.memo` boundary**, and the one that
+  replaced it is the hex pane. App re-renders ~10x a second during a capture and
+  every widget did a full pass over the buffer, so the dock had to absorb that;
+  the surviving surfaces are unmounted unless their view is active, which is a
+  stronger version of the same guarantee - except the dump, which is mounted
+  whenever Packets is and is the most expensive thing under App. `LinkedHexViewer`
+  in `components/packet-details/LinkedDetailPanes.tsx` is the boundary, and what
+  it rests on is worth knowing: `permissions` in `App.tsx` is a `useMemo` with an
+  empty dep list **for this reason alone**, because it was an object literal
+  rebuilt every render, and a changed prop is a memo that never hits and never
+  says so. The tree beside it is deliberately not memoized - `onSelectFrame`
+  closes over `packets`, so its identity changes on every flush and the memo
+  could not hold.
+- **The highlighted byte range is a store for the same reason the counter is.**
+  `services/byteRange.ts`. It is the cross-highlight between the two bottom panes
+  - hover a field, its bytes light up; hover a byte, its field lights up - so it
+  is state shared by two siblings and it lived in their common parent, which is
+  `App`. Every pointer move over a byte therefore re-rendered the whole
+  application; on a 64KB frame the dump alone is ~79 virtualized rows of 32
+  spans. The panes subscribe now and `App` holds nothing - it may `resetByteRange`
+  where the selection goes and may not publish, which
+  `scripts/session/byte-range.ts` asserts along with the memo's preconditions.
+  **It is not `hoveredByte.ts` and must not be merged with it**: that store
+  carries a byte's VALUE so only a dump can publish one, this carries a RANGE so
+  the tree can. `PacketDetailPane` subscribes to neither and keeps its own
+  `useState`, because it owns both halves of its own cross-highlight and is
+  already off App's render path.
+- **The dump's hover is delegated, not per byte.** Every byte is two elements,
+  so a handler pair each was ~5,000 closures built and diffed per render on a
+  large frame; `HexDumpView` binds one `mouseover`/`mouseout` pair on its
+  container and reads `data-byte`. The `mouseout` has to check `relatedTarget`,
+  because it also fires when the pointer moves BETWEEN two cells and an
+  unconditional clear would blank the readout for a frame on every byte crossed.
+  The cells are `transition-colors` rather than `transition-all` for the same
+  class of reason: the hovered cell also takes `scale-110` and a shadow, and
+  `transition-all` declared the transition on all of them.
+- What survives unchanged is `services/packetCounts.ts`:
   the counter publishes and its readout subscribes, because threading a
   ten-times-a-second number down through props was the regression that shipped
   once already (`b0ce1fc`).
