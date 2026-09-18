@@ -2563,6 +2563,7 @@ export default function App() {
         captureStats={captureStats}
         droppedBuffer={droppedBuffer}
         bufferAutoPaused={bufferAutoPaused}
+        nameResolution={nameResolution}
         onOpenSettings={() => setShowSettingsModal(true)}
       />
 

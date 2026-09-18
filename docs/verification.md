@@ -400,26 +400,79 @@ the dragging and the bars lining up.
       difference. Drag it: the tree changes width, and the dump takes what is
       left over.
 
-### The byte inspector
+### The status bar, and the byte readout in it
 
-It was the application's bottom bar for one revision, spanning the window with
-its text inset to line up under this pane. It is Hex View's own footer again.
+The application has a bottom bar again. It had one for a revision and it was
+deleted, so this section carries the checks that say which of the two is on
+screen. The short form: the bar is back, the indent is not.
 
-- [ ] **There is no window-spanning bar.** Nothing runs under the rail; the
-      strip is inside the Hex View pane and stops at that pane's left edge.
-      A full-width strip that survived the revert is the bug.
-- [ ] **Hover a byte in the dump**: the footer fills with offset, decimal, hex,
-      bits and ASCII.
-- [ ] **Hover a one-byte field in the protocol tree**: the footer does **not**
-      react. That is the change — the bar used to, because it read a range
-      derived in `App` that the tree also publishes, and the footer reads this
-      pane's own hover.
-- [ ] **Drag the divider.** The footer is inside the pane, so it resizes with it
-      and there is nothing to keep in step by hand.
-- [ ] **Turn the detail panes off** (Settings → Interface): the footer goes with
-      the pane. In the **stacked** arrangement it sits under the dump.
-- [ ] The **Frame Detail** view's own footer is unaffected — it always had one,
-      spanning that pane and carrying the buffer position at its right end.
+- [ ] **The chrome is a C.** The title row across the top, the rail down the
+      left and the bar across the bottom are one continuous ground, with **no
+      line where the rail meets the bar** and none where it meets the title row.
+      The only 1px border traces the workspace's top, left and bottom. A line
+      cutting across either corner means something grew a `border-t`.
+- [ ] **The bar spans the full window**, under the rail as well as the panes,
+      and **its contents are not indented.** The right-hand group sits at the
+      window's right edge, wherever the panes above it happen to end. A readout
+      pushed sideways to line up under the hex dump is the bug that was reverted
+      once; the machinery for it no longer exists.
+- [ ] **Dragging the bar does not move the window.** It is not a drag region.
+      Every item in it is clickable and lands in Settings.
+- [ ] At **1024×680** with a capture running, an adapter selected, a fault on
+      the agent and a byte hovered — **everything visible at once** — nothing
+      wraps, clips, or pushes the counter off the right edge. The adapter's
+      label is what truncates first.
+
+**The byte readout**, which is the item with the history:
+
+- [ ] **Hover a byte in the Packets view's hex dump**: the readout appears at
+      the right end of the bar — offset, hex, decimal, bits and ASCII. Move off
+      the dump and it **disappears entirely**. There is no "hover any byte"
+      prompt: that sentence taught you what the pane did when it lived in the
+      pane, and in a window-wide bar it would be a permanent sentence about a
+      pane that may not be on screen.
+- [ ] **Hover a one-byte field in the protocol tree**: the bar does **not**
+      react. This is the check with the history. The first bar was fed a range
+      derived in `App` that the tree also publishes, so it answered "this byte"
+      for a hover in a pane that was not the dump.
+- [ ] **Hover a byte, then switch to Frame Detail** (Ctrl+2) and back. The bar
+      is empty in between. The packets view stays mounted behind
+      `display: none`, so this is the case a pointer event cannot cover.
+- [ ] **Hover a byte in Frame Detail's own dump**: the same bar cell fills.
+      That view's footer now carries only `Frame N of M`.
+- [ ] **Drag the tree/dump divider.** Nothing in the bar moves or realigns —
+      which is the whole difference from the version that was deleted.
+- [ ] **Turn the detail panes off** (Settings → Interface): the bar stays and
+      its byte cell is empty.
+- [ ] **Neither hex pane has a footer any more.** The dump's last row sits
+      directly above the workspace's bottom border.
+
+**The left group**, which should read as a diagnosis:
+
+- [ ] **With the agent stopped**, the first item carries a warning triangle and
+      names the fault, and the second reads **No adapter**. The capture and
+      dropped-frame items are **absent** rather than showing zeroes. Clicking
+      either of the two opens Settings.
+- [ ] The warning hue is on the **glyph**, not the label — the label stays at
+      full-strength text. In **Day** check this specifically: `--warning` on the
+      chrome is 4.06:1, which is why it never carries text.
+- [ ] **Start a capture**: a pulsing dot and an elapsed clock appear, and the
+      clock advances once a second. Leave it running past a minute and past an
+      hour if you can: `4:12` becomes `1:04:12`.
+- [ ] **Dropped frames appear only when there are some.** If the driver's own
+      counters could not be read the number carries a `+` and the tooltip says
+      the real total may be higher — it must never read as a plain zero.
+
+**The right group:**
+
+- [ ] The **packet counter is here, not in the title row**, and the title row's
+      centre is empty. The `+N UNSEARCHED` rescan button came with it and still
+      re-runs a whole-capture scan.
+- [ ] The **outbound indicator** is at the far right. With geo-IP and reverse
+      DNS both off it is a quiet shield; turn either on in Settings → Interface
+      and it becomes a coloured globe naming which. This is the one item that
+      is deliberately visible in its quiet state, because "nothing is going out"
+      is the claim worth confirming in a packet analyzer.
 
 - [ ] **The divider drags**, and the hex dump absorbs the change: widen the
       details tree and the dump narrows, and back again.
