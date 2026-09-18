@@ -222,6 +222,27 @@ for (const tier of TIERS) {
     component.includes('brandMarkPaths('), true);
 }
 
+{
+  // **The rendered box and the declared size have to agree**, and nothing but
+  // this notices when they stop. `size` picks the DRAWING - it is the only
+  // input to `tierForSize` - while the Tailwind class picks the BOX the browser
+  // paints into. Set one without the other and the mark is drawn for a size it
+  // is not rendered at: a `w-4` box carrying the five-plate tier is the smudge
+  // the tiering exists to prevent, and it type-checks, renders, and looks
+  // merely slightly wrong.
+  //
+  // Read out of `TitleRow.tsx` because that is the only call site. A second one
+  // would need this to become a walk rather than a match, and the failure would
+  // name the file it could not parse.
+  const row = text('src/components/common/TitleRow.tsx');
+  const at = /<BrandMark className="w-(\d+) h-(\d+)[^"]*" size=\{(\d+)\}/.exec(row);
+  check('the title row renders the mark in a square box', [at?.[1], at?.[2]], [at?.[1], at?.[1]]);
+  // Tailwind's scale is 4px a step, so `w-6` is 24. That conversion is the
+  // whole of the check.
+  check('...and the box it declares is the size it asks to be drawn at',
+    Number(at?.[1]) * 4, Number(at?.[3]));
+}
+
 // --- The rasters ------------------------------------------------------------
 
 const pngSize = (buf: Buffer) => [buf.readUInt32BE(16), buf.readUInt32BE(20)];

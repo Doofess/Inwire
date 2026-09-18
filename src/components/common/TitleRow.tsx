@@ -174,11 +174,20 @@ export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
         caption does" - an icon that announced itself as "Inwire" to a screen
         reader on every focus would be the third telling. */}
     <div className="w-[138px] shrink-0 flex items-center">
-      {/* 16 CSS pixels, which is what picks the drawing: the mark is tiered and
-          the full one is a smudge at this size. Passing the size rather than the
-          tier keeps the caller saying what it knows. */}
+      {/* **24 CSS pixels in a 32px row**, and the two numbers have to be read
+          together. The mark carries about 10% optical margin of its own - the
+          art spans 12..88 of a 100 box - so a 24px box draws roughly 19px of
+          ink, which leaves the row 6 or 7px of air rather than the 4 the
+          numbers suggest. It was 16, where the ink was 12px and the mark read
+          as a detail rather than as the app's corner.
+
+          `size` is what picks the DRAWING and the class is what picks the BOX,
+          so the two must agree or a mark is rendered at one size and drawn for
+          another. `scripts/brand/icon.ts` asserts they do. 24 is still below
+          the 32px tier boundary, so this is the three-plate small tier - five
+          at 24 would put the gap at 2.2px and merge them. */}
       <div className="ml-1 w-11 shrink-0 flex items-center justify-center">
-        <BrandMark className="w-4 h-4 shrink-0" size={16} />
+        <BrandMark className="w-6 h-6 shrink-0" size={24} />
       </div>
     </div>
 

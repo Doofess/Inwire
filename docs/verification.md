@@ -94,10 +94,12 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
 - [ ] **The brand mark is at the top-left corner**, on the rail's axis so it
       lines up with the icons below it — which is `gutter + width / 2`, not half
       the rail's width, since the rail is an inset card. It is the layered
-      stack, drawn at its **small** tier because the mark is 16 CSS pixels —
-      **three** plates, not five. Count them if you can; five at this size merge
-      into one blue lump, and that is the single most likely thing to be wrong
-      after any edit to `BrandMark`.
+      stack, drawn at its **small** tier because the mark is 24 CSS pixels and
+      the boundary is 32 — **three** plates, not five. Count them; five at this
+      size merge into one blue lump, and that is the single most likely thing to
+      be wrong after any edit to `BrandMark`. It should read as the app's
+      corner, not as a detail in it: 24 in a 32px row, with the art's own 10%
+      margin leaving roughly 19px of ink.
 - [ ] **It is legible on both chromes.** The mark carries its own colours rather
       than inheriting one, and a single ramp serves Day and Night: check the
       darkest plate has not sunk into `--secondary` on Night, and that the
