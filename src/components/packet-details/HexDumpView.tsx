@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Packet } from '../../types/packet';
 
 /**
@@ -192,14 +192,49 @@ export const HexDumpView: React.FC<HexDumpViewProps> = ({
         ? 'bg-primary/15 dark:bg-primary/30 text-primary font-bold ring-1 ring-primary'
         : 'text-muted-foreground hover:text-primary hover:bg-accent';
 
-  const hoverProps = (absIdx: number) => ({
-    onMouseEnter: () => onHoverByte(absIdx),
-    onMouseLeave: () => onHoverByte(null),
-  });
+  /**
+   * One pair of handlers for the whole dump, rather than a pair per byte.
+   *
+   * Every byte is TWO elements - one in the hex block, one in the ASCII
+   * column - so a `{ onMouseEnter, onMouseLeave }` per byte allocated four
+   * closures per byte, on every render. A full-height column of a large frame
+   * mounts about 79 rows at 16 bytes, so that was upwards of five thousand
+   * functions built and thrown away per pass, plus five thousand props for
+   * React to diff.
+   *
+   * Delegation costs one listener and a `data-byte` attribute. `mouseover` and
+   * `mouseout` rather than enter/leave because only the bubbling pair can be
+   * caught at an ancestor - which is the whole mechanism - and `closest` rather
+   * than reading `target` directly because the span has no children today and
+   * this does not have to be revisited if it grows one.
+   *
+   * The ref is what keeps these two stable: `onHoverByte` is a prop and may
+   * change identity, and re-binding a delegated listener on every render would
+   * give back the churn this removes.
+   */
+  const hoverRef = useRef(onHoverByte);
+  hoverRef.current = onHoverByte;
+
+  const onPointerOver = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const cell = (e.target as HTMLElement).closest<HTMLElement>('[data-byte]');
+    if (cell) hoverRef.current(Number(cell.dataset.byte));
+  }, []);
+
+  const onPointerOut = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const cell = (e.target as HTMLElement).closest<HTMLElement>('[data-byte]');
+    // `mouseout` also fires when the pointer moves BETWEEN two byte cells, and
+    // the enter for the new one arrives after this. Clearing unconditionally
+    // would blank the readout for a frame on every byte crossed, so this only
+    // reports a departure that leaves the dump's cells entirely.
+    const to = e.relatedTarget as HTMLElement | null;
+    if (cell && !(to && to.closest?.('[data-byte]'))) hoverRef.current(null);
+  }, []);
 
   return (
     <div
       ref={containerRef}
+      onMouseOver={onPointerOver}
+      onMouseOut={onPointerOut}
       className={`font-mono text-[11px] ${external ? '' : 'overflow-y-auto custom-scrollbar'} ${className ?? ''}`}
     >
       {topSpacer > 0 && <div style={{ height: topSpacer }} aria-hidden="true" />}
@@ -226,8 +261,16 @@ export const HexDumpView: React.FC<HexDumpViewProps> = ({
                     return (
                       <span
                         key={bIdx}
-                        {...hoverProps(absIdx)}
-                        className={`w-4 text-center cursor-pointer transition-all rounded px-0.5 ${byteClass(absIdx)}`}
+                        data-byte={absIdx}
+                        // `transition-colors`, not `transition-all`. The
+                        // hovered cell also takes `scale-110` and a shadow, and
+                        // `transition-all` animated both - on every one of the
+                        // thousands of cells in a large frame, since the
+                        // property is declared on all of them and not just on
+                        // the one under the pointer. The colour fade is the
+                        // part that reads as responsive; the scale is better
+                        // instant anyway.
+                        className={`w-4 text-center cursor-pointer transition-colors rounded px-0.5 ${byteClass(absIdx)}`}
                       >
                         {byte.toString(16).padStart(2, '0').toUpperCase()}
                       </span>
@@ -249,7 +292,7 @@ export const HexDumpView: React.FC<HexDumpViewProps> = ({
                 return (
                   <span
                     key={bIdx}
-                    {...hoverProps(absIdx)}
+                    data-byte={absIdx}
                     className={`cursor-pointer transition-colors ${
                       hoveredByteIndex === absIdx
                         ? 'bg-primary text-primary-foreground font-bold rounded'

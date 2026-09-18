@@ -23,7 +23,7 @@ import { hasBytes } from '../../services/packetBytes';
 import type { PacketDetailState } from '../../lib/usePacketDetail';
 import { PaneHeader } from '../common/PaneHeader';
 
-interface HexViewerProps {
+export interface HexViewerProps {
   packet: Packet | null;
   activeByteRange: [number, number] | null;
   onHoverByte: (byteIndex: number | null) => void;

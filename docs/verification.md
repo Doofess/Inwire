@@ -459,6 +459,32 @@ screen. The short form: the bar is back, the indent is not.
       wraps, clips, or pushes the counter off the right edge. The adapter's
       label is what truncates first.
 
+**The cross-highlight between the two bottom panes**, which is where a
+performance fix could have broken a behaviour:
+
+- [ ] **Hover a field in the protocol tree**: its bytes light up in the dump,
+      hex and ASCII both.
+- [ ] **Hover a byte in the dump**: the field containing it lights up in the
+      tree. Both directions, or the store lost a publisher.
+- [ ] **Sweep the pointer along a row of bytes** without stopping. The highlight
+      follows continuously and never flickers off between cells — the dump binds
+      one delegated `mouseout` for the whole pane, and if it stopped checking
+      `relatedTarget` the highlight would blank for a frame on every byte
+      crossed. This is the check that a screenshot cannot make.
+- [ ] **Move the pointer off the dump entirely** — onto the divider, or the row
+      background between the hex and ASCII columns. The highlight clears.
+- [ ] **Move from the tree straight into the dump and back.** Whichever pane the
+      pointer is in owns the highlight; leaving one must not blank what the
+      other just lit.
+- [ ] **On a large frame** — a 64KB segmentation-offload frame is the case —
+      sweeping the dump should feel immediate. It used to re-render the whole
+      application once per byte, so the tell was a lag that got worse the bigger
+      the frame, and was invisible on a 54-byte one.
+- [ ] **With a capture running and a large frame selected**, the dump should sit
+      still. It is the app's only `React.memo` boundary; if it re-renders ten
+      times a second, a prop crossing it stopped being stable — `permissions` is
+      the one to look at first.
+
 **The byte readout**, which is the item with the history:
 
 - [ ] **Hover a byte in the Packets view's hex dump**: the readout appears at
