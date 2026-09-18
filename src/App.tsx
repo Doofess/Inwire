@@ -2088,19 +2088,24 @@ export default function App() {
           were quoted here as 40 / 640 / 630 long after all three had moved. */}
       <TitleRow focused={windowFocused} maximized={windowMaximized} />
 
-      {/* **`bg-secondary`, and it must track the rail and the title row.** The
-          rail and <main> cover this row edge to edge, so with the top-left
-          corner square there is nothing for it to show through any more: it was
-          the colour inside the notch `rounded-tl-xl` cut out of the chrome, and
-          that notch is gone.
+      {/* **The cluster band, and its ground is the shell backdrop.** The rail
+          and <main> are two cards floating in here, inset by the 4px gutter
+          this element's padding draws - left, right and bottom, and NOT top,
+          because the cards meet the title row flush. What shows in that gutter
+          is this `bg-secondary`, which is why it has to stay the chrome's
+          colour: it is the surface the whole cluster sits on.
 
-          It stays the chrome's colour anyway, because it is the ground this
-          row's children are composited against. It was `bg-card` while the
-          chrome moved to `bg-secondary` without it, which put a wedge of the
-          WRONG grey in the one curve the whole arrangement was about - a few
-          dozen pixels, two plausible greys, and nothing in the suite that could
-          see it. If the chrome's ground changes again, this changes with it. */}
-      <div className="flex-1 flex min-h-0 overflow-hidden bg-secondary">
+          That is VS Code's Modern UI arrangement, and the gutter is the half
+          of it that makes the radius legal here. `spacing-size40` is 4px and
+          `cornerRadius-large` is 8; both are carried below.
+
+          It was `bg-card` while the chrome moved to `bg-secondary` without it,
+          which put a wedge of the WRONG grey in the one curve the arrangement
+          was about - a few dozen pixels, two plausible greys, and nothing in
+          the suite that could see it. There is a great deal more of it on
+          screen now. If the chrome's ground changes again, this changes with
+          it. */}
+      <div className="flex-1 flex min-h-0 overflow-hidden bg-secondary pl-1 pr-1 pb-1">
         <ActivityRail
           isCapturing={isCapturing}
           onStartCapture={handleStartCapture}
@@ -2137,38 +2142,48 @@ export default function App() {
 
         {/* The content pane, tucked into the corner the title row and the rail
             make. **All four corners are square**, and the top-left was the one
-            exception: `rounded-tl-xl`, on the argument that the one corner where
-            two chrome edges meet is not an edge of the window and may curve.
-            It is square now, which makes the shell's rule general: no surface
-            that meets the window - the title row, the rail, this pane - draws a
-            corner of its own, and the only curve at the window's edge is the
-            one Windows puts there (`roundedCorners`, a default never set).
-            Radii INSIDE the workspace are a separate question and are
-            everywhere: buttons, cards, popovers and pills all carry one. The
-            rule is about the shell's own edges, not about the app.
+            exception: `rounded-tl-xl`, on the argument that the one corner
+            where two chrome edges meet is not an edge of the window and may
+            curve. That was deleted, and the rule it left is the one still in
+            force: **no surface that meets the window draws a corner of its
+            own**, because the only curve out there is Windows' own
+            (`roundedCorners`, a default never set).
 
-            **The VERTICAL line is on this pane and not on the rail.** It is
-            the edge between the chrome and the workspace, and at `--secondary`
-            against `--background` the two grounds differ by 13/255 in Night, so
-            the edge reads on its own and this border carries it in Day. The
-            rail's `border-r` used to draw the same line a pixel to the left, so
-            the two cannot both exist - it went when this arrived, and a
-            returning `border-r` is what a 2px seam down that column means.
+            This pane carries `rounded-r-lg` and does not break that rule - it
+            no longer meets the window. The cluster band holds it 4px clear on
+            the right and the bottom, and a card floating inside the chrome is
+            not a surface at the window's edge. The rule is unchanged; what
+            changed is that nothing here answers to it any more except the
+            title row and the status bar, which still run edge to edge and are
+            still square.
 
-            **The two HORIZONTAL lines are shared with the rail**, which draws
-            its own `border-t` and `border-b` to carry them across its 56px.
-            The three edges together wrap the rail: a rule under the title row,
-            one above the status bar, and this pane's left edge joining them.
-            That is the outline VS Code puts around its activity bar, and it is
-            the only thing separating the rail from the strips above and below
-            it - the ground is `--secondary` on both sides of every one of
-            those lines.
+            **This pane has no `border-l`, and the rail is why.** The two are
+            cards in one cluster, meeting flush, and VS Code's Modern UI gives
+            the facing edge to the RAIL - `.part.sidebar.left` in
+            `floatingPanels.css` drops its border and its left corners for
+            exactly this. The reason carries over unchanged: a rail that hands
+            its facing border to the neighbour has a 55px interior for a 44px
+            icon, so the column lands on a half pixel. Put a `border-l` back
+            here and there are two hairlines in that seam, not one.
 
-            `overflow-hidden` stays, though its original argument went with the
-            radius - it was there so the FILTER ROW, which paints its own
-            `bg-background`, could not fill the curve back in. What keeps it is
-            plainer: every child of this column scrolls inside it, and their
-            scrollers resolve against this box.
+            **The three edges this pane does draw are the cluster's outside**,
+            which is why they carry the radius the rail's left corners carry.
+            `rounded-r-lg` is 8px, `--vscode-cornerRadius-large`, and it is
+            legal for the same reason the rail's is: the band's 4px gutter
+            holds this pane off the window, so the shell's no-corner-against-
+            the-window rule is not engaged. The gutter and the radius move
+            together or not at all.
+
+            At `--secondary` against `--background` the two grounds differ by
+            13/255 in Night, so the cluster's edge half-reads on its own and
+            these borders carry it in Day.
+
+            `overflow-hidden` is load-bearing again, and for its ORIGINAL
+            reason: the filter row paints its own `bg-background` straight into
+            the top-right corner, so without the clip the curve is drawn and
+            then filled back in by the child sitting in it. It was also keeping
+            every child's scroller resolving against this box, which is the
+            argument that held while all four corners were square.
 
             **This is a column, and it was a row for exactly one revision.** The
             dock ran the pane's full height with the filter row beside it, so
@@ -2182,7 +2197,7 @@ export default function App() {
             beside it; both the constant and the file are deleted, and nothing
             competes with the list for horizontal space in this row any more. */}
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden
-          border-l border-t border-b border-border bg-background">
+          border-t border-r border-b border-border rounded-r-lg bg-background">
           {/* **The filter row belongs to the Packets view, and only to it.**
 
               This reverses the rule that was here, and the reversal is the

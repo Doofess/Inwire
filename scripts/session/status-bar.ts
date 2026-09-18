@@ -158,14 +158,15 @@ console.log('\n--- the indent cannot come back ---\n');
   // that separates them is a line, not a second ground.
   checkTrue('...on the chrome own ground', bar.includes('bg-secondary'));
 
-  // **The line above this bar exists and is not drawn here.** The band above
-  // draws it - `border-b` on the rail and on `<main>` - so it runs the whole
-  // width of the window and neither strip pays for it out of its own height,
-  // which `border-box` is what makes that distinction real. A `border-t` here
-  // is therefore the same line twice AND a 23px bar.
+  // **This bar draws no line, and there is one above it.** The cluster band
+  // sits on it: two cards, each with its own `border-b`, held 4px clear by the
+  // band's `pb-1`. So the edge above this strip is the cards' own outline
+  // rather than a rule this element owns - and a `border-t` here would draw a
+  // second line 4px below the first AND make the bar 23px, because
+  // `border-box` takes it out of the height.
   checkTrue('...and drawing no line of its own', !bar.includes('border-t'));
-  checkTrue('...because the band above it draws that line',
-    code('src/components/common/ActivityRail.tsx').includes('border-t border-b border-border'));
+  checkTrue('...because the cluster above it closes its own bottom edge',
+    code('src/components/common/ActivityRail.tsx').includes('border border-border'));
 
   // The shell draws no corner of its own; the window's bottom-left is Windows'.
   checkTrue('...and no radius of its own', !/\brounded/.test(bar));
@@ -175,8 +176,8 @@ console.log('\n--- the indent cannot come back ---\n');
   // click that does nothing.
   checkTrue('the bar is not a drag region', !/\bapp-drag\b/.test(bar));
 
-  checkTrue('<main> closes the border the bar sits under',
-    code('src/App.tsx').includes('border-l border-t border-b border-border'));
+  checkTrue('...and <main> closes the other half of it',
+    code('src/App.tsx').includes('border-t border-r border-b border-border'));
 }
 
 console.log('\n--- one publisher per dump, and none anywhere else ---\n');

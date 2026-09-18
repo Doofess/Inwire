@@ -411,25 +411,33 @@ The application has a bottom bar again. It had one for a revision and it was
 deleted, so this section carries the checks that say which of the two is on
 screen. The short form: the bar is back, the indent is not.
 
-- [ ] **The chrome is a C and the rail is outlined inside it.** The title row
-      across the top, the rail down the left and the bar across the bottom are
-      one continuous `--secondary` ground - the outline is a line, never a
-      second colour. Check the ground first: a panel that reads *darker* or
-      *lighter* than its neighbours is a different bug from a missing line.
-- [ ] **Three lines, and they meet.** One under the title row, one above the
-      status bar, both running the **full width of the window**; and one down
-      the rail's right side joining them at both ends. Put a finger on the
-      top-left corner and follow it: the horizontal rule must not stop at the
-      rail's right edge, which is what a missing `border-t` on the rail looks
-      like - `<main>` would still draw its half, so the line starts 56px in.
-- [ ] **The rail's left edge has no line**, and neither does the window's right.
-      The shell draws nothing against the window's own edge; that is the same
-      rule that keeps all four corners square.
-- [ ] **One line per seam, not two.** A `border-r` returning to the rail puts a
-      second rule beside `<main>`'s - visible in Day as a thickened edge, and in
-      Night as nothing at all, which is why the script checks it rather than the
-      eye. The strips are the same trap at the horizontal seams: a `border-t` on
-      the status bar draws that line twice **and** makes the bar 23px.
+- [ ] **The chrome is a C and the cluster floats inside it.** The title row
+      across the top and the bar across the bottom run edge to edge; between
+      them the rail and the workspace are two cards, inset by a 4px gutter on
+      the left, the right and the bottom, and **flush against the title row at
+      the top**. The gutter shows the chrome's own `--secondary`. A card that
+      reads *darker* or *lighter* than the gutter is a different bug from a
+      missing line.
+- [ ] **The outline is continuous around the pair.** Follow it: down the rail's
+      rounded left side, along the bottom under both cards, up the workspace's
+      rounded right side, and back across under the title row. One seam crosses
+      it, between the rail and the workspace, and it has **square** corners at
+      both ends where the two cards meet.
+- [ ] **Two rounded corners per card, on the outside only** — 8px, and only on
+      the cluster's perimeter. A radius appearing where the rail meets the
+      workspace means the two have stopped reading as one surface.
+- [ ] **Nothing is rounded against the window itself.** The title row and the
+      status bar still run corner to corner and are square. The only curve at
+      the window's edge is Windows'.
+- [ ] **One line per seam, not two.** A `border-l` returning to `<main>` puts a
+      second rule beside the rail's — a thickened edge in Day, invisible in
+      Night, which is why the script checks it rather than the eye. The strips
+      are the same trap: a `border-t` on the status bar draws a line 4px under
+      the cards' own **and** makes the bar 23px.
+- [ ] **The icon column is centred in the rail card.** With a border on each
+      side the interior is 54px for a 44px target — 5px of air either side. If
+      the icons look a pixel left of centre, the facing border has moved to
+      `<main>`.
 - [ ] **The bar spans the full window**, under the rail as well as the panes,
       and **its contents are not indented.** The right-hand group sits at the
       window's right edge, wherever the panes above it happen to end. A readout

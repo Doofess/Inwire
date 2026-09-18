@@ -62,17 +62,18 @@ import { PacketCountsReadout } from '../common/PacketCountsReadout';
  * strips are one surface and the shell's colour scheme is unchanged by the
  * outline described next.
  *
- * **This bar draws no `border-t`, and the line above it is still there.** It
- * is drawn by the two elements in the band above - `border-b` on the rail and
- * on `<main>` - which is what lets the rule run the full width of the window
- * from one element's edge to the next, and what keeps this strip's 24px whole:
- * `border-box` would take a border out of the height rather than adding to it.
- * `TitleRow` declines its `border-b` for the same reason and a sharper one,
- * since 1px off an `h-8` row clips 32px caption buttons.
+ * **This bar draws no `border-t`, and there is an edge above it anyway.** The
+ * cluster sits on this strip - the rail and `<main>` are two cards, each
+ * closing its own bottom edge, held 4px clear by the band's `pb-1`. So the
+ * line above is the cards' outline, 4px up, with the chrome's own ground in
+ * the gap.
  *
- * So a `border-t` appearing here is not a second opinion about the design, it
- * is the same line drawn twice - 2px in Day, and the bar a pixel shorter than
- * `STATUS_BAR_HEIGHT` says. `scripts/session/status-bar.ts` fails on one.
+ * A `border-t` here is therefore not a second opinion about the design: it is
+ * a second line 4px under the first, and a 23px bar into the bargain, because
+ * `border-box` takes the border out of the height rather than adding to it.
+ * `TitleRow` declines its `border-b` for the sharper version of the same -
+ * 1px off an `h-8` row clips 32px caption buttons.
+ * `scripts/session/status-bar.ts` fails on either.
  *
  * ## What may be threaded through it
  *
