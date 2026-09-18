@@ -93,7 +93,7 @@ import { StreamFollowerPane } from "./components/stream-follower/StreamFollowerP
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
 import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
-import { SettingsModal } from "./components/common/SettingsModal";
+import { SettingsPane } from "./components/common/SettingsPane";
 import {
   FILTER_PRESETS_STORAGE_KEY,
   addPreset,
@@ -405,7 +405,7 @@ export default function App() {
   // list too, and what makes leaving for the list and coming back land on the
   // frame you were reading.
   const [showExportModal, setShowExportModal] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showSettingsPane, setShowSettingsPane] = useState(false);
 
   /**
    * Which of the five surfaces the rail says we are on.
@@ -1643,15 +1643,19 @@ export default function App() {
    * case, since a long capture can drop the origin while the stream is read.
    */
   useEffect(() => {
-    if (view === 'packets') return;
+    if (view === 'packets' && !showSettingsPane) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
+      // Settings first, and it does not take the view with it: it is a sheet
+      // over whatever was underneath, so closing it returns you there rather
+      // than to Packets. One Escape per surface, outermost first.
+      if (showSettingsPane) { setShowSettingsPane(false); return; }
       if (view === 'stream' && streamOrigin !== null) goToFrame(streamOrigin);
       setView('packets');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [view, setView, streamOrigin, goToFrame]);
+  }, [view, setView, streamOrigin, goToFrame, showSettingsPane]);
 
   // Window-level keyboard shortcuts - see hooks/useKeyboardNavigation.ts.
   useKeyboardNavigation({
@@ -1910,12 +1914,26 @@ export default function App() {
     if (expression.trim() !== '') setView('packets');
   }, [filterText, setView]);
 
+  /**
+   * The back step, and Settings sits on top of the view hierarchy rather than
+   * in it.
+   *
+   * Settings takes the workspace card without being a view, so the step out of
+   * it is "back to what I was looking at" - the CURRENT view, unchanged
+   * underneath - rather than a step up the `backTargetFor` chain. That is what
+   * makes it a sheet: opening and closing it costs the view nothing.
+   */
   const backTarget = backTargetFor(view);
+  const backLabel = showSettingsPane
+    ? viewLabel(view)
+    : backTarget === null ? null : viewLabel(backTarget);
+
   const goBack = useCallback(() => {
+    if (showSettingsPane) { setShowSettingsPane(false); return; }
     if (backTarget === null) return;
     if (view === 'stream' && streamOrigin !== null) goToFrame(streamOrigin);
     setView(backTarget);
-  }, [backTarget, view, streamOrigin, goToFrame, setView]);
+  }, [showSettingsPane, backTarget, view, streamOrigin, goToFrame, setView]);
 
   /**
    * A stream that goes away takes its view with it.
@@ -2083,8 +2101,8 @@ export default function App() {
   // otherwise is a full pass over up to 50,000 packets, twice a second, for a
   // number nobody can see. The `0` stands in while closed - nothing reads it.
   const totalBytes = useMemo(
-    () => (showSettingsModal ? dashboardPackets.reduce((sum, p) => sum + p.length, 0) : 0),
-    [dashboardPackets, showSettingsModal],
+    () => (showSettingsPane ? dashboardPackets.reduce((sum, p) => sum + p.length, 0) : 0),
+    [dashboardPackets, showSettingsPane],
   );
   /**
    * What the window calls itself. Pure, and asserted without a window.
@@ -2161,7 +2179,7 @@ export default function App() {
         maximized={windowMaximized}
         panesVisible={showPanes}
         onTogglePanes={togglePanes}
-        backLabel={backTarget === null ? null : viewLabel(backTarget)}
+        backLabel={backLabel}
         onBack={goBack}
         center={
           <FilterBar
@@ -2209,7 +2227,8 @@ export default function App() {
           view={view}
           onViewChange={handleViewChange}
           streamAvailable={streamForSelection !== null || streamToFollow !== null}
-          onOpenSettings={() => setShowSettingsModal(true)}
+          settingsOpen={showSettingsPane}
+          onOpenSettings={() => setShowSettingsPane((open) => !open)}
           onOpenExport={() => setShowExportModal(true)}
           schedule={schedule}
           onScheduleChange={setSchedule}
@@ -2315,6 +2334,77 @@ export default function App() {
 
           {/* The views. One row still, because Statistics and Follow Stream are
               siblings of the packet list rather than children of it. */}
+          {/* **Settings takes the workspace, and is not a view.**
+
+              It was the last modal that was a place: `fixed inset-0`, a 70%
+              scrim, a `max-w-5xl` panel and an X. Everything about that said
+              "you are somewhere else for a moment", and Settings is not a
+              moment - the dissector editor, the colour rules, the filter
+              presets and the Update Center all live in it. Same argument that
+              promoted Frame Detail: a modal is a detour, a pane is a place.
+
+              **And it is deliberately not in `APP_VIEWS`.** That list answers
+              one question - is this a way of looking at the capture? - and
+              nothing in Settings changes when a packet arrives, which is the
+              exact test that moved Network out of the view list and into a tab
+              of this pane. Putting Settings in the rail's numbering would
+              reverse that with no new argument. So it takes the card the way a
+              sheet does: the view underneath is untouched and still
+              `restoredView`-able, and leaving Settings puts it back.
+
+              Rendered BEFORE the views and returning early, rather than beside
+              them, so there is one surface in this card at a time by
+              construction. */}
+          {showSettingsPane ? (
+            <SettingsPane
+              dissectorEngine={dissectorEngine}
+              onUpdateDissectors={handleUpdateDissectors}
+              adapters={adapters}
+              networkFacts={networkFacts}
+              onRefreshAdapters={() => sendAgentCommand({ type: 'refresh_adapters' })}
+              agentLinkEnabled={agentLinkEnabled}
+              agentHealth={agentHealth}
+              onStartAgentService={startAgentService}
+              agentError={agentError}
+              onConnectAgent={handleConnectAgent}
+              onDisconnectAgent={handleDisconnectAgent}
+              onRestartAgent={handleRestartAgent}
+              agentStatus={agentStatus}
+              agentVersion={agentVersion}
+              agentOutdated={agentOutdated}
+              agentNpcapAccess={agentNpcapAccess}
+              agentCaptureState={agentCaptureState}
+              agentInterfaces={agentInterfaces}
+              captureStats={captureStats}
+              droppedBuffer={droppedBuffer}
+              linkContext={linkContext}
+              linkChanges={linkChanges}
+              selectedInterfaces={selectedInterfaces}
+              agentLog={agentLog}
+              onSubscribeAgentLog={subscribeAgentLog}
+              onUnsubscribeAgentLog={unsubscribeAgentLog}
+              onClearAgentLog={clearAgentLog}
+              totalPacketsCount={packets.length}
+              totalBytes={totalBytes}
+              packetBufferBytes={packetBufferBytes}
+              // Read off the ref during render rather than mirrored into state:
+              // `packets` changes on every flush, so this render is the one that
+              // follows each change and the ref is current by then. A state copy
+              // would be a second thing to keep in step for a number only Driver
+              // Info reads.
+              bufferResidentBytes={residentBytes()}
+              bufferAutoPaused={bufferAutoPaused}
+              onClearPackets={handleClearPackets}
+              captureStorage={captureStorage}
+              onDiscardCapture={handleDiscardCapture}
+              colorRules={colorRules}
+              onColorRulesChange={setColorRules}
+              packetTheme={packetTheme}
+              permissions={permissions}
+              filterPresetLibrary={filterPresetLibrary}
+              onFilterPresetLibraryChange={handleFilterPresetLibraryChange}
+            />
+          ) : (
           <div className="flex-1 flex min-h-0 overflow-hidden">
             {/* Main Packet Inspection Core */}
             {/* Kept MOUNTED while another view is active, and hidden with
@@ -2620,6 +2710,7 @@ export default function App() {
 
 
           </div>
+          )}
         </main>
       </div>
 
@@ -2696,60 +2787,6 @@ export default function App() {
 
 
 
-      <AnimatePresence>
-        {showSettingsModal && (
-          <SettingsModal
-            key="settings-modal"
-            onClose={() => setShowSettingsModal(false)}
-            dissectorEngine={dissectorEngine}
-            onUpdateDissectors={handleUpdateDissectors}
-            adapters={adapters}
-            networkFacts={networkFacts}
-            onRefreshAdapters={() => sendAgentCommand({ type: 'refresh_adapters' })}
-            agentLinkEnabled={agentLinkEnabled}
-            agentHealth={agentHealth}
-            onStartAgentService={startAgentService}
-            agentError={agentError}
-            onConnectAgent={handleConnectAgent}
-            onDisconnectAgent={handleDisconnectAgent}
-            onRestartAgent={handleRestartAgent}
-            agentStatus={agentStatus}
-            agentVersion={agentVersion}
-            agentOutdated={agentOutdated}
-            agentNpcapAccess={agentNpcapAccess}
-            agentCaptureState={agentCaptureState}
-            agentInterfaces={agentInterfaces}
-            captureStats={captureStats}
-            droppedBuffer={droppedBuffer}
-            linkContext={linkContext}
-            linkChanges={linkChanges}
-            selectedInterfaces={selectedInterfaces}
-            agentLog={agentLog}
-            onSubscribeAgentLog={subscribeAgentLog}
-            onUnsubscribeAgentLog={unsubscribeAgentLog}
-            onClearAgentLog={clearAgentLog}
-            totalPacketsCount={packets.length}
-            totalBytes={totalBytes}
-            packetBufferBytes={packetBufferBytes}
-            // Read off the ref during render rather than mirrored into state:
-            // `packets` changes on every flush, so this render is the one that
-            // follows each change and the ref is current by then. A state copy
-            // would be a second thing to keep in step for a number only Driver
-            // Info reads.
-            bufferResidentBytes={residentBytes()}
-            bufferAutoPaused={bufferAutoPaused}
-            onClearPackets={handleClearPackets}
-            captureStorage={captureStorage}
-            onDiscardCapture={handleDiscardCapture}
-            colorRules={colorRules}
-            onColorRulesChange={setColorRules}
-            packetTheme={packetTheme}
-            permissions={permissions}
-            filterPresetLibrary={filterPresetLibrary}
-            onFilterPresetLibraryChange={handleFilterPresetLibraryChange}
-          />
-        )}
-      </AnimatePresence>
 
       {/* A jump that could not happen, said out loud.
           Bottom-centre and above the modals, because the click that triggers

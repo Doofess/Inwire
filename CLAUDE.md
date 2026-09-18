@@ -378,8 +378,31 @@ so "exactly one map is ever live" is a fact about the component tree instead of
 a condition somebody has to keep true - which is the strongest form the answer
 could take, and the reason to prefer deleting a surface over guarding it.
 
-**The packet detail window is a view too, and it is the last modal that was a
-place.** It was `fixed inset-0`, a scrim and a 92vh panel, opened by
+**Settings is a pane and it is the last modal that was a place.** It was
+`fixed inset-0`, a 70% scrim, a `max-w-5xl` panel at `max-h-[90vh]`, an X and a
+Close button - all of which said "you are somewhere else for a moment", about
+the surface that holds the dissector editor, the colour rules, the filter
+presets and the Update Center. `components/common/SettingsPane.tsx` takes the
+workspace card instead: no scrim, no radius, no border, because `<main>` is the
+card and a second one inside it is a card in a card.
+
+**It is deliberately NOT in `APP_VIEWS`**, and that is the half worth keeping.
+The list answers one question - is this a way of looking at the capture? -
+and nothing in Settings changes when a packet arrives, which is the exact test
+that moved Network out of the list and into a tab of this pane. Putting Settings
+in would reverse that with no new argument and hand it a `Ctrl+N` it does not
+want. So it behaves like a sheet: it covers the workspace, the view underneath is
+untouched, and closing it puts that view back rather than navigating anywhere.
+
+Three ways out and no fourth. The title row's back step reads
+**"Back to &lt;the view underneath&gt;"** and closes it; Escape closes it before
+it closes anything else, outermost surface first; and the rail's Settings icon
+is a toggle carrying the same active marker a view does, because from the rail's
+side "this is what is on screen" is the same fact. The X and the Close button
+were the modal's and neither survived - a surface with four doors is one nobody
+knows how to leave. `scripts/session/view.ts` holds all of it.
+
+**The packet detail window is a view too, and it was the modal before that.** It was `fixed inset-0`, a scrim and a 92vh panel, opened by
 double-clicking a row and dismissed with Escape or an X - which meant the one
 surface that shows a frame in full could only be reached from the one surface
 that shows frames in summary, and was *dismissed* rather than *left*. It passes

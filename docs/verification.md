@@ -116,6 +116,23 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       back into the rasteriser.
       The ground under it moved from `--card` to `--secondary` — a step brighter
       — so this is worth a fresh look rather than a remembered pass.
+- [ ] **Settings takes the workspace, and nothing dims.** Press the rail's
+      Settings icon: it fills the workspace card, the title row, the rail and
+      the status bar stay live and undimmed, and there is **no scrim** and no
+      floating panel. The card's own border and rounded corners are the only
+      ones — Settings must not draw a second card inside the first.
+- [ ] **The rail marks it the way it marks a view** — the translucent accent
+      fill, not the outline a toggle gets. Press the icon again and it closes.
+- [ ] **Three ways out, and they agree.** The title row's back step reads
+      "Back to Packets" (or whichever view is underneath) and closes it; Escape
+      closes it; the rail icon toggles it. There is **no X and no Close
+      button**.
+- [ ] **It does not navigate.** Open Statistics, then Settings, then close it —
+      you are back in Statistics, not in Packets. That is what makes it a sheet
+      rather than a view.
+- [ ] **Escape closes Settings before anything else.** With Settings open over
+      Frame Detail, one Escape closes Settings and leaves you in Frame Detail; a
+      second returns you to Packets.
 - [ ] **The display filter is in the title row's centre**, about 26rem wide,
       centred in the **window** rather than in the gap between the corner and
       the caption buttons. There is no filter row above the packet list and no

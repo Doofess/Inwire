@@ -234,6 +234,49 @@ console.log('\n--- the stored view ---\n');
   }
 }
 
+console.log('\n--- Settings is a pane and not a view ---\n');
+
+{
+  const app = code('src/App.tsx');
+
+  // **The view list answers one question**: is this a way of looking at the
+  // capture? Nothing in Settings changes when a packet arrives - which is the
+  // exact test that moved Network OUT of that list and into a tab of this pane.
+  // Putting Settings in would reverse that with no new argument, and would hand
+  // it a `Ctrl+N` it does not want.
+  check('Settings is not in the view list', ids.filter((id) => id.includes('setting')), []);
+
+  // It takes the workspace card all the same, which is what stops it being a
+  // modal: no scrim, no fixed positioning, nothing floating over the chrome.
+  const pane = code('src/components/common/SettingsPane.tsx');
+  checkTrue('the pane is not positioned over the window',
+    !pane.includes('fixed inset-0') && !/\bz-\d/.test(pane));
+  checkTrue('...and paints no scrim', !/bg-black\//.test(pane));
+  // `<main>` is the card and draws the border, the radius and the ground; a
+  // second set here would be a card inside a card. Asserted as the root's exact
+  // class rather than by grepping for a radius, because the pane's CONTENTS are
+  // full of rounded things and always were - it is the shell that must be bare.
+  checkTrue('...and draws no card of its own',
+    pane.includes('className="h-full min-h-0 flex flex-col bg-background text-foreground"'));
+  checkTrue('it is rendered inside the workspace', app.includes('showSettingsPane ? ('));
+
+  // **Three ways out and no fourth.** Every other pane is left by the back step,
+  // Escape, or the rail. The X and the Close button were the modal's, and a
+  // surface with four doors is one nobody knows how to leave.
+  checkTrue('the pane has no close control of its own',
+    !pane.includes('onClose') && !pane.includes('>Close<'));
+  checkTrue('...the back step closes it rather than leaving the view',
+    app.includes('if (showSettingsPane) { setShowSettingsPane(false); return; }'));
+  checkTrue('...and the rail toggles it',
+    app.includes('setShowSettingsPane((open) => !open)'));
+
+  // The rail says what is on screen and Settings is on screen, so it carries
+  // the same marker a view does rather than the outline a toggle gets.
+  checkTrue('the rail marks Settings the way it marks a view',
+    code('src/components/common/ActivityRail.tsx')
+      .includes("railButton(settingsOpen, 'view')"));
+}
+
 console.log('\n--- the back step, and what is a root ---\n');
 
 {
