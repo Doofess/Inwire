@@ -86,9 +86,11 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       on its own; the border is still what carries it in **Day**, where the two
       are much closer. A second line running past the corner means the rail got
       its `border-r` back and is drawing beside the pane's.
-- [ ] **All four of its corners are square**, this one included. Any radius
-      anywhere is the app drawing a curve inside the one Windows already draws
-      on the window itself, which is the only curve in this window.
+- [ ] **All four of its corners are square**, this one included. A radius on
+      any surface that meets the window - this pane, the title row, the rail -
+      is the app drawing a curve inside the one Windows already draws. Buttons,
+      cards and popovers inside the workspace are rounded and always were; the
+      rule is about the shell's edges.
 - [ ] **The brand mark is at the top-left corner**, centred on the rail's 56px
       axis so it lines up with the icons below it. It is the spiral sphere, drawn
       at its **micro** tier because the lockup is 16 CSS pixels — two turns of

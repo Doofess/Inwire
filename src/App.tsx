@@ -2108,9 +2108,13 @@ export default function App() {
             make. **All four corners are square**, and the top-left was the one
             exception: `rounded-tl-xl`, on the argument that the one corner where
             two chrome edges meet is not an edge of the window and may curve.
-            It is square now because the app draws no radius anywhere - the only
-            curve in this window is the one Windows puts on the window itself,
-            which is `roundedCorners` defaulting true and never being set.
+            It is square now, which makes the shell's rule general: no surface
+            that meets the window - the title row, the rail, this pane - draws a
+            corner of its own, and the only curve at the window's edge is the
+            one Windows puts there (`roundedCorners`, a default never set).
+            Radii INSIDE the workspace are a separate question and are
+            everywhere: buttons, cards, popovers and pills all carry one. The
+            rule is about the shell's own edges, not about the app.
 
             **The border is on this pane and not on the rail.** That was the
             whole reason the curve was visible, and it outlives the curve: it is
