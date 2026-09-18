@@ -190,8 +190,14 @@ console.log('\n--- every view has a surface, and a conditional one is not restor
 
   // Clearing must NOT navigate: the empty filter selects the whole capture,
   // which is what every view already shows, so a jump would land nowhere.
+  // `[^}]*` is what does the work: it cannot cross out of the guarded
+  // statement, so this matches only a `setView('packets')` that is INSIDE the
+  // non-empty test. Written that way rather than as the exact one-liner it used
+  // to be, because the guard grew a second statement - closing Settings - and a
+  // check pinned to the punctuation would have failed on a change that kept
+  // every word of what it is here to prove.
   checkTrue('...but clearing it does not',
-    /expression\.trim\(\) !== ''\) setView\('packets'\)/.test(app));
+    /expression\.trim\(\) !== ''\)[^}]*setView\('packets'\)/.test(app));
 
   // The banner went with the row: it named the agent fault above the packet
   // list while the status bar names it below, and one fault wants one place.
@@ -269,6 +275,22 @@ console.log('\n--- Settings is a pane and not a view ---\n');
     app.includes('if (showSettingsPane) { setShowSettingsPane(false); return; }'));
   checkTrue('...and the rail toggles it',
     app.includes('setShowSettingsPane((open) => !open)'));
+
+  // **Choosing a view closes it**, and this shipped broken. The pane renders
+  // INSTEAD of the view stack, so `setView` underneath it moved the rail's
+  // active marker and nothing else: every rail icon looked dead from inside
+  // Settings and the back step was the only way out. A sheet has to be closed
+  // by the transition that lands somewhere, because the view underneath is
+  // deliberately untouched while it is open - nothing else in the app knows a
+  // view is being chosen.
+  //
+  // Both navigations are checked, because both are reachable with the sheet up:
+  // the rail and `Ctrl+1..5` go through `handleViewChange`, and the filter field
+  // is in the title row, which the sheet does not cover.
+  checkTrue('...and choosing a view closes it',
+    /handleViewChange = useCallback[\s\S]{0,1400}setShowSettingsPane\(false\)/.test(app));
+  checkTrue('...as does applying a filter, which navigates',
+    /expression\.trim\(\) !== ''\)[^}]*setShowSettingsPane\(false\)/.test(app));
 
   // The rail says what is on screen and Settings is on screen, so it carries
   // the same marker a view does rather than the outline a toggle gets.
