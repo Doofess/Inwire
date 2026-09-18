@@ -273,34 +273,17 @@ export const HexDumpView: React.FC<HexDumpViewProps> = ({
 };
 
 /**
- * The numeric breakdown of one byte: offset, decimal, hex, bits, ASCII.
+ * **`ByteInspector` was here and is deleted.**
  *
- * Its own component because the two presentations put it in different places -
- * the pane's footer, the detail window's full-width status bar - but it must
- * read identically in both.
+ * Its doc comment said it was its own component "because the two presentations
+ * put it in different places - the pane's footer, the detail window's
+ * full-width status bar - but it must read identically in both". There is one
+ * place now: `components/status/ByteReadout.tsx`, at the right end of the
+ * application status bar, which reads `services/hoveredByte.ts` instead of
+ * being handed a frame and an index.
+ *
+ * The formatting went with it, into `describeByte` in that store - pure, and
+ * so reachable by an assertion script, which this version was not. That move
+ * turned up a real asymmetry nobody had noticed: the offset's hex was not
+ * zero-padded and the value's was, so byte 10 read `(0xA)` beside `0x0A`.
  */
-export const ByteInspector: React.FC<{ packet: Packet; hoveredByteIndex: number | null }> = ({
-  packet,
-  hoveredByteIndex,
-}) => {
-  const value =
-    hoveredByteIndex !== null && hoveredByteIndex < packet.rawBytes.length
-      ? packet.rawBytes[hoveredByteIndex]
-      : null;
-
-  if (hoveredByteIndex === null || value === null) {
-    return <span>Hover any byte to inspect raw bitwise &amp; numerical representation</span>;
-  }
-
-  return (
-    <div className="flex items-center gap-3">
-      <span>OFFSET: <b className="text-foreground">{hoveredByteIndex} (0x{hoveredByteIndex.toString(16).toUpperCase()})</b></span>
-      <span>DEC: <b className="text-foreground">{value}</b></span>
-      <span>HEX: <b className="text-primary">0x{value.toString(16).padStart(2, '0').toUpperCase()}</b></span>
-      <span>BITS: <b className="text-emerald-400">0b{value.toString(2).padStart(8, '0')}</b></span>
-      <span>
-        ASCII: <b className="text-amber-400">{value >= 32 && value <= 126 ? `'${String.fromCharCode(value)}'` : 'N/A'}</b>
-      </span>
-    </div>
-  );
-};
