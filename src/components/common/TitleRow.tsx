@@ -1,5 +1,5 @@
 import React from 'react';
-import { PanelBottom } from 'lucide-react';
+import { ChevronLeft, PanelBottom } from 'lucide-react';
 import { BrandMark } from './BrandMark';
 import { WindowControls } from './WindowControls';
 
@@ -131,6 +131,15 @@ export interface TitleRowProps {
   /** Whether the packet detail panes are shown below the list. */
   panesVisible: boolean;
   onTogglePanes: () => void;
+  /**
+   * The name of the view a back step lands on, or null at a root.
+   *
+   * The LABEL rather than the view id, because this row has no business
+   * knowing what the views are - it renders a control and says where it goes.
+   * `viewPrefs.ts` owns the hierarchy and `App` resolves it.
+   */
+  backLabel: string | null;
+  onBack: () => void;
 }
 
 /**
@@ -140,7 +149,7 @@ export interface TitleRowProps {
  * would have to carry its own.
  */
 export const TitleRow: React.FC<TitleRowProps> = ({
-  focused, maximized, panesVisible, onTogglePanes,
+  focused, maximized, panesVisible, onTogglePanes, backLabel, onBack,
 }) => (
   <header
     className={`h-8 shrink-0 flex items-center
@@ -195,6 +204,34 @@ export const TitleRow: React.FC<TitleRowProps> = ({
       <div className="ml-1 w-11 shrink-0 flex items-center justify-center">
         <BrandMark className="w-6 h-6 shrink-0" size={24} />
       </div>
+
+      {/* **One step back up the view hierarchy**, in the corner every
+          application puts a back control in, and rendered only when there is
+          somewhere to go: `Packets`, `Statistics` and the `Routing Map` are
+          roots, so nothing appears there. It replaces the "Back to frame N"
+          button that lived in Follow Stream's own footer - a way out that
+          existed in one view and nowhere else.
+
+          It fits here without touching the mark: the corner reserves 138px to
+          balance the caption buttons, the mark takes the first 48 of that on
+          the rail's axis, and this sits in the ~90 left over. Appearing and
+          disappearing therefore moves nothing.
+
+          `app-no-drag`, like every control in this row. */}
+      {backLabel !== null && (
+        <button
+          type="button"
+          onClick={onBack}
+          title={`Back to ${backLabel}`}
+          aria-label={`Back to ${backLabel}`}
+          className="w-9 h-8 shrink-0 inline-flex items-center justify-center rounded
+            app-no-drag cursor-pointer transition-colors text-foreground/70
+            hover:bg-accent hover:text-foreground focus-visible:outline-none
+            focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+      )}
     </div>
 
     {/* Empty, and that is the finished state.

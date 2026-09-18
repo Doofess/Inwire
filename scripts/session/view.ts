@@ -30,8 +30,8 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  APP_VIEWS, isAppView, normalizeViewPrefs, restoredView, viewStore, VIEW_DEFAULTS,
-  type AppView,
+  APP_VIEWS, backTargetFor, isAppView, normalizeViewPrefs, restoredView, viewLabel,
+  viewStore, VIEW_DEFAULTS, type AppView,
 } from '../../src/services/viewPrefs';
 import { MIN_WINDOW_HEIGHT, STATUS_BAR_HEIGHT, TITLE_BAR_HEIGHT } from '../../electron/window';
 
@@ -215,6 +215,60 @@ console.log('\n--- the stored view ---\n');
     check(`${id} survives a round trip through the normaliser`,
       normalizeViewPrefs({ view: id })?.view, id);
   }
+}
+
+console.log('\n--- the back step, and what is a root ---\n');
+
+{
+  // **The views are a drill-down, not a flat set**, and the back control is the
+  // only thing that says so. `Packets` is the capture, `Frame Detail` is one
+  // frame of it, `Follow Stream` is one conversation that frame belongs to -
+  // each step down is taken from the surface above it, so each has a place to
+  // come back to and it is not always `Packets`.
+  check('the chain is stream -> detail -> packets',
+    [backTargetFor('stream'), backTargetFor('detail'), backTargetFor('packets')],
+    ['detail', 'packets', null]);
+
+  // Statistics and the map are roots deliberately: nothing drills into them and
+  // they are reached from the rail rather than from another view, so a back
+  // step would have to invent a destination.
+  check('the two whole-capture views are roots',
+    [backTargetFor('statistics'), backTargetFor('geo')], [null, null]);
+
+  // The property rather than the table: following the chain from any view has
+  // to terminate, and terminate somewhere that is itself a root.
+  for (const id of ids) {
+    let at: AppView | null = id;
+    const seen: AppView[] = [];
+    while (at !== null && seen.length <= ids.length) { seen.push(at); at = backTargetFor(at); }
+    checkTrue(`${id} reaches a root without cycling`,
+      seen.length <= ids.length && backTargetFor(seen[seen.length - 1]) === null);
+  }
+
+  // The label comes from the same list the rail and the shortcuts read, so the
+  // button cannot call a view something its tooltip does not.
+  check('the back control names the view the rail does',
+    viewLabel('detail'), APP_VIEWS.find((v) => v.id === 'detail')?.label);
+
+  const app = code('src/App.tsx');
+
+  // **Escape is a different key and must stay one hop.** It is the exit - any
+  // view to Packets - where the back control is one step. Conflating them would
+  // make the stream's two answers look like a bug.
+  checkTrue('Escape still goes straight to packets',
+    app.includes("setView('packets')"));
+
+  // The pane's own way out is gone, and this is what stops it coming back: a
+  // "Back to frame N" in one view's footer is a way out that exists there and
+  // nowhere else.
+  const stream = code('src/components/stream-follower/StreamFollowerPane.tsx');
+  checkTrue('Follow Stream has no back control of its own',
+    !/Back to/i.test(stream) && !stream.includes('onReturnToPackets'));
+
+  // Leaving a stream lands on the frame it was followed from, by BOTH ways out.
+  // That behaviour belonged to the deleted button; it belongs to leaving.
+  const restores = app.split('goToFrame(streamOrigin)').length - 1;
+  check('both ways out of a stream restore its origin frame', restores, 2);
 }
 
 console.log('\n--- the rail fits the smallest window ---\n');

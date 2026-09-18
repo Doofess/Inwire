@@ -197,12 +197,16 @@ console.log('\n--- the controls cannot be pressed unless they opt out of the dra
   // fourth button placed BESIDE that group inherits none of it, and the symptom
   // is the one this whole section exists for - a press that drags the window
   // and never fires.
-  const ownButtons = titleRow.match(/<button/g)?.length ?? 0;
-  check('the title row carries exactly one control of its own', ownButtons, 1);
-  checkTrue('...and it opts out of the drag region',
-    /<button[\s\S]*?app-no-drag[\s\S]*?<\/button>/.test(titleRow));
-  checkTrue('...and names itself, being a glyph',
-    /<button[\s\S]*?aria-label="[^"]+"/.test(titleRow));
+  const own = titleRow.match(/<button[\s\S]*?<\/button>/g) ?? [];
+  // Two: the back step and the detail-panes toggle. Both are glyphs and both
+  // sit beside `WindowControls` rather than inside it.
+  check('the title row carries two controls of its own', own.length, 2);
+  checkTrue('...and every one opts out of the drag region',
+    own.every((b) => b.includes('app-no-drag')));
+  // Either a literal or an expression - the back control's name says where it
+  // goes, so it cannot be a constant string.
+  checkTrue('...and every one names itself, being a glyph',
+    own.every((b) => /aria-label=(?:"[^"]+"|\{[^}]+\})/.test(b)));
   // A toggle, so it has to say which way it is - a title attribute that always
   // read "Toggle panes" would leave the state to be guessed from the workspace.
   checkTrue('...and announces its state, being a toggle',
