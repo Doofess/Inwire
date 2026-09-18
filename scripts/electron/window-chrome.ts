@@ -190,6 +190,34 @@ console.log('\n--- the controls cannot be pressed unless they opt out of the dra
   // saying where you are, not what pressing it does.
   checkTrue('the maximize control names the action, both ways',
     controls.includes("'Restore down' : 'Maximize'"));
+
+  // **The title row has a control of its own now**, and it is the case the rule
+  // above was written for: `WindowControls` carries `app-no-drag` on its shared
+  // class, which protects the three buttons inside it and nothing else. A
+  // fourth button placed BESIDE that group inherits none of it, and the symptom
+  // is the one this whole section exists for - a press that drags the window
+  // and never fires.
+  const ownButtons = titleRow.match(/<button/g)?.length ?? 0;
+  check('the title row carries exactly one control of its own', ownButtons, 1);
+  checkTrue('...and it opts out of the drag region',
+    /<button[\s\S]*?app-no-drag[\s\S]*?<\/button>/.test(titleRow));
+  checkTrue('...and names itself, being a glyph',
+    /<button[\s\S]*?aria-label="[^"]+"/.test(titleRow));
+  // A toggle, so it has to say which way it is - a title attribute that always
+  // read "Toggle panes" would leave the state to be guessed from the workspace.
+  checkTrue('...and announces its state, being a toggle',
+    titleRow.includes('aria-pressed='));
+
+  // The control it replaced. The preference stays and persists; what must not
+  // come back is the SWITCH, because two ways in is how the two disagree.
+  const settings = readFileSync('src/components/common/InterfaceSettingsPanel.tsx', 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ');
+  checkTrue('Settings no longer switches the panes',
+    !settings.includes('setting-panes') && !/onCheckedChange=\{\(panes\)/.test(settings));
+  // ...but still READS the preference, to grey out an arrangement with nothing
+  // to arrange. That is the row which really is a setting.
+  checkTrue('...and still greys out the arrangement when they are off',
+    settings.includes('disabled={!layout.panes}'));
 }
 
 console.log('\n--- the reserve and the controls agree ---\n');

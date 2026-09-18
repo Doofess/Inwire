@@ -1,4 +1,5 @@
 import React from 'react';
+import { PanelBottom } from 'lucide-react';
 import { BrandMark } from './BrandMark';
 import { WindowControls } from './WindowControls';
 
@@ -127,6 +128,9 @@ export interface TitleRowProps {
   focused: boolean;
   /** From `useWindowChrome`. Decides the maximize button's glyph and label. */
   maximized: boolean;
+  /** Whether the packet detail panes are shown below the list. */
+  panesVisible: boolean;
+  onTogglePanes: () => void;
 }
 
 /**
@@ -135,7 +139,9 @@ export interface TitleRowProps {
  * click that does nothing at all. `WindowControls` carries it; a second control
  * would have to carry its own.
  */
-export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
+export const TitleRow: React.FC<TitleRowProps> = ({
+  focused, maximized, panesVisible, onTogglePanes,
+}) => (
   <header
     className={`h-8 shrink-0 flex items-center
       bg-secondary text-secondary-foreground app-drag transition-opacity
@@ -209,6 +215,40 @@ export const TitleRow: React.FC<TitleRowProps> = ({ focused, maximized }) => (
         below vacuous here rather than delicate: there is nothing inside it that
         needs `app-no-drag`. */}
     <div className="flex-1 min-w-0" />
+
+    {/* **The detail panes, on and off.** It was a switch in
+        `Settings -> Interface`, and this is where every editor puts its layout
+        toggles for a reason that applies here: it is reached for while reading
+        a capture, not while configuring the app. `Settings` keeps the pane
+        ARRANGEMENT, which is chosen once.
+
+        **Not 46px wide.** That is Windows' caption metric and it belongs to the
+        three buttons beside this one; a control of ours that borrowed it would
+        claim to be part of that set. It is `w-9` with a rounded hover, which is
+        what the rail's buttons look like and what VS Code's layout controls
+        look like.
+
+        The two halves of the row are no longer equal - 138px of corner against
+        this plus 138 of controls - and that is fine now in a way it was not
+        before: the centre held the packet counter, which had to be centred in
+        the WINDOW, and it is empty since that moved to the status bar.
+
+        `app-no-drag`, without which this moves the window instead of being
+        pressed - a click that silently does nothing, which is the one failure
+        mode this row has. */}
+    <button
+      type="button"
+      onClick={onTogglePanes}
+      aria-pressed={panesVisible}
+      title={panesVisible ? 'Hide packet detail panes' : 'Show packet detail panes'}
+      aria-label="Toggle packet detail panes"
+      className={`w-9 h-8 mr-1 shrink-0 inline-flex items-center justify-center rounded
+        app-no-drag cursor-pointer transition-colors hover:bg-accent
+        focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring
+        focus-visible:ring-inset ${panesVisible ? 'text-foreground' : 'text-foreground/60'}`}
+    >
+      <PanelBottom className="w-4 h-4" />
+    </button>
 
     <WindowControls maximized={maximized} />
   </header>

@@ -176,6 +176,19 @@ console.log('\n--- the indent cannot come back ---\n');
   // click that does nothing.
   checkTrue('the bar is not a drag region', !/\bapp-drag\b/.test(bar));
 
+  // **Nothing in the bar is pressable, and that is the whole strip rather than
+  // one component.** Each item used to open the Settings tab that fixes what it
+  // reports; the bar is a readout now. Checked across the directory rather than
+  // on `StatusItem` alone, because the easy way to put a button back is to skip
+  // the shared cell and write one inside an item.
+  //
+  // The exception is deliberate and lives outside this directory: the packet
+  // counter's `+N UNSEARCHED` rescan is the only way in the app to re-run a
+  // whole-capture filter scan, and it is a real control that happens to sit in
+  // the bar. `components/common/PacketCountsReadout.tsx` owns it.
+  const pressable = walk('src/components/status').filter((f) => /<button|onClick/.test(code(f)));
+  check('no item in the status bar is a button', pressable, []);
+
   checkTrue('...and <main> closes its own, being the other card in that band',
     code('src/App.tsx').includes('border border-border rounded-lg'));
 }

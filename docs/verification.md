@@ -116,6 +116,22 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       back into the rasteriser.
       The ground under it moved from `--card` to `--secondary` — a step brighter
       — so this is worth a fresh look rather than a remembered pass.
+- [ ] **The detail-panes toggle is beside the caption buttons**, left of
+      minimize, with a small gap. Press it: the protocol tree and hex dump go
+      and come back, and the packet list takes the height. It is narrower than
+      the three caption buttons and has a rounded hover, so it does not read as
+      a fourth one.
+- [ ] **It does not move the window.** Press and hold on it and drag — the
+      window must stay put and the press must register. This is the failure
+      `app-no-drag` exists for, and it looks like a click that did nothing.
+- [ ] **Settings → Interface has no panes switch**, and its "Pane arrangement"
+      row greys out while the panes are hidden. Two ways in is how the two
+      disagree.
+- [ ] **Nothing in the status bar is clickable.** Hover every item in the bar:
+      no hover highlight, no pointer cursor, and Tab from the workspace does not
+      stop on any of them. The one exception is the packet counter's
+      `+N UNSEARCHED` rescan, which is a real button and still runs a
+      whole-capture scan.
 - [ ] **`INWIRE` is gone.** No word beside the mark, in either theme. The window
       still names itself in the **taskbar and Alt-Tab** — hover the taskbar entry
       and start a capture: it reads `Ethernet - capturing - Inwire`. That string
@@ -507,7 +523,7 @@ performance fix could have broken a behaviour:
       That view's footer now carries only `Frame N of M`.
 - [ ] **Drag the tree/dump divider.** Nothing in the bar moves or realigns —
       which is the whole difference from the version that was deleted.
-- [ ] **Turn the detail panes off** (Settings → Interface): the bar stays and
+- [ ] **Turn the detail panes off** (the title row's toggle): the bar stays and
       its byte cell is empty.
 - [ ] **Neither hex pane has a footer any more.** The dump's last row sits
       directly above the workspace's bottom border.
@@ -555,7 +571,7 @@ performance fix could have broken a behaviour:
       stored share does not change, so widening gives back exactly what you set.
 - [ ] **Stacked arrangement** (Settings → Interface): both stack, and the
       divider's arrows flip to up/down.
-- [ ] **Turn the panes off** (Settings → Interface, "Detail panes"): both go.
+- [ ] **Turn the panes off** (the title row's toggle): both go.
 
 ### One map, and it is the view
 

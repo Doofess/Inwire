@@ -96,18 +96,17 @@ export const InterfaceSettingsPanel: React.FC = () => {
   return (
     <div>
       <Section title="Layout">
-        <SettingRow
-          label="Packet detail panes"
-          description="The protocol tree and byte view below the packet list."
-          htmlFor="setting-panes"
-        >
-          <Switch
-            id="setting-panes"
-            checked={layout.panes}
-            onCheckedChange={(panes) => patchLayout({ panes })}
-          />
-        </SettingRow>
+        {/* **The "Packet detail panes" switch was here and is in the title
+            row.** `TitleRow.tsx`, beside the caption buttons, which is where
+            every editor puts a layout toggle - and the distinction that moved
+            it is the one this panel exists to make: a SETTING is chosen once
+            and a CONTROL is reached for mid-task. Showing and hiding the panes
+            is the second, and it was two clicks and a modal away.
 
+            The preference itself is unchanged and still persists; `layout.panes`
+            is still read right below, to grey out an arrangement that has
+            nothing to arrange. That row stays here because choosing beside-vs-
+            stacked really is a setting. */}
         <SettingRow
           label="Pane arrangement"
           description="Whether the protocol tree and byte view sit beside each other or above and below."

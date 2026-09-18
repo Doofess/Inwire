@@ -122,7 +122,6 @@ export const StatusBar: React.FC<StatusBarProps> = ({ nameResolution, ...session
       <OutboundStatus
         geoIp={nameResolution.geoIp}
         reverseDns={nameResolution.reverseDns}
-        onOpenSettings={session.onOpenSettings}
       />
     </div>
   </footer>
