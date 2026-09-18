@@ -427,14 +427,17 @@ screen. The short form: the bar is back, the indent is not.
       the top**. The gutter shows the chrome's own `--secondary`. A card that
       reads *darker* or *lighter* than the gutter is a different bug from a
       missing line.
-- [ ] **The outline is continuous around the pair.** Follow it: down the rail's
-      rounded left side, along the bottom under both cards, up the workspace's
-      rounded right side, and back across under the title row. One seam crosses
-      it, between the rail and the workspace, and it has **square** corners at
-      both ends where the two cards meet.
-- [ ] **Two rounded corners per card, on the outside only** — 8px, and only on
-      the cluster's perimeter. A radius appearing where the rail meets the
-      workspace means the two have stopped reading as one surface.
+- [ ] **Two separate outlines, with daylight between them.** The rail is a
+      closed rounded rectangle and so is the workspace, with a 4px gap down the
+      middle showing the chrome's ground. Follow each outline all the way round
+      — neither should share an edge with the other, and neither should have a
+      flat side facing the gap.
+- [ ] **Four rounded corners per card** — 8px on all eight corners in the band.
+      A square corner facing the gap means the two have gone back to meeting
+      flush.
+- [ ] **The gap is even top to bottom**, and the same width as the gutter at the
+      window's left edge and under the cards. All three are 4px, from the same
+      Tailwind step.
 - [ ] **Nothing is rounded against the window itself.** The title row and the
       status bar still run corner to corner and are square. The only curve at
       the window's edge is Windows'.

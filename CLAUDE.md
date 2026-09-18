@@ -367,14 +367,14 @@ fields.
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  ◉   32px TitleRow                          ─ □ ✕       │
-├──────┬──────────────────────────────────────────────────┤
-│ rail │ FilterRow (banner, filter, restore)              │
-│ 44px ├──────────────────────────────────────────────────┤
-│      │ packets (hidden, never unmounted)                │
-│      │   ├─ packet list                                 │
-│      │   └─ INSPECTION │ HEX VIEW                      │
-│      │ detail | statistics | geo | stream               │
-├──────┴──────────────────────────────────────────────────┤
+│ ╭────╮ ╭──────────────────────────────────────────────╮ │
+│ │rail│ │ FilterRow (banner, filter, restore)          │ │
+│ │44px│ ├──────────────────────────────────────────────┤ │
+│ │    │ │ packets (hidden, never unmounted)            │ │
+│ │    │ │   ├─ packet list                             │ │
+│ │    │ │   └─ INSPECTION │ HEX VIEW                   │ │
+│ │    │ │ detail | statistics | geo | stream           │ │
+│ ╰────╯ ╰──────────────────────────────────────────────╯ │
 │ ● Capturing 04:12  Ethernet     0x42 'B'  44/178,200 ◍  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -434,19 +434,22 @@ each load-bearing for the others:
   **flush** at the top, which is also VS Code's. The chrome's `--secondary`
   shows in the gutter and is the cluster's backdrop, which is the first time
   that ground has been visible at all.
-- **8px radius on the cluster's outside corners only** - `rounded-l-lg` on the
-  rail, `rounded-r-lg` on `<main>` - so the two read as one connected surface
-  rather than two cards with a gap between them. 8px is
-  `--vscode-cornerRadius-large`; 4px is `--vscode-spacing-size40`.
+- **8px on every corner of both cards**, and a 4px gap between them: they
+  FLOAT apart rather than meeting flush. That is VS Code's `.nosidebar` case -
+  a rail with nothing to connect to "closes up as a standalone panel with every
+  corner rounded". The gap is `ml-1` on `<main>`, not `mr-1` on the rail, which
+  is their convention too and keeps it one number rather than two that have to
+  agree. 8px is `--vscode-cornerRadius-large`; 4px is `--vscode-spacing-size40`.
 - **The radius does not break the square-corner rule, it steps around it.** The
   rule is that nothing drawing against the window's OWN edge may carry a corner,
   because Windows draws the only curve out there. The gutter means neither card
   touches the window. Delete the gutter and the radius goes in the same commit.
-- **The rail draws all four of its borders and `<main>` gives up its
-  `border-l`.** VS Code's reason is arithmetic and carries over exactly: `w-14`
-  under `border-box` is 54px of interior between two 1px borders, which centres
-  a 36px target on whole pixels, where handing the facing border to the
-  neighbour leaves 55.
+- **Each card draws its own four borders**, so there is no shared seam and no
+  question of who owns it. They met flush for a revision, with the rail drawing
+  the seam and `<main>` giving up its `border-l`; the border belongs to the rail
+  either way, and the reason is arithmetic: `w-11` under `border-box` is 42px of
+  interior between two 1px borders, which centres a 36px target on whole pixels,
+  where handing the facing border away leaves 43.
 
 **Neither strip draws an edge of its own, and that is arithmetic too.**
 `border-box` takes a border out of the element's height, so a `border-b` on the
@@ -557,14 +560,15 @@ rail, this pane. Radii inside the workspace are untouched by it and are
 everywhere: 242 `rounded-*` utilities across the renderer, on buttons, cards,
 popovers and pills.
 
-**The seam between the two cards is drawn by the rail**, and `<main>` carries
-no `border-l` at all - the paragraph above has the arithmetic, and
-`scripts/session/view.ts` asserts both halves, because two lines in one place is
-one line too many. This reverses the arrangement that held while the rail was a
-strip rather than a card, when the pane drew that line and the rail drew none.
-What has not changed is why the line is needed: at `--secondary` against
-`--background` the grounds differ by 13/255 in Night (the paragraph above has
-the deltas) and the border carries it in Day.
+**There is no seam between the two cards**, because they do not touch: a 4px
+gap runs between them and each closes its own outline. That went through both of
+VS Code's arrangements on the way here - the rail drawing a shared seam while
+`<main>` gave up its `border-l`, then the two floating apart - and
+`scripts/session/view.ts` asserts whichever is in force, because two lines in one
+place is one line too many and so is none. What has not changed is why a line is
+needed at all: at `--secondary` against `--background` the grounds differ by
+13/255 in Night (the paragraph above has the deltas) and the border carries it in
+Day.
 
 `overflow-hidden` stays and its reason changed. It was load-bearing for the
 curve - `FilterRow` paints its own `bg-background` straight into that corner, so

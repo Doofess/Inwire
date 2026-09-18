@@ -248,21 +248,27 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // buttons that move the window instead of being pressed.
   checkTrue('the rail is entirely no-drag', !rail.includes('app-drag'));
 
-  // **The card.** Four borders and a radius on the window side, which is VS
-  // Code's `.part.activitybar.left` (`floatingPanels.css`) rather than an
-  // invention here. The three facts below are one arrangement, and each of
-  // them breaks the other two if it moves on its own.
-  classIs('the rail is a bordered card', 'border border-border rounded-l-lg');
+  // **Two cards, each with its own complete outline, and a gap between them.**
+  // VS Code's `.nosidebar` case (`floatingPanels.css`): a rail with nothing to
+  // connect to closes up as a standalone panel with every corner rounded. The
+  // three facts below are one arrangement and each breaks the other two if it
+  // moves alone.
+  classIs('the rail is a bordered card', 'border border-border rounded-lg');
 
-  // The facing edge belongs to the RAIL. VS Code's reason is arithmetic and it
-  // carries over exactly: `w-11` under `border-box` leaves 42px of interior
+  // The border belongs to the rail whichever arrangement is in force, and the
+  // reason is arithmetic: `w-11` under `border-box` leaves 42px of interior
   // between two 1px borders, which centres a 36px target on whole pixels. Hand
-  // that border to the neighbour instead and the interior is 43.
+  // that border to a neighbour and the interior is 43.
   const app = code('src/App.tsx');
-  checkTrue('...and `<main>` gives up its facing border to it',
-    !/\bborder-l\b/.test(app));
-  checkTrue('...while drawing the three outside edges of the cluster',
-    app.includes('border-t border-r border-b border-border'));
+  checkTrue('...and so is <main>, with all four of its own edges',
+    app.includes('border border-border rounded-lg'));
+
+  // The gap that makes them float apart rather than share a seam. On `<main>`
+  // rather than on the rail, which is VS Code's convention - a left-hand rail
+  // takes its gap from the leading margin of the card beside it - and which
+  // keeps it one number instead of two that have to agree.
+  checkTrue('the workspace card supplies the gap between them',
+    /className="ml-1 flex-1/.test(app));
 
   // The radius is legal only while the gutter holds these cards off the
   // window: the shell's rule is that nothing meeting the window's own edge
@@ -270,8 +276,6 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // commit, which is what this pairing exists to force.
   checkTrue('the cluster band insets the cards from the window',
     app.includes('bg-secondary pl-1 pr-1 pb-1'));
-  checkTrue('...and the outer card carries the matching radius',
-    app.includes('rounded-r-lg'));
 
   // **The brand mark rides the rail's axis, and the axis is not half the rail's
   // width.** The card is inset by the band's gutter, so the icon column is

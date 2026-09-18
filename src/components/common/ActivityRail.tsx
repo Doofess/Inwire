@@ -92,20 +92,24 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * file before changing any of the four facts below, because each of them is
  * load-bearing there for a reason it took them a comment to explain.
  *
- * **A border on all four sides, and the facing one is the seam.** `<main>` sits
- * flush against this card's right edge and gives up its own `border-l`, so the
- * single hairline between them is drawn HERE. VS Code's reason is the one that
- * applies: the rail has to draw it, or its visible interior runs past its own
- * edge to the neighbour's border and the icon column ends up on a half pixel.
- * At `w-11` with `border-box` that is exact - 44 less two 1px borders is 42, an
- * even interior for a 36px target. Give the border away and it is 43.
+ * **A border on all four sides, and a radius on all four corners.** This card
+ * floats: `<main>` is a separate card with a 4px gap between them, so there is
+ * no shared seam and no question of who draws it. That is VS Code's own answer
+ * for a rail with nothing beside it - with the side bar collapsed it "closes up
+ * as a standalone panel with every corner rounded", `.nosidebar` in
+ * `floatingPanels.css`.
  *
- * **Rounded on the window side, square on the neighbour's**: `rounded-l-lg`,
- * 8px, which is `--vscode-cornerRadius-large`. The right corners stay square so
- * the rail and the workspace read as one connected surface rather than two
- * cards with a gap painted between them.
+ * It met `<main>` flush for a revision, which is the other arrangement that
+ * file describes, and the border still belongs here either way: at `w-11` with
+ * `border-box` the interior is exact - 44 less two 1px borders is 42, an even
+ * interior for a 36px target. Give the border to the neighbour and it is 43,
+ * and the icon column lands on a half pixel.
  *
- * **The radius is legal because the card no longer touches the window.** The
+ * **The gap is `ml-1` on `<main>`, not `mr-1` here.** VS Code's convention, and
+ * worth keeping rather than splitting: one margin is one number to change,
+ * where a margin on each side is two that have to agree.
+ *
+ * **The radius is legal because the card does not touch the window.** The
  * shell's rule is that nothing drawing against the window's own edge may carry
  * a corner - Windows draws the only curve out there. `App.tsx`'s cluster band
  * insets this card by a 4px gutter on the left and the bottom, so the rule is
@@ -476,7 +480,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       onKeyDown={onRailKeyDown}
       className="w-11 shrink-0 flex flex-col items-center bg-secondary
         text-secondary-foreground select-none
-        border border-border rounded-l-lg"
+        border border-border rounded-lg"
     >
       {/* No top cell, and the mark is not in one. The rail starts below the
           title row rather than beside it, so the window's top-left corner is
