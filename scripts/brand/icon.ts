@@ -21,25 +21,33 @@
  * `themePalettes.ts`, and it is caught the same way - by regenerating and
  * comparing rather than by trusting.
  *
- * **Two rules from the previous mark are gone and both are worth naming.**
+ * **Two rules from the mark before last survive, and one measurement did not.**
  *
- * The first was that the component paints only `currentColor`, which was how one
- * flat glyph served every theme. The mark is a shaded form now; inheriting one
- * colour would flatten it to a silhouette. What replaces that rule is narrower
- * and still worth having: the colours live in the geometry module and the
- * component holds none.
+ * The component paints no colour of its own. That began as "only
+ * `currentColor`", which was how one flat glyph served every theme; the mark has
+ * been a shaded form through two redraws now, and inheriting a single colour
+ * would flatten either of them to a silhouette. What the rule became is
+ * narrower and still worth having: the colours live in the geometry module, and
+ * the component holds none.
  *
- * The second was that the drawing is measured once. It is tiered now - three
- * densities for three size ranges - so coverage and bounds are checked **per
- * tier**. That is the entire point of tiering: the ceiling is what `full` has to
- * stay under and the floor is what `micro` has to clear, and a single
- * measurement would let one of them hide behind the other.
+ * The drawing is measured **per tier** rather than once, which is the entire
+ * point of tiering - a single measurement lets one tier hide behind the other.
+ *
+ * What went is the coverage test. It flattened every run of the old spiral into
+ * a union of polygons and counted painted cells on a 120x120 grid, which worked
+ * because that mark was **generated**: every run came back as an array of
+ * points. This one is drawn art with curves and arcs in it, so there are no
+ * polygons to flatten and a point-in-path test would mean writing a renderer.
+ * What replaces it measures the thing that actually goes wrong with a drawn
+ * mark - the tiers drifting apart, or a face picking up a colour from outside
+ * the ramp - and the bounds checks, which never needed the polygons, are kept
+ * verbatim.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  MARK_SIZE, MARK_TIERS, brandMarkPaths, markBounds, spiralRuns,
+  MARK_SIZE, brandMarkPaths, markBounds, tierForSize,
   type MarkTier,
 } from '../../src/lib/brandMark';
 import { FAVICON_SVG, ICO_SIZES, ICO_TARGETS, PNG_TARGETS } from './render-icons';
@@ -81,87 +89,77 @@ check('the viewBox is square, so no size can distort it',
 
 // --- The mark itself, once per tier -----------------------------------------
 
-const TIERS: MarkTier[] = ['full', 'compact', 'micro'];
-
-/**
- * How much of its own bounding box the mark paints, flattened.
- *
- * Flattening is a GEOMETRIC operation here, not a colour one - the union of
- * every run, whatever each is filled with. That is what makes the measure
- * survive the mark going from one colour to two.
- */
-function coverageOf(tier: MarkTier): number {
-  const runs = spiralRuns(MARK_TIERS[tier]);
-  const b = markBounds(tier);
-  const inside = (pts: readonly (readonly [number, number])[], px: number, py: number) => {
-    let hit = false;
-    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-      const [xi, yi] = pts[i];
-      const [xj, yj] = pts[j];
-      if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) hit = !hit;
-    }
-    return hit;
-  };
-  const GRID = 120;
-  let painted = 0;
-  for (let iy = 0; iy < GRID; iy++) {
-    for (let ix = 0; ix < GRID; ix++) {
-      const x = b.minX + ((ix + 0.5) / GRID) * (b.maxX - b.minX);
-      const y = b.minY + ((iy + 0.5) / GRID) * (b.maxY - b.minY);
-      if (runs.some((r) => inside(r.pts, x, y))) painted++;
-    }
-  }
-  return painted / (GRID * GRID);
-}
+const TIERS: MarkTier[] = ['primary', 'small'];
 
 for (const tier of TIERS) {
   const b = markBounds(tier);
-  const cover = coverageOf(tier);
-  // The ceiling catches the band being fattened or the turns closing until the
-  // mark flattens into a disc; the floor catches the opposite failure, a mark
-  // thinned until it disappears at 16px. Both are the kind of change that looks
-  // fine at 256 and ruins the taskbar.
-  check(`${tier}: flattened, between a third and a half of its box is painted`,
-    [cover >= 0.3, cover <= 0.55], [true, true]);
+  const paths = brandMarkPaths(tier);
+
   // Anything outside the box is clipped at some sizes and not others.
   check(`${tier}: the mark sits inside the viewBox`,
     [b.minX >= 0, b.minY >= 0, b.maxX <= MARK_SIZE, b.maxY <= MARK_SIZE],
     [true, true, true, true]);
-  // ...and fills enough of it to not look lost. A mark floating in the middle of
-  // its own box is the thing that makes an icon look small at every size.
-  check(`${tier}: ...and fills at least 80% of it across and 70% down`,
-    [(b.maxX - b.minX) / MARK_SIZE >= 0.8, (b.maxY - b.minY) / MARK_SIZE >= 0.7],
+
+  // ...and fills enough of it to not look lost. A mark floating in the middle
+  // of its own box is the thing that makes an icon look small at every size.
+  check(`${tier}: ...and fills at least 75% of it across and 70% down`,
+    [(b.maxX - b.minX) / MARK_SIZE >= 0.75, (b.maxY - b.minY) / MARK_SIZE >= 0.7],
     [true, true]);
-  // Every run is `M x y L x y ... Z`, absolute throughout, so the bounds above
-  // are read off real coordinates rather than approximated from a curve.
-  check(`${tier}: every run is a closed polygon of absolute coordinates`,
-    brandMarkPaths(tier).every((p) => /^M[-\d. ]+(?:L[-\d. ]+)+Z$/.test(p.d)), true);
+
+  // `markBounds` reads coordinate pairs straight out of the path data, which is
+  // only sound while every command is ABSOLUTE. One relative command - a lower
+  // case `l`, `h`, `c` - and the numbers after it are offsets being measured as
+  // positions, which does not throw and does not look wrong until some size
+  // clips.
+  check(`${tier}: every command is absolute`,
+    paths.every((p) => !/[a-z]/.test(p.d.replace(/[^A-Za-z]/g, ''))), true);
+
+  // A fill that is not a literal hex is a fill that came from somewhere else -
+  // a gradient, a pattern, `currentColor`. All three are the thing the flat
+  // facet shading exists to avoid, and a `url(#…)` would also not survive the
+  // rasteriser's data: URL.
+  check(`${tier}: every face is one literal flat colour`,
+    paths.every((p) => /^#[0-9a-fA-F]{6}$/.test(p.fill)), true);
+
+  // The close button's red is the app's alarm colour and is the one hue the
+  // mark may never borrow - an icon that shares a hue with "this went wrong"
+  // spends it.
+  check(`${tier}: the alarm red is not in the mark`,
+    paths.some((p) => p.fill.toLowerCase() === '#c42b1c'), false);
 }
 
 {
-  // The tiers are three densities of ONE construction, not three drawings. The
-  // turn count is what separates them, and it only ever goes down.
-  const turns = TIERS.map((t) => MARK_TIERS[t].turns);
-  check('the tiers shed turns as the box shrinks',
-    turns.every((n, i) => i === 0 || n < turns[i - 1]), true);
+  // **The tiers are two densities of one object, and the small one sheds.**
+  // That is the invariant tiering exists for: the small mark drops the cavity's
+  // four bevelled walls and half the contacts, because below 48px those are
+  // sub-pixel and eight contacts merge into a single blue bar - which says
+  // something untrue about the object rather than merely losing detail.
+  const [primary, small] = TIERS.map((t) => brandMarkPaths(t).length);
+  check('the small tier is the simpler drawing', small < primary, true);
+
   /**
-   * Banding, measured as banding rather than guessed at as a segment count.
+   * The contact count, read as the most repeated fill rather than by counting
+   * rectangles.
    *
-   * The first version of this check counted tone steps per turn, and it was the
-   * wrong quantity twice over: a turn near the pole is a fraction of the arc of
-   * one at the equator, and a step is only visible if the drawing is big enough
-   * to resolve it. What matters is the largest jump between adjacent tone
-   * values, and it only matters at a size that can show it.
-   *
-   * So the limit is held against `full` alone - the only tier drawn above 64px.
-   * `compact` tops out at 48 and `micro` at 16, where the whole band is a couple
-   * of dozen pixels and a tone step cannot be resolved at all; holding them to a
-   * gradient's smoothness would be buying paths nobody can see.
+   * The contacts are the only row of identical faces in either drawing, so the
+   * fill that repeats most IS that row - which means this counts the thing that
+   * matters without the script needing to know which hex the contacts are, and
+   * so without a second copy of the ramp living here.
    */
-  const tones = spiralRuns(MARK_TIERS.full).map((r) => r.tone).sort((a, b) => a - b);
-  const widest = tones.reduce((m, t, i) => (i ? Math.max(m, t - tones[i - 1]) : m), 0);
-  check('...and full leaves no visible band - the widest tone step is under 0.045',
-    widest <= 0.045, true);
+  const contactCount = (tier: MarkTier) => {
+    const byFill = new Map<string, number>();
+    for (const p of brandMarkPaths(tier)) byFill.set(p.fill, (byFill.get(p.fill) ?? 0) + 1);
+    return Math.max(...byFill.values());
+  };
+  check('the primary mark has all eight contacts', contactCount('primary'), 8);
+  check('...and the small one has four', contactCount('small'), 4);
+
+  // The boundary itself, which is the number every raster target is picked by.
+  // 48 is where eight contacts stop resolving; one off it in either direction
+  // is a size rendered with the wrong drawing.
+  check('48 is the edge between the two drawings',
+    [tierForSize(47), tierForSize(48), tierForSize(16), tierForSize(256)],
+    ['small', 'primary', 'small', 'primary']);
 }
 
 {

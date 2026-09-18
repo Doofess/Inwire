@@ -92,14 +92,19 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       cards and popovers inside the workspace are rounded and always were; the
       rule is about the shell's edges.
 - [ ] **The brand mark is at the top-left corner**, centred on the rail's 56px
-      axis so it lines up with the icons below it. It is the spiral sphere, drawn
-      at its **micro** tier because the lockup is 16 CSS pixels — two turns of
-      the band, not three and a half. The full tier here is a smudge, and it is
-      the single most likely thing to be wrong after any edit to `BrandMark`.
-- [ ] **It is legible on both chromes.** The mark carries its own two colours
-      rather than inheriting one, and a single ramp serves Day and Night: check
-      the dark end has not sunk into `--secondary` on Night, which is the failure
-      that a lighter far colour would fix at the cost of flattening the form.
+      axis so it lines up with the icons below it. It is the RJ45 connector,
+      drawn at its **small** tier because the mark is 16 CSS pixels — **four**
+      contacts, not eight. Count them if you can; eight at this size merge into
+      one blue bar, and that is the single most likely thing to be wrong after
+      any edit to `BrandMark`.
+- [ ] **It is legible on both chromes.** The mark carries its own colours rather
+      than inheriting one, and a single ramp serves Day and Night: check the
+      body's dark front face has not sunk into `--secondary` on Night, and that
+      the steel top face still separates the latch from the body in Day.
+- [ ] **The taskbar and Alt-Tab show the same drawing**, at 32px — four contacts
+      there too. Explorer at "extra large" shows the 256px entry, which is the
+      eight-contact primary. If the taskbar icon looks like a blue smear, the
+      `.ico` was packed with the wrong tier per size.
       The ground under it moved from `--card` to `--secondary` — a step brighter
       — so this is worth a fresh look rather than a remembered pass.
 - [ ] **`INWIRE` is gone.** No word beside the mark, in either theme. The window

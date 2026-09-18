@@ -1822,28 +1822,51 @@ brand mark invisible - white on white in Day and Paper. Its checks in
 `scripts/themes/registry.ts` went on passing throughout, because they measured
 the mark against `--chrome`, the bar it had stopped sitting on.
 
-**The brand mark is outside all of this, and that is new.** It is a shaded form -
-one ribbon spiralling round a sphere, `src/lib/brandMark.ts` - and it carries its
-own two colours rather than taking `currentColor`, because a form given one
-colour is a silhouette. The rule that replaced the old one is narrower and still
-worth keeping: the colours live with the geometry, and `BrandMark.tsx` holds
-none. Two consequences are deliberate. **One ramp serves both themes** - checked,
-not assumed, and the obvious alternative of lightening the far end for Night
-measurably flattens the form, because the sense of depth IS the distance between
-the ramp's ends. And **there is no second half to match**: the `INWIRE` wordmark
-is deleted (§3), so the question this paragraph used to answer at length -
-whether a lockup's two halves may carry different colours - has no subject. The
-mark stands alone and carries its own, which is the whole rule now.
+**The brand mark is outside all of this.** It is a head-on RJ45 connector -
+body, latch, cavity, eight contacts, `src/lib/brandMark.ts` - and it carries its
+own colours rather than taking `currentColor`, because a form given one colour is
+a silhouette. The rule that replaced the old one is narrower and still worth
+keeping: the colours live with the geometry, and `BrandMark.tsx` holds none. Two
+consequences are deliberate. **One ramp serves both themes**, so there is no
+per-theme mark to keep in step. And **there is no second half to match**: the
+`INWIRE` wordmark is deleted (§3), so the question this paragraph used to answer
+at length - whether a lockup's two halves may carry different colours - has no
+subject.
 
-**The mark is tiered**, which is the other thing a colour edit can break without
-noticing. `full` is 3½ turns for 256/192/180, `compact` 2.6 for 48/32/24, `micro`
-2.1 for 16 - and 16 is what the title row's own mark renders at. `BrandMark`
-takes a `size` rather than a tier so callers say what they know;
-`scripts/brand/icon.ts` measures coverage and bounds **once per tier**, because
-the ceiling is what `full` has to stay under and the floor is what `micro` has to
-clear. The shading is a hundred and forty flat fills rather than a
-`<linearGradient>`, so the no-gradient rule survives intact and the bounds stay
-readable off the path data.
+**The tones are derived rather than picked**, which is what makes the facets read
+as one object lit from one side. Every face is one of the app's own two brand
+colours shifted in LIGHTNESS only - the steel faces from `--secondary`, the
+contacts from `--primary` `#0b6bcb` - so hue and saturation stay the app's.
+`#c42b1c` is deliberately absent: it is the close button's red and stays the
+alarm, and an icon that shares a hue with "this went wrong" spends it. Do not
+nudge one face by hand; a tone moved on its own flattens the corner it belongs
+to.
+
+**The mark is tiered**, and the boundary is a hard edge rather than a taste.
+`primary` has all eight contacts and is used at **48px and up**; `small` has four,
+drops the cavity's bevelled walls and opens the spacing, and is used **below 48**
+- which is what the title row's own 16px mark gets. 48 is where eight contacts
+stop resolving: below it they merge into a single blue bar, which says something
+untrue about the object rather than merely losing detail. `BrandMark` takes a
+`size` rather than a tier so callers say what they know, and
+`scripts/brand/icon.ts` checks bounds **once per tier** along with the two things
+a drawn mark actually gets wrong - the tiers drifting apart, and a face picking
+up a colour from outside the ramp.
+
+**The shading is flat facets rather than a `<linearGradient>`**, so the
+no-gradient rule survives intact and the bounds stay readable off the path data.
+That rule is not style: every artefact below is rasterised from this one source
+down to 16px, where a gradient is mush.
+
+**The mark before this one was generated rather than drawn** - one ribbon
+spiralling round a sphere, a spiral spec and a projection emitting about 140
+flat fills per tier, in three tiers. It is worth a sentence because of what
+changed and what did not. `brandMark.ts` holds the art now instead of computing
+it, but its JOB is unchanged: one source, every icon generated from it, colours
+here and not in the component. What that cost is the old coverage check, which
+flattened each run into a polygon and counted painted cells on a grid - a drawn
+mark has curves and arcs and no polygons to flatten, so a point-in-path test
+would have meant writing a renderer.
 
 **`Inwire.exe` had no icon at all until this landed** - `electron-builder.yml`
 had no `win.icon` and `directories.buildResources` pointed at a folder that did

@@ -41,12 +41,12 @@ export const RASTER_BG = '#0c0a09';
 /**
  * The icon in a browser tab.
  *
- * Drawn at the micro tier because a favicon is 16 CSS pixels. It no longer
- * carries a `prefers-color-scheme` rule: that existed to flip a monochrome glyph
- * between near-black and near-white against chrome the page cannot read, and the
- * mark carries its own colours now, which work on either.
+ * Drawn at the SMALL tier because a favicon is 16 CSS pixels. It carries no
+ * `prefers-color-scheme` rule: that existed to flip a monochrome glyph between
+ * near-black and near-white against chrome the page cannot read, and the mark
+ * carries its own colours now, which work on either.
  */
-export const FAVICON_SVG = brandMarkSvg('micro');
+export const FAVICON_SVG = brandMarkSvg('small');
 
 /** The sizes each artefact needs, and what it is for. */
 export const PNG_TARGETS = [
