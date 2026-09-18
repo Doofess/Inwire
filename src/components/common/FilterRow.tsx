@@ -1,7 +1,7 @@
 import React from 'react';
 import { TriangleAlert } from 'lucide-react';
 import type { AgentHealth } from '../../services/agentHealth';
-import { agentNeedsAttention, agentSilentLabel } from '../../services/agentHealth';
+import { agentNeedsAttention, agentStatusLabel } from '../../services/agentHealth';
 
 /**
  * The row below the title row: the display filter, and the state of the capture.
@@ -70,7 +70,7 @@ export const FilterRow: React.FC<FilterRowProps> = ({
             bg-warning/10 text-[11px] leading-snug"
         >
           <TriangleAlert className="w-3.5 h-3.5 shrink-0 text-warning" />
-          <span className="font-semibold text-foreground">{agentSilentLabel(agentHealth)}</span>
+          <span className="font-semibold text-foreground">{agentStatusLabel(agentHealth)}</span>
           <span className="min-w-0 truncate text-muted-foreground">
             {'summary' in agentHealth ? agentHealth.summary : 'The capture agent is not answering.'}
           </span>

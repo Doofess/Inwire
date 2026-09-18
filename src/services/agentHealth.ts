@@ -123,12 +123,15 @@ export function diagnoseAgent(input: AgentHealthInput): AgentHealth {
  *
  * Moved here out of `Header.tsx` when the adapter control became an icon in the
  * rail. It was a component-local map, which was fine while exactly one bar
- * rendered it; now the rail's tooltip, its accessible name and the filter row's
- * banner all have to say the same thing, and a string table that lives in one
- * of three consumers is how they stop agreeing. Pure, so
- * `scripts/electron/agent-health.ts` can hold every branch to a label.
+ * rendered it; now the rail's tooltip, its accessible name, the filter row's
+ * banner and the status bar's link item all have to say the same thing, and a
+ * string table living in one of four consumers is how they stop agreeing. Pure,
+ * so `scripts/electron/agent-health.ts` holds every branch to a label - which
+ * it did not until the bug below, and which is why the bug below existed.
  */
-const AGENT_SILENT_LABEL: Partial<Record<AgentHealth['kind'], string>> = {
+const AGENT_STATUS_LABEL: Record<AgentHealth['kind'], string> = {
+  connected: 'Agent connected',
+  connecting: 'Connecting',
   missing: 'Agent missing',
   disabled: 'Agent disabled',
   crashing: 'Agent crashing',
@@ -136,9 +139,27 @@ const AGENT_SILENT_LABEL: Partial<Record<AgentHealth['kind'], string>> = {
   unknown: 'Agent not reachable',
 };
 
-/** The headline, or the fallback that covers a state with no entry. */
-export function agentSilentLabel(health: AgentHealth): string {
-  return AGENT_SILENT_LABEL[health.kind] ?? 'Agent not reachable';
+/**
+ * The headline for any state the agent can be in.
+ *
+ * **This was `agentSilentLabel`, a `Partial<Record<...>>` of the five silent
+ * kinds with `?? 'Agent not reachable'` behind it, and that shipped a lie.**
+ * Its two original callers - the rail's tooltip and the filter row's banner -
+ * only ask while the agent IS silent, so the missing `connected` entry could
+ * not be reached. The status bar's link item asks unconditionally, because its
+ * whole job is to name the state whatever the state is - so a perfectly healthy
+ * agent read **"Agent not reachable"** in the bar while capture ran fine, and
+ * the tooltip beside it said "The capture agent is connected", because that one
+ * was written as a conditional rather than looked up here.
+ *
+ * Two things let it through and both are fixed by the same edit. `Partial`
+ * meant the type could not object to a missing key, and the `??` turned that
+ * hole into a confident wrong answer rather than an absence anybody would
+ * notice. The record is TOTAL now and there is no fallback: a new member of
+ * `AgentHealth['kind']` fails to compile until it has a label.
+ */
+export function agentStatusLabel(health: AgentHealth): string {
+  return AGENT_STATUS_LABEL[health.kind];
 }
 
 /**

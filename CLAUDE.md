@@ -505,6 +505,38 @@ in the order they fail in. Two of those were previously reachable only through a
 hover tooltip or a Settings tab, which is the gap `DriverInfoPanel` was written
 to close and this closes ambiently.
 
+**The right group is the byte readout, the outbound indicator, then the packet
+counter.** The counter had the corner and the indicator sat between; they were
+swapped so the numbers are at the edge, which is what makes them findable
+without reading the bar. The trade is real either way - a right-aligned group
+shifts left as its widest member grows, so whichever item is not at the edge is
+the one that moves when the counts gain a digit.
+
+**The counter's share badge is deleted**, and `filterPercentage` with it. It
+read `100%` beside `2,224 / 2,224`, which is one figure said twice in the weaker
+unit; the pair of numbers says it exactly rather than rounded. The badges that
+remain report a whole-capture scan, which no pair of numbers on screen can
+describe.
+
+**A healthy agent read "Agent not reachable" in this bar**, and the shape of
+that is worth keeping. `agentSilentLabel` was a
+`Partial<Record<AgentHealth['kind'], string>>` of the five SILENT kinds with
+`?? 'Agent not reachable'` behind it. Its two callers - the rail's tooltip and
+the filter row's banner - only ask while the agent is silent, so the missing
+`connected` entry could not be reached; this bar's link item asks
+unconditionally, because its job is to name the state whatever it is. Capture
+ran perfectly and the bar said the agent was gone, with the tooltip beside it
+saying the opposite because that one was a conditional rather than a lookup.
+
+`Partial` meant the type could not object to the missing key, and the `??`
+turned the hole into a confident wrong answer rather than an absence anybody
+would see. It is `agentStatusLabel` now, a TOTAL record with no fallback, so a
+new kind will not compile without a label - and `scripts/electron/agent-health.ts`
+holds the part a type cannot: that the healthy states do not read as faults, and
+that the text agrees with `agentNeedsAttention` about whether a warning glyph is
+drawn. That file had claimed "every branch to a label" in prose and had never
+checked one.
+
 **Nothing in the bar is pressable.** Each item opened the Settings tab that
 fixes what it reports, and that is gone: the bar is a readout. `StatusItem`
 renders a `<span>` and has no `onClick` at all, so putting one back is the

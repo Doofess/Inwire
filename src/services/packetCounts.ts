@@ -76,18 +76,15 @@ export function usePacketCounts(): PacketCounts {
   return useSyncExternalStore(subscribe, () => current, () => EMPTY_COUNTS);
 }
 
-/**
- * What share of the capture the filter selected, as a whole percent.
- *
- * **100 when nothing is filtered, and 0 when nothing is captured.** Those are
- * the two ends a naive `filtered / total` gets wrong: an empty capture divides
- * by zero, and a capture with no filter should read 100% rather than being a
- * ratio that happens to equal one.
- */
-export function filterPercentage({ filtered, total }: PacketCounts): number {
-  if (total <= 0) return 0;
-  return Math.round((filtered / total) * 100);
-}
+/* **`filterPercentage` was here and is deleted with the badge that read it.**
+   It answered "what share of the capture did the filter select", carefully -
+   100 when nothing is filtered and 0 when nothing is captured, which are the
+   two ends a naive `filtered / total` gets wrong. The readout shows
+   `44 / 178,200`, which is the same fact exactly rather than rounded, so the
+   badge was one figure said twice and the weaker saying went. One caller and
+   no other: keeping the function would have been keeping arithmetic nothing
+   reads. `scanPercentage` below is a different question - progress through a
+   pass, which no pair of numbers on screen answers. */
 
 /**
  * How far a whole-capture scan has got, or null while that is unknowable.

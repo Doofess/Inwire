@@ -1,7 +1,5 @@
 import React from 'react';
-import {
-  filterPercentage, scanPercentage, usePacketCounts,
-} from '../../services/packetCounts';
+import { scanPercentage, usePacketCounts } from '../../services/packetCounts';
 
 /**
  * The packet counter, in the middle of the title row.
@@ -38,9 +36,16 @@ import {
  * `React.memo` boundary on `Dock`; there is no memo boundary anywhere in `src/`
  * now, and the reason survives it - see `services/packetCounts.ts`.
  *
- * The arithmetic is there too, for the same reason: `filterPercentage` has two
- * ends a naive `filtered / total` gets wrong, and an assertion script can reach
- * a service but not a component.
+ * **The share badge is deleted.** It read `100%` beside `2,224 / 2,224` and
+ * `0%` beside `44 / 178,200`, which is the same fact a second time in a weaker
+ * unit - the two numbers already say what the filter selected, and they say it
+ * exactly rather than rounded. `filterPercentage` went with it: it had one
+ * caller and no other, so keeping the arithmetic would have been keeping a
+ * tested function nothing reads.
+ *
+ * The badges that remain are not that. `SCANNING` and `NOT SEARCHED` report a
+ * whole-capture pass the two numbers cannot describe, and `+N UNSEARCHED` is a
+ * button.
  *
  * ## The one control in the title row
  *
@@ -83,10 +88,10 @@ export const PacketCountsReadout: React.FC = () => {
           20px because a card is a place you look ON PURPOSE; this one has to
           sit in the chrome without becoming the loudest thing in the window. */}
       {/* The hook is on THIS span and not on the row above it: the row also
-          holds the scan badge, and its `textContent` runs the percentage
-          straight on to the total with no separator - "44 / 178,200" "0.0%"
-          reads back as 178,2000. This span is exactly the two numbers and the
-          slash between them. */}
+          holds the scan badges, and its `textContent` runs them straight on to
+          the total with no separator - "44 / 178,200" "SCANNING" reads back as
+          one string. This span is exactly the two numbers and the slash
+          between them, which is what the drivers parse. */}
       <span data-packet-counts className="min-w-0 flex items-baseline gap-1 text-[11px] truncate">
         <span className="font-semibold tabular-nums text-foreground">
           {counts.filtered.toLocaleString()}
@@ -112,11 +117,7 @@ export const PacketCountsReadout: React.FC = () => {
               wrong one. */}
           SCANNING{scanPct === null ? '' : ` ${scanPct}%`}
         </span>
-      ) : (
-        <span className={`${BADGE} bg-primary/20 text-primary`}>
-          {filterPercentage(counts)}%
-        </span>
-      )}
+      ) : null}
 
       {counts.scan?.status === 'failed' && (
         <span

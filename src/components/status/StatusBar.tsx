@@ -112,17 +112,22 @@ export const StatusBar: React.FC<StatusBarProps> = ({ nameResolution, ...session
 
         Ordered with the most changeable furthest from the edge: the byte
         readout comes and goes with the pointer, so it sits inboard where its
-        arrival does not shove the counter sideways. */}
+        arrival does not shove the numbers sideways. */}
     <div className="shrink-0 flex items-center justify-end">
       <ByteReadout />
-      <PacketCountsReadout />
-      {/* Furthest right because it is the most stable thing in the bar: it
-          changes only when somebody changes a setting, so nothing it does
-          shoves the numbers beside it. */}
+      {/* The outbound indicator sits between the two, which is a swap: it was
+          furthest right, on the argument that it is the most stable thing in
+          the bar and so the best anchor for the corner. The counter has the
+          corner now, and the trade is real either way - a right-aligned group
+          shifts left as its widest member grows, so whichever item is NOT at
+          the edge is the one that moves when the counts gain a digit. Putting
+          the numbers at the corner is what makes them findable without reading
+          the bar, which is what a counter is for. */}
       <OutboundStatus
         geoIp={nameResolution.geoIp}
         reverseDns={nameResolution.reverseDns}
       />
+      <PacketCountsReadout />
     </div>
   </footer>
 );
