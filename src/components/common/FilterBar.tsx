@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { CircleAlert, X, Bookmark, Info } from 'lucide-react';
+import { CircleAlert, Filter, X, Bookmark, Info } from 'lucide-react';
 import { FilterEngine, FilterValidationResult } from '../../services/filterEngine';
 import { allPresets } from '../../services/filterPresets';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
@@ -215,10 +215,13 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 : ''
             }`}
           >
-            {/* Geometric FILTER prefix */}
-            <span className="text-primary font-mono text-xs font-bold mr-2.5 select-none shrink-0">
-              FILTER:
-            </span>
+            {/* **A glyph, where the word `FILTER:` was.** The field lives in
+                the title row now and the word cost about 55px of a ~420px
+                box - a label naming the one thing in the chrome that is
+                obviously a search field. The colour stays `--primary`, which
+                is what makes the box read as the app's own control rather
+                than as a text input somebody dropped in. */}
+            <Filter className="w-3.5 h-3.5 mr-2 shrink-0 text-primary" aria-hidden />
 
             <input
               ref={inputRef}
@@ -238,7 +241,15 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               onFocus={() => setShowPresetsDropdown(true)}
               onClick={() => setShowPresetsDropdown(true)}
               onKeyDown={handleKeyDown}
-              placeholder='ip.addr == 192.168.1.1 || tcp.port == 443 || proto == http'
+              // **An example, and it says so.** It was three clauses of real
+              // syntax with nothing marking them as a sample, so an empty
+              // field read as a filter that was already applied. `e.g.` is
+              // the whole fix: the content stays an EXPRESSION rather than
+              // becoming a prompt, because what goes in this box is an
+              // expression and a prompt would teach the wrong thing. One
+              // clause rather than three, because the box is narrower now and
+              // a truncated example is worse than a short one.
+              placeholder='e.g. tcp.port == 443'
               className="bg-transparent outline-none text-xs font-mono w-full text-foreground placeholder:text-muted-foreground"
             />
 

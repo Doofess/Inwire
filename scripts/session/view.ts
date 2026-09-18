@@ -28,7 +28,7 @@
  * rail does not report anything, it just puts Settings below the bottom of the
  * window.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import {
   APP_VIEWS, backTargetFor, isAppView, normalizeViewPrefs, restoredView, viewLabel,
   viewStore, VIEW_DEFAULTS, type AppView,
@@ -159,34 +159,51 @@ console.log('\n--- every view has a surface, and a conditional one is not restor
   checkTrue('the packet list is hidden rather than unmounted',
     app.includes("view === 'packets' ? undefined : { display: 'none' }"));
 
-  // **The filter row belongs to Packets, and this is the third form of that
-  // rule.** It is worth reading as a sequence, because each form was right about
-  // the views it could see and wrong about the ones it could not:
+  // **There is no filter row, and this is the fourth form of a rule that had
+  // three.** It is worth reading as a sequence, because each form was right
+  // about the views it could see and wrong about the ones it could not:
   //
   //  1. "only Network hides the filter row" - Network described the machine, so
   //     a display filter there was a control with nothing in view to act on.
   //  2. "no view hides the filter row" - written the day Network stopped being a
   //     view, on the argument that every remaining view IS the capture.
-  //  3. this one. (2) was an EXCLUSION rule, so every view added afterwards
-  //     inherited the row without anybody deciding it should. Four did, and all
-  //     four fail (1)'s own test: Statistics is handed `packets` rather than
-  //     `filteredPackets` on purpose, the Routing Map draws the throttled feed,
-  //     Follow Stream reads one conversation, and Frame Detail shows one frame.
-  //     The filter narrowed nothing on screen in any of them.
+  //  3. "the row is rendered by NAMING Packets" - because (2) was an EXCLUSION
+  //     rule, so every view added afterwards inherited the row without anybody
+  //     deciding it should. Four did, and all four fail (1)'s own test.
+  //  4. this one. All three argued about where to PUT a row, and none asked why
+  //     a filter had to live somewhere a view could hide it. It does not act on
+  //     what is in view - `captureScan` answers it over the whole capture on
+  //     disk - so it belongs to the app. It is in the title row, and the
+  //     objection that drove (1) through (3) is answered the other way round:
+  //     **applying a filter goes to Packets.** A control that takes you to its
+  //     subject is not a control with nothing to act on.
   //
-  // So the row is included by NAMING its view. Asserted two ways, because the
-  // failure is silent either way: a row that stops being guarded appears over
-  // four views that cannot act on it, and a row guarded by exclusion hands
-  // itself to the fifth view somebody adds.
-  const filterRowAt = app.indexOf('<FilterRow');
-  checkTrue('the filter row is rendered in App.tsx', filterRowAt !== -1);
-  checkTrue("...only under `view === 'packets'`",
-    /view === 'packets'\s*&&\s*\(\s*$/.test(app.slice(Math.max(0, filterRowAt - 200), filterRowAt)));
+  // Both halves are asserted because both are silent when broken: a filter that
+  // stops navigating leaves somebody in Statistics wondering why nothing
+  // happened, and a filter row growing back in the workspace is the 44px strip
+  // returning with the same argument that deleted it.
+  checkTrue('the filter field is in the title row, not in a row of its own',
+    !app.includes('<FilterRow') && app.includes('<FilterBar'));
+  checkTrue('...passed to the chrome as its centre slot', /center=\{\s*<FilterBar/.test(app));
+  checkTrue('...and applying one goes to look at what it selected',
+    /applyFilter[\s\S]{0,400}setView\('packets'\)/.test(app));
+
+  // Clearing must NOT navigate: the empty filter selects the whole capture,
+  // which is what every view already shows, so a jump would land nowhere.
+  checkTrue('...but clearing it does not',
+    /expression\.trim\(\) !== ''\) setView\('packets'\)/.test(app));
+
+  // The banner went with the row: it named the agent fault above the packet
+  // list while the status bar names it below, and one fault wants one place.
+  // Checked as the FILE being gone rather than as the markup being absent,
+  // because a banner is a div and a div is easy to rebuild somewhere else.
+  checkTrue('the agent fault is reported once, in the status bar',
+    !existsSync('src/components/common/FilterRow.tsx'));
 
   // The fragile form, forbidden outright. `view !== 'x'` is how (2) was written
   // and is what let four views inherit a control none of them uses.
   const excludes = [...app.matchAll(/view !== '([a-z]+)'/g)].map((m) => m[1]);
-  check('no view is given the filter row by exclusion', [...new Set(excludes)], []);
+  check('no view is guarded by exclusion', [...new Set(excludes)], []);
 }
 
 console.log('\n--- the stored view ---\n');

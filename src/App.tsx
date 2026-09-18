@@ -36,7 +36,6 @@ import { TitleRow } from "./components/common/TitleRow";
 import { StatusBar } from "./components/status/StatusBar";
 import { clearHoveredByte } from "./services/hoveredByte";
 import { resetByteRange } from "./services/byteRange";
-import { FilterRow } from "./components/common/FilterRow";
 import {
   useWindowChrome, useWindowTheme, useWindowTitle, windowTitleFor,
 } from "./lib/windowChrome";
@@ -1891,6 +1890,26 @@ export default function App() {
    * the stream came from is exactly what Frame Detail should be showing when
    * the step completes.
    */
+  /**
+   * Applies the display filter, and goes to look at what it selected.
+   *
+   * **The navigation is the rule that replaced "the filter row belongs to
+   * Packets".** The field is in the title row now, visible from every view, and
+   * the objection to that arrangement was always the same: a display filter
+   * above Statistics or the Routing Map is a control with nothing in view to act
+   * on. It acts on the CAPTURE rather than on what is in view, so the answer is
+   * to go where the answer is rather than to hide the control.
+   *
+   * **Only a non-empty expression navigates.** Clearing selects the whole
+   * capture, which is what every view already shows, so dragging somebody out of
+   * Statistics to tell them that would be a jump with nothing at the end of it.
+   */
+  const applyFilter = useCallback((next?: string) => {
+    const expression = next !== undefined ? next : filterText;
+    setAppliedFilter(expression);
+    if (expression.trim() !== '') setView('packets');
+  }, [filterText, setView]);
+
   const backTarget = backTargetFor(view);
   const goBack = useCallback(() => {
     if (backTarget === null) return;
@@ -2144,6 +2163,15 @@ export default function App() {
         onTogglePanes={togglePanes}
         backLabel={backTarget === null ? null : viewLabel(backTarget)}
         onBack={goBack}
+        center={
+          <FilterBar
+            filterText={filterText}
+            onFilterChange={setFilterText}
+            onApplyFilter={applyFilter}
+            filterPresetLibrary={filterPresetLibrary}
+            onSaveCurrentFilter={handleSaveCurrentFilter}
+          />
+        }
       />
 
       {/* **The cluster band, and its ground is the shell backdrop.** The rail
@@ -2260,51 +2288,30 @@ export default function App() {
             competes with the list for horizontal space in this row any more. */}
         <main className="ml-1 flex-1 flex flex-col min-w-0 overflow-hidden
           border border-border rounded-lg bg-background">
-          {/* **The filter row belongs to the Packets view, and only to it.**
+          {/* **The filter row was here and there is no filter row.**
 
-              This reverses the rule that was here, and the reversal is the
-              older argument finally applied to every view rather than to one.
-              The row was hidden above Network and nowhere else, because Network
-              described the machine while a display filter acts on the capture -
-              a control with nothing in view to act on. Network became a Settings
-              tab, the rule was inverted to "no view hides the filter row", and
-              the four views that inherited it turned out to fail the same test
-              Network did:
+              The rule it carried had been rewritten three times and the third
+              was right about the wrong thing. It said the row is rendered by
+              NAMING Packets rather than by excluding the views that do not want
+              it - because a display filter above Statistics, the Routing Map,
+              Follow Stream or Frame Detail is a control with nothing in view to
+              act on, and an exclusion list silently hands the row to anything
+              added later.
 
-                - **Statistics** is handed `packets`, not `filteredPackets`, on
-                  purpose - "these tables count the capture" - so the row above
-                  it changed nothing on screen at all.
-                - **Routing Map** draws `dashboardPackets`, the throttled feed.
-                - **Follow Stream** reads one conversation out of `packets`.
-                - **Frame Detail** shows the one selected frame; the filter
-                  reaches it only as a notice saying the frame is filtered out,
-                  which is a REPORT about the filter, not a control acting on
-                  what is in view.
+              **What that rule never questioned is why the filter had to be
+              somewhere a view could hide it.** A display filter does not act on
+              what is in view; it acts on the CAPTURE, and `captureScan` answers
+              it over the whole thing on disk. The field belongs to the app, not
+              to a pane - so it is in the title row, visible from everywhere, and
+              the old problem is solved the other way round: **applying a filter
+              goes to Packets**, because looking at what a filter selected is the
+              point of applying one. A control that takes you to its subject is
+              not a control with nothing to act on.
 
-              So the row is rendered by NAMING the view that has it rather than
-              by excluding the ones that do not. That is the form that survives a
-              new view being added: an exclusion list silently hands the row to
-              anything added later, which is how four views came to carry an
-              inert control in the first place. */}
-          {view === 'packets' && (
-          <FilterRow
-            restoreProgress={restoreProgress}
-            agentHealth={agentHealth}
-            agentLinkEnabled={agentLinkEnabled}
-            onOpenDriverInfo={() => setShowSettingsModal(true)}
-            filterSlot={
-              <FilterBar
-                filterText={filterText}
-                onFilterChange={setFilterText}
-                onApplyFilter={(newFilter?: string) =>
-                  setAppliedFilter(newFilter !== undefined ? newFilter : filterText)
-                }
-                filterPresetLibrary={filterPresetLibrary}
-                onSaveCurrentFilter={handleSaveCurrentFilter}
-              />
-            }
-          />
-          )}
+              That also deletes the 44px strip it lived in, the banner it carried
+              - the status bar reports the agent now, and one fault wants one
+              place - and `FilterRow.tsx` itself. The restore readout moved into
+              the status bar's left group, which is where session state lives. */}
 
           {/* The views. One row still, because Statistics and Follow Stream are
               siblings of the packet list rather than children of it. */}
@@ -2647,6 +2654,7 @@ export default function App() {
         droppedBuffer={droppedBuffer}
         bufferAutoPaused={bufferAutoPaused}
         nameResolution={nameResolution}
+        restoreProgress={restoreProgress}
       />
 
       {/* **The geo map's expanded window was here.** A `WidgetOverlay`, fixed

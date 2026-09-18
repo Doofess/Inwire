@@ -280,14 +280,28 @@ for (const theme of THEMES) {
 // Dropped rather than replaced, unlike the header above: it owned no decision
 // that moved somewhere else - it drew a ranked table of conversations, and the
 // table went with it.
+// `FilterRow.tsx` was here and is deleted with the row. The warning it owned
+// was the agent banner, and the status bar names that fault now - so the
+// decision moved rather than vanishing, and `components/status/` is where it
+// went. Guarded as a directory, because that strip is six small files and a
+// list of them would go stale the first time one is added.
 const GUARDED_FILES = [
   'src/components/common/ActivityRail.tsx',
-  'src/components/common/FilterRow.tsx',
   'src/components/analytics/TrafficTimelineChart.tsx',
+  ...fs.readdirSync(path.join(process.cwd(), 'src/components/status'))
+    .filter((f) => f.endsWith('.tsx'))
+    .map((f) => `src/components/status/${f}`),
 ];
 const RAW_SHADE = /\b(?:bg|text|border|shadow|ring)-(?:rose|emerald|amber|red|green)-\d{2,3}\b/g;
 for (const file of GUARDED_FILES) {
-  const source = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+  // **Comments stripped, and that is not a nicety.** A note saying "this used
+  // to be a raw shade and here is why it is not" contains the string this grep
+  // looks for, so a check reading the file whole fails on the very paragraph
+  // explaining why it passes. That has happened in this repository before,
+  // which is why `view.ts` and `status-bar.ts` both carry the same helper.
+  const source = fs.readFileSync(path.join(process.cwd(), file), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
   check(`${file}: uses status tokens, not raw Tailwind shades`,
     [...source.matchAll(RAW_SHADE)].map((m) => m[0]), []);
 }

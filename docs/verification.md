@@ -116,6 +116,27 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       back into the rasteriser.
       The ground under it moved from `--card` to `--secondary` — a step brighter
       — so this is worth a fresh look rather than a remembered pass.
+- [ ] **The display filter is in the title row's centre**, about 26rem wide,
+      centred in the **window** rather than in the gap between the corner and
+      the caption buttons. There is no filter row above the packet list and no
+      44px strip where it used to be.
+- [ ] **It does not drag the window.** Click into the field, type, press the X,
+      press the bookmark, open the presets list and pick one. Every one of those
+      must work without the window moving — the slot opts out once, so a failure
+      here means the wrapper lost `app-no-drag`.
+- [ ] **The empty field reads as an example.** It says `e.g. tcp.port == 443`,
+      muted. The old placeholder was three real clauses with nothing marking
+      them as a sample, so an empty field looked like a filter already applied.
+- [ ] **Applying a filter goes to Packets.** From **Statistics**, type
+      `tcp` and press Enter: you land in the packet list looking at the result.
+      From **Packets** it just applies. **Clearing does not navigate** — clear
+      the filter while in Statistics and you stay there.
+- [ ] **There is no agent banner anywhere.** Stop the agent: the fault is named
+      once, in the status bar's left group, and nothing appears above the packet
+      list.
+- [ ] **Restoring shows in the status bar.** Relaunch with a stored capture: a
+      spinner and `Restoring n/m` appear at the left of the bar and go when it
+      finishes.
 - [ ] **The back step appears only where there is somewhere to go.** In
       **Packets**, **Statistics** and the **Routing Map** the corner shows the
       mark and nothing else. In **Frame Detail** a chevron appears beside it
