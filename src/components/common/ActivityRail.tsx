@@ -73,12 +73,27 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * 48 a 20px glyph has 14px of air around it. A future session should not "fix"
  * the disagreement by narrowing it.
  *
+ * ## The outline around it
+ *
+ * The rail is enclosed on three sides: `border-t` and `border-b` here, and
+ * `<main>`'s `border-l` down its right edge. The fourth side is the window's
+ * own, and nothing draws a line there - that is the shell's standing rule, the
+ * same one that keeps every corner square (`roundedCorners` is Windows').
+ *
+ * **It carries no `border-r`, and that is the one edge that must stay bare.**
+ * `<main>` already draws the line down this rail's right side; a `border-r`
+ * here puts a second 1px rule in the same place, which is not subtle in Day.
+ * The two horizontal edges are the opposite case - nothing else draws them, so
+ * without them the rail runs into the title row and the status bar with no
+ * edge at all, which is what this element looked like before the outline.
+ *
  * ## Height
  *
  * 10 icons at 44px, two dividers and the bottom group's padding come to
- * **494px** against the 624px the rail gets - a 680px minimum window, less the
- * 32px title row above it and the 24px status bar below. It fits, with 130px of
- * slack - room for two more.
+ * **494px** against the 622px the rail gets - a 680px minimum window, less the
+ * 32px title row above it, the 24px status bar below, and the 1px seam this
+ * element draws against each of them. It fits, with 128px of slack - room for
+ * two more.
  *
  * **The two strips are funded differently, and that is the thing to carry
  * forward.** The window minimum carries the title row, so this number did not
@@ -429,7 +444,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       aria-label="Activity"
       onKeyDown={onRailKeyDown}
       className="w-14 shrink-0 flex flex-col items-center bg-secondary
-        text-secondary-foreground select-none"
+        text-secondary-foreground select-none border-t border-b border-border"
     >
       {/* No top cell, and the mark is not in one. The rail starts below the
           title row rather than beside it, so the window's top-left corner is
@@ -437,12 +452,18 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           40px below the corner it is meant to occupy and cost 40px this rail
           does not have.
 
-          The rail shares the row's `bg-secondary` and the row draws no bottom
-          border, so the two read as one surface into that corner. Anything
-          that paints its own patch of ground on this rail - the adapter
-          badge's `fill-secondary` is the only one - has to name that token
-          too, or it reads as a darker square in Night. The radius
-          is Windows', not ours; see `TitleRow.tsx`.
+          The rail shares the row's `bg-secondary`, and the line between the
+          two is drawn HERE: `border-t` on this element, collinear with the
+          `border-t` on `<main>` beside it, so one rule crosses the whole
+          window under the row. `border-b` does the same above the status bar.
+          **The strips never draw those lines themselves**, and that is a
+          measurement rather than a preference - `border-box` takes a border
+          out of the element's own height, so a `border-b` on the `h-8` title
+          row would leave 31px for caption buttons that are 46x32 because
+          Windows' are. Anything that paints its own patch of ground on this
+          rail - the adapter badge's `fill-secondary` is the only one - has to
+          name that token too, or it reads as a darker square in Night. The
+          radius is Windows', not ours; see `TitleRow.tsx`.
 
           The cell also carried `.app-drag`, so the window could be grabbed by
           the top-left corner. That is gone with it: the title row is drag

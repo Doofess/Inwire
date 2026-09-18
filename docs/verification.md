@@ -411,11 +411,25 @@ The application has a bottom bar again. It had one for a revision and it was
 deleted, so this section carries the checks that say which of the two is on
 screen. The short form: the bar is back, the indent is not.
 
-- [ ] **The chrome is a C.** The title row across the top, the rail down the
-      left and the bar across the bottom are one continuous ground, with **no
-      line where the rail meets the bar** and none where it meets the title row.
-      The only 1px border traces the workspace's top, left and bottom. A line
-      cutting across either corner means something grew a `border-t`.
+- [ ] **The chrome is a C and the rail is outlined inside it.** The title row
+      across the top, the rail down the left and the bar across the bottom are
+      one continuous `--secondary` ground - the outline is a line, never a
+      second colour. Check the ground first: a panel that reads *darker* or
+      *lighter* than its neighbours is a different bug from a missing line.
+- [ ] **Three lines, and they meet.** One under the title row, one above the
+      status bar, both running the **full width of the window**; and one down
+      the rail's right side joining them at both ends. Put a finger on the
+      top-left corner and follow it: the horizontal rule must not stop at the
+      rail's right edge, which is what a missing `border-t` on the rail looks
+      like - `<main>` would still draw its half, so the line starts 56px in.
+- [ ] **The rail's left edge has no line**, and neither does the window's right.
+      The shell draws nothing against the window's own edge; that is the same
+      rule that keeps all four corners square.
+- [ ] **One line per seam, not two.** A `border-r` returning to the rail puts a
+      second rule beside `<main>`'s - visible in Day as a thickened edge, and in
+      Night as nothing at all, which is why the script checks it rather than the
+      eye. The strips are the same trap at the horizontal seams: a `border-t` on
+      the status bar draws that line twice **and** makes the bar 23px.
 - [ ] **The bar spans the full window**, under the rail as well as the panes,
       and **its contents are not indented.** The right-hand group sits at the
       window's right edge, wherever the panes above it happen to end. A readout
