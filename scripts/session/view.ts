@@ -247,18 +247,30 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // buttons that move the window instead of being pressed.
   checkTrue('the rail is entirely no-drag', !rail.includes('app-drag'));
 
-  // **The outline**, and it is three sides rather than four. The rail draws its
-  // own top and bottom edge, because nothing else does: the title row and the
-  // status bar are the same `--secondary` ground, so without these the rail
-  // runs into both with no edge at all. The right edge is `<main>`'s
-  // `border-l`, already there, which is why a `border-r` here is the one that
-  // must never come back - two 1px rules in the same column, which reads as a
-  // thick line in Day and as nothing at all in Night. The left edge is the
-  // window's, and the shell draws nothing against that.
-  classIs('the rail draws its own horizontal edges', 'border-t border-b border-border');
-  checkTrue('...and not the vertical one `<main>` already draws',
-    !/\bborder-r\b/.test(rail));
-  checkTrue('...which `<main>` still does', code('src/App.tsx').includes('border-l'));
+  // **The card.** Four borders and a radius on the window side, which is VS
+  // Code's `.part.activitybar.left` (`floatingPanels.css`) rather than an
+  // invention here. The three facts below are one arrangement, and each of
+  // them breaks the other two if it moves on its own.
+  classIs('the rail is a bordered card', 'border border-border rounded-l-lg');
+
+  // The facing edge belongs to the RAIL. VS Code's reason is arithmetic and it
+  // carries over exactly: `w-14` under `border-box` leaves 54px of interior
+  // between two 1px borders, which centres a 44px target on whole pixels. Hand
+  // that border to the neighbour instead and the interior is 55.
+  const app = code('src/App.tsx');
+  checkTrue('...and `<main>` gives up its facing border to it',
+    !/\bborder-l\b/.test(app));
+  checkTrue('...while drawing the three outside edges of the cluster',
+    app.includes('border-t border-r border-b border-border'));
+
+  // The radius is legal only while the gutter holds these cards off the
+  // window: the shell's rule is that nothing meeting the window's own edge
+  // draws a corner of its own. Lose the gutter and the radius goes in the same
+  // commit, which is what this pairing exists to force.
+  checkTrue('the cluster band insets the cards from the window',
+    app.includes('bg-secondary pl-1 pr-1 pb-1'));
+  checkTrue('...and the outer card carries the matching radius',
+    app.includes('rounded-r-lg'));
 
   const TARGET = 44;        // w-11
   const GAP = 2;            // gap-0.5
@@ -288,12 +300,13 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // the other - the window minimum is not the rail's budget, and reading it as
   // one is how Settings ends up under the bottom edge.
   //
-  // 680 - 32 - 24 - 2 = **622**. The last term is the outline: the rail draws
-  // a 1px seam against the row above it and another against the bar below, and
-  // `border-box` takes both out of its own height. They are drawn HERE rather
-  // than by the two strips for that same reason - a `border-b` on the `h-8`
-  // title row would leave 31px for caption buttons that are 46x32 because
-  // Windows' are.
+  // 680 - 32 - 24 - 4 - 2 = **618**. The last two terms are the card: the
+  // cluster band holds the rail 4px clear of the status bar (`pb-1`, VS Code's
+  // `spacing-size40`), and the rail's own top and bottom borders come out of
+  // its height because `border-box` says so. The borders are drawn by the card
+  // rather than by the two strips for a reason of the same kind - a `border-b`
+  // on the `h-8` title row would leave 31px for caption buttons that are 46x32
+  // because Windows' are.
   //
   // The 680 was chosen to return the rail the 640 it
   // had when the title row was `h-10`; the row has since come down to `h-8` -
@@ -305,8 +318,10 @@ console.log('\n--- the rail fits the smallest window ---\n');
   //
   // All of which is why the budget is DERIVED here rather than written down:
   // two subtractions that stay right through a change to any of the three.
-  const SEAMS = 2; // border-t + border-b, the outline's two horizontal edges
-  const RAIL_BUDGET = MIN_WINDOW_HEIGHT - TITLE_BAR_HEIGHT - STATUS_BAR_HEIGHT - SEAMS;
+  const GUTTER = 4;  // the cluster band's `pb-1`, VS Code's `spacing-size40`
+  const SEAMS = 2;   // the card's own border-t + border-b, under `border-box`
+  const RAIL_BUDGET = MIN_WINDOW_HEIGHT - TITLE_BAR_HEIGHT - STATUS_BAR_HEIGHT
+    - GUTTER - SEAMS;
 
   let total = 0;
   for (const [name, height] of blocks) {

@@ -73,27 +73,43 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * 48 a 20px glyph has 14px of air around it. A future session should not "fix"
  * the disagreement by narrowing it.
  *
- * ## The outline around it
+ * ## The card it sits in
  *
- * The rail is enclosed on three sides: `border-t` and `border-b` here, and
- * `<main>`'s `border-l` down its right edge. The fourth side is the window's
- * own, and nothing draws a line there - that is the shell's standing rule, the
- * same one that keeps every corner square (`roundedCorners` is Windows').
+ * The rail is a **card**, which is VS Code's Modern UI arrangement rather than
+ * an invention here: `floatingPanels.css`, `.part.activitybar.left`. Read that
+ * file before changing any of the four facts below, because each of them is
+ * load-bearing there for a reason it took them a comment to explain.
  *
- * **It carries no `border-r`, and that is the one edge that must stay bare.**
- * `<main>` already draws the line down this rail's right side; a `border-r`
- * here puts a second 1px rule in the same place, which is not subtle in Day.
- * The two horizontal edges are the opposite case - nothing else draws them, so
- * without them the rail runs into the title row and the status bar with no
- * edge at all, which is what this element looked like before the outline.
+ * **A border on all four sides, and the facing one is the seam.** `<main>` sits
+ * flush against this card's right edge and gives up its own `border-l`, so the
+ * single hairline between them is drawn HERE. VS Code's reason is the one that
+ * applies: the rail has to draw it, or its visible interior runs past its own
+ * edge to the neighbour's border and the icon column ends up on a half pixel.
+ * At `w-14` with `border-box` that is exact - 56 less two 1px borders is 54, an
+ * even interior for a 44px target. Give the border away and it is 55.
+ *
+ * **Rounded on the window side, square on the neighbour's**: `rounded-l-lg`,
+ * 8px, which is `--vscode-cornerRadius-large`. The right corners stay square so
+ * the rail and the workspace read as one connected surface rather than two
+ * cards with a gap painted between them.
+ *
+ * **The radius is legal because the card no longer touches the window.** The
+ * shell's rule is that nothing drawing against the window's own edge may carry
+ * a corner - Windows draws the only curve out there. `App.tsx`'s cluster band
+ * insets this card by a 4px gutter on the left and the bottom, so the rule is
+ * not bent, it is not engaged. Remove the gutter and the radius has to go with
+ * it, in that order.
+ *
+ * **Flush to the title row at the top, 4px clear of the status bar.** Also VS
+ * Code's: cards meet the title bar and take the gutter at the window edge.
  *
  * ## Height
  *
  * 10 icons at 44px, two dividers and the bottom group's padding come to
- * **494px** against the 622px the rail gets - a 680px minimum window, less the
- * 32px title row above it, the 24px status bar below, and the 1px seam this
- * element draws against each of them. It fits, with 128px of slack - room for
- * two more.
+ * **494px** against the 618px the rail gets - a 680px minimum window, less the
+ * 32px title row above it, the 24px status bar below, the cluster's 4px bottom
+ * gutter, and this card's own two 1px borders. It fits, with 124px of slack -
+ * room for two more.
  *
  * **The two strips are funded differently, and that is the thing to carry
  * forward.** The window minimum carries the title row, so this number did not
@@ -444,7 +460,8 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       aria-label="Activity"
       onKeyDown={onRailKeyDown}
       className="w-14 shrink-0 flex flex-col items-center bg-secondary
-        text-secondary-foreground select-none border-t border-b border-border"
+        text-secondary-foreground select-none
+        border border-border rounded-l-lg"
     >
       {/* No top cell, and the mark is not in one. The rail starts below the
           title row rather than beside it, so the window's top-left corner is
@@ -452,18 +469,17 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           40px below the corner it is meant to occupy and cost 40px this rail
           does not have.
 
-          The rail shares the row's `bg-secondary`, and the line between the
-          two is drawn HERE: `border-t` on this element, collinear with the
-          `border-t` on `<main>` beside it, so one rule crosses the whole
-          window under the row. `border-b` does the same above the status bar.
-          **The strips never draw those lines themselves**, and that is a
-          measurement rather than a preference - `border-box` takes a border
-          out of the element's own height, so a `border-b` on the `h-8` title
-          row would leave 31px for caption buttons that are 46x32 because
-          Windows' are. Anything that paints its own patch of ground on this
-          rail - the adapter badge's `fill-secondary` is the only one - has to
-          name that token too, or it reads as a darker square in Night. The
-          radius is Windows', not ours; see `TitleRow.tsx`.
+          This card's top border is the line under the title row, and the
+          title row does not draw it. `border-box` takes a border out of the
+          element's own height, so a `border-b` on the `h-8` row would leave
+          31px for caption buttons that are 46x32 because Windows' are - and
+          the same argument keeps `border-t` off the `h-6` status bar.
+
+          The card's ground is the band's ground, `bg-secondary` either side of
+          its border, so the outline is the whole separation. Anything that
+          paints its own patch of ground on this rail - the adapter badge's
+          `fill-secondary` is the only one - has to name that token too, or it
+          reads as a darker square in Night.
 
           The cell also carried `.app-drag`, so the window could be grabbed by
           the top-left corner. That is gone with it: the title row is drag

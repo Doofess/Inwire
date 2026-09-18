@@ -143,6 +143,26 @@ const GENERATED = new Map<string, string>([
   ['window-state.json', 'runtime, in userData: bounds and the title bar colour cache'],
 ]);
 
+/**
+ * Named, and in somebody else's repository.
+ *
+ * A third list because the assertion is different again: these are not absent
+ * from here deliberately and they are not written by a build - they were never
+ * ours. The guidance cites them because a decision here was copied from a
+ * decision there, and naming the file is what lets the next session check the
+ * copy rather than re-derive it.
+ *
+ * Reported rather than asserted. Nothing here can look at another repository,
+ * and a check that tried would be a network call in a suite whose whole promise
+ * is plain `tsx` with no I/O outside this tree. The value of the list is that a
+ * foreign path has to be ADDED to it deliberately, which is the moment somebody
+ * decides the citation is worth carrying.
+ */
+const ELSEWHERE = new Map<string, string>([
+  ['src/vs/workbench/browser/media/floatingPanels.css',
+    'microsoft/vscode: the Modern UI card cluster the rail and the workspace copy'],
+]);
+
 /** Where the prose's relative paths are rooted. */
 const ROOTS = ['', 'src/', 'src/services/', 'electron/', 'local-agent/'];
 /** Trees searched when resolving a bare filename. */
@@ -197,6 +217,7 @@ const missing: string[] = [];
 const skipped = new Set<string>();
 const absent: string[] = [];
 const generated = new Set<string>();
+const elsewhere = new Set<string>();
 let referenced = 0;
 
 for (const doc of DOCS) {
@@ -215,6 +236,10 @@ for (const doc of DOCS) {
     }
     if (GENERATED.has(token)) {
       generated.add(`${token} — ${GENERATED.get(token)}`);
+      continue;
+    }
+    if (ELSEWHERE.has(token)) {
+      elsewhere.add(`${token} — ${ELSEWHERE.get(token)}`);
       continue;
     }
     if (DELIBERATELY_ABSENT.has(token)) {
@@ -240,6 +265,10 @@ if (absent.length > 0) {
 if (generated.size > 0) {
   console.log(`\n      build output, named but not committed (${generated.size}):`);
   for (const entry of [...generated].sort()) console.log(`        ${entry}`);
+}
+if (elsewhere.size > 0) {
+  console.log(`\n      cited from another repository (${elsewhere.size}):`);
+  for (const entry of [...elsewhere].sort()) console.log(`        ${entry}`);
 }
 if (skipped.size > 0) {
   console.log(`\n      not treated as paths (${skipped.size}):`);
