@@ -2,10 +2,8 @@ import React, { useState } from 'react';
 import type { AgentHealth } from '../../services/agentHealth';
 import type { CaptureDropStats } from '../../services/agentProtocol';
 import type { LinkChange, LinkContext } from '../../services/linkContext';
-import { motion } from 'motion/react';
 import {
   Settings,
-  X,
   Palette,
   Activity,
   Funnel,
@@ -18,7 +16,6 @@ import {
   Code,
   EthernetPort,
 } from 'lucide-react';
-import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
 import { UpdateCenterPanel } from './UpdateCenterPanel';
 import { AppearanceSettingsPanel } from './AppearanceSettingsPanel';
@@ -95,8 +92,7 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   { id: 'updates', label: 'Updates', icon: Download },
 ];
 
-interface SettingsModalProps {
-  onClose: () => void;
+interface SettingsPaneProps {
   totalPacketsCount: number;
   totalBytes: number;
   packetBufferBytes: number;
@@ -154,8 +150,7 @@ interface SettingsModalProps {
   onRefreshAdapters: () => void;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({
-  onClose,
+export const SettingsPane: React.FC<SettingsPaneProps> = ({
   totalPacketsCount,
   totalBytes,
   packetBufferBytes,
@@ -204,20 +199,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     : 0;
 
   return (
-    <motion.div
-      {...modalBackdropMotion}
-      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
-    >
-      <motion.div
-        {...modalPanelMotion}
-        // `max-w-5xl`, not the `max-w-3xl` this was: Custom Dissectors is a
-        // two-column editor rather than a list of setting rows, and at 3xl the
-        // 176px nav left it about 220px to edit in. 5xl is what its own modal
-        // used. The window minimum is 1024, so `w-full` caps this at 992.
-        className="w-full max-w-5xl max-h-[90vh] rounded-xl border flex flex-col shadow-2xl transition-colors bg-card border-border text-card-foreground"
-      >
-        {/* Header */}
-        <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
+    /* **A pane, not a modal, and this is the last one that was a place.**
+     *
+     * It was `fixed inset-0`, a 70% black scrim and a `max-w-5xl` panel at
+     * `max-h-[90vh]`. Everything about that said "you are somewhere else for a
+     * moment": the app dimmed behind it, the window's own chrome was covered,
+     * and the way out was an X in a corner. Settings is not a moment - it is
+     * where the dissector editor, the colour rules, the filter presets and the
+     * Update Center live, and people work in it.
+     *
+     * The same argument promoted Frame Detail from a modal, and the ADR-shaped
+     * version of it is in `App.tsx`: a modal is a detour, a pane is a place.
+     *
+     * **It is deliberately not a VIEW**, and that is the interesting half.
+     * `APP_VIEWS` answers one question - is this a way of looking at the
+     * capture? - and Settings is not: nothing in it changes when a packet
+     * arrives, which is exactly the test that moved Network out of the view list
+     * and into a tab of this pane. So it takes the workspace card without
+     * joining the rail's numbering, the way a sheet does, and `AppView` is
+     * untouched.
+     *
+     * No border, no radius, no shadow and no ground of its own: `<main>` is the
+     * card and draws all four, so anything here would be a second card inside
+     * the first. */
+    <div className="h-full min-h-0 flex flex-col bg-background text-foreground">
+      <>
+        {/* No close button. Every other pane is left the same three ways - the
+            back step in the title row, Escape, or the rail - and an X here
+            would be a fourth door on one room, in the one pane that used to be
+            a modal. The rail's Settings icon shows its active state while this
+            is up, which is how the rail says "you are here" for every view. */}
+        <div className="px-5 py-3.5 border-b border-border flex items-center">
           <div className="flex items-center gap-2.5">
             <Settings className="w-7 h-7 shrink-0 text-primary" />
             <div>
@@ -225,10 +237,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <p className="text-xs text-muted-foreground">Appearance and application preferences</p>
             </div>
           </div>
-
-          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground">
-            <X className="w-5 h-5" />
-          </button>
         </div>
 
         {/* Body: sidebar + section */}
@@ -460,16 +468,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
-        {/* Footer */}
-        <div className="px-5 py-3 border-t border-border flex justify-end">
-          <button
-            onClick={onClose}
-            className="px-4 py-1.5 rounded-md bg-secondary hover:bg-accent text-foreground text-xs font-medium transition-colors"
-          >
-            Close
-          </button>
-        </div>
-      </motion.div>
-    </motion.div>
+        {/* **The footer's Close button went with the X and the scrim.** A
+            modal is dismissed, so it needs a dismissal; a pane is left, and
+            this one is left the way every other pane is. Two buttons doing that
+            in one surface was already one too many while it was a modal - the X
+            above and this - and neither survives the move. */}
+      </>
+    </div>
   );
 };

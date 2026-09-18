@@ -329,6 +329,15 @@ export interface ActivityRailProps {
   // pane.
 
   /* --- bottom ----------------------------------------------------------- */
+  /**
+   * Whether the Settings pane is up.
+   *
+   * It takes the workspace card but is not a view, so it is not in `view` and
+   * has to arrive on its own. The button carries the same active marker every
+   * view button does, because from the rail's side it is the same fact: this is
+   * what is on screen.
+   */
+  settingsOpen: boolean;
   onOpenSettings: () => void;
   /**
    * Export / Import PCAP.
@@ -349,7 +358,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces, onSelectInterface,
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
-  onOpenSettings, onOpenExport,
+  settingsOpen, onOpenSettings, onOpenExport,
   schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
   scheduleSummary, scheduleNow,
 }) => {
@@ -767,11 +776,19 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
         >
           <FileOutput className={GLYPH} />
         </button>
+        {/* **A toggle now, and marked like a view.** Settings was a modal
+            with an X and a Close button; it is a pane taking the workspace
+            card, so the rail has to say it is on screen and pressing this again
+            has to put it away. `'view'` rather than `'toggle'` for the marker:
+            the fill means "this is what you are looking at", which is exactly
+            what it means here, and the outline means "this control is on",
+            which Settings is not. */}
         <button
           onClick={onOpenSettings}
           aria-label="Settings"
           title="Settings"
-          className={railButton(false, 'toggle')}
+          aria-pressed={settingsOpen}
+          className={railButton(settingsOpen, 'view')}
         >
           <Settings className={GLYPH} />
         </button>
