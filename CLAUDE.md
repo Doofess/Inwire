@@ -2025,16 +2025,31 @@ hover tooltip on a header button.
 Validated sequencing, recorded so a future session inherits the reasoning.
 These are **not** work in progress and get an ADR when each is started.
 
-**A Rust agent, as the first post-migration project.** Why it is worth doing:
-one signed exe instead of a 34 MB `--onedir` tree of unsigned `.pyd` files, no
-interpreter to start, sub-second service start. Why it is *contained*: the
-protocol is transport- and language-agnostic and both ends already assert the
-same hand-written byte vectors, so the rewrite is bounded by tests that already
-exist. Two gotchas to carry over: `wpcap.dll` lives in `System32\Npcap` and is
-**not** on the default DLL search path, and the SCM integration wants the
-`windows-service` crate rather than hand-rolled `StartServiceCtrlDispatcher`.
-**It keeps the service model**: it replaces what the agent is written in, not
-where it runs, and it does not fold capture into the app (ADR 0033).
+**~~A Rust agent~~ — written, and in `agent-rs/`. ADR 0037.** This entry was the
+plan; the plan is done and the row below it is what is left of it. The
+throughput argument it rested on was **measured and dropped**: the Python
+sniffer thread costs 2.87 µs of work per frame at a utilisation of 0.003, and
+the frames that were being lost were lost to a sleep in the pump. What justified
+it instead: **449 KB in one file** against a 34 MB `--onedir` tree of unsigned
+`.pyd` files (signing a wrapper does not sign what the wrapper loads);
+**213 ms just to `import agent.py`**, which became load-bearing when demand start
+put the agent's cold start on the critical path of opening Inwire (ADR 0035);
+and two defects that are unrepresentable rather than fixed — a `Capture` is
+`Send` and not `Sync`, so a libpcap handle cannot cross to the event loop.
+
+**What is proven: the wire format, the pipe and the whole capture path, against
+the app's own client**, with conservation asserted to a residual of 0 over
+632,924 frames. **What is not: anything involving the SCM.** `install`,
+`remove`, `start`, `stop` and the status reporting in `service.rs` compile and
+are covered by nothing, because verifying them needs elevation —
+`docs/verification.md` carries them by hand. `npcap_access.py` is not ported and
+the Rust agent sends `None`, which falls back to the registry.
+
+**The Python agent is still what ships**, and has every fix this work produced.
+What blocks the swap is `0030`/`0032`'s constraint rather than this one: a
+code-signing certificate, and elevation to replace the installed binary.
+`wpcap.dll` living in `System32\Npcap` and off the default DLL search path was
+the gotcha to carry over, and `npcap.rs` carries it.
 
 **Engine-side dissection.** Move the pipeline Worker's work into the store
 `utilityProcess` with a `worker_threads` pool over `SharedArrayBuffer`, sharded
@@ -2135,6 +2150,7 @@ plan a bump roughly every other release.
 | 0034 | The side bar is a place: Escape does not close it, nor does navigating | accepted |
 | 0035 | The agent lives as long as the app, and shares its version | accepted; **retires 0033 reason #2** |
 | 0036 | The buffer sizes itself, and the renderer stands down before V8 aborts | accepted |
+| 0037 | The capture agent is Rust on Windows | accepted; **the service half is unverified** |
 
 **ADR 0008 weakened, and it now says so itself.** Its argument was that key
 material "is exactly as old as the tab"; a desktop app open for days breaks

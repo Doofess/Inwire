@@ -55,6 +55,7 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0034](0034-the-side-bar-is-a-place.md) | The side bar is a place, so Escape does not close it and navigating does not either — two negatives that leave no code behind to explain themselves | Accepted 2026-09-19 |
 | [0035](0035-the-agent-lives-as-long-as-the-app.md) | The agent is demand-start and stops itself, and its version is the product's — retires 0033's reason #2, re-justifies 0030's withheld WP | Accepted 2026-09-19 |
 | [0036](0036-the-buffer-sizes-itself.md) | The packet buffer sizes itself from RAM and the V8 heap, and the renderer stands down before V8 aborts | Accepted 2026-09-19 |
+| [0037](0037-the-agent-is-rust-on-windows.md) | The capture agent is Rust on Windows — one 449 KB signed exe instead of a 34 MB tree, and the throughput argument was measured and dropped | Accepted 2026-09-19; **the service half is unverified** |
 
 ## Review outcome: amendments to the spec's execution order
 

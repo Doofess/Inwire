@@ -1093,6 +1093,48 @@ ADR 0036. The numbers differ per machine, which is the point.
 
 ---
 
+### The Rust agent as a service
+
+ADR 0037. **Everything in this block is unverified**, and the reason is
+elevation: installing and starting a service needs an administrator, which is
+the one step a script here cannot take. The wire format, the pipe and the whole
+capture path ARE proven — against the app's own client, with conservation
+asserted — so what is untested is specifically the SCM's side.
+
+Build it with `cargo build --release` in `agent-rs/` (the GNU toolchain; the
+MSVC linker is not installed on this machine, and `dlltool` for the GNU one
+lives in the toolchain's `self-contained` directory rather than on PATH). Then,
+**from an elevated prompt, and with the Python agent's service removed first —
+both register `InwireAgent` and the second install will fail**:
+
+- [ ] `inwire-agent.exe install` exits 0, and `sc qc InwireAgent` reports
+      `START_TYPE : 3 DEMAND_START` and `SERVICE_START_NAME : LocalSystem`.
+- [ ] The description in services.msc reads "…Starts when Inwire asks for it,
+      and stops when Inwire closes."
+- [ ] `sc start InwireAgent` reports `RUNNING`, and **stays** running rather
+      than dropping back — a status handler that never reports `Running` shows
+      as a start that times out.
+- [ ] Launch Inwire against it. The status bar reaches "Agent connected", the
+      interface picker lists adapters, and a capture produces frames. This is
+      the same flow `smoke.ts` drives against the stub, run against the real
+      Rust service.
+- [ ] Close Inwire. `sc query` reports `STOPPED` within about four seconds —
+      the idle self-stop, same rule as the Python agent's.
+- [ ] `sc start` it again, then `sc stop InwireAgent`. It stops promptly, and
+      `sc query` does not sit in `STOP_PENDING` — that would mean `STOPPED` is
+      being reported before the runtime has returned.
+- [ ] **Two clients.** Two Inwire windows. One captures; the other is told
+      `capture_busy` rather than taking it over. The second window closing does
+      not stop the first's capture.
+- [ ] `inwire-agent.exe remove` exits 0 and the service is gone from
+      services.msc.
+- [ ] **Then reinstall the Python agent**, which is what actually ships.
+
+Known gaps to expect rather than report: `npcapAccess` is absent from `hello`
+(not ported), so the Update Center's driver-access row falls back to the
+registry; and the socket table, adapter config and log subscriptions answer with
+a `state` message rather than data.
+
 ## 6. What is still owed
 
 Not checkable yet, recorded so it is not mistaken for done.

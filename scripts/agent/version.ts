@@ -128,6 +128,15 @@ check('agentProtocol.ts REQUIRED_AGENT_VERSION matches package.json',
 check(`${SHIPPING} MyAppVersion matches package.json`,
   define(shipping, 'MyAppVersion'), version);
 
+// The Rust agent's crate version, which `lib.rs` re-exports as `VERSION` via
+// `env!("CARGO_PKG_VERSION")` - so this is what its `hello` carries and what
+// `--version` prints. It was deliberately `0.0.0` while the agent still had a
+// version of its own; it joined the lock when the collapse landed.
+const cargo = text('agent-rs/Cargo.toml');
+check('agent-rs/Cargo.toml was read', cargo.length > 0, true);
+const crateVersion = /^version = "([^"]+)"$/m.exec(cargo)?.[1] ?? null;
+check('agent-rs/Cargo.toml version matches package.json', crateVersion, version);
+
 console.log('\n--- and no second number beside it ---\n');
 
 // The deletion is the decision, so it is asserted rather than assumed. A

@@ -12,8 +12,19 @@ reads with `pcap_next_ex` directly, batches records into a binary format, and
 hands them to whoever asked. It does not dissect: a record carries no source,
 destination, protocol, ports or info (ADR 0010).
 
+**There is a second agent, in `agent-rs/`, and this one is what ships.** The
+Rust port is written and its wire format, pipe and capture path are proven
+against the app's own client (ADR 0037) — what is not proven is anything
+involving the SCM, which needs elevation, and what blocks the swap is a
+code-signing certificate. Until that changes, **every behaviour fix has to land
+in both**: the shared golden vectors and the matching kernel-buffer assertions
+are what keep them in step, and a fix applied to one and not the other is the
+failure mode to watch for. macOS and Linux keep this one regardless.
+
 On **Windows** it runs as the `InwireAgent` LocalSystem service, is installed by
-the product's installer, and its only transport is a named pipe. On **macOS and
+the product's installer, and its only transport is a named pipe. **It is
+demand-start** (ADR 0035): the app asks the SCM for it at launch, and the agent
+stops itself two watchdog ticks after its last client leaves. On **macOS and
 Linux** it installs from a tarball and keeps the WebSocket — and keeps the
 pairing token with it, because there is no interactive-user SID to name on a
 socket file and deciding who may open one is a genuinely different design.
