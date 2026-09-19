@@ -4,7 +4,6 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { AnimatePresence } from "motion/react";
 import { useTheme } from "next-themes";
 import { useSystemThemePreference } from "./lib/useSystemTheme";
 import { useMotionPreference } from "./lib/motion";
@@ -91,13 +90,13 @@ import { LinkedDetailsTree, LinkedHexViewer } from "./components/packet-details/
 import { PacketDetailPane } from "./components/packet-details/PacketDetailPane";
 import { StreamFollowerPane } from "./components/stream-follower/StreamFollowerPane";
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
-import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { SettingsPane } from "./components/common/SettingsPane";
 import { NetworkPane, NetworkPanelActions } from './components/network/NetworkPane';
-import { PANEL_TITLES, SideBar } from './components/sidebar/SideBar';
+import { SideBar } from './components/sidebar/SideBar';
 import { CaptureInterfacePanel } from './components/sidebar/CaptureInterfacePanel';
 import { CaptureSchedulePanel } from './components/sidebar/CaptureSchedulePanel';
+import { TransferPanel } from './components/sidebar/TransferPanel';
 import {
   MAIN_RESERVE_PX, MIN_SIDE_BAR_PX, restoredPanel, SIDE_BAR_DEFAULTS, sideBarStore,
   usableSideBarWidth, type SideBarPanel,
@@ -412,7 +411,6 @@ export default function App() {
   // the bottom panes do, which is what makes stepping frames in there move the
   // list too, and what makes leaving for the list and coming back land on the
   // frame you were reading.
-  const [showExportModal, setShowExportModal] = useState(false);
   /**
    * Which SHEET is over the workspace, or `null` for none.
    *
@@ -2398,7 +2396,7 @@ export default function App() {
           streamAvailable={streamForSelection !== null || streamToFollow !== null}
           settingsOpen={settingsOpen}
           onOpenSettings={() => toggleSheet('settings')}
-          onOpenExport={() => setShowExportModal(true)}
+          onOpenExport={() => toggleSideBar('transfer')}
           sideBarOpen={sideBarOpen}
           sideBarPanel={sideBar}
           onOpenSideBar={toggleSideBar}
@@ -2534,11 +2532,19 @@ export default function App() {
                 agentConnected={agentStatus === 'connected'}
               />
             )}
-            {/* Export/Import lands here next. */}
             {sideBar === 'transfer' && (
-              <p className="px-3 py-3 text-xs text-muted-foreground">
-                {PANEL_TITLES.transfer} moves into this column next.
-              </p>
+              <TransferPanel
+                // The full buffer, never `filteredPackets` or
+                // `dashboardPackets`: what this writes is what was captured,
+                // and the scope control inside it is the one place that
+                // narrows it.
+                packets={packets}
+                appliedFilter={appliedFilter}
+                permissions={permissions}
+                captureStats={captureStats}
+                onImportPackets={handleImportPackets}
+                onImportBatch={handleImportBatch}
+              />
             )}
           </SideBar>
         )}
@@ -3058,30 +3064,13 @@ export default function App() {
           Statistics and the Routing Map - so there is no backdrop to escape
           from and no second frame id to keep in step with the selection. */}
 
-      <AnimatePresence>
-        {showExportModal && (
-          <ExportImportModal
-            key="export-modal"
-            packets={packets}
-            onImportPackets={handleImportPackets}
-            onImportBatch={handleImportBatch}
-            onClose={() => setShowExportModal(false)}
-            permissions={permissions}
-            isDark={isDark}
-            // The modal derives its own filtered set from the full buffer above
-            // rather than being handed `filteredPackets`: its filter is
-            // editable independently of the main window's, and the deliberate
-            // "export sees the live buffer, never dashboardPackets" rule stays
-            // intact either way.
-            appliedFilter={appliedFilter}
-            filterPresetLibrary={filterPresetLibrary}
-            // For the pcapng file's Interface Statistics Block: what the
-            // driver and the agent dropped. A file that does not say it is
-            // incomplete reads as complete.
-            captureStats={captureStats}
-          />
-        )}
-      </AnimatePresence>
+      {/* **Export / Import was a modal here and is a side bar panel.** A 70%
+          scrim over an app whose whole subject was on screen behind it, holding
+          a sequence - what gets written, what travels with it, in which format -
+          laid out as a three-column grid that scrambled that sequence's reading
+          order. `ImportErrorDialog` is the one piece of it that stays a modal,
+          and it lives inside the panel: a refusal that has to be acknowledged
+          is a detour by every test this repo applies. */}
 
 
 

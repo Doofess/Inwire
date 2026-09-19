@@ -5,46 +5,33 @@ import { allPresets } from '../../services/filterPresets';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
 
 /**
- * Which surface this bar is standing on.
+ * **There was a `variant`, and there is one filter field in this app.**
  *
- * A named variant rather than a `compact` boolean: the two differ in more than
- * size, and a boolean called "compact" would be answering the wrong question by
- * the second thing it had to control.
+ * It was `'header' | 'compact'`, a named union rather than a boolean on the
+ * argument that the two differed in more than size - which was right, and was
+ * an argument for naming them rather than for having two. `compact` had exactly
+ * one consumer: the Export modal, which embedded a whole second `FilterBar`
+ * because its 70% scrim covered the real one.
  *
- * `header` is the filter row above the packet list - the full bar, and the name
- * is older than the surface, from when this sat in a 64px app header. `compact`
- * is inside a dialog: the same filter field, the same presets, the same
- * validation, and nothing else.
+ * Export is a side bar panel now and the title row's field is 32px above it,
+ * always reachable, so the second copy is deleted and the panel offers the
+ * CHOICE that copy really stood for - write the buffer, or write what the
+ * filter selects. With its only other consumer gone, a union whose second
+ * member nothing can reach is dead vocabulary, and this repository has a
+ * standing answer for that: `agentSilentLabel`'s unreachable branch shipped as
+ * a confident wrong answer, and the dock's post-mortem is about a marker shape
+ * kept after its subject went.
  *
- * What `compact` drops is smaller than it was, because the full bar has lost
- * most of what it had to drop. It carried a packet-search field and a PACKETS
- * count; the search is deleted outright and the count is the title row's
- * readout now, so the two variants differ mainly in padding and in the bookmark
- * button. The distinction is kept because the reason it existed still holds -
- * a dialog must not edit preset state it does not own (`onSaveCurrentFilter` is
- * simply omitted), and the export panel states its own totals, "412 of 5,231"
- * against a different denominator entirely.
- *
- * `panel` is the side bar's column, and the third variant exists for a
- * difference of KIND rather than of size - which is the test this type was
- * given when it stopped being a `compact` boolean. **Its messages render in
- * FLOW rather than floating.** Everywhere else this bar has room beneath it and
- * a validation notice can hang over whatever is there; in a 300px column an
- * absolutely-positioned notice overflows the column's right edge, and the
- * caller has to reserve empty height against the day it appears.
- *
- * `ExportPanel` did reserve it - `validation.isValid ? 'pt-1' : 'pt-9'` - and
- * that reservation is what this variant deletes. 36px of a narrow column whose
- * only job is to be empty most of the time is not a layout, it is a workaround
- * for a notice that is positioned wrongly for the space.
+ * A third member, `'panel'`, existed for one commit in between. It rendered the
+ * validation notice in flow rather than floating, so `ExportPanel`'s `pt-9`
+ * reservation could be deleted - and then the field it was written for was
+ * deleted instead, which is the better answer to the same problem.
  */
-export type FilterBarVariant = 'header' | 'compact' | 'panel';
 
 interface FilterBarProps {
   filterText: string;
   onFilterChange: (filter: string) => void;
   onApplyFilter: (newFilter?: string) => void;
-  variant?: FilterBarVariant;
   /**
    * The preset library, owned by App.tsx and edited in
    * Settings > Display Filters. Read-only here apart from the bookmark button,
@@ -61,23 +48,9 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   filterText,
   onFilterChange,
   onApplyFilter,
-  variant = 'header',
   filterPresetLibrary,
   onSaveCurrentFilter,
 }) => {
-  const isCompact = variant === 'compact';
-  /**
-   * Whether the two notices push the content below them down.
-   *
-   * The floating form is right wherever this bar has air beneath it - the title
-   * row has the whole workspace - and wrong in a column, where it would both
-   * overflow the right edge and force the caller to reserve height for it.
-   */
-  const noticesInFlow = variant === 'panel';
-  const noticeClass = noticesInFlow
-    ? 'mt-1.5 flex items-start gap-1.5 px-2.5 py-1 rounded text-[11px] border'
-    : 'absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 '
-      + 'rounded text-[11px] border shadow-lg';
   const [validation, setValidation] = useState<FilterValidationResult>({ isValid: true });
   /**
    * Who asked for the presets list, or `null` for nobody.
@@ -245,7 +218,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
     // instead of onto a second line.
     <div
       ref={containerRef}
-      className={`relative z-30 min-w-0 ${isCompact || noticesInFlow ? 'w-full' : 'flex-1'}`}
+      className="relative z-30 min-w-0 flex-1"
     >
       <div className="flex flex-nowrap items-center gap-2">
         {/* The filter field, which is now also the preset picker.
@@ -467,9 +440,8 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 
           {/* Syntax Error Notice */}
           {!validation.isValid && validation.errorMessage && (
-            <div className={`${noticeClass} bg-rose-100 dark:bg-rose-950 text-rose-800
-              dark:text-rose-300 border-rose-300 dark:border-rose-800`}>
-              <CircleAlert className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-px" />
+            <div className="absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 text-[11px] border border-rose-300 dark:border-rose-800 shadow-lg">
+              <CircleAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
               <span>{validation.errorMessage}</span>
             </div>
           )}
@@ -478,9 +450,8 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               It runs, and it will match nothing - which is worth saying, and
               is not an error: the filter is correct, the dissector is missing. */}
           {validation.isValid && validation.warnings && !showSuggestions && (
-            <div className={`${noticeClass} bg-amber-100 dark:bg-amber-950 text-amber-800
-              dark:text-amber-300 border-amber-300 dark:border-amber-800`}>
-              <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
+            <div className="absolute left-0 top-full mt-1.5 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 text-[11px] border border-amber-300 dark:border-amber-800 shadow-lg">
+              <Info className="w-3.5 h-3.5 shrink-0" />
               <span>{validation.warnings[0]}</span>
             </div>
           )}
