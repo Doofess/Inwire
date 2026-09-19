@@ -94,6 +94,7 @@ import { findPacketIndexById, frameJumpRefusal } from "./components/packet-detai
 import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { SettingsPane } from "./components/common/SettingsPane";
+import { NetworkPane } from './components/network/NetworkPane';
 import {
   FILTER_PRESETS_STORAGE_KEY,
   addPreset,
@@ -405,7 +406,26 @@ export default function App() {
   // list too, and what makes leaving for the list and coming back land on the
   // frame you were reading.
   const [showExportModal, setShowExportModal] = useState(false);
-  const [showSettingsPane, setShowSettingsPane] = useState(false);
+  /**
+   * Which SHEET is over the workspace, or `null` for none.
+   *
+   * A sheet takes the workspace card without being a view: it covers what was
+   * on screen, the view underneath is untouched, and closing it puts that view
+   * back rather than navigating anywhere. There are two - Settings and Network
+   * - and they are both here for the same reason they are not in `APP_VIEWS`:
+   * the view list answers "is this a way of looking at the capture?", and
+   * nothing in either changes when a packet arrives.
+   *
+   * **One state rather than a boolean each**, because the card holds one
+   * surface: two flags would make "both open" representable, and the code that
+   * closes a sheet on every navigation would have to remember to close both.
+   */
+  const [sheet, setSheet] = useState<'settings' | 'network' | null>(null);
+  const sheetOpen = sheet !== null;
+  const toggleSheet = useCallback(
+    (which: 'settings' | 'network') => setSheet((open) => (open === which ? null : which)),
+    [],
+  );
 
   /**
    * Which of the five surfaces the rail says we are on.
@@ -1627,7 +1647,7 @@ export default function App() {
      * chooses it. `applyFilter` closes it for the same reason - it navigates
      * to Packets, and a navigation nobody can see is the identical bug.
      */
-    const land = (v: AppView) => { setShowSettingsPane(false); setView(v); };
+    const land = (v: AppView) => { setSheet(null); setView(v); };
     if (next !== 'stream') { land(next); return; }
     const target = selectedPacketRef.current !== null
       ? targetForPacket(selectedPacketRef.current) : null;
@@ -1637,7 +1657,7 @@ export default function App() {
     // including to Settings, because a shortcut that did nothing visible should
     // not have closed the surface you were reading.
     if (target === null) { if (streamToFollow !== null) land('stream'); return; }
-    setShowSettingsPane(false);
+    setSheet(null);
     handleFollowStream(target);
   }, [setView, streamToFollow, handleFollowStream]);
 
@@ -1660,19 +1680,19 @@ export default function App() {
    * case, since a long capture can drop the origin while the stream is read.
    */
   useEffect(() => {
-    if (view === 'packets' && !showSettingsPane) return;
+    if (view === 'packets' && !sheetOpen) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
-      // Settings first, and it does not take the view with it: it is a sheet
+      // The sheet first, and it does not take the view with it: it is a surface
       // over whatever was underneath, so closing it returns you there rather
       // than to Packets. One Escape per surface, outermost first.
-      if (showSettingsPane) { setShowSettingsPane(false); return; }
+      if (sheetOpen) { setSheet(null); return; }
       if (view === 'stream' && streamOrigin !== null) goToFrame(streamOrigin);
       setView('packets');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [view, setView, streamOrigin, goToFrame, showSettingsPane]);
+  }, [view, setView, streamOrigin, goToFrame, sheetOpen]);
 
   // Window-level keyboard shortcuts - see hooks/useKeyboardNavigation.ts.
   useKeyboardNavigation({
@@ -1932,7 +1952,7 @@ export default function App() {
     // `handleViewChange` does: the filter field is in the title row and stays
     // reachable while the sheet is open, and a navigation the sheet covers is a
     // control that looks broken. Clearing does not navigate and so does not.
-    if (expression.trim() !== '') { setShowSettingsPane(false); setView('packets'); }
+    if (expression.trim() !== '') { setSheet(null); setView('packets'); }
   }, [filterText, setView]);
 
   /**
@@ -1945,16 +1965,16 @@ export default function App() {
    * makes it a sheet: opening and closing it costs the view nothing.
    */
   const backTarget = backTargetFor(view);
-  const backLabel = showSettingsPane
+  const backLabel = sheetOpen
     ? viewLabel(view)
     : backTarget === null ? null : viewLabel(backTarget);
 
   const goBack = useCallback(() => {
-    if (showSettingsPane) { setShowSettingsPane(false); return; }
+    if (sheetOpen) { setSheet(null); return; }
     if (backTarget === null) return;
     if (view === 'stream' && streamOrigin !== null) goToFrame(streamOrigin);
     setView(backTarget);
-  }, [showSettingsPane, backTarget, view, streamOrigin, goToFrame, setView]);
+  }, [sheetOpen, backTarget, view, streamOrigin, goToFrame, setView]);
 
   /**
    * A stream that goes away takes its view with it.
@@ -2121,9 +2141,10 @@ export default function App() {
   // behind a modal that is closed almost all of the time, so computing it
   // otherwise is a full pass over up to 50,000 packets, twice a second, for a
   // number nobody can see. The `0` stands in while closed - nothing reads it.
+  const settingsOpen = sheet === 'settings';
   const totalBytes = useMemo(
-    () => (showSettingsPane ? dashboardPackets.reduce((sum, p) => sum + p.length, 0) : 0),
-    [dashboardPackets, showSettingsPane],
+    () => (settingsOpen ? dashboardPackets.reduce((sum, p) => sum + p.length, 0) : 0),
+    [dashboardPackets, settingsOpen],
   );
   /**
    * What the window calls itself. Pure, and asserted without a window.
@@ -2248,8 +2269,10 @@ export default function App() {
           view={view}
           onViewChange={handleViewChange}
           streamAvailable={streamForSelection !== null || streamToFollow !== null}
-          settingsOpen={showSettingsPane}
-          onOpenSettings={() => setShowSettingsPane((open) => !open)}
+          settingsOpen={settingsOpen}
+          onOpenSettings={() => toggleSheet('settings')}
+          networkOpen={sheet === 'network'}
+          onOpenNetwork={() => toggleSheet('network')}
           onOpenExport={() => setShowExportModal(true)}
           schedule={schedule}
           onScheduleChange={setSchedule}
@@ -2376,13 +2399,32 @@ export default function App() {
               Rendered BEFORE the views and returning early, rather than beside
               them, so there is one surface in this card at a time by
               construction. */}
-          {showSettingsPane ? (
+          {sheet === 'network' ? (
+            /* **Network is the second sheet, and it is not a view again.**
+               It was one, on `Ctrl+3`, and it failed the list's own test: it
+               describes the MACHINE - adapters, DNS, public identity - and
+               nothing in it changes when a packet arrives. That is still true,
+               so it is not back in `APP_VIEWS`; what it gets instead is its own
+               front door on the rail, because being a Settings TAB buried the
+               one report that answers "what is this computer even connected
+               to" three clicks inside a configuration panel. A sheet is the
+               shape that says both things at once: reachable in one press,
+               and not a way of looking at the capture.
+
+               It keeps its own ground (`bg-card`, like every view) rather than
+               Settings' `bg-background` - Settings is a panel of controls and
+               this is a report, which is the same distinction the views draw. */
+            <NetworkPane
+              adapters={adapters}
+              facts={networkFacts}
+              captureInterfaces={selectedInterfaces}
+              agentConnected={agentStatus === 'connected'}
+              onRefresh={() => sendAgentCommand({ type: 'refresh_adapters' })}
+            />
+          ) : sheet === 'settings' ? (
             <SettingsPane
               dissectorEngine={dissectorEngine}
               onUpdateDissectors={handleUpdateDissectors}
-              adapters={adapters}
-              networkFacts={networkFacts}
-              onRefreshAdapters={() => sendAgentCommand({ type: 'refresh_adapters' })}
               agentLinkEnabled={agentLinkEnabled}
               agentHealth={agentHealth}
               onStartAgentService={startAgentService}

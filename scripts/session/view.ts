@@ -283,7 +283,23 @@ console.log('\n--- Settings is a pane and not a view ---\n');
   // full of rounded things and always were - it is the shell that must be bare.
   checkTrue('...and draws no card of its own',
     pane.includes('className="h-full min-h-0 flex flex-col bg-background text-foreground"'));
-  checkTrue('it is rendered inside the workspace', app.includes('showSettingsPane ? ('));
+  checkTrue('it is rendered inside the workspace', app.includes("sheet === 'settings' ? ("));
+
+  // **There are two sheets and one slot.** Network joined Settings on the same
+  // argument - it describes the machine, so nothing in it changes when a packet
+  // arrives - and the card holds one surface. `App` models that as one state
+  // rather than a flag each, because two flags make "both open" representable
+  // and every navigation that closes a sheet would have to remember both.
+  checkTrue('a sheet is one state, not a flag each',
+    /const \[sheet, setSheet\] = useState<'settings' \| 'network' \| null>/.test(app));
+  // `ids` is typed `AppView[]`, and `'network'` is not in that union - which is
+  // itself half the answer, and is why this is written against `string[]`
+  // rather than as a comparison `tsc` would reject as impossible. The type says
+  // it cannot be a view; this says nobody put it back in the list either.
+  checkTrue('Network is not back in the view list',
+    !(ids as string[]).includes('network'));
+  checkTrue('...and it is not a Settings tab either',
+    !code('src/components/common/SettingsPane.tsx').includes("id: 'network'"));
 
   // **Three ways out and no fourth.** Every other pane is left by the back step,
   // Escape, or the rail. The X and the Close button were the modal's, and a
@@ -291,9 +307,9 @@ console.log('\n--- Settings is a pane and not a view ---\n');
   checkTrue('the pane has no close control of its own',
     !pane.includes('onClose') && !pane.includes('>Close<'));
   checkTrue('...the back step closes it rather than leaving the view',
-    app.includes('if (showSettingsPane) { setShowSettingsPane(false); return; }'));
+    app.includes('if (sheetOpen) { setSheet(null); return; }'));
   checkTrue('...and the rail toggles it',
-    app.includes('setShowSettingsPane((open) => !open)'));
+    app.includes("(open) => (open === which ? null : which)"));
 
   // **Choosing a view closes it**, and this shipped broken. The pane renders
   // INSTEAD of the view stack, so `setView` underneath it moved the rail's
@@ -307,15 +323,23 @@ console.log('\n--- Settings is a pane and not a view ---\n');
   // the rail and `Ctrl+1..5` go through `handleViewChange`, and the filter field
   // is in the title row, which the sheet does not cover.
   checkTrue('...and choosing a view closes it',
-    /handleViewChange = useCallback[\s\S]{0,1400}setShowSettingsPane\(false\)/.test(app));
+    /handleViewChange = useCallback[\s\S]{0,1600}setSheet\(null\)/.test(app));
   checkTrue('...as does applying a filter, which navigates',
-    /expression\.trim\(\) !== ''\)[^}]*setShowSettingsPane\(false\)/.test(app));
+    /expression\.trim\(\) !== ''\)[^}]*setSheet\(null\)/.test(app));
 
   // The rail says what is on screen and Settings is on screen, so it carries
   // the same marker a view does rather than the outline a toggle gets.
+  const railSrc = code('src/components/common/ActivityRail.tsx');
   checkTrue('the rail marks Settings the way it marks a view',
-    code('src/components/common/ActivityRail.tsx')
-      .includes("railButton(settingsOpen, 'view')"));
+    railSrc.includes("railButton(settingsOpen, 'view')"));
+  checkTrue('...and marks Network the same way, being the same kind of thing',
+    railSrc.includes("railButton(networkOpen, 'view')"));
+  // The strip has shipped two identical glyphs once already - the brand mark
+  // opened as an `EthernetPort`, the adapter button's own icon, 42px under it.
+  // Network is the adapter's neighbour in meaning and must not be in picture.
+  checkTrue('...with a glyph the adapter button does not already use',
+    railSrc.includes('<Network className={GLYPH} />')
+    && !/<EthernetPort className=\{GLYPH\}/.test(railSrc));
 }
 
 console.log('\n--- the back step, and what is a root ---\n');
@@ -464,12 +488,12 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // the same change. Both deltas are 46px and they cancel, which is why the
   // total below did not move.
   const blocks = [
-    ['capture: Start/Stop, adapter, schedule', 4 + group(3)],
+    ['capture: Start/Stop, adapter, schedule, Export/Import', 4 + group(4)],
     ['divider', DIVIDER],
     [`views: ${ids.length}`, group(ids.length)],
     // The bottom group carries its own divider, so the gap between that line and
     // the first button is the group's gap rather than the divider's margin.
-    ['bottom: Export/Import, Settings', DIVIDER + GAP + group(2) + 8],
+    ['bottom: Network, Settings', DIVIDER + GAP + group(2) + 8],
   ] as const;
 
   // What the rail actually gets. The title row spans the full window width and
@@ -515,9 +539,9 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // and deleting the `counts` widget took the widgets group from six icons to
   // five. This is the line that says what each of those cost.
   //
-  // 630 -> 592 -> 516 -> 494 -> 414, and three different things are happening
-  // in that sequence. (494 held through a change that moved nothing: Find
-  // packet out of the capture group, Frame Detail into the views group.)
+  // 630 -> 592 -> 516 -> 494 -> 414 -> 452, and four different things are
+  // happening in that sequence. (494 held through a change that moved nothing:
+  // Find packet out of the capture group, Frame Detail into the views group.)
   //
   // **The first three steps are deleted widgets**, all at a 36px target. Find
   // packet moving from the bottom group up under the schedule contributed
@@ -536,7 +560,14 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // does not fit inside it. Nothing was deleted and nothing moved; this step is
   // purely the size of the button, which is why it is the cleanest number in
   // the sequence: exactly 8 times the ten icons.
-  check('the rail is as tall as it says it is', total, 414);
+  //
+  // **414 -> 452 is one ADDED icon and nothing else.** Export/Import moved from
+  // the bottom group up under the schedule and Network took the slot it left -
+  // the move is free, because both groups gap the same and `group(4) - group(3)`
+  // equals `group(3) - group(2)`. What is not free is the eleventh icon: 36 plus
+  // its gap, which is the 38 in this step. That is the rule to carry forward -
+  // moving an icon between groups costs nothing, adding one costs 38.
+  check('the rail is as tall as it says it is', total, 452);
   // The raw file, not `code()`: the figure lives in the header comment, which is
   // the first thing `code()` throws away. The point of this one is that the
   // prose and the arithmetic cannot part company again.

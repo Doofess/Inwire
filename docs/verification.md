@@ -130,6 +130,23 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
 - [ ] **It does not navigate.** Open Statistics, then Settings, then close it —
       you are back in Statistics, not in Packets. That is what makes it a sheet
       rather than a view.
+- [ ] **Network is a rail button, in the bottom group above Settings.** Press
+      it: the report fills the workspace card and the icon takes the same
+      translucent accent fill a view's does. Press it again and it closes. It is
+      **not** in the rail's numbering — `Ctrl+1..5` are the five views and none
+      of them is this.
+- [ ] **It is gone from Settings.** Open Settings: the tabs run Appearance,
+      Interface, Accessibility, Display Filters, Colouring Rules, Custom
+      Dissectors, Decryption, Driver Info, Updates. No Network tab.
+- [ ] **Only one sheet is ever up.** Open Network, then press the rail's
+      Settings icon: Settings replaces it and the Network icon goes dark. The
+      back step, Escape and choosing a view must each close whichever is open.
+- [ ] **Export/Import moved up.** It is the fourth icon in the capture group,
+      under the schedule clock — not at the bottom beside Settings.
+- [ ] **The two glyphs at the top and bottom are different.** The adapter button
+      in the capture group is an `EthernetPort`; Network is the node graph. If
+      they look like the same icon twice, that is the exact failure this strip
+      has shipped once before.
 - [ ] **Choosing a view from inside Settings works.** Open Settings, then click
       any view icon in the rail: the pane closes and that view is on screen.
       Same with `Ctrl+1..5`. This shipped broken — the rail's marker moved and
