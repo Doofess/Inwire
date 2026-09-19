@@ -142,17 +142,39 @@ class _Outbound:
 
     def __init__(self, max_frames: int, max_bytes: int) -> None:
         self._frames: collections.deque = collections.deque()
+        # How many captured packets each queued frame carries, in step with
+        # `_frames`. Kept apart rather than stored as a tuple so the hot path -
+        # the writer thread's `get()` - still pops a plain bytes object.
+        self._records: collections.deque = collections.deque()
         self._bytes = 0
         self._max_frames = max_frames
         self._max_bytes = max_bytes
         self._cond = threading.Condition()
         self.dropped = 0
 
-    def put(self, frame) -> None:
+    def put(self, frame, records: int = 0) -> None:
+        """Queues one outbound frame.
+
+        `records` is **how many captured packets this frame carries** - a
+        packet batch holds up to 512 of them, a control message holds none.
+
+        **The counter is in packets, and getting that wrong was a real bug.**
+        It counted ITEMS, and the items here are batches; the app adds
+        `droppedPipe` straight into a frames-lost total beside `droppedAgent`
+        and `droppedKernel`, which are packets. So a shed batch of twelve
+        frames was reported as one lost frame, and the figure was short by
+        roughly the batch size - measured against the Rust agent under load,
+        37,793 shed batches accounted for 398,000 missing packets.
+
+        Caught by asserting conservation end to end rather than by reading it:
+        delivered plus shed plus still-queued has to equal what the driver
+        handed over, and it did not.
+        """
         with self._cond:
             self._frames.append(frame)
             if frame is not _SHUTDOWN:
                 self._bytes += len(frame)
+                self._records.append(records)
             # `> 1` so the frame just queued is never the one shed: a queue that
             # evicted its own newest arrival would deliver nothing at all once
             # a single frame exceeded the budget.
@@ -165,7 +187,8 @@ class _Outbound:
                     self._frames.appendleft(oldest)
                     break
                 self._bytes -= len(oldest)
-                self.dropped += 1
+                # In PACKETS, not in queued items. See `put`.
+                self.dropped += self._records.popleft()
             self._cond.notify()
 
     def get(self):
@@ -175,6 +198,7 @@ class _Outbound:
             frame = self._frames.popleft()
             if frame is not _SHUTDOWN:
                 self._bytes -= len(frame)
+                self._records.popleft()
             return frame
 
     def qsize(self) -> int:
@@ -212,14 +236,21 @@ class PipeConnection:
 
     # -- what `register` uses ------------------------------------------------
 
-    async def send(self, data) -> None:
+    async def send(self, data, records: int = 0) -> None:
+        """Sends one message.
+
+        `records` is how many captured packets `data` carries, and it exists so
+        the shed counter can be in PACKETS. A batch that is shed loses every
+        packet in it, and reporting that as one lost frame understates the loss
+        by the batch size - see `_Outbound.put`.
+        """
         if self._closed:
             raise ConnectionError("the pipe client has gone")
         if isinstance(data, str):
             frame = pipe_frame.encode_frame(pipe_frame.FRAME_JSON, data.encode("utf-8"))
         else:
             frame = pipe_frame.encode_frame(pipe_frame.FRAME_BINARY, bytes(data))
-        self._write(frame)
+        self._write(frame, records)
 
     def __aiter__(self):
         return self
@@ -398,7 +429,7 @@ class PipeServer:
         outbound = _Outbound(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES)
         closed = threading.Event()
 
-        def write(frame: bytes) -> None:
+        def write(frame: bytes, records: int = 0) -> None:
             if closed.is_set():
                 # **Raised, not returned.** This used to return silently while
                 # `PipeConnection.send` tested a DIFFERENT flag - its own
@@ -407,7 +438,7 @@ class PipeServer:
                 # has an `except` that exists for exactly this and could never
                 # fire. One flag decides now, and it decides out loud.
                 raise ConnectionError("the pipe client has gone")
-            outbound.put(frame)
+            outbound.put(frame, records)
 
         def close() -> None:
             closed.set()

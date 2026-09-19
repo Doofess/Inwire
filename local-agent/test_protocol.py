@@ -2148,7 +2148,11 @@ import pipe_server
 def _connection():
     written = []
     loop = asyncio.new_event_loop()
-    conn = pipe_server.PipeConnection(loop, written.append, lambda: None)
+    # Takes the record count `send` now passes - the transport's writer needs
+    # it so the shed counter can be in packets rather than in queued items.
+    def _write(frame, records=0):
+        written.append(frame)
+    conn = pipe_server.PipeConnection(loop, _write, lambda: None)
     return loop, conn, written
 
 
@@ -2213,24 +2217,42 @@ _loop.close()
 #   3. The bound was a frame COUNT on items of up to 256 kB - 4,096 of them is
 #      a gigabyte inside a LocalSystem service. The sniffer queue beside it
 #      records adding a byte budget for this precise reason.
+# **The counter is in PACKETS, not in queued items**, and that is a real bug
+# rather than a nicety. The items here are batches of up to 512 packets, while
+# the app adds `droppedPipe` straight into a frames-lost total beside
+# `droppedAgent` and `droppedKernel`, which are packets. Counting items reported
+# a shed batch of twelve frames as one lost frame.
+#
+# Found by asserting conservation end to end against the Rust agent - delivered
+# plus shed plus still-queued must equal what the driver handed over - where
+# 37,793 shed batches accounted for 398,000 missing packets.
 _ob = pipe_server._Outbound(max_frames=3, max_bytes=10_000)
 for _i in range(3):
-    _ob.put(bytes([_i]) * 10)
+    _ob.put(bytes([_i]) * 10, records=12)
 check("frames queue up to the count bound", _ob.qsize(), 3)
 check("...losing none of them", _ob.dropped, 0)
-_ob.put(b"\x09" * 10)
+_ob.put(b"\x09" * 10, records=12)
 check("past the bound the queue does not grow", _ob.qsize(), 3)
-check("...and the shed frame is counted", _ob.dropped, 1)
+check("...and the shed batch is counted in PACKETS, not as one item",
+      _ob.dropped, 12)
 check("...the OLDEST being the one shed, as in the sniffer queue",
       _ob.get(), b"\x01" * 10)
+
+# A control message carries no packets, so shedding one loses none - and the
+# default is 0, so a caller that forgets cannot inflate the figure.
+_obc = pipe_server._Outbound(max_frames=1, max_bytes=10_000)
+_obc.put(b"{}")
+_obc.put(b"{}")
+check("shedding a control message loses no packets", _obc.dropped, 0)
 
 # The byte bound bites first when the items are big, which is the case the
 # count bound could not express at all.
 _ob2 = pipe_server._Outbound(max_frames=4096, max_bytes=1000)
 for _ in range(5):
-    _ob2.put(b"\x00" * 400)
+    _ob2.put(b"\x00" * 400, records=7)
 check_true("a byte budget sheds before the count bound is anywhere near",
            _ob2.qsize() < 4096 and _ob2.dropped > 0)
+check("...counting every packet in every batch it shed", _ob2.dropped % 7, 0)
 check_true("...leaving the queue inside its budget", _ob2.pending_bytes() <= 1000)
 
 # A single frame larger than the whole budget must still be delivered: a queue
@@ -2271,3 +2293,24 @@ check_true("a pipe connection is vouched for by the kernel",
            pipe_server.PipeConnection.kernel_authenticated)
 check_true("...and the agent reads it off the connection, not off the transport",
            'getattr(ws, "kernel_authenticated", False)' in inspect.getsource(agent.AgentServer.register))
+
+
+# --- the summary, and the exit code ------------------------------------------
+#
+# **This file counted failures and then exited 0.** Every `check` above
+# incremented `failures`, printed FAIL, and told nobody: the script simply ran
+# off the end, and Python exits 0 when it does. So the suite was advisory to
+# anything that reads an exit code - which is `.github/workflows/ci.yml:65`,
+# where it is a build step, and the release checklist in `local-agent/CLAUDE.md`,
+# where a person is told to run it before shipping.
+#
+# Two thousand lines of assertions that could not fail a build. It is the same
+# shape as a check pointed at the wrong file - it passes for exactly as long as
+# it is wrong - but wholesale, and it was found only because a real regression
+# printed FAIL while the exit code stayed 0.
+print()
+if failures:
+    print(f"{failures} check(s) FAILED")
+    sys.exit(1)
+print("All protocol checks passed.")
+sys.exit(0)

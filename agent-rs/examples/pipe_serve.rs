@@ -1,4 +1,4 @@
-//! Serves one connection on a pipe and echoes every frame back.
+﻿//! Serves one connection on a pipe and echoes every frame back.
 //!
 //!     cargo run --example pipe_serve -- --name \\.\pipe\inwire-probe
 //!
@@ -67,7 +67,7 @@ fn main() -> std::io::Result<()> {
         println!("recv {seen:3}  {kind:6} {} bytes", frame.payload.len());
         // Echo it straight back, so the client can prove a round trip over the
         // real transport rather than over a description of it.
-        conn.send(frame.kind, &frame.payload)
+        conn.send(frame.kind, &frame.payload, 0)
             .map_err(std::io::Error::other)?;
         if seen >= expect {
             // Tell the writer to finish once the last echo is queued behind it.

@@ -40,6 +40,10 @@ const NOT_TESTS: Record<string, string> = {
   'agent/pipe-interop.ts':
     "drives the Rust agent's named pipe with the app's own client; needs "
     + '`cargo run --example pipe_serve` running beside it, and Windows',
+  'agent/agent-interop.ts':
+    "drives the Rust agent's whole capture path with the app's own client; "
+    + 'needs `cargo run --example agent_serve` running beside it, a real '
+    + 'capture device, and Windows',
   'parity/parity-check.ts': 'needs the untracked fixture captures and tshark ground truth (test/fixtures/README.md)',
   'tcp/reassembly.ts': 'diagnostic; needs the fixtures, and reports rather than asserts (docs/decisions/0020)',
   'perf/clone-cost.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0007)',

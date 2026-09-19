@@ -369,7 +369,10 @@ pub fn write_loop(instance: &PipeInstance, outbound: &Outbound) -> io::Result<()
     loop {
         let frame = match outbound.pop() {
             Item::Shutdown => return Ok(()),
-            Item::Frame(f) => f,
+            // The record count is the queue's business, for its shed counter.
+            // Once a frame is being written it has not been lost, so the writer
+            // has no use for it.
+            Item::Frame(f, _) => f,
         };
         let mut ov = Overlapped {
             h_event: event.0,
@@ -423,9 +426,13 @@ impl Connection {
     }
 
     /// Queues one frame. `Err` once the writer has given up.
-    pub fn send(&self, kind: u8, payload: &[u8]) -> Result<(), SendError> {
+    ///
+    /// `records` is how many captured packets `payload` carries, so the shed
+    /// counter can be in packets rather than in queued items - see
+    /// `Outbound::push`. A control message passes 0.
+    pub fn send(&self, kind: u8, payload: &[u8], records: u64) -> Result<(), SendError> {
         let framed = crate::framing::encode_frame(kind, payload).map_err(SendError::Framing)?;
-        self.outbound.push(framed).map_err(SendError::Gone)
+        self.outbound.push(framed, records).map_err(SendError::Gone)
     }
 
     /// **The kernel checked the descriptor before this handle existed.**
