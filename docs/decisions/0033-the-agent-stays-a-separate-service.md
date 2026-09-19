@@ -1,9 +1,19 @@
 # 0033 — The agent stays a separate service, and Npcap should be admin-only
 
-**Status:** accepted. **Restates the reason for a decision that was never
-re-examined**, and adds the half of it the app can act on. Does not supersede
-anything: `0029` still owns the transport, `0032` still owns the update path,
-and `0010` still owns what the agent does and does not do with a frame.
+**Status:** accepted, with **reason #2 retired by `0035`**. **Restates the
+reason for a decision that was never re-examined**, and adds the half of it the
+app can act on. Does not supersede anything: `0029` still owns the transport,
+`0032` still owns the update path, and `0010` still owns what the agent does and
+does not do with a frame.
+
+> **Reason #2 below — "a capture can outlive the window", meaning boot-time
+> start, a ring buffer, unattended monitoring — is no longer true and is no
+> longer claimed.** The service is demand-start and the agent stops itself when
+> its last client leaves (`0035`). The decision this file records is unchanged,
+> because reasons #1 and #3 each carry it alone: Npcap can be installed
+> admin-only because the app never needs a capture handle, and the handle stays
+> out of the process that parses hostile bytes. A reader weighing whether the
+> separate service is still worth its weight should weigh those two.
 
 ## Context
 

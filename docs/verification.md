@@ -1005,8 +1005,70 @@ account, and it is the reason this file exists.
 - [ ] From a **remote machine**, try to open `\\<host>\pipe\inwire-agent`. It is
       refused. A pipe answers over SMB unless the descriptor says otherwise, which
       is why `WD`, `AN` and `NU` are absent.
-- [ ] Kill the app while capturing. The agent survives, and the capture stops when
-      the last client disconnects.
+- [ ] Kill the app while capturing. The capture stops when the last client
+      disconnects — and so, now, does the **service** (see below).
+
+### The agent's lifetime is the app's
+
+ADR 0035. None of this can be asserted from a script: it needs the real SCM, a
+real service, and a person watching a status bar. Each item fails silently.
+
+- [ ] **Before launching**, `sc query InwireAgent` reports `STOPPED`. On a fresh
+      boot nothing has started it — that is the whole point of demand start, and
+      a `RUNNING` here means the installer registered it `auto`.
+- [ ] Launch Inwire. **`sc query` reports `RUNNING` within a second or two, and
+      no UAC prompt appears.** A prompt means the unelevated `sc start` was
+      refused and `serviceStart.ts` escalated — check that the installer's
+      `GrantServiceStartToInteractiveUsers` ran.
+- [ ] **Watch the status bar's left group while it launches.** It reaches "Agent
+      connected" without passing through a lingering "Agent not running". The
+      2,000 ms `connectedDelay` that caused exactly that is deleted; if it reads
+      wrong for a beat, something is gating `connected` on the socket again
+      rather than on `hello`.
+- [ ] Close Inwire. **`sc query` reports `STOPPED` within about four seconds** —
+      two watchdog ticks at two seconds. It stops itself; nothing runs `sc stop`.
+- [ ] **Kill Inwire from Task Manager** rather than closing it. The service still
+      stops, which is the case a quit-path `sc stop` could not cover and the
+      main reason the self-stop is in the agent.
+- [ ] Launch, then close, then launch again quickly. The second launch starts the
+      service again cleanly. (If the second launch finds it mid-stop, `sc start`
+      fails and the bounded retry covers it — the bar should still reach
+      connected.)
+- [ ] **Two Windows users, via Fast User Switching.** Both run Inwire and both
+      capture. One quitting does **not** stop the other's capture: the agent
+      counts clients, and this is why the app was never granted `WP`.
+- [ ] **Settings → Capture Health → Restart Driver** still works, and Npcap
+      install still cycles the link and re-enumerates adapters. Both go through
+      paths the lifetime change touched.
+
+### Capture Health says what nothing else does
+
+- [ ] The tab is named **Capture Health**, and it carries no Status row, no
+      Version pill, no Capture row and no "Listening on" list. All four are in
+      the status bar permanently; the panel exists for the loss account.
+- [ ] During a capture it shows **Received** and four drop stages — driver,
+      agent, in transit, and the buffer trim. "Dropped in transit" reads
+      `Not reported` against an agent too old to send `droppedPipe`, and **never
+      `0`**: a stage nobody measured must not read as a stage that lost nothing.
+- [ ] The buffer trim is worded apart from the four and says **"still on disk"**.
+      Those frames were captured and are readable; the status bar's single total
+      does fold them in, which is a known overstatement.
+- [ ] There is **no "Link (estimated)" row**. It was Chromium's rounded guess at
+      downlink and RTT among rows of exact counts off the wire.
+
+### The buffer sizes itself
+
+ADR 0036. The numbers differ per machine, which is the point.
+
+- [ ] **Settings → Interface → Buffer size** offers **Auto** first, and it is
+      selected on a fresh profile. Picking it must not leave the control with
+      nothing checked — `Segmented` is a Radix `RadioGroup` and a `NaN` budget
+      renders exactly that.
+- [ ] The description under it reads a plausible packet count for this machine,
+      not one computed from `NaN` or from zero.
+- [ ] Pick an explicit size, restart, and it is still that size. Pick Auto,
+      restart, and it is still Auto — `'auto'` is a stored value, not the
+      absence of one.
 
 ### Npcap
 
@@ -1049,15 +1111,17 @@ Not checkable yet, recorded so it is not mistaken for done.
 - **`crossOriginIsolated` in the packaged app.** Set via `ISOLATION_HEADERS` and
   verified by hand once; nothing depends on it, and an assertion must exist before
   anything does.
-- **`scripts/electron/smoke.ts` on a machine that has the real agent.** It
-  **skips** — "something else is already serving `\\.\pipe\inwire-agent`" —
-  because the installed InwireAgent service owns the pipe, and the script will
-  not race a LocalSystem service for it. That is the right refusal and the wrong
-  outcome: smoke drives the adapter-picking flow, which is the surface the side
-  bar changed most. Until it can be run against a stopped service (or the stub
-  can be given a second pipe name), **every item in §1's side bar block and §2's
-  capture group is by-hand only on this machine**, and a green `npm run check`
-  is not evidence that picking an adapter still works.
+- ~~**`scripts/electron/smoke.ts` on a machine that has the real agent.**~~
+  **Fixed (ADR 0035).** It used to **skip** — "something else is already serving
+  `\\.\pipe\inwire-agent`" — because the installed InwireAgent service owns that
+  name and the script will not race a LocalSystem service for it. The refusal
+  was right and the outcome was wrong: smoke drives the adapter-picking flow,
+  so **every item in §1's side bar block and §2's capture group was by-hand only
+  on this machine**, and a green `npm run check` was not evidence that picking
+  an adapter still worked. `INWIRE_AGENT_PIPE` now gives each run a private pipe
+  name, and the stub is served on it. Kept here rather than deleted because the
+  shape recurs: a script that skips on the one machine it matters on is a script
+  nobody is running.
 - **A keyboard way INTO the side bar.** VS Code has `Ctrl+0`. `Ctrl+B` toggles
   the column and Tab reaches it, but nothing focuses it directly. Not built
   deliberately — ADR 0034 records it as guessing at a problem nobody has raised

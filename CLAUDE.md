@@ -146,10 +146,24 @@ traffic and inject raw frames; restricting them to Administrators is the
 recommended install, and a LocalSystem agent is what makes that cost the user
 nothing. Sniffs nothing until a client sends `start_capture`, and stops when
 the last client disconnects. Reads frames with `pcap_next_ex` directly rather than through
-scapy's socket wrapper, raises the driver's kernel buffer to 32 MB with
-`pcap_setbuff`, and reports what the driver dropped via `pcap_stats`. Frames
-are queued on the sniffer thread, bounded by both a count and a byte budget,
-and drained into batched binary messages by one pump task.
+scapy's socket wrapper, raises the driver's kernel buffer with `pcap_setbuff`,
+and reports what the driver dropped via `pcap_stats`. Frames are queued on the
+sniffer thread, bounded by both a count and a byte budget, and drained into
+batched binary messages by one pump task.
+
+**The kernel buffer is sized per core, not flat, and that is a finding rather
+than a preference.** Npcap splits an adapter's buffer into one segment per
+processor and drops a frame when the segment for the *receiving* core is full —
+so a flat 32 MB was 32/N MB of real slack against a burst, which is 1 MB per
+core on a 32-core machine: Npcap's own default, and a sixteenth of what asking
+for 32 MB was meant to buy. It is the shape that best explains a burst of
+hundreds of thousands of frames appearing as driver drops on a machine with free
+memory. 4 MB per core now, floored at the old 32 MB and capped at 256 MB because
+this is non-paged kernel memory. `docs/bursts-and-what-wireshark-does.md` is the
+whole comparison, including the two places we are ahead of Wireshark (four drop
+stages reported separately and per second, against its one scalar at capture
+end) and the one place we are behind (no snaplen lever, because the wire
+record's `capLen` is a `u16` and we dissect everything).
 
 It carries the driver's timestamps, a per-capture sequence number, and the
 interface index. It does **not** dissect: a record has no source, destination,
@@ -2119,6 +2133,8 @@ plan a bump roughly every other release.
 | 0032 | Npcap is managed by the app, not shipped by the installer | accepted; **voids 0030's Npcap paragraph** |
 | 0033 | The agent stays a separate service, and Npcap should be admin-only | accepted |
 | 0034 | The side bar is a place: Escape does not close it, nor does navigating | accepted |
+| 0035 | The agent lives as long as the app, and shares its version | accepted; **retires 0033 reason #2** |
+| 0036 | The buffer sizes itself, and the renderer stands down before V8 aborts | accepted |
 
 **ADR 0008 weakened, and it now says so itself.** Its argument was that key
 material "is exactly as old as the tab"; a desktop app open for days breaks

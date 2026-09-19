@@ -41,7 +41,9 @@ fn main() -> std::io::Result<()> {
         .unwrap_or(6.0);
 
     let mut cap = npcap.open(&device, true)?;
-    let raised = cap.set_kernel_buffer(32 * 1024 * 1024)?;
+    let raised = cap.set_kernel_buffer(
+        inwire_agent::session::kernel_buffer_bytes(inwire_agent::session::available_cores()) as i32,
+    )?;
     println!("kernel buffer raised to 32 MB: {raised}");
 
     let deadline = Instant::now() + Duration::from_secs_f64(seconds);

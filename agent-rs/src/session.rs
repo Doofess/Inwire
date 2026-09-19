@@ -273,3 +273,86 @@ mod tests {
         );
     }
 }
+
+/// What the capture driver is asked to hold before it starts dropping frames.
+///
+/// Npcap's default on Windows is 1 MB; dumpcap's `-B` default is 2 MiB on every
+/// platform, so the base below is sixteen times what Wireshark asks for.
+pub const KERNEL_BUFFER_BASE_BYTES: usize = 32 * 1024 * 1024;
+
+/// **Npcap splits that buffer per processor, and a burst does not.**
+///
+/// From Npcap's own maintainer (nmap/npcap#30, mirrored in npcap.com's API
+/// guide): the adapter buffer "is split into a number of independent segments
+/// according to the number of processors on the system. When a packet is
+/// received by the driver, it is put into the buffer segment corresponding to
+/// the driver thread's current processor. If there is not enough room in that
+/// segment, the packet is dropped."
+///
+/// So a flat 32 MB is 32/N MB of usable slack against a burst that lands on one
+/// core - 2 MB on a sixteen-core machine, which is dumpcap's *default* and the
+/// opposite of what asking for sixteen times it was meant to buy.
+pub const KERNEL_BUFFER_PER_CORE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Capped because this is **non-paged kernel memory**. A 64-core machine must
+/// not be asked for a gigabyte of it on the strength of a capture starting.
+pub const KERNEL_BUFFER_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// How much to ask the driver for, given this machine's core count.
+///
+/// `None` - or a nonsensical zero - falls back to the flat base rather than to
+/// one core. Not knowing how many processors a machine has is not knowing it
+/// has one, and falling to one would ask for the least on the machine that
+/// needs the most. The Python agent's `kernel_buffer_bytes` is the same
+/// function, and `local-agent/test_protocol.py` holds it to the same shape.
+pub fn kernel_buffer_bytes(cores: Option<usize>) -> usize {
+    match cores {
+        Some(n) if n >= 1 => (n * KERNEL_BUFFER_PER_CORE_BYTES)
+            .clamp(KERNEL_BUFFER_BASE_BYTES, KERNEL_BUFFER_MAX_BYTES),
+        _ => KERNEL_BUFFER_BASE_BYTES,
+    }
+}
+
+/// This machine's core count, or `None` when the platform will not say.
+pub fn available_cores() -> Option<usize> {
+    std::thread::available_parallelism().ok().map(|n| n.get())
+}
+
+#[cfg(test)]
+mod kernel_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn never_shrinks_below_the_base() {
+        for cores in [1usize, 2, 4, 8, 16, 32, 64, 128] {
+            assert!(kernel_buffer_bytes(Some(cores)) >= KERNEL_BUFFER_BASE_BYTES);
+        }
+    }
+
+    #[test]
+    fn grows_with_the_core_count() {
+        assert!(kernel_buffer_bytes(Some(64)) > kernel_buffer_bytes(Some(8)));
+    }
+
+    #[test]
+    fn is_capped_because_it_is_non_paged() {
+        assert_eq!(kernel_buffer_bytes(Some(4096)), KERNEL_BUFFER_MAX_BYTES);
+    }
+
+    /// The `null != 0` rule. Falling to one core would ask for the least on the
+    /// machine that needs the most.
+    #[test]
+    fn unknown_falls_back_to_the_base_not_to_one_core() {
+        assert_eq!(kernel_buffer_bytes(None), KERNEL_BUFFER_BASE_BYTES);
+        assert_eq!(kernel_buffer_bytes(Some(0)), KERNEL_BUFFER_BASE_BYTES);
+    }
+
+    /// dumpcap asks for 2 MiB by default, on every platform. Asserted so an
+    /// edit that flattens this has to argue with the comparison.
+    #[test]
+    fn every_machine_beats_dumpcaps_default() {
+        for cores in [Some(1usize), Some(8), Some(64), Some(0), None] {
+            assert!(kernel_buffer_bytes(cores) > 2 * 1024 * 1024);
+        }
+    }
+}

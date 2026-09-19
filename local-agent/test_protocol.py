@@ -2005,6 +2005,35 @@ check_true("the buffer asked for is bigger than libpcap's 1 MB default",
 check_true("the queue's frame cap and byte cap are within reach of each other",
            0.5 < (agent.MAX_QUEUED_PACKETS * 1100) / agent.MAX_QUEUED_BYTES < 2.0)
 
+# --- the kernel buffer is sized per core, because Npcap splits it per core ---
+#
+# Npcap divides an adapter's buffer into one independent segment per processor
+# and drops a frame when the segment for the receiving core is full - so a flat
+# figure is really that figure divided by the core count, and a burst does not
+# spread itself across cores to suit us. These hold the shape of the fix rather
+# than a number: whatever the constants become, more cores must never mean less
+# slack per core, and the answer must stay bounded because this is non-paged
+# kernel memory.
+check_true("the buffer asked for never shrinks below the flat base",
+           all(agent.kernel_buffer_bytes(c) >= agent.KERNEL_BUFFER_BASE_BYTES
+               for c in (1, 2, 4, 8, 16, 32, 64, 128)))
+check_true("...and grows with the core count",
+           agent.kernel_buffer_bytes(64) > agent.kernel_buffer_bytes(8))
+check_true("...but is capped, because this is non-paged kernel memory",
+           agent.kernel_buffer_bytes(4096) == agent.KERNEL_BUFFER_MAX_BYTES)
+# The `null != 0` rule again: not knowing how many cores a machine has is not
+# knowing it has one. Falling to one core would ask for the flat base on a
+# machine that needs the most, which is the direction that must not happen.
+check("an unknown core count falls back to the base rather than to one core",
+      agent.kernel_buffer_bytes(0), agent.KERNEL_BUFFER_BASE_BYTES)
+check("...and so does a None", agent.kernel_buffer_bytes(None) >= agent.KERNEL_BUFFER_BASE_BYTES, True)
+# Wireshark's dumpcap asks for 2 MiB by default, on every platform. Stated as an
+# assertion so a future edit that "simplifies" this back to a flat value has to
+# argue with the comparison rather than merely delete a comment.
+check_true("every machine shape gets more than dumpcap's 2 MiB default",
+           all(agent.kernel_buffer_bytes(c) > 2 * 1024 * 1024
+               for c in (1, 8, 64, 0, None)))
+
 # AF_PACKET has no read timeout: recv_raw blocks until a frame arrives, so
 # stop_event would never be re-tested without select() in front of it.
 _af = _FakeAfPacketSocket([(None, _A, 100.0), (None, _B, 100.1)])
