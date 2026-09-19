@@ -1511,9 +1511,27 @@ class AgentServer:
             )
 
     def _drain_packets(self):
-        """Takes up to one batch off the queue. Runs on the loop, under the
-        same lock the sniffer threads append with, and holds it only for the
-        pops - the send happens outside it."""
+        """Takes up to one batch off the queue, and says whether more is left.
+
+        Runs on the loop, under the same lock the sniffer threads append with,
+        and holds it only for the pops - the send happens outside it.
+
+        **Returning `more` is what fixes the throttle.** This loop stops on
+        EITHER bound - 512 records or 256 kB - but the pump used to decide
+        whether to sleep by re-testing the record count alone. At the 1,101-byte
+        mean frame this repo measured, 256 kB is about 233 records, so every
+        batch on real traffic came back under 512 and was read as "the queue ran
+        dry" when it had not. The pump then slept 10 ms with a full queue behind
+        it, capping delivery at 256 kB / 10 ms = 25.6 MB/s, roughly 23,000
+        frames a second at that mean and 17,000 at 1,514 bytes.
+
+        Small-frame floods reach 512 records first and were never affected,
+        which is why every synthetic test passed and only real captures lost
+        frames.
+
+        `more` is read under the lock, so it cannot be a stale answer about a
+        queue a sniffer thread has since appended to.
+        """
         batch = []
         size = 0
         with self._packet_lock:
@@ -1522,7 +1540,8 @@ class AgentServer:
                 self._packet_queue_bytes -= len(record)
                 batch.append(record)
                 size += len(record)
-        return batch
+            more = bool(self._packet_queue)
+        return batch, more
 
     async def _packet_pump(self):
         """Drains the packet queue into batched binary frames.
@@ -1534,14 +1553,25 @@ class AgentServer:
         """
         try:
             while True:
-                batch = self._drain_packets()
+                batch, more = self._drain_packets()
                 if not batch:
                     await asyncio.sleep(PACKET_BATCH_INTERVAL_SECONDS)
                     continue
                 payload = packet_batch.encode_batch(batch)
                 await self._send_to_owner(payload)
-                if len(batch) < MAX_BATCH_RECORDS:
+                if not more:
                     await asyncio.sleep(PACKET_BATCH_INTERVAL_SECONDS)
+                else:
+                    # **A yield, not a delay.** `more` means the queue is still
+                    # backed up, so sleeping would be the bug this replaced -
+                    # but the loop cannot simply spin either. On the pipe,
+                    # `PipeConnection.send` is an `async def` with no `await`
+                    # inside it, and awaiting such a coroutine does NOT hand
+                    # control back to the event loop. Draining 30,000 records
+                    # without this would starve the reader, the stats ticker and
+                    # every subscription for the whole drain - trading a
+                    # throughput cap for an unresponsive agent.
+                    await asyncio.sleep(0)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

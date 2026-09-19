@@ -963,9 +963,10 @@ srv3.capture_owner = object()
 srv3.connections.add(srv3.capture_owner)
 for seq in range(agent.MAX_BATCH_RECORDS + 10):
     srv3.queue_packet(packet_batch.encode_record(seq, 0, 1.0, 60, b"\x00" * 60))
-_batch = srv3._drain_packets()
+_batch, _more = srv3._drain_packets()
 check("a drain takes at most one batch", len(_batch), agent.MAX_BATCH_RECORDS)
 check("...and leaves the remainder queued", len(srv3._packet_queue), 10)
+check("...and says so, which is what stops the pump sleeping on it", _more, True)
 check(
     "the drained records are the oldest, in order",
     [r["seq"] for r in packet_batch.decode_batch(packet_batch.encode_batch(_batch))[:3]],
@@ -973,6 +974,42 @@ check(
 )
 srv3.discard_queued_packets()
 check("a stop empties the queue", (len(srv3._packet_queue), srv3._packet_queue_bytes), (0, 0))
+
+# **The throttle, asserted at the boundary that hid it for two releases.**
+#
+# A drain stops on EITHER bound. The pump used to decide whether the queue had
+# run dry by re-testing the RECORD count, so a batch cut short by the 256 kB
+# byte bound - which is what every real frame size produces - was read as "the
+# queue is empty" and the pump slept 10 ms on a full queue. 256 kB / 10 ms is
+# 25.6 MB/s, about 23,000 frames a second at the 1,101-byte mean this repo
+# measured.
+#
+# Small frames reach 512 records first, which is why every synthetic test in
+# this file passed while real captures dropped. So this one uses frames big
+# enough to hit the byte bound, and asserts the batch is short AND `more` is
+# true - the exact combination the old code could not represent.
+srv4 = agent.AgentServer()
+srv4.loop = object()
+srv4.capture_owner = object()
+srv4.connections.add(srv4.capture_owner)
+# 1,100-byte frames: about the measured mean, and 256 kB of them is well under
+# 512 records.
+for seq in range(600):
+    srv4.queue_packet(packet_batch.encode_record(seq, 0, 1.0, 1100, b"\x00" * 1100))
+_big, _big_more = srv4._drain_packets()
+check_true("a batch of real-sized frames stops on the byte bound, not the record bound",
+           len(_big) < agent.MAX_BATCH_RECORDS)
+check_true("...so the record count alone would call a backed-up queue empty",
+           len(_big) < agent.MAX_BATCH_RECORDS and len(srv4._packet_queue) > 0)
+check("...and `more` reports the backlog the count cannot see", _big_more, True)
+_drained = 0
+while True:
+    _b, _m = srv4._drain_packets()
+    _drained += len(_b)
+    if not _m:
+        break
+check("draining while `more` clears the queue", len(srv4._packet_queue), 0)
+check("...having delivered every frame", _drained + len(_big), 600)
 
 
 # --- the binary packet frame ------------------------------------------------
