@@ -30,7 +30,7 @@
  *    machine with nothing on screen to show for it.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import {
   isSideBarPanel, MAX_SIDE_BAR_PX, MIN_SIDE_BAR_PX, normalizeSideBar, restoredPanel,
   SIDE_BAR_DEFAULTS, SIDE_BAR_PANELS, sideBarStore, usableSideBarWidth,
@@ -272,6 +272,36 @@ console.log('\n--- what may not come back ---\n');
     !existsSync('src/components/common/CaptureInterfacePicker.tsx'));
   checkTrue('CaptureSchedulePicker.tsx is gone too',
     !existsSync('src/components/common/CaptureSchedulePicker.tsx'));
+  checkTrue('...and so is the export modal',
+    !existsSync('src/components/export/ExportImportModal.tsx'));
+
+  // **There is one filter field in this app.** The modal embedded a second
+  // `FilterBar` because its scrim covered the real one; a panel sits 32px under
+  // that field, so the copy is gone and with it the `variant` union whose only
+  // other member it was. A union whose second member nothing can reach is dead
+  // vocabulary - `agentSilentLabel`'s unreachable branch shipped as a confident
+  // wrong answer, and the dock's post-mortem is about a marker shape kept after
+  // its subject went.
+  const bar = code('src/components/common/FilterBar.tsx');
+  checkTrue('the filter bar has no variants left', !bar.includes('FilterBarVariant'));
+  // `<FilterBar` rather than the import, because an import can be unused - and
+  // the component's own declaration matches it, so its file is excluded. One
+  // surface renders this, and that is the whole claim.
+  check('...and exactly one surface renders it',
+    walkSrc()
+      .filter((f) => !f.endsWith(`common${sep}FilterBar.tsx`))
+      .filter((f) => code(f).includes('<FilterBar'))
+      .map((f) => f.split(sep).join('/')),
+    ['src/App.tsx']);
+
+  // The heavy work moved off the render path, which is the same class of defect
+  // as the lease countdown: `useHydratedBytes` over the whole buffer was a
+  // one-off in a modal and is ten times a second in a panel.
+  const transfer = code('src/components/sidebar/TransferPanel.tsx');
+  checkTrue('the transfer panel hydrates at press time, not on render',
+    !transfer.includes('useHydratedBytes') && transfer.includes('await packetsBytes('));
+  checkTrue('...and anonymises there too, not in a memo',
+    /const prepare = async[\s\S]{0,900}anonymiseCapture\(/.test(transfer));
 
   // **The schedule's height cap, which was a state variable.** One `editing`
   // slot decided which of two fields the single shared calendar was showing,
