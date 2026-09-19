@@ -35,6 +35,19 @@
 //! moves one fixture and three implementations together, with the port already
 //! proven underneath it.
 
+/// The agent's version, which is Inwire's version (ADR 0035).
+///
+/// Sourced from `Cargo.toml`, which `scripts/agent/version.ts` holds to
+/// `package.json` alongside `agent_version.py`, `REQUIRED_AGENT_VERSION` and the
+/// installer's `MyAppVersion`. It is what `hello` carries and what `--version`
+/// prints.
+///
+/// This crate's `version` was deliberately `0.0.0` while the agent still had a
+/// version of its own and six places carried it - adding a seventh stamp to the
+/// pile the collapse existed to remove would have been the wrong direction. The
+/// collapse has landed, so this is now one more derived copy under one check.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod framing;
 pub mod outbound;
 pub mod protocol;
@@ -47,3 +60,7 @@ pub mod wire;
 pub mod npcap;
 #[cfg(windows)]
 pub mod pipe;
+#[cfg(windows)]
+pub mod runtime;
+#[cfg(windows)]
+pub mod service;

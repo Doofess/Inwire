@@ -101,6 +101,15 @@ extern "system" {
     fn CreateEventW(attrs: *mut c_void, manual: i32, initial: i32, name: *const u16) -> Handle;
     fn CloseHandle(h: Handle) -> i32;
     fn CancelIoEx(h: Handle, ov: *mut Overlapped) -> i32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: *mut c_void,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
     fn LocalFree(mem: *mut c_void) -> *mut c_void;
     fn GetLastError() -> u32;
 }
@@ -122,6 +131,10 @@ const PIPE_READMODE_BYTE: u32 = 0x0000_0000;
 const PIPE_WAIT: u32 = 0x0000_0000;
 const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x0000_0008;
 const SDDL_REVISION_1: u32 = 1;
+
+const GENERIC_READ: u32 = 0x8000_0000;
+const OPEN_EXISTING: u32 = 3;
+const INVALID_HANDLE: isize = -1;
 
 const ERROR_IO_PENDING: u32 = 997;
 const ERROR_PIPE_CONNECTED: u32 = 535;
@@ -411,6 +424,41 @@ pub fn write_loop(instance: &PipeInstance, outbound: &Outbound) -> io::Result<()
 /// Stops a blocked read or write so a thread can leave.
 pub fn cancel_io(instance: &PipeInstance) {
     unsafe { CancelIoEx(instance.handle, ptr::null_mut()) };
+}
+
+/// Connects to the pipe and immediately drops it, to release one acceptor.
+///
+/// **What this is for.** An accept thread is blocked inside `ConnectNamedPipe`
+/// waiting for a client that is never coming, because the agent is shutting
+/// down. Nothing it can see changes: a flag it is not reading, a socket it does
+/// not have. One real connection is what returns it to a loop where it can
+/// check whether a stop was asked for.
+///
+/// `CancelIoEx` from another thread would also do it and is **not** used here:
+/// the acceptor owns its instance handle and is about to hand it to `serve`, so
+/// cancelling from outside would race a handle that is legitimately being used.
+/// A connection is the in-band answer and needs no shared handle at all.
+///
+/// Failure is ignored by every caller, and must be: the common reason for it is
+/// that the acceptor already went away, which is the outcome being asked for.
+pub fn poke(name: &str) -> io::Result<()> {
+    let wide = wide(name);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            0,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        )
+    };
+    if handle as isize == INVALID_HANDLE {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe { CloseHandle(handle) };
+    Ok(())
 }
 
 /// One connected client, as the rest of the agent sees it.

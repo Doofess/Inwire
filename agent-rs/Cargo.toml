@@ -1,17 +1,17 @@
 [package]
 name = "inwire-agent"
-version = "0.0.0"
+version = "4.0.0"
 edition = "2021"
 rust-version = "1.75"
 publish = false
 
-# The version is deliberately 0.0.0 and is NOT the product version.
+# The version IS the product version, and `lib.rs` re-exports it as `VERSION`.
 #
-# `local-agent/agent.py` carries AGENT_VERSION, `installer/setup.iss` carries
-# MyAgentVersion and MyAppVersion, and there are six stamps in total that a
-# later step collapses into one sourced from package.json. Adding a seventh
-# here, now, would be adding a stamp to the pile the collapse exists to remove.
-# The build stamps the real version in when that step lands.
+# It was deliberately 0.0.0 while the agent still carried a version of its own
+# across six places - adding a seventh stamp to the pile the collapse existed to
+# remove would have been the wrong direction. ADR 0035 landed that collapse, so
+# this is now one more copy derived from `package.json`, and
+# `scripts/agent/version.ts` fails the build if it drifts.
 
 [lib]
 name = "inwire_agent"
@@ -29,6 +29,7 @@ path = "src/lib.rs"
 # fifteen fixed shapes, so `json!` and `Value` carry it without proc macros,
 # which keeps the build and the supply chain smaller than the usual serde pull.
 serde_json = { version = "1", default-features = false, features = ["std"] }
+windows-service = "0.7"
 
 [profile.release]
 # A capture agent is a long-lived service; size and predictability beat the
