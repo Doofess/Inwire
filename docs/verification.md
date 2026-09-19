@@ -646,6 +646,28 @@ the dragging and the bars lining up.
       below it** — all three `--card`. It used to be a step brighter, which is the
       chrome's colour, and it was the only column header in the window that did
       not match the bars under it.
+- [ ] **The header's column separators are opaque, and they stay put while the
+      list scrolls under them.** Scroll a coloured capture fast and watch the
+      vertical lines in the header: they must be the app's own grey and must
+      not take a tint from the packet passing beneath. They did, and the tell
+      was subtle enough to survive several looks — a collapsed border on a
+      sticky header is painted by the TABLE, under the body rows, so the line
+      read as transparent rather than as missing. The bottom rule under the
+      header is the same border with the same bug and must be checked the same
+      way.
+- [ ] **The body's column separators go the right way, in both themes.** On
+      **Night** each line is a groove — slightly DARKER than the row it sits on
+      — and on **Day** slightly lighter. A bright cage over dark rows means the
+      step lost its sign, which is the one thing about this token that is
+      per-theme: Day is `+0.02` of oklab lightness and Night is `-0.05`. The
+      rule it replaced was a fraction of white shared by both, which moved a
+      Day row by 0.010 and a Night row by 0.320 — thirty-two times as far, from
+      one number that looked theme-neutral.
+- [ ] **The selected row's separators come from the selection, not the list.**
+      Arrow onto a coloured row: its lines step from the accent fill like every
+      other row's step from theirs. It is the one row painted by a class rather
+      than an inline style, so it is the one that can fall back to the list's
+      ground without anything else changing.
 - [ ] **The two title bars line up**, to the pixel, across the divider. This is
       the item with a real bug behind it: they carried identical classes and
       still differed by 4px, because Hex View's bar holds copy buttons and the

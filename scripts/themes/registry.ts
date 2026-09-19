@@ -149,11 +149,17 @@ const REQUIRED_TOKENS = tokensIn(':root');
 // It was 35 until the four `--chrome*` tokens went. They painted a 64px accent
 // header and a menu drawer, both of which are deleted, and the Colourful switch
 // that chose between them had nothing left to change.
-// `--packet-gridline-lighten` is one of the 31: how much white the packet
-// list's column separators mix into the background they are drawn on. This
-// check is what caught it being added, which is exactly the tripwire it is
-// there to be - a token declared in `:root` alone is inherited silently by
+// `--packet-gridline-step` is one of the 31: how far, in oklab lightness, the
+// packet list's column separators move from the background they are drawn on.
+// This check is what caught it being added, which is exactly the tripwire it
+// is there to be - a token declared in `:root` alone is inherited silently by
 // every other theme and nothing else would have said so.
+//
+// It is also the token that most needs the tripwire, because it is **signed**:
+// Day steps up and Night steps down, so a Night block that inherited Day's
+// value would not merely be a shade out, it would draw the line on the wrong
+// side of the ground - which is the state that shipped while this was a
+// fraction of white and every theme shared it.
 check('the :root baseline declares 31 tokens', REQUIRED_TOKENS.length, 31);
 
 for (const t of THEME_OPTIONS) {

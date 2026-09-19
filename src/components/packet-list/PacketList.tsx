@@ -920,9 +920,22 @@ export const PacketList: React.FC<PacketListProps> = ({
    * `PaneHeader` is `bg-card`, and so is the Frame Detail pane's own header.
    * A table's header row is the same kind of thing as a pane's title bar: the
    * strip that names what is below it.
+   *
+   * **The ground and the rules are split, because only one of them can be a
+   * `border` here.** The `<thead>` is `position: sticky` inside a table that is
+   * `border-collapse`, and a collapsed border belongs to the TABLE rather than
+   * to the cell that declares it - so it is painted in the table's own layer,
+   * underneath the body rows, while the sticky header's background is painted
+   * above them. The line then disappears wherever a row has scrolled beneath
+   * it and the row's colour shows in its place, which reads as a transparent
+   * separator rather than as a missing one. `index.css` draws the header's
+   * rules as `box-shadow` on the cells instead, which paints with the sticky
+   * layer; `HEADER_GROUND` is what the table gets, and `HEADER_CHROME` adds the
+   * ordinary `border-b` back for the empty state, which is a plain div and has
+   * no table under it to be painted beneath.
    */
-  const HEADER_CHROME =
-    'bg-card border-b border-border text-muted-foreground transition-colors';
+  const HEADER_GROUND = 'bg-card text-muted-foreground transition-colors';
+  const HEADER_CHROME = `${HEADER_GROUND} border-b border-border`;
 
   // Where the text sits, per column. Every column is settable now - see
   // ColumnAlignMap for why the numeric three no longer have to be excluded.
@@ -1036,7 +1049,7 @@ export const PacketList: React.FC<PacketListProps> = ({
           {/* Table Header */}
           <thead
             ref={headerRef}
-            className={`sticky top-0 z-20 select-none ${HEADER_CHROME}`}
+            className={`sticky top-0 z-20 select-none ${HEADER_GROUND}`}
           >
             {/* One ContextMenu for the whole header row rather than one per
                 cell. Radix's trigger already positions at the pointer and owns
@@ -1051,12 +1064,20 @@ export const PacketList: React.FC<PacketListProps> = ({
                 const cell = (e.target as HTMLElement).closest('th[data-column]');
                 setAlignColumn((cell?.getAttribute('data-column') as AlignableColumn) ?? null);
               }}
-              // `divide-x` for the width only - the colour comes from
-              // `.packet-grid`, which derives it from this row's own ink.
-              // `divide-border` put the app's panel border here, and on this
-              // theme that is #232b36 against a #1e2733 header: a line the
-              // same lightness as the thing behind it.
-              className="text-[11px] uppercase tracking-wider divide-x"
+              // **No `divide-x` here, and that is the fix rather than a
+              // simplification.** A collapsed border on a sticky header is
+              // painted by the table, under the body rows, so it showed
+              // whatever packet had scrolled beneath it - see `HEADER_CHROME`.
+              // The header's rules are `box-shadow` on the cells, in
+              // `index.css`, which paints with the sticky layer.
+              //
+              // They are `--border` rather than a lightened ground, which is
+              // the body rows' rule and deliberately not this one: the header
+              // is CHROME, so its rules are the app's own hairline, the same
+              // one `PaneHeader` and every panel edge draws. The body's rules
+              // belong to a surface the colouring chain repaints per row, and
+              // have to be derived from it.
+              className="text-[11px] uppercase tracking-wider"
             >
               {columns.id && (
               <th
@@ -1289,19 +1310,21 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // the window that opens over it.
                     onDoubleClick={() => onInspectPacket?.(packet)}
                     onContextMenu={e => handleContextMenu(e, packet)}
-                    // `divide-x` on every row, not just the header. The
-                    // columns had no vertical rule at all below the header, so
-                    // where one value ended and the next began was carried
-                    // entirely by the gap between them - which disappears the
-                    // moment a column is narrow enough for its text to fill it.
+                    // `divide-x` on every body row. The columns had no vertical
+                    // rule at all below the header, so where one value ended
+                    // and the next began was carried entirely by the gap
+                    // between them - which disappears the moment a column is
+                    // narrow enough for its text to fill it.
                     //
-                    // The colour comes from `.packet-grid`, which derives it
-                    // from this row's own ink - the one value guaranteed to
-                    // read on this row's fill, since the colouring rule chose
-                    // the two together. It used to be `divide-border/40`, the
-                    // app's border at an alpha over whatever the rule painted,
-                    // so the same separator was a different colour on every row
-                    // and legible on almost none of them.
+                    // **Width only; the colour is `.packet-grid`'s**, which
+                    // takes this row's own fill and steps it in lightness -
+                    // toward the light on Day, toward the dark on Night. Two
+                    // earlier answers are recorded there: `divide-border/40`,
+                    // the app's hairline at an alpha over whatever the rule
+                    // painted, so one separator was a different colour on every
+                    // row; and the row's INK, which the colouring rule does
+                    // guarantee reads on the fill, but which draws a rule as
+                    // strong as the text it separates.
                     className={`cursor-pointer divide-x ${
                       isSelected
                         // `--row-bg` has to follow, or the one row painted by a
@@ -1321,7 +1344,8 @@ export const PacketList: React.FC<PacketListProps> = ({
                         ? {
                             backgroundColor: style.background,
                             color: style.color,
-                            // The separator is this row's own fill, lightened.
+                            // The separator is this row's own fill, stepped -
+                            // up on Day, down on Night. See `.packet-grid`.
                             ...(style.background
                               ? { '--row-bg': style.background }
                               : {}),
