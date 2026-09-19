@@ -182,3 +182,5 @@ pub fn decode_batch(payload: &[u8]) -> Result<Vec<Record>, WireError> {
     }
     Ok(out)
 }
+
+impl std::error::Error for WireError {}
