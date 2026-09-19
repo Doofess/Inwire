@@ -694,6 +694,14 @@ def set_kernel_buffer(sock, size_bytes=KERNEL_BUFFER_BYTES):
     return size_bytes
 
 
+#: Where `read_frame` leaves the copy time for the loop to collect.
+#:
+#: Thread-local: one sniffer thread per adapter, and a shared slot would give
+#: one thread's measurement to another thread's frame. Only written when
+#: profiling is on.
+_timing = threading.local()
+
+
 def _pcap_error_text(handle) -> str:
     """libpcap's own message for the last failure on this handle.
 
@@ -762,6 +770,24 @@ def read_frame(handle, header, data):
         raise OSError(f"pcap_next_ex failed ({result}): {_pcap_error_text(handle)}")
     contents = header.contents
     caplen = contents.caplen
+    if profile.enabled:
+        # **The copy is timed apart from the call, because only one of them is
+        # work.** `pcap_next_ex` BLOCKS until a frame arrives or `to_ms`
+        # expires, so on a quiet link a successful read is mostly waiting - and
+        # a per-frame cost that includes the wait is the arrival rate again,
+        # which is the exact error `capture_profile.py` exists to have stopped
+        # making. Measured on a 493 f/s link it reported 1,439 us a frame,
+        # which is the gap between frames, not the cost of one.
+        #
+        # `string_at` and the arithmetic below are OURS and are always
+        # meaningful. Thread-local because there is one sniffer thread per
+        # adapter and a shared slot would hand one thread's copy time to
+        # another thread's frame.
+        _copy_start = time.perf_counter()
+        raw = string_at(data, caplen)
+        ts = contents.ts.tv_sec + contents.ts.tv_usec / 1e6
+        _timing.copy_seconds = time.perf_counter() - _copy_start
+        return raw, ts, contents.len
     raw = string_at(data, caplen)
     ts = contents.ts.tv_sec + contents.ts.tv_usec / 1e6
     return raw, ts, contents.len
@@ -1725,7 +1751,8 @@ def make_process_request(on_reject=None):
 _captured_count = 0
 
 
-def sniff_callback(raw, ts, iface_id=0, wire_len=None, read_seconds=None):
+def sniff_callback(raw, ts, iface_id=0, wire_len=None, pcap_seconds=None,
+                   copy_seconds=None):
     global _captured_count
     # Wall time for this frame's own callback. The other half - the driver read
     # - happened before we were called, so the LOOP brackets it and passes it
@@ -1756,7 +1783,7 @@ def sniff_callback(raw, ts, iface_id=0, wire_len=None, read_seconds=None):
         return
     agent.queue_packet(record)
     if profile.enabled:
-        profile.frame(time.perf_counter() - profile_start, read_seconds)
+        profile.frame(time.perf_counter() - profile_start, pcap_seconds, copy_seconds)
         if _captured_count % 10000 == 0:
             log.info("%s", profile.describe())
 
@@ -1966,9 +1993,17 @@ def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
                     # read cost would make a quiet link look like an expensive
                     # one - which is the error the old whole-wall metric made.
                     continue
-                read_seconds = (time.perf_counter() - read_start) if profile.enabled else None
+                if profile.enabled:
+                    # Two numbers, because they answer different questions.
+                    # `pcap` is the call, and on a quiet link it is mostly the
+                    # wait for a frame that had not arrived. `copy` is ours and
+                    # is always work. See capture_profile.py.
+                    pcap_seconds = time.perf_counter() - read_start
+                    copy_seconds = getattr(_timing, "copy_seconds", 0.0)
+                else:
+                    pcap_seconds = copy_seconds = None
                 raw, ts, wire_len = frame
-                sniff_callback(raw, ts, iface_id, wire_len, read_seconds)
+                sniff_callback(raw, ts, iface_id, wire_len, pcap_seconds, copy_seconds)
         elif type(sock).recv_raw is SuperSocket.recv_raw:
             log.info("%s: no raw receive on this socket type - using sniff()", iface_label)
             while not stop_event.is_set():
@@ -1992,7 +2027,9 @@ def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
                 if raw is None:
                     continue
                 read_seconds = (time.perf_counter() - read_start) if profile.enabled else None
-                sniff_callback(raw, ts, iface_id, None, read_seconds)
+                # recv_raw returns bytes it allocated itself, so the call and
+                # the copy are not separable here - the same number is both.
+                sniff_callback(raw, ts, iface_id, None, read_seconds, read_seconds)
     except Exception as exc:
         log.warning("capture failed on interface %r (%s): %s", iface_label, iface_name, exc)
         agent.report_capture_failure(iface_id, iface_name, iface_label, str(exc))
