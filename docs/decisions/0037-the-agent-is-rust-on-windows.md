@@ -1,6 +1,7 @@
 # 0037 — The capture agent is Rust on Windows
 
-**Status:** accepted; **the port is complete and is not yet what ships.** Does
+**Status:** accepted; **the port is complete, measured, and is not yet what
+ships.** Does
 not supersede `0033` — the agent stays a separate LocalSystem service, and this
 changes what it is written in and nothing about where it runs. Does not touch
 `0029` (the pipe), `0010` (it dissects nothing) or `0005`'s surviving half (the
@@ -98,11 +99,32 @@ The whole capture path against that client, decoded by the renderer's own
 `agentBinary.ts`, with conservation asserted: delivered + shed + queued =
 received, **residual 0 over 632,924 frames**.
 
-**Not proven, and it needs elevation.** The service has not been installed or
-started by a real SCM. `install`, `remove`, `start`, `stop` and the status
-reporting in `service.rs` are written and compile and are covered by nothing —
-`docs/verification.md` carries them as by-hand items. **Nothing here should be
-read as "the Rust agent works as a service" yet.**
+**Also proven, by running it.** The runtime serves a real pipe and the app's own
+client drove it to **131,781 frames / 2.88 GB, residual 0, no missing sequence
+numbers**. The idle self-stop fires **2,200 ms** after the last client leaves —
+inside the documented two ticks. Cold start to a served pipe is **56 ms**,
+against Python's 213 ms for its imports alone, which is the number this decision
+rests on.
+
+**Running it found three defects that reading it had not.** The runtime ignored
+`set_interfaces` and captured on whatever adapter came first — on this machine a
+dead `WAN Miniport`, so it reported `sniffing` perfectly truthfully and
+delivered nothing. The final `capture_stats` passed `None` for `droppedPipe`, so
+the last message the app ever sees had a hole in exactly the figures somebody
+checks when the numbers do not add up. And `--startup manual install` parsed
+**`manual`** as the verb and exited 1 without registering anything — which is
+the pywin32 `getopt` trap this crate's own header describes, arriving from the
+opposite direction on the identical command line.
+
+**Still not proven, and it needs elevation.** The service has never been
+*registered* with the SCM. `install`, `remove`, `start` and `stop` reach the
+service manager and are refused for access — the correct unelevated outcome, and
+not the same as working. The status reporting in `service.rs` — `StartPending`,
+`Running`, `StopPending`, `Stopped` and their checkpoints — has never run at
+all, because nothing has hosted this binary as a service.
+`docs/verification.md` carries that as a by-hand block. **Nothing here should be
+read as "the Rust agent works as a service" yet**; what can be said is that
+everything up to the SCM's doorstep does.
 
 **Not ported.** `npcap_access.py` — the DACL on the Npcap device object, which
 `hello` carries as `npcapAccess`. The Rust agent sends `None`, which falls back

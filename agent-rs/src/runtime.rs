@@ -120,6 +120,18 @@ struct Shared {
     clients: Mutex<HashMap<String, Arc<Connection>>>,
     /// Whose capture this is, or none.
     owner: Mutex<Option<String>>,
+    /// Which adapter the client chose, by its index in `interfaces`.
+    ///
+    /// **Honoured rather than ignored, which it was for one run.** The runtime
+    /// used to capture on `interfaces.first()` whatever the client asked for -
+    /// so it opened *an* adapter, reported `sniffing` quite truthfully, and
+    /// delivered nothing, because the frames were on a different one. Driving
+    /// it with the app's own client is what found that; nothing in the unit
+    /// tests could, because they never pick an adapter.
+    ///
+    /// `None` until a client says. Capture then falls back to the first, which
+    /// is what the app's own default does on a fresh connection.
+    selected: Mutex<Option<usize>>,
     capture: Mutex<Option<CaptureHandles>>,
     shutdown: Arc<Shutdown>,
 }
@@ -169,11 +181,25 @@ impl Shared {
         handles.running.store(false, Ordering::SeqCst);
 
         let (queued, _) = handles.queue.depth();
+        // **The owner's pipe drops, not `None`.** Passing None here made the
+        // LAST message the app ever sees report `droppedPipe` as unknown, for a
+        // stage that had been reported every second up to that point - so the
+        // final figures were the only ones with a hole in them, which is
+        // precisely where somebody looks when the numbers do not add up. Found
+        // by driving this with the app's own client, which asserts that every
+        // stage the agent can measure is one it actually reports.
+        let dropped_pipe = self
+            .owner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|owner| self.clients.lock().unwrap().get(owner).cloned())
+            .map(|connection| connection.outbound.dropped());
         let mut stats = protocol::capture_stats(
             STATS_INTERVAL.as_millis() as u32,
             handles.seq.load(Ordering::Relaxed),
             handles.queue.dropped(),
-            None,
+            dropped_pipe,
             &[InterfaceStats {
                 iface: handles.iface,
                 received: handles.received.load(Ordering::Relaxed),
@@ -435,12 +461,29 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
         }
 
         match command {
+            Command::SetInterfaces(chosen) => {
+                // The app sends indices into the list it was given in `hello`.
+                // One adapter: capture is single-interface here, and taking the
+                // first of several is a smaller lie than pretending to merge
+                // them - the app only ever sends one.
+                *shared.selected.lock().unwrap() = chosen.first().copied();
+                let interfaces = shared.interfaces.lock().unwrap().clone();
+                shared.send_to(&client, &protocol::state(
+                    shared.capture_state(),
+                    &interfaces,
+                    shared.owner.lock().unwrap().clone().as_deref(),
+                ));
+            }
             Command::StartCapture => {
                 if shared.capture.lock().unwrap().is_some() {
                     return Ok(());
                 }
                 let interfaces = shared.interfaces.lock().unwrap().clone();
-                let Some(chosen) = interfaces.first().cloned() else {
+                let wanted = *shared.selected.lock().unwrap();
+                let picked = wanted
+                    .and_then(|id| interfaces.iter().find(|i| i.id == id).cloned())
+                    .or_else(|| interfaces.first().cloned());
+                let Some(chosen) = picked else {
                     shared.send_to(&client, &protocol::error(
                         "no_interfaces",
                         "No capture adapters are available. Npcap may not be installed.",
@@ -503,6 +546,25 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
 /// indirection on the hot path. The lifetime is honest rather than erased,
 /// because the library really does outlive every handle.
 pub fn run(shutdown: Arc<Shutdown>) -> io::Result<()> {
+    run_on(shutdown, &pipe_name())
+}
+
+/// Where this agent listens.
+///
+/// `INWIRE_AGENT_PIPE` overrides it, and that is not a debugging nicety - it is
+/// the only way this runtime can be driven at all on a development machine. The
+/// installed service owns the production name, and a second server on one name
+/// is not a state worth debugging. `electron/main.ts` reads the same variable
+/// from the other end, so one export points both halves at a private pipe.
+pub fn pipe_name() -> String {
+    std::env::var("INWIRE_AGENT_PIPE")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| pipe::PIPE_NAME.to_string())
+}
+
+/// The body, with the pipe name given rather than read from the environment.
+pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
     let npcap: &'static Npcap = Box::leak(Box::new(Npcap::load()?));
     let interfaces = read_interfaces(npcap).unwrap_or_default();
 
@@ -511,6 +573,7 @@ pub fn run(shutdown: Arc<Shutdown>) -> io::Result<()> {
         interfaces: Mutex::new(interfaces),
         clients: Mutex::new(HashMap::new()),
         owner: Mutex::new(None),
+        selected: Mutex::new(None),
         capture: Mutex::new(None),
         shutdown: Arc::clone(&shutdown),
     });
@@ -521,11 +584,12 @@ pub fn run(shutdown: Arc<Shutdown>) -> io::Result<()> {
     for slot in 0..pipe::MAX_INSTANCES {
         let shared = Arc::clone(&shared);
         let shutdown = Arc::clone(&shutdown);
+        let name = name.to_string();
         acceptors.push(thread::spawn(move || {
             let mut serial = 0u64;
             while !shutdown.requested() {
                 let instance =
-                    match pipe::create_instance(pipe::PIPE_NAME, pipe::PIPE_SDDL, pipe::MAX_INSTANCES) {
+                    match pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES) {
                         Ok(instance) => Arc::new(instance),
                         Err(error) => {
                             // The one failure that must not be retried in a tight
@@ -594,7 +658,7 @@ pub fn run(shutdown: Arc<Shutdown>) -> io::Result<()> {
     // The acceptors are blocked in `accept`; a connection of our own is what
     // releases them, and each checks `requested()` immediately after.
     for _ in 0..pipe::MAX_INSTANCES {
-        let _ = pipe::poke(pipe::PIPE_NAME);
+        let _ = pipe::poke(name);
     }
     for acceptor in acceptors {
         let _ = acceptor.join();
