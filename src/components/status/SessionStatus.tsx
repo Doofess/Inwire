@@ -66,23 +66,36 @@ export function elapsedLabel(ms: number): string {
 }
 
 /**
- * The dropped-frame total, and whether the driver's own counter was readable.
+ * The dropped-frame total, and whether every counter behind it was readable.
  *
- * **`droppedKernel` is `null` when the driver's counters could not be read, and
- * that is not zero.** Folding it in as 0 would have the bar report "nothing was
- * dropped" about a number nobody obtained - the same mistake `provesAbsent`
+ * **A `null` counter is not zero.** `droppedKernel` is null when the driver's
+ * own counters could not be read; `droppedPipe` is null when the agent does
+ * not report it at all. Folding either in as 0 would have the bar say "nothing
+ * was dropped" about a number nobody obtained - the same mistake `provesAbsent`
  * made with `reg query`, where a failure to ask read as proof of absence. So
  * the unknown travels out with the total and the tooltip says so.
+ *
+ * There are four contributors and they are not the same kind of thing, which
+ * is the open question this function inherits: `droppedBuffer` counts frames
+ * that were **persisted and are still readable off disk**, trimmed from the
+ * RAM window rather than lost. Adding it to frames that never arrived overstates
+ * the loss. Left as it was rather than changed in passing - it is a decision
+ * about what the chip means, and it belongs with the Driver Info revamp.
  */
 export function droppedTotal(
   stats: CaptureDropStats | null,
   droppedBuffer: number,
-): { total: number; kernelUnknown: boolean } {
+): { total: number; unknown: boolean } {
   const agent = stats?.droppedAgent ?? 0;
   const kernel = stats?.droppedKernel ?? 0;
+  // The pipe's own shed count, which had no number at all until the outbound
+  // queue was found discarding frames silently. `null` from an agent that does
+  // not report it, and it travels into `unknown` for the same reason the
+  // kernel's does rather than being folded in as 0.
+  const pipe = stats?.droppedPipe ?? 0;
   return {
-    total: agent + kernel + droppedBuffer,
-    kernelUnknown: stats !== null && stats.droppedKernel === null,
+    total: agent + kernel + pipe + droppedBuffer,
+    unknown: stats !== null && (stats.droppedKernel === null || stats.droppedPipe === null),
   };
 }
 
@@ -120,7 +133,7 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
 }) => {
   const elapsed = useElapsed(isCapturing ? captureStartedAt : null);
   const attention = agentNeedsAttention(agentHealth);
-  const { total: dropped, kernelUnknown } = droppedTotal(captureStats, droppedBuffer);
+  const { total: dropped, unknown: someUncounted } = droppedTotal(captureStats, droppedBuffer);
 
   const selected = interfaces.filter((i) => selectedInterfaces.includes(i.name));
   const adapterLabel = selected.length === 0
@@ -217,16 +230,16 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
               ? 'The capture paused itself: the buffer reached its budget. '
               : '')
             + `${dropped.toLocaleString()} frames dropped`
-            + (kernelUnknown
-              ? ', and the driver’s own counters could not be read, so the '
-                + 'real total may be higher.'
+            + (someUncounted
+              ? ', and at least one counter could not be read - the driver’s '
+                + 'own, or the pipe’s - so the real total may be higher.'
               : '.')
           }
         >
           <ArrowDownToLine className={`${GLYPH} text-warning`} aria-hidden />
           <span className="tabular-nums">
             {bufferAutoPaused ? 'paused - ' : ''}
-            {dropped.toLocaleString()}{kernelUnknown ? '+' : ''} dropped
+            {dropped.toLocaleString()}{someUncounted ? '+' : ''} dropped
           </span>
         </StatusItem>
       )}

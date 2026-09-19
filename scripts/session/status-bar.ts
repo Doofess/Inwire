@@ -39,6 +39,8 @@ import {
   subscribeHoveredByte,
 } from '../../src/services/hoveredByte';
 import { STATUS_BAR_HEIGHT } from '../../electron/window';
+import { droppedTotal } from '../../src/components/status/SessionStatus';
+import type { CaptureDropStats } from '../../src/services/agentProtocol';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -230,6 +232,42 @@ console.log('\n--- one publisher per dump, and none anywhere else ---\n');
   const trees = sources.filter((f) => /Tree\.tsx$/.test(f));
   checkTrue('no protocol tree publishes one',
     trees.length > 0 && trees.every((f) => !code(f).includes('publishHoveredByte')));
+}
+
+console.log();
+console.log('--- the dropped total, and what a null counter means ---');
+console.log();
+
+{
+  // **Four counters feed one chip, and two of them can be `null`.** This is the
+  // arithmetic that decides whether the bar says "nothing was dropped" about a
+  // number nobody obtained - which is `provesAbsent`'s failure with `reg query`
+  // wearing different clothes, and it went unasserted until `droppedPipe` was
+  // added beside it.
+  const stats = (over: Partial<CaptureDropStats>): CaptureDropStats => ({
+    received: 0, droppedAgent: 0, droppedKernel: 0, droppedPipe: 0, seqHigh: 0, ...over,
+  });
+
+  check('no stats and an empty buffer is nothing dropped',
+    droppedTotal(null, 0), { total: 0, unknown: false });
+  check('...and nothing unknown, because nothing claimed to have counted',
+    droppedTotal(null, 0).unknown, false);
+
+  check('every counter adds into one total',
+    droppedTotal(stats({ droppedAgent: 1, droppedKernel: 2, droppedPipe: 4 }), 8).total, 15);
+
+  // The rule with the post-mortem behind it. An unreadable driver counter and a
+  // pipe counter the agent never sent are both absences, and an absence must
+  // not be summed as zero without the chip saying so.
+  check('an unreadable driver counter marks the total incomplete',
+    droppedTotal(stats({ droppedAgent: 3, droppedKernel: null }), 0),
+    { total: 3, unknown: true });
+  check('...and so does an agent that never reported the pipe',
+    droppedTotal(stats({ droppedAgent: 3, droppedPipe: null }), 0),
+    { total: 3, unknown: true });
+  check('...while zero from both is complete and zero',
+    droppedTotal(stats({ droppedKernel: 0, droppedPipe: 0 }), 0),
+    { total: 0, unknown: false });
 }
 
 console.log();
