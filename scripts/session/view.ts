@@ -488,12 +488,12 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // the same change. Both deltas are 46px and they cancel, which is why the
   // total below did not move.
   const blocks = [
-    ['capture: Start/Stop, adapter, schedule, Export/Import', 4 + group(4)],
+    ['capture: Start/Stop, adapter, schedule, Export/Import, Network', 4 + group(5)],
     ['divider', DIVIDER],
     [`views: ${ids.length}`, group(ids.length)],
     // The bottom group carries its own divider, so the gap between that line and
     // the first button is the group's gap rather than the divider's margin.
-    ['bottom: Network, Settings', DIVIDER + GAP + group(2) + 8],
+    ['bottom: Settings', DIVIDER + GAP + group(1) + 8],
   ] as const;
 
   // What the rail actually gets. The title row spans the full window width and
@@ -567,6 +567,14 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // equals `group(3) - group(2)`. What is not free is the eleventh icon: 36 plus
   // its gap, which is the 38 in this step. That is the rule to carry forward -
   // moving an icon between groups costs nothing, adding one costs 38.
+  //
+  // **452 -> 452 is that rule stated a second time**, which is why the sequence
+  // ends on a repeat rather than a new number. Network went back up into the
+  // capture group under Export/Import, leaving Settings alone at the bottom:
+  // `group(5) - group(4)` is 38 and `group(2) - group(1)` is 38, so the two
+  // deltas cancel exactly as they did when Export/Import made the same trip in
+  // the other direction. A rule derived once is a coincidence; the same
+  // arithmetic twice, in opposite directions, is the rule.
   check('the rail is as tall as it says it is', total, 452);
   // The raw file, not `code()`: the figure lives in the header comment, which is
   // the first thing `code()` throws away. The point of this one is that the

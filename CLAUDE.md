@@ -768,16 +768,21 @@ scrolls inside it and their scrollers resolve against this box.
 `ActivityRail.tsx` is 44px and starts below that row - there is no cell above
 its first group, because a cell would put the mark below the corner it is meant
 to occupy and cost height the rail has not got. **Three groups**: **capture**
-(Start/Stop, adapter, schedule, Export/Import - in the order they are used),
-**views** (Packets, Frame Detail, Statistics, Routing Map, Follow Stream), and a
-bottom group (Network, Settings) pinned with `mt-auto`.
+(Start/Stop, adapter, schedule, Export/Import, Network - in the order they are
+used), **views** (Packets, Frame Detail, Statistics, Routing Map, Follow
+Stream), and a bottom group of one, Settings, pinned with `mt-auto`.
 
 **Export/Import moved up into the capture group**, out of the bottom group where
 it sat with Settings. That group is for the application and this is about the
 *capture*: it writes the frames in hand out to a file, or reads a file in as the
-frames in hand, which is the same subject as the three controls above it. The
-move cost nothing - both groups gap the same, so the two deltas cancel - and
-Network took the slot it left.
+frames in hand, which is the same subject as the three controls above it.
+**Network followed it up**, for the same kind of reason read the other way round
+- it describes what this computer is connected to, which is where those frames
+are coming from. That leaves **Settings alone at the bottom**, which is VS
+Code's own arrangement and makes the divider above it mean something rather than
+merely separate: everything above opens a surface beside the workspace, the one
+below takes the workspace itself. Both moves cost nothing, because both groups
+gap the same and the deltas cancel.
 
 **There was a fourth group and it was the widgets.** Six icons toggling panels
 in the dock, with a 20px collapse header in the divider slot above them. All of
@@ -832,10 +837,13 @@ real `updateAvailable` first, and Settings is the icon to hang it on.
 11 icons at **36px**, two dividers and the bottom group's padding come to
 **452px** against the 618px the rail gets - a **680px** minimum window, less the
 32px title row above it, the **24px status bar** below, the cluster's 4px bottom
-gutter, and the card's own two 1px borders - 166px of slack. The last step in
-that number is the rule worth carrying: **rearranging the strip is free and
+gutter, and the card's own two 1px borders - 166px of slack. The last steps in
+that number are the rule worth carrying: **rearranging the strip is free and
 growing it is not.** Export/Import changing groups moved nothing, because both
-groups gap the same; Network arriving cost 38 - one 36px target and its gap.
+groups gap the same; Network arriving from Settings cost 38 - one 36px target
+and its gap - and Network changing groups afterwards moved nothing again. A rule
+derived once is a coincidence; the same arithmetic twice, in opposite
+directions, is a rule.
 `scripts/session/view.ts` adds that up from the Tailwind classes, holds each
 class to what the sum assumes, and prints "the rail is FULL" when the answer is
 no more icons. **The two strips are funded differently and that is deliberate**:
