@@ -75,6 +75,7 @@ import asyncio
 import collections
 import logging
 import sys
+import os
 import threading
 from typing import Awaitable, Callable, Optional
 
@@ -83,7 +84,17 @@ import pipe_frame
 log = logging.getLogger("inwire.pipe")
 
 #: Where the app looks. One instance per connected client.
-PIPE_NAME = r"\\.\pipe\inwire-agent"
+#:
+#: ``INWIRE_AGENT_PIPE`` overrides it, and that is not a debugging nicety - it
+#: is the only way this agent can be run beside the installed service, which
+#: owns the production name. ``electron/main.ts`` and the Rust agent's
+#: ``runtime::pipe_name`` already read the same variable, so one export points
+#: every half of the system at a private pipe; without it here, comparing the
+#: two agents meant unregistering one of them first.
+#:
+#: Empty is treated as unset, so ``INWIRE_AGENT_PIPE=`` in a shell profile
+#: cannot leave the service listening on a name nothing dials.
+PIPE_NAME = os.environ.get("INWIRE_AGENT_PIPE") or r"\\.\pipe\inwire-agent"
 
 #: How many connections may exist at once.
 #:

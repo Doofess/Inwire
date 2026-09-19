@@ -180,9 +180,26 @@ real UI and the whole frame path against the stub. The other is the
 `hello` carries as `npcapAccess`. The Rust agent sends `None`, which falls back
 to the registry answer. That is the weaker answer but never the wrongly
 permissive one, which is the direction `npcapAccess.ts` says must not go wrong.
-Also not ported: the socket table, the adapter configuration report, and the log
-subscription — all answered with a `state` message rather than ignored, because
-silence is the shape the app cannot diagnose.
+Also not ported: the socket table, the adapter configuration report, the log
+subscription, and **`interface_stats`** — all answered with a `state` message
+rather than ignored, because silence is the shape the app cannot diagnose.
+
+**`interface_stats` was missing from that list until somebody opened the
+panel**, which is the kind of omission a "not ported" list invites: it was
+written from what was consciously skipped rather than from the protocol. The
+visible cost is that the **live sparkline in the Interfaces panel draws
+nothing** — the app subscribes, the agent parses the subscription and answers
+with `state`, and no rate ever arrives. Nothing errors, so it reads as a broken
+graph rather than as an absent feature.
+
+Porting it is not small. `local-agent/interface_stats.py` reads the OS's
+per-NIC counters through `psutil.net_io_counters(pernic=True)` and maps them
+onto Npcap's device names; the Rust equivalent is `GetIfTable2` and a match on
+the adapter GUID that `\\Device\\NPF_{GUID}` already contains — which is in fact a
+*better* join than the name heuristic Python uses, and the one part of this
+that gets easier rather than harder. The counters have to be the 64-bit
+`MIB_IF_ROW2` ones: `MIB_IFROW`'s 32-bit octet counters wrap about every 34
+seconds on a gigabit link, which would draw spikes that never happened.
 
 ## Consequences
 
