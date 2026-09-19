@@ -270,6 +270,37 @@ console.log('\n--- what may not come back ---\n');
   // then the export modal.
   checkTrue('CaptureInterfacePicker.tsx is gone, not kept beside its panel',
     !existsSync('src/components/common/CaptureInterfacePicker.tsx'));
+  checkTrue('CaptureSchedulePicker.tsx is gone too',
+    !existsSync('src/components/common/CaptureSchedulePicker.tsx'));
+
+  // **The schedule's height cap, which was a state variable.** One `editing`
+  // slot decided which of two fields the single shared calendar was showing,
+  // and its comment gave the reason outright - "two month grids stacked would
+  // make the panel taller than the header it hangs from". That is a sentence
+  // about a menu on a 36px button. Two independent disclosures is the shape
+  // that says the cap is gone.
+  const sched = code('src/components/sidebar/CaptureSchedulePanel.tsx');
+  checkTrue('both calendars can be open at once',
+    sched.includes('const [startOpen, setStartOpen]')
+    && sched.includes('const [stopOpen, setStopOpen]'));
+
+  // The summary was computed only to fill a tooltip. Two readers now, and the
+  // check is that one expression feeds both rather than being written twice.
+  const app = code('src/App.tsx');
+  check('the countdown is computed once, for the tooltip and the header',
+    (app.match(/describeSchedule\(/g) ?? []).length, 1);
+  // It was also formatted by a `toLocaleString` written out twice - once in
+  // the picker, once INLINE at this call site, same four options in the same
+  // order. One format defined twice is one format that drifts, and the two
+  // copies existed only because the halves of one feature lived in two files.
+  //
+  // Asserted as "the call site names the function" rather than as "these
+  // options appear once in the tree": `pcapParser.ts` formats a timestamp with
+  // the same options for a different reason, and a check that cannot tell
+  // those apart is a check that fails on unrelated work.
+  checkTrue('...and formatted by a named function, not an inline copy',
+    /describeSchedule\([^)]*formatStamp[^)]*\)/.test(app)
+    && !/describeSchedule\([\s\S]{0,200}toLocaleString/.test(app));
 
   const panels = readdirSync('src/components/sidebar')
     .filter((f) => f.endsWith('.tsx'))
