@@ -145,8 +145,15 @@ console.log('\n--- the indent cannot come back ---\n');
   // element and the panes still read it; what must never happen again is the
   // BAR reading it, because wanting to is the symptom of an item that belongs
   // in a pane.
+  //
+  // `--side-bar-width` joins the list in the commit that creates it, because
+  // creating it is what makes the temptation possible: the side bar is the one
+  // thing in the band whose width a bar item could plausibly want to align to,
+  // and wanting to is the symptom rule 1 names.
   checkTrue('the bar reads no pane-sized custom property',
-    !bar.includes('--details-pane-size') && !bar.includes('--bottom-pane-height'));
+    !bar.includes('--details-pane-size')
+    && !bar.includes('--bottom-pane-height')
+    && !bar.includes('--side-bar-width'));
 
   // The other half of the same apparatus: an inline length of any kind is how a
   // window-spanning strip gets pushed sideways.

@@ -93,22 +93,34 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * file before changing any of the four facts below, because each of them is
  * load-bearing there for a reason it took them a comment to explain.
  *
- * **A border on all four sides, and a radius on all four corners.** This card
- * floats: `<main>` is a separate card with a 4px gap between them, so there is
- * no shared seam and no question of who draws it. That is VS Code's own answer
- * for a rail with nothing beside it - with the side bar collapsed it "closes up
- * as a standalone panel with every corner rounded", `.nosidebar` in
- * `floatingPanels.css`.
+ * **A border on all four sides, always; a radius on the corners nothing
+ * covers.** Both of VS Code's arrangements are live here and which one is in
+ * force is a single boolean, `sideBarOpen`:
  *
- * It met `<main>` flush for a revision, which is the other arrangement that
- * file describes, and the border still belongs here either way: at `w-11` with
- * `border-box` the interior is exact - 44 less two 1px borders is 42, an even
- * interior for a 36px target. Give the border to the neighbour and it is 43,
- * and the icon column lands on a half pixel.
+ *  - **Closed.** Nothing to connect to, so the card "closes up as a standalone
+ *    panel with every corner rounded" - `.nosidebar` in `floatingPanels.css` -
+ *    and `<main>` supplies the 4px gap as its own `ml-1`.
+ *  - **Open.** The side bar butts against this edge and the two read as ONE
+ *    surface: the right corners square, the side bar gives up its left border,
+ *    and this card draws the only seam between them.
  *
- * **The gap is `ml-1` on `<main>`, not `mr-1` here.** VS Code's convention, and
- * worth keeping rather than splitting: one margin is one number to change,
- * where a margin on each side is two that have to agree.
+ * **The border never becomes conditional, and that is arithmetic rather than
+ * taste.** At `w-11` under `border-box` the interior is exact - 44 less two 1px
+ * borders is 42, an even interior for a 36px target. Hand the facing border to
+ * the neighbour, which is the obvious way to make one seam out of two edges,
+ * and the interior is 43 and the icon column lands on a half pixel.
+ * `floatingPanels.css` records the identical finding in its own words, which is
+ * why the rail draws the seam in both codebases.
+ *
+ * The left corners are stated unconditionally for the same reason the border
+ * is: they face the band's gutter and can never square, so the only corner an
+ * edit can get wrong is the one that actually varies.
+ *
+ * **The gap is `ml-1` on the element to the RIGHT, never `mr-1` here** - on
+ * `<main>` when this card's neighbour is `<main>`, and on the sash when the
+ * side bar is between them. VS Code's convention, and worth keeping rather than
+ * splitting: one margin is one number to change, where a margin on each side is
+ * two that have to agree.
  *
  * **The radius is legal because the card does not touch the window.** The
  * shell's rule is that nothing drawing against the window's own edge may carry
@@ -376,6 +388,16 @@ export interface ActivityRailProps {
   networkOpen: boolean;
   onOpenNetwork: () => void;
   /**
+   * Whether the side bar is open against this card's right edge.
+   *
+   * **The rail's own geometry is the only thing this changes**, which is why it
+   * arrives as a boolean rather than as the panel: which panel is open is the
+   * side bar's business, and this strip only needs to know whether there is a
+   * card to connect to. VS Code's two arrangements are the same one boolean -
+   * `.nosidebar` versus a side bar against the rail.
+   */
+  sideBarOpen: boolean;
+  /**
    * Export / Import PCAP.
    *
    * It took the Update Center's slot, and that cost nothing: `onOpenUpdates`
@@ -394,7 +416,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces, onSelectInterface,
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
-  settingsOpen, onOpenSettings, networkOpen, onOpenNetwork, onOpenExport,
+  settingsOpen, onOpenSettings, networkOpen, onOpenNetwork, onOpenExport, sideBarOpen,
   schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
   scheduleSummary, scheduleNow,
 }) => {
@@ -523,9 +545,9 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       aria-orientation="vertical"
       aria-label="Activity"
       onKeyDown={onRailKeyDown}
-      className="w-11 shrink-0 flex flex-col items-center bg-secondary
+      className={`w-11 shrink-0 flex flex-col items-center bg-secondary
         text-secondary-foreground select-none
-        border border-border rounded-lg"
+        border border-border rounded-l-lg ${sideBarOpen ? '' : 'rounded-r-lg'}`}
     >
       {/* No top cell, and the mark is not in one. The rail starts below the
           title row rather than beside it, so the window's top-left corner is

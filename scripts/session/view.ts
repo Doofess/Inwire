@@ -432,7 +432,19 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // connect to closes up as a standalone panel with every corner rounded. The
   // three facts below are one arrangement and each breaks the other two if it
   // moves alone.
-  classIs('the rail is a bordered card', 'border border-border rounded-lg');
+  // **The rail draws all four borders, always, and the radius is the only thing
+  // that varies.** Both of VS Code's arrangements are live: `.nosidebar` is
+  // every corner rounded, and a side bar against this edge squares the corners
+  // it covers so the two read as one surface. The border is never conditional,
+  // because `w-11` under `border-box` is 42px of interior between two 1px
+  // borders - an even interior for a 36px target - and handing the facing
+  // border to the neighbour makes it 43 and puts the icon column on a half
+  // pixel. `scripts/session/side-bar.ts` holds the other half of that seam.
+  classIs('the rail draws all four of its own borders', 'border border-border');
+  checkTrue('...and gives none of them away', !/border-[lrtb]-0/.test(rail));
+  classIs('...keeping the corners that face the gutter', 'rounded-l-lg');
+  checkTrue('...and squaring only the corner an open side bar covers',
+    /sideBarOpen \? '' : 'rounded-r-lg'/.test(rail));
 
   // The border belongs to the rail whichever arrangement is in force, and the
   // reason is arithmetic: `w-11` under `border-box` leaves 42px of interior
@@ -442,12 +454,16 @@ console.log('\n--- the rail fits the smallest window ---\n');
   checkTrue('...and so is <main>, with all four of its own edges',
     app.includes('border border-border rounded-lg'));
 
-  // The gap that makes them float apart rather than share a seam. On `<main>`
-  // rather than on the rail, which is VS Code's convention - a left-hand rail
-  // takes its gap from the leading margin of the card beside it - and which
-  // keeps it one number instead of two that have to agree.
-  checkTrue('the workspace card supplies the gap between them',
-    /className="ml-1 flex-1/.test(app));
+  // **The 4px between the workspace and whatever is to its left is ONE number**,
+  // and which element supplies it depends on whether the side bar is open:
+  // `<main>`'s own `ml-1` when nothing is beside it, the sash when something is.
+  // VS Code's convention either way - the gap belongs to the element on the
+  // right, or to the sash standing in that element's place, never to two
+  // margins that have to agree.
+  checkTrue('the workspace supplies the gap when nothing is beside it',
+    /\$\{sideBarOpen \? '' : 'ml-1'\} flex-1/.test(app));
+  checkTrue('...and the sash is that same 4px when something is',
+    /className="w-1 shrink-0[\s\S]{0,200}cursor-col-resize/.test(app));
 
   // The radius is legal only while the gutter holds these cards off the
   // window: the shell's rule is that nothing meeting the window's own edge
@@ -463,7 +479,12 @@ console.log('\n--- the rail fits the smallest window ---\n');
   // it crowns. That went wrong for exactly one commit, when the gutter was
   // added and the title row was not looked at, which is why both halves are
   // read out of the source here rather than trusted to agree.
-  const railWidth = /className="w-(\d+) shrink-0 flex flex-col/.exec(rail)?.[1];
+  // `className={\`` as well as `className="`: the rail's class string became a
+  // template literal when the radius grew a condition, and this regex is the
+  // reason the literal PREFIX had to survive that change character for
+  // character. A check that reads a width out of a class string is one edit
+  // away from silently finding nothing.
+  const railWidth = /className=[{`"]*`?w-(\d+) shrink-0 flex flex-col/.exec(rail)?.[1];
   const markBlock = /className="ml-(\d+) w-(\d+) shrink-0 flex items-center justify-center"/
     .exec(code('src/components/common/TitleRow.tsx'));
   check('the mark block is the rail\'s width', markBlock?.[2], railWidth);

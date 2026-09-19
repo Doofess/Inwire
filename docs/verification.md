@@ -86,6 +86,51 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       on its own; the border is still what carries it in **Day**, where the two
       are much closer. A second line running past the corner means the rail got
       its `border-r` back and is drawing beside the pane's.
+### The side bar
+
+The column between the rail and the workspace — VS Code's primary side bar.
+`Ctrl+B` opens it; each panel's rail button will open its own as they land.
+**Every item here is a geometry check and none of them can be scripted**: the
+assertions can read the class strings but not what the two cards look like when
+they meet.
+
+- [ ] **The seam is ONE line.** Open the side bar: exactly one 1px line runs
+      between the rail and the column, full height. The two failures are a
+      **doubled** line (both cards drawing it) and **no** line (neither), and
+      both of those render perfectly happily.
+- [ ] **The two read as one surface.** The rail's right corners are square, the
+      column's right corners are round, and there is no gap between them.
+      Closed again, the rail closes up with all four corners rounded and 4px of
+      `--secondary` showing between it and `<main>`.
+- [ ] **The icon column does not move by a pixel** when the side bar opens.
+      Screenshot both states and flip between them. This is the `w-11` interior
+      arithmetic — 42px between two borders centres a 36px target on whole
+      pixels — and it is exactly what breaks if the rail ever gives its facing
+      border away to make the seam.
+- [ ] **The grounds differ.** The rail is `--secondary` and the column is
+      `--card`. In **Night** that step is what makes the hairline readable at
+      all; in **Day** the border carries it. If the column looks like a wider
+      rail, it took the wrong ground.
+- [ ] **The gap moves, it does not double.** Opening the side bar must shift
+      `<main>`'s left edge by exactly the column's width — not by the width plus
+      4px. `<main>` gives up its `ml-1` and the sash stands in its place.
+- [ ] **The sash.** Drag it: the column resizes and the packet list reflows.
+      Drag it to the far left — it stops at 170px. Drag right — it stops while
+      the list is still usable. **Right-click, double-click and Enter** each
+      reset it to 288. Tab to it, then arrows nudge, Shift-arrow steps bigger,
+      Home and End hit the bounds.
+- [ ] **It paints nothing at rest** — no grey bar between the two cards, unlike
+      the two dividers inside the packets view. Hover turns it accent.
+- [ ] **The width survives a restart**, and so does the open panel. Then
+      **Settings → Interface → Restore defaults** must leave both untouched.
+- [ ] **At 1024×680 with the side bar open**: frame number, time, source and
+      destination are all still on screen without scrolling; Protocol, Length
+      and Info scroll. This is where the push is paid for, and it is the
+      documented trade rather than a defect.
+- [ ] **Escape never closes it.** From Packets, from Statistics, and with
+      Settings open. Escape from Statistics must still land on Packets in one
+      press. `Ctrl+1..5` must leave it open too.
+
 - [ ] **All four of its corners are square**, this one included. A radius on
       any surface that meets the window - this pane, the title row, the rail -
       is the app drawing a curve inside the one Windows already draws. Buttons,

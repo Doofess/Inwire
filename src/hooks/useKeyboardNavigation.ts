@@ -25,6 +25,15 @@ export interface KeyboardNavigationOptions {
   canCapture: boolean;
   /** Switches the rail's active view, for Ctrl+1..5. */
   onViewShortcut: (view: AppView) => void;
+  /**
+   * `Ctrl+B` - open the side bar on the last panel, or close it.
+   *
+   * VS Code's key for the same surface, and the same job: this is the keyboard
+   * reaching the door the rail buttons are, not a second door. The side bar is
+   * deliberately outside the Escape chain - it is a persisted place rather than
+   * a detour - so without this it has no keyboard at all.
+   */
+  onToggleSideBar: () => void;
   filteredPacketsRef: RefObject<Packet[]>;
   selectedPacketRef: RefObject<Packet | null>;
   isCapturingRef: RefObject<boolean>;
@@ -40,6 +49,7 @@ export interface KeyboardNavigationOptions {
 export function useKeyboardNavigation({
   canCapture,
   onViewShortcut,
+  onToggleSideBar,
   filteredPacketsRef,
   selectedPacketRef,
   isCapturingRef,
@@ -84,6 +94,13 @@ export function useKeyboardNavigation({
         if (view !== undefined) {
           e.preventDefault();
           onViewShortcut(view.id);
+          return;
+        }
+        // The side bar, on VS Code's own key for it. Inside the same modifier
+        // guard as the digits, so it cannot collide with typing either.
+        if (e.key === 'b' || e.key === 'B') {
+          e.preventDefault();
+          onToggleSideBar();
           return;
         }
       }
@@ -184,5 +201,5 @@ export function useKeyboardNavigation({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // `onViewShortcut` joins the deps rather than going through a ref: it is
     // a stable `useCallback` in App, so this re-registers once, not per flush.
-  }, [canCapture, onViewShortcut]);
+  }, [canCapture, onViewShortcut, onToggleSideBar]);
 }

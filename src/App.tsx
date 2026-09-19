@@ -95,6 +95,11 @@ import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { SettingsPane } from "./components/common/SettingsPane";
 import { NetworkPane } from './components/network/NetworkPane';
+import { SideBar } from './components/sidebar/SideBar';
+import {
+  MAIN_RESERVE_PX, MIN_SIDE_BAR_PX, restoredPanel, SIDE_BAR_DEFAULTS, sideBarStore,
+  usableSideBarWidth, type SideBarPanel,
+} from './services/sideBarPrefs';
 import {
   FILTER_PRESETS_STORAGE_KEY,
   addPreset,
@@ -449,6 +454,30 @@ export default function App() {
     setViewState(next);
     patchViewPrefs({ view: next });
   }, [patchViewPrefs]);
+
+  /**
+   * The side bar: which panel is in the column beside the workspace.
+   *
+   * Wired exactly like `view` above, and for the same reason - persisted, with
+   * a `restored*` seam deciding what a fresh window may resume. One slot, for
+   * the reason `sheet` has one: the column holds one panel, so two flags would
+   * make "both open" representable in a place that cannot show both.
+   *
+   * **Orthogonal to `sheet`, deliberately.** `sheet` answers what is IN the
+   * workspace card; this answers what is BESIDE it. So a panel may be open
+   * while Settings has the card, and that is not a tolerated side effect - it
+   * is the thing that proves the side bar is a place rather than a sheet.
+   */
+  const [sideBarPrefs, patchSideBar] = usePreferenceStore(sideBarStore);
+  usePreferenceSync(sideBarStore.key, sideBarStore.normalize, sideBarStore.accept);
+  const [sideBar, setSideBarState] = useState<SideBarPanel | null>(
+    () => restoredPanel(sideBarPrefs.panel),
+  );
+  const sideBarOpen = sideBar !== null;
+  const setSideBar = useCallback((next: SideBarPanel | null) => {
+    setSideBarState(next);
+    patchSideBar({ panel: next });
+  }, [patchSideBar]);
 
   // **The status bar's byte readout, cleared on a view change.**
   //
@@ -1065,7 +1094,18 @@ export default function App() {
 
   const isDraggingRef = useRef(false);
   const isDraggingColumnRef = useRef(false);
+  const isDraggingSideBarRef = useRef(false);
   const bottomPaneRef = useRef<HTMLDivElement>(null);
+  /**
+   * The cluster band, which is what a side bar drag measures against.
+   *
+   * The band rather than the window, so the gutter is outside the box and does
+   * not have to be subtracted - the same reason `resizeSplit` measures the pane
+   * it splits rather than the screen.
+   */
+  const bandRef = useRef<HTMLDivElement>(null);
+  /** The rail's own width, the one number a side bar drag has to know about. */
+  const RAIL_PX = 44;
   /**
    * Where the layout's custom properties live.
    *
@@ -1096,14 +1136,15 @@ export default function App() {
    * state and to storage once, on release. Nothing renders differently, because
    * the properties are the same ones the committed values write.
    */
-  const dragRef = useRef({ bottomPaneHeight, detailsPaneRatio });
+  const dragRef = useRef({ bottomPaneHeight, detailsPaneRatio, sideBarWidth: sideBarPrefs.width });
   useEffect(() => {
-    dragRef.current = { bottomPaneHeight, detailsPaneRatio };
-  }, [bottomPaneHeight, detailsPaneRatio]);
+    dragRef.current = { bottomPaneHeight, detailsPaneRatio, sideBarWidth: sideBarPrefs.width };
+  }, [bottomPaneHeight, detailsPaneRatio, sideBarPrefs.width]);
 
   const applyLayoutVars = useCallback(() => {
     const el = layoutVarsRef.current;
     if (!el) return;
+    el.style.setProperty("--side-bar-width", `${dragRef.current.sideBarWidth}px`);
     el.style.setProperty("--bottom-pane-height", `${dragRef.current.bottomPaneHeight}px`);
     // One share and a remainder, so there is no interaction to clamp. There
     // were two - the map's and the tree's, with "the hex dump keeps at least a
@@ -1141,8 +1182,33 @@ export default function App() {
     applyLayoutVars();
   }, [applyLayoutVars, stacked]);
 
+  /**
+   * The side bar's width, from the pointer.
+   *
+   * Measured off the band rather than the window, so the rail and the gutter
+   * come out of the arithmetic by being outside the box being measured - the
+   * same reason `resizeSplit` measures the pane it is splitting.
+   *
+   * **The ceiling is applied here and never stored.** That is the dock's
+   * surviving rule: a width is held unclamped against the window and clamped at
+   * the point of use, so narrowing the window shrinks an open panel and
+   * widening it gives back the width that was chosen. Clamped on the way out it
+   * could never grow back.
+   */
+  const resizeSideBar = useCallback((clientX: number) => {
+    const el = bandRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    dragRef.current.sideBarWidth = usableSideBarWidth(
+      clientX - rect.left - RAIL_PX,
+      rect.width - RAIL_PX,
+    );
+    applyLayoutVars();
+  }, [applyLayoutVars]);
+
   useEffect(() => {
     const handlePointerMove = (e: PointerEvent) => {
+      if (isDraggingSideBarRef.current) { resizeSideBar(e.clientX); return; }
       if (isDraggingRef.current) {
         // Measured off the pane's own bottom edge, not the window's.
         //
@@ -1173,13 +1239,19 @@ export default function App() {
     };
 
     const endDrag = () => {
-      if (!isDraggingRef.current && !isDraggingColumnRef.current) return;
+      const sideBarDrag = isDraggingSideBarRef.current;
+      if (!isDraggingRef.current && !isDraggingColumnRef.current && !sideBarDrag) return;
       isDraggingRef.current = false;
       isDraggingColumnRef.current = false;
+      isDraggingSideBarRef.current = false;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-      // The one commit for the whole gesture.
-      patchLayout({ ...dragRef.current });
+      // The one commit for the whole gesture, and it goes to exactly one store.
+      // The side bar's width lives on its own key - one `storage` event per
+      // thing that actually moved - so committing both here would wake every
+      // other window with a layout change nothing asked for.
+      if (sideBarDrag) patchSideBar({ width: dragRef.current.sideBarWidth });
+      else patchLayout({ ...dragRef.current });
     };
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -1193,11 +1265,12 @@ export default function App() {
       window.removeEventListener("pointerup", endDrag);
       window.removeEventListener("pointercancel", endDrag);
     };
-  }, [applyLayoutVars, patchLayout, resizeSplit]);
+  }, [applyLayoutVars, patchLayout, patchSideBar, resizeSplit, resizeSideBar]);
 
-  const beginDrag = useCallback((which: "height" | "split") => {
+  const beginDrag = useCallback((which: "height" | "split" | "side-bar") => {
     if (which === "height") isDraggingRef.current = true;
-    else isDraggingColumnRef.current = true;
+    else if (which === "split") isDraggingColumnRef.current = true;
+    else isDraggingSideBarRef.current = true;
     document.body.style.cursor = which === "height" ? "row-resize" : "col-resize";
     // Otherwise the drag selects packet rows as it passes over them.
     document.body.style.userSelect = "none";
@@ -1224,6 +1297,13 @@ export default function App() {
       detailsPaneRatio: Math.max(0.1, Math.min(detailsPaneRatio + delta, 0.9)),
     });
   }, [detailsPaneRatio, patchLayout]);
+
+  const nudgeSideBar = useCallback((deltaPx: number) => {
+    const band = bandRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+    patchSideBar({
+      width: usableSideBarWidth(sideBarPrefs.width + deltaPx, band - RAIL_PX),
+    });
+  }, [patchSideBar, sideBarPrefs.width]);
 
   // Engines
   const dissectorEngine = useMemo(() => new CustomDissectorEngine(), []);
@@ -1698,6 +1778,14 @@ export default function App() {
   useKeyboardNavigation({
     canCapture: permissions.canCapture,
     onViewShortcut: handleViewChange,
+    /**
+     * `Ctrl+B` reopens the panel that was last open, and `interfaces` on a
+     * fresh profile that has never opened one - never "nothing", which would
+     * make the key do nothing on the one press where it most needs to work.
+     */
+    onToggleSideBar: () => setSideBar(sideBar === null
+      ? restoredPanel(sideBarPrefs.panel) ?? 'interfaces'
+      : null),
     filteredPacketsRef,
     selectedPacketRef,
     isCapturingRef,
@@ -2192,6 +2280,11 @@ export default function App() {
           // something.
           "--bottom-pane-height": `${bottomPaneHeight}px`,
           "--details-pane-size": `${detailsPaneRatio * 100}%`,
+          // Declared HERE as well as in `applyLayoutVars`, which is the whole
+          // lesson of `--geo-pane-size` above: a layout property written only
+          // by the drag path has no value until somebody drags something, and
+          // the symptom is a column that renders at zero width on first paint.
+          "--side-bar-width": `${sideBarPrefs.width}px`,
         } as React.CSSProperties
       }
       className="h-screen w-screen flex flex-col font-sans overflow-hidden transition-colors bg-background text-foreground"
@@ -2251,7 +2344,10 @@ export default function App() {
           the suite that could see it. There is a great deal more of it on
           screen now. If the chrome's ground changes again, this changes with
           it. */}
-      <div className="flex-1 flex min-h-0 overflow-hidden bg-secondary pl-1 pr-1 pb-1">
+      <div
+        ref={bandRef}
+        className="flex-1 flex min-h-0 overflow-hidden bg-secondary pl-1 pr-1 pb-1"
+      >
         <ActivityRail
           isCapturing={isCapturing}
           onStartCapture={handleStartCapture}
@@ -2274,6 +2370,7 @@ export default function App() {
           networkOpen={sheet === 'network'}
           onOpenNetwork={() => toggleSheet('network')}
           onOpenExport={() => setShowExportModal(true)}
+          sideBarOpen={sideBarOpen}
           schedule={schedule}
           onScheduleChange={setSchedule}
           schedulePresets={schedulePresets}
@@ -2347,10 +2444,81 @@ export default function App() {
 
             The dock's width reserve went with it. `LIST_RESERVE` in
             `dockPrefs.ts` guaranteed the packet list a width while a column sat
-            beside it; both the constant and the file are deleted, and nothing
-            competes with the list for horizontal space in this row any more. */}
-        <main className="ml-1 flex-1 flex flex-col min-w-0 overflow-hidden
-          border border-border rounded-lg bg-background">
+            beside it; both the constant and the file are deleted. Something
+            competes for that width again - the side bar - and the reserve came
+            back as `MAIN_RESERVE_PX` in `sideBarPrefs.ts`, inheriting that
+            constant's post-mortem rather than its number. */}
+
+        {/* **The side bar, and the seam it makes with the rail.**
+
+            VS Code's two arrangements, and which is in force is one boolean.
+            Closed, the rail "closes up as a standalone panel with every corner
+            rounded" (`.nosidebar` in `floatingPanels.css`) and `<main>` supplies
+            the 4px gap as `ml-1`. Open, the rail and this column meet FLUSH and
+            read as one surface: the column gives up its left border and its
+            left corners, the rail draws the only seam, and the sash supplies
+            the gap to `<main>` instead.
+
+            The gap is one number either way, which is the point of the
+            leading-margin convention - it belongs to the element on the right,
+            or to the sash standing in that element's place, never to two
+            margins that have to agree. */}
+        {sideBar !== null && <SideBar panel={sideBar} />}
+
+        {/* **The sash IS the gap**, which is what VS Code's is: a grid sash
+            centred on the boundary between two cards. 4px wide, matching the
+            `ml-1` it replaces, so opening the side bar moves `<main>`'s edge by
+            exactly the column's width and not a pixel more.
+
+            **It paints nothing at rest**, and that is a departure from the two
+            dividers below. Those sit between two panes inside ONE card, where
+            they are the border as well as the handle, so a resting grey bar is
+            correct. Here two card borders already draw the edge across a 4px
+            gutter, and a third line in the middle of it is clutter.
+
+            The grab zone is widened with a pseudo-element rather than with
+            width, because width here is the gap and the gap is load-bearing. */}
+        {sideBar !== null && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Side bar width"
+            aria-valuenow={Math.round(sideBarPrefs.width)}
+            aria-valuemin={MIN_SIDE_BAR_PX}
+            aria-valuemax={Math.round(
+              Math.max(MIN_SIDE_BAR_PX, window.innerWidth - RAIL_PX - MAIN_RESERVE_PX),
+            )}
+            tabIndex={0}
+            title="Drag to resize - right-click, double-click or Enter to reset"
+            onPointerDown={() => beginDrag('side-bar')}
+            onDoubleClick={() => patchSideBar({ width: SIDE_BAR_DEFAULTS.width })}
+            // Right-click restores the default on every draggable bar in this
+            // app; `stopPropagation` keeps the packet list's own row menu out.
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              patchSideBar({ width: SIDE_BAR_DEFAULTS.width });
+            }}
+            onKeyDown={(e) => {
+              const step = e.shiftKey ? 48 : 8;
+              if (e.key === 'ArrowLeft') { e.preventDefault(); nudgeSideBar(-step); }
+              else if (e.key === 'ArrowRight') { e.preventDefault(); nudgeSideBar(step); }
+              else if (e.key === 'Home') { e.preventDefault(); nudgeSideBar(-9999); }
+              else if (e.key === 'End') { e.preventDefault(); nudgeSideBar(9999); }
+              else if (e.key === 'Enter') {
+                e.preventDefault();
+                patchSideBar({ width: SIDE_BAR_DEFAULTS.width });
+              }
+            }}
+            className="w-1 shrink-0 z-10 cursor-col-resize relative
+              after:absolute after:inset-y-0 after:-left-1 after:-right-1
+              transition-colors hover:bg-primary/50
+              focus-visible:outline-none focus-visible:bg-primary/50"
+          />
+        )}
+
+        <main className={`${sideBarOpen ? '' : 'ml-1'} flex-1 flex flex-col min-w-0 overflow-hidden
+          border border-border rounded-lg bg-background`}>
           {/* **The filter row was here and there is no filter row.**
 
               The rule it carried had been rewritten three times and the third
