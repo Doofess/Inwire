@@ -51,6 +51,10 @@ const NOT_TESTS: Record<string, string> = {
     "drives the Rust agent's whole capture path with the app's own client; "
     + 'needs `cargo run --example agent_serve` running beside it, a real '
     + 'capture device, and Windows',
+  'agent/agent-compare.ts':
+    'runs BOTH agents against one adapter at the same moment and diffs what '
+    + 'they captured; needs the Python agent registered as the service and the '
+    + 'Rust one running on INWIRE_AGENT_PIPE beside it, and Windows',
   'parity/parity-check.ts': 'needs the untracked fixture captures and tshark ground truth (test/fixtures/README.md)',
   'tcp/reassembly.ts': 'diagnostic; needs the fixtures, and reports rather than asserts (docs/decisions/0020)',
   'perf/clone-cost.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0007)',
