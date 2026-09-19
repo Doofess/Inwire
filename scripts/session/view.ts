@@ -285,13 +285,18 @@ console.log('\n--- Settings is a pane and not a view ---\n');
     pane.includes('className="h-full min-h-0 flex flex-col bg-background text-foreground"'));
   checkTrue('it is rendered inside the workspace', app.includes("sheet === 'settings' ? ("));
 
-  // **There are two sheets and one slot.** Network joined Settings on the same
-  // argument - it describes the machine, so nothing in it changes when a packet
-  // arrives - and the card holds one surface. `App` models that as one state
-  // rather than a flag each, because two flags make "both open" representable
-  // and every navigation that closes a sheet would have to remember both.
+  // **One slot, and it is down to one member.** Network joined Settings here
+  // for a while and has since become a side bar PANEL - it sits beside the
+  // workspace rather than in it, which is what makes its observed column live
+  // while frames arrive, an argument a sheet could not make.
+  //
+  // `sheet` stays a union all the same. It answers "what is IN the workspace
+  // card", and a second full-pane surface would join this list rather than sit
+  // beside it; a boolean would invite a second boolean, and the argument for
+  // one slot would have to be won again.
   checkTrue('a sheet is one state, not a flag each',
-    /const \[sheet, setSheet\] = useState<'settings' \| 'network' \| null>/.test(app));
+    /const \[sheet, setSheet\] = useState<'settings' \| null>/.test(app));
+  checkTrue('...and Network is not one any more', !app.includes("sheet === 'network'"));
   // `ids` is typed `AppView[]`, and `'network'` is not in that union - which is
   // itself half the answer, and is why this is written against `string[]`
   // rather than as a comparison `tsc` would reject as impossible. The type says
@@ -332,8 +337,14 @@ console.log('\n--- Settings is a pane and not a view ---\n');
   const railSrc = code('src/components/common/ActivityRail.tsx');
   checkTrue('the rail marks Settings the way it marks a view',
     railSrc.includes("railButton(settingsOpen, 'view')"));
-  checkTrue('...and marks Network the same way, being the same kind of thing',
-    railSrc.includes("railButton(networkOpen, 'view')"));
+  // Every button in this strip that puts a surface on screen takes the fill,
+  // and the three that open a side bar panel compare against the PANEL rather
+  // than each holding a boolean of its own - one column shows one of them, so
+  // four booleans would make "two lit at once" representable.
+  check('...and every side bar button is marked the same way',
+    ['interfaces', 'schedule', 'network']
+      .filter((p) => !railSrc.includes(`railButton(sideBarPanel === '${p}', 'view')`)),
+    []);
   // The strip has shipped two identical glyphs once already - the brand mark
   // opened as an `EthernetPort`, the adapter button's own icon, 42px under it.
   // Network is the adapter's neighbour in meaning and must not be in picture.

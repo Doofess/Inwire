@@ -386,18 +386,6 @@ export interface ActivityRailProps {
   settingsOpen: boolean;
   onOpenSettings: () => void;
   /**
-   * Whether the Network sheet is up.
-   *
-   * The same shape as `settingsOpen` and for the same reason: Network takes the
-   * workspace card without being a view, because nothing in it changes when a
-   * packet arrives - it describes the MACHINE. Two booleans here rather than one
-   * "which sheet" enum, because this strip has no concept of a sheet: it draws a
-   * button and says whether that button's surface is on screen. `App` owns the
-   * rule that only one can be.
-   */
-  networkOpen: boolean;
-  onOpenNetwork: () => void;
-  /**
    * Which side bar panel is open, or null.
    *
    * The panel rather than a boolean per button, because four buttons in this
@@ -437,7 +425,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces,
   captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
-  settingsOpen, onOpenSettings, networkOpen, onOpenNetwork, onOpenExport, sideBarOpen,
+  settingsOpen, onOpenSettings, onOpenExport, sideBarOpen,
   sideBarPanel, onOpenSideBar,
   schedule, scheduleSummary,
 }) => {
@@ -795,13 +783,19 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
 
             `Network` rather than `EthernetPort` - that glyph is the adapter
             button three icons above, and this strip has shipped two identical
-            icons once already. */}
+            icons once already.
+
+            **It took the whole workspace for a while, and it is a side bar
+            panel now.** A sheet meant covering the capture in order to describe
+            what the capture is running on; beside it, its "Observed (capture)"
+            column is live while frames arrive, which is an argument a sheet
+            could not make. */}
         <button
-          onClick={onOpenNetwork}
+          onClick={() => onOpenSideBar('network')}
           aria-label="Network"
           title="Network - adapters, DNS and this machine's public identity"
-          aria-pressed={networkOpen}
-          className={railButton(networkOpen, 'view')}
+          aria-pressed={sideBarPanel === 'network'}
+          className={railButton(sideBarPanel === 'network', 'view')}
         >
           <Network className={GLYPH} />
         </button>

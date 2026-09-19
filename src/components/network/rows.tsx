@@ -110,11 +110,26 @@ export const Row: React.FC<RowProps> = ({
 };
 
 
+/**
+ * A titled block of facts, with a heading that STICKS.
+ *
+ * Seven of these stack in one scroller now - there was a `w-40` nav showing one
+ * at a time, and it went with the two-column sheet - so the heading has to
+ * survive its own section being scrolled through, or a reader three rows into
+ * IPv6 has no way of knowing which section they are in.
+ *
+ * **`overflow-hidden` went for that.** It clipped the children to the card's
+ * radius, and it also made this element a scroll container, which pins a
+ * `sticky` child to a box exactly its own height - stickiness that does
+ * nothing. The radius moves onto the heading instead. What is lost is the clip
+ * on the last row's ground when that row carries a warning wash; what is
+ * gained is knowing where you are.
+ */
 export const Section: React.FC<{ title: string; note?: string; children: React.ReactNode }> = ({
   title, note, children,
 }) => (
-  <div className="rounded-lg border border-border overflow-hidden">
-    <div className="px-3 py-2 bg-secondary border-b border-border">
+  <div className="rounded-lg border border-border">
+    <div className="sticky top-0 z-10 rounded-t-lg px-3 py-2 bg-secondary border-b border-border">
       <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         {title}
       </div>
