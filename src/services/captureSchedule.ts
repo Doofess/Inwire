@@ -203,6 +203,21 @@ export function describeDuration(minutes: number): string {
  * timed capture actually wants. An armed one names the wall-clock time it will
  * act at, because that is what they set.
  */
+/**
+ * A stamp short enough for a row that also carries its label.
+ *
+ * It lives beside `describeSchedule` because it is that function's argument in
+ * practice, and it was written out twice - once in the schedule picker and once
+ * inline at `App`'s call site, character for character, same four options in
+ * the same order. One format defined twice is one format that drifts; the two
+ * halves of the feature simply lived in two files.
+ */
+export function formatStamp(epochMs: number): string {
+  return new Date(epochMs).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
+
 export function describeSchedule(
   schedule: CaptureSchedule,
   now: number,

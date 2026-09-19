@@ -56,7 +56,7 @@ import { usePacketBuffer } from './hooks/usePacketBuffer';
 import { useCaptureSchedule } from './hooks/useCaptureSchedule';
 import { capturePresetStore } from './services/captureSchedulePrefs';
 import {
-  describeSchedule, EMPTY_SCHEDULE, type CaptureSchedule,
+  describeSchedule, EMPTY_SCHEDULE, formatStamp, isScheduleEmpty, type CaptureSchedule,
 } from './services/captureSchedule';
 import { useAgentConnection } from './hooks/useAgentConnection';
 import { inferHostIdentity } from './services/hostIdentity';
@@ -97,6 +97,7 @@ import { SettingsPane } from "./components/common/SettingsPane";
 import { NetworkPane } from './components/network/NetworkPane';
 import { PANEL_TITLES, SideBar } from './components/sidebar/SideBar';
 import { CaptureInterfacePanel } from './components/sidebar/CaptureInterfacePanel';
+import { CaptureSchedulePanel } from './components/sidebar/CaptureSchedulePanel';
 import {
   MAIN_RESERVE_PX, MIN_SIDE_BAR_PX, restoredPanel, SIDE_BAR_DEFAULTS, sideBarStore,
   usableSideBarWidth, type SideBarPanel,
@@ -1734,6 +1735,18 @@ export default function App() {
    * and the rail button cannot come to mean different things - which is the
    * same reason `APP_VIEWS` order IS the numbering.
    */
+  /**
+   * "Stops in 14:58", recomputed on the schedule hook's own tick.
+   *
+   * That tick is what makes the countdown advance without any component here
+   * owning a timer. It has two readers now - the rail button's tooltip and the
+   * side bar header's detail - where it used to have one, and it was worth
+   * moving precisely because the one it had was a tooltip.
+   */
+  const scheduleSummary = describeSchedule(
+    schedule, scheduleNow, isCapturing, captureStartedAtRef.current, formatStamp,
+  );
+
   const handleViewChange = useCallback((next: AppView) => {
     /**
      * **Landing on a view closes Settings**, because Settings is a sheet over
@@ -2392,18 +2405,7 @@ export default function App() {
           sideBarPanel={sideBar}
           onOpenSideBar={toggleSideBar}
           schedule={schedule}
-          onScheduleChange={setSchedule}
-          schedulePresets={schedulePresets}
-          onSchedulePresetsChange={setSchedulePresets}
-          // Recomputed on the hook's own tick, which is what makes the
-          // countdown advance without this component owning a timer.
-          scheduleSummary={describeSchedule(
-            schedule, scheduleNow, isCapturing, captureStartedAtRef.current,
-            (epochMs) => new Date(epochMs).toLocaleString(undefined, {
-              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-            }),
-          )}
-          scheduleNow={scheduleNow}
+          scheduleSummary={scheduleSummary}
         />
 
         {/* The content pane, tucked into the corner the title row and the rail
@@ -2488,7 +2490,11 @@ export default function App() {
             panel={sideBar}
             detail={sideBar === 'interfaces' && agentInterfaces.length > 0
               ? agentInterfaces.length
-              : undefined}
+              : sideBar === 'schedule' && !isScheduleEmpty(schedule)
+                // The promotion this conversion is for: a live countdown that
+                // was computed only to fill a 36px button's tooltip.
+                ? scheduleSummary
+                : undefined}
           >
             {sideBar === 'interfaces' && (
               <CaptureInterfacePanel
@@ -2506,10 +2512,18 @@ export default function App() {
                 onSamplingChange={handleInterfaceSampling}
               />
             )}
-            {/* The other three land here as they are built. A ternary chain
-                rather than four guards, so "one panel at a time" is the shape
-                of the code rather than a condition to keep true. */}
-            {sideBar !== 'interfaces' && (
+            {sideBar === 'schedule' && (
+              <CaptureSchedulePanel
+                schedule={schedule}
+                onScheduleChange={setSchedule}
+                presets={schedulePresets}
+                onPresetsChange={setSchedulePresets}
+                bufferedPackets={packets.length}
+                now={scheduleNow}
+              />
+            )}
+            {/* The other two land here as they are built. */}
+            {sideBar !== 'interfaces' && sideBar !== 'schedule' && (
               <p className="px-3 py-3 text-xs text-muted-foreground">
                 {PANEL_TITLES[sideBar]} moves into this column next.
               </p>

@@ -16,8 +16,7 @@ import {
 } from 'lucide-react';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentStatusLabel } from '../../services/agentHealth';
-import { CaptureSchedulePicker } from './CaptureSchedulePicker';
-import { isScheduleEmpty, type CaptureSchedule, type SchedulePreset } from '../../services/captureSchedule';
+import { isScheduleEmpty, type CaptureSchedule } from '../../services/captureSchedule';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import type { Capabilities } from '../../types/packet';
 import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
@@ -343,14 +342,18 @@ export interface ActivityRailProps {
    * It is a capture control - it decides when one starts and when it stops - so
    * it sits with Start/Stop and the adapter rather than above the packet list.
    */
+  /**
+   * Still here, and only for the BUTTON.
+   *
+   * The dot needs to know whether anything is scheduled and the tooltip needs
+   * the summary; neither needs the schedule's editing surface. The four props
+   * that existed purely to be forwarded into the dropdown - the change
+   * callback, the presets, their callback, and the clock - went to
+   * `sidebar/CaptureSchedulePanel.tsx` with the menu.
+   */
   schedule: CaptureSchedule;
-  onScheduleChange: (next: CaptureSchedule) => void;
-  schedulePresets: SchedulePreset[];
-  onSchedulePresetsChange: (next: SchedulePreset[]) => void;
-  /** "Stops in 14:58". The tooltip, now that there is no room for a label. */
+  /** "Stops in 14:58" - the panel header's detail, and this button's tooltip. */
   scheduleSummary: string;
-  /** The schedule hook's clock, so "already passed" updates without a timer. */
-  scheduleNow: number;
 
   /* --- views ------------------------------------------------------------ */
   view: AppView;
@@ -436,8 +439,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   view, onViewChange, streamAvailable,
   settingsOpen, onOpenSettings, networkOpen, onOpenNetwork, onOpenExport, sideBarOpen,
   sideBarPanel, onOpenSideBar,
-  schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
-  scheduleSummary, scheduleNow,
+  schedule, scheduleSummary,
 }) => {
   const selected = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
   const attention = agentNeedsAttention(agentHealth);
@@ -708,31 +710,36 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
             and the glyph carries a dot when a schedule is set, because a clock
             that looks identical whether or not anything is scheduled is the
             same failure the adapter's health badge exists to avoid. */}
-        <CaptureSchedulePicker
-          schedule={schedule}
-          onScheduleChange={onScheduleChange}
-          presets={schedulePresets}
-          onPresetsChange={onSchedulePresetsChange}
-          bufferedPackets={bufferedPackets}
-          now={scheduleNow}
-          align="start"
-          side="right"
+        {/* **The schedule button opens a panel, and the summary it computes
+            is no longer only a tooltip.**
+
+            It was a dropdown hanging off this button, and the summary -
+            "Stops in 14:58", recomputed every second - was shown to whoever
+            happened to hover a 36px icon and to nobody else. It is the panel
+            header's `detail` now. The tooltip keeps it too, because the button
+            is still reachable with the panel closed.
+
+            The dot stays: a clock glyph looks identical whether or not anything
+            is scheduled, which is the failure the adapter's warning badge
+            exists to avoid. The FILL is what changed - the marker now means
+            "this panel is on screen", and "a schedule is set" is what the dot
+            has always said. */}
+        <button
+          data-tour="schedule"
+          onClick={() => onOpenSideBar('schedule')}
+          aria-label={scheduleSet ? `Capture schedule - ${scheduleSummary}` : 'Capture schedule'}
+          aria-pressed={sideBarPanel === 'schedule'}
+          title={scheduleSet ? scheduleSummary : 'Schedule when this capture starts and stops'}
+          className={railButton(sideBarPanel === 'schedule', 'view')}
         >
-          <button
-            data-tour="schedule"
-            aria-label={scheduleSet ? `Capture schedule - ${scheduleSummary}` : 'Capture schedule'}
-            title={scheduleSet ? scheduleSummary : 'Schedule when this capture starts and stops'}
-            className={railButton(false, 'toggle')}
-          >
-            {scheduleSet && (
-              <span
-                aria-hidden
-                className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"
-              />
-            )}
-            <Clock className={GLYPH} />
-          </button>
-        </CaptureSchedulePicker>
+          {scheduleSet && (
+            <span
+              aria-hidden
+              className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"
+            />
+          )}
+          <Clock className={GLYPH} />
+        </button>
 
         {/* **Export / Import, under the schedule.**
 
