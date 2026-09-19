@@ -166,6 +166,13 @@ const GENERATED = new Map<string, string>([
 const ELSEWHERE = new Map<string, string>([
   ['src/vs/workbench/browser/media/floatingPanels.css',
     'microsoft/vscode: the Modern UI card cluster the rail and the workspace copy'],
+  // The same file by its bare name, because the prose cites it once in full and
+  // then refers back to it - spelling the whole path every time would be
+  // unreadable in a paragraph that mentions it three times.
+  ['floatingPanels.css',
+    'microsoft/vscode: the same file, short-named after the full path above'],
+  ['sidebarPart.ts',
+    'microsoft/vscode: where `minimumWidth = 170` is, which MIN_SIDE_BAR_PX cites'],
 ]);
 
 /** Where the prose's relative paths are rooted. */

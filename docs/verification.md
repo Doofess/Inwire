@@ -27,7 +27,7 @@ they are slow or reach outside the process. They cover the half of the app
 below is not also debugging the store.
 
 ```
-npm run build && npm run check          # 139 scripts, the fast suite
+npm run build && npm run check          # 143 scripts, the fast suite
 npx tsx scripts/electron/disk-drive.ts          # ~2 min: past the RAM budget, onto disk
 npx tsx scripts/electron/import-drive.ts        # ~1 min: 400,000 frames, scroll to frame 1
 npx tsx scripts/electron/update-center-drive.ts # ~1 min: a loopback feed, the real app
@@ -86,51 +86,6 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       on its own; the border is still what carries it in **Day**, where the two
       are much closer. A second line running past the corner means the rail got
       its `border-r` back and is drawing beside the pane's.
-### The side bar
-
-The column between the rail and the workspace — VS Code's primary side bar.
-`Ctrl+B` opens it; each panel's rail button will open its own as they land.
-**Every item here is a geometry check and none of them can be scripted**: the
-assertions can read the class strings but not what the two cards look like when
-they meet.
-
-- [ ] **The seam is ONE line.** Open the side bar: exactly one 1px line runs
-      between the rail and the column, full height. The two failures are a
-      **doubled** line (both cards drawing it) and **no** line (neither), and
-      both of those render perfectly happily.
-- [ ] **The two read as one surface.** The rail's right corners are square, the
-      column's right corners are round, and there is no gap between them.
-      Closed again, the rail closes up with all four corners rounded and 4px of
-      `--secondary` showing between it and `<main>`.
-- [ ] **The icon column does not move by a pixel** when the side bar opens.
-      Screenshot both states and flip between them. This is the `w-11` interior
-      arithmetic — 42px between two borders centres a 36px target on whole
-      pixels — and it is exactly what breaks if the rail ever gives its facing
-      border away to make the seam.
-- [ ] **The grounds differ.** The rail is `--secondary` and the column is
-      `--card`. In **Night** that step is what makes the hairline readable at
-      all; in **Day** the border carries it. If the column looks like a wider
-      rail, it took the wrong ground.
-- [ ] **The gap moves, it does not double.** Opening the side bar must shift
-      `<main>`'s left edge by exactly the column's width — not by the width plus
-      4px. `<main>` gives up its `ml-1` and the sash stands in its place.
-- [ ] **The sash.** Drag it: the column resizes and the packet list reflows.
-      Drag it to the far left — it stops at 170px. Drag right — it stops while
-      the list is still usable. **Right-click, double-click and Enter** each
-      reset it to 288. Tab to it, then arrows nudge, Shift-arrow steps bigger,
-      Home and End hit the bounds.
-- [ ] **It paints nothing at rest** — no grey bar between the two cards, unlike
-      the two dividers inside the packets view. Hover turns it accent.
-- [ ] **The width survives a restart**, and so does the open panel. Then
-      **Settings → Interface → Restore defaults** must leave both untouched.
-- [ ] **At 1024×680 with the side bar open**: frame number, time, source and
-      destination are all still on screen without scrolling; Protocol, Length
-      and Info scroll. This is where the push is paid for, and it is the
-      documented trade rather than a defect.
-- [ ] **Escape never closes it.** From Packets, from Statistics, and with
-      Settings open. Escape from Statistics must still land on Packets in one
-      press. `Ctrl+1..5` must leave it open too.
-
 - [ ] **All four of its corners are square**, this one included. A radius on
       any surface that meets the window - this pane, the title row, the rail -
       is the app drawing a curve inside the one Windows already draws. Buttons,
@@ -167,7 +122,10 @@ they meet.
       floating panel. The card's own border and rounded corners are the only
       ones — Settings must not draw a second card inside the first.
 - [ ] **The rail marks it the way it marks a view** — the translucent accent
-      fill, not the outline a toggle gets. Press the icon again and it closes.
+      fill. Press the icon again and it closes. There is no second marker shape
+      anywhere in the strip now: the outline that meant "this control is ON"
+      went with its last caller, so an outlined button is a defect rather than a
+      state.
 - [ ] **Three ways out, and they agree.** The title row's back step reads
       "Back to Packets" (or whichever view is underneath) and closes it; Escape
       closes it; the rail icon toggles it. There is **no X and no Close
@@ -175,17 +133,25 @@ they meet.
 - [ ] **It does not navigate.** Open Statistics, then Settings, then close it —
       you are back in Statistics, not in Packets. That is what makes it a sheet
       rather than a view.
-- [ ] **Network is a rail button, in the bottom group above Settings.** Press
-      it: the report fills the workspace card and the icon takes the same
+- [ ] **Network is a rail button in the CAPTURE group, directly under
+      Export/Import.** Press it: the report opens in the **side bar**, beside
+      the packet list rather than over it, and the icon takes the same
       translucent accent fill a view's does. Press it again and it closes. It is
       **not** in the rail's numbering — `Ctrl+1..5` are the five views and none
       of them is this.
+- [ ] **The capture it describes is still on screen.** That is the whole reason
+      it stopped being a sheet: "Observed (capture)" is a live column, and as a
+      sheet it covered its own subject.
 - [ ] **It is gone from Settings.** Open Settings: the tabs run Appearance,
       Interface, Accessibility, Display Filters, Colouring Rules, Custom
       Dissectors, Decryption, Driver Info, Updates. No Network tab.
-- [ ] **Only one sheet is ever up.** Open Network, then press the rail's
-      Settings icon: Settings replaces it and the Network icon goes dark. The
-      back step, Escape and choosing a view must each close whichever is open.
+- [ ] **Settings is the only sheet, and a panel is not one.** Open Network in
+      the side bar, then press the rail's Settings icon: Settings takes the
+      workspace card and **the Network panel stays open and lit**. That is
+      correct — the two are different containers — and it is the item most
+      likely to be filed as a bug by somebody remembering the old behaviour.
+      The back step, Escape and choosing a view each close the **sheet** and
+      must leave the column alone.
 - [ ] **Export/Import moved up.** It is the fourth icon in the capture group,
       under the schedule clock — not at the bottom beside Settings.
 - [ ] **The two glyphs at the top and bottom are different.** The adapter button
@@ -297,6 +263,111 @@ they meet.
       radius - `roundedCorners`, also a default that is never set.
 - [ ] Minimize and restore from the taskbar: the window **animates** rather than
       appearing. Same option, same tell.
+
+### The side bar
+
+The column between the rail and the workspace — VS Code's primary side bar.
+Four rail buttons open it — Interfaces, Schedule, Export/Import and Network —
+and `Ctrl+B` toggles whichever was last open. **Most of this section is geometry
+and none of that can be scripted**: the assertions read the class strings, they
+cannot see what two cards look like where they meet.
+
+- [ ] **The seam is ONE line.** Open the side bar: exactly one 1px line runs
+      between the rail and the column, full height. The two failures are a
+      **doubled** line (both cards drawing it) and **no** line (neither), and
+      both of those render perfectly happily.
+- [ ] **The two read as one surface.** The rail's right corners are square, the
+      column's right corners are round, and there is no gap between them.
+      Closed again, the rail closes up with all four corners rounded and 4px of
+      `--secondary` showing between it and `<main>`.
+- [ ] **The icon column does not move by a pixel** when the side bar opens.
+      Screenshot both states and flip between them. This is the `w-11` interior
+      arithmetic — 42px between two borders centres a 36px target on whole
+      pixels — and it is exactly what breaks if the rail ever gives its facing
+      border away to make the seam.
+- [ ] **The grounds differ.** The rail is `--secondary` and the column is
+      `--card`. In **Night** that step is what makes the hairline readable at
+      all; in **Day** the border carries it. If the column looks like a wider
+      rail, it took the wrong ground.
+- [ ] **In Night specifically, look for a hard white rectangle at the seam.**
+      The two dropdowns this replaced carried `border-0 shadow-lg` to suppress a
+      near-white outline on a floating panel, and that suppression is gone with
+      them — the column needs the border it shares with the rail.
+- [ ] **The gap moves, it does not double.** Opening the side bar must shift
+      `<main>`'s left edge by exactly the column's width — not by the width plus
+      4px. `<main>` gives up its `ml-1` and the sash stands in its place.
+- [ ] **The sash.** Drag it: the column resizes and the packet list reflows.
+      Drag it to the far left — it stops at 170px. Drag right — it stops while
+      the list is still usable. **Right-click, double-click and Enter** each
+      reset it to 288. Tab to it, then arrows nudge, Shift-arrow steps bigger,
+      Home and End hit the bounds.
+- [ ] **It paints nothing at rest** — no grey bar between the two cards, unlike
+      the two dividers inside the packets view. Hover turns it accent.
+- [ ] **The width survives a restart**, and so does the open panel. Then
+      **Settings → Interface → Restore defaults** must leave both untouched.
+- [ ] **A width chosen wide survives a narrow window.** Drag the column to its
+      600px ceiling, shrink the window until the column is forced to narrow,
+      then widen the window again: the column must come back to 600. The stored
+      width is clamped only against `[170, 600]` and the window's reserve is
+      applied on the render path, so a drag or an arrow press that *commits* the
+      narrowed figure is the bug — and it is invisible until the window grows
+      back, which may be the next day.
+- [ ] **At 1024×680 with the side bar open**: the column clamps to **192px**
+      (`MAIN_RESERVE_PX` is 780, so it narrows rather than being refused, and
+      192 is still above VS Code's 170 floor). Frame number, time, source and
+      destination are all still on screen without scrolling; Protocol, Length
+      and Info scroll. This is where the push is paid for, and it is the
+      documented trade rather than a defect. Check the Interfaces panel is still
+      usable at 192 — that is the narrowest any panel is ever asked to be.
+- [ ] **Escape never closes it.** From Packets, from Statistics, and with
+      Settings open. Escape from Statistics must still land on Packets in one
+      press. `Ctrl+1..5` must leave it open too. ADR 0034 is the argument; this
+      item exists because "Escape dismisses everything" is the assumption all
+      four of these surfaces arrived with.
+- [ ] **Settings open WITH a panel open.** Both rail buttons lit, Settings in
+      the workspace card, the panel in the column beside it. This is the
+      screenshot that proves the two are orthogonal containers rather than two
+      names for one slot.
+- [ ] **Tab goes rail → panel → `<main>` and is not trapped.** The panel is a
+      place, not a menu; nothing captures focus.
+- [ ] **Arrows inside a panel do not step the packet selection.** Focus a row in
+      the Interfaces list and hold Down past the end of the list — it wraps to
+      the top, and the status bar's packet counter must not move. Without the
+      `stopPropagation` in `useRovingFocus`, one key does two things and only
+      one of them is visible.
+- [ ] **A field inside a panel keeps its own keys.** In the schedule's preset
+      name field, Home goes to the start of the line rather than moving focus;
+      in `DateTimeCalendar`'s Hour and Minute, Up increments rather than
+      jumping out of the field.
+- [ ] **Adapter sampling starts and stops with the PANEL.** Open Interfaces:
+      the sparklines move. Switch to another panel and confirm
+      `unsubscribe_interface_stats` in the agent's log. Switch back: they
+      restart **empty**, not with a ten-minute-old chart. Then drop and restore
+      the agent with the panel open — this is the known edge, listed rather
+      than pre-fixed: the unsubscribe on a dead pipe is a no-op and the
+      reconnected agent is not sampling, so the chart may freeze. Report it if
+      it reproduces rather than treating it as a surprise.
+- [ ] **Network reaches out only when asked.** Open the Network panel and scroll
+      past every section with the status bar visible: it must read `no lookups`
+      the whole way down. Only pressing **Show public identity** may change
+      that. This is the privacy catch the stacking created — `PublicIdentity`
+      used to be mounted only when its nav item was chosen, and the nav is gone.
+- [ ] **Network with a real disagreement.** Change a DNS server, capture a
+      little traffic, and read the section: the amber block and its sentence are
+      unmissable in a 300px column, and the **SEEN** tag is what marks the
+      surprising line — position cannot carry that in one column, which is why
+      the words moved onto the values.
+- [ ] **Export/Import is cheap to open beside a live capture.** Start a capture,
+      open the panel and leave it open: the frame rate in the list must not
+      drop. `prepare()` does its hydrate → anonymise → name pass at press time,
+      not on render, which is the whole reason a modal could get away with the
+      old shape and a persistent panel cannot.
+- [ ] **Export with an invalid filter**: the message renders **in flow** and
+      pushes the list below it down. Nothing floats over the format list and
+      nothing overflows the column's right edge — that is `variant="panel"`
+      doing its job, and the deleted `pt-9` reservation not coming back.
+- [ ] **Import a bad file**: the error dialog is still a **modal**. A refusal
+      that has to be acknowledged is a detour, and detours keep their scrim.
 
 ### Snap
 
@@ -412,10 +483,10 @@ New). Both look like fonts rather than like bugs, which is why this is here.
 - [ ] Generated fields and empty states in the protocol tree are italic and
       **sheared** — Windows ships no Cascadia Mono Italic, and the synthesised
       slant is accepted at 11px over importing a webfont for one style.
-- [ ] Every icon in the rail, the filter row, the Settings tabs and the packet
-      list toolbar is the same stroke weight. Lucide and Tabler are both 2px on
-      a 24 grid, so a survivor from the old set is hard to see — look for
-      rounder corners or square terminals.
+- [ ] Every icon in the rail, the title row, the side bar's panels, the Settings
+      tabs and the packet list toolbar is the same stroke weight. Lucide and
+      Tabler are both 2px on a 24 grid, so a survivor from the old set is hard
+      to see — look for rounder corners or square terminals.
 - [ ] `LoaderCircle` spins during an export and during an import.
 - [ ] In the Routing Map's side panel, a located row shows a **filled** pin and
       an unlocated one a hollow pin with a slash. `fill-current` on `MapPin` is
@@ -466,21 +537,24 @@ New). Both look like fonts rather than like bugs, which is why this is here.
 
 ## 2. The rail
 
-Ten icons, **44px** targets, three groups, 494px against the 624px the rail gets
-- a 680px minimum window, less the 32px title row above it and the 24px status
-bar below. The rail was full at 630 with 36px targets; six deleted icons paid for
-the larger ones, the slack, and the status bar out of what was left.
-`scripts/session/view.ts` holds that arithmetic; what it cannot see is whether
-44px in a 56px strip reads as icons or as boxes.
+Eleven icons, **36px** targets, three groups, **452px** against the **618px** the
+rail gets - a 680px minimum window, less the 32px title row above it, the 24px
+status bar below, the cluster's 4px bottom gutter and the card's own two 1px
+borders. The strip is `w-11`, **44px**, and the target came back down to 36 when
+it narrowed: a 44px target in a 44px card has the button's edges BE the card's.
+`scripts/session/view.ts` adds that up from the Tailwind classes and prints the
+slack; what it cannot see is whether 36-in-44 reads as icons or as boxes.
 
 - [ ] At **1024×680** — the smallest allowed window, and 680 rather than 640
       because the full-width title row takes 32px off the top before the rail
       starts — every group is visible and Settings is not cut off at the bottom.
-      There are 130px of slack now, so this is no longer the tight case it was.
-- [ ] **The icons are 44px in a 56px strip**, glyphs 24px. Judge it against the
-      window buttons and the packet rows: the buttons should read as icons with
-      6px of rail either side, not as a column of boxes whose edges are the
-      rail's own. This is the one thing the arithmetic cannot tell you.
+      There are **166px** of slack, room for four more icons, so this is no
+      longer the tight case it was.
+- [ ] **The icons are 36px in a 44px card**, glyphs 20px, which leaves **3px of
+      air** either side inside the card's two borders. That constant is the
+      thing to judge, not the outer width: 32-in-48, 36-in-56, 44-in-56 and
+      36-in-44 are four points on one line. The buttons should read as icons in
+      a strip, not as a column of boxes whose edges are the card's own.
 - [ ] The active **view** is a **translucent wash of the theme's accent** —
       `--primary` at 20%, so a blue tint rather than a solid blue button — with
       the glyph in `--foreground`. There must be **no 2px edge** down its left
@@ -509,17 +583,26 @@ the larger ones, the slack, and the status bar out of what was left.
       inputs, so a focused rail button both activated and toggled capture. It is
       scoped positively now — body, or inside `[role="grid"]`.
 - [ ] **Arrow keys inside the rail do not also move the packet selection.**
-- [ ] **The capture group reads Start/Stop, adapter, schedule**, top to bottom -
-      the order they are used in.
-- [ ] **The schedule picker opens to the right** and carries a dot when a
-      schedule is set. Without the dot a clock looks identical whether or not
-      anything is scheduled, which is the failure the adapter's badge exists to
-      avoid. Its summary ("Stops in 14:58") is the tooltip now; there is no room
-      for a label in 56px.
-- [ ] **There is no Find packet button.** The capture group is three icons.
-      Anything left over from it — a popover opening off the schedule, a dot on a
-      rail button, a packet list quietly short of rows — is a revert that did not
-      finish.
+- [ ] **The capture group reads Start/Stop, adapter, schedule, Export/Import,
+      Network**, top to bottom - the order they are used in. Five icons; the
+      bottom group is Settings alone, which is what makes the divider above it
+      mean something: everything above opens a surface beside the workspace, the
+      one below takes the workspace itself.
+- [ ] **Four of those five open the side bar, not a popover.** The adapter and
+      the schedule were Radix dropdowns flying out of the rail and
+      Export/Import was a 768px modal; if any of them still flies out or dims
+      the app behind it, that is a revert. Only Start/Stop opens anything over
+      the rail, and only the discard prompt.
+- [ ] **The schedule button carries a dot when a schedule is set**, and its
+      countdown is in the **panel's header** ("Stops in 14:58") rather than in a
+      tooltip. Without the dot a clock looks identical whether or not anything
+      is scheduled, which is the failure the adapter's badge exists to avoid —
+      and the dot is now the rail's only mark besides the fill, so it carries
+      "this control has something to report" for both buttons that used to wear
+      an outline.
+- [ ] **There is no Find packet button.** Anything left over from it — a popover
+      opening off the schedule, a packet list quietly short of rows — is a revert
+      that did not finish.
 - [ ] With no stream being followed, **Follow Stream is disabled** and its tooltip
       says why. It is disabled rather than hidden: a group that changes length
       would move the divider and the bottom group below it.
@@ -535,15 +618,17 @@ the larger ones, the slack, and the status bar out of what was left.
       This item was written the other way round while the word led the mark; the
       thing it warns about is the cost of having taken that word out.
 - [ ] Disconnect the agent (stop `serveStub.ts`): the adapter icon takes a status
-      tint **and** a warning badge, and a one-line banner appears at the top of
-      the filter row with the diagnosis and its action. Tint alone fails for a
-      colour-blind user and says nothing actionable.
+      tint **and** a warning badge, and the **status bar's left group** names the
+      diagnosis. Tint alone fails for a colour-blind user and says nothing
+      actionable. There is no banner above the packet list any more — that went
+      with the filter row, on the rule that one fault wants one place.
 - [ ] Start a capture: the Start/Stop glyph changes from an outlined record to a
-      filled red stop, and the filter row reads `● Capturing on <adapter>`. **No
-      cross-fade** — the old `AnimatePresence` was deleted deliberately.
+      filled red stop, and the **status bar** reads `● Capturing` with the
+      adapter beside it and the elapsed time. **No cross-fade** — the old
+      `AnimatePresence` was deleted deliberately.
 - [ ] With frames in the buffer, press Start again: the discard prompt opens **to
       the right** of the button, not below it (there is no room below a control in
-      a 56px strip). Escape closes it without discarding.
+      a 44px strip). Escape closes it without discarding.
 
 ---
 
@@ -780,13 +865,16 @@ is worth a look after anything touching the view list:
 - [ ] With nothing followed and a non-stream frame selected, the icon is
       **disabled** and its tooltip names the condition: select a frame on a TCP
       or UDP stream.
-- [ ] The filter row is shown in **Packets and nowhere else**. Switch through
-      Statistics, the Routing Map, Follow Stream and Frame Detail: each pane
-      starts directly under the title row, and the pane above it does not shift
-      down by a row's height on the way back to Packets. It used to show in all
-      five, where it narrowed nothing on screen — Statistics counts the whole
-      capture on purpose, and the other three read a feed, a conversation and a
-      single frame.
+- [ ] **There is no filter row in any view.** Switch through Packets,
+      Statistics, the Routing Map, Follow Stream and Frame Detail: every pane
+      starts directly under the title row, and nothing shifts down by a row's
+      height on any of those transitions. The field is in the title row and
+      belongs to the app, which is the fourth and last form of a rule that spent
+      three revisions arguing about where to put a ROW.
+- [ ] **Applying a filter from a non-Packets view goes to Packets.** Open
+      Statistics, type `tcp` and press Enter: you land in the list looking at
+      what you just selected. **Clearing navigates nowhere**, because the empty
+      filter selects the whole capture and every view already shows that.
 - [ ] **Escape**, innermost first: a focused input blurs; then the filter presets
       dropdown, the discard popover; then a non-Packets view
       returns to Packets. Escape on Packets with nothing focused does nothing.
@@ -939,3 +1027,16 @@ Not checkable yet, recorded so it is not mistaken for done.
 - **`crossOriginIsolated` in the packaged app.** Set via `ISOLATION_HEADERS` and
   verified by hand once; nothing depends on it, and an assertion must exist before
   anything does.
+- **`scripts/electron/smoke.ts` on a machine that has the real agent.** It
+  **skips** — "something else is already serving `\\.\pipe\inwire-agent`" —
+  because the installed InwireAgent service owns the pipe, and the script will
+  not race a LocalSystem service for it. That is the right refusal and the wrong
+  outcome: smoke drives the adapter-picking flow, which is the surface the side
+  bar changed most. Until it can be run against a stopped service (or the stub
+  can be given a second pipe name), **every item in §1's side bar block and §2's
+  capture group is by-hand only on this machine**, and a green `npm run check`
+  is not evidence that picking an adapter still works.
+- **A keyboard way INTO the side bar.** VS Code has `Ctrl+0`. `Ctrl+B` toggles
+  the column and Tab reaches it, but nothing focuses it directly. Not built
+  deliberately — ADR 0034 records it as guessing at a problem nobody has raised
+  yet rather than as an omission.
