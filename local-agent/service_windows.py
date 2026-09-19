@@ -68,15 +68,30 @@ class InwireAgentService(win32serviceutil.ServiceFramework):
         # A stop can arrive before SvcDoRun has created the loop (the window around
         # `import agent`). The flag above is what makes that case honored; touching
         # the loop is best-effort and must never raise out of SvcStop.
+        #
+        # **`agent.request_shutdown`, not `loop.stop()`.** Stopping the loop
+        # stops it wherever it happens to be, which was suspended inside
+        # `main()`'s run-forever await - so `main()` never returned, its
+        # `finally: pipes.stop()` never ran, and the pipe name was released by
+        # the process dying rather than by anything that had decided to release
+        # it. Asking through the agent's own event means every exit path,
+        # including this one, runs the same shutdown.
         loop = self.loop
         if loop is not None:
             try:
-                # The loop runs on the service's main thread; SvcStop is called on
-                # a control thread, so this has to hop threads to touch it.
-                loop.call_soon_threadsafe(loop.stop)
-            except RuntimeError:
-                # Already closed - a second stop, or a stop racing shutdown.
-                pass
+                # Imported here rather than at module scope: this file is also
+                # the installer's CLI, and `import agent` pulls in the capture
+                # stack. `install` and `remove` must not need it to be working.
+                import agent
+                agent.request_shutdown("the service control manager asked")
+            except Exception:
+                # Best-effort by contract. If the agent module is not importable
+                # the loop below is what stops the process anyway.
+                try:
+                    loop.call_soon_threadsafe(loop.stop)
+                except RuntimeError:
+                    # Already closed - a second stop, or a stop racing shutdown.
+                    pass
         win32event.SetEvent(self.stop_event)
 
     def SvcDoRun(self):

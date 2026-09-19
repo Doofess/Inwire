@@ -473,7 +473,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   const scheduleSet = !isScheduleEmpty(schedule);
 
   const adapterTitle = attention && 'summary' in agentHealth
-    ? `${agentHealth.summary}. Settings > Driver Info has the detail.`
+    ? `${agentHealth.summary}. Settings > Capture Health has the detail.`
     : selected === null
       ? 'Choose which adapter to capture from'
       : selected.label;

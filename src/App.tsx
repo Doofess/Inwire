@@ -61,9 +61,7 @@ import { useAgentConnection } from './hooks/useAgentConnection';
 import { inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
 import { emptyNetworkFacts, NetworkFactsCollector, type NetworkFacts } from './services/networkFacts';
-import {
-  readLinkContext, watchLinkChanges, type LinkChange, type LinkContext,
-} from './services/linkContext';
+import { watchLinkChanges, type LinkChange } from './services/linkContext';
 import { processForPacket, sendingProcessName, writeProcessFields } from './services/dissect/processFields';
 import { fieldValue } from './services/dissect/fieldAccess';
 import { filterIncrementally, type FilterCache } from "./services/incrementalFilter";
@@ -119,7 +117,8 @@ import type { ColorRule, FilterPresetLibrary } from "./types/packet";
 
 import { TriangleAlert } from "lucide-react";
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
-import { estimateSummaryBytes } from './services/bufferBudget';
+import { currentBufferBudget, estimateSummaryBytes } from './services/bufferBudget';
+import { startRendererHeapGuard } from './services/rendererHeapGuard';
 import { captureStore, newCaptureId } from './services/capture/captureClient';
 import { freshCaptureStorageState, type CaptureStorageState } from './services/capture/captureProtocol';
 import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
@@ -262,7 +261,23 @@ export default function App() {
   // `performance.now()` in this scope and gets a confusing type error.
   const [perf] = usePreferenceStore(performanceStore);
   usePreferenceSync(performanceStore.key, performanceStore.normalize, performanceStore.accept);
-  const { packetBufferBytes, dashboardRefreshMs } = perf;
+  const { packetBufferBytes: bufferSetting, dashboardRefreshMs } = perf;
+  /**
+   * The setting resolved to a number of bytes.
+   *
+   * `'auto'` is a stored preference, so everything downstream of here - the
+   * buffer, the import cap, the settings panel's own "about N packets" line -
+   * needs the figure it resolves to on THIS machine. Resolved once, here,
+   * rather than at each of those, so they cannot disagree.
+   *
+   * `useMemo` with the setting as its only dependency: the two host facts are
+   * fixed for the life of the window (V8's heap limit is set when the isolate
+   * is created and the machine's RAM does not change under us), so re-reading
+   * them per render would buy nothing.
+   */
+  const packetBufferBytes = useMemo(
+    () => currentBufferBudget(bufferSetting), [bufferSetting],
+  );
   // Track the latest isCapturing value for the always-on agent connection
   // below, whose handlers are set up once and must not go stale.
   const isCapturingRef = useRef(isCapturing);
@@ -301,6 +316,28 @@ export default function App() {
    */
   const autoPauseRef = useRef<() => void>(() => {});
   const onAutoPause = useCallback(() => autoPauseRef.current(), []);
+
+  /**
+   * What the renderer's heap guard has said, or null.
+   *
+   * **The renderer had no heap guard at all until this**, which is what kept
+   * the packet buffer capped at a number nobody could reach rather than at the
+   * number that is actually dangerous. The store has had one since it was seen
+   * to die at 4,060 MB (`electron/store/heapGuard.ts`); this is the same
+   * watchdog in the process that holds the buffer, and it is what makes 'auto'
+   * safe to ship. See `services/rendererHeapGuard.ts`.
+   */
+  const [heapNotice, setHeapNotice] = useState<string | null>(null);
+  useEffect(() => startRendererHeapGuard({
+    onWarn: setHeapNotice,
+    onStop: (message) => {
+      setHeapNotice(message);
+      // The same stop the buffer's own auto-pause uses. Reusing it rather than
+      // stopping the capture a second way is the point: there is one path out
+      // of a running capture, and it already tells the agent.
+      autoPauseRef.current();
+    },
+  }), []);
   const onFramesQueued = useCallback((firstTsUs: number, lastTsUs: number) => {
     if (captureStartRef.current === null) captureStartRef.current = firstTsUs;
     lastPacketTimeRef.current = lastTsUs;
@@ -594,7 +631,12 @@ export default function App() {
    * requests, and an absent one must read as "not said" and never as a
    * measurement the capture made. See `services/linkContext.ts`.
    */
-  const [linkContext, setLinkContext] = useState<LinkContext | null>(() => readLinkContext());
+  // **There is no `linkContext` state any more, and that is a deletion rather
+  // than an oversight.** It held Chromium's own rounded guess at downlink and
+  // RTT, and its only reader was Driver Info's "Link (estimated)" row - one
+  // rounded estimate among rows of exact counts off the wire, which is the row
+  // that teaches you to distrust the others. The CHANGE events are the half
+  // worth keeping, and they carry their own before and after.
   const [linkChanges, setLinkChanges] = useState<LinkChange[]>([]);
 
   /**
@@ -608,7 +650,6 @@ export default function App() {
    * number.
    */
   useEffect(() => watchLinkChanges((change) => {
-    setLinkContext(change.after);
     setLinkChanges((prev) => prev.concat(change).slice(-32));
   }), []);
   // How far a session restore has got, or null when none is running. Drives
@@ -741,7 +782,7 @@ export default function App() {
     onNetworkFacts: setNetworkFacts,
   });
   const {
-    agentStatus, agentCaptureState, agentClientId, captureOwner,
+    agentStatus, agentClientId, captureOwner,
     agentHealth, startAgentService,
     agentLinkEnabled, setAgentLinkEnabled,
     agentVersion, agentNpcapAccess, agentIncompatible, agentInterfaces, captureStats, adapters,
@@ -2745,6 +2786,7 @@ export default function App() {
               agentHealth={agentHealth}
               onStartAgentService={startAgentService}
               agentError={agentError}
+              heapNotice={heapNotice}
               onConnectAgent={handleConnectAgent}
               onDisconnectAgent={handleDisconnectAgent}
               onRestartAgent={handleRestartAgent}
@@ -2752,13 +2794,10 @@ export default function App() {
               agentVersion={agentVersion}
               agentOutdated={agentOutdated}
               agentNpcapAccess={agentNpcapAccess}
-              agentCaptureState={agentCaptureState}
               agentInterfaces={agentInterfaces}
               captureStats={captureStats}
               droppedBuffer={droppedBuffer}
-              linkContext={linkContext}
               linkChanges={linkChanges}
-              selectedInterfaces={selectedInterfaces}
               agentLog={agentLog}
               onSubscribeAgentLog={subscribeAgentLog}
               onUnsubscribeAgentLog={unsubscribeAgentLog}

@@ -4,6 +4,9 @@
  *
  *   npx tsx scripts/agent-protocol/version-and-commands.ts
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION } from '../../src/services/agentProtocol';
 
 let failures = 0;
@@ -32,14 +35,20 @@ check('start_capture encodes', encodeAgentCommand({ type: 'start_capture' }), '{
 check('stop_capture encodes', encodeAgentCommand({ type: 'stop_capture' }), '{"type":"stop_capture"}');
 check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', interfaces: ['eth0', 'eth1'] }), '{"type":"set_interfaces","interfaces":["eth0","eth1"]}');
 
-// 3.0.0 was the rename: the service, its data directory and its URI scheme all
-// changed name, so an older agent is not merely missing a command - it is a
-// different install. Major, not minor. This constant has to move with
-// AGENT_VERSION in agent.py and MyAgentVersion in setup.iss;
-// local-agent/test_protocol.py is what enforces that all three agree - and
-// that this number is never RESET, because it is the left-hand side of an
-// ordering comparison.
-check('required agent version is 3.9.0', REQUIRED_AGENT_VERSION, '3.9.0');
+// **Read from package.json rather than pinned to a literal**, which is the
+// change ADR 0035 made here. A hardcoded `'3.9.0'` was one of six stamps that
+// had to move together by hand, and the only thing it actually asserted was
+// that somebody had edited this line too - it could not catch drift, because it
+// WAS the drift. The agent's version is the product's now, so the real
+// assertion is that this constant equals the one place a version is authored.
+//
+// The rest of the lock - the generated `agent_version.py`, the installer, and
+// the anti-reset floor - is `scripts/agent/version.ts`.
+const productVersion = (
+  JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../package.json'), 'utf8')) as
+    { version: string }
+).version;
+check('REQUIRED_AGENT_VERSION is the product version', REQUIRED_AGENT_VERSION, productVersion);
 
 // `authenticate` was here, and is gone with the pairing token. The kernel
 // answers the question it was asked to answer: on Windows the agent's only

@@ -149,7 +149,7 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
             onClick={onOpenSettings}
             className="text-primary hover:underline cursor-pointer"
           >
-            Settings &gt; Driver Info
+            Settings &gt; Capture Health
           </button>
         </div>
       </Empty>

@@ -30,15 +30,16 @@
 #
 # The exe had none - no company, no product, no version - which is what an
 # unsigned dropper also has, and it is the first thing anyone looks at in a
-# file's Properties. It is generated below from `AGENT_VERSION` in agent.py
-# rather than written out here, because a second copy of a version number is a
-# version number that will disagree. The lock covers FOUR places - agent.py,
-# agentProtocol.ts, and `MyAgentVersion` in BOTH installer/setup.iss (the one
-# that ships) and local-agent/installer/setup.iss (the legacy agent-only one) -
-# held by test_protocol.py for the legacy file and by
-# scripts/agent/installer-versions.ts for both. A literal in this file would sit
-# outside all of it. (This comment said "three-place lock in test_protocol.py",
-# which was the count before one installer carried the app and the agent.)
+# file's Properties. It is generated below from `agent_version.py` rather than
+# written out here, because a second copy of a version number is a version
+# number that will disagree.
+#
+# There is now exactly ONE place a version is authored - `package.json` - and
+# `agent_version.py` is generated from it by `npm run sync:version`, with
+# `scripts/agent/version.ts` failing the build if any copy drifts (ADR 0035).
+# This comment used to describe a FOUR-place lock held by two scripts covering
+# different subsets, which itself replaced a "three-place lock" comment that was
+# already out of date. A literal in this file would sit outside all of it.
 
 import re
 from pathlib import Path
@@ -49,10 +50,14 @@ _HERE = Path(SPECPATH)
 
 
 def _agent_version() -> str:
-    text = (_HERE / 'agent.py').read_text(encoding='utf-8')
+    # `agent_version.py`, not `agent.py`: the literal moved when the agent's
+    # version became the product's. Reading agent.py would now match nothing and
+    # this raises rather than defaulting - a VERSIONINFO silently stamped 0.0.0
+    # is the dropper-shaped exe this whole block exists to stop shipping.
+    text = (_HERE / 'agent_version.py').read_text(encoding='utf-8')
     match = re.search(r'^AGENT_VERSION = "(\d+)\.(\d+)\.(\d+)"', text, re.M)
     if not match:
-        raise SystemExit('inwire_agent.spec: could not read AGENT_VERSION from agent.py')
+        raise SystemExit('inwire_agent.spec: could not read AGENT_VERSION from agent_version.py')
     return match.group(0), tuple(int(part) for part in match.groups())
 
 
@@ -101,6 +106,10 @@ a = Analysis(
         # Our own modules - imported inside functions or via sys.path, so
         # PyInstaller's static analysis does not see them.
         'agent',
+        # Generated from package.json, and `agent.py` imports it at module
+        # scope for AGENT_VERSION. A dropped one is a service that dies on
+        # import with `console=False`, so with nothing on screen at all.
+        'agent_version',
         'agent_log',
         'config',
         'interface_stats',

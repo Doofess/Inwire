@@ -54,25 +54,29 @@
 #define MyAppExeName "Inwire.exe"
 #define MyAppPublisher "Inwire"
 
-; Two version numbers, because they are two different things.
+; ONE version number, and it is the product's. ADR 0035.
 ;
-; MyAppVersion is the PRODUCT, and is what Windows compares to decide whether
-; an install is an upgrade. Locked to package.json.
+; There were two. MyAgentVersion sat beside this line as a separate "wire
+; protocol version", and it was defined here and **used nowhere in this file** -
+; one of six stamps that had to be moved together by hand, held by two scripts
+; covering different subsets of them. The agent had a number of its own because
+; it used to be installed by its own installer against a web page of any age;
+; this installer carries both halves and replaces them in one transaction, so
+; two numbers could only ever disagree by mistake.
 ;
-; MyAgentVersion is a WIRE PROTOCOL version - the left-hand side of
-; `isAgentOutdated`, so an ordering that only ever climbs. Locked to
-; AGENT_VERSION in agent.py and REQUIRED_AGENT_VERSION in agentProtocol.ts.
-; They stopped moving in step the moment one installer carried both.
+; What the number still has to be is an ORDERING: it is the left-hand side of
+; `isAgentOutdated`, so an agent left behind by an earlier install must read as
+; older rather than newer - the second of those shows in the UI as "not
+; connected", which is a state with no instruction attached to it. That is why
+; unifying moved the PRODUCT up to 4.0.0 rather than moving the agent down to
+; 1.0.0: the shared number has to be at least the highest either half ever
+; shipped, and the agent had shipped 3.9.0.
 ;
-; Both stamps are enforced by scripts/agent/installer-versions.ts, which runs on
-; every `npm run check` and covers this file AND the legacy agent-only one.
-; NOT by test_protocol.py, which this comment used to credit: that script reads
-; only local-agent/installer/setup.iss (its `_SETUP_ISS`), so for a long while
-; the two numbers here agreed with the code by hand and nothing would have said
-; otherwise. Reset MyAgentVersion and installer-versions.ts fails on the
-; anti-reset floor - compared as numbers, because "3.10.0" sorts before "3.9.0".
-#define MyAppVersion "1.0.0"
-#define MyAgentVersion "3.9.0"
+; Locked to package.json, to agent_version.py and to REQUIRED_AGENT_VERSION by
+; scripts/agent/version.ts, which runs on every `npm run check` and holds the
+; anti-reset floor as numbers rather than as a string - "3.10.0" sorts before
+; "3.9.0" lexically, and a string floor would reject every version past 3.9.
+#define MyAppVersion "4.0.0"
 
 #define AgentExeName "inwire-agent-windows.exe"
 #define ServiceName "InwireAgent"
@@ -458,9 +462,18 @@ begin
 
   // Options MUST precede the command. pywin32's HandleCommandLine parses with
   // getopt, which stops at the first non-option token - so "install --startup
-  // auto" never sees --startup: it prints its usage screen and exits 1 without
-  // registering anything.
-  if not Exec(ExePath, '--startup auto install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  // manual" never sees --startup: it prints its usage screen and exits 1
+  // without registering anything.
+  //
+  // **manual, not auto, and that is the whole of ADR 0035.** Auto meant a
+  // LocalSystem capture service running from boot on a machine where Inwire
+  // may never be opened - paying for itself in memory and attack surface for
+  // an app nobody launched. Demand start means the app asks for it at
+  // `whenReady()` (`electron/agentPipe.ts`) and the agent stops itself when the
+  // last client goes away (`watch_for_orphaned_capture`), so its lifetime is
+  // the app's. The right that makes the unelevated ask work is granted below,
+  // by GrantServiceStartToInteractiveUsers.
+  if not Exec(ExePath, '--startup manual install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     SuppressibleMsgBox('Could not launch the Inwire agent service installer.' + #13#10#13#10 +
       SysErrorMessage(ResultCode), mbCriticalError, MB_OK, IDOK);

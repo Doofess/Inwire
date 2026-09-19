@@ -480,11 +480,23 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
 }
 
 /**
- * Bumped alongside AGENT_VERSION in local-agent/agent.py. Compared against
- * whatever the connected agent reports in its hello message to flag a
- * stale build in the UI.
+ * The agent Inwire ships with, which is Inwire's own version (ADR 0035).
+ *
+ * Compared against whatever the connected agent reports in `hello`, to flag a
+ * build left behind by an earlier install. It is a **literal** rather than an
+ * import of `package.json` because this module is loaded by the renderer, by
+ * the pipeline Worker and by a dozen scripts under plain `tsx`, and pulling a
+ * JSON module into all three to read one string costs more than a line that
+ * `scripts/agent/version.ts` holds to the product on every `npm run check`.
+ *
+ * **It only ever climbs.** This is the left-hand side of `isAgentOutdated`, so
+ * an agent from an older install must read as older; a number that went
+ * backwards would make that agent read as *newer than required*, which the UI
+ * renders as "not connected" - a state with no instruction attached. That
+ * ordering is why unifying the two numbers moved the PRODUCT to 4.0.0 instead
+ * of moving the agent down to 1.0.0.
  */
-export const REQUIRED_AGENT_VERSION = '3.9.0';
+export const REQUIRED_AGENT_VERSION = '4.0.0';
 
 /**
  * Simple major.minor.patch comparison - good enough for this agent's

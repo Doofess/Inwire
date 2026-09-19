@@ -24,6 +24,22 @@ declare global {
       readonly platform: string;
       /** The OS as a person would name it, e.g. "Windows 11 Pro (10.0.26200)". */
       readonly osDescription?: string;
+      /**
+       * Physical RAM, in bytes, or null when the host would not say.
+       *
+       * What `autoBufferBudget` sizes the packet buffer from. Optional AND
+       * nullable, which are two different absences worth keeping apart: absent
+       * means an older preload, null means this one asked and got nothing.
+       * Neither is ever treated as zero.
+       */
+      readonly systemMemoryBytes?: number | null;
+      /**
+       * V8's heap limit for this renderer, in bytes, or null.
+       *
+       * The real ceiling on the packet buffer - see `rendererHeapGuard.ts` for
+       * why the machine's RAM was never the binding constraint.
+       */
+      readonly heapLimitBytes?: number | null;
       readonly versions: {
         readonly electron: string;
         readonly chrome: string;

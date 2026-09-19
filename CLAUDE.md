@@ -106,7 +106,7 @@ beside `electron/agentService.ts`.
 ## 3. Process topology
 
 ```
-  agent (Python, LocalSystem service)
+  agent (Python, LocalSystem service, DEMAND START — ADR 0035)
     │  named pipe \\.\pipe\inwire-agent, SDDL-gated
     ▼
   main (Node)  ── app:// handler · window · menu · quit guard
@@ -124,13 +124,22 @@ beside `electron/agentService.ts`.
 
 ### The agent — `local-agent/agent.py`
 
-Runs as LocalSystem, deliberately, for three reasons in this order (ADR 0033).
+Runs as LocalSystem, deliberately, for **two** reasons now (ADR 0033).
 It is what lets Npcap be installed **admin-only**, because with the agent
-holding the handle the app never needs to open one. It is what lets a capture
-outlive the window — boot-time start, a ring buffer, unattended monitoring —
-none of which a process that dies with its UI can offer. And it keeps the
+holding the handle the app never needs to open one. And it keeps the
 capture handle and the driver's user-mode library out of the process that
-parses hostile bytes, and off Electron's native-module ABI. The Windows fact
+parses hostile bytes, and off Electron's native-module ABI.
+
+**There was a third and it is retired.** "A capture can outlive the window" —
+boot-time start, a ring buffer, unattended monitoring — was reason #2 and is no
+longer true. The service is **demand start**: the app asks the SCM for it at
+`whenReady()` before the window is created, and the agent stops **itself** two
+watchdog ticks after its last client leaves. It stops itself rather than being
+stopped, because the app deliberately holds no `WP` (SERVICE_STOP) right and
+granting one would grant it to every interactive logon — so a second Windows
+user could stop a capture the first is running. A self-stop also survives the
+app being killed from Task Manager, which an `sc stop` on the quit path would
+not. ADR 0035. The Windows fact
 behind the first of those: Npcap's **default** install leaves the capture
 devices open to every local user, so any local account can read this machine's
 traffic and inject raw frames; restricting them to Administrators is the
@@ -385,9 +394,9 @@ describe the machine the capture came from. "Observed (capture)" was a live
 column with its subject hidden behind it. In the column it sits beside the
 frames it is comparing against, which is the one arrangement where both halves
 of the test hold at once: it is not a view, and it is next to the thing it is
-about. Driver Info stays a Settings tab and is the other read-only report about
-this machine - the pair that belongs there is what the driver is doing and which
-version of it you have.
+about. Capture Health stays a Settings tab and is the other read-only report
+about this machine - the pair that belongs there is what the capture is losing
+and which version of the driver you have.
 
 Settings widened from `max-w-3xl` to `max-w-5xl` to take the dissector editor,
 which is two columns rather than a list of setting rows.
@@ -676,6 +685,13 @@ agent link, the adapter, capture state with elapsed time, and dropped frames -
 in the order they fail in. Two of those were previously reachable only through a
 hover tooltip or a Settings tab, which is the gap `DriverInfoPanel` was written
 to close and this closes ambiently.
+
+**That is also what emptied that panel.** Four of its rows - Status, Version,
+Capture, Listening on - said what this strip now says permanently, and the first
+of them did it through a SECOND status label table that could disagree with
+`agentHealth.ts`'s. All four are deleted and the tab is **Capture Health**: the
+app's only full account of frames it lost, which has no other home, because four
+figures do not fit a 24px strip. ADR 0035.
 
 **The right group is the byte readout, the outbound indicator, then the packet
 counter.** The counter had the corner and the indicator sat between; they were
@@ -1214,31 +1230,47 @@ which is the only thing keeping two implementations of one format in agreement.
 
 `src/services/agentLink.ts` is the vocabulary between main and the Worker.
 
-### Two version numbers
+### One version number
 
-**`AGENT_VERSION`** is a wire-protocol version and an **ordering**: it is the
-left-hand side of `isAgentOutdated`, so it only ever climbs. Reset it and an
-agent left behind by an earlier install reads as newer than required, which
-shows as "not connected" rather than "update your agent". Locked across **four**
-places — `local-agent/agent.py`, `src/services/agentProtocol.ts`
-(`REQUIRED_AGENT_VERSION`), and `MyAgentVersion` in **both**
-`installer/setup.iss` (the one that ships) and
-`local-agent/installer/setup.iss` (the legacy agent-only one).
+**The agent's version is Inwire's version.** ADR 0035. `package.json` is the
+only place it is authored; everything else derives from it or is a literal that
+`scripts/agent/version.ts` holds to it on every `npm run check`:
 
-Two things enforce it, and the split matters. `local-agent/test_protocol.py`
-reads the legacy `.iss` and refuses a reset — but it is Python, and
-`scripts/check.ts` only discovers TypeScript, so it fires only when somebody
-runs it. `scripts/agent/installer-versions.ts` covers **both** `.iss` files and
-runs on every `npm run check`. It exists because the shipping installer's two
-stamps were read by nothing at all: they agreed with the code by hand. It holds
-the same anti-reset floor, compared as numbers rather than as a string —
-`"3.10.0"` sorts before `"3.9.0"` lexically, so a string floor would reject the
-first version past 3.9 and every one after it.
+| Where | How it gets there |
+|---|---|
+| `package.json` | **the source** |
+| `local-agent/agent_version.py` | generated by `npm run sync:version`, committed |
+| `local-agent/agent.py` | `from agent_version import AGENT_VERSION` |
+| `src/services/agentProtocol.ts` | `REQUIRED_AGENT_VERSION`, a literal, checked |
+| `installer/setup.iss` | `MyAppVersion`, a literal, checked |
 
-**`MyAppVersion`** is the product, locked to `package.json`, and is what
-Windows compares to decide whether an install is an upgrade. The two stopped
-moving together the moment one installer carried both: a UI release ships an
-installer and no new agent at all.
+**There were six stamps and two scripts covering different subsets of them.**
+`local-agent/test_protocol.py` read the *legacy* `.iss` — and it is Python, so
+`scripts/check.ts` (which discovers TypeScript) never ran it;
+a second script read both `.iss` files and ran unprompted. Between them
+the shipping installer's stamps went unread by anything at all for months. The
+agent had a number of its own because it was once installed by its own
+installer against a web page of any age; one installer carries both halves now
+and replaces them in one transaction, so two numbers could only ever disagree
+by mistake.
+
+**It is still an ordering, and that is why the product jumped to 4.0.0.** The
+number is the left-hand side of `isAgentOutdated`, so an agent left behind by an
+earlier install must read as *older*; one that reads as newer than required
+shows in the UI as "not connected", a state with no instruction attached to it.
+Collapsing two numbers means the survivor has to be at least the highest either
+half ever shipped — the agent had shipped 3.9.0 while the app was on 1.0.0, so
+the product moved up rather than the agent moving down. The anti-reset floor is
+compared as numbers rather than as a string: `"3.10.0"` sorts before `"3.9.0"`
+lexically, so a string floor would reject the first version past 3.9 and every
+one after it.
+
+`MyAppVersion` is also what Windows compares to decide whether an install is an
+upgrade, which it always was. `local-agent/installer/setup.iss` keeps a frozen
+`MyAgentVersion "3.9.0"` and `MyAppVersion "1.0.0"`: nothing builds it, and it
+is the record of what an agent-only install actually put on a machine — which
+is what the unified installer reads in order to remove it. `version.ts` asserts
+those two stay frozen.
 
 ## 5. Invariants
 
@@ -1968,8 +2000,9 @@ signature, so it reads "Not checked". The Npcap row works today.
 `agentHealth` cannot express "driver missing" and still cannot, because it is a
 *link* diagnosis and the link is fine: `diagnoseAgent` short-circuits on
 `status === 'connected'`, and a driverless agent **is** connected — it answers,
-it is healthy, it has nothing to listen on. `DriverInfoPanel` now describes that
-directly from the two facts it already has, and links to the tab that fixes it.
+it is healthy, it has nothing to listen on. `DriverInfoPanel` (the Capture
+Health tab) describes that directly from the two facts it already has, and links
+to the tab that fixes it.
 Before this, the entire signal for the state a fresh install lands in was a
 hover tooltip on a header button.
 
@@ -2148,6 +2181,18 @@ is still the contract: a frame that never joined a buffer carries its whole bag.
 
 The buffer is bounded by **bytes**, not a frame count
 (`services/bufferBudget.ts`), because a frame is 60 bytes to 64 kB.
+
+**And the bound sizes itself to the machine** — `'auto'` is what ships, an
+eighth of physical RAM capped at half of V8's heap limit, with a 128 MB floor
+(ADR 0036). It was a fixed 512 MB, and the thing that had been holding it there
+was not memory: the buffer lives in the renderer's JS heap, V8 fixes that heap's
+limit when it creates the isolate — **4,192 MB, measured** — and past it V8
+aborts rather than degrading. The store had a watchdog for exactly this since it
+was seen to die at 4,060 MB (`electron/store/heapGuard.ts`); the renderer, which
+holds the buffer, had none. `src/services/rendererHeapGuard.ts` is that guard,
+and it is what makes a bigger number safe to ship. On a 32 GB machine the budget
+resolves to 2,096 MB and is bound by the heap rather than by RAM, which is the
+whole answer to "why not as much RAM as the machine has".
 
 ### The dissector
 

@@ -38,6 +38,7 @@ import { MessageChannelMain, type MessagePortMain, type WebContents } from 'elec
 import { execFile } from 'node:child_process';
 import type { FromAgentLink, ToAgentLink } from '../src/services/agentLink';
 import { readAgentService } from './agentService';
+import { classifyStart, MAX_AUTO_START_ATTEMPTS, worthStarting } from './serviceStart';
 import { AGENT_PIPE_PATH, PipeTransport } from './pipeTransport';
 import { AGENT_PORT_CHANNEL } from './channels';
 
@@ -52,6 +53,14 @@ import { AGENT_PORT_CHANNEL } from './channels';
 const SERVICE_POLL_MS = 20_000;
 
 /**
+ * Long enough for the SCM to start a service, short enough not to wedge quit.
+ *
+ * `sc start` returns as soon as the SCM has accepted the request, not when the
+ * service is up, so this bounds a hung SCM rather than a slow agent.
+ */
+const START_TIMEOUT_MS = 10_000;
+
+/**
  * One renderer's link to the agent.
  *
  * Per renderer rather than per app because the port is: a reload makes a new
@@ -62,6 +71,13 @@ export class AgentPipeLink {
   private readonly pipe: PipeTransport;
   /** When the registry was last read, so a 3s retry does not spawn `reg`. */
   private serviceCheckedAt = 0;
+  /**
+   * Unelevated start attempts made without being asked.
+   *
+   * Bounded by `MAX_AUTO_START_ATTEMPTS`, and reset by the two things that
+   * change the answer: a start that worked, and a person clicking the button.
+   */
+  private autoStarts = 0;
 
   constructor(pipePath: string = AGENT_PIPE_PATH) {
     this.pipe = new PipeTransport({
@@ -133,7 +149,7 @@ export class AgentPipeLink {
       case 'open': this.pipe.open(); break;
       case 'close': this.pipe.close(); break;
       case 'send': this.pipe.send(message.text); break;
-      case 'startService': this.startService(); break;
+      case 'startService': void this.startService(); break;
     }
   }
 
@@ -154,6 +170,70 @@ export class AgentPipeLink {
     this.serviceCheckedAt = now;
     const facts = await readAgentService();
     this.tell({ type: 'service', facts, shortConnections: this.pipe.shortConnections });
+
+    // The agent is demand-start, so a link that is down on a machine where the
+    // service is installed and not disabled is the ordinary case rather than a
+    // fault - it means nothing has asked for it yet. Asking is this line.
+    if (worthStarting(facts) && this.autoStarts < MAX_AUTO_START_ATTEMPTS) {
+      this.autoStarts += 1;
+      const verdict = classifyStart(await this.runStart());
+      if (verdict.outcome === 'running') {
+        // Do not wait for the 20s poll to come round again: the pipe's own
+        // backoff is already retrying in the hundreds of milliseconds, and it
+        // is what will actually find the agent.
+        this.autoStarts = 0;
+      } else if (verdict.outcome === 'hopeless') {
+        // Nothing about this machine will change by asking again. The facts
+        // already sent say which of the three reasons it was, and
+        // `agentHealth.ts` turns that into the sentence.
+        this.autoStarts = MAX_AUTO_START_ATTEMPTS;
+      }
+      console.log('[agent-pipe] auto start:', verdict.reason);
+    }
+  }
+
+  /**
+   * Starts the service **without** elevating, and answers with the exit code.
+   *
+   * `null` means the process could not be run or did not finish - which says
+   * nothing about the service, and `classifyStart` treats it that way.
+   *
+   * The arguments are constants. Nothing the renderer sends reaches this
+   * command line; see `startService` below for why that rule is absolute here.
+   */
+  private runStart(): Promise<number | null> {
+    if (process.platform !== 'win32') return Promise.resolve(null);
+    return new Promise((resolve) => {
+      execFile(
+        'sc.exe', ['start', 'InwireAgent'],
+        { timeout: START_TIMEOUT_MS, windowsHide: true },
+        (error) => {
+          if (!error) { resolve(0); return; }
+          const failure = error as NodeJS.ErrnoException & { killed?: boolean };
+          // Same shape rule as `provesAbsent`: a NUMERIC code is the tool's own
+          // answer, and everything else - a spawn failure, a timeout - is us
+          // failing to ask. A killed process carries a code on some Node
+          // versions, so that is tested first.
+          if (failure.killed || typeof failure.code !== 'number') { resolve(null); return; }
+          resolve(failure.code);
+        },
+      );
+    });
+  }
+
+  /**
+   * Starts the service as soon as the app is ready, before any window asks.
+   *
+   * This is the whole of goal one on the app's side: the person launches
+   * Inwire and the agent is coming up while the window is still painting,
+   * rather than after a renderer has mounted, discovered the link is down,
+   * diagnosed it, and offered a button.
+   *
+   * Deliberately not awaited by `whenReady`: a slow SCM must delay the window,
+   * not the app.
+   */
+  ensureRunning(): void {
+    void this.reportService();
   }
 
   /**
@@ -164,24 +244,35 @@ export class AgentPipeLink {
    * service. What it can do is ask Windows to, which is a prompt the person
    * sees and refuses if they did not expect it.
    *
-   * **`-Verb RunAs` unconditionally, and that is a live loose end.**
+   * **The unelevated attempt comes first, and usually succeeds.**
    * `installer/setup.iss` runs `sc sdset` to grant `RP` on the service's `IU`
    * ACE (`GrantServiceStartToInteractiveUsers`) precisely so an unelevated
-   * `sc start InwireAgent` succeeds without a prompt - and this call never
-   * tries it, so the prompt appears every time and the grant buys nothing
-   * here. It is not dead on the machine: it still lets somebody start the
-   * agent from an unelevated prompt by hand. The fix, when it is worth making,
-   * is to attempt an unelevated `sc.exe start` first and fall back to this -
-   * which must keep the invariant below intact, since the fallback is the
-   * privileged half. This used to say "no amount of arranging makes it able
-   * to", which the installer had already disproved.
+   * `sc start InwireAgent` works without a prompt. This used to escalate
+   * unconditionally, so the prompt appeared every time and the grant bought
+   * nothing here - and the comment that stood in its place said "no amount of
+   * arranging makes it able to", which the installer had already disproved.
+   *
+   * Escalation is now reached only by `SC_ACCESS_DENIED`, which is the one
+   * code a prompt can fix. On a disabled or uninstalled service a UAC prompt
+   * would ask a person to authorise something that cannot work, and they would
+   * have no way to know that before answering.
    *
    * The arguments are constants. Nothing the renderer sends reaches this
    * command line, because a privileged command built from a message is a
    * privileged command an injected script can write.
    */
-  private startService(): void {
+  private async startService(): Promise<void> {
     if (process.platform !== 'win32') return;
+    // A click is a person saying they want this, so the automatic budget is
+    // refilled: whatever they just fixed - enabling the service, reinstalling
+    // it - should not be met with an app that has given up asking.
+    this.autoStarts = 0;
+    const verdict = classifyStart(await this.runStart());
+    if (verdict.outcome !== 'needsElevation') {
+      console.log('[agent-pipe] start service:', verdict.reason);
+      this.serviceCheckedAt = 0;
+      return;
+    }
     execFile(
       'powershell.exe',
       [

@@ -58,6 +58,24 @@ const OS_NAMES: Record<string, string> = {
   linux: 'Linux',
 };
 
+/**
+ * One of Electron's kilobyte readings, as bytes, or null.
+ *
+ * Wrapped because this file has exactly one job it must never fail at: reaching
+ * `exposeInMainWorld`. A `process` shim that does not carry one of these
+ * methods on some future Electron would otherwise throw at module scope and
+ * take the entire bridge down - which is the `node:os` failure again, in a
+ * different disguise and just as silent.
+ */
+function readKilobytes(read: () => number): number | null {
+  try {
+    const kb = read();
+    return typeof kb === 'number' && kb > 0 ? kb * 1024 : null;
+  } catch {
+    return null;
+  }
+}
+
 const api = {
   isDesktop: true,
   platform: process.platform,
@@ -77,6 +95,29 @@ const api = {
    * `navigator.userAgent`, which named a Chrome build.
    */
   osDescription: `${OS_NAMES[process.platform] ?? process.platform} ${process.getSystemVersion()}`,
+  /**
+   * How much RAM the machine has, and how much heap V8 will give this
+   * renderer. Both in **bytes**; Electron reports kilobytes.
+   *
+   * This is what lets the packet buffer size itself to the machine instead of
+   * being a fixed 512 MB chosen for no machine in particular
+   * (`services/bufferBudget.ts`).
+   *
+   * **`process.getSystemMemoryInfo()`, not `node:os`.** `os.totalmem()` is the
+   * obvious call and it is the documented trap: a sandboxed preload cannot
+   * require an arbitrary Node module, and the failure is not an exception
+   * anybody sees - the preload dies while loading, `exposeInMainWorld` never
+   * runs, and `window.inwire` is simply undefined, taking the store, the agent
+   * and the save dialog with it. Electron's own `process` shim answers both
+   * questions synchronously and is already what `osDescription` above uses.
+   *
+   * **`null` when it cannot be read, and never 0.** The budget multiplies these
+   * by a fraction, so a zero would compute a buffer of nothing and a capture
+   * that trims every frame it takes. An absent reading means "fall back to the
+   * fixed default" - the same `provesAbsent` rule the service diagnosis keeps.
+   */
+  systemMemoryBytes: readKilobytes(() => process.getSystemMemoryInfo().total),
+  heapLimitBytes: readKilobytes(() => process.getHeapStatistics().heapSizeLimit),
   versions: {
     electron: process.versions.electron,
     chrome: process.versions.chrome,

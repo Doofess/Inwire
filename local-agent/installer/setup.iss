@@ -23,9 +23,11 @@
 ;
 ; It is kept because it is the SOURCE of the product an agent-3.x machine
 ; actually has installed, so the AppId and the version stamps below are a
-; record of what is out there rather than a build input. Two assertion scripts
-; read it and would have to change with it: test_protocol.py (its `_SETUP_ISS`)
-; and scripts/agent/installer-versions.ts (its `LEGACY`). Nothing builds it -
+; record of what is out there rather than a build input. One assertion script
+; reads it and would have to change with it: scripts/agent/version.ts (its
+; `LEGACY`), which asserts both stamps stay FROZEN rather than tracking the
+; product. test_protocol.py used to read it too and no longer does - the agent
+; has no version of its own to lock (ADR 0035). Nothing builds it -
 ; no npm script compiles it, and the release checklist runs
 ; `iscc installer/setup.iss` only.
 ;
@@ -43,26 +45,21 @@
 ; Two numbers, because they are two different things and only ever looked like
 ; one while this installer shipped the agent and nothing else.
 ;
-; MyAgentVersion is a WIRE PROTOCOL version. Its whole job is the comparison in
-; `isAgentOutdated(agentVersion, REQUIRED_AGENT_VERSION)`, so it is an ordering
-; and it only ever climbs - reset it and an agent left behind by an earlier
-; install reads as NEWER than required, which shows as "not connected" rather
-; than "update your agent". It is locked to `AGENT_VERSION` in agent.py and
-; `REQUIRED_AGENT_VERSION` in agentProtocol.ts; `test_protocol.py` fails if the
-; three drift.
+; **These two numbers are FROZEN, and that is the point of this file now.**
 ;
-; MyAppVersion is the PRODUCT, and it is what Windows compares to decide
-; whether an install is an upgrade. Under one installer carrying the app and
-; the agent together the two stop moving in step - a UI release ships an
-; installer and no new agent at all - so a single number would have to lie
-; about one of them.
+; Nothing builds this installer. It is the record of what a machine with the
+; agent-only install actually has on it - 3.9.0, under its own AppId - which is
+; what the unified installer reads in order to uninstall it. A record that
+; tracked the current version would describe an install that was never made.
 ;
-; This file is still the AGENT'S installer, under the AppId 3.7.0 already
-; occupies, so every AppVersion below is MyAgentVersion. MyAppVersion is
-; declared here and locked to package.json (test_protocol.py) so the product
-; has one number from the moment it has one, and is used by the unified
-; installer - which needs its own AppId, because a product resetting to 1.0.0
-; under this one would read as a downgrade on every machine that has the agent.
+; So they no longer move with the product, and `scripts/agent/version.ts`
+; asserts they do not. Before ADR 0035 they were two of six stamps that had to
+; be bumped together by hand; now the product has ONE version (package.json,
+; agent_version.py, REQUIRED_AGENT_VERSION and the shipping installer's
+; MyAppVersion), and these are history rather than configuration.
+;
+; If this file is ever built again - it should not be - both numbers are wrong
+; and the AppId question in the paragraph below has to be re-answered first.
 #define MyAgentVersion "3.9.0"
 #define MyAppVersion "1.0.0"
 #define MyAppExeName "inwire-agent-windows.exe"
