@@ -1193,13 +1193,40 @@ trackers, and `pcapParser.ts`.
 
 ```
 agent → pipe → main (deframe) → MessagePortMain → pipeline Worker
-      → dissect → 100 ms flush → renderer main thread → React state
+                                                   ├─→ bytes → capture store → disk
+                                                   └─→ dissect → 100 ms flush
+                                                       → renderer main thread → React state
 ```
+
+**The Worker writes the bytes itself, before it dissects anything** (ADR 0038).
+Ids are assigned and the bytes posted for a whole released group ahead of the
+dissection loop, over a **second** `MessagePort` to the store. What that buys
+concretely: a frame whose dissection throws still reaches disk — before this,
+`ingest`'s catch reported the failure and the frame was gone, not on disk, not
+in the list, not in any counter.
+
+The Worker rather than main, because main treats a batch as an opaque buffer and
+decoding it there to get ids would end that. The Worker rather than the
+renderer's main thread, because of ADR 0007 — and it is the only place holding a
+frame's bytes and its id at the same moment.
+
+**Two ports into the store, and only one of them answers.** `entry.ts` took
+`event.ports[0]` from any parent message and assigned it to its single `port`,
+which was correct with one channel and silently wrong with two: the second would
+replace the first and every reply would go down a port nothing was reading. The
+role travels with the port now; `scripts/electron/store-ports.ts` holds it.
+
+**The app never chooses between "bytes and row" and "row only".** There is no
+`attachRows` message. Rows keep arriving as `append`, and `CaptureWriter`
+answers one local question — *do I already have a slot for this id?* That is
+what makes an import, a live capture and a build with no ingest port all
+correct, with no renderer-side knowledge of which case it is in.
 
 Main hands the Worker one end of a `MessageChannelMain`. The renderer's main
 thread receives that port from the preload and transfers it straight into the
 Worker — it carries the port exactly once and then plays no part in the frame
-path, which is the property ADR 0007 bought.
+path, which is the property ADR 0007 bought. The store's ingest port travels the
+identical route for the identical reason.
 
 **There is one copy, and it is unavoidable.** `MessagePortMain.postMessage`
 accepts only ports in its transfer list; an `ArrayBuffer` is cloned, not
@@ -2064,6 +2091,16 @@ this entry assumed. The hop is **5.26 µs a frame** against the writer's
 Moving the store back in-process would buy that 16%, which is not an argument
 for anything. The trigger above still stands; the boundary is not it.
 
+**Half of what this entry was for has landed, and the rest is still the same
+trigger.** ADR 0038 took the *write* off the dissector's critical path: bytes go
+to disk before anything dissects them, a frame whose dissection throws is no
+longer lost, and the writer never stalls behind a slow dissector. What it did
+**not** do is make dissection asynchronous — within one Worker, decoding and
+dissection are still serialized, so a dissector uniformly slower than arrival
+still backs up the Worker's own queue and everything lags together. That is what
+the `worker_threads` pool is for, and its trigger is unchanged: a profile, or a
+sustained rate above ~100 MB/s. Not a plan.
+
 **Offline by default, as a product invariant.** No outbound connection the user
 did not ask for. A packet analyzer that makes requests visible in the user's own
 capture is a trust problem specific to this audience. First steps: an offline
@@ -2151,6 +2188,7 @@ plan a bump roughly every other release.
 | 0035 | The agent lives as long as the app, and shares its version | accepted; **retires 0033 reason #2** |
 | 0036 | The buffer sizes itself, and the renderer stands down before V8 aborts | accepted |
 | 0037 | The capture agent is Rust on Windows | accepted; **the service half is unverified** |
+| 0038 | Bytes and rows are two arrivals; dissection is off the capture path | accepted |
 
 **ADR 0008 weakened, and it now says so itself.** Its argument was that key
 material "is exactly as old as the tab"; a desktop app open for days breaks

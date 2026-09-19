@@ -118,10 +118,80 @@ const DEFAULT_FLUSH_EVERY_CHUNKS = 8;
 const defaultDeflate = (bytes: Uint8Array): Uint8Array => deflateSync(bytes, { level: 6 });
 
 interface Staged {
-  packet: Packet;
+  /** Known when the bytes arrive, which may be long before the row does. */
+  id: number;
+  /**
+   * The frame's capture time, taken at byte-append time.
+   *
+   * The horizon is measured against this rather than against `packet.tsUs`,
+   * because a slot may not have a packet yet - and a chunk whose ageing
+   * depended on a row arriving would never age out at all while dissection was
+   * behind, which is the exact stall this split exists to remove.
+   */
+  tsUs: number;
+  /**
+   * The dissected row, or `null` while dissection is still behind.
+   *
+   * **This being nullable is the whole of the change.** Bytes and rows are two
+   * arrivals now: the bytes are immutable and go down the instant they exist,
+   * and the row catches up when the dissector gets to it. A slot still holding
+   * `null` when its chunk seals is written as a placeholder rather than
+   * holding the chunk back - see `placeholderRow`.
+   */
+  packet: Packet | null;
   /** Where this frame's bytes already are. Written before the row waits. */
   bytOffset: number;
   bytLength: number;
+}
+
+/**
+ * One frame as it arrives, before anything has looked at it.
+ *
+ * Deliberately three fields. Anything more would be something a dissector
+ * decided, and the point of this path is that nothing has dissected yet.
+ */
+export interface RawFrame {
+  id: number;
+  tsUs: number;
+  bytes: Uint8Array;
+}
+
+/**
+ * A row for a frame whose dissection never arrived.
+ *
+ * Built here rather than with `buildFallbackPacket`, which lives in
+ * `sessionRestore.ts` and imports `pcapParser` - the whole dissector, into the
+ * store process, to fill in ten fields. The store must stay small and must not
+ * gain a reason to import the thing it exists to be independent of.
+ *
+ * **The frame is not lost and this is not a hole.** Its bytes are on disk,
+ * exactly and completely, and `frames.iwbyt` is the source of truth that a
+ * re-read reconstructs from; what the placeholder stands in for is the derived
+ * accelerator row. The Info column says so, because a row reading `TCP` with
+ * no explanation would be a confident wrong answer about a frame nobody
+ * dissected.
+ */
+function placeholderRow(id: number, tsUs: number, length: number): Packet {
+  return {
+    id,
+    tsUs,
+    timeDelta: 0,
+    relativeTime: 0,
+    source: '0.0.0.0',
+    destination: '0.0.0.0',
+    protocol: 'TCP' as Packet['protocol'],
+    length,
+    info: 'Not dissected - frame bytes are on disk',
+    status: 'normal' as Packet['status'],
+    // Empty rather than absent: the tree is rebuilt by replaying the frame's
+    // conversation from the bytes on disk, never read back from here.
+    layers: [],
+    // The bytes themselves are NOT carried. They are already written, and
+    // `sealChunk` passes the length it recorded at append time rather than
+    // reading this - see the note on `encodeChunk`'s `capLengths`.
+    rawBytes: new Uint8Array(0),
+    interfaceName: 'Live Agent',
+  };
 }
 
 export interface WriterStats {
@@ -133,6 +203,20 @@ export interface WriterStats {
   /** Patches whose target had already been sealed. See the module header. */
   patchesMissed: number;
   flushes: number;
+  /** Rows matched to a frame whose bytes were already down. */
+  rowsAttached: number;
+  /**
+   * Rows that arrived too late to be written, and rows abandoned at the end of
+   * a capture.
+   *
+   * The number that says whether splitting bytes from rows is costing
+   * anything. Its frames are **not** lost - their bytes are on disk and their
+   * slot holds a placeholder - so this counts degraded rows, never lost
+   * frames, and it must not be added to a frames-lost total.
+   */
+  rowsMissed: number;
+  /** Slots sealed with a placeholder because no row ever arrived. */
+  framesSealedWithoutRow: number;
 }
 
 export class CaptureWriter {
@@ -144,6 +228,23 @@ export class CaptureWriter {
   private readonly staged: Staged[] = [];
   /** Frame id to its position in `staged`, so a patch is a lookup not a scan. */
   private readonly stagedAt = new Map<number, number>();
+  /**
+   * Rows that arrived before their frame's bytes did.
+   *
+   * See `attachRows`. Normally empty - bytes lead rows by a flush interval -
+   * but two channels into one process have no ordering guarantee between them,
+   * and holding is the only answer that cannot lose a row.
+   */
+  private readonly orphanRows = new Map<number, Packet>();
+  /**
+   * The highest frame id whose bytes this writer has staged.
+   *
+   * **This is what tells an EARLY row from a LATE one**, and nothing else can:
+   * `sealChunk` deletes a sealed slot from `stagedAt`, so a miss in that map
+   * means either "the bytes have not arrived" or "the slot is already on disk",
+   * and those want opposite answers. Ids ascend, so the comparison is exact.
+   */
+  private highestStagedId = -1;
   /** How many entries have been shifted off the front of `staged`. */
   private drained = 0;
   private newestTsUs = 0;
@@ -161,6 +262,7 @@ export class CaptureWriter {
   private readonly counters: WriterStats = {
     framesStaged: 0, framesWritten: 0, chunksWritten: 0, bytesWritten: 0,
     patchesApplied: 0, patchesMissed: 0, flushes: 0,
+    rowsAttached: 0, rowsMissed: 0, framesSealedWithoutRow: 0,
   };
 
   /**
@@ -207,16 +309,132 @@ export class CaptureWriter {
    * ascending id order, which is what the ordering window already guarantees.
    */
   append(packets: readonly Packet[]): void {
-    for (const packet of packets) {
-      const bytes = packet.rawBytes;
-      const at = append(this.files.byt, bytes);
-      this.counters.bytesWritten += bytes.length;
-      this.stagedAt.set(packet.id, this.staged.length);
-      this.staged.push({ packet, bytOffset: at, bytLength: bytes.length });
-      this.counters.framesStaged += 1;
-      if (packet.tsUs > this.newestTsUs) this.newestTsUs = packet.tsUs;
+    // **The writer decides whether these bytes are already down, and that is
+    // what keeps the app out of it entirely.**
+    //
+    // A live capture sends bytes ahead of rows, from the Worker, over a
+    // separate port (ADR 0038). An import has both at once and no reason to
+    // split them. A build whose preload predates the ingest port has no bytes
+    // coming at all. The app would otherwise have to know which case it is in
+    // and choose a message - three states, two of them invisible from the
+    // renderer, and getting it wrong writes every frame's bytes twice or not
+    // at all. Here it is one question with a local answer: do I have a slot?
+    const fresh = packets.filter((packet) => !this.hasSlot(packet.id));
+    if (fresh.length > 0) {
+      // **Staged without draining, then the rows attached, then drained once.**
+      // Calling `appendBytes` here instead would drain with no rows attached
+      // yet, and at a short horizon that seals the whole batch as placeholders
+      // - a row arriving in the same call would already be too late. Caught by
+      // `scripts/capture/writer.ts`, which had asserted the patched row reaches
+      // disk since before the split existed.
+      this.stageBytes(fresh.map((packet) => ({
+        id: packet.id,
+        tsUs: packet.tsUs,
+        bytes: packet.rawBytes,
+      })));
     }
+    this.attachRows(packets);
+  }
+
+  /**
+   * Whether this writer has already written this frame's bytes.
+   *
+   * True for a slot still staged AND for one already sealed - a sealed frame's
+   * bytes are emphatically on disk, and writing them again would append a
+   * second copy that nothing indexes and that breaks the contiguity `sealChunk`
+   * checks for every chunk after it.
+   */
+  private hasSlot(id: number): boolean {
+    return this.stagedAt.has(id) || id <= this.highestStagedId;
+  }
+
+  /**
+   * Takes frames that have arrived and nothing more.
+   *
+   * **This is the capture path's write, and it does not wait for a dissector.**
+   * Bytes are immutable, so they go down the instant they exist; the row is a
+   * derived accelerator and catches up through `attachRows`. A dissector that
+   * falls behind therefore costs latency in the packet list and **cannot cost
+   * a frame**, which is the property this split exists to buy.
+   *
+   * Frames must arrive in ascending id order. That is what the ordering window
+   * already guarantees, and it is what makes a chunk's byte extent contiguous -
+   * the invariant `sealChunk` checks rather than assumes.
+   */
+  appendBytes(frames: readonly RawFrame[]): void {
+    this.stageBytes(frames);
     this.drainReady();
+  }
+
+  /** Writes the bytes and opens a slot for each, without sealing anything. */
+  private stageBytes(frames: readonly RawFrame[]): void {
+    for (const frame of frames) {
+      const at = append(this.files.byt, frame.bytes);
+      this.counters.bytesWritten += frame.bytes.length;
+      this.stagedAt.set(frame.id, this.staged.length);
+      // A row that overtook its bytes is already waiting. Claimed here rather
+      // than left in the map, so the map holds only what is genuinely early.
+      const early = this.orphanRows.get(frame.id) ?? null;
+      if (early !== null) this.orphanRows.delete(frame.id);
+      if (frame.id > this.highestStagedId) this.highestStagedId = frame.id;
+      this.staged.push({
+        id: frame.id,
+        tsUs: frame.tsUs,
+        packet: early,
+        bytOffset: at,
+        bytLength: frame.bytes.length,
+      });
+      this.counters.framesStaged += 1;
+      if (frame.tsUs > this.newestTsUs) this.newestTsUs = frame.tsUs;
+    }
+  }
+
+  /**
+   * Fills in the rows for frames whose bytes are already down.
+   *
+   * **A row for a frame this writer has not seen bytes for is held, not
+   * dropped.** The two arrivals come from different places - bytes from the
+   * capture path, rows from the dissector - and nothing orders two channels
+   * into one process against each other. In practice bytes always win by a
+   * flush interval; "in practice" is not a guarantee, and the failure it would
+   * produce is a silently missing row rather than an error.
+   *
+   * The held rows are bounded by the same thing the staging ring is: a row
+   * whose bytes never arrive is a frame that never arrived, and
+   * `clearOrphans()` is called when a capture ends.
+   */
+  attachRows(packets: readonly Packet[]): void {
+    for (const packet of packets) {
+      const index = this.stagedAt.get(packet.id);
+      const sealed = index !== undefined
+        ? index < this.drained
+        // Not in the map. Either its slot was sealed and removed, or its bytes
+        // have not arrived - and `highestStagedId` is the only thing that can
+        // tell those apart, because ids ascend.
+        : packet.id <= this.highestStagedId;
+      if (sealed) {
+        // Too late to be written: a sealed chunk is deflated and appended, and
+        // rewriting it would undo the append-only property recovery depends on.
+        this.counters.rowsMissed += 1;
+        continue;
+      }
+      if (index === undefined) {
+        this.orphanRows.set(packet.id, packet);
+        continue;
+      }
+      this.staged[index].packet = packet;
+      this.counters.rowsAttached += 1;
+    }
+    // Attaching a row can make a chunk sealable that was not before, because
+    // `drainReady` only needs the slots - but a chunk held only by the horizon
+    // is unaffected, so this is cheap and never premature.
+    this.drainReady();
+  }
+
+  /** Rows waiting for bytes that have not arrived. Dropped when a capture ends. */
+  clearOrphans(): void {
+    this.counters.rowsMissed += this.orphanRows.size;
+    this.orphanRows.clear();
   }
 
   /**
@@ -237,6 +455,15 @@ export class CaptureWriter {
         continue;
       }
       const entry = this.staged[index];
+      // A patch for a slot whose row has not arrived cannot be applied to
+      // nothing. Counted as missed rather than dropped silently - and it is
+      // genuinely missed, because the row will arrive already patched or not
+      // at all: the dissector applies its own patches before emitting.
+      if (entry.packet === null) {
+        this.counters.patchesMissed += 1;
+        this.missedPatches.push(patch);
+        continue;
+      }
       const copy = { ...entry.packet };
       applyInfoPatch(copy, patch);
       entry.packet = copy;
@@ -257,7 +484,10 @@ export class CaptureWriter {
       // The chunk's newest frame decides. Sealing on the OLDEST would let a
       // chunk go out while its last frames are still inside the horizon.
       const newestInChunk = this.staged[this.drained + CHUNK_FRAMES - 1];
-      const agedOut = this.newestTsUs - newestInChunk.packet.tsUs >= this.horizonUs;
+      // The SLOT's timestamp, not its packet's. A slot may have no packet yet,
+      // and a horizon that depended on a row arriving would never age out
+      // while the dissector was behind - which is the stall this split removes.
+      const agedOut = this.newestTsUs - newestInChunk.tsUs >= this.horizonUs;
       const tooMany = available > this.horizonFrames;
       if (!agedOut && !tooMany) return;
       this.sealChunk(CHUNK_FRAMES);
@@ -275,11 +505,20 @@ export class CaptureWriter {
     this.stagedAt.clear();
     this.staged.length = 0;
     this.drained = 0;
+    this.clearOrphans();
   }
 
   private sealChunk(count: number): void {
     const entries = this.staged.slice(this.drained, this.drained + count);
-    const packets = entries.map((e) => e.packet);
+    // A slot with no row is written as a placeholder rather than holding the
+    // chunk back. Holding it back would make a slow dissector stall the
+    // capture's write path, which is the coupling being removed; the frame's
+    // bytes are on disk either way and are the source of truth.
+    const packets = entries.map((e) => {
+      if (e.packet !== null) return e.packet;
+      this.counters.framesSealedWithoutRow += 1;
+      return placeholderRow(e.id, e.tsUs, e.bytLength);
+    });
     // The lengths recorded when the bytes were appended, not the lengths the
     // packets report now - `evictOldBytes` may have emptied `rawBytes` in
     // place on any frame already sealed, and nothing stops it reaching one
@@ -339,7 +578,8 @@ export class CaptureWriter {
     // Release the sealed entries. `drained` counts rather than splicing,
     // because splicing 4,096 entries off the front of a 100,000-entry array
     // once a chunk is O(n) work for nothing.
-    for (const e of entries) this.stagedAt.delete(e.packet.id);
+    // Keyed off the SLOT's id, which exists whether or not a row ever did.
+    for (const e of entries) this.stagedAt.delete(e.id);
     this.drained += count;
     if (this.drained > CHUNK_FRAMES * 4) this.compactStaging();
   }
@@ -349,7 +589,7 @@ export class CaptureWriter {
     this.staged.splice(0, this.drained);
     this.drained = 0;
     this.stagedAt.clear();
-    for (let i = 0; i < this.staged.length; i++) this.stagedAt.set(this.staged[i].packet.id, i);
+    for (let i = 0; i < this.staged.length; i++) this.stagedAt.set(this.staged[i].id, i);
   }
 
   private flushData(): void {

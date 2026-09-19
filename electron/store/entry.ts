@@ -42,12 +42,36 @@ const host = new CaptureHost(captureVolume(directory), (message) => {
   port?.postMessage(message);
 });
 
+/**
+ * The app's channel. **Every reply goes here and nowhere else.**
+ *
+ * There is a second port now (see below), and it is one-way. A reply posted to
+ * whichever port happened to arrive last is a read the hex viewer waits on for
+ * the life of the window.
+ */
 let port: Electron.MessagePortMain | null = null;
 
-// Main sends exactly one message, carrying the port the renderer talks over.
+/**
+ * Main sends one message per channel, and the message says which channel it is.
+ *
+ * **The role is load-bearing.** This used to take `event.ports[0]` from any
+ * parent message and assign it to `port` unconditionally, so the second channel
+ * silently replaced the first - the store would keep working, keep writing, and
+ * answer every request down a port nothing was reading. A failure with no error
+ * anywhere and a hung UI, which is the shape this file's own header warns about
+ * one line lower.
+ */
 process.parentPort.on('message', (event) => {
   const [incoming] = event.ports;
   if (!incoming) return;
+  const role = (event.data as { role?: string } | null)?.role ?? 'client';
+  if (role === 'ingest') {
+    // One-way: frames in, nothing out. It never becomes `port`, so nothing can
+    // accidentally answer a request on it.
+    incoming.on('message', (message) => host.receive(message.data as ToCapture));
+    incoming.start();
+    return;
+  }
   port = incoming;
   port.on('message', (message) => host.receive(message.data as ToCapture));
   // Required, and easy to miss: a `MessagePortMain` delivers nothing until it

@@ -48,6 +48,19 @@ export type ToPipeline =
    * if it has not arrived yet.
    */
   | { type: 'agentPort' }
+  /**
+   * One end of a channel to the capture store, for frame bytes.
+   *
+   * **The Worker writes bytes to disk itself now** (ADR 0038). It is the only
+   * place that holds a frame's bytes and its assigned id at the same moment, so
+   * routing this through the renderer's main thread would put frames back on
+   * the thread ADR 0007 took them off.
+   *
+   * Optional in practice: a Worker that never receives this keeps dissecting
+   * and the app keeps working. What is lost is bytes reaching disk ahead of
+   * their rows.
+   */
+  | { type: 'storePort' }
   /** Ask Windows to start the agent's service. Raises a UAC prompt in main. */
   | { type: 'startAgentService' }
   /** Ask main to connect, and to keep retrying on the usual cadence. */

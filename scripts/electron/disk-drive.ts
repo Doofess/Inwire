@@ -44,7 +44,7 @@
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { startStubAgent, STUB_PIPE, type StubAgent } from './stubAgent';
+import { startStubAgent, type StubAgent } from './stubAgent';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -100,21 +100,35 @@ async function until(condition: () => Promise<boolean>, ms: number): Promise<boo
 
 let agent: StubAgent | null = null;
 let profile: string | null = null;
+/**
+ * A pipe of this run's own, rather than the name the installed service holds.
+ *
+ * The same fix `smoke.ts` got, and for the same reason: a development machine
+ * has the real `InwireAgent` service running, the service owns the production
+ * pipe name, and a stub that cannot bind it had nothing honest to do but SKIP -
+ * so the one script that reaches the DISK path was silently not running on the
+ * machine that most needed it.
+ */
+const DRIVE_PIPE = `\\\\.\\pipe\\inwire-disk-${process.pid}`;
+
 let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
 let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof electron.launch>>['firstWindow']>> | null = null;
 
 try {
   try {
-    agent = await startStubAgent(STUB_PIPE, PER_TICK);
+    agent = await startStubAgent(DRIVE_PIPE, PER_TICK);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
-      skip('something else is already serving the agent pipe - stop `serveStub.ts` first');
+      skip(`something else is already serving ${DRIVE_PIPE}, which should be impossible`);
     }
     throw error;
   }
 
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-disk-'));
-  app = await electron.launch({ args: ['.'], env: { ...process.env, INWIRE_USER_DATA: profile } });
+  app = await electron.launch({
+    args: ['.'],
+    env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: DRIVE_PIPE },
+  });
   const page = await app.firstWindow();
   mainWindow = page;
   page.setDefaultTimeout(30_000);
@@ -180,7 +194,11 @@ try {
   const [, captured] = await counts();
 
   console.log('\n--- filtering the whole capture ---\n');
-  const input = page.getByPlaceholder(/ip\.addr ==/).first();
+  // `e.g. tcp.port == 443`, which is what the field says since the display
+  // filter moved into the title row. It used to read `ip.addr ==`, and this
+  // locator went on naming that for as long as the script was SKIPping on a
+  // pipe collision - a stale selector in a test nobody could run.
+  const input = page.getByPlaceholder(/tcp\.port ==/).first();
   await input.fill('udp.srcport == 49152');
   await input.press('Enter');
   await sleep(700);

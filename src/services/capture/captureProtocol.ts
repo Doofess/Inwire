@@ -8,7 +8,7 @@
  */
 import type { Packet } from '../../types/packet';
 import type { InfoPatch } from '../dissect/types';
-import type { WriterStats } from './captureWriter';
+import type { RawFrame, WriterStats } from './captureWriter';
 
 export type ToCapture =
   /**
@@ -62,6 +62,24 @@ export type ToCapture =
    * horizon - see `captureWriter.ts`.
    */
   | { type: 'append'; packets: Packet[] }
+  /**
+   * Frames as they arrived, before anything dissected them.
+   *
+   * **The capture path's write, and the reason it no longer waits for a
+   * dissector** (ADR 0038). `append` above carries bytes AND a row together,
+   * which is right for an import - the file is read and dissected in one pass,
+   * so there is nothing to decouple. A live capture has two arrivals: the bytes
+   * exist the moment the agent sends them, and the row exists when the
+   * dissector gets to it.
+   *
+   * The two are matched by frame id inside `captureWriter.ts`, in either order.
+   *
+   * **There is deliberately no `attachRows` beside this.** Rows keep arriving
+   * as `append`, and the writer answers "do I already have this frame's bytes?"
+   * itself - so the app never has to know whether the ingest port exists, and a
+   * build without one writes bytes and rows together exactly as it always did.
+   */
+  | { type: 'appendBytes'; frames: RawFrame[] }
   /** Patches produced by this flush, for rows that are still staged. */
   | { type: 'patches'; patches: InfoPatch[] }
   /** Seals the staging ring and flushes. Pause, stop, and page hide. */

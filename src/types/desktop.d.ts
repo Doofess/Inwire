@@ -64,6 +64,14 @@ declare global {
        */
       requestCaptureStorePort?(): void;
       /**
+       * Asks for the store's second port, the one frames travel on.
+       *
+       * Optional like the rest of this bridge: the app has to work against a
+       * preload that predates it, and without this the Worker simply keeps
+       * routing frames the old way. ADR 0038.
+       */
+      requestCaptureIngestPort?(): void;
+      /**
        * Called if the store process dies.
        *
        * A `MessagePort` has no error event and no reliable close event, so a

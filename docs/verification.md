@@ -1093,6 +1093,32 @@ ADR 0036. The numbers differ per machine, which is the point.
 
 ---
 
+### Frames reach disk before anything dissects them
+
+ADR 0038. Two of these are automated now and are listed so the by-hand pass
+knows not to repeat them; the rest need a person.
+
+- [x] `npx tsx scripts/electron/disk-drive.ts` — 174,000 frames past the RAM
+      window, the whole-capture filter reading matches back off disk in order.
+      **It used to SKIP on this machine** (the installed service owned the pipe
+      name), and running it for the first time found a stale locator.
+- [x] `npx tsx scripts/electron/import-drive.ts` — 400,000 frames through the
+      combined `append` path, scrolling back to frame 1.
+- [ ] **Capture, then look at Settings → Capture Health.** Nothing reads
+      "Not dissected". That row is the placeholder a slot gets when no row ever
+      arrived, and on a healthy machine it should never be reached.
+- [ ] **Two windows, one capturing.** The second window's reads still answer -
+      the hex viewer opens a frame, Frame Detail fills in. A hang here is the
+      port-role bug: a reply going down the one-way ingest port.
+- [ ] **Stop a capture while frames are still arriving.** The counts settle and
+      the store does not complain in main's log. Frames in flight when the
+      capture closed are dropped by the store on purpose; they must not produce
+      an error.
+- [ ] **The console says nothing about frames reaching the store before a
+      capture was open.** That message means bytes beat the `open` on a
+      different port, which no ordinary path should produce - and it is frames
+      lost at the start of a capture.
+
 ### The Rust agent as a service
 
 ADR 0037. **Everything in this block is unverified**, and the reason is

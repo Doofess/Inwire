@@ -16,6 +16,24 @@ export const STORE_PORT_CHANNEL = 'inwire:capture-port';
 /** Renderer -> main: please send me that port. */
 export const STORE_PORT_REQUEST = 'inwire:capture-port-request';
 
+/**
+ * Main -> renderer: a SECOND `MessagePort` to the capture store, for frames.
+ *
+ * The renderer only ferries it, exactly as it ferries the agent's port. Its
+ * real destination is the pipeline Worker, which is the only place that holds
+ * a captured frame's bytes and an id for it at the same moment - so the
+ * renderer's main thread still never sees a frame, and ADR 0007 is intact.
+ *
+ * Why a second port rather than reusing the first: the first is the app's, and
+ * it carries requests that expect replies. This one is one-way and carries
+ * frames at capture rate. Sharing would put a 256 kB batch in front of the
+ * read the hex viewer is waiting on. ADR 0038.
+ */
+export const STORE_INGEST_PORT_CHANNEL = 'inwire:capture-ingest-port';
+
+/** Renderer -> main: please send me the ingest port too. */
+export const STORE_INGEST_PORT_REQUEST = 'inwire:capture-ingest-port-request';
+
 /** Main -> renderer: the store process is gone, and why. */
 export const STORE_EXIT_CHANNEL = 'inwire:capture-store-exit';
 
