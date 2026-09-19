@@ -29,6 +29,7 @@
  *    component that draws them and it outlives the panel, measuring the user's
  *    machine with nothing on screen to show for it.
  */
+import { readFileSync } from 'node:fs';
 import {
   isSideBarPanel, MAX_SIDE_BAR_PX, MIN_SIDE_BAR_PX, normalizeSideBar, restoredPanel,
   SIDE_BAR_DEFAULTS, SIDE_BAR_PANELS, sideBarStore, usableSideBarWidth,
@@ -47,6 +48,13 @@ function check(name: string, actual: unknown, expected: unknown): void {
   }
 }
 const checkTrue = (name: string, condition: boolean): void => check(name, condition, true);
+
+/** Comments stripped, so a check cannot pass or fail on its own rationale. */
+function code(file: string): string {
+  return readFileSync(file, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
 
 /**
  * The normaliser's answer, for a record it is known to accept.
@@ -134,13 +142,112 @@ console.log('--- the preference is a place, clamped and not reset ---\n');
   check('the key is its own', sideBarStore.key, 'inwire.sideBar');
 }
 
-/*
- * The seam, the deleted popovers and the sampling lifecycle are asserted here
- * too, and land with the code they describe - the column itself, then the two
- * pickers, then the modal. Written up front in the plan and added step by step,
- * so that no check in this file ever passes by describing something that has
- * not been built.
- */
+console.log('\n--- the seam is drawn once ---\n');
+
+{
+  const rail = code('src/components/common/ActivityRail.tsx');
+  const bar = code('src/components/sidebar/SideBar.tsx');
+
+  // **Exactly one of the two draws the edge between them.** Both drawing it is
+  // a 2px double line; neither drawing it is no line at all and two grounds
+  // running together. Both render, so neither is caught by anything but this.
+  checkTrue('the rail draws all four of its own borders',
+    rail.includes('border border-border'));
+  checkTrue('...and gives none of them away', !/border-[lrtb]-0/.test(rail));
+  checkTrue('the side bar gives up exactly the one it shares',
+    bar.includes('border border-l-0 border-border'));
+
+  // Which of VS Code's two arrangements is in force is one boolean. The left
+  // corners are unconditional on both cards - the rail's face the band's
+  // gutter, the side bar's face the rail - so the only corners that vary are
+  // the ones an open panel covers.
+  checkTrue('the rail keeps the corners that face the gutter',
+    rail.includes('rounded-l-lg'));
+  checkTrue('...and squares only the corner an open panel covers',
+    /sideBarOpen \? '' : 'rounded-r-lg'/.test(rail));
+  checkTrue('the side bar rounds only the corners it owns',
+    bar.includes('rounded-r-lg') && !/rounded-l/.test(bar));
+
+  // The gap is one number and it belongs to the element on the right - or to
+  // the sash standing in that element's place. A margin here would be a second
+  // number that has to agree with the first.
+  checkTrue('...and draws no margin of its own', !/m[lrxy]?-\d/.test(bar));
+
+  // The ground is what makes the seam legible: the rail is chrome and this is a
+  // titled content surface, so the two differ by a real step. On `--secondary`
+  // the panel would merge into the rail and there would be nothing for the
+  // hairline to separate.
+  checkTrue('the panel stands on the card ground, not the chrome',
+    bar.includes('bg-card') && !bar.includes('bg-secondary'));
+
+  // One panel exists at a time - mounted or absent, never hidden. The one
+  // hidden-rather-than-unmounted surface in this app is the packet list, and it
+  // earns that with a virtualised scroll offset; nothing here has that, and one
+  // of these panels holds a live agent subscription whose correctness rests on
+  // being torn down when it stops being looked at.
+  checkTrue('the side bar hides nothing, it mounts one panel',
+    !/display:\s*'?none/.test(bar));
+
+  // Total, so a fifth panel cannot be added without deciding what the header
+  // says. `agentStatusLabel` is why that matters: a `Partial` record with a
+  // `??` behind it turned a missing entry into a confident wrong answer that
+  // shipped and was read as a fault for weeks.
+  checkTrue('every panel has a title, by the type rather than by habit',
+    bar.includes('Record<SideBarPanel, string>'));
+}
+
+console.log('\n--- a place, not a detour ---\n');
+
+{
+  const app = code('src/App.tsx');
+
+  /**
+   * The body of one function, by its two ends rather than by a character
+   * budget.
+   *
+   * The first try here was `/Escape[\s\S]{0,600}setSideBar/`, and it failed on
+   * correct code: `useKeyboardNavigation`'s options object sits a few lines
+   * below the Escape effect and legitimately contains `setSideBar`, for
+   * `Ctrl+B`. A window wide enough to cover a handler is wide enough to catch
+   * its neighbour, and the neighbour of every one of these is the place the
+   * side bar IS allowed to be opened from.
+   */
+  const bodyOf = (from: string, to: string): string => {
+    const start = app.indexOf(from);
+    if (start === -1) throw new Error(`no "${from}" in App.tsx`);
+    const end = app.indexOf(to, start + from.length);
+    if (end === -1) throw new Error(`no "${to}" after "${from}"`);
+    return app.slice(start, end);
+  };
+
+  // **Escape must not close it**, and the tempting wrong change is one line at
+  // the head of the chain by analogy with the Settings sheet. It would also
+  // stop Escape returning a view to Packets in one press, which is the second
+  // failure and the one nobody would connect to this file.
+  checkTrue('Escape does not reach the side bar',
+    !bodyOf("if (e.key !== 'Escape') return;", 'window.addEventListener').includes('setSideBar'));
+  checkTrue('...and the sheet is still the first thing it closes',
+    app.includes('if (sheetOpen) { setSheet(null); return; }'));
+
+  // **Navigating must not close it either**, which is the exact INVERSE of the
+  // rule one line above it in `handleViewChange`. A sheet renders INSTEAD of
+  // the view stack, so a navigation under it is invisible and it has to close;
+  // this renders BESIDE the view stack, so a navigation under it is fully
+  // visible, and closing it would make it the one pane that cannot be kept
+  // while working - which is the entire point of a side bar.
+  checkTrue('choosing a view leaves the side bar alone',
+    !bodyOf('const handleViewChange = useCallback(', '}, [').includes('setSideBar'));
+  checkTrue('...and so does applying a filter',
+    !bodyOf('const applyFilter = useCallback(', '}, [').includes('setSideBar'));
+
+  // The property has to exist in the React style object as well as in the
+  // imperative drag path. `--geo-pane-size` is the recorded case of the other
+  // way round: written only by a drag, so the pane had no width until somebody
+  // dragged something.
+  checkTrue('the width is declared on first paint, not only on drag',
+    /"--side-bar-width":/.test(app));
+  checkTrue('...as well as during one', app.includes("setProperty(\"--side-bar-width\""));
+}
 
 console.log(
   failures === 0
