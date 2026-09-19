@@ -37,6 +37,9 @@ const NOT_TESTS: Record<string, string> = {
   'electron/gpu-restore-drive.ts':
     'loses and restores a real WebGL context in the running app; needs dist/ and a GPU, run by hand',
   'electron/serveStub.ts': 'tool; serves the stub agent until Ctrl+C, for driving the app by hand',
+  'agent/pipe-interop.ts':
+    "drives the Rust agent's named pipe with the app's own client; needs "
+    + '`cargo run --example pipe_serve` running beside it, and Windows',
   'parity/parity-check.ts': 'needs the untracked fixture captures and tshark ground truth (test/fixtures/README.md)',
   'tcp/reassembly.ts': 'diagnostic; needs the fixtures, and reports rather than asserts (docs/decisions/0020)',
   'perf/clone-cost.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0007)',

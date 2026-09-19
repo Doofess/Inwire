@@ -36,9 +36,12 @@
 //! proven underneath it.
 
 pub mod framing;
+pub mod outbound;
 pub mod wire;
 
 // Windows-only: this is the Npcap surface, and the Python agent remains the
 // implementation on macOS and Linux.
 #[cfg(windows)]
 pub mod npcap;
+#[cfg(windows)]
+pub mod pipe;

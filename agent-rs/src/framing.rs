@@ -129,3 +129,5 @@ impl FrameReader {
         self.buf.len()
     }
 }
+
+impl std::error::Error for FramingError {}
