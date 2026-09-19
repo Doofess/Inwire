@@ -28,20 +28,40 @@ path rested on the same arithmetic.
 
 Three quantities, kept apart, and a fourth derived from them:
 
-  readUs        time inside `read_frame`, accumulated **only for reads that
-                returned a frame**. The handle is opened with `to_ms=100`, so a
-                timeout return is the thread idling, not working, and counting
-                it would inflate the cost of a quiet link until it looked like
-                the expensive one.
+  pcapUs        time inside the `pcap_next_ex` call, for reads that RETURNED a
+                frame. **Mostly the wait on a quiet link**, and therefore not a
+                cost - see below.
+  copyUs        the `string_at` and the timestamp arithmetic that follow it.
+                Ours, and always work.
   callbackUs    what our own code costs once it has the bytes.
-  busyUs        the two together: what one frame actually costs the thread.
+  busyUs        `copyUs + callbackUs`: what one frame costs the thread in work
+                we can account for.
   idleUs        arrival interval less `busyUs` - the headroom.
 
-`sustainableFramesPerSecond` is `1e6 / busyUs`, and THAT is the ceiling: what
-this thread could do if frames never stopped arriving. `utilisation` is
-`busyUs / arrivalPerFrameUs`, which is the number to read first - at 1.0 the
-sniffer thread is the bottleneck, and well under it the bottleneck is
-somewhere else and no amount of work here will move it.
+## Why the ceiling is not derived from `pcapUs`, and the second version of the
+## same mistake
+
+The first version of this module divided by wall-clock and called the result a
+ceiling, which made it the arrival rate. The fix was to time the read instead -
+and that was **still wrong at low rates**, because `pcap_next_ex` *blocks*
+until a frame arrives or `to_ms` expires. A successful read on a quiet link is
+mostly waiting, so the "cost" it reported was the gap between frames wearing a
+different name.
+
+Measured while finding this: a real 493 f/s adapter reported **1,439 us a
+frame**, which is 1/493 of a second. It was reporting the link again.
+
+So the call and the copy are timed apart. `sustainableFramesPerSecond` is
+`1e6 / busyUs` and is an **upper bound**: it counts the work this code does and
+cannot see the driver's own per-frame cost, which is only visible when frames
+are arriving back to back. `utilisation` is `busyUs / arrivalPerFrameUs` and is
+the number to read first - near 1.0 the sniffer thread is the bottleneck, and
+well under it the bottleneck is elsewhere and no work here will move it.
+
+`waitBound` is true when `pcapUs` is most of the arrival interval, which means
+the thread spent its time waiting and **the driver's share of the cost was not
+measurable from this sample**. A ceiling reported next to `waitBound: true` is
+an upper bound with nothing under it; take the reading again under load.
 
 **`readUs` is `None` on two of the three branches, and is never rounded to
 zero.** `sniff_on_interface` has three, and only the fast one can be timed from
@@ -101,7 +121,8 @@ class CaptureProfile:
         with self._lock:
             self._frames = 0
             self._callback_s = 0.0
-            self._read_s = 0.0
+            self._pcap_s = 0.0
+            self._copy_s = 0.0
             # How many frames arrived by a branch that could time its own read.
             # Kept apart from `_frames` so a capture that ran on the fast path
             # and then fell back reports the read it actually measured rather
@@ -109,20 +130,26 @@ class CaptureProfile:
             self._read_frames = 0
             self._started = time.perf_counter()
 
-    def frame(self, callback_seconds: float, read_seconds: float | None = None) -> None:
-        """Records one frame, what our callback cost, and what the read cost.
+    def frame(self, callback_seconds: float, pcap_seconds: float | None = None,
+              copy_seconds: float | None = None) -> None:
+        """Records one frame: the callback, the pcap call, and the copy.
 
-        `read_seconds` is `None` from the `sniff(prn=...)` branch, which has no
+        `pcap_seconds` is `None` from the `sniff(prn=...)` branch, which has no
         read this module can bracket. Passing 0.0 there would be a measurement
         of something that was never measured.
+
+        `copy_seconds` defaults to the call's own time for the `recv_raw`
+        branch, where the library allocates the bytes itself and the two are
+        genuinely the same operation.
         """
         if not self.enabled:
             return
         with self._lock:
             self._frames += 1
             self._callback_s += callback_seconds
-            if read_seconds is not None:
-                self._read_s += read_seconds
+            if pcap_seconds is not None:
+                self._pcap_s += pcap_seconds
+                self._copy_s += pcap_seconds if copy_seconds is None else copy_seconds
                 self._read_frames += 1
 
     def snapshot(self) -> dict | None:
@@ -136,7 +163,8 @@ class CaptureProfile:
         with self._lock:
             frames = self._frames
             callback_s = self._callback_s
-            read_s = self._read_s
+            pcap_s = self._pcap_s
+            copy_s = self._copy_s
             read_frames = self._read_frames
             wall_s = time.perf_counter() - self._started
         if frames == 0:
@@ -146,7 +174,8 @@ class CaptureProfile:
         callback_us = callback_s / frames * 1_000_000
         # Averaged over the frames whose read was actually timed, not over all
         # of them - see `_read_frames`.
-        read_us = (read_s / read_frames * 1_000_000) if read_frames else None
+        pcap_us = (pcap_s / read_frames * 1_000_000) if read_frames else None
+        copy_us = (copy_s / read_frames * 1_000_000) if read_frames else None
 
         snap = {
             "frames": frames,
@@ -157,11 +186,12 @@ class CaptureProfile:
             "arrivalPerFrameUs": round(arrival_per_frame_us, 2),
             "arrivalFramesPerSecond": int(frames / wall_s) if wall_s > 0 else 0,
             "callbackUs": round(callback_us, 2),
-            "readUs": round(read_us, 2) if read_us is not None else None,
+            "pcapUs": round(pcap_us, 2) if pcap_us is not None else None,
+            "copyUs": round(copy_us, 2) if copy_us is not None else None,
             "readFrames": read_frames,
         }
 
-        if read_us is None:
+        if copy_us is None:
             # Nothing to add the callback to, so there is no honest ceiling and
             # no honest headroom. Both stay absent rather than being rounded
             # from a half that was never measured.
@@ -169,9 +199,14 @@ class CaptureProfile:
             snap["idleUs"] = None
             snap["sustainableFramesPerSecond"] = None
             snap["utilisation"] = None
+            snap["waitBound"] = None
             return snap
 
-        busy_us = read_us + callback_us
+        # **The copy, not the call.** `pcap_next_ex` blocks until a frame
+        # arrives, so including it would put the gap between frames back into
+        # the per-frame cost - which is the mistake this module has now made
+        # twice and must not make a third time.
+        busy_us = copy_us + callback_us
         snap["busyUs"] = round(busy_us, 2)
         snap["idleUs"] = round(arrival_per_frame_us - busy_us, 2)
         snap["sustainableFramesPerSecond"] = int(1_000_000 / busy_us) if busy_us > 0 else 0
@@ -179,6 +214,20 @@ class CaptureProfile:
         # under it, the bottleneck is downstream and work here buys nothing.
         snap["utilisation"] = (round(busy_us / arrival_per_frame_us, 3)
                                if arrival_per_frame_us > 0 else None)
+        # **Waiting, not working**, and the test cannot be "the call took most
+        # of the interval": under real saturation it does, because the thread
+        # does nothing else. What separates the two is whether our own work is
+        # anywhere near the call, and whether the thread is loaded at all.
+        #
+        #   waiting     pcap 10,000 us, work 300 us, utilisation 0.03
+        #   saturated   pcap      2 us, work   4 us, utilisation 0.9
+        #
+        # So: the call dwarfs our work AND the thread is not near saturation.
+        snap["waitBound"] = (pcap_us is not None
+                             and busy_us > 0
+                             and pcap_us > busy_us * 2
+                             and snap["utilisation"] is not None
+                             and snap["utilisation"] < 0.5)
         return snap
 
     def describe(self) -> str:
@@ -200,7 +249,7 @@ class CaptureProfile:
         return (
             "capture profile: {frames} frames, arriving every "
             "{arrivalPerFrameUs} us (~{arrivalFramesPerSecond}/s); "
-            "cost {busyUs} us/frame ({readUs} read + {callbackUs} callback), "
-            "idle {idleUs} us, utilisation {utilisation}, "
-            "ceiling ~{sustainableFramesPerSecond} frames/s"
-        ).format(**snap)
+            "work {busyUs} us/frame ({copyUs} copy + {callbackUs} callback), "
+            "pcap_next_ex {pcapUs} us{waited}, utilisation {utilisation}, "
+            "ceiling <= ~{sustainableFramesPerSecond} frames/s"
+        ).format(waited=" (mostly waiting)" if snap["waitBound"] else "", **snap)

@@ -1601,15 +1601,16 @@ for _ in range(4):
     _cb = time.perf_counter() - _t0
     _t1 = time.perf_counter()
     time.sleep(0.001)
-    _on.frame(_cb, time.perf_counter() - _t1)
+    _read = time.perf_counter() - _t1
+    _on.frame(_cb, _read, _read)
 _snap = _on.snapshot()
 check("frames are counted", _snap["frames"], 4)
 check_true("the callback share is the mean of what was measured",
            900.0 <= _snap["callbackUs"] <= 3000.0)
-check_true("...and so is the read share", 900.0 <= _snap["readUs"] <= 3000.0)
+check_true("...and so is the copy share", 900.0 <= _snap["copyUs"] <= 3000.0)
 check("every frame's read was timed on this branch", _snap["readFrames"], 4)
-check_true("what a frame COSTS is the two halves added",
-           abs((_snap["callbackUs"] + _snap["readUs"]) - _snap["busyUs"]) < 0.05)
+check_true("what a frame COSTS is the copy plus the callback",
+           abs((_snap["callbackUs"] + _snap["copyUs"]) - _snap["busyUs"]) < 0.05)
 # Arrival is a different quantity from cost, and keeping them apart is the
 # whole correction. Wall time per frame includes everything the thread spent
 # waiting for traffic, so it is at least the cost and usually much more.
@@ -1631,7 +1632,7 @@ check_true("a ceiling is derived from the cost", _snap["sustainableFramesPerSeco
 _idle = capture_profile.CaptureProfile(enabled=True)
 for _ in range(4):
     time.sleep(0.010)
-    _idle.frame(0.0002, 0.0002)
+    _idle.frame(0.0002, 0.0002, 0.0002)
 _slow = _idle.snapshot()
 check_true("a quiet link does not lower the ceiling",
            _slow["sustainableFramesPerSecond"] > 1000)
@@ -1640,6 +1641,33 @@ check_true("...while the arrival rate reports the quiet",
 check_true("...and utilisation names which of the two is the bottleneck",
            _slow["utilisation"] < 0.2)
 
+# **The same mistake, one level down, and it shipped for a commit.** Timing the
+# read instead of the wall clock was the first fix - and `pcap_next_ex` BLOCKS
+# until a frame arrives, so a successful read on a quiet link is mostly waiting.
+# Measured against a real 493 f/s adapter it reported 1,439 us a frame, which is
+# 1/493 of a second: the link again, wearing the name of a cost.
+#
+# So the call and the copy are timed apart, and the ceiling comes from the copy.
+# Here: a 10 ms blocking call that yields 200 us of actual copying. The ceiling
+# must reflect the copy, and `waitBound` must say the driver's share was not
+# visible in this sample.
+_blocking = capture_profile.CaptureProfile(enabled=True)
+for _ in range(4):
+    time.sleep(0.010)
+    _blocking.frame(0.0001, pcap_seconds=0.0100, copy_seconds=0.0002)
+_bw = _blocking.snapshot()
+check_true("a blocking read does not become a per-frame cost",
+           _bw["sustainableFramesPerSecond"] > 2000)
+check_true("...and the call's own time is still reported, apart from it",
+           _bw["pcapUs"] > 9000)
+check("...with a flag saying the driver's share was not measurable here",
+      _bw["waitBound"], True)
+# Under load the call stops being the wait, and the flag clears.
+_loaded = capture_profile.CaptureProfile(enabled=True)
+for _ in range(200):
+    _loaded.frame(0.000002, pcap_seconds=0.000002, copy_seconds=0.000002)
+check("a saturated link is not wait-bound", _loaded.snapshot()["waitBound"], False)
+
 # The unmeasurable branch reports an absence, not a zero. `sniff(prn=...)`
 # invokes the callback from inside scapy's own loop, so there is no read to
 # bracket - and it is the SLOWEST branch, so a read rounded to 0 would have
@@ -1647,7 +1675,7 @@ check_true("...and utilisation names which of the two is the bottleneck",
 _untimed = capture_profile.CaptureProfile(enabled=True)
 _untimed.frame(0.0005)
 _u = _untimed.snapshot()
-check("a branch that cannot time its read says so", _u["readUs"], None)
+check("a branch that cannot time its read says so", _u["copyUs"], None)
 check("...and no frame is counted as timed", _u["readFrames"], 0)
 check("...so there is no ceiling to report", _u["sustainableFramesPerSecond"], None)
 check("...and no headroom either", _u["idleUs"], None)
