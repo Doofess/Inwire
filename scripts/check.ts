@@ -35,6 +35,9 @@ const NOT_TESTS: Record<string, string> = {
     + 'A check suite that rewrites its own inputs cannot fail - '
     + '`scripts/agent/version.ts` is the half that asserts',
   'electron/disk-drive.ts': 'drives a 180,000-frame capture to reach the disk path; ~2 minutes, run by hand',
+  'electron/agent-live-drive.ts':
+    'drives the app against the REAL installed agent service and reads the SCM; '
+    + 'needs dist/, the InwireAgent service, and Windows - run by hand',
   'electron/update-center-drive.ts':
     'drives the Update Center against a loopback feed in the real app; needs dist/ and ~1 minute, run by hand',
   'electron/import-drive.ts': 'imports a 400,000-frame file to reach the disk path; ~1 minute, run by hand',

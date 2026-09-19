@@ -2187,7 +2187,7 @@ plan a bump roughly every other release.
 | 0034 | The side bar is a place: Escape does not close it, nor does navigating | accepted |
 | 0035 | The agent lives as long as the app, and shares its version | accepted; **retires 0033 reason #2** |
 | 0036 | The buffer sizes itself, and the renderer stands down before V8 aborts | accepted |
-| 0037 | The capture agent is Rust on Windows | accepted; **the service half is unverified** |
+| 0037 | The capture agent is Rust on Windows | accepted; **SCM registration unverified** |
 | 0038 | Bytes and rows are two arrivals; dissection is off the capture path | accepted |
 
 **ADR 0008 weakened, and it now says so itself.** Its argument was that key

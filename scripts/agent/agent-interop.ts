@@ -29,7 +29,7 @@
  * bytes decode, nothing errors. The only thing between a lossy capture and a
  * silently wrong one is a counter that moved.
  */
-import { connect } from 'node:net';
+import { connect, createServer, type Socket } from 'node:net';
 import { FRAME_BINARY, FRAME_JSON, FrameReader, encodeFrame } from '../../src/services/agentFraming';
 import { decodePacketBatch } from '../../src/services/agentBinary';
 import { parseAgentMessage, summarizeCaptureStats } from '../../src/services/agentProtocol';
@@ -37,6 +37,16 @@ import type { AgentCaptureStatsMessage } from '../../src/services/agentProtocol'
 
 const PIPE = process.env.INWIRE_PROBE_PIPE ?? String.raw`\\.\pipe\inwire-probe`;
 const SECONDS = Number(process.env.INWIRE_PROBE_SECONDS ?? 6);
+
+/**
+ * Which adapter to capture on, matched against the label the agent reports.
+ *
+ * **Loopback by default, and that is a privacy decision rather than a
+ * convenience one.** The other adapters on a development machine carry the
+ * person's actual traffic, and a test harness must not be the thing that
+ * captures it. Loopback carries what this file puts on it and nothing else.
+ */
+const ADAPTER = process.env.INWIRE_PROBE_ADAPTER ?? 'loopback';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -62,6 +72,54 @@ let batches = 0;
 const seqs: number[] = [];
 let lastStats: AgentCaptureStatsMessage | null = null;
 let sawStart = false;
+let chosenLabel = '(none)';
+
+/**
+ * Traffic of our own, on loopback, for as long as the capture runs.
+ *
+ * The harness used to rely on whatever happened to be on the wire, which makes
+ * it non-deterministic on a quiet machine and makes it capture somebody's real
+ * traffic on a busy one. A server and a client talking to themselves is neither.
+ *
+ * The flood is the point as well as the traffic: the bounded queues are meant
+ * to shed under pressure, and a harness that never applies any proves only that
+ * the counters are zero.
+ */
+function floodLoopback(): () => void {
+  const sockets: Socket[] = [];
+  const payload = Buffer.alloc(64 * 1024, 0x5a);
+  let stopped = false;
+  const server = createServer((connection) => {
+    sockets.push(connection);
+    connection.on('error', () => {});
+    connection.resume();
+  });
+  server.on('error', () => {});
+  server.listen(0, '127.0.0.1', () => {
+    const port = (server.address() as { port: number }).port;
+    for (let i = 0; i < 4; i++) {
+      const client = connect(port, '127.0.0.1');
+      sockets.push(client);
+      client.on('error', () => {});
+      const pump = () => {
+        if (stopped || client.destroyed) return;
+        // `write` answers false when the buffer is full; `drain` is the signal
+        // to carry on. Ignoring it would grow an unbounded queue in THIS
+        // process, which is the failure the agent is being tested for.
+        if (client.write(payload)) setImmediate(pump);
+        else client.once('drain', pump);
+      };
+      client.on('connect', pump);
+    }
+  });
+  return () => {
+    stopped = true;
+    for (const s of sockets) s.destroy();
+    server.close();
+  };
+}
+
+const stopFlood = floodLoopback();
 
 const socket = connect(PIPE);
 const reader = new FrameReader();
@@ -98,8 +156,29 @@ await new Promise<void>((resolve, reject) => {
         }
         control.push(parsed as unknown as Record<string, unknown>);
         if (parsed.type === 'capture_stats') lastStats = parsed as AgentCaptureStatsMessage;
-        // Start capturing as soon as the agent says hello, the way the app does.
+        // **Choose an adapter, THEN start - which is what the app does.**
+        //
+        // This used to send `start_capture` alone, and the agent fell back to
+        // the first adapter in its own list. On this machine that is
+        // `WAN Miniport (Network Monitor)`, which carries nothing: the agent
+        // opened it, reported `sniffing` perfectly truthfully, and delivered
+        // zero frames. A harness that does not pick an adapter is not
+        // exercising the path the app takes.
         if (parsed.type === 'hello') {
+          const interfaces = (parsed as unknown as {
+            interfaces?: { id?: number; label?: string; name?: string }[];
+          }).interfaces ?? [];
+          const wanted = interfaces.find((i) =>
+            `${i.label ?? ''} ${i.name ?? ''}`.toLowerCase().includes(ADAPTER.toLowerCase()));
+          if (wanted === undefined) {
+            console.log(`FAIL  no adapter matching "${ADAPTER}" - the agent offered `
+              + interfaces.map((i) => i.label ?? i.name).join(', '));
+            failures++;
+          } else {
+            chosenLabel = wanted.label ?? wanted.name ?? String(wanted.id);
+            socket.write(encodeFrame(FRAME_JSON, new TextEncoder().encode(
+              JSON.stringify({ type: 'set_interfaces', interfaces: [wanted.id ?? 0] }))));
+          }
           socket.write(encodeFrame(FRAME_JSON, new TextEncoder().encode('{"type":"start_capture"}')));
         }
         // `state: idle` is the agent's last word: it follows the final
@@ -126,6 +205,9 @@ await new Promise<void>((resolve, reject) => {
     }
   });
 });
+
+stopFlood();
+console.log(`        captured on ${chosenLabel}`);
 
 console.log();
 const kinds = control.map((m) => m.type);

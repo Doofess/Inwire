@@ -1010,21 +1010,31 @@ account, and it is the reason this file exists.
 
 ### The agent's lifetime is the app's
 
-ADR 0035. None of this can be asserted from a script: it needs the real SCM, a
-real service, and a person watching a status bar. Each item fails silently.
+ADR 0035. **Most of this is a script now** - `npx tsx
+scripts/electron/agent-live-drive.ts`, which reads the SCM and drives the app
+against the **real installed service** rather than the stub. What follows is
+what it measured here, so a later run has something to disagree with:
 
-- [ ] **Before launching**, `sc query InwireAgent` reports `STOPPED`. On a fresh
-      boot nothing has started it — that is the whole point of demand start, and
-      a `RUNNING` here means the installer registered it `auto`.
+| | |
+|---|---|
+| unelevated `sc start InwireAgent` | exits **1056** (already running) - it reaches the SCM |
+| unelevated `sc stop InwireAgent` | exits **5**, ACCESS_DENIED |
+| the `IU` ACE | `CCLCSWRPLOCRRC` - **`RP` present, `WP` absent** |
+| the app reaching "Agent connected" | **827 ms** from launch |
+
+Those four were the heart of the by-hand block and they are the part a script
+can take. The claim that granting `WP` would let a second interactive user stop
+the first's capture is now a **measurement** rather than a reading of the
+installer.
+
+The rest still needs a person, because it needs the demand-start install this
+machine does not yet have - it still carries the pre-0035 `AUTO_START` service,
+which the drive script says so about rather than failing on.
+
 - [ ] Launch Inwire. **`sc query` reports `RUNNING` within a second or two, and
       no UAC prompt appears.** A prompt means the unelevated `sc start` was
       refused and `serviceStart.ts` escalated — check that the installer's
       `GrantServiceStartToInteractiveUsers` ran.
-- [ ] **Watch the status bar's left group while it launches.** It reaches "Agent
-      connected" without passing through a lingering "Agent not running". The
-      2,000 ms `connectedDelay` that caused exactly that is deleted; if it reads
-      wrong for a beat, something is gating `connected` on the socket again
-      rather than on `hello`.
 - [ ] Close Inwire. **`sc query` reports `STOPPED` within about four seconds** —
       two watchdog ticks at two seconds. It stops itself; nothing runs `sc stop`.
 - [ ] **Kill Inwire from Task Manager** rather than closing it. The service still
@@ -1127,11 +1137,32 @@ the one step a script here cannot take. The wire format, the pipe and the whole
 capture path ARE proven — against the app's own client, with conservation
 asserted — so what is untested is specifically the SCM's side.
 
-Build it with `cargo build --release` in `agent-rs/` (the GNU toolchain; the
-MSVC linker is not installed on this machine, and `dlltool` for the GNU one
-lives in the toolchain's `self-contained` directory rather than on PATH). Then,
-**from an elevated prompt, and with the Python agent's service removed first —
-both register `InwireAgent` and the second install will fail**:
+**Everything up to the SCM's doorstep is measured, and is not repeated here.**
+The runtime, the pipe, the control protocol, the capture path and the idle
+self-stop are driven by `scripts/agent/agent-interop.ts` against the real
+binary - point both at a private pipe with `INWIRE_AGENT_PIPE`, since the
+installed service owns the production name:
+
+```
+$env:INWIRE_AGENT_PIPE = '\\.\pipe\inwire-rs-live'
+Start-Process .\agent-rs\target\release\inwire-agent.exe debug -NoNewWindow
+$env:INWIRE_PROBE_PIPE = '\\.\pipe\inwire-rs-live'
+npx tsx scripts/agent/agent-interop.ts
+```
+
+Measured here: **131,781 frames / 2.88 GB, residual 0, none missing**; idle
+self-stop **2,200 ms** after the last client left; cold start **56 ms** to a
+served pipe. The harness captures on **loopback and generates its own traffic**,
+deliberately - the other adapters carry real traffic and a test must not be the
+thing that captures it.
+
+Build with `cargo build --release` in `agent-rs/` (the GNU toolchain; the MSVC
+linker is not installed on this machine, and `dlltool` for the GNU one lives in
+the toolchain's `self-contained` directory rather than on PATH).
+
+**What is left is the SCM itself**, which needs elevation. From an elevated
+prompt, **with the Python agent's service removed first — both register
+`InwireAgent` and the second install will fail**:
 
 - [ ] `inwire-agent.exe install` exits 0, and `sc qc InwireAgent` reports
       `START_TYPE : 3 DEMAND_START` and `SERVICE_START_NAME : LocalSystem`.

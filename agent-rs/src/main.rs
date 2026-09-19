@@ -62,8 +62,7 @@ fn main() -> ExitCode {
         };
     }
 
-    let verb = args.iter().find(|a| !a.starts_with("--")).cloned();
-    let manual = !args.iter().any(|a| a == "auto");
+    let Parsed { verb, manual } = parse(&args);
 
     match verb.as_deref() {
         Some("install") => report(install(manual)),
@@ -86,6 +85,83 @@ fn main() -> ExitCode {
     }
 }
 
+struct Parsed {
+    verb: Option<String>,
+    manual: bool,
+}
+
+/// Splits the installer's command line into a verb and a start type.
+///
+/// **`--startup` takes a VALUE, and forgetting that is the bug this shipped
+/// with.** The first version took "the first argument that does not begin with
+/// `--`" as the verb, which on the installer's own line -
+/// `--startup manual install` - is **`manual`**. It printed a usage screen and
+/// exited 1 without registering anything.
+///
+/// Which is, almost exactly, the pywin32 failure this file's header describes:
+/// there `getopt` stopped at the first non-option token, so options had to come
+/// first; here options came first and the value was mistaken for the verb. Same
+/// command line, same outcome, opposite cause. Found by running it rather than
+/// by reading it.
+fn parse(args: &[String]) -> Parsed {
+    let mut verb = None;
+    let mut manual = true;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--startup" => {
+                // Its value, consumed here so it can never be read as a verb.
+                // Anything other than `auto` means on-demand, which is the
+                // shipped configuration (ADR 0035).
+                if let Some(value) = rest.next() {
+                    manual = value != "auto";
+                }
+            }
+            other if other.starts_with("--") => {}
+            other if verb.is_none() => verb = Some(other.to_string()),
+            _ => {}
+        }
+    }
+    Parsed { verb, manual }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::parse;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The installer's own line. This is the case that shipped broken.
+    #[test]
+    fn options_before_the_verb() {
+        let p = parse(&args(&["--startup", "manual", "install"]));
+        assert_eq!(p.verb.as_deref(), Some("install"));
+        assert!(p.manual);
+    }
+
+    #[test]
+    fn auto_is_the_only_thing_that_is_not_manual() {
+        assert!(!parse(&args(&["--startup", "auto", "install"])).manual);
+        assert!(parse(&args(&["install"])).manual);
+    }
+
+    /// Either order, because a parser that only accepts one is the trap again.
+    #[test]
+    fn options_after_the_verb() {
+        let p = parse(&args(&["install", "--startup", "auto"]));
+        assert_eq!(p.verb.as_deref(), Some("install"));
+        assert!(!p.manual);
+    }
+
+    #[test]
+    fn a_bare_verb_is_the_verb() {
+        assert_eq!(parse(&args(&["debug"])).verb.as_deref(), Some("debug"));
+        assert_eq!(parse(&args(&["--version"])).verb, None);
+    }
+}
+
 /// Turns a result into an exit code, and says why on stderr.
 ///
 /// The installer reads the code and never the output, so the message is for a
@@ -96,7 +172,12 @@ fn report(result: windows_service::Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            // The SCM's refusals arrive as a fairly opaque "IO error in winapi
+            // call", and the overwhelmingly common reason for one here is that
+            // this was not run elevated. Saying so costs a line and is the
+            // difference between a person retrying correctly and filing a bug.
             eprintln!("[inwire-agent] {error}");
+            eprintln!("[inwire-agent] install, remove, start and stop need an elevated prompt");
             ExitCode::FAILURE
         }
     }
@@ -185,6 +266,10 @@ fn stop() -> windows_service::Result<()> {
 /// surprising once and then it is the thing being tested.
 fn debug() -> windows_service::Result<()> {
     let shutdown = Arc::new(Shutdown::new());
-    eprintln!("[inwire-agent] {} - foreground; Ctrl+C to stop", inwire_agent::VERSION);
+    eprintln!(
+        "[inwire-agent] {} - foreground on {}; Ctrl+C to stop",
+        inwire_agent::VERSION,
+        runtime::pipe_name(),
+    );
     runtime::run(shutdown).map_err(windows_service::Error::Winapi)
 }
