@@ -15,7 +15,7 @@ import {
 } from '../../services/interfacePrefs';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
 import { Section, SettingRow } from './settingsLayout';
-import { AVERAGE_FRAME_BYTES, framesForBudget } from '../../services/bufferBudget';
+import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
 
 /**
  * Settings -> Interface: how the app looks and behaves as a UI.
@@ -68,11 +68,25 @@ const REFRESH_OPTIONS = [
  * 74 MB: the setting was rationing a resource nobody was short of, in a unit
  * that says nothing about the one they are.
  */
+/**
+ * 'Auto' leads, because it is the answer for almost every machine.
+ *
+ * The explicit sizes stay as overrides rather than being replaced: somebody
+ * running a capture beside a VM has a reason to hold the buffer down that the
+ * machine's RAM cannot tell them.
+ *
+ * **The value is the string 'auto', and the handler no longer does `Number(v)`
+ * unconditionally.** It did, which turns 'auto' into `NaN` - and `Segmented` is
+ * a Radix `RadioGroup`, so a `NaN` budget would have rendered a control with
+ * nothing selected AND written a `NaN` into the stored preference.
+ */
 const BUFFER_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
   { value: String(128 * 1024 * 1024), label: '128 MB' },
   { value: String(256 * 1024 * 1024), label: '256 MB' },
   { value: String(512 * 1024 * 1024), label: '512 MB' },
   { value: String(1024 * 1024 * 1024), label: '1 GB' },
+  { value: String(2048 * 1024 * 1024), label: '2 GB' },
 ];
 
 
@@ -185,7 +199,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
           label="Buffer size"
           description={
             `Memory the captured frames may use before the oldest are dropped - about `
-            + `${framesForBudget(perf.packetBufferBytes, AVERAGE_FRAME_BYTES).toLocaleString()} packets at this `
+            + `${framesForBudget(currentBufferBudget(perf.packetBufferBytes), AVERAGE_FRAME_BYTES).toLocaleString()} packets at this `
             + `capture's average. A smaller buffer makes every calculation in the app `
             + `proportionally cheaper. Frame data and analysis state are held separately and `
             + `add roughly 60 MB on top of this.`
@@ -194,7 +208,9 @@ export const InterfaceSettingsPanel: React.FC = () => {
           <Segmented
             ariaLabel="Buffer size"
             value={String(perf.packetBufferBytes)}
-            onValueChange={(v) => patchPerf({ packetBufferBytes: Number(v) })}
+            onValueChange={(v) => patchPerf({
+              packetBufferBytes: v === 'auto' ? 'auto' : Number(v),
+            })}
             options={BUFFER_OPTIONS}
           />
         </SettingRow>

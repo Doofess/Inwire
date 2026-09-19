@@ -35,12 +35,29 @@ import type { AgentLinkStatus } from '../src/services/agentLink';
 export const AGENT_PIPE_PATH = '\\\\.\\pipe\\inwire-agent';
 
 /**
- * Unchanged from the Worker's old `RECONNECT_MS`.
+ * The settled cadence, once the fast attempts have not found it.
  *
- * The retry moved here with the handle, and the cadence did not move with it:
- * the header's "connecting…" is meant to behave exactly as it did.
+ * Unchanged from the Worker's old `RECONNECT_MS`, and it is still what a
+ * machine with no agent installed pays: a retry every three seconds for as
+ * long as the window is open.
  */
 const RECONNECT_MS = 3000;
+
+/**
+ * What the first four retries wait instead.
+ *
+ * The agent is demand-start now, so the ordinary case at launch is a pipe that
+ * is not there **yet** - main has just asked the SCM for it and the service is
+ * coming up. A flat three seconds meant the app spent most of a service start
+ * deliberately not looking, and the person watched the status bar say the agent
+ * was missing for the whole of it.
+ *
+ * Doubling from 150 ms covers a warm start inside the first attempt or two and
+ * reaches the settled cadence in 2.25 s, which is under the time the SCM itself
+ * takes on a cold one. It is bounded rather than unbounded-exponential because
+ * the failure this must not create is a process that hammers a pipe for ever.
+ */
+const FAST_RETRY_MS = [150, 300, 600, 1200];
 
 /**
  * A connection this short did not do any work.
@@ -79,6 +96,14 @@ export class PipeTransport {
   private connectedAt = 0;
   /** Timestamps of recent connections that died almost immediately. */
   private shortLived: number[] = [];
+  /**
+   * Retries since the last connection that lasted, indexing `FAST_RETRY_MS`.
+   *
+   * Reset by a connection that **survived** rather than by one that opened: a
+   * service dying a moment after accepting would otherwise keep the fast steps
+   * armed for ever, which is a crash loop retried four times a second.
+   */
+  private attempt = 0;
 
   constructor(
     private readonly events: PipeEvents,
@@ -89,6 +114,10 @@ export class PipeTransport {
   /** Connect, and keep reconnecting until `close`. */
   open(): void {
     this.wanted = true;
+    // Somebody asked, so this is a fresh start however the last one ended.
+    // `recycle()` is the caller that makes this matter: a driver has just been
+    // installed and the reconnect must not inherit a backed-off cadence.
+    this.attempt = 0;
     this.openSocket();
   }
 
@@ -160,6 +189,12 @@ export class PipeTransport {
       // not also answer, differently.
       if (this.connectedAt !== 0 && Date.now() - this.connectedAt < SHORT_CONNECTION_MS) {
         this.shortLived.push(Date.now());
+      } else if (this.connectedAt !== 0) {
+        // A connection that lasted. The next drop is a fresh event rather than
+        // the continuation of a failing start, so the fast steps are armed
+        // again - which is what makes the agent's own idle stop and restart
+        // cost a fraction of a second instead of three of them.
+        this.attempt = 0;
       }
       this.connectedAt = 0;
       if (this.socket === socket) this.socket = null;
@@ -201,10 +236,17 @@ export class PipeTransport {
 
   private scheduleRetry(): void {
     if (!this.wanted || this.retry !== null) return;
+    // `reconnectMs` is still the floor a caller can override - `agent-link.ts`
+    // drives this with a short one - so the fast steps are capped by it rather
+    // than replacing it. Without that a test asking for a 20 ms cadence would
+    // silently get 150.
+    const step = FAST_RETRY_MS[this.attempt];
+    const wait = step === undefined ? this.reconnectMs : Math.min(step, this.reconnectMs);
+    this.attempt += 1;
     this.retry = setTimeout(() => {
       this.retry = null;
       this.openSocket();
-    }, this.reconnectMs);
+    }, wait);
   }
 
   private closeSocket(): void {

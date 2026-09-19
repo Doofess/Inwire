@@ -10,7 +10,7 @@ import {
   type ColumnVisibility,
 } from '../lib/packetColumns';
 import { FIELD_BY_ABBREV } from './dissect/fieldRegistry';
-import { BUDGET_CHOICES, DEFAULT_BUFFER_BUDGET_BYTES } from './bufferBudget';
+import { BUDGET_CHOICES, type BufferBudgetSetting } from './bufferBudget';
 
 const TIME_FORMATS: readonly TimeFormat[] = ['relative', 'clock', 'date', 'utc', 'delta'];
 
@@ -225,12 +225,18 @@ export interface PerformancePrefs {
    * See `services/bufferBudget.ts` for what the budget governs and what it
    * deliberately does not.
    */
-  packetBufferBytes: number;
+  packetBufferBytes: BufferBudgetSetting;
 }
 
 export const PERFORMANCE_DEFAULTS: PerformancePrefs = {
   dashboardRefreshMs: 500,
-  packetBufferBytes: DEFAULT_BUFFER_BUDGET_BYTES,
+  // **'auto', not a number.** A fixed 512 MB was a figure chosen for no machine
+  // in particular; `autoBufferBudget` reads the machine's RAM and V8's heap
+  // limit and answers for the one the app is on. Stored as a word rather than
+  // as whatever that resolves to today, because "size it for me" and "I chose
+  // this number" are different intentions and only the first follows the
+  // machine when the app moves to another one.
+  packetBufferBytes: 'auto',
 };
 
 export function normalizePerformance(raw: unknown): PerformancePrefs | null {
@@ -250,10 +256,12 @@ export function normalizePerformance(raw: unknown): PerformancePrefs | null {
     // answer: the old numbers are frame counts, and reading 50000 as 50 kB
     // would give someone a buffer of about seventy frames.
     packetBufferBytes:
-      typeof v.packetBufferBytes === 'number' &&
-      (BUDGET_CHOICES as readonly number[]).includes(v.packetBufferBytes)
-        ? v.packetBufferBytes
-        : PERFORMANCE_DEFAULTS.packetBufferBytes,
+      v.packetBufferBytes === 'auto'
+        ? 'auto'
+        : typeof v.packetBufferBytes === 'number' &&
+          (BUDGET_CHOICES as readonly number[]).includes(v.packetBufferBytes)
+          ? v.packetBufferBytes
+          : PERFORMANCE_DEFAULTS.packetBufferBytes,
   };
 }
 

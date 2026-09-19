@@ -93,12 +93,11 @@ Revised order: 1 -> 1b -> 2a -> 3 -> 4 -> 5 -> (2b alongside) -> 6 -> 7 -> 8 -> 
   itself define (0020, enforced by `scripts/dissect/wireshark-abbrevs.ts`).
 - No new `async` in the dissection path (0003).
 - No fixture bytes, names or addresses in the diff (0004).
-- Agent protocol change => version bumped in all **four** places: `local-agent/agent.py`,
-  `REQUIRED_AGENT_VERSION` in `src/services/agentProtocol.ts`, and `MyAgentVersion` in
-  **both** `installer/setup.iss` (the one that ships) and `local-agent/installer/setup.iss`
-  (the legacy agent-only one). It was three until the unified installer carried the stamp
-  too. Two things enforce it and only one of them runs on every gate:
-  `local-agent/test_protocol.py` reads the legacy `.iss` and fires only when somebody runs
-  it, because `scripts/check.ts` discovers TypeScript; `scripts/agent/installer-versions.ts`
-  covers both `.iss` files and runs under `npm run check`. `AGENT_VERSION` is an ordering
-  and only ever climbs - reset it and an older agent reads as newer than required.
+- Agent protocol change => bump `version` in **`package.json`**, then
+  `npm run sync:version`. The agent's version is the product's (0035), so there is one
+  number: it was four places, and before that three, held by two scripts covering
+  different subsets. `scripts/agent/version.ts` holds every derived copy to
+  `package.json` under `npm run check`, including the two deletions that keep it
+  singular. It is still an ordering and only ever climbs - reset it and an older agent
+  reads as newer than required, which shows as "not connected" rather than "update your
+  agent".

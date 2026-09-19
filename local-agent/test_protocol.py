@@ -37,16 +37,23 @@ def check_true(name, condition):
     check(name, bool(condition), True)
 
 
-# --- agent version stays in sync across all three locations ---
-# Any change to the agent's wire protocol or behavior must bump
-# AGENT_VERSION, and all three locations below must move together. This
-# reads the other two files by regex (resolved relative to this file's own
-# location, not the CWD) rather than pinning a literal, so a legitimate
-# version bump doesn't make this suite fail - it fails only if the three
-# values drift apart, or if one of them isn't a MAJOR.MINOR.PATCH string.
+# --- the agent's version IS the product's version ---
+#
+# It used to be its own number, locked across six stamps by two scripts that
+# covered different subsets of them - and the subset THIS file covered was the
+# legacy agent-only installer, which nothing builds. ADR 0035 collapsed the two
+# numbers into one authored in package.json, which deletes the drift question
+# rather than checking it more carefully.
+#
+# What is left here is the half a Python test is the right place for: that the
+# agent reports the product's version, and that it has not gone backwards. The
+# full singularity check - every stamp, both installers, the generated file -
+# is `scripts/agent/version.ts`, which runs on every `npm run check`. This one
+# is Python, and `scripts/check.ts` discovers only TypeScript, so it fires only
+# when somebody runs it; that asymmetry is why the authoritative check lives
+# there and not here.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _AGENT_PROTOCOL_TS = os.path.join(_REPO_ROOT, "src", "services", "agentProtocol.ts")
-_SETUP_ISS = os.path.join(_REPO_ROOT, "local-agent", "installer", "setup.iss")
 
 
 def _read_required_text(path):
@@ -65,43 +72,27 @@ def _extract(pattern, text, path):
 
 
 _ts_text = _read_required_text(_AGENT_PROTOCOL_TS)
-_iss_text = _read_required_text(_SETUP_ISS)
-
 _ts_version = _extract(r"REQUIRED_AGENT_VERSION\s*=\s*'([^']+)'", _ts_text, _AGENT_PROTOCOL_TS)
-# MyAgentVersion, not MyAppVersion. The installer carries two numbers since the
-# app and the agent started shipping in one: the agent's is a wire-protocol
-# ordering that only climbs, and the product's is what Windows compares to
-# decide whether an install is an upgrade. They no longer move together - a UI
-# release ships an installer and no new agent - and this lock is the protocol
-# one, which is the one a mismatch actually breaks.
-_iss_version = _extract(r'#define\s+MyAgentVersion\s+"([^"]+)"', _iss_text, _SETUP_ISS)
 
-check("agentProtocol.ts REQUIRED_AGENT_VERSION matches agent.py AGENT_VERSION", _ts_version, agent.AGENT_VERSION)
-check("setup.iss MyAgentVersion matches agent.py AGENT_VERSION", _iss_version, agent.AGENT_VERSION)
-check_true(
-    "agent.py AGENT_VERSION is MAJOR.MINOR.PATCH",
-    re.fullmatch(r"\d+\.\d+\.\d+", agent.AGENT_VERSION) is not None,
-)
-
-# The product's own number, which nothing above this line constrains. Asserted
-# because the failure it prevents is the quiet one: package.json is what
-# electron-builder stamps into the exe and what the About box reads, and an
-# installer whose AppVersion disagrees with the binary it installs makes every
-# later upgrade decision unreadable.
 _PACKAGE_JSON = os.path.join(_REPO_ROOT, "package.json")
 _product_version = json.loads(_read_required_text(_PACKAGE_JSON))["version"]
-_iss_product = _extract(r'#define\s+MyAppVersion\s+"([^"]+)"', _iss_text, _SETUP_ISS)
-check("setup.iss MyAppVersion matches package.json", _iss_product, _product_version)
+
+# The one that matters at run time: what the agent puts in `hello` is what the
+# app compares against REQUIRED_AGENT_VERSION. If the generated module has gone
+# stale, this is where a running agent disagrees with the app that shipped it.
+check("the agent reports the product's version", agent.AGENT_VERSION, _product_version)
+check("agentProtocol.ts REQUIRED_AGENT_VERSION matches package.json", _ts_version, _product_version)
 check_true(
-    "the product version is MAJOR.MINOR.PATCH",
-    re.fullmatch(r"\d+\.\d+\.\d+", _product_version) is not None,
+    "the version is MAJOR.MINOR.PATCH",
+    re.fullmatch(r"\d+\.\d+\.\d+", agent.AGENT_VERSION) is not None,
 )
-# The two are independent, and the protocol one must never be reset to sit
-# under an agent that is already installed. Stated as an assertion rather than
-# a comment because "only ever climbs" is exactly the rule a release under time
-# pressure breaks.
+# Never reset below an agent that is already installed out there. Stated as an
+# assertion rather than a comment because "only ever climbs" is exactly the rule
+# a release under time pressure breaks - and collapsing two numbers into one is
+# the single most likely way to break it, since the surviving number has to be
+# at least the highest either half ever shipped.
 check_true(
-    "the agent's protocol version has not been reset below what has shipped",
+    "the version has not been reset below what has already shipped",
     tuple(int(part) for part in agent.AGENT_VERSION.split(".")) >= (3, 9, 0),
 )
 
@@ -1089,8 +1080,9 @@ try:
     try:
         agent.ORPHAN_CHECK_SECONDS = 0.01
 
-        async def _run_watchdog_once():
-            task = asyncio.ensure_future(agent.watch_for_orphaned_capture())
+        async def _run_watchdog_once(may_exit=False):
+            task = asyncio.ensure_future(
+                agent.watch_for_orphaned_capture(may_exit=may_exit))
             await asyncio.sleep(0.05)
             task.cancel()
 
@@ -1105,6 +1097,63 @@ try:
         asyncio.run(_run_watchdog_once())
         check("watchdog stops capture once no clients remain",
               agent.sniffer.is_sniffing(), False)
+
+        # --- the idle exit (ADR 0035) ---
+        #
+        # The agent stops the whole process, not just the capture, once the app
+        # has gone. Everything below drives `watch_for_orphaned_capture` with a
+        # shutdown event in place and reads whether it was set, because "did the
+        # service stop" is not otherwise observable from inside it.
+        _prev_grace = agent.FIRST_CLIENT_GRACE_SECONDS
+
+        async def _idle_run(may_exit, seconds, connected=False):
+            agent._shutdown_event = asyncio.Event()
+            agent._shutdown_loop = asyncio.get_running_loop()
+            if connected:
+                _watch_srv.connections.add(object())
+            else:
+                _watch_srv.connections.clear()
+            task = asyncio.ensure_future(
+                agent.watch_for_orphaned_capture(may_exit=may_exit))
+            await asyncio.sleep(seconds)
+            task.cancel()
+            was_set = agent._shutdown_event.is_set()
+            agent._shutdown_event = None
+            agent._shutdown_loop = None
+            return was_set
+
+        # The grace period is what keeps a demand-started service alive long
+        # enough for the app that started it to connect. Without it the agent
+        # kills itself before Inwire's first retry lands, which reads to
+        # `pipeTransport.ts` as a crash loop.
+        agent.FIRST_CLIENT_GRACE_SECONDS = 5.0
+        check("a fresh agent does not exit before its first client",
+              asyncio.run(_idle_run(True, 0.08)), False)
+
+        # Once the grace has passed, an agent nothing ever connected to does
+        # stop - an app that died between `sc start` and its first connection
+        # must not leave a capture service running for ever.
+        agent.FIRST_CLIENT_GRACE_SECONDS = 0.0
+        check("...but it does exit once the grace period has passed",
+              asyncio.run(_idle_run(True, 0.08)), True)
+
+        # A connected client holds it open, which is the ordinary running state.
+        check("a connected client keeps the agent alive",
+              asyncio.run(_idle_run(True, 0.08, connected=True)), False)
+
+        # The macOS/Linux tarball has no SCM to start it again on demand, so
+        # exiting there means never coming back. The orphan check still runs -
+        # that guarantee is unconditional - but the process must not stop.
+        check("the WebSocket agent never exits on idleness",
+              asyncio.run(_idle_run(False, 0.08)), False)
+
+        # `IDLE_EXIT_TICKS` is a number with a specific job: absorbing
+        # `AgentPipeLink.recycle()`, which closes and reopens the pipe. One tick
+        # would let a reconnect that takes milliseconds stop the service.
+        check_true("idleness must persist for more than one tick",
+                   agent.IDLE_EXIT_TICKS >= 2)
+
+        agent.FIRST_CLIENT_GRACE_SECONDS = _prev_grace
     finally:
         agent.agent = _prev_agent
         agent.ORPHAN_CHECK_SECONDS = 2

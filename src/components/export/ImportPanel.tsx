@@ -6,7 +6,7 @@ import { ImportFailure } from '../../services/exportSchema';
 import { importAnyFile, IMPORT_ACCEPT } from '../../services/tabularImport';
 import { performanceStore } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
-import { AVERAGE_FRAME_BYTES, framesForBudget } from '../../services/bufferBudget';
+import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
 
 /**
  * The Import half of the Import/Export centre.
@@ -70,7 +70,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
       // the rest is on disk. Without one it is still a cap on the import, and
       // `importAnyFile` says so in a note.
       const outcome = await importAnyFile(file, {
-        maxFrames: framesForBudget(perf.packetBufferBytes, AVERAGE_FRAME_BYTES),
+        maxFrames: framesForBudget(currentBufferBudget(perf.packetBufferBytes), AVERAGE_FRAME_BYTES),
         onBatch: onImportBatch,
       });
       if (outcome.ok === false) {

@@ -90,8 +90,17 @@ checkTrue('...and writes a pairing token', installer.includes('token_hex'));
 checkTrue('...and does not embed a copy of the agent',
   !installer.includes('AGENT_VERSION') && !installer.includes('async def register'));
 
-const version = /AGENT_VERSION = "([\d.]+)"/.exec(agentSource)?.[1];
+// `agent_version.py`, not `agent.py`: the literal moved there when the agent's
+// version became the product's (ADR 0035), and `agent.py` imports it. That
+// module is picked up by `LOCAL_MODULES` automatically, and the import walk
+// above is what proves it actually reaches the tarball - a Unix agent missing
+// it does not start at all, because the import is at module scope.
+const versionSource = readFileSync(join(agentDir, 'agent_version.py'), 'utf8');
+const version = /AGENT_VERSION = "([\d.]+)"/.exec(versionSource)?.[1];
 checkTrue('the agent declares a version', typeof version === 'string');
+checkTrue('...and agent.py imports it rather than declaring its own',
+  /^from agent_version import AGENT_VERSION/m.test(agentSource)
+  && !/^AGENT_VERSION = /m.test(agentSource));
 
 // --- is the SHIPPED archive current? ---------------------------------------------
 //

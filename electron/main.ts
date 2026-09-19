@@ -160,8 +160,15 @@ const store = new CaptureStoreHost(captureDirectory());
  * constraint exactly: while the transport was a WebSocket the socket *had* to
  * be in the renderer, because `is_origin_allowed` refused a connection with no
  * `Origin` and only a renderer sends one.
+ *
+ * `INWIRE_AGENT_PIPE` overrides the pipe name, and that is not a debugging
+ * nicety either. `scripts/electron/smoke.ts` has to serve a stub agent, and on
+ * a development machine the real service already holds the production name -
+ * so without an override the smoke test's only honest option is to SKIP, which
+ * is exactly what it did. It follows the four existing `INWIRE_*` variables and
+ * is read once here rather than baked into a build.
  */
-const agent = new AgentPipeLink();
+const agent = new AgentPipeLink(process.env.INWIRE_AGENT_PIPE || undefined);
 
 /**
  * Everything that updates, in one place.
@@ -258,6 +265,12 @@ async function start(): Promise<void> {
   registerAppProtocol();
   hardenSession(session.defaultSession);
   Menu.setApplicationMenu(buildMenu({ packaged: app.isPackaged }));
+  // Before the window, and deliberately not awaited. The agent is demand-start
+  // (ADR 0035), so something has to ask for it, and asking here is what makes
+  // the link land while the window is still painting rather than after a
+  // renderer has mounted, found the pipe shut, diagnosed it and offered a
+  // button. A slow SCM must delay the agent, never the window.
+  agent.ensureRunning();
   await createWindow();
 
   app.on('activate', () => {

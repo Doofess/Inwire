@@ -199,47 +199,58 @@ export function useAgentConnection(host: AgentConnectionHost) {
     // second thing to keep correct.
     if (!agentLinkEnabled) return;
 
-    let connectedDelay: NodeJS.Timeout | null = null;
     // A pre-Task-4 agent never sends `hello` at all, so its absence within
     // this window (started on every fresh socket open, cleared the moment
     // `hello` arrives) is the only way to flag it as incompatible instead of
     // silently showing a normal "Agent Connected" with zero packets ever
     // arriving.
     let helloTimeout: NodeJS.Timeout | null = null;
-    // Only the very first connection attempt shows "Connecting..." - once we
-    // know the agent isn't there, silent background retries every 3s keep
-    // the status calmly on "disconnected" instead of flashing "Connecting"
-    // on every retry (which read as a repeating loop when the agent was
-    // never running to begin with).
-    let isFirstAttempt = true;
+    // Whether a retry should be silent.
+    //
+    // This replaces a latched `isFirstAttempt`, and the difference is that it
+    // is **cleared by a working connection**. Latched once, it meant every
+    // attempt after the first was invisible for the life of the window - so
+    // the agent stopping and restarting, which is now the ordinary case
+    // (ADR 0035), left the bar saying "disconnected" all the way through a
+    // reconnect that was going fine. What the latch was right about is kept:
+    // once we know the agent is not there, three-second retries must not flash
+    // "Connecting" for ever.
+    let quietRetry = false;
 
     pipeline.onStatus = (status) => {
       if (status === 'connecting') {
-        if (isFirstAttempt) setAgentStatus("connecting");
+        if (!quietRetry) setAgentStatus("connecting");
         return;
       }
       if (status === 'connected') {
-        console.log("[Inwire] Connected to Local Agent");
-        // Hold "Connecting..." for a beat after the handshake succeeds so
-        // the button doesn't flash instantly - and so a socket that drops
-        // right back off (e.g. a page reload racing the connection) reads
-        // as still-connecting rather than a confusing connect/disconnect flicker.
-        if (connectedDelay) clearTimeout(connectedDelay);
-        connectedDelay = setTimeout(() => setAgentStatus("connected"), 2000);
-        setAgentIncompatible(false);
+        // **Not `connected` yet, and this is the fix rather than an omission.**
+        // An accepted socket says a pipe answered; it does not say the thing
+        // answering speaks this protocol or knows what its own state is. The
+        // status moves on `hello`, which is the message that carries both.
+        //
+        // What used to be here was a 2,000 ms timer to `connected`, which on a
+        // successful *retry* left the bar reading "Agent not running" for two
+        // seconds after `hello` had already been processed - the app knew and
+        // was waiting out a timer to say so.
+        console.log("[Inwire] Pipe open - waiting for hello");
         if (helloTimeout) clearTimeout(helloTimeout);
         helloTimeout = setTimeout(() => {
           console.warn("[Inwire] No hello received from agent within 5s - treating it as incompatible.");
           setAgentIncompatible(true);
+          // The socket is up and the agent is not answering, which is neither
+          // "connecting" nor "connected". Without this the bar sits on
+          // "Connecting..." for ever against an agent that will never reply,
+          // and `agentIncompatible` reaches no surface that says why.
+          setAgentStatus("error");
+          quietRetry = true;
         }, 5000);
         return;
       }
 
-      if (connectedDelay) { clearTimeout(connectedDelay); connectedDelay = null; }
       if (helloTimeout) { clearTimeout(helloTimeout); helloTimeout = null; }
       if (status === 'error') {
         console.warn("[Inwire] Agent link failed. Agent might not be running.");
-        if (isFirstAttempt) setAgentStatus("error");
+        if (!quietRetry) setAgentStatus("error");
       } else {
         console.log("[Inwire] Disconnected from Local Agent. Reconnecting in 3s...");
         setAgentStatus("disconnected");
@@ -262,7 +273,9 @@ export function useAgentConnection(host: AgentConnectionHost) {
         setAgentError(null);
         setAgentNpcapAccess(null);
       }
-      isFirstAttempt = false;
+      // Every path to here is a connection that did not work. The next attempt
+      // is silent; `hello` is what makes it loud again.
+      quietRetry = true;
     };
 
     pipeline.onAgentMessage = (message) => {
@@ -271,6 +284,11 @@ export function useAgentConnection(host: AgentConnectionHost) {
           clearTimeout(helloTimeout);
           helloTimeout = null;
         }
+        // The one message that proves the link works, so it is the one that
+        // moves the status. A reconnect after this is worth showing again.
+        setAgentStatus("connected");
+        quietRetry = false;
+        console.log("[Inwire] Connected to Local Agent");
         setAgentIncompatible(false);
         setAgentError(null);
         setAgentVersion(message.version);
@@ -439,7 +457,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
     pipeline.connect();
 
     return () => {
-      if (connectedDelay) clearTimeout(connectedDelay);
       if (helloTimeout) clearTimeout(helloTimeout);
       pipeline.onStatus = () => {};
       pipeline.onAgentMessage = () => {};

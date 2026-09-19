@@ -97,7 +97,7 @@ export function diagnoseAgent(input: AgentHealthInput): AgentHealth {
       summary: 'The capture agent is disabled',
       detail: 'Its Windows service is set to Disabled, so nothing can start it - '
         + 'not this app and not a reboot. An administrator has to set it back to '
-        + 'Automatic in Services.',
+        + 'Manual in Services.',
       canStart: false,
     };
   }
@@ -107,8 +107,13 @@ export function diagnoseAgent(input: AgentHealthInput): AgentHealth {
   return {
     kind: 'stopped',
     summary: 'The capture agent is not running',
+    // The agent is demand-start (ADR 0035) and Inwire asks for it on launch
+    // without a prompt, so reaching this state means those attempts failed.
+    // The copy no longer promises a UAC prompt unconditionally - it is now the
+    // fallback for one specific refusal rather than the only route there is.
     detail: 'Its service is installed and enabled but nothing is listening. '
-      + 'Starting it needs administrator rights, so Windows will ask.',
+      + 'Inwire starts it on launch; if that did not work, starting it here may '
+      + 'need administrator rights.',
     canStart: true,
   };
 }

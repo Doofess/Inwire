@@ -134,9 +134,22 @@ let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
  */
 let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof electron.launch>>['firstWindow']>> | null = null;
 
+/**
+ * A pipe of this run's own, rather than the name the installed service holds.
+ *
+ * This is what stopped the smoke test being a SKIP on the one machine it most
+ * needed to run on. A development machine has the real `InwireAgent` service
+ * installed, the service owns `\\.\pipe\inwire-agent`, and a stub that cannot
+ * bind it had nothing honest to do but skip - so the script that exists to
+ * catch the three bugs nothing else here can catch was silently not running.
+ *
+ * The pid makes it unique, so two checks at once do not collide either.
+ */
+const SMOKE_PIPE = `\\\\.\\pipe\\inwire-smoke-${process.pid}`;
+
 try {
   try {
-    agent = await startStubAgent();
+    agent = await startStubAgent(SMOKE_PIPE);
   } catch (error) {
     // Almost always a `serveStub.ts` left running from driving the app by
     // hand. The raw `EADDRINUSE` stack out of `node:net` says none of that,
@@ -144,8 +157,12 @@ try {
     // Playwright-adjacent noise - which cost an afternoon of thinking a real
     // regression had landed.
     if ((error as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
-      skip('something else is already serving \\\\.\\pipe\\inwire-agent - '
-        + 'stop `serveStub.ts`, or the InwireAgent service, and run this again');
+      // Now genuinely unexpected: the name carries this process's own pid, so
+      // nothing else should ever hold it. Kept because the raw `EADDRINUSE`
+      // stack out of `node:net` names nothing, and a bare FAIL with a page of
+      // Playwright-adjacent noise once cost an afternoon of thinking a real
+      // regression had landed.
+      skip(`something else is already serving ${SMOKE_PIPE}, which should be impossible`);
     }
     throw error;
   }
@@ -159,7 +176,9 @@ try {
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-smoke-'));
   app = await electron.launch({
     args: ['.'],
-    env: { ...process.env, INWIRE_USER_DATA: profile },
+    // `INWIRE_AGENT_PIPE` points the app at this run's stub instead of the
+    // installed service's pipe - the other half of the SKIP this deleted.
+    env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: SMOKE_PIPE },
   });
 
   const page = await app.firstWindow();

@@ -30,16 +30,130 @@ import type { Packet } from '../types/packet';
  * length of a capture until the buffer trimmed itself to nothing.
  */
 
-/** Memory the summaries may use. The default; the user picks from `BUDGET_CHOICES`. */
+/**
+ * The fallback when the machine cannot be measured. Not the usual answer.
+ *
+ * `'auto'` is what the app ships with (`PERFORMANCE_DEFAULTS`), and this is
+ * where `autoBufferBudget` lands when the host reports nothing - see the
+ * `null` rule there.
+ */
 export const DEFAULT_BUFFER_BUDGET_BYTES = 512 * 1024 * 1024;
 
-/** What the settings panel offers, in bytes. */
+/** What the settings panel offers as explicit overrides, in bytes. */
 export const BUDGET_CHOICES = [
   128 * 1024 * 1024,
   256 * 1024 * 1024,
   512 * 1024 * 1024,
   1024 * 1024 * 1024,
+  2048 * 1024 * 1024,
 ] as const;
+
+/** Below this the buffer holds too few frames to scroll usefully. */
+export const BUDGET_FLOOR_BYTES = 128 * 1024 * 1024;
+
+/**
+ * Share of the machine's RAM the summaries may take.
+ *
+ * An eighth. A packet analyzer is not the only thing running, and the buffer is
+ * a *window* onto a capture that is entirely on disk - frames leaving it are
+ * still in the list and still readable (ADR 0025), so a bigger window buys
+ * scrollback without a filter scan and nothing else. Trading half the machine
+ * for that would be a bad deal even on a machine that has it.
+ */
+export const BUDGET_MEMORY_SHARE = 1 / 8;
+
+/**
+ * Share of V8's heap limit the summaries may take.
+ *
+ * **This is the answer to "why not as much RAM as the user has".** The buffer
+ * lives in the renderer's JavaScript heap, and that heap has a hard wall V8
+ * sets when it creates the isolate: 4,192 MB by default on 64-bit, and not
+ * movable afterwards - `electron/store/heapGuard.ts` records the whole
+ * `--max-old-space-size` measurement that proved it. Past the wall V8 does not
+ * degrade, it **aborts**: `MarkCompactCollector: young object promotion failed`
+ * into a log nobody is reading, and the window disappears.
+ *
+ * So the real ceiling was never the machine's RAM, and raising the old 1 GB cap
+ * needed two things rather than one: this share, and a guard that stands down
+ * deliberately before V8 aborts (`rendererHeapGuard.ts`). Half, because the
+ * summaries are the largest pool but not the only one - raw bytes (~29 MB),
+ * trackers (~28 MB), React's own tree, and the hex dump's virtualized rows all
+ * live in the same heap, and a collector needs headroom to work in.
+ */
+export const BUDGET_HEAP_SHARE = 0.5;
+
+/**
+ * What this machine should give the buffer.
+ *
+ * Pure, and takes its two facts as arguments, so `scripts/session/buffer-budget.ts`
+ * can drive every machine shape without being on one. Both come from the
+ * preload (`window.inwire`), which reads them out of Electron's `process` shim.
+ *
+ * **A `null` reading falls back rather than computing from zero.** The
+ * arithmetic below multiplies by a fraction, so a zero would produce a budget
+ * of nothing and a capture that trimmed every frame it took - a confident wrong
+ * answer of exactly the kind `provesAbsent` exists to prevent elsewhere. Not
+ * knowing how much memory a machine has is not knowing it has none.
+ */
+export function autoBufferBudget(
+  systemMemoryBytes: number | null,
+  heapLimitBytes: number | null,
+): number {
+  if (!systemMemoryBytes || systemMemoryBytes <= 0) return DEFAULT_BUFFER_BUDGET_BYTES;
+
+  const fromMemory = systemMemoryBytes * BUDGET_MEMORY_SHARE;
+  // The heap is a wall rather than a preference, so it caps the answer instead
+  // of averaging with it. Unknown means uncapped by this term - the floor and
+  // the memory share still bound it, and the guard is the real backstop.
+  const fromHeap = heapLimitBytes && heapLimitBytes > 0
+    ? heapLimitBytes * BUDGET_HEAP_SHARE
+    : Number.POSITIVE_INFINITY;
+
+  const budget = Math.min(fromMemory, fromHeap);
+  // Rounded to whole megabytes so the settings panel never shows a figure like
+  // "1,073.7 MB", and floored so a small machine still gets a usable window.
+  return Math.max(BUDGET_FLOOR_BYTES, Math.floor(budget / (1024 * 1024)) * 1024 * 1024);
+}
+
+/**
+ * What the user chose, or what the machine says.
+ *
+ * `'auto'` is a stored value rather than the absence of one, because "size it
+ * for me" and "I picked 512 MB, which happens to be what auto would have said"
+ * are different intentions: the first follows the machine if the app moves to
+ * another one, and the second does not.
+ */
+export type BufferBudgetSetting = number | 'auto';
+
+export function resolveBufferBudget(
+  setting: BufferBudgetSetting,
+  systemMemoryBytes: number | null,
+  heapLimitBytes: number | null,
+): number {
+  return setting === 'auto'
+    ? autoBufferBudget(systemMemoryBytes, heapLimitBytes)
+    : setting;
+}
+
+/**
+ * The same thing, reading the two facts off the preload bridge.
+ *
+ * The convenience form, because three call sites want the resolved number and
+ * none of them want to know where the machine's RAM comes from. `window` is
+ * touched rather than imported, so this module still imports nothing at all and
+ * `scripts/capture/node-safe.ts` stays satisfied - and the `typeof` guard is
+ * what lets an assertion script import it under plain `tsx`, where there is no
+ * window and both facts are correctly unknown.
+ */
+export function currentBufferBudget(setting: BufferBudgetSetting): number {
+  if (typeof window === 'undefined') return resolveBufferBudget(setting, null, null);
+  const host = window.inwire;
+  return resolveBufferBudget(
+    setting,
+    host?.systemMemoryBytes ?? null,
+    host?.heapLimitBytes ?? null,
+  );
+}
 
 /**
  * How much free disk a capture stops itself at.

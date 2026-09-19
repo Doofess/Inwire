@@ -30,6 +30,10 @@ const repoRoot = join(here, '..');
  */
 const NOT_TESTS: Record<string, string> = {
   'gen-oui.ts': 'generator; downloads ~5MB from IEEE',
+  'agent/sync-version.ts':
+    'generator; WRITES local-agent/agent_version.py from package.json. '
+    + 'A check suite that rewrites its own inputs cannot fail - '
+    + '`scripts/agent/version.ts` is the half that asserts',
   'electron/disk-drive.ts': 'drives a 180,000-frame capture to reach the disk path; ~2 minutes, run by hand',
   'electron/update-center-drive.ts':
     'drives the Update Center against a loopback feed in the real app; needs dist/ and ~1 minute, run by hand',

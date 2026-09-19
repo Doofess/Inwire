@@ -2,13 +2,11 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AgentHealth } from '../../services/agentHealth';
 import { Trash, Plug, Unplug, RefreshCw } from 'lucide-react';
 import type { AgentLogEntry, CaptureDropStats } from '../../services/agentProtocol';
-import { describeLink, type LinkChange, type LinkContext } from '../../services/linkContext';
+import { describeLink, type LinkChange } from '../../services/linkContext';
 
 interface DriverInfoPanelProps {
+  /** Only for the Connect / Disconnect / Restart controls - no row names it. */
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
-  agentVersion: string | null;
-  agentOutdated: boolean;
-  agentCaptureState: 'idle' | 'sniffing';
   /** This capture's frame counts from the agent, or null before its first report. */
   captureStats?: CaptureDropStats | null;
   /**
@@ -21,12 +19,10 @@ interface DriverInfoPanelProps {
    * the list.
    */
   droppedBuffer?: number;
-  /** What the engine says about the link, or null where it says nothing. */
-  linkContext?: LinkContext | null;
   /** Network transitions observed this session, oldest first. */
   linkChanges?: LinkChange[];
+  /** Only to detect the no-adapters state; the adapter in use is in the bar. */
   agentInterfaces: { name: string; label: string }[];
-  selectedInterfaces: string[];
   agentLog: AgentLogEntry[];
   /** Whether the app is meant to be holding a link at all - see App.tsx.
    *  Distinguishes "you disconnected" from "the agent is not running", which
@@ -51,6 +47,13 @@ interface DriverInfoPanelProps {
   onShowUpdates?: () => void;
   /** The agent's most recent rejection, or null. */
   agentError: string | null;
+  /**
+   * What the renderer's heap guard has said, or null.
+   *
+   * Warn and stop both land here; the message itself says which. See
+   * `services/rendererHeapGuard.ts`.
+   */
+  heapNotice?: string | null;
   onConnect: () => void;
   onDisconnect: () => void;
   onRestartAgent: () => void;
@@ -71,26 +74,20 @@ interface DriverInfoPanelProps {
 }
 
 /**
- * What each link state is called in the UI.
+ * **There was a second status label table here, and deleting it is the point.**
  *
- * "Connected" rather than "Running", because this row reports the state of the
- * LINK, not of the service: the driver runs as a Windows service and is running
- * whether or not this page has a socket to it. Calling a closed socket "not
- * running" said something about the machine that the app cannot actually know.
+ * `AGENT_STATUS_LABEL` and `AGENT_STATUS_COLOR` mapped the same four link
+ * states this panel's Status row showed - while `services/agentHealth.ts`
+ * already held `agentStatusLabel`, a TOTAL record, for the status bar and the
+ * rail. Two tables for one fact is how they stop agreeing, which is exactly the
+ * bug `agentSilentLabel` shipped: a healthy agent read "Agent not reachable" in
+ * one place and "connected" in another, because one was a lookup with a
+ * fallback and the other a conditional.
+ *
+ * The panel no longer names the link state at all. The status bar's left group
+ * does, permanently, in the one place session state lives - and this tab is
+ * reached by opening Settings, which is strictly more work than glancing down.
  */
-const AGENT_STATUS_LABEL: Record<DriverInfoPanelProps['agentStatus'], string> = {
-  connected: 'Connected',
-  connecting: 'Connecting',
-  disconnected: 'Not reachable',
-  error: 'Error',
-};
-
-const AGENT_STATUS_COLOR: Record<DriverInfoPanelProps['agentStatus'], string> = {
-  connected: 'text-emerald-600 dark:text-emerald-400',
-  connecting: 'text-amber-600 dark:text-amber-400',
-  disconnected: 'text-muted-foreground',
-  error: 'text-rose-600 dark:text-rose-400',
-};
 
 // The agent resolves this itself from %ProgramData% (config.config_dir()),
 // so a machine with a relocated ProgramData would differ. Showing the
@@ -142,21 +139,17 @@ export const DRIVER_ACTION_BUTTON_CLASS =
 
 export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   agentStatus,
-  agentVersion,
-  agentOutdated,
-  agentCaptureState,
   captureStats,
   droppedBuffer = 0,
-  linkContext,
   linkChanges = [],
   agentInterfaces,
-  selectedInterfaces,
   agentLog,
   agentLinkEnabled,
   agentHealth,
   onStartAgentService,
   onShowUpdates,
   agentError,
+  heapNotice,
   onConnect,
   onDisconnect,
   onRestartAgent,
@@ -210,8 +203,6 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
     // again.
     setAutoScroll(true);
   };
-
-  const listening = agentInterfaces.filter((i) => selectedInterfaces.includes(i.name));
 
   // Shown only when it says something the Status row does not. "Connected" and
   // "Connecting" are already legible; a banner repeating them would be noise
@@ -274,37 +265,21 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
         </div>
       )}
       <div>
-        <div className="text-xs font-semibold text-foreground mb-2">Driver</div>
+        {/* **Where the frames went, and nothing the status bar already says.**
+            This block was a Status row, a Version pill, a Capture row and a
+            Listening-on list, all four of which the status bar reports
+            permanently - and reaching this one means opening Settings and
+            picking a tab, which is strictly more work than glancing down. What
+            is left is the app's only full account of frames it lost, which has
+            no other home at all: the bar shows a single total, deliberately,
+            because four figures do not fit a 24px strip. */}
+        <div className="text-xs font-semibold text-foreground mb-2">Frames lost</div>
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
-          <dt className="text-muted-foreground">Status</dt>
-          <dd className={`font-mono font-semibold ${
-            agentLinkEnabled ? AGENT_STATUS_COLOR[agentStatus] : 'text-muted-foreground'
-          }`}>
-            {agentLinkEnabled ? AGENT_STATUS_LABEL[agentStatus] : 'Disconnected (by you)'}
-          </dd>
-
-          <dt className="text-muted-foreground">Version</dt>
-          <dd className="font-mono flex items-center gap-2">
-            <span>{agentVersion ?? '—'}</span>
-            {agentOutdated && (
-              <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400">
-                Update
-              </span>
-            )}
-          </dd>
-
-          <dt className="text-muted-foreground">Capture</dt>
-          {/* "Not capturing" rather than "Idle": idle describes the driver,
-              and the driver is never idle - it is a service that is always up.
-              What this row actually reports is whether it is sniffing right
-              now, so both of its values now say that. */}
-          <dd className="font-mono">{agentCaptureState === 'sniffing' ? 'Sniffing' : 'Not capturing'}</dd>
-
           {/* Loss is reported here, in full and in one place. "Unknown" for
               the driver's count means the agent could not read pcap's
               statistics on this adapter - it is not a zero, and is never shown
               as one. */}
-          {captureStats && (
+          {captureStats ? (
             <>
               <dt className="text-muted-foreground">Received</dt>
               <dd className="font-mono">{captureStats.received.toLocaleString()}</dd>
@@ -316,38 +291,63 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
               <dd className={`font-mono ${captureStats.droppedAgent ? 'text-amber-600 dark:text-amber-400' : ''}`}>
                 {captureStats.droppedAgent.toLocaleString()}
               </dd>
+              {/* The fourth stage, and the newest. The agent's outbound queue
+                  sheds whole batches when the app cannot keep up; it counts
+                  PACKETS rather than items, because this figure is summed
+                  beside the two above it and a batch counted as one understated
+                  the loss by the batch size. Absent rather than zero on an
+                  agent too old to report it - `null` is not 0, and a stage
+                  nobody measured must not read as a stage that lost nothing. */}
+              <dt className="text-muted-foreground">Dropped in transit</dt>
+              <dd className={`font-mono ${captureStats.droppedPipe ? 'text-amber-600 dark:text-amber-400' : ''}`}>
+                {captureStats.droppedPipe === null
+                  ? <span className="text-muted-foreground">Not reported</span>
+                  : captureStats.droppedPipe.toLocaleString()}
+              </dd>
+            </>
+          ) : (
+            <>
+              {/* An empty grid reads as a panel that failed to load. Saying
+                  there is nothing to report is a different statement from
+                  reporting zeros, which is the distinction the counters
+                  themselves keep. */}
+              <dt className="text-muted-foreground">Capture</dt>
+              <dd className="text-muted-foreground">No capture has reported yet</dd>
             </>
           )}
 
           {/* Gated on its own count rather than on captureStats: the buffer
               fills during an import too, when there is no agent to have
-              reported anything. */}
+              reported anything.
+
+              **And it is worded apart from the four above on purpose.** These
+              frames were captured, dissected, written to disk and are still
+              readable off it - they are only out of the RAM window. Folding
+              them into a loss total says the capture missed them, which it did
+              not. `SessionStatus.tsx` does fold them in, and that is a known
+              overstatement rather than a decision. */}
           {droppedBuffer > 0 && (
             <>
-              <dt className="text-muted-foreground">Dropped from buffer</dt>
-              <dd className="font-mono text-amber-600 dark:text-amber-400">
+              <dt className="text-muted-foreground">Trimmed from the buffer</dt>
+              <dd className="font-mono">
                 {droppedBuffer.toLocaleString()}
+                <span className="text-muted-foreground"> (still on disk)</span>
               </dd>
-            </>
-          )}
-
-          {/* What the ENGINE believes about the link, kept visibly apart from
-              the counts above, which the capture measured. These are estimates
-              Chromium derives from its own recent requests and rounds to resist
-              fingerprinting: context for reading a capture, never a measurement
-              of one, which is what the label has to keep saying. The agent
-              could report the adapter's negotiated speed instead, and that
-              would be a measurement - it does not yet. */}
-          {linkContext && describeLink(linkContext) && (
-            <>
-              <dt className="text-muted-foreground">Link (estimated)</dt>
-              <dd className="font-mono">{describeLink(linkContext)}</dd>
             </>
           )}
 
           {/* The half that actually explains a capture. A machine changing
               network is what a gap with no frames, a burst of ARP and DHCP, or
-              a stream that stops dead all look like from the inside. */}
+              a stream that stops dead all look like from the inside.
+
+              Its companion row, "Link (estimated)", is deleted. That was
+              Chromium's own guess at downlink and RTT, derived from its recent
+              requests and ROUNDED to resist fingerprinting - the code's own
+              comment admitted it was not a measurement. In a panel whose
+              remaining rows are all exact counts off the wire, one rounded
+              estimate is the row that teaches you to distrust the others. A
+              real one would come from the adapter's negotiated speed, which
+              the agent could report and does not. */}
           {linkChanges.length > 0 && (
             <>
               <dt className="text-muted-foreground">Network changed</dt>
@@ -361,19 +361,6 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
               </dd>
             </>
           )}
-
-          <dt className="text-muted-foreground">Listening on</dt>
-          <dd className="font-mono">
-            {listening.length === 0 ? (
-              <span className="text-muted-foreground">No interfaces selected</span>
-            ) : (
-              <ul className="flex flex-col gap-0.5">
-                {listening.map((i) => (
-                  <li key={i.name} className="truncate" title={i.name}>{i.label}</li>
-                ))}
-              </ul>
-            )}
-          </dd>
 
           <dt className="text-muted-foreground">Log file</dt>
           <dd className="font-mono text-muted-foreground break-all">{logFilePath()}</dd>
@@ -427,6 +414,20 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
         {agentError && (
           <div className="mt-2 px-2.5 py-2 rounded-md text-[11px] bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400">
             {agentError}
+          </div>
+        )}
+
+        {/* The one thing a V8 abort cannot say.
+            `services/rendererHeapGuard.ts` samples the heap and stands down
+            before the collector gives up - without it the window simply
+            disappears, with the reason in a stderr a packaged GUI app pipes
+            into a log nobody is reading. This strip is the difference between
+            "Inwire crashed" and a sentence naming the ceiling and what to
+            change. It lives in this tab because the ceiling is the same subject
+            as the counts above it: where the frames went. */}
+        {heapNotice && (
+          <div className="mt-2 px-2.5 py-2 rounded-md text-[11px] bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400">
+            {heapNotice}
           </div>
         )}
       </div>

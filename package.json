@@ -1,7 +1,7 @@
 {
   "name": "inwire",
   "private": true,
-  "version": "1.0.0",
+  "version": "4.0.0",
   "description": "Real-time network packet analyzer for the desktop, with its capture agent built in.",
   "license": "MIT",
   "author": "Rotem Grinhut",
@@ -23,6 +23,7 @@
     "start:app": "npm run build && node electron/start.cjs",
     "pack": "npm run build && electron-builder --dir",
     "lint": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "sync:version": "tsx scripts/agent/sync-version.ts",
     "check": "npm run lint && tsx scripts/check.ts",
     "clean": "node -e \"for (const d of ['dist','dist-electron','release','build','installer/output','local-agent/build','local-agent/dist','local-agent/installer/output']) require('node:fs').rmSync(d,{recursive:true,force:true})\""
   },

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import type { AgentHealth } from '../../services/agentHealth';
 import type { CaptureDropStats } from '../../services/agentProtocol';
-import type { LinkChange, LinkContext } from '../../services/linkContext';
+import type { LinkChange } from '../../services/linkContext';
 import {
   Settings,
   Palette,
@@ -79,11 +79,18 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // configures nothing. It is a report about the machine, and a report worth
   // one press is worth its own door. What is left here is the pair that does
   // belong: what the capture driver is doing, and which version of it you have.
-  { id: 'driver', label: 'Driver Info', icon: Activity },
-  // Last, directly after Driver Info, because the two answer halves of one
-  // question. Driver Info says what the capture driver is doing; this says
-  // which version of it you have and where a newer one comes from - and the
-  // banner for "there is no driver" points from one to the other.
+  // **'Capture Health', not 'Driver Info'.** The panel was Status, Version,
+  // Capture and Listening-on rows - four facts the status bar reports
+  // permanently, one of them through a SECOND label table that could disagree
+  // with the first. All four are deleted, and what is left is the app's only
+  // full account of frames it lost: four drop stages, the buffer trim, and the
+  // network transitions that explain a gap. The id stays `driver` because it is
+  // a stored preference key, not a label.
+  { id: 'driver', label: 'Capture Health', icon: Activity },
+  // Last, directly after Capture Health, because the two answer halves of one
+  // question. That tab says what the capture is losing; this says which version
+  // of the driver you have and where a newer one comes from - and the banner
+  // for "there is no driver" points from one to the other.
   { id: 'updates', label: 'Updates', icon: Download },
 ];
 
@@ -112,22 +119,20 @@ interface SettingsPaneProps {
   agentOutdated: boolean;
   /** The Npcap device object's DACL from `hello`, for the Update Center's row. */
   agentNpcapAccess?: string | null;
-  agentCaptureState: 'idle' | 'sniffing';
   captureStats?: CaptureDropStats | null;
   /** Frames pushed out of the browser's buffer because it filled. */
   droppedBuffer?: number;
-  /** What the browser says about the link, or null where it says nothing. */
-  linkContext?: LinkContext | null;
   /** Network transitions observed this session. */
   linkChanges?: LinkChange[];
   agentInterfaces: { name: string; label: string }[];
-  selectedInterfaces: string[];
   agentLog: AgentLogEntry[];
   agentLinkEnabled: boolean;
   /** Why the agent link is down, and whether the app can offer to fix it. */
   agentHealth: AgentHealth;
   onStartAgentService: () => void;
   agentError: string | null;
+  /** What the renderer's heap guard has said, or null. */
+  heapNotice?: string | null;
   onConnectAgent: () => void;
   onDisconnectAgent: () => void;
   onRestartAgent: () => void;
@@ -161,18 +166,16 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   agentVersion,
   agentOutdated,
   agentNpcapAccess,
-  agentCaptureState,
   captureStats,
   droppedBuffer,
-  linkContext,
   linkChanges,
   agentInterfaces,
-  selectedInterfaces,
   agentLog,
   agentLinkEnabled,
   agentHealth,
   onStartAgentService,
   agentError,
+  heapNotice,
   onConnectAgent,
   onDisconnectAgent,
   onRestartAgent,
@@ -293,18 +296,14 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
             {section === 'driver' && (
               <DriverInfoPanel
                 agentStatus={agentStatus}
-                agentVersion={agentVersion}
-                agentOutdated={agentOutdated}
-                agentCaptureState={agentCaptureState}
                 captureStats={captureStats}
                 droppedBuffer={droppedBuffer}
-                linkContext={linkContext}
                 linkChanges={linkChanges}
                 agentInterfaces={agentInterfaces}
-                selectedInterfaces={selectedInterfaces}
                 agentLog={agentLog}
                 agentLinkEnabled={agentLinkEnabled}
                 agentError={agentError}
+                heapNotice={heapNotice}
                 onConnect={onConnectAgent}
                 onDisconnect={onDisconnectAgent}
                 onRestartAgent={onRestartAgent}

@@ -125,7 +125,16 @@ CLIENT_GONE = (
 
 HOST = "localhost"
 PORT = 8999
-AGENT_VERSION = "3.9.0"
+
+# The agent's version IS Inwire's version (ADR 0035). Imported rather than
+# written here so that `package.json` is the only place it is authored - see
+# `agent_version.py`, which `npm run sync:version` generates and
+# `scripts/agent/version.ts` holds to the product.
+#
+# Re-exported under this name because it is what `hello` carries, what
+# `--version` prints, and what four other files read; moving the value out of
+# this module did not need to move the name with it.
+from agent_version import AGENT_VERSION  # noqa: E402
 
 # How often per-interface traffic rates are sampled while a client has the
 # capture-interface picker open. 500ms is fast enough that the sparkline
@@ -179,6 +188,29 @@ KERNEL_BUFFER_BYTES = 32 * 1024 * 1024
 # watching (see watch_for_orphaned_capture).
 ORPHAN_CHECK_SECONDS = 2
 
+# How many consecutive idle watchdog ticks end the process.
+#
+# Two rather than one, and the reason is `AgentPipeLink.recycle()`: the app
+# closes the pipe and reopens it immediately to make the agent re-enumerate
+# adapters after a driver install. That gap is milliseconds, but a tick landing
+# inside it would read as "the app is gone" and stop the service the app is
+# mid-way through reconnecting to. Two ticks means idleness has to persist for
+# between two and four seconds, which no reconnect does and no human notices.
+IDLE_EXIT_TICKS = 2
+
+# How long to wait for a first client before exiting on idleness.
+#
+# The agent is demand-start (ADR 0035): the app asks the SCM for it at
+# `whenReady()` and connects a moment later. Between those two events the agent
+# has no clients and has never had one, and stopping there would be a service
+# that kills itself before the thing that started it can arrive - which looks
+# exactly like a crash loop, including to `pipeTransport.ts`'s own
+# short-connection counter.
+#
+# It is a bound rather than "wait for ever": if the app dies between starting
+# the service and connecting to it, something still has to clean up.
+FIRST_CLIENT_GRACE_SECONDS = 30
+
 # How often capture_stats is sent while sniffing. One second is what the
 # drop counter in the app is expected to move at; the numbers behind it are
 # two integers per interface and cost nothing to read.
@@ -217,6 +249,21 @@ import adapters
 # Configured for real in main(); until then this is a plain logger, so an
 # import-time failure still has somewhere to go.
 log = logging.getLogger("inwire")
+
+# The capture engine, once main() has built one.
+#
+# **Declared here rather than only assigned in main(), and that is a fix.** It
+# was an undeclared module global: three separate guards test `sniffer is not
+# None`, and every one of them raised `NameError` instead of returning false
+# for the whole window between process start and main()'s assignment. A guard
+# that raises is not a guard - it is the failure it was written to prevent,
+# with a worse message.
+sniffer = None
+
+# Set when something has asked the run loop to return; see request_shutdown.
+# Both are written once, by main(), and read from the service's control thread.
+_shutdown_event = None
+_shutdown_loop = None
 
 # The adapters currently available to capture on, as (device_name, label), and
 # the same data as a lookup. Deliberately module-level rather than created in
@@ -2057,8 +2104,36 @@ def spawn_sniffer_thread(iface_name, stop_event):
     return t
 
 
-async def watch_for_orphaned_capture():
-    """Stops capture whenever nothing is watching.
+def request_shutdown(reason):
+    """Asks the run loop to return, from any thread.
+
+    The only orderly way out of `main()`. Before this existed, `SvcStop` called
+    `loop.stop()` directly, which stops the loop **wherever it is** - and where
+    it was is suspended inside `await asyncio.Future()`, so the `finally:
+    pipes.stop()` beneath it never ran and the pipe name was released by process
+    exit rather than by anything that had decided to release it. That is the
+    defect this fixes; the idle exit below is what made it urgent, because a
+    service that stops itself every time the app closes performs that shutdown
+    constantly instead of once a reboot.
+
+    Safe from a control thread: `call_soon_threadsafe` is the only way to touch
+    a loop you are not running on, and a loop that has already closed raises
+    rather than corrupting anything - which a stop racing a stop will do.
+    """
+    event, loop = _shutdown_event, _shutdown_loop
+    if event is None or loop is None:
+        return
+    log.info("shutting down: %s", reason)
+    try:
+        loop.call_soon_threadsafe(event.set)
+    except RuntimeError:
+        # Already closed. A second stop, or a stop racing shutdown; there is
+        # nothing left to ask.
+        pass
+
+
+async def watch_for_orphaned_capture(may_exit):
+    """Stops capture whenever nothing is watching, and then stops the agent.
 
     handle_disconnect already stops on the last client leaving, and in normal
     operation that is what fires. This exists because that path is a single
@@ -2071,18 +2146,65 @@ async def watch_for_orphaned_capture():
 
     Polling is the right shape for a guarantee like this precisely because it
     does not depend on any event arriving.
+
+    ## The second job, which is the whole of ADR 0035
+
+    With `may_exit` set, an agent that has been idle for `IDLE_EXIT_TICKS`
+    consecutive ticks asks the process to stop. That is what makes closing
+    Inwire stop the service rather than merely stop the capture, and it is done
+    **here, by the agent itself**, rather than by the app running `sc stop`:
+
+      - the app deliberately has no right to stop this service, and granting
+        `WP` would grant it to every interactive logon - so a second Windows
+        user could stop a capture the first is running (ADR 0030);
+      - a self-stop survives the app crashing or being killed from Task
+        Manager, where an `sc stop` on the quit path does not;
+      - and the agent is the only party that knows whether some *other* client
+        is still connected.
+
+    `may_exit` is false on the macOS/Linux WebSocket path, where there is no
+    SCM to start the agent again on demand and exiting would mean it never
+    comes back.
     """
+    idle_ticks = 0
+    started = time.monotonic()
+    seen_a_client = False
+
     while True:
         await asyncio.sleep(ORPHAN_CHECK_SECONDS)
         if sniffer is not None and sniffer.is_sniffing() and not agent.connections:
             log.warning("capture was running with no clients connected - stopping it")
             sniffer.stop_threads()
 
+        if not may_exit:
+            continue
+
+        if agent.connections:
+            seen_a_client = True
+            idle_ticks = 0
+            continue
+
+        # Never had one, and the grace has not run out: the app that started
+        # this service is still on its way. See FIRST_CLIENT_GRACE_SECONDS.
+        if not seen_a_client and time.monotonic() - started < FIRST_CLIENT_GRACE_SECONDS:
+            continue
+
+        idle_ticks += 1
+        if idle_ticks >= IDLE_EXIT_TICKS:
+            request_shutdown(
+                "no clients connected" if seen_a_client
+                else "no client connected within the startup grace period"
+            )
+            return
+
 
 async def main(to_stderr=True):
     # The interface globals are owned by refresh_interfaces() now, and only
     # read here, so they are deliberately not declared global.
-    global sniffer, log
+    global sniffer, log, _shutdown_event, _shutdown_loop
+
+    _shutdown_event = asyncio.Event()
+    _shutdown_loop = asyncio.get_running_loop()
 
     log = logging_setup.setup_logging(config.config_dir(), to_stderr=to_stderr)
     # Must come after setup_logging, which tears down existing handlers when
@@ -2152,10 +2274,22 @@ async def main(to_stderr=True):
 
     if pipes.serving:
         try:
-            asyncio.create_task(watch_for_orphaned_capture())
-            await asyncio.Future()  # run forever
+            # `may_exit=True`: this is the Windows service, which the SCM starts
+            # again the moment the app asks for it. ADR 0035.
+            asyncio.create_task(watch_for_orphaned_capture(may_exit=True))
+            # **Not `asyncio.Future()` any more.** That never completes, so the
+            # only way out was stopping the loop from underneath it and this
+            # `finally` never ran - the pipe name was released by process exit.
+            # Now every exit path passes through the line below it.
+            await _shutdown_event.wait()
         finally:
             pipes.stop()
+            if sniffer is not None and sniffer.is_sniffing():
+                # A capture still running at shutdown. Stopping it here rather
+                # than letting the process die on top of it is what closes the
+                # pcap handles and flushes the last counters - the sniffer
+                # threads are daemons and would otherwise simply vanish.
+                sniffer.stop_threads()
         return True
 
     async with websockets.serve(
@@ -2165,8 +2299,12 @@ async def main(to_stderr=True):
         process_request=make_process_request(on_reject=log_rejection),
     ):
         log.info("WebSocket server listening on ws://%s:%d", HOST, PORT)
-        asyncio.create_task(watch_for_orphaned_capture())
-        await asyncio.Future()  # run forever
+        # `may_exit=False`: macOS and Linux install from the tarball and have no
+        # SCM to start this again on demand, so an agent that exited on idleness
+        # would be an agent that never came back. The orphan check still runs -
+        # that guarantee is unconditional.
+        asyncio.create_task(watch_for_orphaned_capture(may_exit=False))
+        await _shutdown_event.wait()
 
     return True
 

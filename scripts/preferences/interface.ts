@@ -24,7 +24,6 @@ import {
   normalizePerformance,
 } from '../../src/services/interfacePrefs';
 import { DEFAULT_COLUMN_ALIGN } from '../../src/lib/packetColumns';
-import { DEFAULT_BUFFER_BUDGET_BYTES } from '../../src/services/bufferBudget';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -176,11 +175,17 @@ for (const [name, fn] of [
 
 {
   // The buffer budget is SNAPPED rather than clamped: it is a choice between
-  // four offered values, and an arbitrary number would render a segmented
+  // the offered values, and an arbitrary number would render a segmented
   // control with nothing selected.
+  //
+  // **Compared against the DEFAULT rather than against a constant.** These two
+  // pinned `DEFAULT_BUFFER_BUDGET_BYTES`, which was the default until ADR 0036
+  // made it `'auto'` - and then they failed against correct code, asserting
+  // yesterday's default rather than the rule, which is that an unreadable value
+  // falls back to whatever the app ships with.
   const odd = normalizePerformance({ ...PERFORMANCE_DEFAULTS, packetBufferBytes: 33333 });
   check('an unoffered buffer budget falls back rather than clamping',
-    odd?.packetBufferBytes, DEFAULT_BUFFER_BUDGET_BYTES);
+    odd?.packetBufferBytes, PERFORMANCE_DEFAULTS.packetBufferBytes);
 
   // The setting used to be a frame count, and a stored one has to fall back
   // rather than be read as bytes. 50,000 was the old default; taken as a
@@ -188,7 +193,12 @@ for (const [name, fn] of [
   // look broken and that nobody chose.
   const legacy = normalizePerformance({ dashboardRefreshMs: 500, packetBufferCap: 50000 });
   check('a buffer cap stored before this was a budget falls back',
-    legacy?.packetBufferBytes, DEFAULT_BUFFER_BUDGET_BYTES);
+    legacy?.packetBufferBytes, PERFORMANCE_DEFAULTS.packetBufferBytes);
+
+  // And the value that default now IS, which nothing above would catch if
+  // `'auto'` stopped being accepted: it would fall back to itself and pass.
+  const auto = normalizePerformance({ dashboardRefreshMs: 500, packetBufferBytes: 'auto' });
+  check("'auto' is a value the store accepts, not a fallback", auto?.packetBufferBytes, 'auto');
 
   const offered = normalizePerformance({
     ...PERFORMANCE_DEFAULTS, packetBufferBytes: 128 * 1024 * 1024,
