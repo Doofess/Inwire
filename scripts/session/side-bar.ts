@@ -330,6 +330,31 @@ console.log('\n--- what may not come back ---\n');
   checkTrue('...through a ref, so a new callback identity cannot resubscribe',
     adapters.includes('const notify = useRef(onSamplingChange)'));
 
+  // **Network's two-column vocabulary is gone.** `CompareHeader` wrote
+  // "Configured (OS)" and "Observed (capture)" ONCE per section, and every pair
+  // below it inherited meaning from which SIDE of the row it sat on. A column
+  // has no sides, so the words moved onto the values - every value, every time,
+  // which is also what keeps a pair readable when its heading is scrolled off.
+  const rows = code('src/components/network/rows.tsx');
+  checkTrue('the compare header is gone with the columns it labelled',
+    !rows.includes('CompareHeader')
+    && !code('src/components/network/NetworkPane.tsx').includes('CompareHeader'));
+  // The tags are short because a 48px gutter is what one can have beside a
+  // value that may be an IPv6 address; the full phrases live in the `title`, so
+  // the abbreviation is never the only place the meaning exists.
+  checkTrue('...and each value names its own side',
+    rows.includes('title="Configured on this machine"')
+    && rows.includes('title="Observed in this capture"'));
+  // Stacked, "which of these is the surprising one" is no longer answerable by
+  // position - the right-hand column was the capture - so the observed tag
+  // takes the warning hue on a finding.
+  checkTrue('...with the observed side marked when the two disagree',
+    /warn \? 'text-warning font-semibold'/.test(rows));
+  // The `w-40` label column left ~90px for a value in a 288px panel, and this
+  // panel's values are IPv6 addresses and multi-entry DNS lists. A truncated
+  // address is a wrong address.
+  checkTrue('no fixed label column survives the restack', !/w-40/.test(rows));
+
   // The sqrt-eased width was a SECOND encoding of volume laid over `max`, and
   // the dishonest one - the easing existed so a tenth of the peak would not
   // look like a tenth. It cannot come back, because there is no longer an

@@ -24,6 +24,21 @@ import { CopyButton } from '../ui/CopyButton';
  * the failure is not noticing.
  */
 
+/**
+ * The two constants a restacked row is built from.
+ *
+ * `LABEL` is the line above a value rather than the column beside it, so it is
+ * sized like a heading rather than like a cell. `WARN_BLOCK` is the treatment
+ * that says "these two disagree, and the disagreement is the finding" - it was
+ * `bg-amber-500/10 border-l-2 border-amber-500`, raw Tailwind shades of exactly
+ * the kind `scripts/themes/status.ts` was pointed at `ByteReadout` to catch.
+ * Fixed shades do not move between Day and Night the way every other colour in
+ * this panel does, and amber is the app's warning hue, which it has a token
+ * for.
+ */
+const LABEL = 'text-[10px] font-semibold uppercase tracking-wider text-muted-foreground';
+const WARN_BLOCK = 'bg-warning/10 border-l-2 border-warning';
+
 /** Replaces the middle of a value, keeping enough to tell two of them apart. */
 export function mask(value: string): string {
   if (value.length <= 4) return '••••';
@@ -68,20 +83,28 @@ export const Row: React.FC<RowProps> = ({
 }) => {
   const text = value === null || value === undefined ? '' : String(value);
   return (
-    <div className={`flex items-start gap-3 px-3 py-2 text-xs ${
-      warn ? 'bg-amber-500/10 border-l-2 border-amber-500' : ''}`}>
-      <div className="w-40 shrink-0 text-muted-foreground" title={source ? `From ${source}` : undefined}>
-        {label}
-        {source && <span className="ml-1 opacity-40">·</span>}
+    <div className={`px-3 py-2 text-xs ${warn ? WARN_BLOCK : ''}`}>
+      {/* **Label above value, not beside it.** It was a `w-40` column, which
+          left ~90px for the value in a 288px column - and this panel's values
+          are IPv6 addresses with prefix lengths, MACs with vendor lines and
+          multi-entry DNS lists. A truncated address is a wrong address, so the
+          value takes the whole width and the label takes a line of its own.
+
+          The copy button rides the LABEL line rather than the value's, which
+          is what stops it stealing width from the thing it copies. */}
+      <div className="flex items-center gap-1">
+        <span className={LABEL} title={source ? `From ${source}` : undefined}>
+          {label}
+        </span>
+        {/* Only when there is something to copy, and never the masked form - a
+            copy button that put bullets on the clipboard would be a trap. */}
+        {text !== '' && !children && (
+          <CopyButton value={text} label={label.toLowerCase()} className="ml-auto" />
+        )}
       </div>
-      <div className="flex-1 min-w-0 text-foreground">
+      <div className="mt-0.5 text-foreground">
         {children ?? <Value value={value} sensitive={sensitive} hidden={hidden} />}
       </div>
-      {/* Only when there is something to copy, and never the masked form - a
-          copy button that put bullets on the clipboard would be a trap. */}
-      {text !== '' && !children && (
-        <CopyButton value={text} label={label.toLowerCase()} />
-      )}
     </div>
   );
 };
@@ -114,11 +137,36 @@ export const Empty: React.FC<{ children: React.ReactNode }> = ({ children }) => 
 );
 
 /**
- * Two columns: what the OS is configured with, and what the capture showed.
+ * What the OS is configured with and what the capture showed, stacked.
  *
- * The panel's whole argument. Either side may be unknown, and the two being
+ * The panel's whole argument: either side may be unknown, and the two being
  * different is the finding rather than an error.
+ *
+ * ## The words moved onto the values, because position can no longer carry them
+ *
+ * This was two `flex-1` columns under a `CompareHeader` that wrote "Configured
+ * (OS)" and "Observed (capture)" ONCE per section - so every pair below
+ * inherited its meaning from which side of the row it sat on. In a 288px column
+ * there are no sides. **`CompareHeader` is deleted and each value carries its
+ * own tag**, every time, which is what keeps the pane readable when a section
+ * is scrolled so its heading is off screen - a thing the two-column form never
+ * had to survive.
+ *
+ * `OS` and `SEEN` rather than the full phrases, with those phrases in the
+ * `title`. A 48px gutter is what a tag can have beside a value that may be an
+ * IPv6 address; "Configured (OS)" needs 90 and would put the address back in
+ * the ~90px box this restack exists to escape.
+ *
+ * ## The warned side is marked, which the two-column form did not need to do
+ *
+ * Side by side, "which of these two is the surprising one" was answered by
+ * position - the right-hand column was the capture. Stacked, it is not, so on
+ * a finding the OBSERVED tag takes the warning hue. The block treatment and the
+ * `note` sentence are unchanged and they are what actually carry the argument;
+ * this is the half that the geometry cost.
  */
+const TAG = 'w-12 shrink-0 text-[10px] uppercase tracking-wider pt-px';
+
 export const Compare: React.FC<{
   label: string;
   configured: React.ReactNode;
@@ -126,21 +174,27 @@ export const Compare: React.FC<{
   warn?: boolean;
   note?: string;
 }> = ({ label, configured, observed, warn, note }) => (
-  <div className={`px-3 py-2 text-xs ${warn ? 'bg-amber-500/10 border-l-2 border-amber-500' : ''}`}>
-    <div className="flex items-start gap-3">
-      <div className="w-40 shrink-0 text-muted-foreground">{label}</div>
-      <div className="flex-1 min-w-0">{configured}</div>
-      <div className="flex-1 min-w-0">{observed}</div>
+  <div className={`px-3 py-2 text-xs ${warn ? WARN_BLOCK : ''}`}>
+    <div className={LABEL}>{label}</div>
+    <div className="mt-0.5 space-y-1">
+      <div className="flex items-start gap-2">
+        <span className={`${TAG} text-muted-foreground/70`} title="Configured on this machine">
+          OS
+        </span>
+        <div className="flex-1 min-w-0">{configured}</div>
+      </div>
+      <div className="flex items-start gap-2">
+        <span
+          className={`${TAG} ${warn ? 'text-warning font-semibold' : 'text-muted-foreground/70'}`}
+          title="Observed in this capture"
+        >
+          SEEN
+        </span>
+        <div className="flex-1 min-w-0">{observed}</div>
+      </div>
     </div>
-    {note && <div className="ml-40 pl-3 mt-1 text-[11px] text-amber-600 dark:text-amber-400">{note}</div>}
-  </div>
-);
-
-export const CompareHeader: React.FC = () => (
-  <div className="flex items-start gap-3 px-3 py-1.5 text-[10px] uppercase tracking-wider
-    text-muted-foreground/70 bg-muted/30">
-    <div className="w-40 shrink-0" />
-    <div className="flex-1">Configured (OS)</div>
-    <div className="flex-1">Observed (capture)</div>
+    {/* No indent any more: it was `ml-40 pl-3`, hanging the sentence under a
+        label column that no longer exists. */}
+    {note && <div className="mt-1 text-[11px] text-warning-muted">{note}</div>}
   </div>
 );
