@@ -1046,6 +1046,23 @@ check("an excess past the u16 ceiling clamps instead of wrapping",
 check("the frame bytes are exact", _decoded[0]["data"], bytes(range(64)))
 check("the interface index is carried", _decoded[1]["iface"], 7)
 
+# **A captured length is a length the reader SEEKS BY, so it is refused rather
+# than masked.** `cap_len & 0xFFFF` was here while the payload was appended in
+# full, so a 70,000-byte frame declared 4,464 and the decoder took its next
+# record 65,536 bytes early - reading a plausible record out of the middle of a
+# frame and discarding the rest of the batch, up to 512 frames, with no error
+# anywhere. The `extra` field above may clamp because nothing indexes with it.
+_oversized = "no error"
+try:
+    packet_batch.encode_record(0, 0, 1.0, 70000, b"\x00" * 70000)
+except ValueError:
+    _oversized = "ValueError"
+check("a frame too long for the length field is refused, not masked",
+      _oversized, "ValueError")
+check_true("...and one that exactly fills it still encodes",
+           len(packet_batch.encode_record(0, 0, 1.0, 0xFFFF, b"\x00" * 0xFFFF))
+           == packet_batch.RECORD.size + 0xFFFF)
+
 for _bad, _why in (
     (b"NOPE" + _frame[4:], "refuses a frame that is not a batch"),
     (_frame[:-1], "refuses a truncated record"),
@@ -1871,6 +1888,24 @@ check("a truncated frame copies caplen and reports the wire length",
 check("a read timeout is None rather than an empty frame",
       _read_one(b"", caplen=0, wire_len=0, result=0), None)
 
+# **A timeout and a failure are different answers, and collapsing them spun the
+# CPU.** This was `if result != 1: return None`, and the caller is
+# `while not stop_event.is_set(): ... continue`. pcap_next_ex returns 0 for the
+# timeout but -1 for an error - and an adapter removed mid-capture returns -1
+# immediately, for ever. The loop then burned 100% of a core inside a
+# LocalSystem service, with no frames, no log line and nothing on screen.
+#
+# Raising is what reaches the machinery that already existed: sniff_on_interface
+# wraps this loop in a try/except that calls report_capture_failure, which is
+# how the app is told an interface died.
+for _result, _what in ((-1, "an error"), (-2, "end of capture")):
+    _raised = "no error"
+    try:
+        _read_one(b"", caplen=0, wire_len=0, result=_result)
+    except OSError:
+        _raised = "OSError"
+    check(f"{_what} raises rather than looping for ever", _raised, "OSError")
+
 
 # --- 3.7.0: the capture driver's buffer ------------------------------------------
 #
@@ -2134,6 +2169,55 @@ except ConnectionError:
     _sent_after_close = "ConnectionError"
 check("sending to a client that has gone raises", _sent_after_close, "ConnectionError")
 _loop.close()
+
+# --- the outbound queue, which used to lose frames in silence ---------------------
+#
+# Three defects lived here together, and each hid the others.
+#
+#   1. A full queue CLOSED the connection. Closing drops the client; the client
+#      leaving is what stops the capture. So the protection against a slow
+#      reader terminated the thing it was protecting - and took with it the
+#      connection that would have reported the loss.
+#   2. The close set a LOCAL `closed` Event, while `PipeConnection.send` tested
+#      its own `_closed`. Two flags, so every send after the writer gave up
+#      returned success and discarded its frame. `_send_to_owner`'s `except`
+#      exists for exactly this and could never fire.
+#   3. The bound was a frame COUNT on items of up to 256 kB - 4,096 of them is
+#      a gigabyte inside a LocalSystem service. The sniffer queue beside it
+#      records adding a byte budget for this precise reason.
+_ob = pipe_server._Outbound(max_frames=3, max_bytes=10_000)
+for _i in range(3):
+    _ob.put(bytes([_i]) * 10)
+check("frames queue up to the count bound", _ob.qsize(), 3)
+check("...losing none of them", _ob.dropped, 0)
+_ob.put(b"\x09" * 10)
+check("past the bound the queue does not grow", _ob.qsize(), 3)
+check("...and the shed frame is counted", _ob.dropped, 1)
+check("...the OLDEST being the one shed, as in the sniffer queue",
+      _ob.get(), b"\x01" * 10)
+
+# The byte bound bites first when the items are big, which is the case the
+# count bound could not express at all.
+_ob2 = pipe_server._Outbound(max_frames=4096, max_bytes=1000)
+for _ in range(5):
+    _ob2.put(b"\x00" * 400)
+check_true("a byte budget sheds before the count bound is anywhere near",
+           _ob2.qsize() < 4096 and _ob2.dropped > 0)
+check_true("...leaving the queue inside its budget", _ob2.pending_bytes() <= 1000)
+
+# A single frame larger than the whole budget must still be delivered: a queue
+# that evicts its own newest arrival delivers nothing at all.
+_ob3 = pipe_server._Outbound(max_frames=4096, max_bytes=100)
+_ob3.put(b"\x00" * 500)
+check("an oversized frame is kept rather than shed into nothing", _ob3.qsize(), 1)
+
+# The writer thread blocks on `get()` waiting for the stop signal, so shedding
+# it would leave that thread parked until the handle closed underneath it.
+_ob4 = pipe_server._Outbound(max_frames=1, max_bytes=10)
+_ob4.put(pipe_server._SHUTDOWN)
+for _ in range(4):
+    _ob4.put(b"\x00" * 50)
+check("the stop signal is never shed", _ob4.get(), pipe_server._SHUTDOWN)
 
 # The descriptor is the whole security model now, so its shape is worth
 # pinning even where it cannot be applied. IU is the interactive user - the

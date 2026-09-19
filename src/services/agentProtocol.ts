@@ -172,13 +172,25 @@ export interface AgentCaptureStatsMessage {
   intervalMs: number;
   /** The next `seq` the agent will assign - one more than the highest sent. */
   seqHigh: number;
-  /** Frames the agent dropped because the app was not draining fast enough. */
+  /** Frames the agent dropped from its sniffer queue, waiting to be batched. */
   droppedAgent: number;
+  /**
+   * Frames shed from the outbound pipe queue because the client was not
+   * reading fast enough - the third loss site, and the one that had no number
+   * at all until it was found discarding frames with no counter and no log
+   * line per drop.
+   *
+   * **Optional, and absent rather than 0 when nobody counted.** An agent
+   * predating it omits the field, and the WebSocket transport has no
+   * counterpart; `undefined` is "unknown" and `0` is "none lost here", which
+   * is the distinction `droppedKernel` already draws with `null`.
+   */
+  droppedPipe?: number;
   interfaces: AgentCaptureInterfaceStats[];
 }
 
 /**
- * The three numbers the UI shows, folded from one capture_stats message.
+ * The numbers the UI shows, folded from one capture_stats message.
  * Kernel drops sum across interfaces; an unreadable counter on any one of
  * them makes the sum unknown rather than an undercount.
  */
@@ -186,6 +198,8 @@ export interface CaptureDropStats {
   received: number;
   droppedAgent: number;
   droppedKernel: number | null;
+  /** `null` when the agent did not report it. Never folded to 0. */
+  droppedPipe: number | null;
   seqHigh: number;
 }
 
@@ -197,7 +211,15 @@ export function summarizeCaptureStats(message: AgentCaptureStatsMessage): Captur
     if (entry.droppedKernel === null) droppedKernel = null;
     else if (droppedKernel !== null) droppedKernel += entry.droppedKernel;
   }
-  return { received, droppedAgent: message.droppedAgent, droppedKernel, seqHigh: message.seqHigh };
+  return {
+    received,
+    droppedAgent: message.droppedAgent,
+    droppedKernel,
+    // `?? null` rather than `?? 0`: an agent that does not send the field has
+    // not told us the pipe lost nothing, it has told us nothing.
+    droppedPipe: message.droppedPipe ?? null,
+    seqHigh: message.seqHigh,
+  };
 }
 
 /**
@@ -437,6 +459,11 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
     case 'capture_stats':
       if (!isCount(msg.intervalMs) || !isCount(msg.seqHigh) || !isCount(msg.droppedAgent)
         || !isValidCaptureStats(msg.interfaces)) return null;
+      // `droppedPipe` is additive and optional, so absent is valid - but a
+      // present one that is not a count is a malformed message, not a missing
+      // field, and accepting it would put a negative or a NaN into a figure
+      // the status bar adds up.
+      if (msg.droppedPipe !== undefined && !isCount(msg.droppedPipe)) return null;
       return msg as unknown as AgentCaptureStatsMessage;
     case 'socket_table':
       if (typeof msg.full !== 'boolean' || !Array.isArray(msg.add) || !Array.isArray(msg.gone)

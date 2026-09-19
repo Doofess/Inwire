@@ -112,8 +112,24 @@ def encode_record(seq: int, iface: int, ts_us: float, orig_len: int, data: bytes
         extra = 0
     elif extra > 0xFFFF:
         extra = 0xFFFF
+    # **Refused, not masked.** `cap_len & 0xFFFF` was here, and the payload is
+    # appended in FULL - so a frame of 70,000 captured bytes would declare
+    # 4,464 and the decoder would take its next record from 65,536 bytes too
+    # early. It does not fail: it reads a plausible record out of the middle of
+    # a frame and then discards the rest of the batch, up to 512 frames, with
+    # no error anywhere. Clamping `extra` above is safe because that field is a
+    # difference nobody indexes with; this one is a length the reader seeks by.
+    #
+    # Unreachable today only by coincidence - scapy opens with snaplen 0xffff -
+    # and one LRO-coalesced segment is all it would take.
+    if cap_len > 0xFFFF:
+        raise ValueError(
+            f"a captured frame of {cap_len} bytes cannot be framed: "
+            "the record's length field is 16 bits, and masking it would "
+            "desynchronise the decoder rather than truncate the frame"
+        )
     return RECORD.pack(seq & 0xFFFFFFFF, iface & 0xFFFF,
-                       cap_len & 0xFFFF, extra, float(ts_us)) + data
+                       cap_len, extra, float(ts_us)) + data
 
 
 def encode_batch(records) -> bytes:
