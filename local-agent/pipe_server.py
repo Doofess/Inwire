@@ -331,6 +331,12 @@ class PipeServer:
             closed.set()
 
         connection = PipeConnection(self._loop, write, close)
+        # Diagnostics only, read through `getattr` the way `kernel_authenticated`
+        # is, so the WebSocket transport needs no counterpart. This is the one
+        # reading that tells "the pump is the bottleneck" (the sniffer queue is
+        # pinned and this is empty) apart from "the client is slow" (both full),
+        # and the two want opposite fixes.
+        connection.outbound_depth = outbound.qsize
 
         writer_thread = threading.Thread(
             target=self._write_loop, args=(handle, outbound, closed),

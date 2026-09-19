@@ -1,41 +1,64 @@
 """Per-frame timing for the capture path.
 
-There is no timing instrumentation anywhere in this project, so every claim
-about what capture costs is an estimate. This is the smallest thing that turns
-one number - the per-frame cost of the sniffer thread - into a measurement, so
-a change to that path can be shown to have worked rather than asserted to.
+There is no timing instrumentation anywhere else in this project, so every
+claim about what capture costs is an estimate. This is the smallest thing that
+turns the sniffer thread's per-frame cost into a measurement, so a change to
+that path can be shown to have worked rather than asserted to.
 
 **The interesting cost is not in the callback.** By the time `sniff_callback`
 runs, the read is already over - the sniffer thread spent its time in libpcap
 before it called us. Timing the callback body alone would measure the cheap end
 and report that everything is fine.
 
-So this measures both halves and reports them apart:
+## The number this module used to report was the arrival rate
 
-  wall / frames      what one frame costs the sniffer thread, end to end
-  callback           what our own code costs inside it
-  driver + read      the remainder, which is where the frame came from
+It reported `impliedFramesPerSecond = frames / wall`, and called it a ceiling.
+It is not one, and it cannot be: **wall time includes every microsecond the
+thread spent waiting for a frame that had not arrived yet.** On a quiet link
+the number is small because the link is quiet; on a busy one it is larger for
+the same reason. It can never exceed the rate traffic happened to arrive at, so
+it can never tell you the thread could not keep up - which is the one question
+it was being asked.
 
-That remainder is the number the capture path exists to reduce. Comparing it
-before and after a change is the whole point of this module.
+That mattered beyond this file. `packet_batch.py` cites a "~12,000 f/s driver
+limit" derived from it, and every performance judgement made about the capture
+path rested on the same arithmetic.
 
-**What the remainder is depends on which branch of `sniff_on_interface` is
-running, and this docstring used to name the wrong one.** It said
-`sniff(prn=...)` hands the callback "a fully dissected scapy packet", so the
-remainder was scapy building an Ether/IP/TCP object graph that
-`packet_to_record` then discarded. That was true before 3.5.0 and is now the
-*fallback*:
+## What is measured now
+
+Three quantities, kept apart, and a fourth derived from them:
+
+  readUs        time inside `read_frame`, accumulated **only for reads that
+                returned a frame**. The handle is opened with `to_ms=100`, so a
+                timeout return is the thread idling, not working, and counting
+                it would inflate the cost of a quiet link until it looked like
+                the expensive one.
+  callbackUs    what our own code costs once it has the bytes.
+  busyUs        the two together: what one frame actually costs the thread.
+  idleUs        arrival interval less `busyUs` - the headroom.
+
+`sustainableFramesPerSecond` is `1e6 / busyUs`, and THAT is the ceiling: what
+this thread could do if frames never stopped arriving. `utilisation` is
+`busyUs / arrivalPerFrameUs`, which is the number to read first - at 1.0 the
+sniffer thread is the bottleneck, and well under it the bottleneck is
+somewhere else and no amount of work here will move it.
+
+**`readUs` is `None` on two of the three branches, and is never rounded to
+zero.** `sniff_on_interface` has three, and only the fast one can be timed from
+outside:
 
   pcap_next_ex       the fast path, and the one almost every capture takes.
-                     `read_frame` goes straight to libpcap, so there is NO
-                     scapy dissection at all and the remainder is the driver
-                     read plus one `string_at` copy. This is the path
-                     `read_frame`'s own 12x measurement is about.
-  recv_raw           Linux AF_PACKET, which has no libpcap handle. A plain
-                     `recvfrom` returning bytes; no dissection either.
+                     `read_frame` is a call this module can bracket, so the
+                     read is measured.
+  recv_raw           Linux AF_PACKET. Also bracketable, also measured.
   sniff(prn=...)     the last resort, for a socket that has not overridden
-                     `recv_raw` and so reports no timestamp. THIS is the one
-                     where the remainder is scapy.
+                     `recv_raw`. The callback is invoked from **inside**
+                     scapy's own loop, so there is no read for us to bracket:
+                     `readUs` is `None` and `sustainableFramesPerSecond` is
+                     `None` with it. An unmeasured half reported as 0 would
+                     make this the fastest path in the table while being the
+                     slowest one, which is the confident-wrong-answer failure
+                     this codebase keeps writing down.
 
 Read a measurement against the branch the log line named at capture start.
 
@@ -78,15 +101,29 @@ class CaptureProfile:
         with self._lock:
             self._frames = 0
             self._callback_s = 0.0
+            self._read_s = 0.0
+            # How many frames arrived by a branch that could time its own read.
+            # Kept apart from `_frames` so a capture that ran on the fast path
+            # and then fell back reports the read it actually measured rather
+            # than one averaged over frames nobody timed.
+            self._read_frames = 0
             self._started = time.perf_counter()
 
-    def frame(self, callback_seconds: float) -> None:
-        """Records one frame and what our own callback cost for it."""
+    def frame(self, callback_seconds: float, read_seconds: float | None = None) -> None:
+        """Records one frame, what our callback cost, and what the read cost.
+
+        `read_seconds` is `None` from the `sniff(prn=...)` branch, which has no
+        read this module can bracket. Passing 0.0 there would be a measurement
+        of something that was never measured.
+        """
         if not self.enabled:
             return
         with self._lock:
             self._frames += 1
             self._callback_s += callback_seconds
+            if read_seconds is not None:
+                self._read_s += read_seconds
+                self._read_frames += 1
 
     def snapshot(self) -> dict | None:
         """What has been measured so far, or None when profiling is off.
@@ -99,23 +136,50 @@ class CaptureProfile:
         with self._lock:
             frames = self._frames
             callback_s = self._callback_s
+            read_s = self._read_s
+            read_frames = self._read_frames
             wall_s = time.perf_counter() - self._started
         if frames == 0:
             return {"frames": 0}
-        per_frame_us = wall_s / frames * 1_000_000
+
+        arrival_per_frame_us = wall_s / frames * 1_000_000
         callback_us = callback_s / frames * 1_000_000
-        return {
+        # Averaged over the frames whose read was actually timed, not over all
+        # of them - see `_read_frames`.
+        read_us = (read_s / read_frames * 1_000_000) if read_frames else None
+
+        snap = {
             "frames": frames,
             "wallSeconds": round(wall_s, 3),
-            "perFrameUs": round(per_frame_us, 2),
+            # The interval between arrivals. NOT a cost and NOT a ceiling; this
+            # is the quantity the old `perFrameUs` was, under a name that says
+            # which one it is.
+            "arrivalPerFrameUs": round(arrival_per_frame_us, 2),
+            "arrivalFramesPerSecond": int(frames / wall_s) if wall_s > 0 else 0,
             "callbackUs": round(callback_us, 2),
-            # What is left once our own code is taken out: the driver read plus
-            # scapy's dissection. The target of any change to this path.
-            "driverAndDissectUs": round(per_frame_us - callback_us, 2),
-            # Derived rather than measured: one thread, so this is what the
-            # sniffer could sustain if nothing else ever blocked it.
-            "impliedFramesPerSecond": int(1_000_000 / per_frame_us) if per_frame_us > 0 else 0,
+            "readUs": round(read_us, 2) if read_us is not None else None,
+            "readFrames": read_frames,
         }
+
+        if read_us is None:
+            # Nothing to add the callback to, so there is no honest ceiling and
+            # no honest headroom. Both stay absent rather than being rounded
+            # from a half that was never measured.
+            snap["busyUs"] = None
+            snap["idleUs"] = None
+            snap["sustainableFramesPerSecond"] = None
+            snap["utilisation"] = None
+            return snap
+
+        busy_us = read_us + callback_us
+        snap["busyUs"] = round(busy_us, 2)
+        snap["idleUs"] = round(arrival_per_frame_us - busy_us, 2)
+        snap["sustainableFramesPerSecond"] = int(1_000_000 / busy_us) if busy_us > 0 else 0
+        # The first number to read. At 1.0 this thread is the bottleneck; well
+        # under it, the bottleneck is downstream and work here buys nothing.
+        snap["utilisation"] = (round(busy_us / arrival_per_frame_us, 3)
+                               if arrival_per_frame_us > 0 else None)
+        return snap
 
     def describe(self) -> str:
         """One log line, for the periodic report."""
@@ -124,13 +188,19 @@ class CaptureProfile:
             return "capture profiling is off"
         if snap["frames"] == 0:
             return "capture profile: no frames yet"
+        if snap["sustainableFramesPerSecond"] is None:
+            # The sniff(prn=...) branch. Says what it could not measure rather
+            # than reporting a ceiling derived from half the cost.
+            return (
+                "capture profile: {frames} frames, arriving every "
+                "{arrivalPerFrameUs} us (~{arrivalFramesPerSecond}/s), "
+                "{callbackUs} us in callback; the read is not separable on this "
+                "branch, so there is no ceiling to report"
+            ).format(**snap)
         return (
-            "capture profile: {frames} frames, {perFrameUs} us/frame "
-            # "driver+read", not "driver+dissect": on the pcap_next_ex path
-            # there is no dissection in the remainder at all - see the module
-            # docstring for which branch puts scapy back into it. The KEY keeps
-            # its old name because test_protocol.py pins it by name; only the
-            # words a person reads are corrected here.
-            "({callbackUs} us in callback, {driverAndDissectUs} us driver+read), "
-            "~{impliedFramesPerSecond} frames/s ceiling"
+            "capture profile: {frames} frames, arriving every "
+            "{arrivalPerFrameUs} us (~{arrivalFramesPerSecond}/s); "
+            "cost {busyUs} us/frame ({readUs} read + {callbackUs} callback), "
+            "idle {idleUs} us, utilisation {utilisation}, "
+            "ceiling ~{sustainableFramesPerSecond} frames/s"
         ).format(**snap)
