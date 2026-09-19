@@ -287,6 +287,15 @@ for (const theme of THEMES) {
 // list of them would go stale the first time one is added.
 const GUARDED_FILES = [
   'src/components/common/ActivityRail.tsx',
+  // Added when `rows.tsx` was restacked for the side bar's column and its
+  // `bg-amber-500/10 border-l-2 border-amber-500` became `--warning`. The whole
+  // directory, because this panel's drift was spread over three files - the
+  // warn block in `rows.tsx`, a DoH callout and a `temporary` pill in
+  // `NetworkPane.tsx` - and naming files one at a time is how the fourth is
+  // missed.
+  ...fs.readdirSync(path.join(process.cwd(), 'src/components/network'))
+    .filter((f) => f.endsWith('.tsx'))
+    .map((f) => `src/components/network/${f}`),
   'src/components/analytics/TrafficTimelineChart.tsx',
   ...fs.readdirSync(path.join(process.cwd(), 'src/components/status'))
     .filter((f) => f.endsWith('.tsx'))

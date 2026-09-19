@@ -18,7 +18,7 @@ import { networkPanelStore } from '../../services/interfacePrefs';
 import { resolveMacVendor } from '../../services/macVendors';
 import type { AgentAdapter } from '../../services/agentProtocol';
 import type { NetworkFacts } from '../../services/networkFacts';
-import { Row, Section, Empty, Compare, CompareHeader, Value } from './rows';
+import { Row, Section, Empty, Compare, Value } from './rows';
 import { PublicIdentity } from './PublicIdentity';
 
 /**
@@ -219,8 +219,8 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                               saying, because it means this address is not the
                               card's and will not persist. */}
                           {isLocallyAdministered(adapter.mac) && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15
-                              text-amber-600 dark:text-amber-400">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-warning/15
+                              text-warning-muted">
                               locally administered / randomised
                             </span>
                           )}
@@ -280,9 +280,17 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                             <Value value={entry.prefixLength === null ? entry.address
                               : `${entry.address}/${entry.prefixLength}`}
                               sensitive hidden={hidden} />
+                            {/* A pill in a fixed sky shade, for a fact that is
+                                neither a warning nor a success - so it had
+                                nothing in the theme to take and reached for the
+                                palette instead. In a column its ground was also
+                                competing with the address beside it for width.
+                                Muted text says the same thing and moves between
+                                Day and Night like everything around it. */}
                             {entry.temporary === true && (
-                              <span className="px-1.5 py-0.5 rounded text-[10px]
-                                bg-sky-500/15 text-sky-600 dark:text-sky-400">temporary</span>
+                              <span className="text-[10px] text-muted-foreground/60">
+                                temporary
+                              </span>
                             )}
                             {/* Three states, and the third is honest: macOS
                                 exposes nothing cheap that answers this, so
@@ -303,7 +311,6 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
             {section === 'gateway' && (
               <>
                 <Section title="Gateway">
-                  <CompareHeader />
                   <Compare label="IPv4 gateway"
                     configured={<Value value={adapter?.gatewayV4 ?? null} sensitive hidden={hidden} />}
                     observed={<Value value={facts.gatewayAddresses.find((a) => a.includes('.')) ?? null}
@@ -337,7 +344,6 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                 </Section>
 
                 <Section title="DNS">
-                  <CompareHeader />
                   <Compare label="Servers"
                     // A resolver that was queried but is not configured is the
                     // finding: a browser with its own settings, or something
@@ -375,8 +381,8 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                       : <span className="flex flex-col gap-0.5">{facts.encryptedDns.map((e) =>
                           <span key={e} className="font-mono break-all">{e}</span>)}</span>} />
                   {facts.dnsServers.length === 0 && facts.encryptedDns.length > 0 && (
-                    <div className="px-3 py-2 text-[11px] text-amber-600 dark:text-amber-400
-                      bg-amber-500/10 border-l-2 border-amber-500">
+                    <div className="px-3 py-2 text-[11px] text-warning-muted
+                      bg-warning/10 border-l-2 border-warning">
                       No plain DNS was queried in this capture, but an encrypted-DNS endpoint was
                       contacted. Name resolution is happening where a packet capture cannot read it.
                     </div>
@@ -387,7 +393,6 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
 
             {section === 'dhcp' && (
               <Section title="DHCP">
-                <CompareHeader />
                 <Compare label="Enabled"
                   configured={<Value value={adapter === null || adapter.dhcpEnabled === null
                     ? null : adapter.dhcpEnabled ? 'yes' : 'no (static)'} />}
