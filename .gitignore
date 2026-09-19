@@ -47,3 +47,6 @@ test/fixtures/*
 !test/fixtures/README.md
 !test/fixtures/acceptance.json
 *.tmp
+
+# The Rust agent's build output.
+agent-rs/target/
