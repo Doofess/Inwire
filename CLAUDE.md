@@ -243,7 +243,11 @@ service workers, every permission request denied. The preload is a **single
 CommonJS file** — a sandboxed preload cannot be ESM and cannot `require` a
 relative module, so `electron/build.cjs` bundles it.
 
-**The shell is a rail and a title row, and there is no menu and no filter row.**
+**The shell is a title row, a rail, a status bar and a side bar, and there is no
+menu and no filter row.** The first three are always there; the fourth is a
+column that expands out of the rail and is the only part of the chrome that has
+a width the user chose. It is described after the two cards below, because its
+geometry only makes sense once the rail's does.
 `Header.tsx` is deleted and its contents are split three ways; `AppMenu.tsx` -
 the hamburger drawer that hung off the title row - is deleted too. Of its seven
 entries, **three already had a rail button** (Capture Statistics, Network,
@@ -266,7 +270,11 @@ would have to invent a destination.
 
 **Escape is a different key and stays one hop** - any non-Packets view to
 Packets, which is the exit rather than a step. That is why `stream` has two
-answers, and `scripts/session/view.ts` holds both.
+answers, and `scripts/session/view.ts` holds both. **The side bar is
+deliberately not in that chain**, which is the whole subject of ADR 0034: it is
+persisted, and this repository's own test is that a place is a setting while a
+detour is not, so an Escape that closed it would silently rewrite a stored
+preference AND make the documented one hop into two.
 
 **Follow Stream's own "Back to frame N" is deleted.** It was a way out that
 existed in one view's footer and nowhere else. What it did that was worth
@@ -360,27 +368,26 @@ identity - and nothing in it changes when a packet arrives. The tell was the
 filter row, which had to be hidden above Network and nowhere else, because a
 display filter there was a control with nothing in view to act on.
 
-**It is back on the rail, and it is a SHEET rather than a view.** The half of
-that decision that stood is the test itself - it is still not in `APP_VIEWS`, it
-has no `Ctrl+n` and no place in the numbering. The half that did not stand is
-what followed from it: "not a view" was read as "therefore a Settings tab", and
-Settings is where the app is *configured* while Network configures nothing. It
-is a report about the machine, and a report worth one press is worth its own
-door rather than three clicks inside a preferences panel. So it takes the
-workspace card the way Settings does, with the rail marking it the way it marks
-a view, because from the rail's side "this is what is on screen" is the same
-fact. Driver Info stays a Settings tab and is the other read-only report about
+**It is back on the rail, and it is a side bar PANEL.** The half of that
+decision that stood is the test itself - it is still not in `APP_VIEWS`, it has
+no `Ctrl+n` and no place in the numbering, and `viewPrefs.ts` still lands a
+stored `'network'` back on Packets. The half that kept moving is what followed
+from it, and it took four containers to settle: "not a view" was read as
+"therefore a Settings tab", and Settings is where the app is *configured* while
+Network configures nothing; so it became a **sheet** taking the workspace card,
+which is where a report worth one press belongs rather than three clicks inside
+a preferences panel.
+
+**The sheet is what the side bar corrected.** This panel's whole organising idea
+is the pairing - the OS says how the machine was told to behave, the capture
+shows what actually happened - and as a sheet it covered the capture in order to
+describe the machine the capture came from. "Observed (capture)" was a live
+column with its subject hidden behind it. In the column it sits beside the
+frames it is comparing against, which is the one arrangement where both halves
+of the test hold at once: it is not a view, and it is next to the thing it is
+about. Driver Info stays a Settings tab and is the other read-only report about
 this machine - the pair that belongs there is what the driver is doing and which
-version of it you have. `scripts/session/view.ts` has carried three versions of that rule
-and now holds the third: **the filter row is rendered by naming Packets**, never
-by excluding the views that do not want it. Version two was "no view hides the
-filter row", written the day Network stopped being a view - and being an
-exclusion rule, every view added afterwards inherited the row without anybody
-deciding it should. Four did, and all four fail Network's own test: Statistics is
-handed `packets` rather than `filteredPackets` deliberately, the Routing Map
-draws the throttled feed, Follow Stream reads one conversation, and Frame Detail
-shows the one selected frame. The filter narrowed nothing on screen in any of
-them.
+version of it you have.
 
 Settings widened from `max-w-3xl` to `max-w-5xl` to take the dissector editor,
 which is two columns rather than a list of setting rows.
@@ -434,11 +441,15 @@ side "this is what is on screen" is the same fact. The X and the Close button
 were the modal's and neither survived - a surface with four doors is one nobody
 knows how to leave. `scripts/session/view.ts` holds all of it.
 
-**There are two sheets and one slot.** Settings and Network are the whole list,
-and `App` models it as one state - `sheet: 'settings' | 'network' | null` -
-rather than a flag each. Two flags make "both open" representable in a card that
-holds one surface, and every navigation that closes a sheet would then have to
-remember to close both.
+**There is one sheet and one slot, and the slot stays a union.** Settings is the
+whole list - Network was the second and is a side bar panel now - and `App`
+models it as `sheet: 'settings' | null` rather than a boolean. At one member the
+two are isomorphic, so keeping the union is a choice: it is what makes "the card
+holds exactly one surface" a fact the type carries. A boolean invites a second
+boolean beside it, which makes "both open" representable in a card that shows
+one, and every navigation that closes a sheet would then have to remember to
+close both. That argument was won once, and a union is what stops an edit
+re-opening it.
 
 **Landing on a view closes it, and that shipped broken.** The sheet renders
 INSTEAD of the view stack, so a rail click from inside Settings moved `view`
@@ -498,17 +509,37 @@ validated against a widget catalogue - shaped that way so a settings list could
 be generated from it. There is no catalogue and no generated list; the fields are
 fields.
 
+**Closed** — the rail and `<main>` float apart, which is VS Code's `.nosidebar`
+case. The title row carries the back step, the filter field with its presets
+chevron, and the detail panes' toggle.
+
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  ◉   32px TitleRow                          ─ □ ✕       │
+│  ◉  ‹  [ tcp.port == 443 ]  ▾           ▤    ─ □ ✕      │
 │ ╭────╮ ╭──────────────────────────────────────────────╮ │
-│ │rail│ │ FilterRow (banner, filter, restore)          │ │
-│ │44px│ ├──────────────────────────────────────────────┤ │
-│ │    │ │ packets (hidden, never unmounted)            │ │
-│ │    │ │   ├─ packet list                             │ │
+│ │rail│ │ packets (hidden, never unmounted)            │ │
+│ │44px│ │   ├─ packet list                             │ │
 │ │    │ │   └─ INSPECTION │ HEX VIEW                   │ │
 │ │    │ │ detail | statistics | geo | stream           │ │
+│ │    │ │ settings - the sheet, INSTEAD of the stack   │ │
 │ ╰────╯ ╰──────────────────────────────────────────────╯ │
+│ ● Capturing 04:12  Ethernet     0x42 'B'  44/178,200 ◍  │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Open** — the side bar butts against the rail and the two read as one surface:
+one seam, drawn by the rail, and the sash takes over the 4px gap `<main>` used
+to supply. `<main>` keeps its own four borders and simply gets narrower.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  ◉  ‹  [ tcp.port == 443 ]  ▾           ▤    ─ □ ✕      │
+│ ╭────┬──────────────╮╷╭───────────────────────────────╮ │
+│ │rail│ INTERFACES   │╷│ packets                       │ │
+│ │44px│ ──────────── │╷│   ├─ packet list              │ │
+│ │    │ Ethernet ▁▃▅ │╷│   └─ INSPECTION │ HEX         │ │
+│ │    │ Wi-Fi    ▁▁▂ │╷│                               │ │
+│ ╰────┴──────────────╯╵╰───────────────────────────────╯ │
 │ ● Capturing 04:12  Ethernet     0x42 'B'  44/178,200 ◍  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -557,33 +588,52 @@ the window's bottom edge, `components/status/StatusBar.tsx`. The chrome is a
 **C**: the title row across the top, the rail down the left, the bar across the
 bottom, all one `--secondary` ground.
 
-**Between those two strips the rail and `<main>` are two CARDS**, which is VS
-Code's Modern UI arrangement ported rather than invented - read
+**Between those two strips the rail, the side bar and `<main>` are CARDS**,
+which is VS Code's Modern UI arrangement ported rather than invented - read
 `src/vs/workbench/browser/media/floatingPanels.css` in `microsoft/vscode`, and
-`.part.activitybar.left` in particular, before changing any of it. Four facts,
-each load-bearing for the others:
+`.part.activitybar.left` in particular, before changing any of it. **Both of
+that file's arrangements are live here and one boolean chooses**: with no panel
+open the rail and `<main>` float apart, and with one open the rail and the side
+bar meet flush while `<main>` floats beside them. Four facts, each load-bearing
+for the others:
 
 - **A 4px gutter** on the band (`pl-1 pr-1 pb-1` in `App.tsx`) holds both cards
   off the window on the left, the right and the bottom. They meet the title row
   **flush** at the top, which is also VS Code's. The chrome's `--secondary`
   shows in the gutter and is the cluster's backdrop, which is the first time
   that ground has been visible at all.
-- **8px on every corner of both cards**, and a 4px gap between them: they
-  FLOAT apart rather than meeting flush. That is VS Code's `.nosidebar` case -
-  a rail with nothing to connect to "closes up as a standalone panel with every
-  corner rounded". The gap is `ml-1` on `<main>`, not `mr-1` on the rail, which
-  is their convention too and keeps it one number rather than two that have to
-  agree. 8px is `--vscode-cornerRadius-large`; 4px is `--vscode-spacing-size40`.
+- **8px on the corners nothing covers, and a 4px gap between cards.** Closed,
+  every corner of both cards is rounded and they FLOAT apart: VS Code's
+  `.nosidebar` case, a rail with nothing to connect to that "closes up as a
+  standalone panel with every corner rounded". Open, the rail's two RIGHT
+  corners square and the side bar's two left ones do, because the seam runs
+  between them; the left corners are stated unconditionally in both files,
+  since they face the gutter and can never square, so the only corner an edit
+  can get wrong is the one that varies. 8px is `--vscode-cornerRadius-large`;
+  4px is `--vscode-spacing-size40`.
+- **The 4px gap is always one number on the element to the RIGHT**, never a
+  `mr-1` on the left card - VS Code's convention, and the reason is that two
+  margins are two numbers that have to agree. **Which element supplies it moves
+  with the arrangement**: closed it is `ml-1` on `<main>`, open it is the sash,
+  which is an in-flow `w-1` sibling and therefore IS the gap rather than sitting
+  in one. So `<main>`'s margin is conditional - `${sideBarOpen ? '' : 'ml-1'}` -
+  and doubling it is what a session adding the sash without touching `<main>`
+  would ship. `view.ts` asserts the pair.
 - **The radius does not break the square-corner rule, it steps around it.** The
   rule is that nothing drawing against the window's OWN edge may carry a corner,
   because Windows draws the only curve out there. The gutter means neither card
   touches the window. Delete the gutter and the radius goes in the same commit.
-- **Each card draws its own four borders**, so there is no shared seam and no
-  question of who owns it. They met flush for a revision, with the rail drawing
-  the seam and `<main>` giving up its `border-l`; the border belongs to the rail
-  either way, and the reason is arithmetic: `w-11` under `border-box` is 42px of
-  interior between two 1px borders, which centres a 36px target on whole pixels,
-  where handing the facing border away leaves 43.
+- **The rail draws all four of its borders in both arrangements, and the card
+  that meets it gives one up.** Closed there is nothing beside it and every card
+  closes its own outline. Open, the side bar takes `border border-l-0` - the
+  shorthand first, so the give-up is explicit rather than an omission - and the
+  rail draws the only seam. **Which side owns it is arithmetic, not taste**:
+  `w-11` under `border-box` is 42px of interior between two 1px borders, which
+  centres a 36px target on whole pixels, where handing the facing border away
+  leaves 43 and puts the icon column on a half pixel. `floatingPanels.css`
+  records the identical finding in its own words, which is why the rail draws
+  the seam in both codebases - and it is why the rail's `border border-border`
+  must stay complete and unconditional and must never become `border-r-0`.
 
 **Neither strip draws an edge of its own, and that is arithmetic too.**
 `border-box` takes a border out of the element's height, so a `border-b` on the
@@ -749,21 +799,94 @@ rail, this pane. Radii inside the workspace are untouched by it and are
 everywhere: 242 `rounded-*` utilities across the renderer, on buttons, cards,
 popovers and pills.
 
-**There is no seam between the two cards**, because they do not touch: a 4px
-gap runs between them and each closes its own outline. That went through both of
-VS Code's arrangements on the way here - the rail drawing a shared seam while
-`<main>` gave up its `border-l`, then the two floating apart - and
-`scripts/session/view.ts` asserts whichever is in force, because two lines in one
-place is one line too many and so is none. What has not changed is why a line is
-needed at all: at `--secondary` against `--background` the grounds differ by
-13/255 in Night (the paragraph above has the deltas) and the border carries it in
-Day.
+**There is exactly one seam and only when the side bar is open**, between the
+rail and the column; `<main>` never has one, because a 4px gap always runs to
+its left and it closes its own outline. Both of VS Code's arrangements are in
+force here rather than one having replaced the other, so
+`scripts/session/view.ts` asserts the seam **as a pair** - the rail draws it and
+the side bar gives its border up - because the two failures are a **doubled**
+line and **no** line, and each is one line wrong in the opposite direction.
+What does not change with the arrangement is why a line is needed at all: at
+`--secondary` against `--background` the grounds differ by 13/255 in Night (the
+paragraph above has the deltas) and the border carries it in Day. The side bar
+is `bg-card` rather than `bg-secondary` for the same reason read across the
+seam - the rail is chrome and the column is a titled content surface, so
+card-against-secondary is a real ground change and the hairline reads. A
+`bg-secondary` column would merge into the rail and the seam would vanish.
 
 `overflow-hidden` stays and its reason changed. It was load-bearing for the
-curve - `FilterRow` paints its own `bg-background` straight into that corner, so
-without the clip the curve was drawn and then covered by the child sitting in
-it. With the corner square, what keeps it is that every child of the column
-scrolls inside it and their scrollers resolve against this box.
+curve - the deleted `FilterRow` painted its own `bg-background` straight into
+that corner, so without the clip the curve was drawn and then covered by the
+child sitting in it. With the corner square, what keeps it is that every child
+of the column scrolls inside it and their scrollers resolve against this box.
+
+**The side bar is a resizable column between the rail and `<main>`**, opened by
+four of the rail's buttons, and it **pushes** rather than overlays - `<main>`
+gets narrower, which is VS Code's arrangement and was chosen with the user over
+an overlay. `components/sidebar/` is the directory, `SideBar.tsx` is the card,
+and `sideBarPrefs.ts` is the state.
+
+**Nothing was pasted into it, and that was the rule the work was done under.**
+Each of the four was shaped by a constraint the column removes, so each one
+spends what it gains and the workarounds for the old container are deletions
+rather than ports:
+
+- **Interfaces** was a 288px Radix dropdown capped at `max-h-80` and dismissed on
+  select. The sparkline's `MAX_SPARKLINE_WIDTH = 130` was derived in its own
+  comment from `w-72` minus padding - wrong by construction in a column whose
+  width is a preference - so it is derived from the stored width now. Radix's
+  typeahead is **lost**, said plainly: it was reachable only while a menu was
+  open, had no affordance, and covered three to eight rows.
+- **Schedule** was capped at 512px tall, which is why only one field's calendar
+  could open - `CaptureSchedulePicker` said so in as many words. Two disclosures
+  now, and the countdown `describeSchedule(...)` was computing **only to fill a
+  rail tooltip** is the header's `detail` line: a live "Stops in 14:58".
+- **Export/Import** was a 768px modal with a scrim over an app whose subject is
+  on screen behind it. The export is a sequence and a column is the shape of
+  one. `ExportPanel`'s `pt-9` reservation for a floating validation banner is
+  deleted, not tuned - in a 300px column it was 36px whose only job was to be
+  empty. `ImportErrorDialog` **stays a modal**: a refusal that must be
+  acknowledged is a detour by every test here.
+- **Network** is above; `Compare`'s two columns stack, `CompareHeader` is
+  deleted, and the `w-40` nav went with them.
+
+**The persisted state is `inwire.sideBar`** - one key holding `panel`, `open`
+and `width`, so a restore is one storage event and one atomic apply.
+`MIN_SIDE_BAR_PX` is **170**, cited to VS Code's `sidebarPart.ts`, and
+deliberately NOT `MIN_PANE_PX` (220), which defends a hex dump's 16-byte row and
+has nothing to do with this. `restoredPanel()` sits beside `restoredView` even
+though it is the identity today: it is where a future panel that needs something
+handed to it declares itself unrestorable, and cutting the seam early is what
+stopped `stream` being scattered.
+
+**`Ctrl+B` toggles it**, VS Code's own key, through a ref in
+`useKeyboardNavigation` rather than a dep - this hook binds a `keydown` on
+`window` and re-registering it ten times a second during a capture is the exact
+thing its opening comment exists to prevent.
+
+**Escape does not close it and navigating does not close it**, which is the
+exact inverse of the sheet rule sitting a few lines away in the same file. ADR
+0034 is written for those two negatives specifically, because a negative
+decision leaves no code behind to explain itself, and
+`scripts/session/side-bar.ts` asserts them by reading the **bodies** of
+`handleViewChange`, `applyFilter` and the Escape effect - between two known
+ends, not by a character window, because the first version of that check failed
+on correct code (`useKeyboardNavigation`'s options object legitimately contains
+`setSideBar`, for `Ctrl+B`).
+
+**The sash is an in-flow `w-1` sibling and IS the 4px gap**, which is what VS
+Code's is. At rest it paints nothing - two card borders already draw the edge
+there and a third line is clutter - and it carries the full divider vocabulary:
+`role="separator"`, `aria-valuenow/min/max` in px, arrows with Shift for bigger
+steps, Home/End, and a reset on double-click, right-click and Enter.
+
+**Adapter sampling is tied to the panel's MOUNT**, not to an App effect keyed on
+which panel is open. Mount/unmount is the stronger tie because the subscription
+cannot outlive the display *by construction* - the same argument that deleted
+the second map. The notify callback goes through a **ref**: it has an empty dep
+list today, and the day it gains one a naked dep array would tear the
+subscription down and rebuild it on every App render, which is a write down the
+pipe thirty times a second with no symptom on screen.
 
 `ActivityRail.tsx` is 44px and starts below that row - there is no cell above
 its first group, because a cell would put the mark below the corner it is meant
@@ -893,14 +1016,21 @@ the floor, which is why the glyph changed and the floor did not.
 holds four numbers to it: the glyph's contrast on the composite, and the fill's
 deltaE from both the rail's ground and its own hover - the second being the pair
 that matters, since an active marker a hover can be mistaken for is not a
-marker. There used to be a third shape - a dot and
-an outline, for a widget that was open in the dock - and with the dock gone every
-icon in the strip is a view or an action, so one shape is all there is to say
-**for a view**. The pair survives on the two
-controls that are neither: the adapter and the schedule take
-`railButton(active, 'toggle')`, which is the outline, and the schedule carries
-the dot when one is set. Find packet was the third and is deleted; what was
-deleted before it was the widget icons, not the vocabulary. 44 disagrees with
+marker.
+
+**The vocabulary is down to two marks and `railButton` takes one argument.**
+There were three shapes at the widest - the fill, an outline meaning "this
+control is ON", and a dot for a widget open in the dock. The outline's last two
+callers were the adapter and the schedule, and both open a side bar panel now,
+so both wear the fill: from the rail's side "this surface is on screen" is one
+fact however the surface is arranged. What the outline used to carry moved to
+the **dot**, which was already the schedule's and now means the same thing for
+both - *the thing behind this button has something to report*, an adapter that
+needs attention or a schedule that is set. The `'view' | 'toggle'` parameter
+went with the branch rather than being kept for a future caller, because a
+marker shape nothing draws is a shape the next session has to guess the meaning
+of; `view.ts` asserts both the signature and that no raw `ring-1 ring-inset`
+brings a second shape back without a name. 44 disagrees with
 `FrameMetaRail`'s 48 - this rail was 8px wider and is now 4px narrower, so the
 disagreement changed sign rather than went away - and that is accepted rather
 than overlooked: one is a group of icons inside a pane, the other is three groups
@@ -954,7 +1084,15 @@ Three things the dock knew that are worth not rediscovering:
   to keep every column would have meant the dock could not open **at all** at the
   1024 minimum. The constant is gone with the dock; the reasoning is the general
   form of "guarantee the identity - frame number, time, both addresses - and let
-  the rest scroll".
+  the rest scroll". **It has a subject again**: `MAIN_RESERVE_PX` in
+  `sideBarPrefs.ts`, the width `usableSideBarWidth` keeps for `<main>` before it
+  narrows the side bar. It is **780**, not 480, and the 300px correction is the
+  reserve's own history repeating - 480 was picked as a number that felt like
+  enough, and the measurement behind the rule says the fixed columns take ~785,
+  so at 480 the identity this rule exists to guarantee would have been the
+  thing that scrolled. At the 1024 minimum 780 still leaves a 192px column,
+  which is above VS Code's own 170 floor, so the panel narrows rather than
+  being refused.
 - **A width or a share is stored unclamped and clamped at the point of use.**
   `clampDockWidth` applied against the window, so narrowing shrank an open dock
   and widening gave back the width the user chose; a width clamped on the way out
@@ -964,7 +1102,14 @@ Three things the dock knew that are worth not rediscovering:
   interaction ("the hex dump keeps at least a tenth") applied at the point of use
   in `App.tsx`. One share has no interaction to defer, so the 0.1..0.9 ceiling in
   the normalizer is the whole clamp again and `MIN_PANE_PX` is what stops either
-  pane being dragged to nothing.
+  pane being dragged to nothing. **The side bar is the rule's live subject**:
+  `inwire.sideBar` stores a width clamped only against `[170, 600]`, the window
+  never touches what is stored, and `usableSideBarWidth(stored, available)`
+  applies the reserve on the render path every time. The failure the split
+  prevents is silent and was caught in review: a drag or an arrow key that
+  committed the window-clamped figure would let two presses at a narrow window
+  permanently rewrite a 600px choice, and widening the window would never give
+  it back.
 - **`Dock` was the application's only `React.memo` boundary**, and the one that
   replaced it is the hex pane. App re-renders ~10x a second during a capture and
   every widget did a full pass over the buffer, so the dock had to absorb that;
@@ -1971,7 +2116,9 @@ focusable; with a dozen rail buttons, Space on a focused one both activated it
 and ran this handler's `preventDefault`, so the button's own activation was
 suppressed and capture toggled anyway. Scoped positively, every control added
 from here on is safe by default rather than by being remembered. `Ctrl+1..5`
-switch views, and `APP_VIEWS` order **is** the numbering. **There is no
+switch views, and `APP_VIEWS` order **is** the numbering; **`Ctrl+B` toggles the
+side bar**, VS Code's key, and reaches its handler through a ref for the reason
+in the parenthesis above rather than sitting in the dep array. **There is no
 detail-window gate any more**: this hook used to bail out entirely while
 `detailPacketId` was set, because a modal covered the window. Frame Detail is a
 view, so the hook binds Up and Down and the pane binds Left and Right, and both
