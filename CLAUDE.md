@@ -358,9 +358,20 @@ view, on Ctrl+3, and it failed the test the view list applies: a view is a way o
 looking at the capture. Network describes the *machine* - adapters, DNS, public
 identity - and nothing in it changes when a packet arrives. The tell was the
 filter row, which had to be hidden above Network and nowhere else, because a
-display filter there was a control with nothing in view to act on. It is a
-Settings tab now, next to Driver Info, which is the other read-only report about
-this machine. `scripts/session/view.ts` has carried three versions of that rule
+display filter there was a control with nothing in view to act on.
+
+**It is back on the rail, and it is a SHEET rather than a view.** The half of
+that decision that stood is the test itself - it is still not in `APP_VIEWS`, it
+has no `Ctrl+n` and no place in the numbering. The half that did not stand is
+what followed from it: "not a view" was read as "therefore a Settings tab", and
+Settings is where the app is *configured* while Network configures nothing. It
+is a report about the machine, and a report worth one press is worth its own
+door rather than three clicks inside a preferences panel. So it takes the
+workspace card the way Settings does, with the rail marking it the way it marks
+a view, because from the rail's side "this is what is on screen" is the same
+fact. Driver Info stays a Settings tab and is the other read-only report about
+this machine - the pair that belongs there is what the driver is doing and which
+version of it you have. `scripts/session/view.ts` has carried three versions of that rule
 and now holds the third: **the filter row is rendered by naming Packets**, never
 by excluding the views that do not want it. Version two was "no view hides the
 filter row", written the day Network stopped being a view - and being an
@@ -422,6 +433,12 @@ is a toggle carrying the same active marker a view does, because from the rail's
 side "this is what is on screen" is the same fact. The X and the Close button
 were the modal's and neither survived - a surface with four doors is one nobody
 knows how to leave. `scripts/session/view.ts` holds all of it.
+
+**There are two sheets and one slot.** Settings and Network are the whole list,
+and `App` models it as one state - `sheet: 'settings' | 'network' | null` -
+rather than a flag each. Two flags make "both open" representable in a card that
+holds one surface, and every navigation that closes a sheet would then have to
+remember to close both.
 
 **Landing on a view closes it, and that shipped broken.** The sheet renders
 INSTEAD of the view stack, so a rail click from inside Settings moved `view`
@@ -751,9 +768,16 @@ scrolls inside it and their scrollers resolve against this box.
 `ActivityRail.tsx` is 44px and starts below that row - there is no cell above
 its first group, because a cell would put the mark below the corner it is meant
 to occupy and cost height the rail has not got. **Three groups**: **capture**
-(Start/Stop, adapter, schedule - in the order they are used), **views**
-(Packets, Frame Detail, Statistics, Routing Map, Follow Stream), and a bottom
-group of actions (Export/Import, Settings) pinned with `mt-auto`.
+(Start/Stop, adapter, schedule, Export/Import - in the order they are used),
+**views** (Packets, Frame Detail, Statistics, Routing Map, Follow Stream), and a
+bottom group (Network, Settings) pinned with `mt-auto`.
+
+**Export/Import moved up into the capture group**, out of the bottom group where
+it sat with Settings. That group is for the application and this is about the
+*capture*: it writes the frames in hand out to a file, or reads a file in as the
+frames in hand, which is the same subject as the three controls above it. The
+move cost nothing - both groups gap the same, so the two deltas cancel - and
+Network took the slot it left.
 
 **There was a fourth group and it was the widgets.** Six icons toggling panels
 in the dock, with a 20px collapse header in the divider slot above them. All of
@@ -805,10 +829,13 @@ Export/Import took the slot. The Update Center is unchanged and still lives wher
 ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs a
 real `updateAvailable` first, and Settings is the icon to hang it on.
 
-10 icons at **36px**, two dividers and the bottom group's padding come to
-**414px** against the 618px the rail gets - a **680px** minimum window, less the
+11 icons at **36px**, two dividers and the bottom group's padding come to
+**452px** against the 618px the rail gets - a **680px** minimum window, less the
 32px title row above it, the **24px status bar** below, the cluster's 4px bottom
-gutter, and the card's own two 1px borders - 204px of slack.
+gutter, and the card's own two 1px borders - 166px of slack. The last step in
+that number is the rule worth carrying: **rearranging the strip is free and
+growing it is not.** Export/Import changing groups moved nothing, because both
+groups gap the same; Network arriving cost 38 - one 36px target and its gap.
 `scripts/session/view.ts` adds that up from the Tailwind classes, holds each
 class to what the sum assumes, and prints "the rail is FULL" when the answer is
 no more icons. **The two strips are funded differently and that is deliberate**:

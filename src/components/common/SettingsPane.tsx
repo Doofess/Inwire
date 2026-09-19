@@ -14,7 +14,6 @@ import {
   Key,
   Download,
   Code,
-  EthernetPort,
 } from 'lucide-react';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
 import { UpdateCenterPanel } from './UpdateCenterPanel';
@@ -25,10 +24,7 @@ import { DisplayFiltersPanel } from './DisplayFiltersPanel';
 import { ColorRulesPanel } from './ColorRulesPanel';
 import { DecryptionSettingsPanel } from './DecryptionSettingsPanel';
 import { CustomDissectorsPanel } from '../dissectors/CustomDissectorsPanel';
-import { NetworkPane } from '../network/NetworkPane';
 import type { CustomDissectorEngine } from '../../services/customDissectorEngine';
-import type { AgentAdapter } from '../../services/agentProtocol';
-import type { NetworkFacts } from '../../services/networkFacts';
 import type { AgentLogEntry } from '../../services/agentProtocol';
 import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/packet';
 import type { PacketTheme } from '../../services/packetThemes';
@@ -50,7 +46,7 @@ import type { CaptureStorageState } from '../../services/capture/captureProtocol
  * separate visits made a single story into two.
  */
 type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters' | 'colors'
-  | 'dissectors' | 'decryption' | 'network' | 'driver' | 'updates';
+  | 'dissectors' | 'decryption' | 'driver' | 'updates';
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
@@ -76,14 +72,13 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // what the dissector can read, which is the same kind of setting as a rule
   // that changes what is shown - and nothing to do with the driver.
   { id: 'decryption', label: 'Decryption', icon: Key },
-  // The first of the three that describe this MACHINE rather than configure the
-  // app, and deliberately first of them: Network says how this computer is
-  // connected, Driver Info says what the capture driver is doing on it, Updates
-  // says which version of that driver you have. It was a rail view with its own
-  // Ctrl+3 - and the thing that made it odd there was that it never described
-  // the capture, so the filter row had to be hidden above it. Nothing in it
-  // changes when a packet arrives.
-  { id: 'network', label: 'Network', icon: EthernetPort },
+  // **Network was here and is a sheet of its own now**, reached from the rail.
+  // Its argument for being a tab still stands as far as it went - nothing in it
+  // changes when a packet arrives, so it is not a view - but it was the wrong
+  // half of the story: this panel is where the app is CONFIGURED, and Network
+  // configures nothing. It is a report about the machine, and a report worth
+  // one press is worth its own door. What is left here is the pair that does
+  // belong: what the capture driver is doing, and which version of it you have.
   { id: 'driver', label: 'Driver Info', icon: Activity },
   // Last, directly after Driver Info, because the two answer halves of one
   // question. Driver Info says what the capture driver is doing; this says
@@ -144,10 +139,7 @@ interface SettingsPaneProps {
   dissectorEngine: CustomDissectorEngine;
   onUpdateDissectors: () => void;
 
-  /* --- Network, which was a rail view ------------------------------------ */
-  adapters: AgentAdapter[];
-  networkFacts: NetworkFacts;
-  onRefreshAdapters: () => void;
+  /* --- Network was here, and is its own sheet off the rail now ------------ */
 }
 
 export const SettingsPane: React.FC<SettingsPaneProps> = ({
@@ -189,9 +181,6 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   onClearAgentLog,
   dissectorEngine,
   onUpdateDissectors,
-  adapters,
-  networkFacts,
-  onRefreshAdapters,
 }) => {
   const [section, setSection] = useState<SettingsSection>('appearance');
   const bufferPercent = packetBufferBytes > 0
@@ -289,20 +278,6 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
             )}
 
             {section === 'decryption' && <DecryptionSettingsPanel />}
-
-            {/* The pane, unchanged. It never took a "return to packets"
-                callback - it describes the machine, so it had nothing to hand
-                back - which is exactly what made it a poor view and makes it a
-                good tab. */}
-            {section === 'network' && (
-              <NetworkPane
-                adapters={adapters}
-                facts={networkFacts}
-                captureInterfaces={selectedInterfaces}
-                agentConnected={agentStatus === 'connected'}
-                onRefresh={onRefreshAdapters}
-              />
-            )}
 
             {section === 'updates' && (
               <UpdateCenterPanel

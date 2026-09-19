@@ -12,6 +12,7 @@ import {
   Settings,
   FileOutput,
   ListTree,
+  Network,
 } from 'lucide-react';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentStatusLabel } from '../../services/agentHealth';
@@ -121,11 +122,11 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  *
  * ## Height
  *
- * 10 icons at 36px, two dividers and the bottom group's padding come to
- * **414px** against the 618px the rail gets - a 680px minimum window, less the
+ * 11 icons at 36px, two dividers and the bottom group's padding come to
+ * **452px** against the 618px the rail gets - a 680px minimum window, less the
  * 32px title row above it, the 24px status bar below, the cluster's 4px bottom
- * gutter, and this card's own two 1px borders. It fits, with 204px of slack -
- * room for five more.
+ * gutter, and this card's own two 1px borders. It fits, with 166px of slack -
+ * room for four more.
  *
  * **The two strips are funded differently, and that is the thing to carry
  * forward.** The window minimum carries the title row, so this number did not
@@ -166,6 +167,13 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * than assumed: `scripts/session/view.ts` adds up the groups as they actually
  * are.
  *
+ * **414 -> 452 is the free move and the paid-for icon in one change.**
+ * Export/Import went from the bottom group up under the schedule, which cost
+ * nothing by the rule above; Network came BACK from Settings into the slot it
+ * left, and that is a genuine eleventh icon at 36 + 2 = 38. Read the pair
+ * together and the rule is unmissable: rearranging this strip is free and
+ * growing it is not.
+ *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that
  * script was written: the figure was for `my-1` dividers, it counted three rather
@@ -185,7 +193,12 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * Dissectors went to Settings beside Decryption, and **Network stopped being a
  * view at all**: it described the machine rather than the capture, which is why
  * the filter row had to be hidden above it and nowhere else, so it became a
- * Settings tab next to Driver Info. That is two icons back. Every digit below it
+ * Settings tab next to Driver Info. That is two icons back - and Network has
+ * since spent one of them again, as a SHEET rather than a view: not in
+ * `APP_VIEWS`, no `Ctrl+n`, no place in the numbering, but a button in the
+ * bottom group beside Settings. The half of that decision that stood was "it is
+ * not a way of looking at the capture"; the half that did not was "therefore it
+ * belongs inside the configuration panel". Every digit below it
  * has shifted twice since - Network leaving, then Frame Detail arriving second -
  * and the current assignment is Packets `Ctrl+1`, Frame Detail `Ctrl+2`,
  * Statistics `Ctrl+3`, Routing Map `Ctrl+4`, Follow Stream `Ctrl+5`. None of
@@ -340,6 +353,18 @@ export interface ActivityRailProps {
   settingsOpen: boolean;
   onOpenSettings: () => void;
   /**
+   * Whether the Network sheet is up.
+   *
+   * The same shape as `settingsOpen` and for the same reason: Network takes the
+   * workspace card without being a view, because nothing in it changes when a
+   * packet arrives - it describes the MACHINE. Two booleans here rather than one
+   * "which sheet" enum, because this strip has no concept of a sheet: it draws a
+   * button and says whether that button's surface is on screen. `App` owns the
+   * rule that only one can be.
+   */
+  networkOpen: boolean;
+  onOpenNetwork: () => void;
+  /**
    * Export / Import PCAP.
    *
    * It took the Update Center's slot, and that cost nothing: `onOpenUpdates`
@@ -358,7 +383,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces, onSelectInterface,
   interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
-  settingsOpen, onOpenSettings, onOpenExport,
+  settingsOpen, onOpenSettings, networkOpen, onOpenNetwork, onOpenExport,
   schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
   scheduleSummary, scheduleNow,
 }) => {
@@ -673,6 +698,32 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           </button>
         </CaptureSchedulePicker>
 
+        {/* **Export / Import, under the schedule.**
+
+            It was pinned at the bottom with Settings, in the group for "the
+            application" - and it is not about the application, it is about THIS
+            capture: it writes the frames in hand out to a file, or reads a file
+            in as the frames in hand. That is the same subject as the three
+            controls above it, which decide what is captured and when, so it
+            belongs at the end of that run rather than beside the app's
+            configuration. Moving an icon between two groups costs nothing:
+            both gap the same, so the two deltas cancel.
+
+            `FileOutput` rather than the menu's `Download`, and deliberately
+            not `ArrowRightLeft`: an exchange glyph would sit four icons above
+            Follow Stream's `ArrowLeftRight` and read as the same control
+            twice. That mistake has been made in this strip once already - the
+            brand mark opened as an `EthernetPort`, identical to the adapter
+            button 42px under it, and only a screenshot found it. */}
+        <button
+          onClick={onOpenExport}
+          aria-label="Export or import a capture"
+          title="Export / Import PCAP"
+          className={railButton(false, 'toggle')}
+        >
+          <FileOutput className={GLYPH} />
+        </button>
+
         {/* **Find packet was here and is deleted.**
 
             A substring match over the rows already in hand, with a popover, a
@@ -762,19 +813,33 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           above can grow without overlapping it. */}
       <div className={`${GROUP} mt-auto pb-2`} role="group" aria-label="Application">
         <RailDivider />
-        {/* `FileOutput` rather than the menu's `Download`, and deliberately
-            not `ArrowRightLeft`: an exchange glyph would sit five icons below
-            Follow Stream's `ArrowLeftRight` and read as the same control
-            twice. That mistake has been made in this strip once already - the
-            brand mark opened as an `EthernetPort`, identical to the adapter button
-            42px under it, and only a screenshot found it. */}
+        {/* **Network, in the slot Export/Import left.**
+
+            It was a VIEW once, on `Ctrl+3`, and it failed the view list's own
+            test - it describes the MACHINE rather than the capture, and nothing
+            in it changes when a packet arrives. It became a Settings tab on
+            that argument, and the tab was the wrong conclusion from a right
+            premise: Settings is where the app is CONFIGURED, and Network
+            configures nothing. It is a report, and a report about what this
+            computer is connected to should not be three clicks inside a
+            preferences panel.
+
+            So it is a sheet with its own door, marked `'view'` like Settings is
+            and for the identical reason: the fill means "this is what you are
+            looking at", which is true while it is up, where the outline means
+            "this control is on", which a surface is not.
+
+            `Network` rather than `EthernetPort` - that glyph is the adapter
+            button four icons above, and this strip has shipped two identical
+            icons once already. */}
         <button
-          onClick={onOpenExport}
-          aria-label="Export or import a capture"
-          title="Export / Import PCAP"
-          className={railButton(false, 'toggle')}
+          onClick={onOpenNetwork}
+          aria-label="Network"
+          title="Network - adapters, DNS and this machine's public identity"
+          aria-pressed={networkOpen}
+          className={railButton(networkOpen, 'view')}
         >
-          <FileOutput className={GLYPH} />
+          <Network className={GLYPH} />
         </button>
         {/* **A toggle now, and marked like a view.** Settings was a modal
             with an X and a Close button; it is a pane taking the workspace
