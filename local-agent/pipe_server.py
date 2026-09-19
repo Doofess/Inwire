@@ -72,8 +72,8 @@ this agent's own stream is a 256 kB batch about thirty times a second.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
-import queue
 import sys
 import threading
 from typing import Awaitable, Callable, Optional
@@ -95,14 +95,95 @@ MAX_PIPE_INSTANCES = 8
 #: Read buffer. A batch is capped at 256 kB and a control message is smaller.
 READ_CHUNK = 64 * 1024
 
-#: Queued outbound frames before a slow reader is dropped.
+#: Queued outbound frames before the oldest are shed.
 #:
 #: The same reasoning as ``MAX_QUEUED_PACKETS`` in the sniffer: backpressure
 #: has to end somewhere, and a client that cannot keep up must cost the client
 #: rather than the agent's memory.
 MAX_OUTBOUND_FRAMES = 4096
 
+#: ...and the byte budget beside it, for the reason ``MAX_QUEUED_BYTES`` exists.
+#:
+#: **A count bound alone was the wrong shape here and the sniffer already knew
+#: it.** ``agent.py`` records adding ``MAX_QUEUED_BYTES`` because a frame is 60
+#: bytes to 64 kB, so a count says nothing about memory. The items in THIS queue
+#: are whole batches of up to 256 kB, which makes the mismatch far worse: 4,096
+#: of them is up to **1 GB**, queued inside a LocalSystem service, on a machine
+#: whose owner is watching it for using too much memory.
+#:
+#: 32 MB, matching ``MAX_QUEUED_BYTES`` and ``KERNEL_BUFFER_BYTES`` - the same
+#: order of magnitude as every other buffer on this path.
+MAX_OUTBOUND_BYTES = 32 * 1024 * 1024
+
 _SHUTDOWN = object()
+
+
+class _Outbound:
+    """Frames waiting for the writer thread, bounded by count AND bytes.
+
+    A ``queue.Queue`` was here, and it could only express the count bound. The
+    items are whole batches of up to 256 kB, so 4,096 of them is up to a
+    gigabyte held inside a LocalSystem service - the same mistake ``agent.py``
+    records fixing in the sniffer queue when it added ``MAX_QUEUED_BYTES``
+    beside ``MAX_QUEUED_PACKETS``. A deque under a condition is what that queue
+    is, so this is the same shape as the one on the other end of the pump.
+
+    **Full means shed the oldest, not drop the client.** It used to close the
+    connection, and that is worse than it sounds: closing drops the client, the
+    client leaving is what stops the capture (``handle_disconnect``), so the
+    protection against a slow reader terminated the very thing it was
+    protecting. It also made the loss unreportable - the connection that would
+    have carried the number is the one being closed.
+
+    Oldest-first, matching the sniffer queue, and **counted**, which is the
+    other half of what was missing: frames vanished here with no counter, no
+    per-drop log line and nothing in ``capture_stats``.
+    """
+
+    def __init__(self, max_frames: int, max_bytes: int) -> None:
+        self._frames: collections.deque = collections.deque()
+        self._bytes = 0
+        self._max_frames = max_frames
+        self._max_bytes = max_bytes
+        self._cond = threading.Condition()
+        self.dropped = 0
+
+    def put(self, frame) -> None:
+        with self._cond:
+            self._frames.append(frame)
+            if frame is not _SHUTDOWN:
+                self._bytes += len(frame)
+            # `> 1` so the frame just queued is never the one shed: a queue that
+            # evicted its own newest arrival would deliver nothing at all once
+            # a single frame exceeded the budget.
+            while (len(self._frames) > self._max_frames
+                   or self._bytes > self._max_bytes) and len(self._frames) > 1:
+                oldest = self._frames.popleft()
+                if oldest is _SHUTDOWN:
+                    # Never shed the stop signal - the writer thread is waiting
+                    # for it and would block until the handle closed under it.
+                    self._frames.appendleft(oldest)
+                    break
+                self._bytes -= len(oldest)
+                self.dropped += 1
+            self._cond.notify()
+
+    def get(self):
+        with self._cond:
+            while not self._frames:
+                self._cond.wait()
+            frame = self._frames.popleft()
+            if frame is not _SHUTDOWN:
+                self._bytes -= len(frame)
+            return frame
+
+    def qsize(self) -> int:
+        with self._cond:
+            return len(self._frames)
+
+    def pending_bytes(self) -> int:
+        with self._cond:
+            return self._bytes
 
 
 class PipeConnection:
@@ -314,18 +395,19 @@ class PipeServer:
         import win32file  # noqa: PLC0415
         import win32pipe  # noqa: PLC0415
 
-        outbound: queue.Queue = queue.Queue(maxsize=MAX_OUTBOUND_FRAMES)
+        outbound = _Outbound(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES)
         closed = threading.Event()
 
         def write(frame: bytes) -> None:
             if closed.is_set():
-                return
-            try:
-                outbound.put_nowait(frame)
-            except queue.Full:
-                # A reader that cannot keep up costs itself, not the agent.
-                log.warning("pipe client fell too far behind - dropping it")
-                closed.set()
+                # **Raised, not returned.** This used to return silently while
+                # `PipeConnection.send` tested a DIFFERENT flag - its own
+                # `_closed` - so every send after the writer gave up returned
+                # success and every frame in it was discarded. `_send_to_owner`
+                # has an `except` that exists for exactly this and could never
+                # fire. One flag decides now, and it decides out loud.
+                raise ConnectionError("the pipe client has gone")
+            outbound.put(frame)
 
         def close() -> None:
             closed.set()
@@ -337,6 +419,11 @@ class PipeServer:
         # pinned and this is empty) apart from "the client is slow" (both full),
         # and the two want opposite fixes.
         connection.outbound_depth = outbound.qsize
+        connection.outbound_bytes = outbound.pending_bytes
+        # Read by the agent into `capture_stats.droppedPipe`. A plain
+        # attribute on the shared object rather than a callback, so the
+        # count survives the connection being handed around.
+        connection.outbound = outbound
 
         writer_thread = threading.Thread(
             target=self._write_loop, args=(handle, outbound, closed),
@@ -412,7 +499,7 @@ class PipeServer:
         finally:
             win32file.CloseHandle(overlapped.hEvent)
 
-    def _write_loop(self, handle, outbound: "queue.Queue", closed: threading.Event) -> None:
+    def _write_loop(self, handle, outbound: "_Outbound", closed: threading.Event) -> None:
         import pywintypes  # noqa: PLC0415
         import win32event  # noqa: PLC0415
         import win32file  # noqa: PLC0415

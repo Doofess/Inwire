@@ -694,6 +694,23 @@ def set_kernel_buffer(sock, size_bytes=KERNEL_BUFFER_BYTES):
     return size_bytes
 
 
+def _pcap_error_text(handle) -> str:
+    """libpcap's own message for the last failure on this handle.
+
+    Best-effort by design: this runs on the failure path of a capture that has
+    already gone wrong, and an import or a decode raising here would replace a
+    useful diagnosis with a traceback about fetching the diagnosis.
+    """
+    try:
+        from scapy.libs.winpcapy import pcap_geterr  # noqa: PLC0415
+        text = pcap_geterr(handle)
+        if not text:
+            return "no message"
+        return text.decode("utf-8", "replace") if isinstance(text, bytes) else str(text)
+    except Exception:
+        return "no message"
+
+
 def read_frame(handle, header, data):
     """One captured frame as (bytes, timestamp, wire length), or None.
 
@@ -721,10 +738,28 @@ def read_frame(handle, header, data):
 
     Returns None on the read timeout (libpcap opens with to_ms=100), which is
     how a stop is honoured promptly on a silent adapter.
+
+    **A timeout and a failure are different answers, and collapsing them span
+    the CPU.** This used to be `if result != 1: return None`, and the caller is
+    `while not stop_event.is_set(): ... continue`. `pcap_next_ex` returns 0 for
+    the timeout, but **-1 for an error and -2 at end-of-capture** - and an
+    adapter removed mid-capture returns -1 immediately, for ever. The loop then
+    spun at 100% of a core inside a LocalSystem service, with no frames, no log
+    line and nothing on screen, until the capture was stopped by hand.
+
+    So an error raises. `sniff_on_interface` already wraps this loop in a
+    `try/except` that calls `report_capture_failure`, which is how the app gets
+    told an interface died - machinery that existed the whole time and that a
+    silent `None` walked straight past.
     """
     result = pcap_next_ex(handle, byref(header), byref(data))
-    if result != 1:
+    if result == 0:
         return None
+    if result != 1:
+        # -1 is an error, -2 is end-of-capture on a savefile. Neither is
+        # survivable by looping, and the text is worth having: "device is no
+        # longer attached" is the whole diagnosis on a removed USB adapter.
+        raise OSError(f"pcap_next_ex failed ({result}): {_pcap_error_text(handle)}")
     contents = header.contents
     caplen = contents.caplen
     raw = string_at(data, caplen)
@@ -755,8 +790,17 @@ def read_pcap_stats(sock):
         return None
 
 
-def build_capture_stats(seq_high, received, kernel_stats, dropped_agent) -> dict:
-    """One capture_stats message. Pure, so the shape is testable."""
+def build_capture_stats(seq_high, received, kernel_stats, dropped_agent,
+                        dropped_pipe=None) -> dict:
+    """One capture_stats message. Pure, so the shape is testable.
+
+    `dropped_pipe` is the third loss site and the one that had no number at
+    all: frames shed from the outbound pipe queue because the client was not
+    reading fast enough. It is **omitted** rather than sent as 0 when the
+    transport cannot report it - the WebSocket has no counterpart - so the app
+    can tell "none were lost here" from "nobody counted", which is the rule
+    `droppedKernel` already follows.
+    """
     interfaces = []
     for iface_id in sorted(received):
         kernel = kernel_stats.get(iface_id)
@@ -766,13 +810,16 @@ def build_capture_stats(seq_high, received, kernel_stats, dropped_agent) -> dict
             "kernelReceived": None if kernel is None else kernel[0],
             "droppedKernel": None if kernel is None else kernel[1],
         })
-    return {
+    message = {
         "type": "capture_stats",
         "intervalMs": int(CAPTURE_STATS_INTERVAL_SECONDS * 1000),
         "seqHigh": seq_high,
         "droppedAgent": dropped_agent,
         "interfaces": interfaces,
     }
+    if dropped_pipe is not None:
+        message["droppedPipe"] = dropped_pipe
+    return message
 
 
 class AgentServer:
@@ -853,6 +900,9 @@ class AgentServer:
         # _dropped_sends at the moment the current capture started, so the
         # number the app shows is this capture's, not the process's lifetime.
         self._dropped_at_capture_start = 0
+        # The pipe's own shed counter lives on the connection, which
+        # outlives a capture, so it is rebased the same way.
+        self._dropped_pipe_at_capture_start = 0
 
     async def register(self, ws):
         self.connections.add(ws)
@@ -1189,6 +1239,8 @@ class AgentServer:
         counters.reset()
         profile.reset()
         self._dropped_at_capture_start = self._dropped_sends
+        _outbound = getattr(self.capture_owner, "outbound", None)
+        self._dropped_pipe_at_capture_start = 0 if _outbound is None else _outbound.dropped
         sniffer.start_threads(spawn_sniffer_thread)
         if self.loop is not None and (self._capture_stats_task is None or self._capture_stats_task.done()):
             self._capture_stats_task = asyncio.create_task(self._capture_stats_loop())
@@ -1270,6 +1322,25 @@ class AgentServer:
         self.stop_capture()
         self.broadcast_state()
 
+    def _dropped_pipe(self):
+        """Frames shed from the owner's outbound pipe queue, this capture.
+
+        `None` when the transport cannot say - the WebSocket has no
+        counterpart, and there may be no owner at all - so the app renders
+        "unknown" rather than a confident zero. Same `getattr` idiom as
+        `kernel_authenticated`, for the same reason: the agent stays ignorant
+        of which transport it has.
+
+        Rebased per capture like `droppedAgent`, because a number that
+        accumulated across every capture since the service started would be
+        read as belonging to the one on screen.
+        """
+        owner = self.capture_owner
+        outbound = getattr(owner, "outbound", None) if owner is not None else None
+        if outbound is None:
+            return None
+        return outbound.dropped - self._dropped_pipe_at_capture_start
+
     def _log_queue_depths(self):
         """Where the frames are sitting, once a second, under the profile flag.
 
@@ -1318,7 +1389,8 @@ class AgentServer:
                 kernel = {iface_id: read_pcap_stats(sock) for iface_id, sock in sockets.items()}
                 dropped_agent = self._dropped_sends - self._dropped_at_capture_start
                 await self._send_to_owner(json.dumps(
-                    build_capture_stats(seq_high, received, kernel, dropped_agent)
+                    build_capture_stats(seq_high, received, kernel, dropped_agent,
+                                        self._dropped_pipe())
                 ))
                 self._log_queue_depths()
                 await asyncio.sleep(CAPTURE_STATS_INTERVAL_SECONDS)

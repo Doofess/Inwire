@@ -3,7 +3,8 @@
  *
  *   npx tsx scripts/agent-protocol/message-parsing.ts
  */
-import { parseAgentMessage } from '../../src/services/agentProtocol';
+import { parseAgentMessage, summarizeCaptureStats } from '../../src/services/agentProtocol';
+import type { AgentCaptureStatsMessage } from '../../src/services/agentProtocol';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -106,6 +107,39 @@ check('capture_stats with a negative count returns null',
   parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":-1,"interfaces":[]}'), null);
 check('capture_stats with a malformed interface entry returns null',
   parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"interfaces":[{"iface":0}]}'), null);
+
+// --- droppedPipe: the third loss site, added without breaking the second ---------
+//
+// Frames shed from the outbound pipe queue when the client is not reading fast
+// enough. It had no counter at all - `write()` discarded them and set a flag
+// `send()` did not test - so every one of them was invisible.
+//
+// Additive and OPTIONAL, which is the whole compatibility story: an agent that
+// predates it omits the field, and an omitted field is `null` downstream, never
+// 0. "None were lost here" and "nobody counted" are different facts, and this
+// repo has the `agentSilentLabel` post-mortem for what happens when a missing
+// value is given a confident default.
+check('capture_stats without droppedPipe still parses',
+  parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"interfaces":[]}')?.type,
+  'capture_stats');
+check('...and summarises as unknown rather than none',
+  summarizeCaptureStats(parseAgentMessage(
+    '{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"interfaces":[]}',
+  ) as AgentCaptureStatsMessage).droppedPipe, null);
+check('capture_stats with droppedPipe carries the number',
+  summarizeCaptureStats(parseAgentMessage(
+    '{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"droppedPipe":7,"interfaces":[]}',
+  ) as AgentCaptureStatsMessage).droppedPipe, 7);
+check('...and zero is reported as zero, not as unknown',
+  summarizeCaptureStats(parseAgentMessage(
+    '{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"droppedPipe":0,"interfaces":[]}',
+  ) as AgentCaptureStatsMessage).droppedPipe, 0);
+// A field that is present and wrong is a malformed message, not a missing one.
+// Accepting it would put a negative into a figure the status bar adds up.
+check('a negative droppedPipe returns null',
+  parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"droppedPipe":-1,"interfaces":[]}'), null);
+check('a non-numeric droppedPipe returns null',
+  parseAgentMessage('{"type":"capture_stats","intervalMs":1000,"seqHigh":0,"droppedAgent":0,"droppedPipe":"lots","interfaces":[]}'), null);
 
 // --- adapter_config (3.6.0) ---------------------------------------------------
 //
