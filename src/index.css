@@ -19,10 +19,12 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  /* How much white a column separator mixes into the background it is drawn
-     on - see `.packet-grid` below. One value for every theme, because the line
-     is now a function of that background alone. */
-  --packet-gridline-lighten: 40%;
+  /* How far a column separator moves from the background it is drawn on, in
+     oklab lightness, SIGNED - see `.packet-grid` below. Positive here because
+     Day's rows have room above them and none below that would not read as a
+     hard rule; the value is small because that room is 0.024 and this is
+     nearly all of it. */
+  --packet-gridline-step: 0.02;
   --background: #f6f7f9;
   --foreground: #1b1f24;
   --card: #ffffff;
@@ -439,41 +441,70 @@ html[data-platform="win32"] {
   transform: none !important;
 }
 
-/* The packet list's column separators.
+/* The packet list's column separators, and there are two rules rather than one.
 
-   One rule for the whole grid: a separator is the background it is drawn on,
-   lightened. Nothing else - not the app's `--border`, which is what it used to
-   be and which knows nothing about a list that paints its own ground and then
-   lets the colouring chain paint every row again on top; and not the row's ink,
-   which was the second attempt and reads differently on a light theme than on a
-   dark one because a dark ink over a light ground carries less luminance ratio
-   than a light ink over a dark one.
-
+   **The body's separator is the background it is drawn on, stepped in whichever
+   direction that ground has room for.** Not the app's `--border`, which knows
+   nothing about a list that paints its own ground and then lets the colouring
+   chain paint every row again on top; and not the row's ink, which was the
+   second attempt and reads differently on a light theme than on a dark one.
    Taking it from the background makes the line a property of the surface rather
-   than of anything layered over it, so it needs no per-theme value and no
-   per-rule reasoning: every row, matched or not, header or body, gets the same
-   treatment of whatever it happens to be painted.
+   than of anything layered over it, so the cascade does the per-row part with
+   no work at the border.
 
    `--row-bg` is published by `PacketList.tsx` - the container sets the list's
-   own ground and each painted row overrides it with the colour its rule chose,
-   so the cascade does the per-row part with no work at the border. */
+   own ground and each painted row overrides it with the colour its rule chose.
 
-/* The header sits on `--card` - the same ground every other titled bar in the
-   window uses - rather than on the list's own.
+   **The step is a signed LIGHTNESS delta now, and it used to be a fraction of
+   white.** `color-mix(in oklab, white 40%, var(--row-bg))` looks theme-neutral
+   and is not, because a fraction measures distance from white rather than from
+   the ground: the same 40% moved a Day row by 0.010 of oklab L and a Night row
+   by **0.320** - thirty-two times as far, which is why the dark theme's grid
+   read as a bright cage and the light theme's was nearly invisible. Measured,
+   not assumed: #f6f7f9 -> #fafafb against #161616 -> #696969.
 
-   **This has to track `HEADER_CHROME` in `PacketList.tsx` and nothing makes it.**
-   That constant paints the header; this publishes the ground its GRIDLINES are
-   mixed against in the rule below. They were both `--secondary`, the header
-   moved to `bg-card`, and this did not - so the column separators in the header
-   row were being computed against a ground the header no longer had. It is a
-   fraction of a step of lightness on a 1px line, which is why nothing caught it
-   and why it is worth a comment rather than a silent fix. */
-.packet-grid thead tr {
-  --row-bg: var(--card);
+   A signed step fixes both halves with one number each, and the sign is where
+   the room is. Day's list ground is 0.024 of L below white, so there is no
+   lighter line to be had than a whisper and +0.02 is very nearly all of it;
+   Night's is 0.200 above black, so -0.05 is a groove rather than a cage
+   (#161616 -> #0b0b0b, where the old rule gave #696969). `oklch(from ...)`
+   rather than a second `color-mix` because the thing being said IS "this
+   colour, moved in lightness" - a mix toward a fixed endpoint can only say it
+   by accident. */
+.packet-grid tbody tr > :not(:last-child) {
+  border-right-color: oklch(from var(--row-bg) calc(l + var(--packet-gridline-step, 0.02)) c h);
 }
 
-.packet-grid tr > :not(:last-child) {
-  border-right-color: color-mix(in oklab, white var(--packet-gridline-lighten, 40%), var(--row-bg));
+/* **The header's rules are the app's own hairline, and they are box-shadows.**
+
+   Two decisions, and they are independent.
+
+   The COLOUR is `--border` rather than a stepped ground, because the header is
+   chrome: it sits on `--card` like every other titled bar in the window, no
+   colouring rule ever repaints it, and a strip that names the columns should
+   draw the same line `PaneHeader` and every panel edge draws. Deriving it from
+   a ground was right for rows precisely because rows are not chrome.
+
+   The MECHANISM is a box-shadow because the `<thead>` is `position: sticky`
+   inside a `border-collapse` table, and a collapsed border belongs to the table
+   rather than to the cell that declares it - so it is painted in the table's
+   layer, UNDER the body rows, while the sticky header's own background is
+   painted above them. Every header separator therefore showed the colour of
+   whatever packet had scrolled beneath it, which reads as a transparent line
+   rather than a missing one and is why it survived being looked at. An inset
+   shadow is painted by the cell, so it travels with the sticky layer.
+
+   The bottom rule is here for the same reason and not as tidiness: it is the
+   same collapsed border with the same bug, one pixel further down, and leaving
+   it as `border-b` on the `<thead>` would have fixed the lines nobody could
+   name and left the one everybody can. `PacketList.tsx` passes the table
+   `HEADER_GROUND` for that reason - `HEADER_CHROME` keeps the real border for
+   the empty state, which is a div with nothing under it. */
+.packet-grid thead th {
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+.packet-grid thead th:not(:last-child) {
+  box-shadow: inset -1px 0 0 var(--border), inset 0 -1px 0 var(--border);
 }
 
 /* Custom scrollbars for high-density packet tables.
@@ -565,8 +596,11 @@ html[data-platform="win32"] {
    dark to be told apart from; with one dark theme there is nothing to
    distinguish it from, and neutral is the better ground on its own. */
 .dark {
-  /* See the note in `:root`. */
-  --packet-gridline-lighten: 40%;
+  /* See the note in `:root`. **Negative, which is the whole per-theme part of
+     this token**: a separator lighter than a dark row is a cage drawn over the
+     data, and the ground has 0.200 of lightness beneath it to spend where it
+     has 0.800 above. -0.05 is a groove. */
+  --packet-gridline-step: -0.05;
   /* Neutral grey, not the blue-black this used to be.
 
      It was `#0d1219` with a `#dbe3ec` foreground - a cool cast on every surface,
