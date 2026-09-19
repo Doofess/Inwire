@@ -416,14 +416,22 @@ export default function App() {
    *
    * A sheet takes the workspace card without being a view: it covers what was
    * on screen, the view underneath is untouched, and closing it puts that view
-   * back rather than navigating anywhere. There are two - Settings and Network
-   * - and they are both here for the same reason they are not in `APP_VIEWS`:
-   * the view list answers "is this a way of looking at the capture?", and
-   * nothing in either changes when a packet arrives.
+   * back rather than navigating anywhere. It is here for the reason it is not
+   * in `APP_VIEWS`: the view list answers "is this a way of looking at the
+   * capture?", and nothing in Settings changes when a packet arrives.
    *
-   * **One state rather than a boolean each**, because the card holds one
-   * surface: two flags would make "both open" representable, and the code that
-   * closes a sheet on every navigation would have to remember to close both.
+   * **There were two and now there is one.** Network was the other, and it is a
+   * side bar panel - a surface that sits BESIDE the capture rather than over
+   * it, which is what a panel comparing the OS's configuration against the
+   * capture's own evidence wanted all along.
+   *
+   * **It stays a union at one member, rather than becoming a boolean.** With
+   * one member the two are isomorphic, so this is a choice: the union is what
+   * makes "the card holds exactly one surface" a fact the type carries. A
+   * boolean invites a second boolean beside it, which makes "both open"
+   * representable in a card that can show one, and every navigation that closes
+   * a sheet would then have to remember to close both. That argument was won
+   * once; a union is what stops it being re-litigated by an edit.
    */
   const [sheet, setSheet] = useState<'settings' | null>(null);
   const sheetOpen = sheet !== null;

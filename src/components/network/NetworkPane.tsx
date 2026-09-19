@@ -225,22 +225,26 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
   );
 
   /*
-   * **A Settings tab, and it went there by failing the test the view list
-   * applies.** It was briefly a rail view of its own, converted out of a modal
-   * the way Statistics was - the `fixed inset-0` scrim, the centred 90vh panel,
-   * its border, shadow, entrance animation and close button are all still gone,
-   * and this renders as a plain flex column filling whatever it is given.
+   * **A side bar panel, and it is the fourth container this has had.** A modal
+   * with a scrim, then briefly a rail view, then a Settings tab, then a sheet
+   * taking the workspace card, and now the column beside it. Every one of those
+   * is gone from this file - no `fixed inset-0`, no scrim, no 90vh panel, no
+   * header, no ground; it renders as a plain column filling whatever it is
+   * handed, and `sidebar/SideBar.tsx` is the only thing that renders it.
    *
-   * What it could not answer is "is this a way of looking at the capture?"
-   * Network describes the MACHINE - its adapters, its DNS, its public identity -
-   * and nothing in it changes when a packet arrives. The tell was the filter
-   * row, which had to be hidden above this view and above no other, because a
-   * display filter here was a control with nothing in view to act on. So it sits
-   * beside Driver Info now, which is the other read-only report about this
-   * machine, and `SettingsModal` is the only thing that renders it.
+   * **The test that decided all four is the same one and its answer has not
+   * changed**: "is this a way of looking at the capture?" No. Network describes
+   * the MACHINE - its adapters, its DNS, its public identity - and nothing in it
+   * changes when a packet arrives. So it is not in `APP_VIEWS`, has no `Ctrl+n`,
+   * and `viewPrefs.ts` still lands a stored `'network'` back on Packets.
    *
-   * `services/viewPrefs.ts` carries the full argument and the clamp that lands
-   * a stored `'network'` back on Packets.
+   * What kept moving is the half that answer does NOT settle: *not a view* was
+   * read as *therefore a Settings tab*, and Settings is where the app is
+   * configured while this configures nothing. Then as a sheet it covered the
+   * capture in order to describe the machine it was captured on - which is the
+   * one arrangement that made "Observed (capture)" unreadable beside its
+   * subject. The column is where both halves are true at once: it is not a view,
+   * and it sits next to the frames it is comparing against.
    */
   return (
     /* **No header and no ground of its own.** The side bar's card supplies
