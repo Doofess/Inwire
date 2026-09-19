@@ -45,6 +45,22 @@ export function useRovingFocus(
     if (e.key !== prevKey && e.key !== nextKey && e.key !== 'Home' && e.key !== 'End') {
       return;
     }
+    // **A field keeps its own arrows, and its own Home and End.**
+    //
+    // The rail had no inputs, so the first version of this did not have to ask.
+    // A panel does: the schedule's preset name, and `DateTimeCalendar`'s Hour
+    // and Minute. Home in a text field is "start of line" and Up in a number
+    // field is "increment" - both of which this would have taken, moving FOCUS
+    // out of the field somebody was typing in.
+    //
+    // Answered here rather than by a `stopPropagation` on each input, because
+    // the per-input form is a thing every future field has to remember, and
+    // forgetting it is silent: the caret does not move and the focus ring
+    // lands somewhere else.
+    const target = e.target as HTMLElement;
+    if (target.closest('input, textarea, select, [contenteditable="true"]') !== null) {
+      return;
+    }
     const buttons = [...e.currentTarget.querySelectorAll<HTMLButtonElement>(
       'button:not([disabled])',
     )];

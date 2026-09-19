@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from 'react';
+import { useEffect, useRef, type RefObject } from 'react';
 
 import type { Packet } from '../types/packet';
 import type { AgentCommand } from '../services/agentProtocol';
@@ -59,6 +59,18 @@ export function useKeyboardNavigation({
   setSelectedPacket,
   sendAgentCommand,
 }: KeyboardNavigationOptions): void {
+  /**
+   * `Ctrl+B`'s handler, held the way everything that changes is held here.
+   *
+   * It reads which panel was last open, so it cannot be a stable
+   * `useCallback` the way `onViewShortcut` is - and a fresh identity in the
+   * dep array below would re-register the window listener on every render,
+   * which during a capture is ten times a second. That is the exact property
+   * this file's opening comment exists to protect.
+   */
+  const toggleSideBarRef = useRef(onToggleSideBar);
+  toggleSideBarRef.current = onToggleSideBar;
+
   useEffect(() => {
     /* **There is no detail-window gate any more.** This used to bail out
        entirely while `detailPacketId` was set, because a modal was covering the
@@ -100,7 +112,7 @@ export function useKeyboardNavigation({
         // guard as the digits, so it cannot collide with typing either.
         if (e.key === 'b' || e.key === 'B') {
           e.preventDefault();
-          onToggleSideBar();
+          toggleSideBarRef.current();
           return;
         }
       }
@@ -201,5 +213,12 @@ export function useKeyboardNavigation({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // `onViewShortcut` joins the deps rather than going through a ref: it is
     // a stable `useCallback` in App, so this re-registers once, not per flush.
-  }, [canCapture, onViewShortcut, onToggleSideBar]);
+    //
+    // **`onToggleSideBar` does NOT, and the difference is the whole rule this
+    // file opens with.** It arrives as an inline arrow - it has to read which
+    // panel was last open, which changes - so a fresh identity every render
+    // would tear this listener down and rebuild it ten times a second during a
+    // capture. It goes through the ref above, where everything that changes
+    // already goes.
+  }, [canCapture, onViewShortcut]);
 }

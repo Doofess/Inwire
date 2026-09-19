@@ -141,9 +141,15 @@ console.log('--- the preference is a place, clamped and not reset ---\n');
   // **The split clamp**, which is the dock's surviving rule: stored unclamped
   // against the window, clamped at the point of use. Clamped on the way OUT, a
   // width could never grow back when the window did.
-  check('a narrow window shrinks an open panel', usableSideBarWidth(500, 700), 220);
+  check('a narrow window shrinks an open panel', usableSideBarWidth(500, 1000), 220);
   check('...and a wide one gives back the width that was chosen',
     usableSideBarWidth(500, 1400), 500);
+  // The number that makes the reserve's own rule true. At the 1024 minimum the
+  // band is 1016 and the rail takes 44, so this is what the column gets - and
+  // it is above VS Code's 170 floor, so the panel narrows rather than
+  // vanishing while the list keeps its identity columns.
+  check('the smallest window still leaves a usable column',
+    usableSideBarWidth(288, 1016 - 44), 192);
   // The floor wins even against a window with no room, because a column that
   // renders at 20px is a column nobody can see to close.
   check('...and the floor survives a window with no room',
@@ -202,13 +208,27 @@ console.log('\n--- the seam is drawn once ---\n');
   checkTrue('the panel stands on the card ground, not the chrome',
     bar.includes('bg-card') && !bar.includes('bg-secondary'));
 
-  // One panel exists at a time - mounted or absent, never hidden. The one
+  // **One panel exists at a time - mounted or absent, never hidden.** The one
   // hidden-rather-than-unmounted surface in this app is the packet list, and it
   // earns that with a virtualised scroll offset; nothing here has that, and one
   // of these panels holds a live agent subscription whose correctness rests on
   // being torn down when it stops being looked at.
-  checkTrue('the side bar hides nothing, it mounts one panel',
-    !/display:\s*'?none/.test(bar));
+  //
+  // **This read `SideBar.tsx` and passed vacuously**, which is the failure mode
+  // this repository has a name for - "a guard aimed at the wrong ground passes
+  // for exactly as long as it is wrong". The shell takes its panel as a
+  // `children` slot and has never contained a panel selection, so grepping it
+  // for `display: none` was asking a file that could not answer. The selection
+  // is in `App.tsx`, so that is what is read.
+  const appBar = code('src/App.tsx');
+  const sideBarBlock = appBar.slice(
+    appBar.indexOf('<SideBar'),
+    appBar.indexOf('</SideBar>'),
+  );
+  check('every panel is rendered by its own guard, inside the column',
+    SIDE_BAR_PANELS.filter((p) => !sideBarBlock.includes(`sideBar === '${p}'`)), []);
+  checkTrue('...and none of them is merely hidden',
+    !/display:\s*'?none/.test(sideBarBlock) && !/display:\s*'?none/.test(bar));
 
   // Total, so a fifth panel cannot be added without deciding what the header
   // says. `agentStatusLabel` is why that matters: a `Partial` record with a
