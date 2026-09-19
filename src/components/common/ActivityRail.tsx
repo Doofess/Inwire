@@ -22,6 +22,7 @@ import { isScheduleEmpty, type CaptureSchedule, type SchedulePreset } from '../.
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import type { Capabilities } from '../../types/packet';
 import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
+import { useRovingFocus } from './useRovingFocus';
 
 /**
  * The one strip of chrome that is always there.
@@ -512,32 +513,15 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   /**
    * Arrow keys move focus within the rail, and must not leave it.
    *
-   * `stopPropagation` is the load-bearing half. `useKeyboardNavigation` listens
-   * on `window` for ArrowUp/ArrowDown and moves the packet selection, guarded
-   * only against `[role="grid"]` - so without this an arrow press in the rail
-   * would move focus here AND step the selected packet. The old dashboard rail
-   * called `preventDefault` alone and has had that bug the whole time.
+   * The implementation was here and is `useRovingFocus` now, because the side
+   * bar's panels are the same shape - a column of plain buttons - and needed
+   * the same thing. What moved with it is the reason it is not twenty lines
+   * anybody can rewrite: `stopPropagation`. `useKeyboardNavigation` listens on
+   * `window` for the arrow keys and moves the packet selection, so a container
+   * that forgets it does not fail visibly, it quietly steps the capture
+   * underneath while the pointer is nowhere near the list.
    */
-  const onRailKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
-    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown' && e.key !== 'Home' && e.key !== 'End') {
-      return;
-    }
-    const buttons = [...e.currentTarget.querySelectorAll<HTMLButtonElement>(
-      'button:not([disabled])',
-    )];
-    if (buttons.length === 0) return;
-    const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    e.preventDefault();
-    e.stopPropagation();
-    const next = e.key === 'Home'
-      ? 0
-      : e.key === 'End'
-        ? buttons.length - 1
-        : at < 0
-          ? 0
-          : (at + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
-    buttons[next]?.focus();
-  };
+  const onRailKeyDown = useRovingFocus('vertical');
 
   return (
     <div
