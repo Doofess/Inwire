@@ -299,6 +299,197 @@ console.log('\n--- the write path itself ---\n');
     [CHUNK_FRAMES * 3 + 10, CHUNK_FRAMES * 3 + 1]);
 }
 
+console.log('\n--- bytes and rows are two arrivals ---\n');
+
+/** One frame as the capture path hands it over: no dissector has looked at it. */
+const raw = (id: number, size = 20) => ({
+  id,
+  tsUs: 1_000_000_000 + id * 1000,
+  bytes: new Uint8Array(size).fill(id & 0xff),
+});
+
+{
+  // The property the split exists to buy: the capture path writes bytes and
+  // does not wait for a dissector. Bytes only - no row attached at all.
+  const f = files();
+  const writer = new CaptureWriter(f, { deflate: (b) => new Uint8Array(deflateRawSync(b)) });
+  writer.appendBytes([raw(1), raw(2), raw(3)]);
+  check('bytes reach disk with no row at all', f.byt.size(), 60);
+  check('...and a slot is staged for each', writer.stagedCount, 3);
+  writer.finish();
+  const back = readAll(f);
+  check('every frame is still there', back.map((p) => p.id), [1, 2, 3]);
+  // The frame is not lost - its bytes are exact and complete on disk. What is
+  // degraded is the derived row, and it SAYS so rather than inventing a
+  // plausible one, which would be a confident wrong answer about a frame
+  // nobody dissected.
+  checkTrue('...with a row that admits it was not dissected',
+    back.every((p) => p.info.includes('Not dissected')));
+  check('...counted, so the cost is visible', writer.stats.framesSealedWithoutRow, 3);
+  // Never to be read as frames lost. Asserted because the status bar adds drop
+  // counters together and this is emphatically not one of them.
+  check('...and no frame was dropped', writer.stats.framesWritten, 3);
+}
+
+{
+  // Rows catching up. The ordinary case: bytes lead by a flush interval.
+  const f = files();
+  const writer = new CaptureWriter(f, { deflate: (b) => new Uint8Array(deflateRawSync(b)) });
+  const ids = [1, 2, 3, 4];
+  writer.appendBytes(ids.map((id) => raw(id)));
+  writer.attachRows(ids.map((id) => frame(id)));
+  check('rows attach to the slots their bytes made', writer.stats.rowsAttached, 4);
+  check('...and none was missed', writer.stats.rowsMissed, 0);
+  writer.finish();
+  check('no placeholder was needed', writer.stats.framesSealedWithoutRow, 0);
+  check('and the dissected rows are what came back',
+    readAll(f).map((p) => p.info), ['frame 1', 'frame 2', 'frame 3', 'frame 4']);
+}
+
+{
+  // **A row that overtakes its own bytes.** Two channels into one process have
+  // no ordering guarantee between them. In practice bytes lead; "in practice"
+  // is not a guarantee, and the failure it would produce is a silently missing
+  // row rather than an error - so an early row is held and later claimed.
+  const f = files();
+  const writer = new CaptureWriter(f, { deflate: (b) => new Uint8Array(deflateRawSync(b)) });
+  writer.attachRows([frame(1), frame(2)]);
+  check('an early row is held rather than dropped', writer.stats.rowsMissed, 0);
+  check('...and is attached to nothing yet', writer.stats.rowsAttached, 0);
+  writer.appendBytes([raw(1), raw(2)]);
+  writer.finish();
+  check('...and is claimed when its bytes arrive', writer.stats.framesSealedWithoutRow, 0);
+  check('the early rows are what came back',
+    readAll(f).map((p) => p.info), ['frame 1', 'frame 2']);
+}
+
+{
+  // A slow dissector must not stall the write path. Bytes for two whole chunks
+  // with no rows at all, at a horizon of zero: the chunks seal on the SLOT's
+  // timestamp, which exists whether or not a row does. Before the split the
+  // ageing test read `packet.tsUs`, so a chunk with no rows could never age out
+  // and the capture path stalled behind the dissector - the coupling removed.
+  const f = files();
+  const writer = new CaptureWriter(f, {
+    horizonUs: 0, deflate: (b) => new Uint8Array(deflateRawSync(b)),
+  });
+  const batch = [];
+  for (let id = 1; id <= CHUNK_FRAMES * 2; id++) batch.push(raw(id));
+  writer.appendBytes(batch);
+  check('chunks seal with no rows attached at all', writer.stats.chunksWritten, 2);
+  check('...leaving nothing staged behind them', writer.stagedCount, 0);
+}
+
+{
+  // A row arriving after its slot was sealed cannot be written - a sealed chunk
+  // is deflated and appended, and rewriting it would undo the append-only
+  // property recovery depends on. Counted, never silent.
+  const f = files();
+  const writer = new CaptureWriter(f, {
+    horizonUs: 0, deflate: (b) => new Uint8Array(deflateRawSync(b)),
+  });
+  const batch = [];
+  for (let id = 1; id <= CHUNK_FRAMES; id++) batch.push(raw(id));
+  writer.appendBytes(batch);
+  check('the chunk sealed without its rows', writer.stats.chunksWritten, 1);
+  writer.attachRows([frame(1)]);
+  check('a row for a sealed slot is counted as missed', writer.stats.rowsMissed, 1);
+  check('...and attaches to nothing', writer.stats.rowsAttached, 0);
+}
+
+{
+  // Contiguity, which `sealChunk` checks rather than assumes. Bytes arriving
+  // without rows must still produce a chunk whose byte extent equals the sum of
+  // its frames' lengths - otherwise every byte read in it slices the wrong
+  // frame, silently. Variable lengths, so a mismatch cannot cancel out.
+  const f = files();
+  const writer = new CaptureWriter(f, {
+    horizonUs: 0, deflate: (b) => new Uint8Array(deflateRawSync(b)),
+  });
+  let expected = 0;
+  const batch = [];
+  for (let id = 1; id <= CHUNK_FRAMES; id++) {
+    const size = 20 + (id % 37);
+    expected += size;
+    batch.push(raw(id, size));
+  }
+  writer.appendBytes(batch);
+  writer.finish();
+  const index = new CaptureIndex(recoverIndex(f.index, f.pfx, f.sum, f.byt).records);
+  check('the sealed chunk covers exactly the bytes appended',
+    index.record(0).bytLength, expected);
+  check('...starting at the first frame', index.record(0).bytOffset, 0);
+}
+
+{
+  // `append` still does both in one call, because the import path has bytes and
+  // rows at the same moment and has no reason to split them. It must stage and
+  // attach BEFORE draining: draining first seals the whole batch as
+  // placeholders at a short horizon, which is the bug this split shipped with
+  // for one run.
+  const f = files();
+  const writer = new CaptureWriter(f, {
+    horizonUs: 0, deflate: (b) => new Uint8Array(deflateRawSync(b)),
+  });
+  const batch: Packet[] = [];
+  for (let i = 1; i <= CHUNK_FRAMES; i++) batch.push(frame(i));
+  writer.append(batch);
+  check('append seals its own rows, not placeholders', writer.stats.framesSealedWithoutRow, 0);
+  check('...attaching every one', writer.stats.rowsAttached, CHUNK_FRAMES);
+  check('...and the rows are what reached disk',
+    readAll(f).find((p) => p.id === 7)?.info, 'frame 7');
+}
+
+{
+  // **The writer decides whether bytes are already down, and that is what
+  // keeps the app out of it.** A live capture sends bytes first from the
+  // Worker; an import sends both at once; a build with no ingest port sends
+  // only `append`. All three go through `append`, and writing a frame's bytes
+  // twice would append a second copy nothing indexes - breaking the contiguity
+  // check for every chunk after it.
+  const f = files();
+  const writer = new CaptureWriter(f, { deflate: (b) => new Uint8Array(deflateRawSync(b)) });
+  writer.appendBytes([raw(1), raw(2)]);
+  check('bytes are down once', f.byt.size(), 40);
+  writer.append([frame(1), frame(2)]);
+  check('...and append does not write them again', f.byt.size(), 40);
+  check('...it attaches the rows instead', writer.stats.rowsAttached, 2);
+  writer.finish();
+  check('no placeholder was needed', writer.stats.framesSealedWithoutRow, 0);
+  check('and the rows are the dissected ones',
+    readAll(f).map((p) => p.info), ['frame 1', 'frame 2']);
+}
+
+{
+  // A frame whose bytes were already SEALED must not be re-written either -
+  // `stagedAt` no longer holds it, so only the high-water id can say.
+  const f = files();
+  const writer = new CaptureWriter(f, {
+    horizonUs: 0, deflate: (b) => new Uint8Array(deflateRawSync(b)),
+  });
+  const batch = [];
+  for (let id = 1; id <= CHUNK_FRAMES; id++) batch.push(raw(id));
+  writer.appendBytes(batch);
+  const sealedBytes = f.byt.size();
+  writer.append([frame(1)]);
+  check('a sealed frame does not get a second copy of its bytes',
+    f.byt.size(), sealedBytes);
+  check('...and its late row is counted as missed', writer.stats.rowsMissed, 1);
+}
+
+{
+  // The degraded path: no ingest port at all, so `append` is the only message.
+  // This is what a build with an older preload does, and it must behave exactly
+  // as it did before the split.
+  const f = files();
+  const writer = new CaptureWriter(f, { deflate: (b) => new Uint8Array(deflateRawSync(b)) });
+  writer.append([frame(1), frame(2), frame(3)]);
+  check('with no bytes sent ahead, append writes them', f.byt.size(), 60);
+  writer.finish();
+  check('...with no placeholders', writer.stats.framesSealedWithoutRow, 0);
+  check('...and the rows intact', readAll(f).map((p) => p.id), [1, 2, 3]);
+}
+
 console.log('\n--- against real frames, and how far patches really reach ---\n');
 
 const FIXTURES: Record<string, string> = {

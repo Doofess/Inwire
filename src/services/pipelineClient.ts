@@ -55,16 +55,32 @@ export interface ReplayBundle {
  */
 const AGENT_PORT_MESSAGE = 'inwire:agent-port';
 
-/** How long to wait for main before saying the agent link failed. */
+/**
+ * The store's second port, which frames travel on.
+ *
+ * Ferried into the Worker exactly like the agent's, and for the same reason:
+ * the Worker is the only place that holds a frame's bytes and its id at the
+ * same moment, so routing this through the main thread would put frames back
+ * on it. ADR 0038.
+ */
+const INGEST_PORT_MESSAGE = 'inwire:capture-ingest-port';
+
+/** How long to wait for main before saying the link failed. */
 const AGENT_PORT_TIMEOUT_MS = 15_000;
 
-function requestAgentPort(): Promise<MessagePort> {
+/**
+ * Waits for a port the preload posts into the page.
+ *
+ * Shared by the agent's and the store's, because they arrive the same way and
+ * a second copy of this would be a second place to get `event.source` wrong.
+ */
+function requestPort(channel: string, ask: () => void, what: string): Promise<MessagePort> {
   return new Promise((resolve, reject) => {
     const onMessage = (event: MessageEvent) => {
       // `event.source === window` is what makes the preload's `'*'` safe: only
       // this window can post to itself.
       if (event.source !== window) return;
-      if ((event.data as { channel?: string } | null)?.channel !== AGENT_PORT_MESSAGE) return;
+      if ((event.data as { channel?: string } | null)?.channel !== channel) return;
       const [port] = event.ports;
       if (!port) return;
       window.removeEventListener('message', onMessage);
@@ -73,10 +89,10 @@ function requestAgentPort(): Promise<MessagePort> {
     };
     const timer = setTimeout(() => {
       window.removeEventListener('message', onMessage);
-      reject(new Error('the agent link did not answer'));
+      reject(new Error(`${what} did not answer`));
     }, AGENT_PORT_TIMEOUT_MS);
     window.addEventListener('message', onMessage);
-    window.inwire?.requestAgentPort?.();
+    ask();
   });
 }
 
@@ -205,7 +221,35 @@ export class PipelineClient {
    */
   connect() {
     void this.attachAgentPort();
+    void this.attachIngestPort();
     this.send({ type: 'connect' });
+  }
+
+  /** The store's frame port, requested once and remembered. */
+  private ingestPort: Promise<void> | null = null;
+
+  /**
+   * Hands the Worker its own port to the capture store.
+   *
+   * **Failure here is not fatal and must not be.** Without it the Worker keeps
+   * dissecting and the app keeps working; what is lost is bytes reaching disk
+   * ahead of their rows, so a frame whose dissection throws is lost the way it
+   * always was. Degraded, not broken - and the store says so.
+   */
+  private attachIngestPort(): Promise<void> {
+    if (this.ingestPort) return this.ingestPort;
+    this.ingestPort = (async () => {
+      const port = await requestPort(
+        INGEST_PORT_MESSAGE,
+        () => window.inwire?.requestCaptureIngestPort?.(),
+        'the capture store',
+      );
+      this.send({ type: 'storePort' }, [port]);
+    })().catch((error: unknown) => {
+      this.ingestPort = null;
+      console.warn('[inwire] frames will not reach disk ahead of dissection:', error);
+    });
+    return this.ingestPort;
   }
 
   /** The port, requested once and remembered, so a reconnect does not re-ask. */
@@ -214,7 +258,11 @@ export class PipelineClient {
   private attachAgentPort(): Promise<void> {
     if (this.agentPort) return this.agentPort;
     this.agentPort = (async () => {
-      const port = await requestAgentPort();
+      const port = await requestPort(
+        AGENT_PORT_MESSAGE,
+        () => window.inwire?.requestAgentPort?.(),
+        'the agent link',
+      );
       // Transferred straight through. The renderer's main thread has now
       // carried this port exactly once and will not appear in the frame path
       // again - which is the property ADR 0007 bought and moving the

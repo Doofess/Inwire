@@ -190,6 +190,7 @@ export class CaptureHost {
       switch (message.type) {
         case 'open': return this.onOpen(message);
         case 'append': return this.onAppend(message);
+        case 'appendBytes': return this.onAppendBytes(message);
         case 'patches': {
           this.open?.writer.applyPatches(message.patches);
           return;
@@ -274,6 +275,23 @@ export class CaptureHost {
     }
     this.open.writer.append(message.packets);
   }
+
+  /**
+   * Frame bytes, straight off the capture path.
+   *
+   * **Silently ignored when no capture is open, unlike `append` above**, and
+   * the difference is which side is wrong. `append` comes from the app, which
+   * knows whether it started a capture, so an orphan there is a wiring error
+   * worth shouting about - it was silent once and cost 500 frames. These come
+   * from the agent's own stream, which keeps arriving for a beat after a stop
+   * because the pipe is in flight; treating that as a fault would fire the
+   * alarm on every single capture that ends.
+   */
+  private onAppendBytes(message: Extract<ToCapture, { type: 'appendBytes' }>): void {
+    if (this.open === null) return;
+    this.open.writer.appendBytes(message.frames);
+  }
+
 
   /**
    * Every request-shaped message answers, even when it fails.

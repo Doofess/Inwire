@@ -29,7 +29,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
 import {
-  AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
+  AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL, STORE_INGEST_PORT_REQUEST, STORE_PORT_REQUEST,
+  WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
 } from './channels';
@@ -234,6 +235,11 @@ async function start(): Promise<void> {
   ipcMain.handle(STORE_PORT_REQUEST, async (event) => {
     store.watch(event.sender);
     await store.connect(event.sender);
+  });
+  // The second channel, one-way, for frames on their way to disk. The renderer
+  // only ferries it; its destination is the pipeline Worker. ADR 0038.
+  ipcMain.handle(STORE_INGEST_PORT_REQUEST, async (event) => {
+    await store.connectIngest(event.sender);
   });
   ipcMain.handle(AGENT_PORT_REQUEST, (event) => {
     agent.attach(event.sender);

@@ -9,7 +9,7 @@
  */
 import { app, MessageChannelMain, utilityProcess, type UtilityProcess, type WebContents } from 'electron';
 import path from 'node:path';
-import { STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL } from '../channels';
+import { STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_PORT_CHANNEL } from '../channels';
 
 export class CaptureStoreHost {
   private child: UtilityProcess | null = null;
@@ -99,13 +99,37 @@ export class CaptureStoreHost {
 
   /** Gives this renderer one end of a fresh channel to the store. */
   async connect(contents: WebContents): Promise<void> {
+    await this.give(contents, 'client', STORE_PORT_CHANNEL);
+  }
+
+  /**
+   * The second channel, for frames on their way to disk.
+   *
+   * One-way and separate from the client's, so a 256 kB batch never queues in
+   * front of the read the hex viewer is waiting on. ADR 0038.
+   */
+  async connectIngest(contents: WebContents): Promise<void> {
+    await this.give(contents, 'ingest', STORE_INGEST_PORT_CHANNEL);
+  }
+
+  /**
+   * Hands one end to the store and the other to the renderer.
+   *
+   * **The role travels with the port, and that is not decoration.** `entry.ts`
+   * used to take `event.ports[0]` from any parent message and assign it to its
+   * single `port` - so a second channel silently replaced the first, and every
+   * reply the app was waiting on went down a port nothing was reading.
+   */
+  private async give(
+    contents: WebContents, role: 'client' | 'ingest', channel: string,
+  ): Promise<void> {
     if (this.exited) throw new Error('the capture store is not running');
     await this.ensure();
     if (!this.child) throw new Error('the capture store is not running');
 
     const { port1, port2 } = new MessageChannelMain();
-    this.child.postMessage(null, [port2]);
-    contents.postMessage(STORE_PORT_CHANNEL, null, [port1]);
+    this.child.postMessage({ role }, [port2]);
+    contents.postMessage(channel, null, [port1]);
   }
 
   /** Ends the process. The store seals whatever is open on the way out. */

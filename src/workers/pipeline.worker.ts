@@ -78,6 +78,28 @@ let agentPort: MessagePort | null = null;
 let wantConnection = false;
 
 let capturing = false;
+
+/**
+ * The capture store, for frame bytes. Null until the port arrives, and
+ * possibly for ever - see `ToPipeline`'s `storePort`.
+ *
+ * **This is what takes the write off the dissector's critical path.** Bytes are
+ * posted for a whole released group BEFORE any of it is dissected, so a frame
+ * whose own dissection throws still reaches disk - which it did not before:
+ * `ingest`'s catch reported the failure and the frame was simply gone.
+ */
+let storePort: MessagePort | null = null;
+/**
+ * Frames posted to the store that it may not have had a capture open for.
+ *
+ * Should always be zero. The app sends `open` to the store before it sends
+ * `start_capture` to the agent, and `capturing` below is set after both - so
+ * bytes cannot precede the open by any ordinary path. Counted rather than
+ * assumed, because the two travel on different ports and nothing orders two
+ * ports against each other; a silent loss at the start of every capture is the
+ * shape this codebase has shipped before.
+ */
+let bytesPostedWhileIdle = 0;
 let interfaces: PipelineInterface[] = [];
 
 let tcpTracker = new TcpStreamTracker();
@@ -201,7 +223,7 @@ function interfaceFor(iface: number): { name: string; label: string } | undefine
   return interfaceById.get(iface);
 }
 
-function ingest(frame: LiveFrame): void {
+function ingest(frame: LiveFrame, id: number): void {
   try {
     if (captureStartUs === null) {
       captureStartUs = frame.tsUs;
@@ -213,7 +235,6 @@ function ingest(frame: LiveFrame): void {
       : 0;
     lastPacketUs = frame.tsUs;
 
-    const id = nextId++;
     const decoded = decodeRawEthernetPacket(
       frame.bytes, id, frame.tsUs, relativeTime, timeDelta, frame.origLen,
       tcpTracker, icmpTracker, quicTracker, dnsTracker, interfaceFor(frame.iface),
@@ -264,7 +285,39 @@ function flush(): void {
   // here, so the trackers see them in the order the wire did. Stopping
   // releases whatever is still held rather than stranding it.
   const ready = capturing ? ordering.drain(performance.now()) : ordering.flush();
-  for (const frame of ready) ingest(frame);
+
+  // **Ids first, then bytes to disk, then dissection - in that order, for the
+  // whole group.** ADR 0038.
+  //
+  // The id has to come first because it is what addresses the frame on disk,
+  // and it is assigned here rather than inside `ingest` so that the bytes can
+  // go before any dissection runs. Doing it per frame inside the loop would
+  // put each frame's write behind the previous frame's dissection, which is
+  // the coupling this removes.
+  //
+  // What it buys, concretely: a frame whose dissection throws still reaches
+  // disk. Before this, `ingest`'s catch reported the failure and the frame was
+  // gone - not counted anywhere, not on disk, not in the list.
+  const assigned = ready.map((frame) => ({ frame, id: nextId++ }));
+  if (storePort !== null && assigned.length > 0) {
+    if (!capturing && bytesPostedWhileIdle === 0) {
+      // Said once, and said at all. A counter nobody reads is the same silence
+      // it was written to break; the store drops these, so if this ever fires
+      // it is frames lost at the start of a capture and somebody has to know.
+      post({
+        type: 'failure',
+        message: 'frames reached the store before a capture was open - '
+          + 'some may not have been written',
+      });
+    }
+    if (!capturing) bytesPostedWhileIdle += assigned.length;
+    storePort.postMessage({
+      type: 'appendBytes',
+      frames: assigned.map(({ frame, id }) => ({ id, tsUs: frame.tsUs, bytes: frame.bytes })),
+    });
+  }
+
+  for (const { frame, id } of assigned) ingest(frame, id);
 
   // Frames the same capture saw twice, on two adapters. Done over the batch
   // rather than per frame because a duplicate is a relationship BETWEEN
@@ -483,6 +536,16 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       // `connect` may have arrived first - it is sent in the same tick, and
       // the port is not - so the wish is honoured now rather than lost.
       if (wantConnection) tellAgent({ type: 'open' });
+      break;
+    }
+
+    case 'storePort': {
+      const [port] = event.ports;
+      if (!port) break;
+      storePort = port;
+      // One-way. Nothing is read back on it, and nothing may be: replies go on
+      // the app's own port, and `entry.ts` keeps them apart by role.
+      port.start();
       break;
     }
 

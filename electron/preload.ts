@@ -23,7 +23,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
-  STORE_EXIT_CHANNEL, STORE_PORT_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
+  STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_INGEST_PORT_REQUEST,
+  STORE_PORT_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
   type WindowControl,
@@ -148,6 +149,17 @@ const api = {
     void ipcRenderer.invoke(STORE_PORT_REQUEST);
   },
 
+  /**
+   * Asks for the store's SECOND port, the one frames travel on.
+   *
+   * Same route and same reason as the agent's: the renderer receives it on
+   * `window` and transfers it straight into the pipeline Worker, so the main
+   * thread carries it exactly once and never sees a frame. ADR 0038.
+   */
+  requestCaptureIngestPort(): void {
+    void ipcRenderer.invoke(STORE_INGEST_PORT_REQUEST);
+  },
+
   onCaptureStoreExit(listener: (reason: string) => void): void {
     ipcRenderer.on(STORE_EXIT_CHANNEL, (_event, reason: string) => listener(reason));
   },
@@ -265,6 +277,10 @@ const api = {
 // never leaves this window, and the listener checks `event.source === window`.
 ipcRenderer.on(STORE_PORT_CHANNEL, (event) => {
   window.postMessage({ channel: STORE_PORT_CHANNEL }, '*', event.ports);
+});
+
+ipcRenderer.on(STORE_INGEST_PORT_CHANNEL, (event) => {
+  window.postMessage({ channel: STORE_INGEST_PORT_CHANNEL }, '*', event.ports);
 });
 
 // The agent's port takes the identical route. It does not stop in the page,
