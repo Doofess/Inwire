@@ -1225,6 +1225,27 @@ elevated prompt:
 .\agent-rs\switch-agent.ps1 -Status      # needs no elevation
 ```
 
+**`-Python` restores a current build**, which it did not always mean. The
+payload in Program Files was the **3.8.0** PyInstaller build from 11 September —
+older than the version collapse, so the app read it as outdated — and it carried
+none of this work's agent fixes, the pump included. Rebuild it with
+`python -m PyInstaller local-agent/inwire_agent.spec` and copy `_internal` and
+`inwire-agent-windows.exe` in; replace `_internal` **wholesale rather than
+merging**, or stale `.pyd` files from the previous build sit beside the new ones
+and PyInstaller's loader is perfectly happy to import one.
+
+**Both agent binaries must be run with `Start-Process -Wait`, never `&`, and
+getting that wrong is silent.** PowerShell waits for console-subsystem processes
+and not for GUI-subsystem ones. The PyInstaller build is GUI (its bootloader is
+`runw.exe`), so `& $exe --startup manual install` returns *immediately*: the
+`sc sdset` that follows then runs against a service pywin32 has not created yet,
+pywin32 creates it afterwards with the SCM's default descriptor, and the `IU`
+ace comes out as `CCLCSWLOCRRC` — **no `RP`**. Nothing fails. What you get is an
+agent that looks perfectly installed and that the app cannot start without a UAC
+prompt, which is the exact regression the grant exists to prevent. Observed
+here, and fixed by waiting on a handle instead of on a heuristic. `setup.iss` is
+unaffected: Inno's `Exec(…, ewWaitUntilTerminated, ResultCode)` waits properly.
+
 It **copies the build into `C:\Program Files\Inwire\agent\`** rather than
 registering it where it was built, and that is a security decision rather than
 tidiness: a LocalSystem service whose image sits in a user-writable directory

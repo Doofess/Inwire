@@ -46,12 +46,52 @@ $RustBuilt = Join-Path $PSScriptRoot 'target\release\inwire-agent.exe'
 # running. Both agents stop themselves instead. ADR 0035.
 $Sddl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)'
 
-# What was on this machine before the Rust agent was first registered, captured
-# from `sc qdescription`. It predates the migration - it says "web app" - and
-# restoring means restoring, so it is reproduced rather than corrected.
-$PythonDesc = 'Captures network packets for the Inwire web app. Idle until a Inwire page connects, and stops capturing when the last one closes.'
+# **There was a `$PythonDesc` here and it is deliberately gone.**
+#
+# This script first restored the Python agent exactly as it was found on this
+# machine: AUTO_START, with a description still reading "for the Inwire web
+# app". That was right while the payload in Program Files was the 3.8.0 build
+# from 11 September, because restoring a stale binary to a fresh configuration
+# is how you get a service whose settings promise behaviour its code does not
+# have - demand start on an agent with no idle self-stop is a service that
+# starts on request and then never leaves.
+#
+# The payload is a current build now, so the reasoning expired with it.
+# `install` is left to write its own description (`_svc_description_` in
+# `service_windows.py`, which has said "desktop app" for two phases) and its own
+# start type from `--startup manual`. Both agents are then configured the same
+# way, by the same rule, which is what ADR 0035 actually asks for - and what
+# `setup.iss` does today.
 
 function Say($m) { Write-Host "[switch-agent] $m" }
+
+<#
+.SYNOPSIS
+  Runs one of the agent binaries and WAITS for it, whatever its subsystem.
+
+.DESCRIPTION
+  **This exists because `& $exe install` is not enough, and the way that failed
+  was silent.** PowerShell waits for console-subsystem processes and does not
+  wait for GUI-subsystem ones; the PyInstaller build is the latter (its
+  bootloader is `runw.exe`). So `&` returned the instant it was launched,
+  `Set-InstallerPolicy` ran `sc sdset` against a service pywin32 had not created
+  yet, and pywin32 then created it with the SCM's default descriptor - no `RP`
+  on the `IU` ace.
+
+  The result was an agent that looked perfectly installed and could not be
+  started by the app without a UAC prompt, which is the exact regression the
+  grant exists to prevent. Nothing failed; a step just landed in the wrong
+  order.
+
+  `Start-Process -Wait -PassThru` waits on a handle rather than on a heuristic,
+  so it is right for both agents and stays right if either one's subsystem
+  changes again.
+#>
+function Invoke-AgentVerb {
+  param([string] $Exe, [string[]] $Arguments)
+  $p = Start-Process -FilePath $Exe -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
+  return $p.ExitCode
+}
 
 function Show-State {
   $q = (& sc.exe qc $Service) -join "`n"
@@ -128,8 +168,8 @@ if ($Rust) {
   Copy-Item $RustBuilt $RustDest -Force
 
   Say 'registering, on the installer''s own command line - options before the verb'
-  & $RustDest --startup manual install
-  if ($LASTEXITCODE -ne 0) { throw "install failed with exit code $LASTEXITCODE" }
+  $code = Invoke-AgentVerb $RustDest @('--startup', 'manual', 'install')
+  if ($code -ne 0) { throw "install failed with exit code $code" }
 
   Set-InstallerPolicy
   Say 'registered. It is DEMAND start: the app asks the SCM for it at launch,'
@@ -146,15 +186,15 @@ if ($Python) {
   Say 'stopping and removing the current registration'
   Remove-Registration
 
+  # Options before the verb. pywin32's `HandleCommandLine` parses with `getopt`,
+  # which stops at the first non-option token - so `install --startup manual`
+  # prints a usage screen and exits 1 without registering anything. The Rust
+  # agent's parser accepts either order and the installer writes this one for
+  # both, which is why the two lines above and below are identical.
   Say 'registering the Python agent'
-  & $PythonExe --startup manual install
-  if ($LASTEXITCODE -ne 0) { Say "warning: install reported exit code $LASTEXITCODE" }
+  $code = Invoke-AgentVerb $PythonExe @('--startup', 'manual', 'install')
+  if ($code -ne 0) { Say "warning: install reported exit code $code" }
 
-  # Restored as FOUND, which was auto-start with the pre-migration description.
-  # This machine's install predates ADR 0035; putting it back means putting it
-  # back, not quietly upgrading it to what today's installer would write.
-  & sc.exe config $Service start= auto | Out-Null
-  & sc.exe description $Service $PythonDesc | Out-Null
   Set-InstallerPolicy
 
   & sc.exe start $Service | Out-Null
