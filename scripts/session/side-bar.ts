@@ -355,6 +355,34 @@ console.log('\n--- what may not come back ---\n');
   // address is a wrong address.
   checkTrue('no fixed label column survives the restack', !/w-40/.test(rows));
 
+  // **The one section that reaches the internet is behind a press**, and this
+  // is a consent property rather than a layout one. `PublicIdentity` used to be
+  // mounted only when its nav item was chosen; deleting the nav and stacking
+  // everything would have mounted it on every open - an outbound lookup nobody
+  // asked for, in the app whose standing direction is "no outbound connection
+  // the user did not ask for". Mounting is what starts the request, so the
+  // guard has to be on the MOUNT and not on a CSS class.
+  const net = code('src/components/network/NetworkPane.tsx');
+  checkTrue('public identity is not mounted until it is asked for',
+    /\{showPublic \? \(\s*<PublicIdentity/.test(net));
+  // Per mount rather than persisted: consent to make a request is given for a
+  // sitting, and a panel that remembered it would reach out on the next launch
+  // with nobody watching.
+  checkTrue('...and the asking is not remembered across launches',
+    net.includes('useState(false)') && !net.includes("'inwire.publicIdentity'"));
+
+  // **A defect the conversion CREATED.** `countdown` read `Date.now()` at
+  // render, which was survivable while this was a sheet - a sheet is a detour,
+  // you open it and you leave. A panel sits open for hours, and
+  // `adapter_config` is only sent when something CHANGES, so nothing forces a
+  // re-render and "expires in 42 minutes" quietly becomes false with no tell.
+  checkTrue('the lease countdown takes the clock as an argument',
+    /function countdown\(seconds: number \| null, now: number\)/.test(net));
+  // And the tick exists only while there is a lease to draw, which is the same
+  // discipline the adapter panel's sampling follows.
+  checkTrue('...ticked only while a lease is on screen',
+    /if \(!hasLease\) return;[\s\S]{0,160}setInterval/.test(net));
+
   // The sqrt-eased width was a SECOND encoding of volume laid over `max`, and
   // the dishonest one - the easing existed so a tenth of the peak would not
   // look like a tenth. It cannot come back, because there is no longer an

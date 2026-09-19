@@ -1,17 +1,7 @@
-import React, { useMemo, useState } from 'react';
-import {
-  EthernetPort,
-  RefreshCw,
-  Eye,
-  EyeOff,
-  Monitor,
-  BookUser,
-  Router,
-  Clock,
-  Globe,
-  Plug,
-  Shield,
-} from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+// Seven of the twelve glyphs here were the nav's, one per section, and went
+// with it. What is left is the two header actions.
+import { RefreshCw, Eye, EyeOff } from 'lucide-react';
 import { useNameResolutionPreference } from '../../lib/nameResolution';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { networkPanelStore } from '../../services/interfacePrefs';
@@ -50,21 +40,60 @@ import { PublicIdentity } from './PublicIdentity';
  *     does not read as a bug - it reads as a finding.
  */
 
-type NetworkSection =
-  | 'adapter' | 'addresses' | 'gateway' | 'dhcp' | 'router' | 'neighbour' | 'public';
+/**
+ * **There was a `SECTIONS` table and a `w-40` nav built from it, and both are
+ * deleted.**
+ *
+ * The nav showed one section at a time, which is a space-saving device for a
+ * two-column sheet - and in a column the scarce axis is horizontal, not
+ * vertical, so it was saving the wrong thing. It also prevented what this panel
+ * is for: scrolling from Gateway to DHCP to see whether the same disagreement
+ * shows up twice. Each `Section` already carries its own heading, so the order
+ * and the labels the table held are in the markup where they are read.
+ */
 
-const SECTIONS: {
-  id: NetworkSection; label: string; icon: React.ComponentType<{ className?: string }>;
-}[] = [
-  { id: 'adapter', label: 'Adapter', icon: Monitor },
-  { id: 'addresses', label: 'Addresses', icon: BookUser },
-  { id: 'gateway', label: 'Gateway & DNS', icon: Router },
-  { id: 'dhcp', label: 'DHCP', icon: Clock },
-  { id: 'router', label: 'IPv6 router', icon: Globe },
-  { id: 'neighbour', label: 'Neighbour', icon: Plug },
-  // Last, and the only one that asks anybody anything.
-  { id: 'public', label: 'Public identity', icon: Shield },
-];
+/**
+ * The two controls that used to sit in this pane's own header.
+ *
+ * Exported separately because the header belongs to the side bar's shell now,
+ * and the shell renders it ABOVE the scroller this panel is inside. They reach
+ * the same preference store the panel does rather than being threaded through
+ * it, so there is no state here to keep in step - `networkPanelStore` is the
+ * single writer either way.
+ */
+export const NetworkPanelActions: React.FC<{
+  agentConnected: boolean;
+  onRefresh: () => void;
+}> = ({ agentConnected, onRefresh }) => {
+  const [panel, setPanel] = usePreferenceValue(networkPanelStore);
+  const hidden = panel.hideSensitive;
+  return (
+    <>
+      {/* Masks addresses and MACs for screen-sharing. Remembered, because
+          somebody who shares their screen once tends to do it again, and a
+          switch that resets is one they will forget the second time. */}
+      <button
+        type="button"
+        onClick={() => setPanel({ ...panel, hideSensitive: !hidden })}
+        title={hidden ? 'Show addresses and MACs' : 'Hide addresses and MACs'}
+        className={`p-1 rounded transition-colors cursor-pointer ${hidden
+          ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground'}`}
+      >
+        {hidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+      </button>
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={!agentConnected}
+        title={agentConnected ? 'Re-read from this machine' : 'The agent is not connected'}
+        className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground
+          disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+      >
+        <RefreshCw className="w-3.5 h-3.5" />
+      </button>
+    </>
+  );
+};
 
 interface NetworkPaneProps {
   /**
@@ -80,7 +109,15 @@ interface NetworkPaneProps {
   /** Which adapters the capture is running on, so the right one leads. */
   captureInterfaces: string[];
   agentConnected: boolean;
-  onRefresh: () => void;
+  /**
+   * No longer a prop, for the second time.
+   *
+   * The first deletion was `onClose` - a pane describing the MACHINE has
+   * nothing to hand back on the way out. This one is `onRefresh`, and it left
+   * for a different reason: the control that used it lives in the side bar's
+   * header, which is above this scroller and outside this component.
+   * `NetworkPanelActions` owns it.
+   */
 }
 
 /** A MAC whose second-least-significant bit of the first octet is set. */
@@ -94,10 +131,22 @@ function formatEpoch(seconds: number | null): string | null {
   return new Date(seconds * 1000).toLocaleString();
 }
 
-/** "in 42 minutes", "expired 3 minutes ago" - a lease is only useful as a countdown. */
-function countdown(seconds: number | null): string | null {
+/**
+ * "in 42 minutes", "expired 3 minutes ago" - a lease is only useful as a
+ * countdown.
+ *
+ * **`now` is a parameter rather than a `Date.now()` inside**, and that is a
+ * defect this panel's own conversion created rather than one it inherited. It
+ * read the clock at render, which was survivable while this was a sheet: a
+ * sheet is a detour, you open it and you leave. As a side bar panel it sits
+ * open for hours beside a running capture, and `adapter_config` is only sent
+ * when something CHANGES - so nothing forces a re-render and "expires in 42
+ * minutes" quietly becomes false with no tell at all. In a column where every
+ * other value refreshes itself, a frozen one reads as a live one.
+ */
+function countdown(seconds: number | null, now: number): string | null {
   if (seconds === null || !Number.isFinite(seconds)) return null;
-  const delta = seconds * 1000 - Date.now();
+  const delta = seconds * 1000 - now;
   const minutes = Math.round(Math.abs(delta) / 60000);
   const amount = minutes < 60
     ? `${minutes} minute${minutes === 1 ? '' : 's'}`
@@ -106,11 +155,30 @@ function countdown(seconds: number | null): string | null {
 }
 
 export const NetworkPane: React.FC<NetworkPaneProps> = ({
-  adapters, facts, captureInterfaces, agentConnected, onRefresh,
+  adapters, facts, captureInterfaces, agentConnected,
 }) => {
-  const [section, setSection] = useState<NetworkSection>('adapter');
+  /**
+   * Whether the one section that reaches the internet has been asked for.
+   *
+   * Per mount rather than persisted, deliberately: consent to make a request is
+   * given for a sitting, and a panel that remembered it would reach out on the
+   * next launch with nobody watching.
+   */
+  const [showPublic, setShowPublic] = useState(false);
+
+  /**
+   * A minute hand, and it exists only while a lease is on screen.
+   *
+   * The DHCP lease is the one value here that goes stale by the clock rather
+   * than by an agent message. A minute is the resolution `countdown` reports
+   * in, so a faster tick would repaint for nothing, and the effect is keyed on
+   * whether there is a lease at all - no lease, no interval, which is the same
+   * discipline the adapter panel's sampling follows: nothing runs while nothing
+   * is showing it.
+   */
+  const [now, setNow] = useState(() => Date.now());
   const [nameResolution, patchNameResolution] = useNameResolutionPreference();
-  const [panel, setPanel] = usePreferenceValue(networkPanelStore);
+  const [panel] = usePreferenceValue(networkPanelStore);
   const hidden = panel.hideSensitive;
 
   /**
@@ -127,10 +195,15 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
       ?? adapters[0] ?? null;
   }, [adapters, captureInterfaces]);
 
+  const hasLease = adapter?.leaseExpires !== null && adapter?.leaseExpires !== undefined;
+  useEffect(() => {
+    if (!hasLease) return;
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, [hasLease]);
+
   const noAgent = <Empty>The agent is not connected, so this machine&rsquo;s own
     configuration cannot be read. Anything the capture itself reveals is still shown.</Empty>;
-
-  const setHidden = (next: boolean) => setPanel({ ...panel, hideSensitive: next });
 
   /*
    * **A Settings tab, and it went there by failing the test the view list
@@ -151,56 +224,21 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
    * a stored `'network'` back on Packets.
    */
   return (
-    <div className="flex-1 min-w-0 flex flex-col overflow-hidden bg-card text-card-foreground">
+    /* **No header and no ground of its own.** The side bar's card supplies
+       both: `PaneHeader` at a fixed `h-9`, and `bg-card` on the column. The
+       28px icon, the title, the subtitle and the two action buttons that stood
+       here are the shell's now - `SettingsPane`'s root check enforces the same
+       shape for the same reason, that a card inside a card is a card in a card.
 
-        <div className="px-5 py-3.5 border-b border-border flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <EthernetPort className="w-7 h-7 shrink-0 text-primary" />
-            <div className="min-w-0">
-              <div className="font-bold text-base">Network</div>
-              <p className="text-xs text-muted-foreground truncate">
-                How this machine is configured, and what the capture shows
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            {/* Masks addresses and MACs for screen-sharing. Remembered, because
-                somebody who shares their screen once tends to do it again, and
-                a switch that resets is one they will forget the second time. */}
-            <button onClick={() => setHidden(!hidden)}
-              title={hidden ? 'Show addresses and MACs' : 'Hide addresses and MACs'}
-              className={`p-1.5 rounded-md transition-colors ${hidden
-                ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground'}`}>
-              {hidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-            <button onClick={onRefresh} disabled={!agentConnected}
-              title={agentConnected ? 'Re-read from this machine' : 'The agent is not connected'}
-              className="p-1.5 rounded-md hover:bg-accent text-muted-foreground
-                hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed">
-              <RefreshCw className="w-4 h-4" />
-            </button>
-            {/* The close button stood here, beside Refresh. */}
-          </div>
-        </div>
+       **The `w-40` nav is deleted rather than replaced.** It showed one section
+       at a time, which was a space-saving device for a two-column sheet - and
+       in a column the scarce axis is horizontal, not vertical. It also actively
+       prevented the thing this panel is for: scrolling from Gateway to DHCP to
+       see whether the same disagreement shows up twice. A comparison panel
+       should be readable as a whole. */
+    <div className="p-2 space-y-2">
 
-        <div className="flex min-h-0 flex-1">
-          <nav className="w-40 shrink-0 border-r border-border p-2 flex flex-col gap-1">
-            {SECTIONS.map(({ id, label, icon: Icon }) => (
-              <button key={id} onClick={() => setSection(id)}
-                className={`flex items-center gap-2 px-2.5 py-2 rounded-md text-xs font-medium
-                  text-left transition-colors ${section === id
-                    ? 'bg-accent text-foreground'
-                    : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}`}>
-                <Icon className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{label}</span>
-              </button>
-            ))}
-          </nav>
-
-          <div className="flex-1 min-w-0 p-4 overflow-y-auto space-y-4">
-
-            {section === 'adapter' && (
-              <Section title="Capture adapter">
+                          <Section title="Capture adapter">
                 {adapter === null ? noAgent : (
                   <>
                     <Row label="Name" value={adapter.name} source={adapter.source.adapter} />
@@ -241,9 +279,8 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                   </>
                 )}
               </Section>
-            )}
 
-            {section === 'addresses' && (adapter === null ? (
+            {adapter === null ? (
               <Section title="Addresses">{noAgent}</Section>
             ) : (
               <>
@@ -306,10 +343,9 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                   )}
                 </Section>
               </>
-            ))}
+            )}
 
-            {section === 'gateway' && (
-              <>
+            <>
                 <Section title="Gateway">
                   <Compare label="IPv4 gateway"
                     configured={<Value value={adapter?.gatewayV4 ?? null} sensitive hidden={hidden} />}
@@ -389,10 +425,8 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                   )}
                 </Section>
               </>
-            )}
 
-            {section === 'dhcp' && (
-              <Section title="DHCP">
+            <Section title="DHCP">
                 <Compare label="Enabled"
                   configured={<Value value={adapter === null || adapter.dhcpEnabled === null
                     ? null : adapter.dhcpEnabled ? 'yes' : 'no (static)'} />}
@@ -412,16 +446,14 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                   {adapter?.leaseExpires == null ? <Value value={null} /> : (
                     <span className="flex flex-wrap items-baseline gap-x-2">
                       <span className="font-mono">{formatEpoch(adapter.leaseExpires)}</span>
-                      <span className="text-muted-foreground">{countdown(adapter.leaseExpires)}</span>
+                      <span className="text-muted-foreground">{countdown(adapter.leaseExpires, now)}</span>
                     </span>
                   )}
                 </Row>
                 {!agentConnected && noAgent}
               </Section>
-            )}
 
-            {section === 'router' && (
-              <Section title="IPv6 router"
+            <Section title="IPv6 router"
                 note="From Router Advertisements. Nothing on this machine records where its IPv6 configuration came from.">
                 {facts.router === null ? (
                   <Empty>No Router Advertisement in this capture.</Empty>
@@ -451,10 +483,8 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                   </>
                 )}
               </Section>
-            )}
 
-            {section === 'neighbour' && (
-              <>
+            <>
                 <Section title="Switch / neighbour">
                   {facts.neighbour === null ? (
                     <Empty>No neighbour LLDP seen in this capture.</Empty>
@@ -485,14 +515,43 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                   </Section>
                 )}
               </>
-            )}
 
-            {section === 'public' && (
+            {/* **Last, and behind a press, and that is a consent property
+                rather than a layout one.**
+
+                `PublicIdentity` is the only section here that reaches the
+                internet. Today it is mounted only when its nav item is chosen,
+                so deleting the nav and stacking everything would have mounted
+                it on every open - an outbound lookup nobody asked for, in the
+                app whose standing direction is "no outbound connection the user
+                did not ask for".
+
+                A disclosure is STRONGER than the nav it replaces, not merely
+                equivalent: a nav item says nothing about reaching out, and a
+                labelled button that says so does. Mounting is what starts the
+                request, so the guard has to be on the mount rather than on a
+                CSS class. */}
+            {showPublic ? (
               <PublicIdentity allowed={nameResolution.geoIp} hidden={hidden}
                 onAllow={() => patchNameResolution({ geoIp: true })} />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowPublic(true)}
+                className="w-full rounded-lg border border-border px-3 py-2 text-left
+                  cursor-pointer transition-colors hover:bg-accent/60
+                  focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <span className="text-[11px] font-semibold uppercase tracking-wider
+                  text-muted-foreground">
+                  Public identity
+                </span>
+                <span className="mt-0.5 block text-[11px] text-muted-foreground/70">
+                  How this machine looks from the outside. Opening this asks a
+                  third party; nothing else on this panel leaves the machine.
+                </span>
+              </button>
             )}
-          </div>
-        </div>
     </div>
   );
 };

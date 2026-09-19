@@ -94,7 +94,7 @@ import { findPacketIndexById, frameJumpRefusal } from "./components/packet-detai
 import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { SettingsPane } from "./components/common/SettingsPane";
-import { NetworkPane } from './components/network/NetworkPane';
+import { NetworkPane, NetworkPanelActions } from './components/network/NetworkPane';
 import { PANEL_TITLES, SideBar } from './components/sidebar/SideBar';
 import { CaptureInterfacePanel } from './components/sidebar/CaptureInterfacePanel';
 import { CaptureSchedulePanel } from './components/sidebar/CaptureSchedulePanel';
@@ -427,10 +427,10 @@ export default function App() {
    * surface: two flags would make "both open" representable, and the code that
    * closes a sheet on every navigation would have to remember to close both.
    */
-  const [sheet, setSheet] = useState<'settings' | 'network' | null>(null);
+  const [sheet, setSheet] = useState<'settings' | null>(null);
   const sheetOpen = sheet !== null;
   const toggleSheet = useCallback(
-    (which: 'settings' | 'network') => setSheet((open) => (open === which ? null : which)),
+    (which: 'settings') => setSheet((open) => (open === which ? null : which)),
     [],
   );
 
@@ -2398,8 +2398,6 @@ export default function App() {
           streamAvailable={streamForSelection !== null || streamToFollow !== null}
           settingsOpen={settingsOpen}
           onOpenSettings={() => toggleSheet('settings')}
-          networkOpen={sheet === 'network'}
-          onOpenNetwork={() => toggleSheet('network')}
           onOpenExport={() => setShowExportModal(true)}
           sideBarOpen={sideBarOpen}
           sideBarPanel={sideBar}
@@ -2488,6 +2486,12 @@ export default function App() {
         {sideBar !== null && (
           <SideBar
             panel={sideBar}
+            actions={sideBar === 'network' ? (
+              <NetworkPanelActions
+                agentConnected={agentStatus === 'connected'}
+                onRefresh={() => sendAgentCommand({ type: 'refresh_adapters' })}
+              />
+            ) : undefined}
             detail={sideBar === 'interfaces' && agentInterfaces.length > 0
               ? agentInterfaces.length
               : sideBar === 'schedule' && !isScheduleEmpty(schedule)
@@ -2522,10 +2526,18 @@ export default function App() {
                 now={scheduleNow}
               />
             )}
-            {/* The other two land here as they are built. */}
-            {sideBar !== 'interfaces' && sideBar !== 'schedule' && (
+            {sideBar === 'network' && (
+              <NetworkPane
+                adapters={adapters}
+                facts={networkFacts}
+                captureInterfaces={selectedInterfaces}
+                agentConnected={agentStatus === 'connected'}
+              />
+            )}
+            {/* Export/Import lands here next. */}
+            {sideBar === 'transfer' && (
               <p className="px-3 py-3 text-xs text-muted-foreground">
-                {PANEL_TITLES[sideBar]} moves into this column next.
+                {PANEL_TITLES.transfer} moves into this column next.
               </p>
             )}
           </SideBar>
@@ -2633,29 +2645,18 @@ export default function App() {
               Rendered BEFORE the views and returning early, rather than beside
               them, so there is one surface in this card at a time by
               construction. */}
-          {sheet === 'network' ? (
-            /* **Network is the second sheet, and it is not a view again.**
-               It was one, on `Ctrl+3`, and it failed the list's own test: it
-               describes the MACHINE - adapters, DNS, public identity - and
-               nothing in it changes when a packet arrives. That is still true,
-               so it is not back in `APP_VIEWS`; what it gets instead is its own
-               front door on the rail, because being a Settings TAB buried the
-               one report that answers "what is this computer even connected
-               to" three clicks inside a configuration panel. A sheet is the
-               shape that says both things at once: reachable in one press,
-               and not a way of looking at the capture.
+          {/* **Network was the second sheet and is a side bar PANEL now.**
 
-               It keeps its own ground (`bg-card`, like every view) rather than
-               Settings' `bg-background` - Settings is a panel of controls and
-               this is a report, which is the same distinction the views draw. */
-            <NetworkPane
-              adapters={adapters}
-              facts={networkFacts}
-              captureInterfaces={selectedInterfaces}
-              agentConnected={agentStatus === 'connected'}
-              onRefresh={() => sendAgentCommand({ type: 'refresh_adapters' })}
-            />
-          ) : sheet === 'settings' ? (
+              It took the whole workspace to describe the machine, which meant
+              covering the capture to say what the capture is running on. It
+              sits beside it instead, which is also what makes its "Observed
+              (capture)" column live while frames arrive - the argument for the
+              move, and one a sheet could not make.
+
+              `sheet` is down to one member and stays a union all the same: it
+              answers "what is IN the workspace card", and a second full-pane
+              surface would join this list rather than sit beside it. */}
+          {sheet === 'settings' ? (
             <SettingsPane
               dissectorEngine={dissectorEngine}
               onUpdateDissectors={handleUpdateDissectors}
