@@ -1246,7 +1246,7 @@ class AgentServer:
             return False
         return sniffer is not None and sniffer.is_sniffing()
 
-    async def _send_to_owner(self, data):
+    async def _send_to_owner(self, data, records=0):
         """Packets and their statistics go to the connection that asked for
         them and to no one else. A tab that never pressed Start should not
         quietly accumulate somebody else's traffic."""
@@ -1254,6 +1254,14 @@ class AgentServer:
         if ws is None or ws not in self.connections or ws not in self.authenticated:
             return
         try:
+            # `records` travels so the pipe's shed counter can be in PACKETS.
+            # A shed batch loses every packet in it, and a counter that ticks
+            # once per shed ITEM understates the loss by the batch size.
+            await ws.send(data, records)
+        except TypeError:
+            # A transport whose `send` predates the second argument - the
+            # WebSocket on macOS and Linux. Its queue does not shed, so there
+            # is no counter to keep in packets.
             await ws.send(data)
         except Exception:
             self.connections.discard(ws)
@@ -1656,7 +1664,7 @@ class AgentServer:
                     await asyncio.sleep(PACKET_BATCH_INTERVAL_SECONDS)
                     continue
                 payload = packet_batch.encode_batch(batch)
-                await self._send_to_owner(payload)
+                await self._send_to_owner(payload, len(batch))
                 if not more:
                     await asyncio.sleep(PACKET_BATCH_INTERVAL_SECONDS)
                 else:
