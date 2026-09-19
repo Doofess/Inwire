@@ -182,7 +182,52 @@ MAX_QUEUED_BYTES = 32 * 1024 * 1024
 # about two seconds at the same rate - enough to ride out the bursts that
 # actually cause loss, and small enough to be uncontroversial as non-paged
 # kernel memory on any machine that can run a browser.
-KERNEL_BUFFER_BYTES = 32 * 1024 * 1024
+#
+# For scale: dumpcap's `-B` default is **2 MiB** on every platform including
+# Windows, so this is sixteen times what Wireshark asks for by default.
+KERNEL_BUFFER_BASE_BYTES = 32 * 1024 * 1024
+
+# **Npcap splits that buffer per processor, and a burst does not.**
+#
+# From Npcap's own maintainer (nmap/npcap#30, mirrored in npcap.com's API
+# guide): the adapter buffer "is split into a number of independent segments
+# according to the number of processors on the system. When a packet is received
+# by the driver, it is put into the buffer segment corresponding to the driver
+# thread's current processor. If there is not enough room in that segment, the
+# packet is dropped."
+#
+# So a flat 32 MB is 32/N MB of usable slack against a burst that lands on one
+# core - 2 MB on a sixteen-core machine, which is dumpcap's *default* and the
+# opposite of what asking for sixteen times it was meant to buy. It is also the
+# shape that best explains a burst of hundreds of thousands of frames in seconds
+# showing up as driver drops on a machine with plenty of memory.
+#
+# Sized per core instead, so the per-segment share is what the number means.
+# Floored at the old value so nothing gets smaller, and capped because this is
+# **non-paged kernel memory** - a 64-core machine must not be asked for a
+# gigabyte of it on the strength of a capture starting.
+KERNEL_BUFFER_PER_CORE_BYTES = 4 * 1024 * 1024
+KERNEL_BUFFER_MAX_BYTES = 256 * 1024 * 1024
+
+
+def kernel_buffer_bytes(cores=None):
+    """How much to ask the driver for on this machine.
+
+    Pure and parameterised so `test_protocol.py` can drive every machine shape
+    rather than the one it is running on.
+
+    `cores` unknown falls back to the flat base rather than to one core - the
+    same rule the rest of this codebase keeps about a reading it could not take.
+    """
+    if cores is None:
+        cores = os.cpu_count()
+    if not cores or cores < 1:
+        return KERNEL_BUFFER_BASE_BYTES
+    wanted = cores * KERNEL_BUFFER_PER_CORE_BYTES
+    return max(KERNEL_BUFFER_BASE_BYTES, min(wanted, KERNEL_BUFFER_MAX_BYTES))
+
+
+KERNEL_BUFFER_BYTES = kernel_buffer_bytes()
 
 # How often the watchdog checks that capture is not running with nobody
 # watching (see watch_for_orphaned_capture).

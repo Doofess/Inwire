@@ -139,7 +139,11 @@ fn main() -> std::io::Result<()> {
                 *owner.lock().unwrap() = Some("rs-1".into());
 
                 let mut cap = npcap.open(&device, true)?;
-                cap.set_kernel_buffer(32 * 1024 * 1024)?;
+                cap.set_kernel_buffer(
+                    inwire_agent::session::kernel_buffer_bytes(
+                        inwire_agent::session::available_cores(),
+                    ) as i32,
+                )?;
 
                 // The sniffer: encode on this thread, so the pump sees finished
                 // bytes rather than live driver buffers.

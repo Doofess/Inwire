@@ -53,6 +53,8 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0032](0032-the-update-center.md) | Npcap is a prerequisite the app manages, not a payload the installer ships — **corrects 0030**: no silent install, a feed instead of a `#define`, and the version is not in `wpcap.dll` | Accepted 2026-09-12 |
 | [0033](0033-the-agent-stays-a-separate-service.md) | The agent stays a separate LocalSystem service, and Npcap should be installed admin-only — the browser reason is gone and three better ones replace it | Accepted 2026-09-12 |
 | [0034](0034-the-side-bar-is-a-place.md) | The side bar is a place, so Escape does not close it and navigating does not either — two negatives that leave no code behind to explain themselves | Accepted 2026-09-19 |
+| [0035](0035-the-agent-lives-as-long-as-the-app.md) | The agent is demand-start and stops itself, and its version is the product's — retires 0033's reason #2, re-justifies 0030's withheld WP | Accepted 2026-09-19 |
+| [0036](0036-the-buffer-sizes-itself.md) | The packet buffer sizes itself from RAM and the V8 heap, and the renderer stands down before V8 aborts | Accepted 2026-09-19 |
 
 ## Review outcome: amendments to the spec's execution order
 
