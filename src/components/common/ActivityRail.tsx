@@ -174,6 +174,13 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * together and the rule is unmissable: rearranging this strip is free and
  * growing it is not.
  *
+ * **452 -> 452 is that rule said a second time**, which is why the sequence ends
+ * on a repeat. Network moved again, up into the capture group under
+ * Export/Import, leaving Settings alone at the bottom: `group(5) - group(4)` is
+ * 38 and `group(2) - group(1)` is 38, so the deltas cancel exactly as they did
+ * when Export/Import made the same trip the other way. A rule derived once is a
+ * coincidence; the same arithmetic twice, in opposite directions, is a rule.
+ *
  * That number is added up from these classes by `scripts/session/view.ts`, which
  * also holds each class to what the sum assumes. This comment said 549 until that
  * script was written: the figure was for `my-1` dividers, it counted three rather
@@ -195,10 +202,14 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
  * the filter row had to be hidden above it and nowhere else, so it became a
  * Settings tab next to Driver Info. That is two icons back - and Network has
  * since spent one of them again, as a SHEET rather than a view: not in
- * `APP_VIEWS`, no `Ctrl+n`, no place in the numbering, but a button in the
- * bottom group beside Settings. The half of that decision that stood was "it is
- * not a way of looking at the capture"; the half that did not was "therefore it
- * belongs inside the configuration panel". Every digit below it
+ * `APP_VIEWS`, no `Ctrl+n`, no place in the numbering, but a button of its own
+ * at the end of the capture group, under Export/Import. The half of that
+ * decision that stood was "it is not a way of looking at the capture"; the half
+ * that did not was "therefore it belongs inside the configuration panel".
+ * **The bottom group is Settings alone now**, which is VS Code's own
+ * arrangement and makes the divider above it mean something rather than merely
+ * separating: everything above opens a surface beside the workspace, the one
+ * below takes the workspace itself. Every digit below it
  * has shifted twice since - Network leaving, then Frame Detail arriving second -
  * and the current assignment is Packets `Ctrl+1`, Frame Detail `Ctrl+2`,
  * Statistics `Ctrl+3`, Routing Map `Ctrl+4`, Follow Stream `Ctrl+5`. None of
@@ -724,6 +735,45 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           <FileOutput className={GLYPH} />
         </button>
 
+        {/* **Network, under Export/Import.**
+
+            It was a VIEW once, on `Ctrl+3`, and it failed the view list's own
+            test - it describes the MACHINE rather than the capture, and nothing
+            in it changes when a packet arrives. It became a Settings tab on
+            that argument, and the tab was the wrong conclusion from a right
+            premise: Settings is where the app is CONFIGURED, and Network
+            configures nothing. It is a report, and a report about what this
+            computer is connected to should not be three clicks inside a
+            preferences panel.
+
+            **It sits here rather than at the bottom because of what the run
+            above it is.** Start/Stop, the adapter, the schedule and
+            Export/Import are the capture and the machine it runs on, in the
+            order they are used; Network is the same subject read the other way
+            - what this computer is connected to, which is what those frames
+            are coming off. The bottom group is left holding Settings alone,
+            which is VS Code's own arrangement and makes the divider mean
+            something: everything above it opens a surface beside the
+            workspace, the one below takes the workspace itself.
+
+            Moving it here cost nothing. Both groups gap the same, so
+            `group(5) - group(4)` and `group(2) - group(1)` are both 38 and
+            they cancel - the strip is still 452px. `scripts/session/view.ts`
+            adds it up rather than trusting this sentence.
+
+            `Network` rather than `EthernetPort` - that glyph is the adapter
+            button three icons above, and this strip has shipped two identical
+            icons once already. */}
+        <button
+          onClick={onOpenNetwork}
+          aria-label="Network"
+          title="Network - adapters, DNS and this machine's public identity"
+          aria-pressed={networkOpen}
+          className={railButton(networkOpen, 'view')}
+        >
+          <Network className={GLYPH} />
+        </button>
+
         {/* **Find packet was here and is deleted.**
 
             A substring match over the rows already in hand, with a popover, a
@@ -813,34 +863,6 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           above can grow without overlapping it. */}
       <div className={`${GROUP} mt-auto pb-2`} role="group" aria-label="Application">
         <RailDivider />
-        {/* **Network, in the slot Export/Import left.**
-
-            It was a VIEW once, on `Ctrl+3`, and it failed the view list's own
-            test - it describes the MACHINE rather than the capture, and nothing
-            in it changes when a packet arrives. It became a Settings tab on
-            that argument, and the tab was the wrong conclusion from a right
-            premise: Settings is where the app is CONFIGURED, and Network
-            configures nothing. It is a report, and a report about what this
-            computer is connected to should not be three clicks inside a
-            preferences panel.
-
-            So it is a sheet with its own door, marked `'view'` like Settings is
-            and for the identical reason: the fill means "this is what you are
-            looking at", which is true while it is up, where the outline means
-            "this control is on", which a surface is not.
-
-            `Network` rather than `EthernetPort` - that glyph is the adapter
-            button four icons above, and this strip has shipped two identical
-            icons once already. */}
-        <button
-          onClick={onOpenNetwork}
-          aria-label="Network"
-          title="Network - adapters, DNS and this machine's public identity"
-          aria-pressed={networkOpen}
-          className={railButton(networkOpen, 'view')}
-        >
-          <Network className={GLYPH} />
-        </button>
         {/* **A toggle now, and marked like a view.** Settings was a modal
             with an X and a Close button; it is a pane taking the workspace
             card, so the rail has to say it is on screen and pressing this again
