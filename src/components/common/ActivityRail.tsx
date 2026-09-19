@@ -16,12 +16,12 @@ import {
 } from 'lucide-react';
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentStatusLabel } from '../../services/agentHealth';
-import { CaptureInterfacePicker } from './CaptureInterfacePicker';
 import { CaptureSchedulePicker } from './CaptureSchedulePicker';
 import { isScheduleEmpty, type CaptureSchedule, type SchedulePreset } from '../../services/captureSchedule';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import type { Capabilities } from '../../types/packet';
 import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
+import type { SideBarPanel } from '../../services/sideBarPrefs';
 import { useRovingFocus } from './useRovingFocus';
 
 /**
@@ -324,11 +324,17 @@ export interface ActivityRailProps {
   onClearPackets: () => void;
   bufferedPackets: number;
   permissions: Capabilities;
+  /**
+   * Still here, and only for the BUTTON - the list itself is the panel's.
+   *
+   * The rail draws a health badge on this glyph and names the chosen adapter
+   * in its tooltip, both of which need the list. What it no longer does is
+   * carry the list itself, the selection callback, the traffic samples or the
+   * open/close hook that gated them: those went to
+   * `sidebar/CaptureInterfacePanel.tsx` with the menu they belonged to.
+   */
   agentInterfaces: { name: string; label: string }[];
   selectedInterfaces: string[];
-  onSelectInterface: (name: string) => void;
-  interfaceRates?: Record<string, number[]>;
-  onInterfacePickerOpenChange?: (open: boolean) => void;
   captureOwnedElsewhere?: boolean;
   agentHealth: AgentHealth;
   /**
@@ -389,6 +395,17 @@ export interface ActivityRailProps {
   networkOpen: boolean;
   onOpenNetwork: () => void;
   /**
+   * Which side bar panel is open, or null.
+   *
+   * The panel rather than a boolean per button, because four buttons in this
+   * strip mark one column: what each needs to know is whether the surface on
+   * screen is ITS surface, which is one comparison against one value. Four
+   * booleans would make "two lit at once" representable in a strip that has
+   * exactly one column to point at.
+   */
+  sideBarPanel: SideBarPanel | null;
+  onOpenSideBar: (panel: SideBarPanel) => void;
+  /**
    * Whether the side bar is open against this card's right edge.
    *
    * **The rail's own geometry is the only thing this changes**, which is why it
@@ -414,10 +431,11 @@ export interface ActivityRailProps {
 
 export const ActivityRail: React.FC<ActivityRailProps> = ({
   isCapturing, onStartCapture, onStopCapture, onClearPackets,
-  bufferedPackets, permissions, agentInterfaces, selectedInterfaces, onSelectInterface,
-  interfaceRates, onInterfacePickerOpenChange, captureOwnedElsewhere, agentHealth,
+  bufferedPackets, permissions, agentInterfaces, selectedInterfaces,
+  captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
   settingsOpen, onOpenSettings, networkOpen, onOpenNetwork, onOpenExport, sideBarOpen,
+  sideBarPanel, onOpenSideBar,
   schedule, onScheduleChange, schedulePresets, onSchedulePresetsChange,
   scheduleSummary, scheduleNow,
 }) => {
@@ -646,38 +664,39 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           )}
         </div>
 
-        {agentInterfaces.length === 0 ? (
-          // A dead end by design: there is no adapter list to open, and a button
-          // that opens an empty menu reads as broken rather than as blocked.
-          <button
-            disabled
-            data-tour="interfaces"
-            aria-label={adapterName}
-            title={adapterTitle}
-            className={`${railButton(false, 'toggle')} cursor-not-allowed opacity-60`}
-          >
-            <AdapterGlyph attention={attention} />
-          </button>
-        ) : (
-          <CaptureInterfacePicker
-            interfaces={agentInterfaces}
-            selectedInterface={selectedInterfaces[0] ?? null}
-            onSelect={onSelectInterface}
-            interfaceRates={interfaceRates}
-            onOpenChange={onInterfacePickerOpenChange}
-            align="start"
-            side="right"
-          >
-            <button
-              data-tour="interfaces"
-              aria-label={adapterName}
-              title={adapterTitle}
-              className={railButton(selected !== null, 'toggle')}
-            >
-              <AdapterGlyph attention={attention} />
-            </button>
-          </CaptureInterfacePicker>
-        )}
+        {/* **The adapter button opens a panel, and it is no longer ever
+            disabled.**
+
+            It forked on an empty list once and rendered a DEAD button, on the
+            sound argument that "a button that opens an empty menu reads as
+            broken rather than as blocked". That argument was about a MENU. A
+            panel exists when its content does not, so the empty case finally
+            has somewhere to say which of three reasons applies - and until now
+            the state a fresh install lands in, an agent connected and healthy
+            with no driver to listen on, had a hover tooltip and nothing else.
+
+            **The marker changed with it.** It carried the outline, meaning "an
+            adapter is chosen"; it carries the FILL now, meaning "this is what
+            is on screen", which is the rail's own rule for a surface. The fact
+            it used to carry moved to the dot beside it, where the schedule's
+            equivalent already lived - so the strip's vocabulary got smaller
+            rather than larger: fill is a surface, dot is something to report. */}
+        <button
+          data-tour="interfaces"
+          onClick={() => onOpenSideBar('interfaces')}
+          aria-label={adapterName}
+          aria-pressed={sideBarPanel === 'interfaces'}
+          title={adapterTitle}
+          className={railButton(sideBarPanel === 'interfaces', 'view')}
+        >
+          {selected !== null && (
+            <span
+              aria-hidden
+              className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"
+            />
+          )}
+          <AdapterGlyph attention={attention} />
+        </button>
 
         {/* The schedule picker, which was a labelled button in the filter row.
 

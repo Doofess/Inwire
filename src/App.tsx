@@ -95,7 +95,8 @@ import { ExportImportModal } from "./components/export/ExportImportModal";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { SettingsPane } from "./components/common/SettingsPane";
 import { NetworkPane } from './components/network/NetworkPane';
-import { SideBar } from './components/sidebar/SideBar';
+import { PANEL_TITLES, SideBar } from './components/sidebar/SideBar';
+import { CaptureInterfacePanel } from './components/sidebar/CaptureInterfacePanel';
 import {
   MAIN_RESERVE_PX, MIN_SIDE_BAR_PX, restoredPanel, SIDE_BAR_DEFAULTS, sideBarStore,
   usableSideBarWidth, type SideBarPanel,
@@ -477,6 +478,14 @@ export default function App() {
   const setSideBar = useCallback((next: SideBarPanel | null) => {
     setSideBarState(next);
     patchSideBar({ panel: next });
+  }, [patchSideBar]);
+  /** A rail button opens its own panel, and closes it when it is already up. */
+  const toggleSideBar = useCallback((which: SideBarPanel) => {
+    setSideBarState((open) => {
+      const next = open === which ? null : which;
+      patchSideBar({ panel: next });
+      return next;
+    });
   }, [patchSideBar]);
 
   // **The status bar's byte readout, cleared on a view change.**
@@ -1419,7 +1428,19 @@ export default function App() {
   // Driven by the picker opening and closing. Sampling adapter counters is
   // cheap but not free, and nothing should be measured on the user's machine
   // while the menu that displays it is shut.
-  const handleInterfacePickerOpenChange = useCallback((open: boolean) => {
+  /**
+   * The agent's interface counters, on while something is displaying them.
+   *
+   * It was `handleInterfacePickerOpenChange` and was driven by Radix's
+   * `onOpenChange`. With the menu gone, the panel that draws the charts owns
+   * it from its own MOUNT - which is a stricter boundary than the menu's was,
+   * because a menu can be left open behind a click and a panel cannot be left
+   * mounted behind anything.
+   *
+   * `clearInterfaceRates()` on the way in stays: a panel reopened ten minutes
+   * later must not draw a ten-minute-old sparkline as though it were now.
+   */
+  const handleInterfaceSampling = useCallback((open: boolean) => {
     if (open) {
       clearInterfaceRates();
       sendAgentCommand({ type: 'subscribe_interface_stats' });
@@ -2357,9 +2378,6 @@ export default function App() {
           permissions={permissions}
           agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
-          onSelectInterface={handleSelectInterface}
-          interfaceRates={interfaceRates}
-          onInterfacePickerOpenChange={handleInterfacePickerOpenChange}
           captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
           agentHealth={agentHealth}
           view={view}
@@ -2371,6 +2389,8 @@ export default function App() {
           onOpenNetwork={() => toggleSheet('network')}
           onOpenExport={() => setShowExportModal(true)}
           sideBarOpen={sideBarOpen}
+          sideBarPanel={sideBar}
+          onOpenSideBar={toggleSideBar}
           schedule={schedule}
           onScheduleChange={setSchedule}
           schedulePresets={schedulePresets}
@@ -2463,7 +2483,39 @@ export default function App() {
             leading-margin convention - it belongs to the element on the right,
             or to the sash standing in that element's place, never to two
             margins that have to agree. */}
-        {sideBar !== null && <SideBar panel={sideBar} />}
+        {sideBar !== null && (
+          <SideBar
+            panel={sideBar}
+            detail={sideBar === 'interfaces' && agentInterfaces.length > 0
+              ? agentInterfaces.length
+              : undefined}
+          >
+            {sideBar === 'interfaces' && (
+              <CaptureInterfacePanel
+                interfaces={agentInterfaces}
+                adapters={adapters}
+                selectedInterface={selectedInterfaces[0] ?? null}
+                onSelect={handleSelectInterface}
+                interfaceRates={interfaceRates}
+                agentHealth={agentHealth}
+                isCapturing={isCapturing}
+                captureOwnedElsewhere={
+                  captureOwner !== null && captureOwner !== agentClientId
+                }
+                onOpenSettings={() => setSheet('settings')}
+                onSamplingChange={handleInterfaceSampling}
+              />
+            )}
+            {/* The other three land here as they are built. A ternary chain
+                rather than four guards, so "one panel at a time" is the shape
+                of the code rather than a condition to keep true. */}
+            {sideBar !== 'interfaces' && (
+              <p className="px-3 py-3 text-xs text-muted-foreground">
+                {PANEL_TITLES[sideBar]} moves into this column next.
+              </p>
+            )}
+          </SideBar>
+        )}
 
         {/* **The sash IS the gap**, which is what VS Code's is: a grid sash
             centred on the boundary between two cards. 4px wide, matching the

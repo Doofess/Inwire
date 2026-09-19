@@ -29,7 +29,8 @@
  *    component that draws them and it outlives the panel, measuring the user's
  *    machine with nothing on screen to show for it.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   isSideBarPanel, MAX_SIDE_BAR_PX, MIN_SIDE_BAR_PX, normalizeSideBar, restoredPanel,
   SIDE_BAR_DEFAULTS, SIDE_BAR_PANELS, sideBarStore, usableSideBarWidth,
@@ -48,6 +49,15 @@ function check(name: string, actual: unknown, expected: unknown): void {
   }
 }
 const checkTrue = (name: string, condition: boolean): void => check(name, condition, true);
+
+/** Every source file under `src/`, for the checks that are about absence. */
+function walkSrc(dir = 'src'): string[] {
+  return readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return walkSrc(full);
+    return /\.tsx?$/.test(entry) ? [full] : [];
+  });
+}
 
 /** Comments stripped, so a check cannot pass or fail on its own rationale. */
 function code(file: string): string {
@@ -247,6 +257,57 @@ console.log('\n--- a place, not a detour ---\n');
   checkTrue('the width is declared on first paint, not only on drag',
     /"--side-bar-width":/.test(app));
   checkTrue('...as well as during one', app.includes("setProperty(\"--side-bar-width\""));
+}
+
+console.log('\n--- what may not come back ---\n');
+
+{
+  // Checked as the FILE being gone rather than as the markup being absent,
+  // which is the `FilterRow.tsx` technique and for its stated reason: a
+  // dropdown is a component, and a component is easy to rebuild somewhere else.
+  //
+  // The rest of this list fills in as each surface moves - the schedule picker,
+  // then the export modal.
+  checkTrue('CaptureInterfacePicker.tsx is gone, not kept beside its panel',
+    !existsSync('src/components/common/CaptureInterfacePicker.tsx'));
+
+  const panels = readdirSync('src/components/sidebar')
+    .filter((f) => f.endsWith('.tsx'))
+    .map((f) => `src/components/sidebar/${f}`);
+  checkTrue('there are panels to check', panels.length > 0);
+
+  // **The check that stops a future session "fixing" the keyboard by pinning a
+  // Radix menu open inside a layout pane.** `DropdownMenuItem` only works
+  // inside a live `DropdownMenuContent` - that is where the roving focus, the
+  // typeahead and the `data-state` come from - so the answer for a panel of
+  // bare buttons is `useRovingFocus`, never a menu told not to close.
+  check('no panel reaches for the menu primitive',
+    panels.filter((f) => /from '.*dropdown-menu'/.test(code(f))), []);
+
+  // **Sampling is tied to a MOUNT, not to a flag.** The agent samples interface
+  // counters only while somebody is subscribed, and the panel that draws them
+  // is the only thing that displays them - so an empty dep array and a cleanup
+  // make "nothing is measured while nothing is showing it" a fact about the
+  // component tree rather than a condition somebody keeps true.
+  const adapters = code('src/components/sidebar/CaptureInterfacePanel.tsx');
+  checkTrue('the adapter panel subscribes on mount and unsubscribes on unmount',
+    /notify\.current\(true\);[\s\S]{0,140}return \(\) => \{ notify\.current\(false\); \};[\s\S]{0,30}\}, \[\]\)/
+      .test(adapters));
+  // The ref indirection, which is what stops a future dependency on that
+  // callback tearing the subscription down thirty times a second during a
+  // capture - a write down the pipe each time, with no symptom on screen.
+  checkTrue('...through a ref, so a new callback identity cannot resubscribe',
+    adapters.includes('const notify = useRef(onSamplingChange)'));
+
+  // The sqrt-eased width was a SECOND encoding of volume laid over `max`, and
+  // the dishonest one - the easing existed so a tenth of the peak would not
+  // look like a tenth. It cannot come back, because there is no longer an
+  // authoring-time width to derive it from.
+  const spark = code('src/components/common/Sparkline.tsx');
+  checkTrue('the sparkline takes its width from CSS, not from traffic',
+    !/width\?:/.test(spark) && !spark.includes('style={{ width'));
+  check('nothing computes a sparkline width any more',
+    walkSrc().filter((f) => code(f).includes('SPARKLINE_WIDTH')), []);
 }
 
 console.log(
