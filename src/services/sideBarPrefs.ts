@@ -75,8 +75,19 @@ export const MIN_SIDE_BAR_PX = 170;
 export const MAX_SIDE_BAR_PX = 600;
 
 export interface SideBarPrefs {
-  /** Which panel is open, or `null` for a closed side bar. */
-  panel: SideBarPanel | null;
+  /**
+   * The panel the column is showing, or LAST showed.
+   *
+   * **It is not `null` when the column is closed**, and that separation is a
+   * bug fix rather than a nicety. It was one field: closing wrote `null`, so
+   * the record of which panel you had been using was destroyed by the act of
+   * closing it - and `Ctrl+B`, whose whole job is "reopen the last panel",
+   * could only ever fall back to its default. The key remembered a panel
+   * across a restart and forgot it across a keystroke.
+   */
+  panel: SideBarPanel;
+  /** Whether the column is showing at all. */
+  open: boolean;
   /** The column's width in pixels. Dragged, so it changes continuously. */
   width: number;
 }
@@ -92,16 +103,21 @@ export interface SideBarPrefs {
  * install would otherwise meet the packet list's horizontal scroll before it
  * had asked for anything.
  */
-export const SIDE_BAR_DEFAULTS: SideBarPrefs = { panel: null, width: 288 };
+export const SIDE_BAR_DEFAULTS: SideBarPrefs = {
+  panel: 'interfaces',
+  open: false,
+  width: 288,
+};
 
 export function normalizeSideBar(raw: unknown): SideBarPrefs | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const v = raw as Record<string, unknown>;
   return {
     // Clamped rather than rejected, the house rule: a panel id from a build
-    // that had a panel this one removed lands on "closed" rather than
+    // that had a panel this one removed lands on the default rather than
     // discarding the key and taking the width with it.
     panel: isSideBarPanel(v.panel) ? v.panel : SIDE_BAR_DEFAULTS.panel,
+    open: typeof v.open === 'boolean' ? v.open : SIDE_BAR_DEFAULTS.open,
     width:
       typeof v.width === 'number' && Number.isFinite(v.width)
         ? Math.max(MIN_SIDE_BAR_PX, Math.min(v.width, MAX_SIDE_BAR_PX))
@@ -126,7 +142,7 @@ export const sideBarStore = createPreferenceStore(
  * seam is cut so that a panel which one day does need something has one place
  * to say so.
  */
-export function restoredPanel(stored: SideBarPanel | null): SideBarPanel | null {
+export function restoredPanel(stored: SideBarPanel): SideBarPanel {
   return stored;
 }
 

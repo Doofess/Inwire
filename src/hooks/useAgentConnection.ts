@@ -124,6 +124,8 @@ export function useAgentConnection(host: AgentConnectionHost) {
   const [agentLog, setAgentLog] = useState<AgentLogEntry[]>([]);
   /** Whether Driver Info is open, so a reconnect knows to resubscribe. */
   const logSubscribedRef = useRef(false);
+  /** The same shape, for the interface counters the adapter panel draws. */
+  const interfaceStatsSubscribedRef = useRef(false);
   /**
    * The agent's most recent rejection, surfaced in Driver Info.
    *
@@ -317,6 +319,16 @@ export function useAgentConnection(host: AgentConnectionHost) {
           setAgentLog([]);
           pipeline.command({ type: 'subscribe_logs' });
         }
+        // The interface counters live on that socket too, and their failure is
+        // quieter than the log's: the adapter panel keeps drawing the last
+        // thirty samples, so a frozen chart reads as a genuinely idle adapter
+        // rather than as a dropped subscription. Cleared first for the same
+        // reason the log is - a fresh series stitched onto a dead connection's
+        // tail would be read as continuous.
+        if (interfaceStatsSubscribedRef.current) {
+          setInterfaceRates({});
+          pipeline.command({ type: 'subscribe_interface_stats' });
+        }
 
         // Who owns which socket, for process attribution.
         //
@@ -501,6 +513,24 @@ export function useAgentConnection(host: AgentConnectionHost) {
   const clearInterfaceRates = useCallback(() => setInterfaceRates({}), []);
 
   /**
+   * The adapter panel's sampling, remembered across a reconnect.
+   *
+   * The flag is the whole point. A subscription lives on the agent's socket, so
+   * a drop takes it silently - and unlike the log, whose absence is a panel
+   * that stops filling, this one leaves thirty stale samples on screen that
+   * read as a quiet adapter. `hello` re-sends it when this is set.
+   */
+  const setInterfaceStatsSubscribed = useCallback((on: boolean) => {
+    interfaceStatsSubscribedRef.current = on;
+    if (on) {
+      setInterfaceRates({});
+      pipeline.command({ type: 'subscribe_interface_stats' });
+    } else {
+      pipeline.command({ type: 'unsubscribe_interface_stats' });
+    }
+  }, []);
+
+  /**
    * The drop counters describe ONE capture. The agent resets its own on
    * `start_capture` and the first tick replaces this within a second, but a
    * stale "dropped" chip for that second would be a lie.
@@ -515,6 +545,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
     captureStats, adapters, agentLog, agentError, interfaceRates,
     selectedInterfaces, setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
-    clearAgentLog, clearInterfaceRates, clearCaptureStats,
+    clearAgentLog, clearInterfaceRates, clearCaptureStats, setInterfaceStatsSubscribed,
   };
 }

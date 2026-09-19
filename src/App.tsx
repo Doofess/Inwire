@@ -470,22 +470,36 @@ export default function App() {
    */
   const [sideBarPrefs, patchSideBar] = usePreferenceStore(sideBarStore);
   usePreferenceSync(sideBarStore.key, sideBarStore.normalize, sideBarStore.accept);
-  const [sideBar, setSideBarState] = useState<SideBarPanel | null>(
+  /**
+   * Which panel, and whether it is showing - two facts, deliberately.
+   *
+   * They were one: `null` meant closed. That destroyed the record of which
+   * panel you had been using at the moment you closed it, so `Ctrl+B` - whose
+   * entire job is "reopen the last panel" - could only ever fall back to its
+   * default. The key remembered a panel across a restart and forgot it across
+   * a keystroke.
+   */
+  const [sideBarPanel, setSideBarPanel] = useState<SideBarPanel>(
     () => restoredPanel(sideBarPrefs.panel),
   );
-  const sideBarOpen = sideBar !== null;
-  const setSideBar = useCallback((next: SideBarPanel | null) => {
-    setSideBarState(next);
-    patchSideBar({ panel: next });
+  const [sideBarOpen, setSideBarOpen] = useState(() => sideBarPrefs.open);
+  const sideBar = sideBarOpen ? sideBarPanel : null;
+
+  const showSideBar = useCallback((next: SideBarPanel | null) => {
+    if (next === null) {
+      setSideBarOpen(false);
+      patchSideBar({ open: false });
+      return;
+    }
+    setSideBarPanel(next);
+    setSideBarOpen(true);
+    patchSideBar({ panel: next, open: true });
   }, [patchSideBar]);
+
   /** A rail button opens its own panel, and closes it when it is already up. */
   const toggleSideBar = useCallback((which: SideBarPanel) => {
-    setSideBarState((open) => {
-      const next = open === which ? null : which;
-      patchSideBar({ panel: next });
-      return next;
-    });
-  }, [patchSideBar]);
+    showSideBar(sideBar === which ? null : which);
+  }, [showSideBar, sideBar]);
 
   // **The status bar's byte readout, cleared on a view change.**
   //
@@ -726,7 +740,7 @@ export default function App() {
     agentLog, agentError, interfaceRates, selectedInterfaces,
     setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
-    clearAgentLog, clearInterfaceRates, clearCaptureStats,
+    clearAgentLog, clearCaptureStats, setInterfaceStatsSubscribed,
   } = agent;
   // The other half of auto-pause. The buffer hook owns the flag and cannot own
   // this, because stopping a capture needs the agent - and the agent needs the
@@ -1115,6 +1129,32 @@ export default function App() {
   /** The rail's own width, the one number a side bar drag has to know about. */
   const RAIL_PX = 44;
   /**
+   * The band's width, measured, because the point-of-use clamp needs it on the
+   * RENDER path and not only during a drag.
+   *
+   * The split clamp is the dock's surviving rule - a width is stored unclamped
+   * against the window and clamped where it is used, so narrowing the window
+   * shrinks an open panel and widening gives back the width that was chosen.
+   * The drag half of that was there from the start; the render half was not,
+   * so `MAIN_RESERVE_PX` held for exactly as long as a pointer was down and
+   * the stored width went to CSS raw everywhere else. A window narrowed with a
+   * 600px panel open kept the 600px panel and squeezed the workspace to
+   * nothing, which is the failure the rule exists to prevent.
+   *
+   * A `ResizeObserver` rather than a `resize` listener: the band is not the
+   * window, and it changes height when the status bar or the title row does.
+   */
+  const [bandWidth, setBandWidth] = useState(0);
+  useEffect(() => {
+    const el = bandRef.current;
+    if (el === null) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setBandWidth(entry.contentRect.width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  /**
    * Where the layout's custom properties live.
    *
    * The root rather than the bottom pane, and the two are different jobs that
@@ -1439,14 +1479,21 @@ export default function App() {
    * `clearInterfaceRates()` on the way in stays: a panel reopened ten minutes
    * later must not draw a ten-minute-old sparkline as though it were now.
    */
-  const handleInterfaceSampling = useCallback((open: boolean) => {
-    if (open) {
-      clearInterfaceRates();
-      sendAgentCommand({ type: 'subscribe_interface_stats' });
-    } else {
-      sendAgentCommand({ type: 'unsubscribe_interface_stats' });
-    }
-  }, []);
+  /**
+   * The adapter panel's sampling, owned by the hook that owns the socket.
+   *
+   * It was three lines here - clear, subscribe, unsubscribe - and it had a
+   * hole that only appeared once the surface became persistent: a reconnect
+   * drops the subscription with the socket, and nothing re-sent it. The log
+   * had solved that already, with a ref the `hello` handler reads, so this is
+   * that pattern rather than a second one.
+   *
+   * The failure it closes is quieter than the log's, which is why it went
+   * unnoticed: a dropped log subscription is a panel that stops filling, where
+   * a dropped counter subscription leaves thirty stale samples on screen that
+   * read as a genuinely idle adapter.
+   */
+  const handleInterfaceSampling = setInterfaceStatsSubscribed;
 
   // Reuses the existing "outdated" amber pill for a second, related case: an
   // agent old enough to predate `hello` entirely can't be caught by the
@@ -1815,9 +1862,9 @@ export default function App() {
      * fresh profile that has never opened one - never "nothing", which would
      * make the key do nothing on the one press where it most needs to work.
      */
-    onToggleSideBar: () => setSideBar(sideBar === null
-      ? restoredPanel(sideBarPrefs.panel) ?? 'interfaces'
-      : null),
+    // The last panel, which is now a thing the preference still knows when the
+    // column is closed - the whole reason `panel` and `open` are two fields.
+    onToggleSideBar: () => showSideBar(sideBarOpen ? null : sideBarPanel),
     filteredPacketsRef,
     selectedPacketRef,
     isCapturingRef,
@@ -2316,7 +2363,15 @@ export default function App() {
           // lesson of `--geo-pane-size` above: a layout property written only
           // by the drag path has no value until somebody drags something, and
           // the symptom is a column that renders at zero width on first paint.
-          "--side-bar-width": `${sideBarPrefs.width}px`,
+          //
+          // **Clamped on the way out, never on the way in.** The stored value
+          // stays whatever was dragged; this is the point of use, so this is
+          // where the window gets a say. Without the clamp here the reserve
+          // held only while a pointer was down - and a window narrowed with a
+          // wide panel open kept the panel and squeezed the workspace.
+          "--side-bar-width": `${bandWidth === 0
+            ? sideBarPrefs.width
+            : usableSideBarWidth(sideBarPrefs.width, bandWidth - RAIL_PX)}px`,
         } as React.CSSProperties
       }
       className="h-screen w-screen flex flex-col font-sans overflow-hidden transition-colors bg-background text-foreground"
