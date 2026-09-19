@@ -342,7 +342,7 @@ console.log('\n--- Settings is a pane and not a view ---\n');
   // than each holding a boolean of its own - one column shows one of them, so
   // four booleans would make "two lit at once" representable.
   check('...and every side bar button is marked the same way',
-    ['interfaces', 'schedule', 'network']
+    ['interfaces', 'schedule', 'transfer', 'network']
       .filter((p) => !railSrc.includes(`railButton(sideBarPanel === '${p}', 'view')`)),
     []);
   // The strip has shipped two identical glyphs once already - the brand mark

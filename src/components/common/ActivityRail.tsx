@@ -407,16 +407,21 @@ export interface ActivityRailProps {
    */
   sideBarOpen: boolean;
   /**
-   * Export / Import PCAP.
+   * Export / Import was a prop of its own and is `onOpenSideBar('transfer')`.
    *
    * It took the Update Center's slot, and that cost nothing: `onOpenUpdates`
-   * and `onOpenSettings` were the same handler - both opened the Settings modal,
-   * which is where the Update Center lives as a section - and `updateAvailable`
-   * was passed `false` at the only call site, so the badge could never light. It
-   * was a second Settings button with a dot that never appeared. Settings ->
-   * Updates is still the one place this app updates anything (ADR 0032).
+   * and `onOpenSettings` were the same handler - both opened the Settings
+   * modal, which is where the Update Center lives as a section - and
+   * `updateAvailable` was passed `false` at the only call site, so the badge
+   * could never light. It was a second Settings button with a dot that never
+   * appeared. Settings -> Updates is still the one place this app updates
+   * anything (ADR 0032).
+   *
+   * It was also the last side bar door with no marker on it: three of the four
+   * compared against `sideBarPanel` and this one passed a literal `false`, so
+   * the one panel you could open without the rail saying so was the one that
+   * replaced a modal.
    */
-  onOpenExport: () => void;
 
 }
 
@@ -425,7 +430,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces,
   captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
-  settingsOpen, onOpenSettings, onOpenExport, sideBarOpen,
+  settingsOpen, onOpenSettings, sideBarOpen,
   sideBarPanel, onOpenSideBar,
   schedule, scheduleSummary,
 }) => {
@@ -747,10 +752,11 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
             brand mark opened as an `EthernetPort`, identical to the adapter
             button 42px under it, and only a screenshot found it. */}
         <button
-          onClick={onOpenExport}
+          onClick={() => onOpenSideBar('transfer')}
           aria-label="Export or import a capture"
+          aria-pressed={sideBarPanel === 'transfer'}
           title="Export / Import PCAP"
-          className={railButton(false, 'toggle')}
+          className={railButton(sideBarPanel === 'transfer', 'view')}
         >
           <FileOutput className={GLYPH} />
         </button>

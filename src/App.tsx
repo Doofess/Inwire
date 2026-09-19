@@ -98,7 +98,7 @@ import { CaptureInterfacePanel } from './components/sidebar/CaptureInterfacePane
 import { CaptureSchedulePanel } from './components/sidebar/CaptureSchedulePanel';
 import { TransferPanel } from './components/sidebar/TransferPanel';
 import {
-  MAIN_RESERVE_PX, MIN_SIDE_BAR_PX, restoredPanel, SIDE_BAR_DEFAULTS, sideBarStore,
+  MAIN_RESERVE_PX, MAX_SIDE_BAR_PX, MIN_SIDE_BAR_PX, restoredPanel, SIDE_BAR_DEFAULTS, sideBarStore,
   usableSideBarWidth, type SideBarPanel,
 } from './services/sideBarPrefs';
 import {
@@ -1346,10 +1346,23 @@ export default function App() {
     });
   }, [detailsPaneRatio, patchLayout]);
 
+  /**
+   * The keyboard's step, stored UNCLAMPED against the window.
+   *
+   * It used to commit `usableSideBarWidth(...)`, which is the other half of the
+   * dock's rule read backwards: clamped on the way OUT, a width could never
+   * grow back when the window did. Two arrow presses at a narrow window would
+   * have permanently rewritten a 600px choice down to whatever fitted. The
+   * floor and the ceiling still bound it - those are facts about the column
+   * rather than about the window - and the render path clamps against the
+   * window, which is where that belongs.
+   */
   const nudgeSideBar = useCallback((deltaPx: number) => {
-    const band = bandRef.current?.getBoundingClientRect().width ?? window.innerWidth;
     patchSideBar({
-      width: usableSideBarWidth(sideBarPrefs.width + deltaPx, band - RAIL_PX),
+      width: Math.max(
+        MIN_SIDE_BAR_PX,
+        Math.min(sideBarPrefs.width + deltaPx, MAX_SIDE_BAR_PX),
+      ),
     });
   }, [patchSideBar, sideBarPrefs.width]);
 
@@ -2451,7 +2464,6 @@ export default function App() {
           streamAvailable={streamForSelection !== null || streamToFollow !== null}
           settingsOpen={settingsOpen}
           onOpenSettings={() => toggleSheet('settings')}
-          onOpenExport={() => toggleSideBar('transfer')}
           sideBarOpen={sideBarOpen}
           sideBarPanel={sideBar}
           onOpenSideBar={toggleSideBar}

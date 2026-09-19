@@ -202,8 +202,27 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
     return () => window.clearInterval(id);
   }, [hasLease]);
 
-  const noAgent = <Empty>The agent is not connected, so this machine&rsquo;s own
-    configuration cannot be read. Anything the capture itself reveals is still shown.</Empty>;
+  /**
+   * Why there is nothing to show, and the two reasons are not the same.
+   *
+   * It was one sentence blaming the link, rendered wherever an adapter was
+   * missing - so a CONNECTED agent that had not sent an `adapter_config`
+   * snapshot yet, which is every stub run and the first second of every real
+   * one, claimed the agent was not there. That is the shape `Empty`'s own
+   * comment exists to prevent: "'the agent is not connected' and 'the capture
+   * did not show this' are completely different statements, and a panel that
+   * rendered one blank area for both would leave the reader unable to tell a
+   * missing agent from a quiet network."
+   */
+  const noAdapter = (
+    <Empty>
+      {agentConnected
+        ? 'The agent has not reported this machine’s adapter configuration. '
+          + 'Anything the capture itself reveals is still shown.'
+        : 'The agent is not connected, so this machine’s own configuration '
+          + 'cannot be read. Anything the capture itself reveals is still shown.'}
+    </Empty>
+  );
 
   /*
    * **A Settings tab, and it went there by failing the test the view list
@@ -239,7 +258,7 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
     <div className="p-2 space-y-2">
 
                           <Section title="Capture adapter">
-                {adapter === null ? noAgent : (
+                {adapter === null ? noAdapter : (
                   <>
                     <Row label="Name" value={adapter.name} source={adapter.source.adapter} />
                     <Row label="Description" value={adapter.description} source={adapter.source.adapter} />
@@ -281,7 +300,7 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
               </Section>
 
             {adapter === null ? (
-              <Section title="Addresses">{noAgent}</Section>
+              <Section title="Addresses">{noAdapter}</Section>
             ) : (
               <>
                 <Section title="IPv4">
@@ -450,7 +469,7 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                     </span>
                   )}
                 </Row>
-                {!agentConnected && noAgent}
+                {!agentConnected && noAdapter}
               </Section>
 
             <Section title="IPv6 router"

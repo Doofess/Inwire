@@ -154,13 +154,24 @@ export function restoredPanel(stored: SideBarPanel): SideBarPanel {
  * what the workspace keeps.
  *
  * **`MAIN_RESERVE` is the successor to the dock's `LIST_RESERVE`**, and it
- * inherits that constant's post-mortem rather than its number: 640 was measured
- * and did not fit every column either, because the packet list's fixed columns
- * come to ~785px. The rule it left behind is the one applied here - guarantee
- * the identity, which is the frame number, the time and both addresses, and let
- * Protocol, Length and Info scroll.
+ * inherits that constant's post-mortem AND, in the end, its arithmetic. The
+ * rule it left behind is "guarantee the identity - the frame number, the time
+ * and both addresses - and let Protocol, Length and Info scroll", and the
+ * measurement behind it is that the packet list's fixed columns come to ~785px.
+ *
+ * **It was 480 for four commits, and 480 cannot keep that promise.** At the
+ * 1024 minimum the band is 1016, less the rail's 44 leaves 972, so a 480
+ * reserve lets the column take 492 and hands the list 480 - which is 300px
+ * short of its own identity columns. `docs/verification.md` said the identity
+ * survived; it would not have. 780 is the number that makes the rule true, and
+ * it still leaves 192px of column at the smallest window this app allows -
+ * above VS Code's own 170 floor, so the panel narrows rather than vanishing.
+ *
+ * That is the split clamp doing exactly what it is for: the stored width is
+ * untouched, so widening the window gives back the 288 or the 600 that was
+ * chosen.
  */
-export const MAIN_RESERVE_PX = 480;
+export const MAIN_RESERVE_PX = 780;
 
 export function usableSideBarWidth(stored: number, available: number): number {
   const ceiling = Math.max(MIN_SIDE_BAR_PX, available - MAIN_RESERVE_PX);
