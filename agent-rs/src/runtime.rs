@@ -131,7 +131,8 @@ struct Shared {
     ///
     /// `None` until a client says. Capture then falls back to the first, which
     /// is what the app's own default does on a fresh connection.
-    selected: Mutex<Option<usize>>,
+    /// The device NAME the app asked for, never a list position.
+    selected: Mutex<Option<String>>,
     capture: Mutex<Option<CaptureHandles>>,
     shutdown: Arc<Shutdown>,
 }
@@ -462,11 +463,15 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
 
         match command {
             Command::SetInterfaces(chosen) => {
-                // The app sends indices into the list it was given in `hello`.
+                // The app sends device NAMES - `\Device\NPF_{GUID}` - which is
+                // what `agentProtocol.ts` declares and what `agent.py` spawns a
+                // sniffer per. This used to read them as indices, so the app's
+                // message did not parse at all.
+                //
                 // One adapter: capture is single-interface here, and taking the
                 // first of several is a smaller lie than pretending to merge
                 // them - the app only ever sends one.
-                *shared.selected.lock().unwrap() = chosen.first().copied();
+                *shared.selected.lock().unwrap() = chosen.first().cloned();
                 let interfaces = shared.interfaces.lock().unwrap().clone();
                 shared.send_to(&client, &protocol::state(
                     shared.capture_state(),
@@ -479,14 +484,34 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                     return Ok(());
                 }
                 let interfaces = shared.interfaces.lock().unwrap().clone();
-                let wanted = *shared.selected.lock().unwrap();
-                let picked = wanted
-                    .and_then(|id| interfaces.iter().find(|i| i.id == id).cloned())
-                    .or_else(|| interfaces.first().cloned());
-                let Some(chosen) = picked else {
+                let wanted = shared.selected.lock().unwrap().clone();
+
+                // **No fallback to "whatever is first", and that absence is the
+                // fix.** This used to end `.or_else(|| interfaces.first())`, so
+                // a selection that did not arrive - which is what happened for
+                // every real capture, because the names did not parse - became
+                // a capture on adapter 0. On this machine adapter 0 is a dead
+                // `WAN Miniport`: the agent opened it, reported `sniffing`
+                // perfectly truthfully, and delivered nothing for ever.
+                //
+                // A guess is the one answer this must not give. The app always
+                // sends `set_interfaces` before `start_capture` - including on
+                // reconnect - and says so in `App.tsx`: "starting always names
+                // exactly one adapter, so there is no way to begin capturing
+                // without having said where from". So an absent or unknown
+                // selection is a real fault, and saying so puts a sentence in
+                // front of somebody instead of an empty packet list.
+                let Some(wanted) = wanted else {
                     shared.send_to(&client, &protocol::error(
                         "no_interfaces",
-                        "No capture adapters are available. Npcap may not be installed.",
+                        "No adapter has been chosen. Send set_interfaces before start_capture.",
+                    ));
+                    return Ok(());
+                };
+                let Some(chosen) = interfaces.iter().find(|i| i.name == wanted).cloned() else {
+                    shared.send_to(&client, &protocol::error(
+                        "no_interfaces",
+                        &format!("No capture adapter named '{wanted}'. It may have been removed."),
                     ));
                     return Ok(());
                 };

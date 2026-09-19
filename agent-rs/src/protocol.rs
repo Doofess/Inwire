@@ -165,7 +165,11 @@ pub fn error(code: &str, message: &str) -> Value {
 pub enum Command {
     StartCapture,
     StopCapture,
-    SetInterfaces(Vec<usize>),
+    /// The adapters to capture on, as the device NAMES the app was given in
+    /// `hello` - `\Device\NPF_{GUID}` - and never as indices into that list.
+    /// `src/services/agentProtocol.ts` declares `interfaces: string[]`, and
+    /// `local-agent/agent.py` spawns one sniffer per entry by name.
+    SetInterfaces(Vec<String>),
     SubscribeLogs,
     UnsubscribeLogs,
     SubscribeInterfaceStats,
@@ -185,7 +189,7 @@ pub enum ParseError {
     /// Named, so the reply can say which command it did not know - which is how
     /// a version mismatch reports itself as a sentence rather than as silence.
     Unknown(String),
-    /// `set_interfaces` with something that is not a list of indices.
+    /// `set_interfaces` with something that is not a list of device names.
     BadInterfaces,
     /// `set_interfaces` with an empty list. A capture on no adapter is a capture
     /// that silently returns nothing, so it is refused rather than accepted.
@@ -208,10 +212,13 @@ pub fn parse_command(text: &str) -> Result<Command, ParseError> {
             }
             let mut out = Vec::with_capacity(list.len());
             for entry in list {
-                // A float or a negative is not an index. Refused rather than
-                // rounded: `as usize` on -1 is 18 quintillion.
-                let n = entry.as_u64().ok_or(ParseError::BadInterfaces)?;
-                out.push(n as usize);
+                // Names, not numbers. A number is refused rather than coerced:
+                // `0` would stringify to "0", match no device, and then be
+                // selected silently - which is the shape of the bug this
+                // replaced, where an unparseable selection became a capture on
+                // whatever adapter happened to be first.
+                let name = entry.as_str().ok_or(ParseError::BadInterfaces)?;
+                out.push(name.to_string());
             }
             Ok(Command::SetInterfaces(out))
         }
@@ -305,13 +312,41 @@ mod tests {
         assert_eq!(capture_stats(1000, 0, 0, Some(0), &[])["droppedPipe"], 0);
     }
 
+    /// **`set_interfaces` carries device NAMES, and this agent read indices.**
+    ///
+    /// `AgentCommand` in `src/services/agentProtocol.ts` declares
+    /// `interfaces: string[]`, and `local-agent/agent.py` spawns one sniffer
+    /// per entry as a name. This implementation demanded `as_u64`, so the app's
+    /// message failed to parse, the selection stayed unset, and `start_capture`
+    /// fell back to adapter 0 - a dead `WAN Miniport` on the machine this was
+    /// found on. The agent reported `sniffing` perfectly truthfully and
+    /// delivered nothing.
+    ///
+    /// The test that used to live here asserted `[0,2]` parsed to indices. It
+    /// was written against this implementation rather than against the
+    /// protocol, so it passed for as long as the bug existed - which is the
+    /// whole argument for checking both ends against one shared description
+    /// rather than each end against itself. `scripts/agent/command-vectors.json`
+    /// is that description for the inbound direction, and `command_vectors.rs`
+    /// is this end reading it.
+    #[test]
+    fn set_interfaces_carries_device_names_not_indices() {
+        assert_eq!(
+            parse_command(r#"{"type":"set_interfaces","interfaces":["\\Device\\NPF_{A}"]}"#),
+            Ok(Command::SetInterfaces(vec![r"\Device\NPF_{A}".to_string()]))
+        );
+        // A number is not a name. Refused rather than coerced: `0` would
+        // stringify to "0", which matches no device and would be selected
+        // silently.
+        assert_eq!(
+            parse_command(r#"{"type":"set_interfaces","interfaces":[0,2]}"#),
+            Err(ParseError::BadInterfaces)
+        );
+    }
+
     #[test]
     fn commands_parse_and_unknown_ones_are_named() {
         assert_eq!(parse_command(r#"{"type":"start_capture"}"#), Ok(Command::StartCapture));
-        assert_eq!(
-            parse_command(r#"{"type":"set_interfaces","interfaces":[0,2]}"#),
-            Ok(Command::SetInterfaces(vec![0, 2]))
-        );
         assert_eq!(parse_command("{not json"), Err(ParseError::NotJson));
         assert_eq!(parse_command("{}"), Err(ParseError::NoType));
         assert_eq!(
@@ -356,11 +391,70 @@ mod tests {
         // silently re-points the first user's capture.
         assert!(!may_run(&start, "b", Some("a")));
         assert!(!may_run(&Command::StopCapture, "b", Some("a")));
-        assert!(!may_run(&Command::SetInterfaces(vec![0]), "b", Some("a")));
+        assert!(!may_run(&Command::SetInterfaces(vec!["x".into()]), "b", Some("a")));
 
         // Watching costs the owner nothing and is never gated.
         assert!(may_run(&logs, "b", Some("a")));
         assert!(may_run(&Command::SubscribeAdapters, "b", Some("a")));
         assert!(may_run(&Command::RefreshAdapters, "b", Some("a")));
+    }
+}
+
+/// The app's own commands, parsed from the shared fixture.
+///
+/// **This is the check that was missing.** `control-vectors.json` holds what
+/// the agent emits and `scripts/agent/control-vectors.ts` holds the app's
+/// parser to it; nothing held THIS end to what the app sends. So
+/// `set_interfaces` could be read as a list of indices here, be encoded as a
+/// list of indices by the interop harness, and be asserted as a list of indices
+/// by a unit test - three agreeing witnesses, none of them the app - while
+/// every real capture opened the wrong adapter.
+///
+/// Reading the fixture rather than restating it is the whole point: the bytes
+/// are produced by `encodeAgentCommand`, and if they change without this
+/// parser changing, this fails.
+#[cfg(test)]
+mod command_vectors {
+    use super::*;
+
+    const VECTORS: &str = include_str!("../../scripts/agent/command-vectors.json");
+
+    #[test]
+    fn every_command_the_app_sends_is_understood() {
+        let doc: Value = serde_json::from_str(VECTORS).expect("the fixture is JSON");
+        let commands = doc["commands"].as_array().expect("commands is an array");
+        assert!(!commands.is_empty(), "an empty fixture would pass vacuously");
+
+        for entry in commands {
+            let text = entry.as_str().expect("each vector is an encoded string");
+            let parsed = parse_command(text);
+            assert!(
+                parsed.is_ok(),
+                "the app sends {text} and this agent answered {parsed:?} - \
+                 a command the agent cannot parse is one the app gets no effect from",
+            );
+        }
+    }
+
+    /// Named on its own, because a diff of thirteen strings does not say
+    /// "adapter selection is broken" and this does.
+    #[test]
+    fn set_interfaces_from_the_app_is_a_device_name() {
+        let doc: Value = serde_json::from_str(VECTORS).unwrap();
+        let text = doc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|c| c.contains("set_interfaces"))
+            .expect("the fixture covers set_interfaces");
+
+        match parse_command(text) {
+            Ok(Command::SetInterfaces(names)) => {
+                assert_eq!(names, vec![r"\Device\NPF_{A}".to_string()],
+                    "the backslashes must survive, and the entry is a NAME");
+            }
+            other => panic!("the app's set_interfaces parsed as {other:?}"),
+        }
     }
 }
