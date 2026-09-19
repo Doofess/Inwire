@@ -1,0 +1,18 @@
+{
+  "note": "Commands the app sends, encoded by encodeAgentCommand in src/services/agentProtocol.ts. Held to the app by scripts/agent/command-vectors.ts and to the Rust agent by its command_vectors test. Do not hand-edit: command-vectors.ts prints the replacement when the union changes.",
+  "commands": [
+    "{\"type\":\"start_capture\"}",
+    "{\"type\":\"stop_capture\"}",
+    "{\"type\":\"set_interfaces\",\"interfaces\":[\"\\\\Device\\\\NPF_{A}\"]}",
+    "{\"type\":\"subscribe_logs\"}",
+    "{\"type\":\"unsubscribe_logs\"}",
+    "{\"type\":\"subscribe_interface_stats\"}",
+    "{\"type\":\"unsubscribe_interface_stats\"}",
+    "{\"type\":\"subscribe_sockets\"}",
+    "{\"type\":\"unsubscribe_sockets\"}",
+    "{\"type\":\"subscribe_adapters\"}",
+    "{\"type\":\"unsubscribe_adapters\"}",
+    "{\"type\":\"refresh_adapters\"}",
+    "{\"type\":\"restart_agent\"}"
+  ]
+}

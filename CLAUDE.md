@@ -1269,6 +1269,22 @@ Both ends assert the same hand-written byte vectors — `scripts/agent/binary.ts
 and `scripts/agent/pipe-framing.ts` against `local-agent/test_protocol.py` —
 which is the only thing keeping two implementations of one format in agreement.
 
+**Control messages are covered in both directions now, and the missing half
+cost a working capture.** `scripts/agent/control-vectors.json` holds what the
+agent *emits* and is checked against the app's parser; nothing held the agent to
+what the app *sends*. So the Rust agent could read `set_interfaces` as a list of
+adapter **indices** where the app and `agent.py` send device **names** — and be
+agreed with by an interop harness written from the Rust source and by a unit
+test asserting `[0,2]`. Three witnesses, none of them the app. The app's message
+failed to parse, the selection stayed unset, and `start_capture` fell back to
+adapter 0: a dead `WAN Miniport`, opened and reported as `sniffing`, delivering
+nothing. `scripts/agent/command-vectors.json` is the inbound fixture that closes
+it — produced by the app's own `encodeAgentCommand`, checked by
+`scripts/agent/command-vectors.ts` against the app and by `agent-rs`'s
+`command_vectors` test against the Rust parser. The lesson generalises past this
+bug: **a fixture only proves something if the end that authored it is not the
+end being tested.**
+
 `src/services/agentLink.ts` is the vocabulary between main and the Worker.
 
 ### One version number

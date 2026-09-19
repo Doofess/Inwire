@@ -91,7 +91,7 @@ attached to it. Adding tokio would be a large dependency to express what
 
 ## What is proven, and what is not
 
-**Proven.** 35 tests. The wire format against the shared golden vectors, in all
+**Proven.** 42 tests. The wire format against the shared golden vectors, in all
 three implementations. The pipe against **the app's own client** —
 `scripts/agent/pipe-interop.ts` connects with the same `net.connect` and the same
 `agentFraming.ts` the renderer uses, which is where the overlapped-I/O trap lives.
@@ -106,7 +106,10 @@ inside the documented two ticks. Cold start to a served pipe is **56 ms**,
 against Python's 213 ms for its imports alone, which is the number this decision
 rests on.
 
-**Running it found three defects that reading it had not.** The runtime ignored
+**Running it found four defects that reading it had not**, and the fourth was
+found by a person opening the app rather than by any harness here.
+
+The runtime ignored
 `set_interfaces` and captured on whatever adapter came first — on this machine a
 dead `WAN Miniport`, so it reported `sniffing` perfectly truthfully and
 delivered nothing. The final `capture_stats` passed `None` for `droppedPipe`, so
@@ -115,6 +118,26 @@ checks when the numbers do not add up. And `--startup manual install` parsed
 **`manual`** as the verb and exited 1 without registering anything — which is
 the pywin32 `getopt` trap this crate's own header describes, arriving from the
 opposite direction on the identical command line.
+
+**The fourth, and it is the one worth carrying.** `set_interfaces` carries
+device **names** — `agentProtocol.ts` declares `interfaces: string[]` and
+`agent.py` spawns one sniffer per entry by name. This port read them as
+**indices into its own list**. The app's message did not parse, the selection
+stayed unset, and `start_capture` ended `.or_else(|| interfaces.first())`, so
+every real capture opened adapter 0 — on this machine a dead `WAN Miniport`.
+The agent reported `sniffing` truthfully and delivered nothing, which is the
+same signature as the first defect and a different cause.
+
+**Everything agreed except the app.** `agent-interop.ts` — written to be "the
+app's own client" — sent `interfaces: [wanted.id]`, a number, because it was
+written while reading this implementation; its captures worked perfectly. The
+unit test asserted `[0,2]` parsed to `vec![0, 2]`. Three witnesses, none of them
+the app, and 148,000-frame interop runs passing throughout. What was missing was
+not a test but a fixture the *other* end authored:
+`scripts/agent/command-vectors.json` is produced by the app's own
+`encodeAgentCommand` and is now read by both. The silent fallback is gone too —
+an absent or unknown adapter is an error, because a guess is the one answer that
+turns a protocol fault into an empty packet list nobody can diagnose.
 
 **And proven as a service, which is what this section used to say was missing.**
 The Python agent's registration was removed, this binary was registered in its

@@ -33,7 +33,7 @@ import { connect, createServer, type Socket } from 'node:net';
 import { FRAME_BINARY, FRAME_JSON, FrameReader, encodeFrame } from '../../src/services/agentFraming';
 import { decodePacketBatch } from '../../src/services/agentBinary';
 import { parseAgentMessage, summarizeCaptureStats } from '../../src/services/agentProtocol';
-import type { AgentCaptureStatsMessage } from '../../src/services/agentProtocol';
+import type { AgentCaptureStatsMessage, AgentCommand } from '../../src/services/agentProtocol';
 
 const PIPE = process.env.INWIRE_PROBE_PIPE ?? String.raw`\\.\pipe\inwire-probe`;
 const SECONDS = Number(process.env.INWIRE_PROBE_SECONDS ?? 6);
@@ -124,6 +124,19 @@ const stopFlood = floodLoopback();
 const socket = connect(PIPE);
 const reader = new FrameReader();
 
+/**
+ * Sends a command the way the app sends it.
+ *
+ * Typed as `AgentCommand` rather than as a JSON string, because this harness
+ * exists to be "the app's own client" and on one message it quietly was not:
+ * it sent `set_interfaces` with adapter INDICES while the app sends device
+ * names. Both ends of that disagreement were written here, so both agreed, and
+ * the app's real capture opened the wrong adapter for as long as it existed.
+ */
+function sendCommand(command: AgentCommand): void {
+  socket.write(encodeFrame(FRAME_JSON, new TextEncoder().encode(JSON.stringify(command))));
+}
+
 let sawFinalState = false;
 
 await new Promise<void>((resolve, reject) => {
@@ -133,7 +146,7 @@ await new Promise<void>((resolve, reject) => {
   // add up and a real accounting bug would be indistinguishable from the gap
   // that sampling alone creates.
   const stopAt = setTimeout(() => {
-    socket.write(encodeFrame(FRAME_JSON, new TextEncoder().encode('{"type":"stop_capture"}')));
+    sendCommand({ type: 'stop_capture' });
   }, SECONDS * 1000);
   const stop = setTimeout(() => { clearTimeout(stopAt); socket.end(); resolve(); },
     SECONDS * 1000 + 2500);
@@ -174,12 +187,23 @@ await new Promise<void>((resolve, reject) => {
             console.log(`FAIL  no adapter matching "${ADAPTER}" - the agent offered `
               + interfaces.map((i) => i.label ?? i.name).join(', '));
             failures++;
+          } else if (wanted.name === undefined) {
+            console.log('FAIL  the agent offered an adapter with no device name');
+            failures++;
           } else {
-            chosenLabel = wanted.label ?? wanted.name ?? String(wanted.id);
-            socket.write(encodeFrame(FRAME_JSON, new TextEncoder().encode(
-              JSON.stringify({ type: 'set_interfaces', interfaces: [wanted.id ?? 0] }))));
+            chosenLabel = wanted.label ?? wanted.name;
+            // **By NAME, and through `AgentCommand`, because this line is why
+            // the bug survived.** It sent `[wanted.id]` - a number - which the
+            // Rust agent happily parsed, because the Rust agent also believed
+            // this field was a list position. The app sends `string[]`, so the
+            // harness agreed with the implementation instead of with the app,
+            // and a capture that worked perfectly here delivered nothing there.
+            //
+            // Going through the app's own union is the part that keeps it
+            // fixed: `interfaces: [wanted.id]` no longer type-checks.
+            sendCommand({ type: 'set_interfaces', interfaces: [wanted.name] });
           }
-          socket.write(encodeFrame(FRAME_JSON, new TextEncoder().encode('{"type":"start_capture"}')));
+          sendCommand({ type: 'start_capture' });
         }
         // `state: idle` is the agent's last word: it follows the final
         // capture_stats, so by the time it lands the figures are complete.
