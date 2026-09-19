@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { CircleAlert, Filter, X, Bookmark, Info } from 'lucide-react';
+import { CircleAlert, Filter, X, Bookmark, Info, ChevronDown } from 'lucide-react';
 import { FilterEngine, FilterValidationResult } from '../../services/filterEngine';
 import { allPresets } from '../../services/filterPresets';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
@@ -54,7 +54,20 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 }) => {
   const isCompact = variant === 'compact';
   const [validation, setValidation] = useState<FilterValidationResult>({ isValid: true });
-  const [showPresetsDropdown, setShowPresetsDropdown] = useState(false);
+  /**
+   * Who asked for the presets list, or `null` for nobody.
+   *
+   * It was a boolean, and it grew a second question the moment the field's
+   * right edge got a chevron: the completions and the presets share the space
+   * under the field, so only one can be up, and the rule for which was "the
+   * half-typed word wins". That rule is right for the gesture it was written
+   * for - clicking INTO the field, where the completions are what you were
+   * already doing - and wrong for a control whose whole job is to put the
+   * presets on screen. Recording the opener answers both with one state.
+   */
+  const [presetsSource, setPresetsSource] = useState<'field' | 'chevron' | null>(null);
+  const showPresetsDropdown = presetsSource !== null;
+  const setShowPresetsDropdown = (open: boolean) => setPresetsSource(open ? 'field' : null);
   /**
    * Which completion is highlighted, or -1 for none.
    *
@@ -92,7 +105,20 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   // The completions and the presets share the space under the field, so only
   // one can be up. Completing what is half-typed is the more immediate of the
   // two, and the presets are one Escape away.
-  const showSuggestions = suggestions.length > 0 && !(suggestions.length === 1 && suggestions[0] === token.text);
+  const showSuggestions = suggestions.length > 0
+    && !(suggestions.length === 1 && suggestions[0] === token.text)
+    // ...except when the chevron asked for the presets, which is the one
+    // gesture that means "show me the list" rather than "help me finish this".
+    && presetsSource !== 'chevron';
+
+  /**
+   * What is actually on screen, which is what the chevron toggles.
+   *
+   * Keyed to the VISIBLE list rather than to the flag: with completions up the
+   * flag can be true while the presets are not showing, and a button that read
+   * "close" there would close something the user cannot see.
+   */
+  const presetsVisible = showPresetsDropdown && !showSuggestions;
 
   useEffect(() => setHighlighted(-1), [token.text]);
 
@@ -261,12 +287,18 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 the empty filter - so the tick was a second button for a thing
                 that had already happened.
 
-                A chevron used to sit here too, opening the presets. It went the
-                same way and for the same reason: clicking the field already
-                opens them, so the chevron was a second door onto a room whose
-                first door is the whole width of the bar.
+                **The chevron is back, and it is not the one that was deleted.**
+                That one only OPENED the list, which is what made it a second
+                door onto a room whose first door is the whole width of the bar.
+                This one is a toggle, and closing is the thing the field cannot
+                do: clicking it opens the presets, clicking it again opens them
+                again, so the only ways out were Escape and a click somewhere
+                else - both of which you have to know about. A disclosure
+                control that turns the list off is a new job rather than a
+                duplicate of the field's.
 
-                Both survivors are filled rather than bare glyphs. At 12px on
+                The survivors either side of it are filled rather than bare
+                glyphs, and it is deliberately not. At 12px on
                 the inside edge of a field they read as part of the text
                 otherwise - the X in particular looked like a character someone
                 had typed - and only appear once there is a filter to act on, so
@@ -294,6 +326,46 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   <Bookmark className="w-3 h-3" />
                 </button>
               )}
+
+              {/* **The presets toggle**, at the field's right edge, which is
+                  where a text input that also has a list of choices puts one.
+
+                  Unlike the two chips before it, it is **always here**: they
+                  act on an expression and have nothing to do until there is
+                  one, while this opens a list that exists whether the field is
+                  empty or not - and a control that came and went as you typed
+                  would be the one thing in the box that moves.
+
+                  `onMouseDown` does the work, not `onClick`. The document-level
+                  "click outside" listener is a `mousedown` and this button is
+                  inside the container, so that one leaves it alone - but the
+                  INPUT's own `onFocus`/`onClick` both reopen the list, and a
+                  click that blurred the field would race them. Taking the
+                  gesture on mousedown and preventing the default keeps focus
+                  where it is, so the toggle is the only thing that decides.
+
+                  `aria-expanded` rather than `aria-pressed`: this discloses a
+                  list rather than holding a state, which is also why the glyph
+                  turns over instead of filling in. */}
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setPresetsSource(presetsVisible ? null : 'chevron');
+                }}
+                aria-expanded={presetsVisible}
+                aria-label="Show display filter presets"
+                title={presetsVisible ? 'Hide presets' : 'Show presets'}
+                className="flex items-center justify-center h-5 w-5 rounded shrink-0
+                  cursor-pointer text-muted-foreground transition-colors
+                  hover:bg-accent hover:text-foreground focus-visible:outline-none
+                  focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <ChevronDown
+                  className={`w-3.5 h-3.5 transition-transform duration-150
+                    ${presetsVisible ? 'rotate-180' : ''}`}
+                />
+              </button>
             </div>
           </div>
 
@@ -320,7 +392,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             </div>
           )}
 
-          {showPresetsDropdown && !showSuggestions && (
+          {presetsVisible && (
             <div className="absolute left-0 right-0 top-full mt-1.5 rounded-lg border p-1.5 shadow-2xl z-50 transition-all bg-popover border-border text-popover-foreground">
               <div className="text-[10px] font-bold text-muted-foreground px-2 py-1 uppercase tracking-wider flex items-center justify-between font-mono">
                 <span>Display Filter Presets</span>

@@ -199,6 +199,25 @@ console.log('\n--- every view has a surface, and a conditional one is not restor
   checkTrue('...but clearing it does not',
     /expression\.trim\(\) !== ''\)[^}]*setView\('packets'\)/.test(app));
 
+  // **The presets chevron is a toggle, and the distinction is the whole reason
+  // it exists.** A chevron stood at the field's right edge once and was deleted
+  // for being a second way to OPEN a list the field's whole width already
+  // opened. What the field cannot do is close one - the only ways out were
+  // Escape and a click elsewhere, both of which you have to know about - so a
+  // control that puts the list away is a new job rather than that one returning.
+  // Asserted as the shape of the handler, because an `onMouseDown` that only
+  // ever set it open would pass any check that merely looked for a chevron.
+  {
+    const bar = code('src/components/common/FilterBar.tsx');
+    checkTrue('the presets chevron closes as well as opens',
+      /presetsVisible \? null : 'chevron'/.test(bar));
+    // It tracks what is ON SCREEN rather than the flag: with completions up the
+    // flag is true while the presets are not showing, and a chevron reading
+    // "close" there would close something nobody can see.
+    checkTrue('...and it reads the visible list, not the flag',
+      bar.includes("const presetsVisible = showPresetsDropdown && !showSuggestions"));
+  }
+
   // The banner went with the row: it named the agent fault above the packet
   // list while the status bar names it below, and one fault wants one place.
   // Checked as the FILE being gone rather than as the markup being absent,

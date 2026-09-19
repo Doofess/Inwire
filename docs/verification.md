@@ -150,6 +150,17 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       press the bookmark, open the presets list and pick one. Every one of those
       must work without the window moving — the slot opts out once, so a failure
       here means the wrapper lost `app-no-drag`.
+- [ ] **The chevron at the field's right edge opens AND closes the presets.**
+      Press it: the list appears and the glyph turns over. Press it again: the
+      list goes. That second press is the whole point — clicking the field
+      already opens the list, and before this the only ways to put it away were
+      Escape and a click elsewhere.
+- [ ] **It wins over the completions.** Type `tcp.po` so the field-name
+      completions appear, then press the chevron: the presets replace them.
+      Typing again brings the completions back. A chevron that flips its glyph
+      and leaves the completions up is the failure to look for.
+- [ ] **It does not steal focus.** Click into the field, type, then press the
+      chevron and keep typing — the caret must still be in the field.
 - [ ] **The empty field reads as an example.** It says `e.g. tcp.port == 443`,
       muted. The old placeholder was three real clauses with nothing marking
       them as a sample, so an empty field looked like a filter already applied.
