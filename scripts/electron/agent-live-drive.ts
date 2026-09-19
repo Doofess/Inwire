@@ -18,13 +18,33 @@
  * version comparison against a really-installed agent, and `hello` arriving
  * from something that opened a real capture device.
  *
- * ## What it deliberately does NOT do
+ * ## What it deliberately does NOT do, and why that cannot be fixed here
  *
- * **It never starts a capture.** The adapters here are the machine's real
- * ones, and a capture on a real adapter is somebody's actual traffic. Every
- * assertion below is about the LINK, which is what the lifetime work changed;
- * `smoke.ts` and `disk-drive.ts` cover the frame path against a stub, where
- * the traffic is synthetic and nobody's.
+ * **It never starts a capture.** The adapters here are the machine's real ones,
+ * and a capture on a real adapter is somebody's actual traffic.
+ *
+ * That was the whole of the reason, and it turns out to be the weaker half of
+ * it. `scripts/agent/agent-interop.ts` gets around exactly this constraint by
+ * capturing **loopback** and generating the traffic itself - nobody's but the
+ * harness's - so the obvious move is to do the same here through the UI. It
+ * does not work, and the reason is a decision rather than an obstacle:
+ * `filterCapturableInterfaces` in `src/services/captureInterfaces.ts`
+ * **removes loopback from the picker**, because it is the busiest device on a
+ * typical machine (~1,200 pkt/s of process-to-process chatter against ~50/sec
+ * on a live Ethernet adapter) and capturing it floods the buffer and saturates
+ * the render loop.
+ *
+ * So the one adapter that would make an automated capture safe is the one the
+ * app is designed never to offer. **The gap is structural**: driving a capture
+ * from this window means picking a real adapter, and this script will not do
+ * that on a person's machine.
+ *
+ * What covers it instead, in two halves that meet in the middle: `interop`
+ * drives a **real agent with a real capture handle** over the production pipe,
+ * and `smoke.ts` drives the **real UI and the whole frame path** against the
+ * stub. Only their conjunction is untested, and it is untested on purpose.
+ * `docs/verification.md` keeps it as a by-hand step, which is the honest place
+ * for it - a person capturing their own traffic is a person who has consented.
  *
  * In `NOT_TESTS`: it needs the InwireAgent service installed, which a CI
  * machine does not have, and it reads state a person's machine owns.
@@ -132,7 +152,6 @@ async function until(condition: () => Promise<boolean>, ms = 25_000): Promise<bo
 
 let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
 let profile: string | null = null;
-
 try {
   console.log('\n--- the app, against the real service ---\n');
 
@@ -184,8 +203,9 @@ try {
   check('nothing threw in the renderer', rendererErrors, []);
 } finally {
   // Closing with frames buffered opens the native "Quit Inwire?" box, which no
-  // test can answer. Nothing was captured here, but the call is free and the
-  // failure it prevents is a hung run.
+  // test can answer. This used to be belt-and-braces against a script that
+  // captured nothing; now that it captures, it is load-bearing - without it the
+  // run hangs on a modal outside the page, with no output saying why.
   try {
     const page = app ? await app.firstWindow() : null;
     await page?.evaluate(() => window.inwire?.setUnsavedCapture?.(false));

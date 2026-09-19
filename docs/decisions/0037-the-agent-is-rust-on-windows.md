@@ -137,10 +137,21 @@ five seconds for ever. Watched for sixteen.
 companion, measured rather than reasoned:** 9.0 MB resident against the Python
 agent's 66.2 MB, same role, same machine, read minutes apart.
 
-**What is still by hand, and is not about elevation.** Driving the **real Inwire
-window** against the Rust service — the interop client speaks the same protocol
-but is not the app's UI reaching "Agent connected" — and the **two-client**
-`capture_busy` case, which needs two logons. Both are in `verification.md`.
+**And the real Inwire window connects to it**, which was the other half of this
+paragraph until `agent-rs/switch-agent.ps1` made swapping the two agents a
+transaction rather than a checklist: with the Rust agent registered,
+`scripts/electron/agent-live-drive.ts` reaches "Agent connected" in **807 ms**
+and passes every SCM assertion unelevated.
+
+**What is still by hand, and one of the two cannot be automated at all.** A
+capture driven **through the UI** needs a real adapter, because
+`filterCapturableInterfaces` removes loopback from the picker — so the one
+adapter a harness could safely capture is the one the app is designed never to
+offer, and a script capturing a person's real traffic is not a trade this
+repository makes. The two halves that *are* covered meet in the middle: interop
+drives a real capture handle over the production pipe, `smoke.ts` drives the
+real UI and the whole frame path against the stub. The other is the
+**two-client** `capture_busy` case, which needs two logons.
 
 **Not ported.** `npcap_access.py` — the DACL on the Npcap device object, which
 `hello` carries as `npcapAccess`. The Rust agent sends `None`, which falls back
