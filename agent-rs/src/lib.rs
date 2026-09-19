@@ -37,6 +37,7 @@
 
 pub mod framing;
 pub mod outbound;
+pub mod protocol;
 pub mod wire;
 
 // Windows-only: this is the Npcap surface, and the Python agent remains the

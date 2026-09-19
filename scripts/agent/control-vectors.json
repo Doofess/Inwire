@@ -1,0 +1,181 @@
+{
+  "cases": [
+    {
+      "message": {
+        "authRequired": false,
+        "clientId": "rs-1",
+        "interfaces": [
+          {
+            "id": 0,
+            "label": "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)",
+            "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}"
+          },
+          {
+            "id": 1,
+            "label": "Adapter for loopback traffic capture",
+            "name": "\\Device\\NPF_Loopback"
+          }
+        ],
+        "npcapAccess": "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+        "owner": null,
+        "state": "idle",
+        "type": "hello",
+        "version": "1.0.0"
+      },
+      "note": "hello, idle, nobody owns the capture, the driver's DACL was readable"
+    },
+    {
+      "message": {
+        "authRequired": false,
+        "clientId": "rs-2",
+        "interfaces": [
+          {
+            "id": 0,
+            "label": "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)",
+            "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}"
+          },
+          {
+            "id": 1,
+            "label": "Adapter for loopback traffic capture",
+            "name": "\\Device\\NPF_Loopback"
+          }
+        ],
+        "npcapAccess": null,
+        "owner": "rs-1",
+        "state": "sniffing",
+        "type": "hello",
+        "version": "1.0.0"
+      },
+      "note": "hello while another client is capturing - the app greys Start rather than hijacking"
+    },
+    {
+      "message": {
+        "authRequired": false,
+        "clientId": "rs-3",
+        "interfaces": [],
+        "npcapAccess": null,
+        "owner": null,
+        "state": "idle",
+        "type": "hello",
+        "version": "1.0.0"
+      },
+      "note": "hello with no interfaces at all, which is what a machine with no Npcap looks like"
+    },
+    {
+      "message": {
+        "interfaces": [
+          {
+            "id": 0,
+            "label": "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)",
+            "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}"
+          },
+          {
+            "id": 1,
+            "label": "Adapter for loopback traffic capture",
+            "name": "\\Device\\NPF_Loopback"
+          }
+        ],
+        "owner": "rs-1",
+        "state": "sniffing",
+        "type": "state"
+      },
+      "note": "state: capture started"
+    },
+    {
+      "message": {
+        "interfaces": [
+          {
+            "id": 0,
+            "label": "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)",
+            "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}"
+          },
+          {
+            "id": 1,
+            "label": "Adapter for loopback traffic capture",
+            "name": "\\Device\\NPF_Loopback"
+          }
+        ],
+        "owner": null,
+        "state": "idle",
+        "type": "state"
+      },
+      "note": "state: capture stopped and the owner released it"
+    },
+    {
+      "message": {
+        "droppedAgent": 12,
+        "droppedPipe": 3,
+        "interfaces": [
+          {
+            "droppedKernel": 100,
+            "iface": 0,
+            "kernelReceived": 4100,
+            "received": 4000
+          }
+        ],
+        "intervalMs": 1000,
+        "seqHigh": 4096,
+        "type": "capture_stats"
+      },
+      "note": "capture_stats with every counter readable"
+    },
+    {
+      "message": {
+        "droppedAgent": 0,
+        "droppedPipe": 0,
+        "interfaces": [
+          {
+            "droppedKernel": 0,
+            "iface": 0,
+            "kernelReceived": 10,
+            "received": 10
+          },
+          {
+            "droppedKernel": null,
+            "iface": 1,
+            "kernelReceived": null,
+            "received": 5
+          }
+        ],
+        "intervalMs": 1000,
+        "seqHigh": 10,
+        "type": "capture_stats"
+      },
+      "note": "capture_stats where one interface's driver counters could not be read - null, never 0"
+    },
+    {
+      "message": {
+        "droppedAgent": 0,
+        "interfaces": [
+          {
+            "droppedKernel": 0,
+            "iface": 0,
+            "kernelReceived": 10,
+            "received": 10
+          }
+        ],
+        "intervalMs": 1000,
+        "seqHigh": 10,
+        "type": "capture_stats"
+      },
+      "note": "capture_stats from a transport that cannot report pipe drops - the field is absent"
+    },
+    {
+      "message": {
+        "code": "capture_busy",
+        "message": "Another client is capturing on this machine.",
+        "type": "error"
+      },
+      "note": "error: a second client tried to start a capture somebody else owns"
+    },
+    {
+      "message": {
+        "code": "unknown_command",
+        "message": "This agent does not understand 'fly'.",
+        "type": "error"
+      },
+      "note": "error: a command this build does not know, named so the app can say which"
+    }
+  ],
+  "note": "Control messages the Rust agent emits. Generated by `cargo run --example control_vectors`. Checked against the app's own parser by scripts/agent/control-vectors.ts."
+}

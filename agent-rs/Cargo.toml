@@ -18,10 +18,17 @@ name = "inwire_agent"
 path = "src/lib.rs"
 
 [dependencies]
-
-[dev-dependencies]
-# Reading the golden vectors the Python and TypeScript sides are also held to.
-serde_json = "1"
+# **The one dependency, and CLAUDE.md's rule asks what it buys over the platform.**
+#
+# The answer is a JSON parser that reads input arriving over a pipe into a
+# privileged service. Hand-rolling that is the trade this rule exists to refuse:
+# it would be the only unaudited parser in the process that parses anything, and
+# the thing it parses comes from outside.
+#
+# `default-features = false` with `std`, and **no derive**: the protocol is about
+# fifteen fixed shapes, so `json!` and `Value` carry it without proc macros,
+# which keeps the build and the supply chain smaller than the usual serde pull.
+serde_json = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 # A capture agent is a long-lived service; size and predictability beat the
