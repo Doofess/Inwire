@@ -1156,9 +1156,15 @@ served pipe. The harness captures on **loopback and generates its own traffic**,
 deliberately - the other adapters carry real traffic and a test must not be the
 thing that captures it.
 
-Build with `cargo build --release` in `agent-rs/` (the GNU toolchain; the MSVC
-linker is not installed on this machine, and `dlltool` for the GNU one lives in
-the toolchain's `self-contained` directory rather than on PATH).
+Build with `cargo build --release` in `agent-rs/`, and that command now means
+something: `agent-rs/rust-toolchain.toml` pins
+**`stable-x86_64-pc-windows-gnu`**. Without the pin cargo takes rustup's
+default, which on this machine is MSVC, whose linker is not installed - so the
+documented command compiled most of the tree and then failed at `link.exe was
+not found`. The pin's own comment carries what has to be re-checked if it ever
+moves to MSVC: the `windows-service` 0.7 hold exists because the GNU toolchain's
+`dlltool` ships without an assembler, and every size figure in ADR 0037 was
+measured on GNU.
 
 **The SCM's own side, measured.** Run elevated, with the Python agent's service
 removed first — both register `InwireAgent`, so the second install fails.
@@ -1207,11 +1213,51 @@ Inno's `Exec(…, ewWaitUntilTerminated, ResultCode)` waits properly and reads t
 real code, so the installer's error path is unaffected; this is a hand-testing
 trap only. Check `sc qc` rather than an exit code.
 
-Two things in this block are still by hand and were **not** done, because both
-need a person at the screen rather than elevation: driving the **real Inwire
-window** against the Rust service (the interop client covers the same protocol,
-but not the app's UI reaching "Agent connected"), and the **two-client**
-`capture_busy` case over Fast User Switching.
+**Swapping the two agents is a script, not a checklist.** Both register the same
+service name, so a swap is remove-then-install and there is a window where the
+machine has no capture agent at all — a script does that window in one
+transaction where a person following steps can be interrupted inside it. From an
+elevated prompt:
+
+```
+.\agent-rs\switch-agent.ps1 -Rust        # the Rust agent, demand start
+.\agent-rs\switch-agent.ps1 -Python      # back to what the installer put there
+.\agent-rs\switch-agent.ps1 -Status      # needs no elevation
+```
+
+It **copies the build into `C:\Program Files\Inwire\agent\`** rather than
+registering it where it was built, and that is a security decision rather than
+tidiness: a LocalSystem service whose image sits in a user-writable directory
+can be replaced by any process running as that user, which turns "I can write my
+own files" into "I can run code as SYSTEM", and `agent-rs\target\release\` is
+exactly such a directory. The consequence to remember is that **rebuilding does
+not update the service** — run `-Rust` again after `cargo build --release`, or
+you are testing the previous binary and your change will look like it did
+nothing.
+
+With the Rust agent registered, `npm run build && npx tsx
+scripts/electron/agent-live-drive.ts` passes every check above **and** reaches
+"Agent connected" in **807 ms**, which is the real Inwire window against the
+real Rust service. That item used to be on the by-hand list below and is not any
+more.
+
+**What is left by hand, and one of the two cannot be automated here at all.**
+
+- [ ] **Capture through the UI, against the Rust agent.** Launch Inwire, pick a
+      real adapter, Start, and confirm rows arrive and are dissected. This
+      cannot be a script, and the reason is a product decision rather than an
+      obstacle: `filterCapturableInterfaces` **removes loopback from the
+      picker** — it is the busiest device on a typical machine and capturing it
+      saturates the render loop — so the one adapter a harness could safely
+      capture is the one the app is designed never to offer. A person capturing
+      their own traffic is a person who has consented; a script doing it on
+      their machine is not. The two halves that *are* covered meet in the
+      middle: `agent-interop.ts` drives a real capture handle over the
+      production pipe (184,614 frames, residual 0), and `smoke.ts` drives the
+      real UI and the whole frame path against the stub.
+- [ ] **Two clients**, over Fast User Switching: one captures, the other is told
+      `capture_busy` rather than taking it over, and the second closing does not
+      stop the first's capture.
 
 Afterwards, **reinstall the Python agent**, which is what actually ships. What
 it was here, and what restoring means, is recorded in this repository's history

@@ -26,7 +26,28 @@
 //! the Python agent is still what ships.
 
 #![cfg(windows)]
-#![windows_subsystem = "windows"]
+
+// **Console subsystem, deliberately, and `windows_subsystem = "windows"` must
+// not come back.** It was set on the usual reasoning that a service has no UI
+// and should not carry a console. The cost was only found by running the verbs
+// at a prompt: a GUI-subsystem process is one a shell does **not wait for**, so
+// `$LASTEXITCODE` after `inwire-agent.exe install` is whatever ran *before* it.
+// An install that succeeded reports the previous command's code, and one that
+// failed reports success just as readily. Its stderr does appear - it inherits
+// the parent's console - but after the next prompt has been drawn, which reads
+// as output from the wrong command.
+//
+// What the GUI subsystem was protecting against turns out to be nothing here.
+// The SCM runs this in session 0, where a console is invisible whichever
+// subsystem it is. `setup.iss` calls it through Inno's `Exec(..., SW_HIDE,
+// ewWaitUntilTerminated, ResultCode)`, which hides the console and reads the
+// real code either way. And **nothing in the app ever spawns this binary** -
+// `electron/agentPipe.ts` asks `sc.exe`, never the exe - so there is no path
+// where a window could flash at a user.
+//
+// That leaves one behaviour change, and it is an improvement: double-clicking
+// the exe in Explorer now prints why it cannot run outside the SCM, where
+// before it exited silently.
 
 use std::env;
 use std::ffi::OsString;

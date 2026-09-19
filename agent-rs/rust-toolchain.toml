@@ -1,0 +1,25 @@
+# The GNU toolchain, pinned, because `cargo build --release` has to mean
+# something.
+#
+# Without this file cargo takes rustup's default, which on this machine is
+# `stable-x86_64-pc-windows-msvc` - and the MSVC linker is not installed, so the
+# build fails at `link.exe was not found` after compiling most of the tree. ADR
+# 0037 and `docs/verification.md` both tell a reader to run `cargo build
+# --release`; before this they were telling them to run a command that does not
+# work here.
+#
+# **Changing this to MSVC is a real decision, not a preference**, and two things
+# have to be re-checked with it:
+#
+#   - `windows-service` is held at 0.7 (windows-sys 0.52, prebuilt import libs)
+#     precisely because the GNU toolchain's `dlltool` ships without an assembler
+#     in its `self-contained` directory, so the newer crate's raw-dylib imports
+#     cannot be linked. On MSVC that pin is unnecessary.
+#   - every size figure in ADR 0037 - the 449 KB that the "one signed
+#     executable" argument rests on - was measured on this toolchain.
+#
+# So MSVC is likely where a *shipping*, Authenticode-signed build wants to be.
+# It is not where the measurements came from, and swapping silently would leave
+# the ADR quoting a number nothing produces.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"
