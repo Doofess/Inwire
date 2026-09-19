@@ -1131,13 +1131,13 @@ knows not to repeat them; the rest need a person.
 
 ### The Rust agent as a service
 
-ADR 0037. **Everything in this block is unverified**, and the reason is
-elevation: installing and starting a service needs an administrator, which is
-the one step a script here cannot take. The wire format, the pipe and the whole
-capture path ARE proven — against the app's own client, with conservation
-asserted — so what is untested is specifically the SCM's side.
+ADR 0037. **This block has been run, elevated, against the real SCM**, with the
+Python agent's service removed for the duration and restored afterwards. What
+follows is therefore a record of measurements rather than a list of things to
+check — repeat it after anything touching `service.rs`, `main.rs`'s verbs, or
+the installer's service registration.
 
-**Everything up to the SCM's doorstep is measured, and is not repeated here.**
+**The runtime on its own is measured separately, and is not repeated here.**
 The runtime, the pipe, the control protocol, the capture path and the idle
 self-stop are driven by `scripts/agent/agent-interop.ts` against the real
 binary - point both at a private pipe with `INWIRE_AGENT_PIPE`, since the
@@ -1160,32 +1160,66 @@ Build with `cargo build --release` in `agent-rs/` (the GNU toolchain; the MSVC
 linker is not installed on this machine, and `dlltool` for the GNU one lives in
 the toolchain's `self-contained` directory rather than on PATH).
 
-**What is left is the SCM itself**, which needs elevation. From an elevated
-prompt, **with the Python agent's service removed first — both register
-`InwireAgent` and the second install will fail**:
+**The SCM's own side, measured.** Run elevated, with the Python agent's service
+removed first — both register `InwireAgent`, so the second install fails.
 
-- [ ] `inwire-agent.exe install` exits 0, and `sc qc InwireAgent` reports
-      `START_TYPE : 3 DEMAND_START` and `SERVICE_START_NAME : LocalSystem`.
-- [ ] The description in services.msc reads "…Starts when Inwire asks for it,
-      and stops when Inwire closes."
-- [ ] `sc start InwireAgent` reports `RUNNING`, and **stays** running rather
-      than dropping back — a status handler that never reports `Running` shows
-      as a start that times out.
-- [ ] Launch Inwire against it. The status bar reaches "Agent connected", the
-      interface picker lists adapters, and a capture produces frames. This is
-      the same flow `smoke.ts` drives against the stub, run against the real
-      Rust service.
-- [ ] Close Inwire. `sc query` reports `STOPPED` within about four seconds —
-      the idle self-stop, same rule as the Python agent's.
-- [ ] `sc start` it again, then `sc stop InwireAgent`. It stops promptly, and
-      `sc query` does not sit in `STOP_PENDING` — that would mean `STOPPED` is
-      being reported before the runtime has returned.
-- [ ] **Two clients.** Two Inwire windows. One captures; the other is told
-      `capture_busy` rather than taking it over. The second window closing does
-      not stop the first's capture.
-- [ ] `inwire-agent.exe remove` exits 0 and the service is gone from
-      services.msc.
-- [ ] **Then reinstall the Python agent**, which is what actually ships.
+| What was run | What the SCM did |
+|---|---|
+| `inwire-agent.exe --startup manual install` | registered; `sc qc` reports `START_TYPE : 3 DEMAND_START`, `SERVICE_START_NAME : LocalSystem`, and the post-migration description |
+| `sc start InwireAgent`, **unelevated** | `RUNNING` in **16 ms**, `CHECKPOINT 0x0` — straight to Running, never seen in `START_PENDING` |
+| the app's own client over `\\.\pipe\inwire-agent` | **184,614 frames / 4,039 MB, residual 0**, none missing |
+| last client leaves | `STOPPED` **2,436 ms** later, `WIN32_EXIT_CODE 0` |
+| `sc stop InwireAgent`, **unelevated** | **5**, ACCESS_DENIED — the withheld `WP`, enforced |
+| `sc stop InwireAgent`, **elevated** | `STOPPED` in **30 ms** |
+| `inwire-agent.exe remove` while RUNNING | service gone (1060), no stray process |
+
+Four of those are the ones worth keeping, because each is a distinct failure
+somebody would otherwise have to imagine:
+
+**`Running` is reported, not merely reached.** A status handler that never calls
+`set_service_status(Running)` shows up as a start that *times out* after 30
+seconds, with the service working perfectly the whole time. 16 ms with
+checkpoint 0 is that path having run.
+
+**The self-stop reports exit code 0, and that is load-bearing.** The installer
+sets `failure … actions= restart/5000` three times over. A self-stop reporting
+any non-zero exit would read to the SCM as a crash, and a *demand-start* service
+would then restart itself every five seconds for ever — a service that cannot
+be turned off, caused by a status field. Watched for 16 s, eight times the
+delay: it stays stopped.
+
+**An SCM-initiated stop is different code from the self-stop.** The watchdog's
+exit is the agent deciding; `sc stop` arrives as `ServiceControl::Stop` at the
+handler. Both now measured, and they are 30 ms and 2,436 ms for reasons that are
+correct in each case — the second is two watchdog ticks by design.
+
+**`--startup manual install` is the installer's own line**, and the order is the
+whole point: the verb comes last. That is the line that shipped broken (ADR
+0037), and running it against a real SCM is the only thing that can tell you it
+registers rather than prints usage.
+
+One nuance that will mislead the next person at a prompt: the exe is
+`#![windows_subsystem = "windows"]`, so **PowerShell does not wait for it and
+`$LASTEXITCODE` is left stale from the previous command** — an `install` that
+succeeded can appear to exit with whatever ran before it. Its stderr *is*
+visible, inheriting the parent's console, but it arrives after the next prompt.
+Inno's `Exec(…, ewWaitUntilTerminated, ResultCode)` waits properly and reads the
+real code, so the installer's error path is unaffected; this is a hand-testing
+trap only. Check `sc qc` rather than an exit code.
+
+Two things in this block are still by hand and were **not** done, because both
+need a person at the screen rather than elevation: driving the **real Inwire
+window** against the Rust service (the interop client covers the same protocol,
+but not the app's UI reaching "Agent connected"), and the **two-client**
+`capture_busy` case over Fast User Switching.
+
+Afterwards, **reinstall the Python agent**, which is what actually ships. What
+it was here, and what restoring means, is recorded in this repository's history
+rather than guessed: `sc qc`, `sc qfailure`, `sc sdshow` and the service's
+registry key, captured before the swap and compared byte-for-byte after it. Note
+that `sc sdshow` prints the SACL only when run **elevated**, so an unelevated
+reading and an elevated one of the same service differ by a trailing `S:(AU;…)`
+and neither is wrong.
 
 Known gaps to expect rather than report: `npcapAccess` is absent from `hello`
 (not ported), so the Update Center's driver-access row falls back to the
