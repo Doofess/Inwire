@@ -61,6 +61,21 @@ import type { SideBarPanel } from '../../services/sideBarPrefs';
  */
 export interface SideBarProps {
   panel: SideBarPanel;
+  /**
+   * The panel itself, built by `App`.
+   *
+   * A slot rather than the panels' own props, for the reason the title row
+   * takes the filter as a slot: this component decides what the COLUMN is -
+   * the seam, the header, the one scroller - and has no business knowing what
+   * an adapter or an export is. It also keeps the props of four unrelated
+   * surfaces from collecting here, which is how a shell becomes a second copy
+   * of `App`.
+   */
+  children: React.ReactNode;
+  /** The far-right slot of the header, for whatever actions the panel has. */
+  actions?: React.ReactNode;
+  /** A live figure the panel wants in the header, in `--primary`. */
+  detail?: React.ReactNode;
 }
 
 /**
@@ -77,23 +92,15 @@ export const PANEL_TITLES: Record<SideBarPanel, string> = {
   network: 'Network',
 };
 
-export const SideBar: React.FC<SideBarProps> = ({ panel }) => (
+export const SideBar: React.FC<SideBarProps> = ({ panel, children, actions, detail }) => (
   <div
     className="w-[var(--side-bar-width)] shrink-0 flex flex-col min-w-0 overflow-hidden
       border border-l-0 border-border rounded-r-lg bg-card text-card-foreground"
     aria-label={PANEL_TITLES[panel]}
   >
-    <PaneHeader title={PANEL_TITLES[panel]} />
+    <PaneHeader title={PANEL_TITLES[panel]} detail={detail}>{actions}</PaneHeader>
     {/* One scroll container for every panel, so no panel manages its own
         overflow and they cannot disagree about where the scrollbar is. */}
-    <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
-      {/* The panels land here one at a time, each replacing the placeholder
-          for its own id. The column, the seam and the drag are proved first
-          and on their own, because a geometry bug and a content bug look the
-          same from the outside. */}
-      <p className="px-3 py-3 text-xs text-muted-foreground">
-        {PANEL_TITLES[panel]} moves into this column next.
-      </p>
-    </div>
+    <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">{children}</div>
   </div>
 );

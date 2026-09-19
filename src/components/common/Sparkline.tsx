@@ -4,11 +4,22 @@ interface SparklineProps {
   /** Oldest sample first. Fewer than two points renders a flat baseline. */
   values: number[];
   /**
-   * Rendered CSS width in px. The drawing itself uses a fixed internal
-   * coordinate space (see VIEW_WIDTH), so this can be animated between values
-   * without recomputing any geometry - the curve simply stretches.
+   * The drawing has no width of its own, and that is the whole of this prop's
+   * history.
+   *
+   * There WAS a `width` in pixels, and one caller computed it from a sqrt-eased
+   * traffic ratio so that a busier adapter drew a wider chart. That was a
+   * SECOND encoding of volume laid over the first - `max` below already says
+   * relative volume exactly, in the trace's height - and it was the dishonest
+   * one: the easing existed precisely so a tenth of the peak would not LOOK
+   * like a tenth. Both went when the interface picker became a side bar panel
+   * and the chart got a line of its own to span.
+   *
+   * What survives is the reason it could go so cheaply: the internal coordinate
+   * space is fixed (see VIEW_WIDTH), so the element takes whatever width CSS
+   * gives it and the curve simply stretches. Size it with a class -
+   * `className="w-full"` - and the caller never has to know a number.
    */
-  width?: number;
   height?: number;
   className?: string;
   /**
@@ -44,7 +55,6 @@ const VIEW_WIDTH = 100;
  */
 export const Sparkline: React.FC<SparklineProps> = ({
   values,
-  width = 68,
   height = 16,
   className = '',
   max,
@@ -86,14 +96,12 @@ export const Sparkline: React.FC<SparklineProps> = ({
     <svg
       height={height}
       viewBox={`0 0 ${VIEW_WIDTH} ${height}`}
-      // Width as a style rather than an attribute so it transitions. The
-      // stroke is vector-effect'd below because preserveAspectRatio="none"
-      // would otherwise thicken the line as the box widens.
-      style={{ width: `${width}px` }}
-      // Slow on purpose. The width is driven by a traffic level that can jump
-      // between one 500ms sample and the next, and a snappy transition turns
-      // that into a chart that visibly flinches on every tick.
-      className={`transition-[width] duration-1000 ease-out ${className}`}
+      // No width attribute and no width style: the box is whatever the caller's
+      // class gives it. The stroke is vector-effect'd below because
+      // `preserveAspectRatio="none"` would otherwise thicken the line as the
+      // box widens - which is now the ordinary case rather than an animation,
+      // since a side bar panel's chart is resized by dragging the column.
+      className={className}
       preserveAspectRatio="none"
       aria-hidden
     >
