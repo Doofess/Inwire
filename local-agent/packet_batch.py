@@ -124,9 +124,19 @@ def encode_batch(records) -> bytes:
     one pre-sized bytearray. Measured, it is not worth it: 0.36 us a frame at a
     batch of 64 against 0.37 for pack_into, and 1.17 against 1.05 at a batch of
     256 - a 10% win at the larger size and a small loss at the smaller one,
-    against a capture loop that costs 0.58 us a frame and a driver that tops
-    out near 12,000 frames/s. Restructuring would also move the encode off the
-    sniffer thread, which is where it is deliberately (see `encode_record`).
+    against a capture loop that costs 0.58 us a frame. Restructuring would also
+    move the encode off the sniffer thread, which is where it is deliberately
+    (see `encode_record`).
+
+    **This used to end "and a driver that tops out near 12,000 frames/s", and
+    that number is withdrawn.** It came from `capture_profile.py`'s
+    `impliedFramesPerSecond`, which was `frames / wall` - the rate traffic
+    happened to ARRIVE at, counting every microsecond the thread spent waiting
+    as though it were work. It could never exceed the arrival rate, so it could
+    never report a driver limit; it reported the link. The conclusion above
+    does not depend on it - 0.36 against 0.37 microseconds is its own argument -
+    but the figure should not be quoted again. `sustainableFramesPerSecond` is
+    the honest one, and nothing has measured the driver with it yet.
     """
     count = len(records)
     if count == 0:

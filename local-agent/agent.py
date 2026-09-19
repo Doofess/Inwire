@@ -1270,6 +1270,47 @@ class AgentServer:
         self.stop_capture()
         self.broadcast_state()
 
+    def _log_queue_depths(self):
+        """Where the frames are sitting, once a second, under the profile flag.
+
+        **This is the reading that tells two opposite problems apart**, and
+        without it they look identical from outside - `droppedAgent` climbs in
+        both:
+
+          sniffer queue pinned, pipe empty   the PUMP is not draining fast
+                                             enough. Fix the agent.
+          sniffer queue pinned, pipe full    the CLIENT is not reading fast
+                                             enough. Fix the app, or shed.
+          both near empty                    the loss is upstream, in the
+                                             driver's own ring, and only
+                                             reading faster reaches it.
+
+        Bytes as well as counts for the sniffer queue, because it is bounded by
+        both and the count alone cannot say which bound is biting - the lesson
+        `MAX_QUEUED_BYTES` was added for.
+
+        Off unless `INWIRE_PROFILE_CAPTURE` is set: this runs once a second on
+        an installed service, and a log line a second is how a rotation loses
+        the history somebody is looking for.
+        """
+        if not profile.enabled:
+            return
+        with self._packet_lock:
+            queued = len(self._packet_queue)
+            queued_bytes = self._packet_queue_bytes
+        owner = self.capture_owner
+        # `getattr`, because the WebSocket transport has no counterpart - the
+        # same idiom `kernel_authenticated` uses. `None` reads as "this
+        # transport cannot say", never as an empty queue.
+        depth = getattr(owner, "outbound_depth", None) if owner is not None else None
+        pipe_depth = depth() if depth is not None else None
+        log.info(
+            "queues: sniffer %d frames / %d bytes (of %d / %d), pipe %s frames (of %d)",
+            queued, queued_bytes, MAX_QUEUED_PACKETS, MAX_QUEUED_BYTES,
+            "unknown" if pipe_depth is None else pipe_depth,
+            pipe_server.MAX_OUTBOUND_FRAMES,
+        )
+
     async def _capture_stats_loop(self):
         try:
             while sniffer is not None and sniffer.is_sniffing():
@@ -1279,6 +1320,7 @@ class AgentServer:
                 await self._send_to_owner(json.dumps(
                     build_capture_stats(seq_high, received, kernel, dropped_agent)
                 ))
+                self._log_queue_depths()
                 await asyncio.sleep(CAPTURE_STATS_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
@@ -1581,11 +1623,17 @@ def make_process_request(on_reject=None):
 _captured_count = 0
 
 
-def sniff_callback(raw, ts, iface_id=0, wire_len=None):
+def sniff_callback(raw, ts, iface_id=0, wire_len=None, read_seconds=None):
     global _captured_count
-    # Wall time for this frame's own callback. The expensive half - the driver
-    # read and scapy's dissection - already happened before we were called, so
-    # capture_profile derives it from the gap between frames instead.
+    # Wall time for this frame's own callback. The other half - the driver read
+    # - happened before we were called, so the LOOP brackets it and passes it
+    # in as `read_seconds`. It used to be derived from the gap between frames
+    # instead, which measured how fast traffic arrived rather than what a frame
+    # cost; `capture_profile.py` has the post-mortem.
+    #
+    # `None` means "this branch cannot time its own read", not "the read was
+    # free" - only `sniff(prn=...)` is in that position, and it is the slowest
+    # branch, so rounding it to zero would have made it look like the fastest.
     profile_start = time.perf_counter() if profile.enabled else 0.0
     _captured_count += 1
     if _captured_count == 1:
@@ -1606,7 +1654,7 @@ def sniff_callback(raw, ts, iface_id=0, wire_len=None):
         return
     agent.queue_packet(record)
     if profile.enabled:
-        profile.frame(time.perf_counter() - profile_start)
+        profile.frame(time.perf_counter() - profile_start, read_seconds)
         if _captured_count % 10000 == 0:
             log.info("%s", profile.describe())
 
@@ -1804,11 +1852,21 @@ def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
             header = POINTER(pcap_pkthdr)()
             data = POINTER(c_ubyte)()
             while not stop_event.is_set():
+                # Bracketed here rather than inside `read_frame`, so the timing
+                # costs one `perf_counter` pair per frame on a path that is
+                # already two ctypes calls - and nothing at all when profiling
+                # is off, which is the state an installed service is in.
+                read_start = time.perf_counter() if profile.enabled else 0.0
                 frame = read_frame(handle, header, data)
                 if frame is None:
+                    # The `to_ms=100` timeout expiring. Deliberately NOT
+                    # recorded: the thread was idle, and counting idle time as
+                    # read cost would make a quiet link look like an expensive
+                    # one - which is the error the old whole-wall metric made.
                     continue
+                read_seconds = (time.perf_counter() - read_start) if profile.enabled else None
                 raw, ts, wire_len = frame
-                sniff_callback(raw, ts, iface_id, wire_len)
+                sniff_callback(raw, ts, iface_id, wire_len, read_seconds)
         elif type(sock).recv_raw is SuperSocket.recv_raw:
             log.info("%s: no raw receive on this socket type - using sniff()", iface_label)
             while not stop_event.is_set():
@@ -1822,12 +1880,17 @@ def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
             while not stop_event.is_set():
                 if not sock.select([sock], CAPTURE_POLL_SECONDS):
                     continue
+                # The select is the wait; the recv is the read. Only the recv
+                # is timed, for the same reason the fast path skips its
+                # timeouts - see capture_profile.py.
+                read_start = time.perf_counter() if profile.enabled else 0.0
                 _cls, raw, ts = sock.recv_raw()
                 # None is the read timeout expiring, not an error: loop round
                 # and re-test stop_event.
                 if raw is None:
                     continue
-                sniff_callback(raw, ts, iface_id)
+                read_seconds = (time.perf_counter() - read_start) if profile.enabled else None
+                sniff_callback(raw, ts, iface_id, None, read_seconds)
     except Exception as exc:
         log.warning("capture failed on interface %r (%s): %s", iface_label, iface_name, exc)
         agent.report_capture_failure(iface_id, iface_name, iface_label, str(exc))

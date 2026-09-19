@@ -1539,24 +1539,66 @@ check("an enabled profile with no frames reports none", _on.snapshot()["frames"]
 check("...and describes that without dividing by it", _on.describe(), "capture profile: no frames yet")
 
 # Real elapsed time, not a fabricated number: the invariant below is that the
-# callback's share fits inside the wall clock, and feeding it timings that never
+# measured halves fit inside the wall clock, and feeding it timings that never
 # actually elapsed would assert nothing while appearing to.
 for _ in range(4):
     _t0 = time.perf_counter()
     time.sleep(0.001)
-    _on.frame(time.perf_counter() - _t0)
+    _cb = time.perf_counter() - _t0
+    _t1 = time.perf_counter()
+    time.sleep(0.001)
+    _on.frame(_cb, time.perf_counter() - _t1)
 _snap = _on.snapshot()
 check("frames are counted", _snap["frames"], 4)
 check_true("the callback share is the mean of what was measured",
            900.0 <= _snap["callbackUs"] <= 3000.0)
-# The whole point: wall time per frame is larger than the callback, and the
-# difference is the driver read plus scapy's dissection - the half that happens
-# before our code is ever called, and the half a change to this path targets.
-check_true("per-frame wall time is at least the callback time",
-           _snap["perFrameUs"] >= _snap["callbackUs"])
-check_true("...and the remainder is attributed to driver+dissect",
-           abs((_snap["callbackUs"] + _snap["driverAndDissectUs"]) - _snap["perFrameUs"]) < 0.05)
-check_true("an implied ceiling is derived", _snap["impliedFramesPerSecond"] > 0)
+check_true("...and so is the read share", 900.0 <= _snap["readUs"] <= 3000.0)
+check("every frame's read was timed on this branch", _snap["readFrames"], 4)
+check_true("what a frame COSTS is the two halves added",
+           abs((_snap["callbackUs"] + _snap["readUs"]) - _snap["busyUs"]) < 0.05)
+# Arrival is a different quantity from cost, and keeping them apart is the
+# whole correction. Wall time per frame includes everything the thread spent
+# waiting for traffic, so it is at least the cost and usually much more.
+check_true("arrival per frame is at least what a frame cost",
+           _snap["arrivalPerFrameUs"] >= _snap["busyUs"])
+check_true("...and the gap between them is reported as idle",
+           abs((_snap["busyUs"] + _snap["idleUs"]) - _snap["arrivalPerFrameUs"]) < 0.05)
+check_true("a ceiling is derived from the cost", _snap["sustainableFramesPerSecond"] > 0)
+
+# **The regression this module exists to prevent.** `impliedFramesPerSecond` was
+# `frames / wall`, which is the ARRIVAL rate: it counts the thread's idle time as
+# if it were work, so it can never exceed the rate traffic happened to arrive at
+# and can never say the thread could not keep up - the one question it was asked.
+# `packet_batch.py` cites a driver limit derived from it.
+#
+# So: same per-frame cost, ten times the idle between frames. The ceiling must
+# not move; the arrival rate must collapse. Asserted as a RATIO rather than as
+# absolute numbers, because a loaded CI machine moves both together.
+_idle = capture_profile.CaptureProfile(enabled=True)
+for _ in range(4):
+    time.sleep(0.010)
+    _idle.frame(0.0002, 0.0002)
+_slow = _idle.snapshot()
+check_true("a quiet link does not lower the ceiling",
+           _slow["sustainableFramesPerSecond"] > 1000)
+check_true("...while the arrival rate reports the quiet",
+           _slow["arrivalFramesPerSecond"] < 200)
+check_true("...and utilisation names which of the two is the bottleneck",
+           _slow["utilisation"] < 0.2)
+
+# The unmeasurable branch reports an absence, not a zero. `sniff(prn=...)`
+# invokes the callback from inside scapy's own loop, so there is no read to
+# bracket - and it is the SLOWEST branch, so a read rounded to 0 would have
+# made it report the highest ceiling in the table.
+_untimed = capture_profile.CaptureProfile(enabled=True)
+_untimed.frame(0.0005)
+_u = _untimed.snapshot()
+check("a branch that cannot time its read says so", _u["readUs"], None)
+check("...and no frame is counted as timed", _u["readFrames"], 0)
+check("...so there is no ceiling to report", _u["sustainableFramesPerSecond"], None)
+check("...and no headroom either", _u["idleUs"], None)
+check_true("...and describe() says which it could not measure",
+           "no ceiling to report" in _untimed.describe())
 
 _on.reset()
 check("reset starts a fresh measurement", _on.snapshot()["frames"], 0)
