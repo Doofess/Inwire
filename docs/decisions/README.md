@@ -52,6 +52,7 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0031](0031-a-filter-answers-over-the-whole-capture.md) | A display filter answers over the whole capture — **completes 0025**: one evaluator, a bitmap, and the boundary is the window | Accepted 2026-09-12 |
 | [0032](0032-the-update-center.md) | Npcap is a prerequisite the app manages, not a payload the installer ships — **corrects 0030**: no silent install, a feed instead of a `#define`, and the version is not in `wpcap.dll` | Accepted 2026-09-12 |
 | [0033](0033-the-agent-stays-a-separate-service.md) | The agent stays a separate LocalSystem service, and Npcap should be installed admin-only — the browser reason is gone and three better ones replace it | Accepted 2026-09-12 |
+| [0034](0034-the-side-bar-is-a-place.md) | The side bar is a place, so Escape does not close it and navigating does not either — two negatives that leave no code behind to explain themselves | Accepted 2026-09-19 |
 
 ## Review outcome: amendments to the spec's execution order
 
