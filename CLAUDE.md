@@ -1940,6 +1940,7 @@ plan a bump roughly every other release.
 | 0031 | A display filter answers over the whole capture | accepted |
 | 0032 | Npcap is managed by the app, not shipped by the installer | accepted; **voids 0030's Npcap paragraph** |
 | 0033 | The agent stays a separate service, and Npcap should be admin-only | accepted |
+| 0034 | The side bar is a place: Escape does not close it, nor does navigating | accepted |
 
 **ADR 0008 weakened, and it now says so itself.** Its argument was that key
 material "is exactly as old as the tab"; a desktop app open for days breaks
