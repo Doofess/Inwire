@@ -294,6 +294,18 @@ marking them as a sample, so an empty field read as a filter already applied.
 The content stays an EXPRESSION rather than becoming a prompt, because an
 expression is what goes in the box.
 
+**The field's right edge has a presets chevron again, and it is a toggle.** The
+one that was deleted only OPENED the list, which made it a second door onto a
+room whose first door is the whole width of the bar - clicking the field opens
+the presets. Closing is what the field cannot do: the only ways out were Escape
+and a click somewhere else, both of which have to be known rather than seen. It
+also decides the list when both could claim it - the completions and the presets
+share the space under the field, and the rule was "the half-typed word wins",
+which is right for clicking INTO the field and wrong for a control whose whole
+job is to show the presets. `FilterBar` records WHO opened the list rather than
+that it is open, which answers both with one state; the chevron tracks the
+VISIBLE list, so it never offers to close something nobody can see.
+
 **The banner went with the row**, and `FilterRow.tsx` with it. It named the agent
 fault above the packet list while the status bar names it below; one fault wants
 one place. The restore readout moved into the status bar's left group, which is
