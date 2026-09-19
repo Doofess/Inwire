@@ -2066,11 +2066,16 @@ and two defects that are unrepresentable rather than fixed — a `Capture` is
 
 **What is proven: the wire format, the pipe and the whole capture path, against
 the app's own client**, with conservation asserted to a residual of 0 over
-632,924 frames. **What is not: anything involving the SCM.** `install`,
-`remove`, `start`, `stop` and the status reporting in `service.rs` compile and
-are covered by nothing, because verifying them needs elevation —
-`docs/verification.md` carries them by hand. `npcap_access.py` is not ported and
-the Rust agent sends `None`, which falls back to the registry.
+632,924 frames. **And the SCM's side, which this entry used to list as the
+gap.** Registered in the installed agent's place and driven elevated: the
+installer's own `--startup manual install` line registers `DEMAND_START`; an
+**unelevated** `sc start` reaches `RUNNING` in **16 ms at checkpoint 0**; the
+app's client moved **184,614 frames / 4,039 MB, residual 0** over the production
+pipe; the idle self-stop reports `STOPPED` **2,436 ms** later **with exit code
+0**, which is what stops the installer's `restart/5000` policy from resurrecting
+a demand-start service for ever. `docs/verification.md` holds the table, and the
+machine was put back. `npcap_access.py` is not ported and the Rust agent sends
+`None`, which falls back to the registry.
 
 **The Python agent is still what ships**, and has every fix this work produced.
 What blocks the swap is `0030`/`0032`'s constraint rather than this one: a
@@ -2187,7 +2192,7 @@ plan a bump roughly every other release.
 | 0034 | The side bar is a place: Escape does not close it, nor does navigating | accepted |
 | 0035 | The agent lives as long as the app, and shares its version | accepted; **retires 0033 reason #2** |
 | 0036 | The buffer sizes itself, and the renderer stands down before V8 aborts | accepted |
-| 0037 | The capture agent is Rust on Windows | accepted; **SCM registration unverified** |
+| 0037 | The capture agent is Rust on Windows | accepted; **proven as a service; not yet what ships** |
 | 0038 | Bytes and rows are two arrivals; dissection is off the capture path | accepted |
 
 **ADR 0008 weakened, and it now says so itself.** Its argument was that key

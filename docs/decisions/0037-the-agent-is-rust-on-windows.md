@@ -1,7 +1,7 @@
 # 0037 — The capture agent is Rust on Windows
 
-**Status:** accepted; **the port is complete, measured, and is not yet what
-ships.** Does
+**Status:** accepted; **the port is complete, measured — including as a
+registered Windows service — and is not yet what ships.** Does
 not supersede `0033` — the agent stays a separate LocalSystem service, and this
 changes what it is written in and nothing about where it runs. Does not touch
 `0029` (the pipe), `0010` (it dissects nothing) or `0005`'s surviving half (the
@@ -116,15 +116,31 @@ checks when the numbers do not add up. And `--startup manual install` parsed
 the pywin32 `getopt` trap this crate's own header describes, arriving from the
 opposite direction on the identical command line.
 
-**Still not proven, and it needs elevation.** The service has never been
-*registered* with the SCM. `install`, `remove`, `start` and `stop` reach the
-service manager and are refused for access — the correct unelevated outcome, and
-not the same as working. The status reporting in `service.rs` — `StartPending`,
-`Running`, `StopPending`, `Stopped` and their checkpoints — has never run at
-all, because nothing has hosted this binary as a service.
-`docs/verification.md` carries that as a by-hand block. **Nothing here should be
-read as "the Rust agent works as a service" yet**; what can be said is that
-everything up to the SCM's doorstep does.
+**And proven as a service, which is what this section used to say was missing.**
+The Python agent's registration was removed, this binary was registered in its
+place, driven, and the machine put back. `docs/verification.md` holds the table;
+the four results that carry the decision:
+
+`--startup manual install` — the installer's own line, the one that shipped
+broken — **registers** rather than printing usage: `DEMAND_START`, LocalSystem,
+the post-migration description. An **unelevated** `sc start` reaches `RUNNING`
+in **16 ms at checkpoint 0**, which is `service.rs` reporting `Running` rather
+than merely reaching it; a handler that never reports shows up as a start that
+times out while the service works perfectly. The app's own client then drove
+**184,614 frames / 4,039 MB over the production pipe with residual 0**. And the
+idle self-stop reports `STOPPED` **2,436 ms** later **with exit code 0** —
+load-bearing, because the installer sets `restart/5000` three times, so a
+non-zero exit there would make a *demand-start* service restart itself every
+five seconds for ever. Watched for sixteen.
+
+**Two of the three "unrepresentable defects" arguments now have a third
+companion, measured rather than reasoned:** 9.0 MB resident against the Python
+agent's 66.2 MB, same role, same machine, read minutes apart.
+
+**What is still by hand, and is not about elevation.** Driving the **real Inwire
+window** against the Rust service — the interop client speaks the same protocol
+but is not the app's UI reaching "Agent connected" — and the **two-client**
+`capture_busy` case, which needs two logons. Both are in `verification.md`.
 
 **Not ported.** `npcap_access.py` — the DACL on the Npcap device object, which
 `hello` carries as `npcapAccess`. The Rust agent sends `None`, which falls back
