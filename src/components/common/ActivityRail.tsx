@@ -26,16 +26,25 @@ import { useRovingFocus } from './useRovingFocus';
 /**
  * The one strip of chrome that is always there.
  *
- * Three groups, and the grouping is the only thing saying that two of them
- * behave differently: the views are a radio - one active at a time, switching
- * what fills the window - while the adapter, the schedule and Start/Stop are
- * controls that are simply on or off. A divider alone does not convey that, so
- * the active states are deliberately different shapes:
+ * Three groups, and **the vocabulary is two marks rather than three**:
  *
- *  - a view carries a **translucent fill in the theme's own accent** -
- *    `--primary` at 20%, with `--foreground` on the glyph;
- *  - a control that is on carries an **outline only**, and a dot where it has
- *    something to report.
+ *  - a **translucent fill in the theme's own accent** - `--primary` at 20%,
+ *    with `--foreground` on the glyph - means *this surface is on screen*.
+ *    Every view wears it, and so do the four side bar panels and Settings,
+ *    because from the rail's side "this is what you are looking at" is one
+ *    fact however the surface is arranged;
+ *  - a **dot** means *this control has something to report* - a schedule is
+ *    set, an adapter needs attention. It is not a state of the rail, it is
+ *    news from the thing behind the button.
+ *
+ * **There was a third and it is deleted: an outline, meaning "this control is
+ * ON".** It said something the fill could not while the adapter and the
+ * schedule opened dropdowns - a chosen adapter is not a surface on screen. The
+ * side bar took both of those buttons, so both now open a panel and both wear
+ * the fill; what the outline used to carry moved to the dot, which was already
+ * the schedule's. The branch went with its last caller rather than being kept
+ * "in case", because a marker shape nothing draws is a shape the next session
+ * has to decide the meaning of.
  *
  * **The view marker used to be two things: a 2px left accent edge over an
  * `--accent` fill.** That was VS Code's "you are here" pair, and the fill was
@@ -288,19 +297,23 @@ const RailDivider: React.FC = () => (
   <div aria-hidden className="my-1.5 h-px w-7 shrink-0 bg-muted-foreground/30" />
 );
 
-/** The shared button shape. `active` styling is supplied per group. */
-function railButton(active: boolean, kind: 'view' | 'toggle'): string {
+/**
+ * The shared button shape, and **one active mark**.
+ *
+ * It took a second argument for as long as there were two shapes - `'view'`
+ * for the fill, `'toggle'` for an outline. The outline's last caller was the
+ * adapter, which is a side bar panel now; the parameter went with the branch,
+ * so there is nothing to pass wrongly and no second shape to reason about.
+ */
+function railButton(active: boolean): string {
   const base = `relative ${TARGET} flex items-center justify-center rounded-md `
     + 'transition-colors cursor-pointer shrink-0 app-no-drag '
     + 'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring';
   if (!active) return `${base} text-muted-foreground hover:bg-accent hover:text-foreground`;
-  return kind === 'view'
-    // The theme's own accent, at a fifth. See the note above the group for what
-    // this replaced, why the edge went with it, and why the glyph is
-    // `--foreground` rather than the accent itself.
-    ? `${base} bg-primary/20 text-foreground`
-    // Outline only: a control that is ON, not "where you are".
-    : `${base} text-foreground ring-1 ring-inset ring-border`;
+  // The theme's own accent, at a fifth. See the note above the group for what
+  // this replaced, why the edge went with it, and why the glyph is
+  // `--foreground` rather than the accent itself.
+  return `${base} bg-primary/20 text-foreground`;
 }
 
 const VIEW_ICONS: Record<AppView, React.ComponentType<{ className?: string }>> = {
@@ -601,7 +614,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
                       ? `Start a new capture - discards the ${bufferedPackets.toLocaleString()} packets in the buffer`
                       : 'Start capture'
             }
-            className={`${railButton(false, 'toggle')} ${
+            className={`${railButton(false)} ${
               captureBlocked ? 'opacity-50 cursor-not-allowed' : ''
             }`}
           >
@@ -682,7 +695,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           aria-label={adapterName}
           aria-pressed={sideBarPanel === 'interfaces'}
           title={adapterTitle}
-          className={railButton(sideBarPanel === 'interfaces', 'view')}
+          className={railButton(sideBarPanel === 'interfaces')}
         >
           {selected !== null && (
             <span
@@ -723,7 +736,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           aria-label={scheduleSet ? `Capture schedule - ${scheduleSummary}` : 'Capture schedule'}
           aria-pressed={sideBarPanel === 'schedule'}
           title={scheduleSet ? scheduleSummary : 'Schedule when this capture starts and stops'}
-          className={railButton(sideBarPanel === 'schedule', 'view')}
+          className={railButton(sideBarPanel === 'schedule')}
         >
           {scheduleSet && (
             <span
@@ -756,7 +769,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           aria-label="Export or import a capture"
           aria-pressed={sideBarPanel === 'transfer'}
           title="Export / Import PCAP"
-          className={railButton(sideBarPanel === 'transfer', 'view')}
+          className={railButton(sideBarPanel === 'transfer')}
         >
           <FileOutput className={GLYPH} />
         </button>
@@ -801,7 +814,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           aria-label="Network"
           title="Network - adapters, DNS and this machine's public identity"
           aria-pressed={sideBarPanel === 'network'}
-          className={railButton(sideBarPanel === 'network', 'view')}
+          className={railButton(sideBarPanel === 'network')}
         >
           <Network className={GLYPH} />
         </button>
@@ -857,7 +870,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
               title={unavailable
                 ? `${label} - select a frame on a TCP or UDP stream first`
                 : `${label} (${shortcut})`}
-              className={`${railButton(active, 'view')} ${
+              className={`${railButton(active)} ${
                 unavailable ? 'opacity-40 cursor-not-allowed' : ''
               }`}
             >
@@ -898,16 +911,15 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
         {/* **A toggle now, and marked like a view.** Settings was a modal
             with an X and a Close button; it is a pane taking the workspace
             card, so the rail has to say it is on screen and pressing this again
-            has to put it away. `'view'` rather than `'toggle'` for the marker:
-            the fill means "this is what you are looking at", which is exactly
-            what it means here, and the outline means "this control is on",
-            which Settings is not. */}
+            has to put it away. It takes the fill, which is now the rail's only
+            active mark - the choice this comment used to argue, between the
+            fill and an outline, no longer exists to get wrong. */}
         <button
           onClick={onOpenSettings}
           aria-label="Settings"
           title="Settings"
           aria-pressed={settingsOpen}
-          className={railButton(settingsOpen, 'view')}
+          className={railButton(settingsOpen)}
         >
           <Settings className={GLYPH} />
         </button>

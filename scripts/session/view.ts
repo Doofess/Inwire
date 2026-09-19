@@ -333,18 +333,33 @@ console.log('\n--- Settings is a pane and not a view ---\n');
     /expression\.trim\(\) !== ''\)[^}]*setSheet\(null\)/.test(app));
 
   // The rail says what is on screen and Settings is on screen, so it carries
-  // the same marker a view does rather than the outline a toggle gets.
+  // the same marker a view does.
   const railSrc = code('src/components/common/ActivityRail.tsx');
   checkTrue('the rail marks Settings the way it marks a view',
-    railSrc.includes("railButton(settingsOpen, 'view')"));
+    railSrc.includes('railButton(settingsOpen)'));
   // Every button in this strip that puts a surface on screen takes the fill,
-  // and the three that open a side bar panel compare against the PANEL rather
+  // and the four that open a side bar panel compare against the PANEL rather
   // than each holding a boolean of its own - one column shows one of them, so
   // four booleans would make "two lit at once" representable.
   check('...and every side bar button is marked the same way',
     ['interfaces', 'schedule', 'transfer', 'network']
-      .filter((p) => !railSrc.includes(`railButton(sideBarPanel === '${p}', 'view')`)),
+      .filter((p) => !railSrc.includes(`railButton(sideBarPanel === '${p}')`)),
     []);
+  // **One active mark, and the second shape stays deleted.** `railButton` took
+  // a `kind` for as long as there were two - the fill for "this surface is on
+  // screen", an outline for "this control is ON". The outline's last caller was
+  // the adapter, which opens a side bar panel now, so a chosen adapter is
+  // reported by the dot beside the glyph and the branch went with the caller.
+  //
+  // Checked rather than left to the reader, because the failure is not a
+  // compile error: a second shape can be added back as a raw `ring-1 ring-inset`
+  // on one button, and the rail would then be saying two things with no name
+  // for either. The dot is the vocabulary's second half and has its own classes.
+  checkTrue('...and `railButton` has one shape, not two',
+    /function railButton\(active: boolean\): string/.test(railSrc)
+    && !railSrc.includes("'view' | 'toggle'"));
+  checkTrue('...with no outline ring anywhere in the strip',
+    !/ring-1 ring-inset/.test(railSrc));
   // The strip has shipped two identical glyphs once already - the brand mark
   // opened as an `EthernetPort`, the adapter button's own icon, 42px under it.
   // Network is the adapter's neighbour in meaning and must not be in picture.
