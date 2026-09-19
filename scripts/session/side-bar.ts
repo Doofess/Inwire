@@ -93,7 +93,14 @@ console.log('--- the preference is a place, clamped and not reset ---\n');
 
   // Closed, because opening pushes the workspace: a fresh profile must not meet
   // the packet list's horizontal scroll before it has asked for anything.
-  check('a fresh profile opens closed', SIDE_BAR_DEFAULTS.panel, null);
+  check('a fresh profile opens closed', SIDE_BAR_DEFAULTS.open, false);
+  // **`panel` and `open` are two fields, and that is a bug fix.** They were
+  // one, with `null` meaning closed - so closing the column destroyed the
+  // record of which panel had been in it, and `Ctrl+B`, whose entire job is
+  // "reopen the last panel", could only ever fall back to a default. The key
+  // remembered a panel across a restart and forgot it across a keystroke.
+  checkTrue('...remembering which panel all the same',
+    isSideBarPanel(SIDE_BAR_DEFAULTS.panel));
   // 288 is `w-72`, the width the adapter dropdown was drawn for, so the first
   // list to move into this column is unchanged rather than re-tuned.
   check('...at the width the adapter menu had', SIDE_BAR_DEFAULTS.width, 288);
@@ -105,20 +112,26 @@ console.log('--- the preference is a place, clamped and not reset ---\n');
   // one removed lands on "closed" rather than discarding the key and taking the
   // width with it - the same rule `normalizeViewPrefs` applies to a retired
   // view, and the reason `'network'` did not cost anybody their stored layout.
-  check('an unknown panel clamps to closed',
-    accepted({ panel: 'dashboard', width: 300 }), { panel: null, width: 300 });
+  check('an unknown panel clamps to the default',
+    accepted({ panel: 'dashboard', open: true, width: 300 }),
+    { panel: 'interfaces', open: true, width: 300 });
   check('...and a missing one does too',
-    accepted({ width: 300 }), { panel: null, width: 300 });
+    accepted({ width: 300 }), { panel: 'interfaces', open: false, width: 300 });
 
   check('a width below the floor is raised',
     accepted({ panel: 'network', width: 40 }).width, MIN_SIDE_BAR_PX);
   check('...and one past the ceiling is lowered',
     accepted({ panel: 'network', width: 9000 }).width, MAX_SIDE_BAR_PX);
+  // The width survives a panel the normaliser had to clamp, which is the point
+  // of clamping field by field rather than refusing the record.
+  check('...and a clamped panel does not take the width with it',
+    accepted({ panel: 'nope', width: 320 }).width, 320);
   check('...and a non-number takes the default',
     [accepted({ width: 'wide' }).width, accepted({ width: NaN }).width],
     [SIDE_BAR_DEFAULTS.width, SIDE_BAR_DEFAULTS.width]);
   check('a legal record survives a round trip',
-    accepted({ panel: 'schedule', width: 320 }), { panel: 'schedule', width: 320 });
+    accepted({ panel: 'schedule', open: true, width: 320 }),
+    { panel: 'schedule', open: true, width: 320 });
 
   // The floor is VS Code's `sidebarPart.ts` number, taken rather than invented -
   // and deliberately NOT `MIN_PANE_PX`, which is 220 and defends a hex dump's
@@ -141,7 +154,6 @@ console.log('--- the preference is a place, clamped and not reset ---\n');
   // and scattered through `App` the way `stream`'s was.
   check('every panel is restorable, for now',
     SIDE_BAR_PANELS.map((p) => restoredPanel(p)), [...SIDE_BAR_PANELS]);
-  check('...and closed stays closed', restoredPanel(null), null);
 
   // `resetInterfacePreferences` already refuses to undo a dragged pane size, on
   // the rule that a button restoring a LIST of settings must not quietly undo
@@ -294,6 +306,18 @@ console.log('\n--- what may not come back ---\n');
       .map((f) => f.split(sep).join('/')),
     ['src/App.tsx']);
 
+  // **The split clamp has to hold on the RENDER path, not only during a drag.**
+  // It did not: the drag clamped and `--side-bar-width` was written from the
+  // stored value raw, so `MAIN_RESERVE_PX` held for exactly as long as a
+  // pointer was down. A window narrowed with a 600px panel open kept the panel
+  // and squeezed the workspace to nothing - which is the failure the rule
+  // exists to prevent, and the rule's own commit message claimed it did.
+  const app2 = code('src/App.tsx');
+  checkTrue('the rendered width is clamped against the band, not the store',
+    /"--side-bar-width":[\s\S]{0,200}usableSideBarWidth\(/.test(app2));
+  checkTrue('...measured, because the band is not the window',
+    app2.includes('new ResizeObserver'));
+
   // The heavy work moved off the render path, which is the same class of defect
   // as the lease countdown: `useHydratedBytes` over the whole buffer was a
   // one-off in a modal and is ten times a second in a panel.
@@ -359,6 +383,17 @@ console.log('\n--- what may not come back ---\n');
   // capture - a write down the pipe each time, with no symptom on screen.
   checkTrue('...through a ref, so a new callback identity cannot resubscribe',
     adapters.includes('const notify = useRef(onSamplingChange)'));
+
+  // **And it survives a reconnect**, which the first version did not. A
+  // subscription lives on the agent's socket, so a drop takes it silently -
+  // and this one fails more quietly than the log it is modelled on: a dropped
+  // log subscription is a panel that stops filling, where thirty stale samples
+  // read as a genuinely idle adapter.
+  const conn = code('src/hooks/useAgentConnection.ts');
+  checkTrue('sampling is re-sent when the agent comes back',
+    conn.includes('interfaceStatsSubscribedRef')
+    && /if \(interfaceStatsSubscribedRef\.current\) \{[\s\S]{0,160}subscribe_interface_stats/
+      .test(conn));
 
   // **Network's two-column vocabulary is gone.** `CompareHeader` wrote
   // "Configured (OS)" and "Observed (capture)" ONCE per section, and every pair
