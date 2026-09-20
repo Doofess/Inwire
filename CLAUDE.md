@@ -1680,6 +1680,30 @@ exactly as many rows as the filter has matches over the whole capture.
 frames built byte by byte from an RFC, written to a real `.pcap`, handed to
 tshark, compared as exact strings.
 
+**Three files now build their own capture for the same reason, and what they
+have in common is worth stating: a measurement that cannot see a feature
+cannot defend it.** `tree-coverage.ts` reads the fixtures, and the fixtures
+turned out not to contain a single ICMP error frame, a single frame of real
+HTTP, or a single readable certificate - both captures negotiate TLS 1.3,
+which encrypts the Certificate message, so tshark emits no `x509af.*` on them
+either. So `scripts/icmp/dissect.ts`, `scripts/http/dissect.ts` and
+`scripts/tls/certificate.ts` each build the frames, write a `.pcap`, dissect
+it with the real parser and cross-check the values against tshark's own
+answers for that file. Each skips the cross-check cleanly with no tshark and
+still runs its own assertions.
+
+They pay for themselves in findings rather than in coverage: the reference
+splits a URI query on `+` as well as `&`, it files an unknown header under
+`http.request.line` on a connection and `http.unknown_header` in its SSDP
+NOTIFY path, and it emits every URI in a certificate - the SAN's, both access
+locations, the CRL point - under one name. None of that is visible to a count
+of abbrevs.
+
+The certificate one authors its DER rather than pasting a blob from `openssl`,
+so the structure reads as RFC 5280's own ASN.1. That is the same rule
+`synthetic.ts` states for frames, and it matters more here: the fields under
+test are the ones an `openssl req` one-liner does not emit.
+
 **`scripts/electron/smoke.ts` drives the real app.** Playwright's
 `_electron.launch`, a real Electron process over a real named pipe against
 `scripts/electron/stubAgent.ts`, which speaks the production protocol: pick an
