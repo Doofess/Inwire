@@ -51,7 +51,40 @@
         "outOfOrder",
         "lostSegment",
         "dupAck"
-      ]
+      ],
+      "tree": {
+        "layers": {
+          "arp": 5,
+          "dhcp": 11,
+          "dns": 26,
+          "eth": 4,
+          "icmp": 2,
+          "icmpv6": 10,
+          "ieee1905": 2,
+          "igmp": 4,
+          "ip": 14,
+          "ipv6": 5,
+          "llc": 3,
+          "lldp": 4,
+          "stp": 4,
+          "tcp": 24,
+          "tls": 17,
+          "udp": 5
+        },
+        "protosNamed": 21,
+        "ceilings": {
+          "filterableNotInTree": 10,
+          "valueMismatches": 67
+        },
+        "counts": {
+          "absentDistinct": 621
+        },
+        "unimplemented": {
+          "quic": "A 479-line dissector with its own crypto that decrypts Initials and labels the Protocol column, publishing not one quic.* abbrev on either surface. 40 reference fields here. Recorded rather than floored at 0: a zero floor protects nothing and reads as measured-and-accepted.",
+          "ssdp": "A registered layer token with zero fields. The reference files SSDP under HTTP's field names, so these 13 are re-attributed here (see REATTRIBUTE) rather than blamed on the HTTP dissector.",
+          "prp": "Parallel Redundancy Protocol - a 6-byte trailer this build does not read at all, on 20 frames. The one protocol the reference names here that nothing in this build can name."
+        }
+      }
     },
     "bulk": {
       "file": "bulk_capture_1788426090876.pcap",
@@ -84,7 +117,36 @@
         "tcpClientHelloSni",
         "quicClientHelloSni",
         "dupAck"
-      ]
+      ],
+      "tree": {
+        "layers": {
+          "arp": 5,
+          "dns": 26,
+          "eth": 4,
+          "icmp": 2,
+          "icmpv6": 10,
+          "ieee1905": 2,
+          "ip": 13,
+          "ipv6": 4,
+          "llc": 3,
+          "stp": 4,
+          "tcp": 24,
+          "tls": 17,
+          "udp": 5
+        },
+        "protosNamed": 16,
+        "ceilings": {
+          "filterableNotInTree": 9,
+          "valueMismatches": 60
+        },
+        "counts": {
+          "absentDistinct": 455
+        },
+        "unimplemented": {
+          "quic": "As inwire: no quic.* abbrev on either surface, against 37 reference fields.",
+          "ssdp": "As inwire: a layer token with no fields."
+        }
+      }
     }
   }
 }
