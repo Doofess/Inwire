@@ -558,6 +558,10 @@ export function dissectTcpTransport(
       : httpResult
       ? httpResult.layers
       : undefined,
+    // The certificate's rows sit inside the TLS layer's tree, so there is no
+    // layer name for `frameProtocols` to read `x509ce` off - the same position
+    // QUIC and SSDP are in, and the same answer.
+    protocolTokens: tlsResult?.protocolTokens,
     // A name learned over TCP is a name learned; the passive resolution map
     // does not care which transport carried the answer.
     resolvedNames: tcpDns && tcpDns.resolved.length > 0 ? tcpDns.resolved : undefined,
