@@ -37,22 +37,13 @@ const ACCEPTANCE = join(FIXTURES, 'acceptance.json');
 
 // --- acceptance.json --------------------------------------------------------
 
-export interface FixtureSpec {
-  file: string;
-  sha256: string;
-  frames: number;
-  /** Per-column minimum match percentage. Raised, never lowered, phase by phase. */
-  floors: Record<string, number>;
-  /** What tshark counts. Only the keys in `enforce` fail the run. */
-  counts: Record<string, number>;
-  enforce: string[];
-}
-
-export interface Acceptance {
-  tshark: string;
-  groundTruthFields: string[];
-  fixtures: Record<string, FixtureSpec>;
-}
+// The shape lives in `acceptance-schema.ts`, which three scripts now read. It
+// is re-exported here because this file has exported these two names since it
+// was written and something may import them - but a new reader should take
+// them from the schema, which has no runtime statements. This one calls
+// `main()` at module scope.
+export type { FixtureSpec, Acceptance } from './acceptance-schema';
+import type { Acceptance, FixtureSpec } from './acceptance-schema';
 
 // --- ground truth ------------------------------------------------------------
 

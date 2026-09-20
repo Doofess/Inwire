@@ -19,6 +19,8 @@ import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { Acceptance } from './acceptance-schema';
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ACCEPTANCE_PATH = 'test/fixtures/acceptance.json';
 
@@ -33,11 +35,6 @@ function check(name: string, actual: unknown, expected: unknown) {
   }
 }
 
-interface Fixture {
-  file: string; sha256: string; frames: number;
-  floors: Record<string, number>; counts: Record<string, number>; enforce: string[];
-}
-interface Acceptance { tshark: string; groundTruthFields: string[]; fixtures: Record<string, Fixture> }
 
 const acceptance = JSON.parse(readFileSync(join(root, ACCEPTANCE_PATH), 'utf8')) as Acceptance;
 const readme = readFileSync(join(root, 'test/fixtures/README.md'), 'utf8');
