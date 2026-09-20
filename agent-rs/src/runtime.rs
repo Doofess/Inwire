@@ -363,6 +363,20 @@ impl Shared {
         let handles = self.capture.lock().unwrap().take()?;
         handles.running.store(false, Ordering::SeqCst);
 
+        // **The workers are joined before a single counter is read**, and the
+        // queue is not discarded until after. Every figure below is then final
+        // rather than a snapshot taken while threads were still moving it: a
+        // sniffer could previously push after `depth()` was read, and the
+        // driver's own counters are now sampled on a timer rather than per
+        // frame, so the last sample belongs to the sniffer's exit.
+        //
+        // The cost is up to one `to_ms` - the sniffers are blocked in
+        // `pcap_next_ex` with a 100 ms timeout - on a path that is already
+        // stopping. The join was always here; only its position moved.
+        for worker in handles.workers {
+            let _ = worker.join();
+        }
+
         let (queued, _) = handles.queue.depth();
         // **The owner's pipe drops, not `None`.** Passing None here made the
         // LAST message the app ever sees report `droppedPipe` as unknown, for a
@@ -400,9 +414,6 @@ impl Shared {
         }
 
         handles.queue.discard();
-        for worker in handles.workers {
-            let _ = worker.join();
-        }
         *self.owner.lock().unwrap() = None;
         Some(stats)
     }
@@ -497,6 +508,12 @@ fn start_capture(shared: &Arc<Shared>, client: &str, chosen: &[Interface]) -> io
         // Per handle, not per capture: the budget is the driver's per-adapter
         // ring, so two adapters is two of these rather than one split in half.
         capture.set_kernel_buffer(kernel_buffer_bytes(available_cores()) as i32)?;
+        // Hand frames over as they arrive rather than at Npcap's 16 KB default,
+        // which is what scapy asks for and therefore what the Python agent has
+        // always had. Not an error when the library does not export it: a
+        // capture at the default `mintocopy` is slower to show a frame, not
+        // wrong about one.
+        capture.set_min_to_copy(0)?;
         opened.push((interface.id, capture));
     }
 
@@ -552,6 +569,7 @@ fn start_capture(shared: &Arc<Shared>, client: &str, chosen: &[Interface]) -> io
             Arc::clone(&roster),
         );
         workers.push(thread::spawn(move || {
+            let mut kernel_sampled = Instant::now();
             while run.load(Ordering::SeqCst) && !shutdown.requested() {
                 match capture.next() {
                     Ok(Read::Timeout) => {}
@@ -600,9 +618,30 @@ fn start_capture(shared: &Arc<Shared>, client: &str, chosen: &[Interface]) -> io
                         return;
                     }
                 }
-                if let Some(stats) = capture.stats() {
-                    *kn.lock().unwrap() = Some(stats);
+                // **`pcap_stats` on a timer, not per frame.** This was one FFI
+                // call and one mutex acquisition for every packet, on the
+                // thread whose only job is draining the driver's buffer before
+                // it overflows - so it spent stage-1 drops in order to measure
+                // stage-1 drops. Nothing reads the figure more than once a
+                // second. `local-agent/agent.py` polls it off the sniffer
+                // thread entirely; here it cannot leave this thread, because a
+                // libpcap handle belongs to the one thread that reads it.
+                //
+                // Half of `STATS_INTERVAL`, so the figure the pump sends is
+                // never more than half a tick old.
+                if kernel_sampled.elapsed() >= STATS_INTERVAL / 2 {
+                    kernel_sampled = Instant::now();
+                    if let Some(stats) = capture.stats() {
+                        *kn.lock().unwrap() = Some(stats);
+                    }
                 }
+            }
+            // The last word, whatever the timer was about to do. `stop_capture`
+            // joins the workers before it reads these counters, so this is what
+            // the final `capture_stats` carries - and the final drop figure is
+            // the one somebody looks at when the numbers do not add up.
+            if let Some(stats) = capture.stats() {
+                *kn.lock().unwrap() = Some(stats);
             }
         }));
     }
