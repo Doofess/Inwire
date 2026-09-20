@@ -111,6 +111,21 @@ export const LAYERS = [
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
   'ipv6.hopopts', 'ipv6.dstopts', 'ipv6.routing', 'ipv6.fragment', 'ipv6.ext', 'ah',
+  // **X.509, which is three protocols in the reference and therefore three
+  // tokens here.** `x509af` is the certificate's own frame (RFC 5280 §4.1),
+  // `x509ce` the extensions, `pkix1implicit` the authority-information-access
+  // description - and its protocol chain for a TLS 1.2 Certificate frame
+  // really does read `...tls:x509sat:x509ce:pkix1implicit:x509ce`, measured on
+  // the synthetic handshake in `scripts/tls/certificate.ts`.
+  //
+  // Adopting its names rather than inventing `tls.x509.*` ones is the
+  // registry's whole promise applied to a layer neither fixture contains: a
+  // filter learnt in Wireshark has to answer the same here. `x509sat` is
+  // deliberately absent - it is the reference's generated string-attribute
+  // tree, where one `uTF8String` row is every attribute of every name in the
+  // chain and nothing says which is the subject's, so this build publishes a
+  // composed Subject and Issuer under `tls.x509.*` instead and exempts them.
+  'x509af', 'x509ce', 'pkix1implicit',
 ] as const;
 export type LayerToken = (typeof LAYERS)[number];
 
@@ -478,6 +493,44 @@ export const FIELDS: readonly FieldDef[] = [
   uint('tls.alert_message.desc', 'Description', 'tls'),
   str('tls.x509.subject_cn', 'Subject CN', 'tls'),
   str('tls.x509.issuer_cn', 'Issuer CN', 'tls'),
+
+  // --- X.509 -----------------------------------------------------------------
+  // Every one of these is tree-only, and that is the per-frame cost argument
+  // rather than a limitation: a chain is two to four certificates, each with
+  // several names, usages and access descriptions, so a certificate frame
+  // would carry dozens of bag keys against a tree that is built on demand and
+  // thrown away with the pane (ADR 0007). The two CN fields above stay in the
+  // bag, because they are the two anybody filters on.
+  //
+  // The key SIZE is not here at all. The reference's `x509af.subjectPublicKey`
+  // is FT_BYTES - the key itself - so a field carrying 2048 under that name
+  // would be a filter that works in this build and nowhere else, which is
+  // exactly what `wireshark-abbrevs.ts` exists to catch. It is in the Public
+  // Key Algorithm row's text.
+  treeOnly(uint('x509af.version', 'version', 'x509af')),
+  treeOnly(str('x509af.serialNumber', 'serialNumber', 'x509af')),
+  // The algorithm the certificate was SIGNED with, which was skipped outright
+  // - `i++; // signature algorithm` - and is the whole of what a deprecated
+  // hash looks like from the outside.
+  treeOnly(str('x509af.algorithm.id', 'Algorithm Id', 'x509af')),
+  treeOnly(str('x509af.extension.id', 'Extension Id', 'x509af')),
+  treeOnly(bool('x509af.critical', 'critical', 'x509af')),
+  // subjectAltName, one row per name and one name per FORM. The dNSName half
+  // was all this build read; an internal service whose certificate names only
+  // its address read as a certificate with no names at all.
+  treeOnly(str('x509ce.dNSName', 'dNSName', 'x509ce')),
+  treeOnly(str('x509ce.rfc822Name', 'rfc822Name', 'x509ce')),
+  // One name for every URI in a certificate - the SAN's, both access
+  // locations and the CRL distribution point - which is the reference's own
+  // choice, confirmed against it on the synthetic handshake.
+  treeOnly(str('x509ce.uniformResourceIdentifier', 'uniformResourceIdentifier', 'x509ce')),
+  treeOnly(str('x509ce.IPAddress.ipv4', 'iPAddress', 'x509ce')),
+  treeOnly(str('x509ce.IPAddress.ipv6', 'iPAddress', 'x509ce')),
+  treeOnly(bool('x509ce.cA', 'cA', 'x509ce')),
+  treeOnly(uint('x509ce.pathLenConstraint', 'pathLenConstraint', 'x509ce')),
+  treeOnly(str('x509ce.KeyUsage', 'KeyUsage', 'x509ce')),
+  treeOnly(str('x509ce.KeyPurposeId', 'KeyPurposeId', 'x509ce')),
+  treeOnly(str('pkix1implicit.accessMethod', 'accessMethod', 'pkix1implicit')),
   bool('tls.reassembled', 'Reassembled record', 'tls'),
   bool('inwire.tls.decrypted', 'Decrypted with a key log secret', 'tls'),
 

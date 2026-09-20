@@ -768,6 +768,18 @@ export interface TlsSegmentResult {
    * `http2` under `tls` in the protocol hierarchy.
    */
   appLayers?: ProtocolLayer[];
+  /**
+   * `frameProtocols` tokens for a certificate this segment carried.
+   *
+   * The certificate's rows live inside the TLS layer's tree rather than in
+   * layers of their own, so there is no layer name for the token to be read
+   * off - which is the same position QUIC and SSDP are in, and the same
+   * answer. The reference's own chain for a TLS 1.2 Certificate frame reads
+   * `...tls:x509sat:x509ce:pkix1implicit:x509ce`, measured on the synthetic
+   * handshake in `scripts/tls/certificate.ts`, so without these the barewords
+   * `x509af` and `x509ce` would validate as filters and match nothing.
+   */
+  protocolTokens?: string[];
 }
 
 export type TlsSegmentOutcome =
@@ -1063,11 +1075,19 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   } else if (conv.negotiatedVersion === undefined && ctx.inOrder) {
     if (!conv.pendingVersionFrames.includes(frame)) conv.pendingVersionFrames.push(frame);
   }
+  // The tokens for a certificate this segment carried. `pkix1implicit` only
+  // when an access description was actually read, because a token for a frame
+  // that has none is a protocol claimed on no evidence.
+  const certificates = completed.flatMap((r) => r.certificates ?? r.decrypted?.certificates ?? []);
+  const protocolTokens = certificates.length > 0
+    ? ['x509af', 'x509ce', ...(certificates.some((c) => c.accessDescriptions.length > 0) ? ['pkix1implicit'] : [])]
+    : undefined;
+
   return {
     kind: 'tls',
     result: {
       protocolLabel, info, fields, layer, records: completed, reassembledFrom, labelPatches,
-      appProtocolLabel, appLayers,
+      appProtocolLabel, appLayers, protocolTokens,
     },
   };
 }
@@ -1226,16 +1246,85 @@ function serverHelloFields(s: ServerHelloFacts, conv: TlsConversationState): Pro
   return fields;
 }
 
+/**
+ * One certificate's rows, under the reference's own field names.
+ *
+ * `x509af.*`, `x509ce.*` and `pkix1implicit.*` rather than names of ours,
+ * because the reference genuinely has them and they are what a filter learnt
+ * in Wireshark spells - see `fieldRegistry.ts`, where the three layer tokens
+ * are added. The two that stay ours are `tls.x509.subject_cn` and
+ * `tls.x509.issuer_cn`: the reference reaches a CN through its generated
+ * `x509sat.*` tree, where one `uTF8String` row is every attribute of every
+ * name in the chain and nothing says which is the subject's. Those two are
+ * exempt in `wireshark-abbrevs.ts` and have been since before this.
+ *
+ * **Every row here is tree-only.** A chain is two to four certificates, each
+ * with several names, usages and access descriptions, so putting them in the
+ * per-frame bag would be dozens of keys on a frame - against a tree that is
+ * built on demand and thrown away with the pane (ADR 0007). The two CN fields
+ * stay in the bag because they are the two anybody filters on.
+ */
 function certificateFields(certs: CertificateSummary[], conv: TlsConversationState, now: Date): ProtocolField[] {
   return certs.map((c, i): ProtocolField => {
     const children: ProtocolField[] = [
+      ...(c.version !== null ? [{ name: 'version', value: c.version, abbrev: 'x509af.version' }] : []),
+      ...(c.serialHex ? [{ name: 'serialNumber', value: c.serialHex, abbrev: 'x509af.serialNumber' }] : []),
+      ...(c.signatureAlgorithm ? [{ name: 'signature', value: c.signatureAlgorithm, abbrev: 'x509af.algorithm.id' }] : []),
       { name: 'Subject', value: c.subject || '(none)', ...(c.subjectCN ? { abbrev: 'tls.x509.subject_cn' } : {}) },
       { name: 'Issuer', value: c.issuer || '(none)', ...(c.issuerCN ? { abbrev: 'tls.x509.issuer_cn' } : {}) },
       { name: 'Not Before', value: c.notBefore ? c.notBefore.toISOString() : 'unknown' },
       { name: 'Not After', value: c.notAfter ? c.notAfter.toISOString() : 'unknown' },
-      ...(c.dnsNames.length > 0 ? [{ name: 'Subject Alternative Name', value: c.dnsNames.join(', ') }] : []),
-      ...(c.keyType ? [{ name: 'Public Key Algorithm', value: c.keyType }] : []),
-      ...(c.serialHex ? [{ name: 'Serial Number', value: c.serialHex }] : []),
+      // One row per name, as the reference emits one field per name, rather
+      // than the joined string this used to draw - which could not say which
+      // of them was a DNS name and dropped every other form on the floor.
+      ...c.dnsNames.map((n): ProtocolField => ({ name: 'dNSName', value: n, abbrev: 'x509ce.dNSName' })),
+      ...c.ipNames.map((n): ProtocolField => ({
+        name: 'iPAddress', value: n,
+        abbrev: n.includes(':') ? 'x509ce.IPAddress.ipv6' : 'x509ce.IPAddress.ipv4',
+      })),
+      ...c.emailNames.map((n): ProtocolField => ({ name: 'rfc822Name', value: n, abbrev: 'x509ce.rfc822Name' })),
+      ...c.uriNames.map((n): ProtocolField => ({ name: 'uniformResourceIdentifier', value: n, abbrev: 'x509ce.uniformResourceIdentifier' })),
+      ...(c.keyType ? [{
+        name: 'Public Key Algorithm',
+        // The size is the number anybody judges a key by, and it needed the
+        // SPKI BIT STRING opened rather than its algorithm read off the front.
+        value: c.keyBits !== null ? `${c.keyType} (${c.keyBits} bits)` : c.keyType,
+      }] : []),
+      // The key SIZE is display-only, and deliberately. The reference's
+      // `x509af.subjectPublicKey` is FT_BYTES - the key itself - so a row
+      // carrying 2048 under that name would be a filter that works here and
+      // nowhere else, which is the exact failure `wireshark-abbrevs.ts`
+      // exists to catch. It is in the algorithm row's text instead.
+      ...(c.isCa !== null ? [{ name: 'cA', value: c.isCa, abbrev: 'x509ce.cA' }] : []),
+      ...(c.pathLen !== null ? [{ name: 'pathLenConstraint', value: c.pathLen, abbrev: 'x509ce.pathLenConstraint' }] : []),
+      ...(c.keyUsageHex !== null ? [{
+        name: 'KeyUsage',
+        value: `${c.keyUsageHex} (${c.keyUsage.join(', ') || 'none'})`,
+        abbrev: 'x509ce.KeyUsage',
+      }] : []),
+      ...c.extKeyUsage.map((p): ProtocolField => ({ name: 'KeyPurposeId', value: p, abbrev: 'x509ce.KeyPurposeId' })),
+      ...c.accessDescriptions.map((a): ProtocolField => ({
+        name: 'accessMethod',
+        value: a.method,
+        abbrev: 'pkix1implicit.accessMethod',
+        children: [{ name: 'accessLocation', value: a.location, abbrev: 'x509ce.uniformResourceIdentifier' }],
+      })),
+      ...c.crlDistributionPoints.map((u): ProtocolField => ({
+        // One name for every URI in the certificate is the reference's own
+        // choice, confirmed on the synthetic capture: the SAN's URI, both
+        // access locations and this all come back under it.
+        name: 'cRLDistributionPoint', value: u, abbrev: 'x509ce.uniformResourceIdentifier',
+      })),
+      ...(c.extensions.length > 0 ? [{
+        name: 'extensions',
+        value: `${c.extensions.length} extension${c.extensions.length === 1 ? '' : 's'}`,
+        children: c.extensions.map((e): ProtocolField => ({
+          name: 'extnId',
+          value: e.critical ? `${e.name} (critical)` : e.name,
+          abbrev: 'x509af.extension.id',
+          children: [{ name: 'critical', value: e.critical, abbrev: 'x509af.critical' }],
+        })),
+      }] : []),
     ];
     if (c.notAfter && c.notAfter < now) children.push({ name: '[Expert]', value: 'certificate has expired', generated: true, expertInfo: { category: 'Security', message: 'Certificate expired' } });
     if (c.selfSigned) children.push({ name: '[Expert]', value: 'self-signed certificate', generated: true, expertInfo: { category: 'Security', message: 'Self-signed certificate' } });
