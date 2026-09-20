@@ -29,6 +29,10 @@ const METHODS = new Set([
   // WebDAV and friends, which appear on captures of anything with a calendar.
   'PROPFIND', 'PROPPATCH', 'MKCOL', 'COPY', 'MOVE', 'LOCK', 'UNLOCK', 'REPORT',
   'SEARCH', 'MKCALENDAR', 'ACL', 'BIND', 'UNBIND', 'REBIND', 'NOTIFY', 'SUBSCRIBE',
+  // SSDP, which is HTTP/1.1 syntax over UDP multicast and is read by this same
+  // parser - the reference does the same thing, filing it under HTTP's field
+  // names. `NOTIFY` above is SSDP's other verb and was already here for WebDAV.
+  'M-SEARCH',
 ]);
 
 export interface Http1Header { name: string; value: string }

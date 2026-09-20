@@ -3,8 +3,13 @@
  *
  * `checksumVerdict` is the offload policy - a checksum this machine has not
  * filled in yet is `Unverified`, never `Bad` - and TCP and UDP both ask it. The
- * three ASCII helpers under it turn a payload into something the Info column
+ * two ASCII helpers under it turn a payload into something the Info column
  * can show, and both decoders reach for those too.
+ *
+ * There was a third, `readAsciiRequestLine`, and it is gone: its one caller
+ * read SSDP's start line to put in the Info column, and SSDP is parsed as the
+ * HTTP message it is now (`dissectors/ssdp.ts`), which produces the same line
+ * as a by-product of producing the whole tree.
  *
  * They lived in `pcapParser.ts` because that is where the only two callers
  * lived. Splitting the transport branches into their own modules makes that
@@ -12,13 +17,6 @@
  * one of them happens to host.
  */
 import { ETHERNET_MAX_FRAME } from '../direction';
-
-/**
- * One decoder, not one per call - `new TextDecoder()` is not free, and
- * `scripts/perf/hot-path-allocations.ts` fails the build on one constructed
- * inside a function under `src/services/`.
- */
-const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
 
 /**
  * What sits in front of a transport segment on a plain Ethernet/IPv4 frame:
@@ -149,22 +147,4 @@ export function extractLiteralUrlOrHost(rawBytes: Uint8Array, payloadStart: numb
   if (urlMatch) return urlMatch[0].replace(/[.,;:)]+$/, '');
   const hostMatch = text.match(HTTP_HOST_HEADER_PATTERN);
   return hostMatch ? hostMatch[1].trim() : null;
-}
-
-/**
- * Reads the first CRLF-terminated ASCII line of a text protocol payload
- * (SSDP's "M-SEARCH * HTTP/1.1", HTTP's request line). Returns null unless the
- * line is entirely printable and plausibly a request line, so binary payloads
- * on the same port don't produce mojibake in the Info column.
- */
-export function readAsciiRequestLine(rawBytes: Uint8Array, payloadStart: number): string | null {
-  const limit = Math.min(rawBytes.length, payloadStart + 256);
-  let end = payloadStart;
-  while (end < limit && rawBytes[end] !== 0x0d && rawBytes[end] !== 0x0a) {
-    const byte = rawBytes[end];
-    if (byte < 0x20 || byte > 0x7e) return null;
-    end++;
-  }
-  if (end === payloadStart || end >= limit) return null;
-  return utf8Decoder.decode(rawBytes.subarray(payloadStart, end));
 }

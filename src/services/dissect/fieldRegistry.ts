@@ -486,10 +486,70 @@ export const FIELDS: readonly FieldDef[] = [
   // same dissector reads both, so one set of names covers both.
   str('http.request.method', 'Request Method', 'http', { label: 'Method', align: 'left' }),
   str('http.request.uri', 'Request URI', 'http', { label: 'URI', align: 'left' }),
-  str('http.host', 'Host', 'http'),
-  str('http.user_agent', 'User-Agent', 'http'),
+  str('http.request.version', 'Request Version', 'http'),
+  str('http.response.version', 'Response Version', 'http'),
   uint('http.response.code', 'Status Code', 'http', { label: 'Status', align: 'right' }),
+  str('http.response.phrase', 'Response Phrase', 'http'),
+  treeOnly(str('http.response.code.desc', 'Status Code Description', 'http')),
+  // **Presence, which is how you ask for requests without naming a method.**
+  // SSDP's NOTIFY gets `http.notification` rather than `http.request`: it is a
+  // request by syntax and answers nobody, and the reference separates them so
+  // a filter can have the announcements without every M-SEARCH on the segment.
+  bool('http.request', 'Request', 'http'),
+  bool('http.response', 'Response', 'http'),
+  bool('http.notification', 'Notification', 'http'),
+  // The URI, decomposed. The path and the query are single and filterable; a
+  // path SEGMENT and a query PARAMETER repeat, so they are rows rather than
+  // bag keys - one key holds one value, and the tree is where the reference's
+  // repeated fields can be represented at all.
+  str('http.request.uri.path', 'Request URI Path', 'http'),
+  treeOnly(str('http.request.uri.path.segment', 'Request URI Path Segment', 'http')),
+  str('http.request.uri.query', 'Request URI Query', 'http'),
+  treeOnly(str('http.request.uri.query.parameter', 'Request URI Query Parameter', 'http')),
+  // The authority and the target together, which neither the start line nor
+  // the Host header carries alone.
+  str('http.request.full_uri', 'Full request URI', 'http'),
+  // Every header line's raw text, which the reference emits beside each named
+  // header and hides. Repeated, so tree-only for the reason above.
+  treeOnly(str('http.request.line', 'Request line', 'http')),
+  treeOnly(str('http.response.line', 'Response line', 'http')),
+  treeOnly(str('http.unknown_header', 'Unknown header', 'http')),
+  // The headers HTTP has a name of its own for. The awkward spellings are the
+  // reference's - `content_length_header` is the raw header where
+  // `http.content_length` is the parsed number, and `accept_encoding` has one
+  // underscore where `x_forwarded_for` has two - and `wireshark-abbrevs.ts`
+  // is what keeps them that way.
+  str('http.accept', 'Accept', 'http'),
+  str('http.accept_encoding', 'Accept Encoding', 'http'),
+  str('http.accept_language', 'Accept-Language', 'http'),
+  str('http.authorization', 'Authorization', 'http'),
+  str('http.cache_control', 'Cache-Control', 'http'),
+  str('http.connection', 'Connection', 'http'),
+  str('http.content_encoding', 'Content-Encoding', 'http'),
+  str('http.content_length_header', 'Content-Length', 'http'),
+  str('http.content_range', 'Content-Range', 'http'),
   str('http.content_type', 'Content-Type', 'http'),
+  str('http.cookie', 'Cookie', 'http'),
+  str('http.date', 'Date', 'http'),
+  str('http.host', 'Host', 'http'),
+  str('http.last_modified', 'Last-Modified', 'http'),
+  str('http.location', 'Location', 'http'),
+  str('http.proxy_authenticate', 'Proxy-Authenticate', 'http'),
+  str('http.proxy_authorization', 'Proxy-Authorization', 'http'),
+  str('http.range', 'Range', 'http'),
+  str('http.referer', 'Referer', 'http'),
+  str('http.sec_websocket_accept', 'Sec-WebSocket-Accept', 'http'),
+  str('http.sec_websocket_extensions', 'Sec-WebSocket-Extensions', 'http'),
+  str('http.sec_websocket_key', 'Sec-WebSocket-Key', 'http'),
+  str('http.sec_websocket_protocol', 'Sec-WebSocket-Protocol', 'http'),
+  str('http.sec_websocket_version', 'Sec-WebSocket-Version', 'http'),
+  str('http.server', 'Server', 'http'),
+  str('http.set_cookie', 'Set-Cookie', 'http'),
+  str('http.transfer_encoding', 'Transfer-Encoding', 'http'),
+  str('http.upgrade', 'Upgrade', 'http'),
+  str('http.user_agent', 'User-Agent', 'http'),
+  str('http.www_authenticate', 'WWW-Authenticate', 'http'),
+  str('http.x_forwarded_for', 'X-Forwarded-For', 'http'),
 
   // --- HTTP/2 ----------------------------------------------------------------
   uint('http2.type', 'Type', 'http2'),
