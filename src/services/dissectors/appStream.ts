@@ -9,7 +9,8 @@
  * - and by content when there is not, which is the ordinary case on port 80.
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
-import { dissectHttp1, freshHttp1Direction, looksLikeHttp1, type Http1Direction, type Http1Message } from './http1';
+import { httpMessageFields, httpMessageRows } from './httpFields';
+import { dissectHttp1, freshHttp1Direction, looksLikeHttp1, type Http1Direction } from './http1';
 import {
   dissectHttp2, freshHttp2Direction, http2ErrorName, HTTP2_PREFACE,
   type Http2Direction, type Http2Frame,
@@ -126,20 +127,9 @@ function readHttp1(
       : undefined;
     const mediaType = type === undefined ? '' : ` (${type.split(';')[0].trim()})`;
     info.push(`${message.summary} ${mediaType}`);
-    rows.push(...http1Rows(message));
-    if (message.kind === 'request') {
-      if (fromClient) direction.lastMethod = message.method;
-      fields['http.request.method'] = message.method ?? '';
-      fields['http.request.uri'] = message.target ?? '';
-      const host = message.headers.find((h) => h.name.toLowerCase() === 'host')?.value;
-      if (host !== undefined) fields['http.host'] = host;
-      const agent = message.headers.find((h) => h.name.toLowerCase() === 'user-agent')?.value;
-      if (agent !== undefined) fields['http.user_agent'] = agent;
-    } else {
-      fields['http.response.code'] = message.status ?? 0;
-      const type = message.headers.find((h) => h.name.toLowerCase() === 'content-type')?.value;
-      if (type !== undefined) fields['http.content_type'] = type;
-    }
+    rows.push(...httpMessageRows(message));
+    Object.assign(fields, httpMessageFields(message));
+    if (message.kind === 'request' && fromClient) direction.lastMethod = message.method;
   }
 
   const line = info.join('');
@@ -151,36 +141,6 @@ function readHttp1(
     layers: [{ name: 'Hypertext Transfer Protocol', summary: line.trim(), fields: rows }],
     fields,
   };
-}
-
-/**
- * One message's rows. When a segment carries more than one they are wrapped
- * per message, so a pipelined pair does not read as one confused message.
- */
-function http1Rows(message: Http1Message): ProtocolField[] {
-  const fields: ProtocolField[] = [];
-  if (message.kind === 'request') {
-    fields.push({ name: 'Request Method', value: message.method ?? '', abbrev: 'http.request.method' });
-    fields.push({ name: 'Request URI', value: message.target ?? '', abbrev: 'http.request.uri' });
-    fields.push({ name: 'Request Version', value: message.version });
-  } else {
-    fields.push({ name: 'Response Version', value: message.version });
-    fields.push({ name: 'Status Code', value: message.status ?? 0, abbrev: 'http.response.code' });
-    if (message.reason) fields.push({ name: 'Response Phrase', value: message.reason });
-  }
-
-  for (const header of message.headers) {
-    const field: ProtocolField = { name: header.name, value: header.value };
-    const lower = header.name.toLowerCase();
-    if (lower === 'host') field.abbrev = 'http.host';
-    else if (lower === 'user-agent') field.abbrev = 'http.user_agent';
-    else if (lower === 'content-type') field.abbrev = 'http.content_type';
-    fields.push(field);
-  }
-
-  fields.push({ name: 'Body', value: message.bodyFraming, description: 'How the message says its body is delimited' });
-
-  return [{ name: message.summary, value: '', isExpanded: true, children: fields }];
 }
 
 // --- HTTP/2 --------------------------------------------------------------------

@@ -16,12 +16,13 @@ import type { Packet, ProtocolLayer } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
 import type { QuicFlowTracker } from '../quicFlowTracker';
 import type { DnsTracker } from '../dnsTracker';
-import { checksumVerdict, extractLiteralUrlOrHost, readAsciiRequestLine } from '../dissect/transportShared';
+import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
 import { detectUdpPayload } from './heuristics';
 import { buildHttp3Layer } from './http3';
 import { dissectNbns } from './nbns';
+import { dissectSsdp } from './ssdp';
 import { dissectQuicDatagram } from './quic';
 import { buildQuicTlsLayer } from './tls';
 import { dissectNtp, dissectStun } from './udpApps';
@@ -101,6 +102,7 @@ export function dissectUdpTransport(
   const dnsFields: Record<string, string | number> = {};
   const quicFields: Record<string, string | number> = {};
   const appFields: Record<string, string | number> = {};
+  const ssdpFields: Record<string, string | number> = {};
   let dnsMatchedQueryFrameId: number | undefined;
   let resolvedNames: { name: string; addresses: string[] }[] | undefined;
   const protocolTokens: string[] = [];
@@ -173,13 +175,14 @@ export function dissectUdpTransport(
       }
     }
   } else if (isSsdp) {
-    const requestLine = readAsciiRequestLine(rawBytes, udpPayloadStart);
-    if (requestLine) {
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    const ssdp = dissectSsdp(rawBytes, udpPayloadStart, payloadEnd);
+    if (ssdp) {
       protocolLabel = 'SSDP';
       protocolTokens.push('ssdp');
-      // The reference analyzer's HTTP-style dissectors emit a trailing space after the
-      // request line; kept so the diff against tshark is exact.
-      info = `${requestLine} `;
+      info = ssdp.info;
+      extraLayers.push(ssdp.layer);
+      Object.assign(ssdpFields, ssdp.fields);
     }
   } else if (isQuic) {
     // A short header is only identifiable as QUIC in the context of a
@@ -320,6 +323,7 @@ export function dissectUdpTransport(
       ...dnsFields,
       ...quicFields,
       ...appFields,
+      ...ssdpFields,
     },
     layer: {
       name: 'User Datagram Protocol',

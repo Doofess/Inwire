@@ -66,6 +66,7 @@
           "ipv6": 5,
           "llc": 3,
           "lldp": 4,
+          "ssdp": 13,
           "stp": 4,
           "tcp": 59,
           "tls": 17,
@@ -73,15 +74,14 @@
         },
         "protosNamed": 21,
         "ceilings": {
-          "filterableNotInTree": 9
+          "filterableNotInTree": 5
         },
         "counts": {
-          "absentDistinct": 538,
-          "valueMismatches": 113
+          "absentDistinct": 529,
+          "valueMismatches": 117
         },
         "unimplemented": {
           "quic": "A 479-line dissector with its own crypto that decrypts Initials and labels the Protocol column, publishing not one quic.* abbrev on either surface. 40 reference fields here. Recorded rather than floored at 0: a zero floor protects nothing and reads as measured-and-accepted.",
-          "ssdp": "A registered layer token with zero fields. The reference files SSDP under HTTP's field names, so these 13 are re-attributed here (see REATTRIBUTE) rather than blamed on the HTTP dissector.",
           "prp": "Parallel Redundancy Protocol - a 6-byte trailer this build does not read at all, on 20 frames. The one protocol the reference names here that nothing in this build can name."
         }
       }
@@ -129,6 +129,7 @@
           "ip": 13,
           "ipv6": 4,
           "llc": 3,
+          "ssdp": 7,
           "stp": 4,
           "tcp": 59,
           "tls": 17,
@@ -136,15 +137,14 @@
         },
         "protosNamed": 16,
         "ceilings": {
-          "filterableNotInTree": 8
+          "filterableNotInTree": 5
         },
         "counts": {
-          "absentDistinct": 378,
-          "valueMismatches": 104
+          "absentDistinct": 374,
+          "valueMismatches": 106
         },
         "unimplemented": {
-          "quic": "As inwire: no quic.* abbrev on either surface, against 37 reference fields.",
-          "ssdp": "As inwire: a layer token with no fields."
+          "quic": "As inwire: no quic.* abbrev on either surface, against 37 reference fields."
         }
       }
     }
