@@ -526,6 +526,25 @@ export const FIELDS: readonly FieldDef[] = [
   uint('tls.handshake.ciphersuite', 'Cipher Suite', 'tls'),
   str('tls.handshake.extensions_server_name', 'Server Name', 'tls', { label: 'SNI', align: 'left' }),
   str('tls.handshake.extensions_alpn_str', 'ALPN Next Protocol', 'tls', { label: 'ALPN', align: 'left' }),
+  // **The frames the reference draws around the two values above.** An SNI is
+  // one entry in a typed list and an ALPN is one string in another, and the
+  // lengths and type bytes are how a malformed hello shows itself - a list
+  // length that disagrees with the extension's own is the shape of a
+  // fingerprint-evasion attempt and was invisible here.
+  treeOnly(uint('tls.handshake.extensions_server_name_list_len', 'Server Name list length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_server_name_type', 'Server Name Type', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_server_name_len', 'Server Name length', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_alpn_len', 'ALPN Extension Length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_alpn_list', 'ALPN Protocol', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_alpn_str_len', 'ALPN string length', 'tls')),
+  treeOnly(uint('tls.handshake.extensions.supported_versions_len', 'Supported Versions length', 'tls')),
+  treeOnly(uint('tls.extension.psk_ke_modes_length', 'PSK Key Exchange Modes Length', 'tls')),
+  treeOnly(str('tls.extension.psk_ke_mode', 'PSK Key Exchange Mode', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_key_share_client_length', 'Client Key Share Length', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_key_share_key_exchange_length', 'Key Exchange Length', 'tls')),
+  // The share itself, which is what a reader compares across captures when
+  // asking whether two connections reused a key.
+  treeOnly(str('tls.handshake.extensions_key_share_key_exchange', 'Key Exchange', 'tls')),
   uint('tls.handshake.extensions.supported_version', 'Supported Version', 'tls'),
   uint('tls.handshake.extensions_supported_group', 'Supported Group', 'tls'),
   uint('tls.handshake.extensions_key_share_group', 'Key Share Group', 'tls'),
