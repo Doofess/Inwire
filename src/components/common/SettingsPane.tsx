@@ -20,11 +20,9 @@ import { AppearanceSettingsPanel } from './AppearanceSettingsPanel';
 import { InterfaceSettingsPanel } from './InterfaceSettingsPanel';
 import { AccessibilitySettingsPanel } from './AccessibilitySettingsPanel';
 import { DisplayFiltersPanel } from './DisplayFiltersPanel';
-import { ColorRulesPanel } from './ColorRulesPanel';
 import { DecryptionSettingsPanel } from './DecryptionSettingsPanel';
 import type { AgentLogEntry } from '../../services/agentProtocol';
-import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/packet';
-import type { PacketTheme } from '../../services/packetThemes';
+import type { FilterPresetLibrary } from '../../types/packet';
 import { formatBytes } from '../../lib/formatBytes';
 import type { CaptureStorageState } from '../../services/capture/captureProtocol';
 
@@ -42,7 +40,7 @@ import type { CaptureStorageState } from '../../services/capture/captureProtocol
  * Reading "the driver is capturing" and "the buffer is 99% full" as two
  * separate visits made a single story into two.
  */
-type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters' | 'colors'
+type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters'
   | 'decryption' | 'driver' | 'updates';
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
@@ -59,7 +57,6 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // a colour on it - the same expression, the same validator, the same
   // autocomplete. Splitting them across the panel would ask the reader to
   // learn the language twice.
-  { id: 'colors', label: 'Colouring Rules', icon: Palette },
   // Beside Decryption, and before it, because the two are the pair that changes
   // what the dissector can READ rather than what is shown: one adds a protocol,
   // the other supplies the keys to see inside one. It was a full-screen modal
@@ -105,11 +102,7 @@ interface SettingsPaneProps {
   filterPresetLibrary: FilterPresetLibrary;
   onFilterPresetLibraryChange: (library: FilterPresetLibrary) => void;
   /** The colouring chain, shared with the packet list's engine. */
-  colorRules: ColorRule[];
-  onColorRulesChange: (rules: ColorRule[]) => void;
   /** The active packet theme, so a rule previews in the colours it will use. */
-  packetTheme: PacketTheme;
-  permissions: Capabilities;
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   agentVersion: string | null;
   agentOutdated: boolean;
@@ -150,10 +143,6 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   onDiscardCapture,
   filterPresetLibrary,
   onFilterPresetLibraryChange,
-  colorRules,
-  onColorRulesChange,
-  packetTheme,
-  permissions,
   agentStatus,
   agentVersion,
   agentOutdated,
@@ -250,15 +239,6 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
               <DisplayFiltersPanel
                 library={filterPresetLibrary}
                 onChange={onFilterPresetLibraryChange}
-              />
-            )}
-
-            {section === 'colors' && (
-              <ColorRulesPanel
-                rules={colorRules}
-                onChange={onColorRulesChange}
-                theme={packetTheme}
-                canEdit={permissions.canChangeColorRules}
               />
             )}
 

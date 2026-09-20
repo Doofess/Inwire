@@ -210,6 +210,12 @@ export const RETIRED_PREFERENCE_KEYS: readonly string[] = [
   // is set in one family in two cuts, and a setting that moved the sans and not
   // the mono put the seam back for exactly the readers who reached for it.
   'inwire.font',
+  // The colouring-rules editor. The chain is a constant again and there is no
+  // surface that can change it, so a stored one is the worst shape a retired
+  // key takes: not a control nothing can show, but COLOURING nothing can
+  // change - a list painted from a chain the user edited once and can no
+  // longer see, let alone correct.
+  'inwire.colorRules',
 ];
 
 export function clearRetiredPreferences(

@@ -1,23 +1,28 @@
 /**
- * Assertion tests for the editable colouring chain.
+ * Assertion tests for the shipped colouring chain.
  *
  *   npx tsx scripts/color-rules/library.ts
  *
- * The chain used to be a constant with no editor, so nothing could go wrong
- * with it that was not a source change. Now it is stored, validated on load and
- * reordered by the user, which introduces three ways to break a packet list
- * silently: a stored value from an older build that no longer parses, an empty
- * chain, and a rule ordered behind one that already matches everything it would
- * have.
+ * **The chain is a constant and nothing can edit it**, so the only way to
+ * break a packet list is a source change - which is exactly what this file is
+ * here to catch. It covered a stored, user-reorderable chain for one revision,
+ * and the three storage hazards it grew for (a value from an older build that
+ * no longer parses, an empty chain, a validator that drops a rule) went with
+ * the editor; what is left is the group that always mattered most.
  *
- * The last group is the one that matters most: `WIRESHARK_DEFAULT_RULES` is
- * what the tshark parity harness compares against frame for frame, so it has to
- * stay exactly Wireshark's chain even as the app ships extra bands on top.
+ * `WIRESHARK_DEFAULT_RULES` is what the tshark parity harness compares against
+ * frame for frame, so it has to stay exactly Wireshark's chain even as the app
+ * ships extra bands on top - and ORDER is the whole design, because the chain
+ * is first-match-wins and a rule placed behind one that already matches
+ * everything it would have is a rule that silently never fires.
  */
 import {
   DEFAULT_COLOR_RULES, INWIRE_EXTRA_RULES, WIRESHARK_DEFAULT_RULES,
-  ColorRulesEngine, defaultColorRules, normalizeColorRules,
+  ColorRulesEngine,
 } from '../../src/services/colorRules';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { FilterEngine } from '../../src/services/filterEngine';
 import { REQUIRED_RULE_IDS, ROLE_BY_RULE_ID } from '../../src/services/packetThemes';
 import { CATEGORY_ORDER } from '../../src/services/expertInfo';
@@ -31,6 +36,8 @@ const KEBAB: Record<ExpertCategory, string> = {
   CaptureGap: 'capture-gap', FlowControl: 'flow-control',
   Unverifiable: 'unverifiable', Note: 'note',
 };
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -99,28 +106,28 @@ check('the theme covers exactly the shipped chain', REQUIRED_RULE_IDS.length, DE
   check('...and Inwire\'s own bands name nothing undissected', dead, []);
 }
 
-// --- what a stored chain may be ------------------------------------------------
-
-check('a non-array is rejected', normalizeColorRules('nope'), null);
-check('an empty array is rejected rather than emptying the list', normalizeColorRules([]), null);
-check('a rule with no filter is dropped', normalizeColorRules([{ id: 'a', name: 'A' }]), null);
-check('a valid rule survives',
-  normalizeColorRules([{ id: 'a', name: 'A', filter: 'tcp', enabled: false }]),
-  [{ id: 'a', name: 'A', filter: 'tcp', enabled: false }]);
-check('enabled defaults to true when the stored value is not a boolean',
-  normalizeColorRules([{ id: 'a', name: 'A', filter: 'tcp', enabled: 'yes' }])?.[0].enabled, true);
-check('a duplicate id is dropped, not merged',
-  normalizeColorRules([
-    { id: 'a', name: 'A', filter: 'tcp' },
-    { id: 'a', name: 'B', filter: 'udp' },
-  ])?.map(r => r.name), ['A']);
-check('colours survive the round trip',
-  normalizeColorRules([{ id: 'a', name: 'A', filter: 'tcp', bgColor: '#123456', lightTextColor: '#abcdef' }])?.[0],
-  { id: 'a', name: 'A', filter: 'tcp', enabled: true, bgColor: '#123456', lightTextColor: '#abcdef' });
-check('the shipped chain survives its own validator',
-  normalizeColorRules(defaultColorRules())?.length, DEFAULT_COLOR_RULES.length);
-check('a reset hands out a copy, not the shared array',
-  defaultColorRules()[0] === DEFAULT_COLOR_RULES[0], false);
+// --- the chain is a constant, and nothing may make it editable again ----------
+//
+// The editor stored its chain under `inwire.colorRules` and read it back
+// through a validator. Both are gone, and this is what stops them coming back
+// by accident: a module that can load a chain is a module that can be handed
+// somebody else's, and every statement the rest of the app makes about
+// colouring - the parity harness's frame-for-frame `frame.coloring_rule.name`
+// comparison, `packetThemes.ts`'s appearance per rule id, the order of the
+// expert bands - is a statement about THIS chain.
+{
+  const source = readFileSync(join(root, 'src', 'services', 'colorRules.ts'), 'utf8');
+  check('the module exports no storage key',
+    /COLOR_RULES_STORAGE_KEY/.test(source), false);
+  check('...and no loader for a stored chain',
+    /normalizeColorRules|defaultColorRules/.test(source), false);
+  const app = readFileSync(join(root, 'src', 'App.tsx'), 'utf8');
+  check('the engine is built from the shipped chain and nothing else',
+    /new ColorRulesEngine\(DEFAULT_COLOR_RULES\)/.test(app), true);
+  const retired = readFileSync(join(root, 'src', 'services', 'preferences.ts'), 'utf8');
+  check('the old key is retired, so an edited chain stops painting',
+    /RETIRED_PREFERENCE_KEYS[\s\S]*?'inwire\.colorRules'[\s\S]*?\];/.test(retired), true);
+}
 
 /** A frame with just enough on it for the chain to have something to read. */
 const packet = (over: Partial<Packet>): Packet => ({

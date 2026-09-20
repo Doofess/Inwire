@@ -71,12 +71,7 @@ import {
   loadSessionMeta,
   saveSessionMeta,
 } from "./services/sessionStore";
-import {
-  ColorRulesEngine,
-  COLOR_RULES_STORAGE_KEY,
-  defaultColorRules,
-  normalizeColorRules,
-} from "./services/colorRules";
+import { ColorRulesEngine, DEFAULT_COLOR_RULES } from "./services/colorRules";
 import {
   isAgentOutdated, REQUIRED_AGENT_VERSION, type AgentMessage,
 } from "./services/agentProtocol";
@@ -113,7 +108,7 @@ import {
   usePreferenceSync,
 } from "./services/preferences";
 import { useThrottledValue } from "./lib/useThrottledValue";
-import type { ColorRule, FilterPresetLibrary } from "./types/packet";
+import type { FilterPresetLibrary } from "./types/packet";
 
 import { TriangleAlert } from "lucide-react";
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
@@ -682,8 +677,6 @@ export default function App() {
     canCapture: true,
     canExportPcap: true,
     canViewPayloads: true,
-    canEditDissectors: true,
-    canChangeColorRules: true,
     canClearBuffer: true,
   }), []);
 
@@ -1449,12 +1442,8 @@ export default function App() {
    * change, so editing the chain has to produce a NEW engine rather than
    * mutating this one.
    */
-  const [colorRules, setColorRules] = useState<ColorRule[]>(
-    () => loadPreference(COLOR_RULES_STORAGE_KEY, normalizeColorRules, defaultColorRules()),
-  );
-  useDebouncedPreference(COLOR_RULES_STORAGE_KEY, colorRules);
-  usePreferenceSync(COLOR_RULES_STORAGE_KEY, normalizeColorRules, setColorRules);
-  const colorEngine = useMemo(() => new ColorRulesEngine(colorRules), [colorRules]);
+  // **The colouring chain is shipped, not chosen.** See `colorRules.ts`.
+  const colorEngine = useMemo(() => new ColorRulesEngine(DEFAULT_COLOR_RULES), []);
   const packetGenerator = useMemo(() => new PacketGenerator(), []);
   /**
    * The colour of the row the selected packet was picked from.
@@ -2824,10 +2813,6 @@ export default function App() {
               onClearPackets={handleClearPackets}
               captureStorage={captureStorage}
               onDiscardCapture={handleDiscardCapture}
-              colorRules={colorRules}
-              onColorRulesChange={setColorRules}
-              packetTheme={packetTheme}
-              permissions={permissions}
               filterPresetLibrary={filterPresetLibrary}
               onFilterPresetLibraryChange={handleFilterPresetLibraryChange}
             />
