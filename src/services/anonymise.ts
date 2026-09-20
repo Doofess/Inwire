@@ -184,7 +184,7 @@ export class Anonymiser {
    */
   packet(packet: Packet): Packet {
     const bytes = packet.rawBytes.length > 0 ? packet.rawBytes.slice() : packet.rawBytes;
-    if (bytes.length > 0) this.rewriteFrame(bytes);
+    if (bytes.length > 0) this.rewriteFrame(bytes, packet.linkType ?? LINKTYPE.ETHERNET);
 
     return {
       ...packet,
@@ -233,8 +233,15 @@ export class Anonymiser {
    * corrupts the payload and leaves the address intact, which is the worst of
    * both outcomes.
    */
-  private rewriteFrame(bytes: Uint8Array): void {
-    const link = dissectLinkLayer(bytes, LINKTYPE.ETHERNET);
+  private rewriteFrame(bytes: Uint8Array, linkType: number): void {
+    // **The frame's own link type, not Ethernet.** Hard-coding it here was the
+    // same class of error this method's own comment warns about one paragraph
+    // up: an offset assumed rather than dissected. On a `LINKTYPE.NULL` frame
+    // the 14-byte Ethernet header this produced overlaps the IP header, so the
+    // anonymiser wrote two MACs over the IP version, the TTL and the protocol -
+    // corrupting the frame while leaving the addresses it was asked to remove
+    // exactly where they were.
+    const link = dissectLinkLayer(bytes, linkType);
     if (link.dstMac && link.srcMac && bytes.length >= 12) {
       writeMac(bytes, 0, parseMac(this.mac(link.dstMac))!);
       writeMac(bytes, 6, parseMac(this.mac(link.srcMac))!);

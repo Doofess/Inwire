@@ -26,6 +26,7 @@ import { decodePacketBatch, isPacketBatch, retain } from '../services/agentBinar
 import { encodeAgentCommand, parseAgentMessage } from '../services/agentProtocol';
 import type { FromAgentLink, ToAgentLink } from '../services/agentLink';
 import { decodeRawEthernetPacket, type InfoPatch } from '../services/pcapParser';
+import { LINKTYPE } from '../services/dissect/types';
 import { flowAnnotations } from '../services/flowAnnotations';
 import { addProcessRow, annotatePacket } from '../services/dissect/processFields';
 import { clientFingerprints, learnOrLabelFingerprint } from '../services/dissect/clientFingerprints';
@@ -208,6 +209,18 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
  */
 let interfaceById = new Map<number, { name: string; label: string }>();
 
+/**
+ * Each adapter's link type, by the same key.
+ *
+ * A second map rather than a third property on the one above, because that
+ * object is handed to the dissector as its `captureInterface` and is compared
+ * by identity - widening it would put a number nobody reads into every
+ * frame's Frame layer. Only adapters the agent actually named a type for are
+ * in here; a miss means Ethernet, which is `decodeRawEthernetPacket`'s own
+ * default.
+ */
+let linkTypeById = new Map<number, number>();
+
 function rebuildInterfaceIndex(): void {
   interfaceById = new Map(
     // `entry.id ?? index` is the agent's own indexing rule, kept exactly: the
@@ -217,10 +230,28 @@ function rebuildInterfaceIndex(): void {
       entry.id ?? index, { name: entry.name, label: entry.label },
     ]),
   );
+  linkTypeById = new Map(
+    interfaces
+      .map((entry, index) => [entry.id ?? index, entry.linkType] as const)
+      .filter((pair): pair is readonly [number, number] => pair[1] !== undefined),
+  );
 }
 
 function interfaceFor(iface: number): { name: string; label: string } | undefined {
   return interfaceById.get(iface);
+}
+
+/**
+ * How to read this adapter's frames.
+ *
+ * **Ethernet when the agent did not say**, which is what this whole path
+ * assumed before the agent could say anything - right for every adapter here
+ * except Npcap's loopback, which is `LINKTYPE.NULL` and was being read as
+ * Ethernet: fabricated MACs with vendors resolved from them, a direction
+ * decided from those MACs, and no transport layer at all.
+ */
+function linkTypeFor(iface: number): number {
+  return linkTypeById.get(iface) ?? LINKTYPE.ETHERNET;
 }
 
 function ingest(frame: LiveFrame, id: number): void {
@@ -238,7 +269,7 @@ function ingest(frame: LiveFrame, id: number): void {
     const decoded = decodeRawEthernetPacket(
       frame.bytes, id, frame.tsUs, relativeTime, timeDelta, frame.origLen,
       tcpTracker, icmpTracker, quicTracker, dnsTracker, interfaceFor(frame.iface),
-      undefined, l3Tracker, host,
+      linkTypeFor(frame.iface), l3Tracker, host,
     );
     const packet = decoded.packet;
     packet.tsPrecision = 6;

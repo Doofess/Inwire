@@ -64,6 +64,7 @@ import { emptyNetworkFacts, NetworkFactsCollector, type NetworkFacts } from './s
 import { watchLinkChanges, type LinkChange } from './services/linkContext';
 import { processForPacket, sendingProcessName, writeProcessFields } from './services/dissect/processFields';
 import { fieldValue } from './services/dissect/fieldAccess';
+import { LINKTYPE } from './services/dissect/types';
 import { filterIncrementally, type FilterCache } from "./services/incrementalFilter";
 import {
   clearSession,
@@ -1003,6 +1004,25 @@ export default function App() {
         }
 
         setRestoreProgress({ done: 0, total: restoring });
+        // How to read each adapter's frames, from the session's own table.
+        //
+        // A restored row is already dissected and needs nothing - but the
+        // detail pane rebuilds its tree by RE-dissecting the conversation
+        // (`pipeline/replay.ts`), and both export writers ask the frame what
+        // link layer it carries. Without this a restored loopback capture
+        // shows a tree that contradicts the row that opened it, and exports a
+        // file that declares Ethernet.
+        //
+        // Only adapters the table names a type for, and only when that type
+        // is not Ethernet - so an ordinary session does nothing here and no
+        // frame gains a property. See `SessionMeta.interfaces`, which also
+        // states what this cannot cover.
+        const restoredLinkTypes = new Map(
+          (meta?.interfaces ?? [])
+            .filter((i) => i.linkType !== undefined && i.linkType !== LINKTYPE.ETHERNET)
+            .map((i) => [i.label, i.linkType as number]),
+        );
+
         let done = 0;
         for (const rows of chunks) {
           // A restored session fills the buffer as full as a live capture ever
@@ -1010,7 +1030,13 @@ export default function App() {
           // back the field bag, because the bag is the contract; the split into
           // columns belongs here, where the frames join the buffer.
           fieldWriter.current.absorb(rows);
-          for (const packet of rows) accountingRef.current.residentBytes += estimateSummaryBytes(packet);
+          for (const packet of rows) {
+            accountingRef.current.residentBytes += estimateSummaryBytes(packet);
+            if (restoredLinkTypes.size > 0) {
+              const linkType = restoredLinkTypes.get(packet.interfaceName);
+              if (linkType !== undefined) packet.linkType = linkType;
+            }
+          }
           done += rows.length;
           // No ICMP or Info patches to apply: the writer held each row behind
           // the patch horizon until no open reassembly could still reach it, so

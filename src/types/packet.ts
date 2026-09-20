@@ -306,6 +306,19 @@ export interface Packet {
   /** Optional: see hexDump. Use packetAsciiDump(). */
   asciiDump?: string;
   interfaceName: string;
+  /**
+   * The capture's `LINKTYPE_*`, and **only when it is not Ethernet**.
+   *
+   * Absent is the overwhelmingly common case and means Ethernet, which is what
+   * every reader already defaults to - so a frame off an ordinary adapter
+   * carries no extra property at all, and the buffer's per-frame cost is
+   * unchanged for it (`docs/decisions/0017`). It is here rather than derived
+   * because three places downstream of dissection need it and none of them can
+   * reach the interface list: the replay that rebuilds a tree, the anonymiser
+   * that rewrites bytes at link-layer offsets, and the two export writers,
+   * which used to declare Ethernet in the file header whatever they held.
+   */
+  linkType?: number;
 }
 
 export interface CustomDissectorFieldDef {

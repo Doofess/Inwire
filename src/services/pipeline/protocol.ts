@@ -33,6 +33,14 @@ export interface PipelineInterface {
   id?: number;
   name: string;
   label: string;
+  /**
+   * The adapter's `LINKTYPE_*`, forwarded from `AgentInterface.linkType`.
+   *
+   * Absent means the agent did not say, and the Worker reads Ethernet - see
+   * `linkTypeFor` in `pipeline.worker.ts`. This is the only route the fact
+   * has: the Worker dissects and the main thread never does.
+   */
+  linkType?: number;
 }
 
 // --- main thread -> worker ---------------------------------------------------
@@ -135,6 +143,16 @@ export interface ReplayFrame {
   timeDelta: number;
   origLen: number;
   bytes: Uint8Array;
+  /**
+   * How to read the frame's first bytes, when that is not Ethernet.
+   *
+   * **A replay that guesses differently from the summary pass produces a tree
+   * that contradicts the row that opened it**, which is the same class of
+   * defect `host` was added here to fix. The frame's own `Packet.linkType`
+   * carries it, absent meaning Ethernet, so a conversation on an ordinary
+   * adapter sends nothing extra.
+   */
+  linkType?: number;
 }
 
 // --- worker -> main thread ---------------------------------------------------

@@ -37,6 +37,14 @@ export const LINKTYPE = {
   NULL: 0,        // BSD loopback: 4-byte AF header
   ETHERNET: 1,
   RAW_IP: 101,
+  // OpenBSD's loopback. The same 4-byte address family as NULL, except it is
+  // always big-endian rather than the capturing host's order - which
+  // `dissectNull` already resolves by checking both and letting the IP version
+  // nibble settle it, so this maps onto that decoder rather than needing one.
+  // Missing from this table meant an imported OpenBSD loopback capture fell
+  // through to Ethernet, which is the same misparse as a live Npcap loopback
+  // capture and for the same reason.
+  LOOP: 108,
   LINUX_SLL: 113,
   LINUX_SLL2: 276,
 } as const;

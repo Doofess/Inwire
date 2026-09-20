@@ -435,9 +435,45 @@ fn read_interfaces(npcap: &Npcap) -> io::Result<Vec<Interface>> {
         .map(|(index, device)| Interface {
             id: index,
             label: adapters::label_for(&device.name, device.description.as_deref(), &friendly),
+            link_type: datalink_of(npcap, &device.name),
             name: device.name,
         })
         .collect())
+}
+
+/// What `pcap_datalink` says about a device, remembered for the process.
+///
+/// **libpcap will only answer about a handle it has open**, so asking costs a
+/// `pcap_open_live` and a `pcap_close` per device - and the interface list is
+/// re-read on *every* connection, which would put that cost on the critical
+/// path of opening Inwire. Demand start is the whole reason the agent's cold
+/// start matters (ADR 0035), so the answer is cached by device name for the
+/// life of the process.
+///
+/// **Caching is safe because a device's link type is a property of what the
+/// device IS.** An Ethernet adapter does not become a loopback one; a device
+/// that appears later is not in the map and is asked about then. What can
+/// change under a running service is the SET of devices, and that is re-read
+/// per connection exactly as before.
+///
+/// Opened **non-promiscuous** and closed immediately: this is a question, not
+/// a capture, and putting an adapter into promiscuous mode to ask it would be
+/// a visible side effect of listing the adapters.
+///
+/// `None` rather than a guess when the open fails - a device in use by
+/// something that will not share it, or one the driver has just removed. The
+/// app's own fallback is Ethernet, so a `1` written here would be
+/// indistinguishable from having asked and been told.
+fn datalink_of(npcap: &Npcap, device: &str) -> Option<i32> {
+    static CACHE: Mutex<Option<HashMap<String, Option<i32>>>> = Mutex::new(None);
+    let mut held = CACHE.lock().unwrap();
+    let cache = held.get_or_insert_with(HashMap::new);
+    if let Some(known) = cache.get(device) {
+        return *known;
+    }
+    let answer = npcap.open(device, false).ok().map(|handle| handle.datalink());
+    cache.insert(device.to_string(), answer);
+    answer
 }
 
 /// The adapter report, joined to the capture devices the app knows.
