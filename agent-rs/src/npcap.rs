@@ -113,6 +113,7 @@ type FnGetErr = unsafe extern "C" fn(*mut PcapT) -> *mut c_char;
 type FnFindAllDevs = unsafe extern "C" fn(*mut *mut PcapIf, *mut c_char) -> c_int;
 type FnFreeAllDevs = unsafe extern "C" fn(*mut PcapIf);
 type FnSetBuff = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
+type FnSetMinToCopy = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
 
 /// The loaded library and its entry points.
 pub struct Npcap {
@@ -127,6 +128,8 @@ pub struct Npcap {
     /// driver's default, which is a degraded capture rather than a failed one -
     /// so this is an `Option` and not an error.
     setbuff: Option<FnSetBuff>,
+    /// Npcap's too, and absent for the same reason - see `set_min_to_copy`.
+    setmintocopy: Option<FnSetMinToCopy>,
 }
 
 #[derive(Debug)]
@@ -197,6 +200,9 @@ impl Npcap {
                 setbuff: sym(module, "pcap_setbuff")
                     .ok()
                     .map(|p| std::mem::transmute::<Farproc, FnSetBuff>(p)),
+                setmintocopy: sym(module, "pcap_setmintocopy")
+                    .ok()
+                    .map(|p| std::mem::transmute::<Farproc, FnSetMinToCopy>(p)),
             })
         }
     }
@@ -306,6 +312,37 @@ impl Capture<'_> {
         Ok(true)
     }
 
+    /// Asks the driver to hand frames over as soon as it has any.
+    ///
+    /// **Latency, not content.** Npcap's default `mintocopy` is 16 KB: the
+    /// driver holds captured frames in its kernel buffer until that much has
+    /// accumulated or `to_ms` expires, so on a quiet adapter a frame waits up
+    /// to the 100 ms timeout before the agent sees it. Nothing is lost - it is
+    /// the time between a packet arriving and a row appearing.
+    ///
+    /// Zero is what scapy asks for on this platform
+    /// (`scapy/arch/libpcap.py`), so the Python agent has always had it and
+    /// this port did not: the symbol was never resolved.
+    ///
+    /// **It is not free and the trade is deliberate.** A copy per frame rather
+    /// than per 16 KB is more user/kernel transitions, which is the wrong side
+    /// of the trade at rate - but at rate the buffer fills in well under
+    /// `to_ms` anyway, so the setting stops mattering exactly where its cost
+    /// would. The latency it buys is at the low rates where a person is
+    /// watching individual frames arrive.
+    ///
+    /// `Ok(false)` on a libpcap that does not export it, for the same reason
+    /// `set_kernel_buffer` answers that way.
+    pub fn set_min_to_copy(&self, bytes: c_int) -> io::Result<bool> {
+        let Some(setmintocopy) = self.npcap.setmintocopy else {
+            return Ok(false);
+        };
+        if unsafe { setmintocopy(self.handle, bytes) } != 0 {
+            return Err(io::Error::other(self.error()));
+        }
+        Ok(true)
+    }
+
     /// One frame, or a timeout.
     ///
     /// **A timeout and a failure are different answers.** Collapsing them is
@@ -385,3 +422,25 @@ impl Drop for Capture<'_> {
 unsafe impl Send for Capture<'_> {}
 unsafe impl Send for Npcap {}
 unsafe impl Sync for Npcap {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The two optional symbols are optional in the type and present here.**
+    ///
+    /// Both are Npcap's rather than libpcap's, so the loader treats a missing
+    /// one as a degraded capture instead of a failure - which means a typo in
+    /// either name would cost the setting and report nothing. `set_min_to_copy`
+    /// in particular buys latency and no content, so its absence has no symptom
+    /// at all beyond frames arriving up to `to_ms` late.
+    #[test]
+    fn npcaps_own_symbols_resolve_on_this_machine() {
+        let npcap = Npcap::load().expect("wpcap.dll loads");
+        assert!(npcap.setbuff.is_some(), "wpcap.dll exports no pcap_setbuff");
+        assert!(
+            npcap.setmintocopy.is_some(),
+            "wpcap.dll exports no pcap_setmintocopy"
+        );
+    }
+}
