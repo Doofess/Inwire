@@ -90,7 +90,9 @@ export function dissectTcpTransport(
   context: TcpContext,
 ): TransportResult | null {
   const { srcIp, dstIp, frameId, tsUs, tcpTracker, l4SegmentLen, pseudoHeader } = context;
-  const sentByUs = context.sentByUs ?? false;
+  // No `?? false`: undefined means the direction is not known, and
+  // `checksumVerdict` needs to tell that from a decided "not us".
+  const { sentByUs } = context;
   const srcPort = (rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1];
   const dstPort = (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3];
   // ">>> 0" reinterprets the bitwise result as unsigned - without it, any

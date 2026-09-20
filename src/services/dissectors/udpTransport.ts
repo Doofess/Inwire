@@ -49,7 +49,8 @@ export function dissectUdpTransport(
   context: UdpContext,
 ): TransportResult | null {
   const { srcIp, dstIp, frameId, tsUs, quicTracker, dnsTracker, pseudoHeader } = context;
-  const sentByUs = context.sentByUs ?? false;
+  // No `?? false`: see the same line in `tcpTransport.ts`.
+  const { sentByUs } = context;
   // UDP Decode
   const srcPort = (rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1];
   const dstPort = (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3];

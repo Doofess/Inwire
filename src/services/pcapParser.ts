@@ -948,16 +948,30 @@ export function decodeRawEthernetPacket(
   // fall through to the address test after dissection.
   let direction = host ? directionFromMacs(link.srcMac, link.dstMac, host) : 0;
   /**
-   * Did this machine send the frame?
+   * Did this machine send the frame? `undefined` when that cannot be decided.
    *
    * Read here, from the MAC decision alone, because it is needed by the
    * checksum verdict deep in the network and transport branches - long before
-   * the address-based fallback runs. On any Ethernet capture the MACs have
-   * already answered; on a link with no MACs the answer is "not known", which
-   * is the safe way round: an unknown frame keeps the ordinary verdict rather
-   * than being excused.
+   * the address-based fallback runs.
+   *
+   * **This used to be a boolean, and "not known" collapsed into "no".** The
+   * comment then called that the safe way round - an unknown frame keeps the
+   * ordinary verdict rather than being excused - and that reasoning holds for
+   * one odd frame among many. It fails for the case it turned out to meet:
+   * when the agent sends no `adapter_config` there are no host MACs at all, so
+   * `directionFromMacs` answers `Unknown` for EVERY frame, and every frame this
+   * machine sent was then validated against bytes the NIC had not finished
+   * writing. Not an odd frame excused - a whole capture accused. The measured
+   * shape of that is in this file's own header: 30.3% and 24.4% of the list
+   * painted `Broken`.
+   *
+   * What the old comment was protecting is untouched, because `Transit` is a
+   * DECIDED direction rather than an unknown one: a frame between two other
+   * machines still returns `false` here and is still checked.
    */
-  const sentByUs = directionOf(direction) === Direction.Out;
+  const sentByUs = directionOf(direction) === Direction.Unknown
+    ? undefined
+    : directionOf(direction) === Direction.Out;
   let proto: Packet['protocol'] = 'TCP';
   // The Protocol column's free-form label, when it differs from the coarse
   // ProtocolType - "TLSv1.2", "ICMPv6", "STP". Left undefined when the two

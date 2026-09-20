@@ -343,6 +343,20 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
 // late - the verdict is already a tree row, an expert finding and a dense
 // column. So the identity is stored in the session and handed back in
 // (`SessionMeta.host`), and these two restores of the SAME bytes must differ.
+//
+// **Which frame shows the difference moved, and the old one was the bug.** This
+// block used to assert that a blind restore called the SENT frame's checksum
+// `Bad` - knowledge withdrawing an accusation. That is exactly the behaviour
+// `scripts/dissect/checksum-verdict.ts` now forbids: with no host identity the
+// direction is unknown for every frame, and a failing checksum is then
+// ambiguous between corruption and a NIC mid-write, so it cannot be called
+// `Bad`. Both restores say `Unverified` for that frame now and it discriminates
+// nothing.
+//
+// The RECEIVED frame does instead, and it is the better probe: knowledge ADDS
+// the judgement rather than removing one. Blind it is `Unverified`; knowing the
+// host it is `Bad`, because `In` is a decided direction and nothing about it
+// suggests an unfinished checksum.
 {
   const host: HostIdentity = {
     macs: new Set(['00:11:22:33:44:55']), addresses: new Set(['10.0.0.1']),
@@ -386,12 +400,17 @@ const stored: StoredFrame[] = live.packets.map(toStoredFrame);
   const blind = restoreBatch(asStored, freshTrackers(), undefined, undefined, true).packets;
   const knowing = restoreBatch(asStored, freshTrackers(), undefined, undefined, true, host).packets;
 
-  check('a restore that does not know the host calls the checksum bad',
-    verdict(blind, 1), 'Bad');
-  check('...and says so as a finding', findingsOf(blind, 1), ['Bad checksum']);
-  check('...while one that does declines to judge it', verdict(knowing, 1), 'Unverified');
-  check('...and raises nothing', findingsOf(knowing, 1), []);
+  check('a restore that does not know the host accuses nothing',
+    verdict(blind, 1), 'Unverified');
+  check('...and raises no finding', findingsOf(blind, 1), []);
+  check('...not even for the frame that was received', verdict(blind, 2), 'Unverified');
+  check('...while one that does still declines to judge what we sent',
+    verdict(knowing, 1), 'Unverified');
+  check('...and raises nothing for it', findingsOf(knowing, 1), []);
+  // The discriminator: the same bytes, judged only because the host travelled.
   check('a frame the machine RECEIVED is still judged', verdict(knowing, 2), 'Bad');
+  check('...and that is the difference the stored host makes',
+    [verdict(blind, 2), verdict(knowing, 2)], ['Unverified', 'Bad']);
 
   // And the direction itself, which is what the stored host is for.
   check('the frame this machine sent is marked as sent',
