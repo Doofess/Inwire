@@ -158,15 +158,18 @@ const TCP_CAP = findTcpCap();
 {
   const tracker = new IcmpEchoTracker();
   for (let i = 0; i < 10_000; i++) {
-    tracker.recordRequest('10.0.0.1', '10.1.' + (i >> 8) + '.' + (i & 0xff), 1, i, i + 1);
+    tracker.recordRequest('10.0.0.1', '10.1.' + (i >> 8) + '.' + (i & 0xff), 1, i, i + 1, i * 1000);
   }
   const cap = tracker.pendingCount;
   checkTrue('unanswered echoes are capped', cap > 0 && cap < 10_000);
 
-  // The newest are the ones a reply is still plausibly coming for.
+  // The newest are the ones a reply is still plausibly coming for. The entry
+  // carries the request's capture time as well as its frame number, because
+  // `icmp.resptime` is measured from it and only the frame that asked knows
+  // when it was asked.
   const lastTarget = '10.1.' + (9999 >> 8) + '.' + (9999 & 0xff);
   check('the newest request still pairs with its reply',
-    tracker.matchReply(lastTarget, '10.0.0.1', 1, 9999), 10_000);
+    tracker.matchReply(lastTarget, '10.0.0.1', 1, 9999), { frameId: 10_000, tsUs: 9_999_000 });
   check('...and consuming it frees the entry', tracker.pendingCount, cap - 1);
 
   // A reply whose request was evicted loses its cross-reference and nothing
