@@ -177,13 +177,25 @@ check('the filter engine resolves its field names through the registry',
   && /from '\.\/dissect\/fieldRegistry'/.test(engine), true);
 
 // A handful of registered names legitimately appear in the resolution table,
-// because the engine's own aliases are BUILT from them: `tcp.port` reads
-// `tcp.srcport` and `tcp.dstport`, `ipv6.addr` reads the two IPv6 addresses.
+// for two reasons.
+//
+// Most are there because the engine's own aliases are BUILT from them:
+// `tcp.port` reads `tcp.srcport` and `tcp.dstport`, `ipv6.addr` reads the two
+// IPv6 addresses.
+//
+// `tcp.stream` is the second kind and needs its own sentence. It is read
+// straight off `Packet.streamId`, a property the dissector already sets and
+// every summary already carries, so routing it through the bag would write a
+// second copy of a number the packet holds - on ~58% of frames. It is
+// registered because it is a real tree row with a real filter name, and it is
+// answered here because the value was never in the bag to begin with.
+//
 // Everything else a dissector publishes must not be spelled out anywhere in
 // the engine - it should arrive through the registry or not at all.
 const ENGINE_ALIASES = new Set([
   'ipv6.src', 'ipv6.dst', 'eth.src', 'eth.dst',
   'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport',
+  'tcp.stream',
 ]);
 check('...and no longer hand-lists a dissector field',
   [...FIELD_ABBREVS]

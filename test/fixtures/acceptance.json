@@ -67,17 +67,17 @@
           "llc": 3,
           "lldp": 4,
           "stp": 4,
-          "tcp": 24,
+          "tcp": 59,
           "tls": 17,
           "udp": 5
         },
         "protosNamed": 21,
         "ceilings": {
-          "filterableNotInTree": 10
+          "filterableNotInTree": 9
         },
         "counts": {
-          "absentDistinct": 621,
-          "valueMismatches": 67
+          "absentDistinct": 587,
+          "valueMismatches": 90
         },
         "unimplemented": {
           "quic": "A 479-line dissector with its own crypto that decrypts Initials and labels the Protocol column, publishing not one quic.* abbrev on either surface. 40 reference fields here. Recorded rather than floored at 0: a zero floor protects nothing and reads as measured-and-accepted.",
@@ -130,17 +130,17 @@
           "ipv6": 4,
           "llc": 3,
           "stp": 4,
-          "tcp": 24,
+          "tcp": 59,
           "tls": 17,
           "udp": 5
         },
         "protosNamed": 16,
         "ceilings": {
-          "filterableNotInTree": 9
+          "filterableNotInTree": 8
         },
         "counts": {
-          "absentDistinct": 455,
-          "valueMismatches": 60
+          "absentDistinct": 421,
+          "valueMismatches": 83
         },
         "unimplemented": {
           "quic": "As inwire: no quic.* abbrev on either surface, against 37 reference fields.",

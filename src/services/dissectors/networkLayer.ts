@@ -519,9 +519,11 @@ export function decodeNetworkLayer(
       const fromTransport = transportPatches(transport, id);
       if (fromTransport) infoPatches = (infoPatches ?? []).concat(fromTransport);
       resolvedNames = transport.resolvedNames;
-      if (transport.streamId !== undefined) {
-        ipLayer.fields.push({ name: '[Stream index]', value: transport.streamId, generated: true });
-      }
+      // **`[Stream index]` is the TCP layer's row and is drawn there now.**
+      // It sat here carrying no abbrev, so `tcp.stream` was answerable only by
+      // a synthetic reader in `filter/fields.ts` and the detail pane showed
+      // the number under the wrong protocol. Two rows for one fact would be
+      // worse than the one in the wrong place.
     } else if (!isFragment) {
       // A fragment has no transport header to have failed to dissect - it was
       // never carrying one, or the datagram is not complete yet. Saying "IP
@@ -760,9 +762,11 @@ export function decodeNetworkLayer(
       const fromTransport = transportPatches(transport, id);
       if (fromTransport) infoPatches = (infoPatches ?? []).concat(fromTransport);
       resolvedNames = transport.resolvedNames;
-      if (transport.streamId !== undefined) {
-        ipv6Layer.fields.push({ name: '[Stream index]', value: transport.streamId, generated: true });
-      }
+      // **`[Stream index]` is the TCP layer's row and is drawn there now.**
+      // It sat here carrying no abbrev, so `tcp.stream` was answerable only by
+      // a synthetic reader in `filter/fields.ts` and the detail pane showed
+      // the number under the wrong protocol. Two rows for one fact would be
+      // worse than the one in the wrong place.
     } else if (!isMalformedJumbo) {
       if (chain && chain.fragmentPayloadOffset !== undefined) {
         // A fragment of a datagram that is not (yet) whole. Its payload is a

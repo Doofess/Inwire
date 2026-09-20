@@ -236,6 +236,22 @@ interface TcpConnection {
   streamId?: number;
   /** Frames seen on this connection, which is `recordStreamPacket`'s answer. */
   packets: number;
+  /**
+   * When this stream's first frame arrived, and its most recent, in epoch
+   * microseconds - the two clocks `tcp.time_relative` and `tcp.time_delta` are
+   * measured against.
+   *
+   * Per connection rather than per direction, which is the reference's own
+   * choice: both fields describe the conversation, so an ACK coming back
+   * resets the delta just as a data segment going out does.
+   *
+   * Two numbers on a record that already exists, against ADR 0014's rule about
+   * what a connection may cost. They are unconditional because every TCP frame
+   * wants them, where `tls`/`ldap`/`smb2` beside them are allocated only on a
+   * connection that speaks those.
+   */
+  firstTsUs?: number;
+  lastTsUs?: number;
   sawSyn: boolean;
   sawSynAck: boolean;
   sawFinOrRst: boolean;
@@ -619,13 +635,37 @@ export class TcpStreamTracker {
     return conn.smb2;
   }
 
-  /** Returns this packet's 1-based position within its stream, recording it. */
-  public recordStreamPacket(streamId: number): number {
+  /**
+   * This packet's 1-based position within its stream, and the two stream
+   * clocks - recording all three.
+   *
+   * One call rather than three, because every one of them is a write and
+   * splitting them would mean three lookups per frame on the hot path. The
+   * memo in `locate` exists because that cost was measured at 8.6% of the
+   * pipeline once already.
+   */
+  public recordStreamPacket(streamId: number, tsUs?: number): {
+    packetNumber: number;
+    /** Since the stream's first frame, in seconds. */
+    sinceFirst?: number;
+    /** Since the previous frame on this stream, in seconds. */
+    sincePrevious?: number;
+  } {
     const conn = this.byStreamId.get(streamId);
     // A stream index whose connection has been evicted counts from one again,
     // which is what a connection this tracker has not seen before looks like.
-    if (conn === undefined) return 1;
-    return ++conn.packets;
+    if (conn === undefined) return { packetNumber: 1 };
+    const packetNumber = ++conn.packets;
+    if (tsUs === undefined) return { packetNumber };
+    // **The first frame of a stream is 0.000000 on both clocks, not absent.**
+    // That is the reference's answer and it is the right one: the stream
+    // starts here, so nothing has elapsed - which is a measurement, where an
+    // empty row would read as one that could not be taken.
+    conn.firstTsUs ??= tsUs;
+    const sinceFirst = (tsUs - conn.firstTsUs) / 1e6;
+    const sincePrevious = (tsUs - (conn.lastTsUs ?? tsUs)) / 1e6;
+    conn.lastTsUs = tsUs;
+    return { packetNumber, sinceFirst, sincePrevious };
   }
 
   public updateConnectionState(streamId: number, syn: boolean, ack: boolean, fin: boolean, rst: boolean): void {
