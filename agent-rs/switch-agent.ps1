@@ -36,7 +36,27 @@ $Service   = 'InwireAgent'
 $AgentDir  = 'C:\Program Files\Inwire\agent'
 $PythonExe = Join-Path $AgentDir 'inwire-agent-windows.exe'
 $RustDest  = Join-Path $AgentDir 'inwire-agent-rs.exe'
-$RustBuilt = Join-Path $PSScriptRoot 'target\release\inwire-agent.exe'
+# **Where cargo actually put it, which is not always `target\release\`.**
+#
+# This machine has no MSVC linker, so the agent is built with
+# `--target x86_64-pc-windows-gnu` - and an explicit `--target` makes cargo
+# write to `target\<triple>\release\` instead. Naming only the untargeted path
+# meant `-Rust` found a binary from whenever the host target last worked,
+# copied it, reported success, and installed a build nobody had asked for. That
+# is the same trap the comment above warns about ("rebuilding does not update
+# the service") arriving by a door the comment does not cover, and it is worse,
+# because here the rebuild happened.
+#
+# So both are considered and the NEWEST wins, with the choice printed. Picking
+# the newest rather than preferring one path keeps this right on a machine that
+# does have MSVC, where `target\release\` is the real output.
+$RustCandidates = @(
+  (Join-Path $PSScriptRoot 'target\x86_64-pc-windows-gnu\release\inwire-agent.exe'),
+  (Join-Path $PSScriptRoot 'target\release\inwire-agent.exe')
+) | Where-Object { Test-Path $_ } | Sort-Object { (Get-Item $_).LastWriteTimeUtc } -Descending
+$RustBuilt = if ($RustCandidates) { $RustCandidates[0] } else {
+  Join-Path $PSScriptRoot 'target\x86_64-pc-windows-gnu\release\inwire-agent.exe'
+}
 
 # The descriptor the installer writes, stated in full rather than edited into
 # whatever `sc sdshow` returns - string surgery on a security descriptor is how
@@ -164,7 +184,11 @@ if ($Rust) {
   Say 'stopping and removing the current registration'
   Remove-Registration
 
-  Say "copying the build into $AgentDir (admin-only, so the image is as privileged as the service)"
+  # Named, and with its age, because installing yesterday's binary and being
+  # told nothing is the mistake this whole block is written around.
+  $age = [int]((Get-Date).ToUniversalTime() - (Get-Item $RustBuilt).LastWriteTimeUtc).TotalMinutes
+  Say "copying $RustBuilt (built $age minute(s) ago) into $AgentDir"
+  Say '  admin-only, so the image is as privileged as the service'
   Copy-Item $RustBuilt $RustDest -Force
 
   Say 'registering, on the installer''s own command line - options before the verb'
