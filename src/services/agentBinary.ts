@@ -75,6 +75,43 @@ export interface BinaryFrame {
 export class BinaryFrameError extends Error {}
 
 /**
+ * The one thing `tsc` cannot say about this module's two entry points.
+ *
+ * Both declare an `ArrayBuffer`, and **TypeScript 5.8 finds a `Uint8Array`
+ * structurally assignable to one** - `byteLength` and `slice` are the whole of
+ * what `ArrayBuffer` declares and a typed array has both. So the annotation is
+ * documentation, not a guard, and `new DataView(...)` is what actually refuses:
+ * at runtime, with `First argument to DataView constructor must be an
+ * ArrayBuffer`, naming neither the caller nor the fix.
+ *
+ * That is not hypothetical. `scripts/agent/agent-compare.ts` shipped passing
+ * `frame.payload` straight in; `npm run lint` passed; the script threw on the
+ * first batch it was ever handed, so it had never once reached its own
+ * assertions.
+ *
+ * **Refusing a view rather than converting it is the point.** A typed array
+ * arriving here is usually a window into a larger buffer - a `FrameReader`
+ * payload, a slab of socket data - and converting one by reading `.buffer`
+ * would decode from the wrong offset *in silence*, which is exactly what
+ * `pipeline.worker.ts`'s `asArrayBuffer` exists to prevent. The caller knows
+ * its own offsets and this does not, so this says so instead of guessing.
+ *
+ * `ArrayBuffer.isView` rather than `instanceof ArrayBuffer`: it reads an
+ * internal slot and so is realm-independent. A real `ArrayBuffer` crosses two
+ * structured-clone boundaries on the frame path, and an `instanceof` against
+ * the wrong realm's prototype would reject a buffer that is perfectly good.
+ */
+function refuseAView(buffer: ArrayBuffer, caller: string): void {
+  if (!ArrayBuffer.isView(buffer)) return;
+  const view = buffer as unknown as ArrayBufferView;
+  throw new BinaryFrameError(
+    `${caller} takes an ArrayBuffer and was given ${view.constructor.name}, which is a view. `
+    + 'Pass `b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)`: reading `.buffer` '
+    + 'alone decodes from the wrong offset whenever the view is into a larger buffer.',
+  );
+}
+
+/**
  * True when a message is one of these rather than JSON.
  *
  * Cheap enough to run on every message: a length check and one 32-bit read.
@@ -82,6 +119,7 @@ export class BinaryFrameError extends Error {}
  * 3.1 agent's per-packet messages still need.
  */
 export function isPacketBatch(buffer: ArrayBuffer): boolean {
+  refuseAView(buffer, 'isPacketBatch');
   if (buffer.byteLength < BATCH_HEADER_BYTES) return false;
   return new DataView(buffer).getUint32(0, true) === MAGIC_LE;
 }
@@ -95,6 +133,7 @@ export function isPacketBatch(buffer: ArrayBuffer): boolean {
  * they are the survivors of a message that was wrong.
  */
 export function decodePacketBatch(buffer: ArrayBuffer): BinaryFrame[] {
+  refuseAView(buffer, 'decodePacketBatch');
   if (buffer.byteLength < BATCH_HEADER_BYTES) {
     throw new BinaryFrameError(`packet batch is ${buffer.byteLength} bytes, shorter than its header`);
   }
