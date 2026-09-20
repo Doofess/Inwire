@@ -58,8 +58,8 @@
           "dhcp": 11,
           "dns": 26,
           "eth": 4,
-          "icmp": 2,
-          "icmpv6": 10,
+          "icmp": 11,
+          "icmpv6": 50,
           "ieee1905": 2,
           "igmp": 4,
           "ip": 14,
@@ -76,8 +76,8 @@
           "filterableNotInTree": 9
         },
         "counts": {
-          "absentDistinct": 587,
-          "valueMismatches": 90
+          "absentDistinct": 538,
+          "valueMismatches": 113
         },
         "unimplemented": {
           "quic": "A 479-line dissector with its own crypto that decrypts Initials and labels the Protocol column, publishing not one quic.* abbrev on either surface. 40 reference fields here. Recorded rather than floored at 0: a zero floor protects nothing and reads as measured-and-accepted.",
@@ -123,8 +123,8 @@
           "arp": 5,
           "dns": 26,
           "eth": 4,
-          "icmp": 2,
-          "icmpv6": 10,
+          "icmp": 11,
+          "icmpv6": 44,
           "ieee1905": 2,
           "ip": 13,
           "ipv6": 4,
@@ -139,8 +139,8 @@
           "filterableNotInTree": 8
         },
         "counts": {
-          "absentDistinct": 421,
-          "valueMismatches": 83
+          "absentDistinct": 378,
+          "valueMismatches": 104
         },
         "unimplemented": {
           "quic": "As inwire: no quic.* abbrev on either surface, against 37 reference fields.",

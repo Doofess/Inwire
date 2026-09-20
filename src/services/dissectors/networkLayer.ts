@@ -28,7 +28,7 @@ import type { QuicFlowTracker } from '../quicFlowTracker';
 import type { DnsTracker } from '../dnsTracker';
 import type { L3Tracker } from '../l3Tracker';
 import type { InfoPatch } from '../dissect/types';
-import { formatIpv6Address, formatMac } from '../addressFormat';
+import { formatIpv6Address } from '../addressFormat';
 import { ETHERNET_MAX_FRAME } from '../direction';
 import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './ipv4';
 import { IPV6_EXT_HEADERS, NO_NEXT_HEADER, walkIpv6Extensions } from './ipv6Ext';
@@ -41,6 +41,7 @@ import { dissectArp } from './l2';
 import { resolveMacName } from '../macVendors';
 import { dissectTcpTransport } from './tcpTransport';
 import { dissectUdpTransport } from './udpTransport';
+import { dissectIcmp } from './icmp';
 
 /**
  * The caller state the network layer decides.
@@ -86,6 +87,18 @@ export interface NetworkContext {
   l3Tracker?: L3Tracker;
   /** This machine sent the frame, so its checksums may not be filled in yet. */
   sentByUs: boolean | undefined;
+  /**
+   * This decode IS the datagram an ICMP error quoted, rather than the frame.
+   *
+   * Two things follow, and both are refusals. Nothing may reach a tracker: a
+   * quoted TCP header is eight bytes of a segment that was sent once and is
+   * being described by somebody else, so feeding it to `TcpStreamTracker`
+   * would invent a retransmission, a stream and an RTT sample out of a
+   * router's complaint. And nothing may recurse again - an error quoting an
+   * error is legal and terminates on its own, but a bound that cannot be
+   * reasoned about is not one worth having.
+   */
+  quoted?: boolean;
 }
 
 /**
@@ -143,6 +156,53 @@ export function decodeNetworkLayer(
     }
     return decodeNetworkLayer(
       rawBytes, inner.offset, inner.etherType, layers, filterFields, carried, context);
+  };
+
+  /**
+   * The datagram an ICMP error quotes back, dissected in place.
+   *
+   * **It looks like the two tunnels below and is the opposite of them.** GRE
+   * and VXLAN look THROUGH themselves: the reference reports the inner
+   * packet in every column, so those two hand back whatever the inner decode
+   * decided. An ICMP error is about a packet rather than carrying one - the
+   * Source, Destination, Protocol and Info all belong to the router that sent
+   * the complaint - so this returns nothing at all and the outer frame's
+   * state is untouched. What it shares with them is the one thing worth
+   * sharing: `layers` is the same array, so the quoted IP header and whatever
+   * sits under it appear in the tree beneath the ICMP layer, which is where
+   * the reference puts them.
+   *
+   * Three refusals make that safe, and each is a bug that would otherwise be
+   * silent:
+   *
+   * - **The bytes are truncated to what was actually quoted.** An error
+   *   carries the original IP header plus eight bytes, and that header's own
+   *   Total Length describes the WHOLE original datagram - so every
+   *   `rawBytes.length` guard downstream would be answering about a buffer
+   *   that keeps going. A `subarray` preserves indices, so every byte range
+   *   the inner decode produces still points at the right place in this
+   *   frame's hex dump, and every length check bounds at the quote.
+   * - **No tracker travels with it.** A quoted TCP header would otherwise
+   *   open a stream, claim a sequence base and be counted as a segment.
+   * - **The field bag is thrown away.** The inner `ip.src` is not this
+   *   frame's source, and one key holds one value.
+   */
+  const decodeQuotedDatagram = (embedded: { offset: number; etherType: number; end: number }): void => {
+    if (context.quoted) return;
+    const quotedBytes = rawBytes.subarray(0, Math.min(embedded.end, rawBytes.length));
+    if (embedded.offset >= quotedBytes.length) return;
+    decodeNetworkLayer(
+      quotedBytes, embedded.offset, embedded.etherType, layers, {},
+      {
+        // Placeholders. Every one of these is thrown away with the object -
+        // what the call is FOR is the rows it appends to `layers`.
+        srcIp: '', dstIp: '', proto: 'TCP', info: '', status: 'ok',
+        transportLayerIndex: -1, extensionTokens: [], transportTokens: [],
+      },
+      {
+        id, tsUs, relativeTime, timeDelta, origLen,
+        sentByUs: undefined, quoted: true,
+      });
   };
 
   /**
@@ -508,6 +568,7 @@ export function decodeNetworkLayer(
         ],
       });
       if (transport.extraLayers) layers.push(...transport.extraLayers);
+      if (transport.embeddedNetwork) decodeQuotedDatagram(transport.embeddedNetwork);
       if (transport.protocolTokens) transportTokens = transport.protocolTokens;
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
@@ -751,6 +812,7 @@ export function decodeNetworkLayer(
         ],
       });
       if (transport.extraLayers) layers.push(...transport.extraLayers);
+      if (transport.embeddedNetwork) decodeQuotedDatagram(transport.embeddedNetwork);
       if (transport.protocolTokens) transportTokens = transport.protocolTokens;
       if (transport.status) status = transport.status;
       streamId = transport.streamId;
@@ -847,128 +909,17 @@ function decodeTransportLayer(
     // IGMP, VRRP and OSPF - see dissectors/portless.ts.
     const read = dissectPortless(rawBytes, transportOffset, ipProtocolNum, l4SegmentLen);
     if (read) return read;
-  } else if ((ipProtocolNum === 1 || ipProtocolNum === 58) && rawBytes.length >= transportOffset + 4) {
-    // ICMP (v4, protocol 1) / ICMPv6 (protocol 58) Decode - ICMPv6 uses
-    // different type numbers than ICMPv4 for the same messages (e.g. echo
-    // request/reply is 128/129 in ICMPv6 vs 8/0 in ICMPv4), and adds the IPv6
-    // Neighbor Discovery messages (router/neighbor solicitation/advertisement)
-    // that make up most real-world ICMPv6 traffic.
-    const isIcmpv6 = ipProtocolNum === 58;
-    const icmpProtocolLabel = isIcmpv6 ? 'ICMPv6' : 'ICMP';
-    const icmpType = rawBytes[transportOffset];
-    const icmpCode = rawBytes[transportOffset + 1];
-    const isEchoRequest = isIcmpv6 ? icmpType === 128 : icmpType === 8;
-    const isEchoReply = isIcmpv6 ? icmpType === 129 : icmpType === 0;
-
-    let icmpId: number | undefined;
-    let icmpSeq: number | undefined;
-    if ((isEchoRequest || isEchoReply) && rawBytes.length >= transportOffset + 8) {
-      icmpId = (rawBytes[transportOffset + 4] << 8) | rawBytes[transportOffset + 5];
-      icmpSeq = (rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7];
-    }
-
-    let info: string;
-    if (isIcmpv6) {
-      switch (icmpType) {
-        case 128: info = 'Echo (ping) request '; break;
-        case 129: info = 'Echo (ping) reply   '; break;
-        case 133: info = 'Router Solicitation'; break;
-        case 134: info = describeRouterAdvertisement(rawBytes, transportOffset); break;
-        case 135: info = describeNeighborSolicitation(rawBytes, transportOffset); break;
-        case 136: info = describeNeighborAdvertisement(rawBytes, transportOffset); break;
-        case 137: info = 'Redirect'; break;
-        case 130: info = 'Multicast Listener Query'; break;
-        case 131: info = 'Multicast Listener Report'; break;
-        case 132: info = 'Multicast Listener Done'; break;
-        case 143: info = 'Multicast Listener Report Message v2'; break;
-        case 1: info = `Destination Unreachable (${ICMPV6_UNREACHABLE_CODES[icmpCode] ?? `Code ${icmpCode}`})`; break;
-        case 2: info = 'Packet Too Big'; break;
-        case 3: info = `Time Exceeded (${icmpCode === 0 ? 'hop limit exceeded in transit' : 'fragment reassembly time exceeded'})`; break;
-        case 4: info = `Parameter Problem (${icmpCode === 0 ? 'erroneous header field encountered' : icmpCode === 1 ? 'unrecognized Next Header type encountered' : 'unrecognized IPv6 option encountered'})`; break;
-        default: info = `ICMPv6 Type ${icmpType} Code ${icmpCode}`;
-      }
-    } else if (icmpType === 8) {
-      // Two trailing spaces, and five after "reply": Wireshark pads the word so
-      // the id= columns line up down the Info column. Matched exactly, since
-      // the column text is the contract the parity harness compares.
-      info = 'Echo (ping) request ';
-    } else if (icmpType === 0) {
-      info = 'Echo (ping) reply   ';
-    } else {
-      const named = ICMP_TYPE_NAMES[icmpType];
-      const code = icmpType === 3 ? ICMP_UNREACHABLE_CODES[icmpCode]
-        : icmpType === 11 ? (icmpCode === 0 ? 'Time to live exceeded in transit' : 'Fragment reassembly time exceeded')
-        : icmpType === 5 ? ICMP_REDIRECT_CODES[icmpCode] : undefined;
-      info = named ? (code ? `${named} (${code})` : named) : `ICMP Type ${icmpType} Code ${icmpCode}`;
-    }
-
-    if (icmpId !== undefined && icmpSeq !== undefined) {
-      // The reference analyzer shows both the big-endian wire value and the same 16 bits
-      // reinterpreted little-endian, since many ping implementations
-      // increment the sequence counter in host (LE) byte order.
-      const seqLe = ((icmpSeq << 8) | (icmpSeq >> 8)) & 0xffff;
-      const ttlPart = ttl !== undefined ? `, ttl=${ttl}` : '';
-      info += ` id=0x${icmpId.toString(16).padStart(4, '0')}, seq=${icmpSeq}/${seqLe}${ttlPart}`;
-    }
-
-    let icmpMatchedRequestFrameId: number | undefined;
-    if (icmpTracker && icmpId !== undefined && icmpSeq !== undefined && frameId !== undefined) {
-      if (isEchoRequest) {
-        icmpTracker.recordRequest(srcIp, dstIp, icmpId, icmpSeq, frameId);
-      } else if (isEchoReply) {
-        icmpMatchedRequestFrameId = icmpTracker.matchReply(srcIp, dstIp, icmpId, icmpSeq);
-        if (icmpMatchedRequestFrameId !== undefined) {
-          info += ` (request in ${icmpMatchedRequestFrameId})`;
-        }
-      }
-    }
-
-    const fields: ProtocolField[] = [
-      { name: 'Type', value: icmpType, rawBytesRange: [transportOffset, transportOffset] },
-      { name: 'Code', value: icmpCode, rawBytesRange: [transportOffset + 1, transportOffset + 1] },
-    ];
-    if (icmpId !== undefined && icmpSeq !== undefined) {
-      fields.push(
-        { name: 'Identifier (BE)', value: `0x${icmpId.toString(16).padStart(4, '0')} (${icmpId})`, rawBytesRange: [transportOffset + 4, transportOffset + 5] },
-        { name: 'Sequence Number (BE)', value: icmpSeq, rawBytesRange: [transportOffset + 6, transportOffset + 7] },
-      );
-    }
-
-    return {
-      proto: 'ICMP',
-      protocolLabel: icmpProtocolLabel,
-      fields: isIcmpv6
-        ? {
-            'icmpv6.type': icmpType, 'icmpv6.code': icmpCode,
-            // Only for an RA. Every other ICMPv6 type would carry a bag of
-            // empty keys, and a field a frame does not have is a field that
-            // correctly matches nothing.
-            ...(icmpType === 134 ? routerAdvertisementFields(rawBytes, transportOffset) : {}),
-          }
-        : { 'icmp.type': icmpType, 'icmp.code': icmpCode },
-      info,
-      icmpMatchedRequestFrameId,
-      layer: {
-        name: isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol',
-        summary: `${isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol'}, ${info}`,
-        rawBytesRange: [transportOffset, transportOffset + (icmpId !== undefined ? 7 : 3)],
-        fields: icmpMatchedRequestFrameId !== undefined
-          ? [
-              ...fields,
-              // The echo request this reply answers. Generated - it describes
-              // another frame, not bytes in this one - and clickable, so the
-              // pairing the tracker already computes is navigable instead of
-              // only appearing as text in the Info column.
-              {
-                name: '[Request In]',
-                value: icmpMatchedRequestFrameId,
-                generated: true,
-                linkToFrame: icmpMatchedRequestFrameId,
-              },
-            ]
-          : fields,
-      },
-    };
+  } else if (ipProtocolNum === 1 || ipProtocolNum === 58) {
+    // ICMP (v4, protocol 1) / ICMPv6 (protocol 58) - see dissectors/icmp.ts.
+    // ICMPv6 uses different type numbers than ICMPv4 for the same messages
+    // (echo request/reply is 128/129 rather than 8/0) and adds the IPv6
+    // Neighbor Discovery messages that make up most real ICMPv6 traffic, so
+    // one module reads both and branches on the protocol number.
+    const read = dissectIcmp(rawBytes, transportOffset, {
+      isIcmpv6: ipProtocolNum === 58,
+      srcIp, dstIp, ttl, frameId, tsUs, icmpTracker, l4SegmentLen, pseudoHeader, sentByUs,
+    });
+    if (read) return read;
   }
 
   return null;
@@ -985,6 +936,12 @@ function decodeTransportLayer(
  */
 const IPV6_FRAGMENT_KEY = 44;
 
+/**
+ * Standard Internet checksum (RFC 1071) over the IPv4 header, with the
+ * checksum field itself treated as zero - the same algorithm the sender
+ * used to produce it, so a correct header always recomputes to the value
+ * actually stored there.
+ */
 function computeIpHeaderChecksum(rawBytes: Uint8Array, l3Offset: number, ipHeaderLen: number): number {
   let sum = 0;
   for (let i = 0; i < ipHeaderLen; i += 2) {
@@ -1149,162 +1106,11 @@ function transportPatches(
 }
 
 /**
- * What a Router Advertisement announces, as filterable fields.
- *
- * The RA is how a passive observer learns an IPv6 network's shape without
- * asking anything: the prefix hosts are autoconfiguring from, the resolvers
- * they were handed, how long the router expects to be the default one, and
- * whether it is telling them to use DHCPv6 as well. Nothing else on the wire
- * carries it, and the machine's own configuration does not say where any of it
- * came from - which is exactly what makes it worth putting beside the OS's
- * answer in the Network panel.
- *
- * RFC 4861 4.2: after the 4-byte ICMPv6 header come the hop limit, a flags
- * byte, the router lifetime, reachable time and retransmit timer, then
- * options. Option 3 is Prefix Information and option 25 (RFC 8106) is RDNSS.
- */
-function routerAdvertisementFields(
-  rawBytes: Uint8Array, transportOffset: number,
-): Record<string, string | number> {
-  const body = transportOffset + 4;
-  if (body + 12 > rawBytes.length) return {};
-  const flags = rawBytes[body + 1];
-  const out: Record<string, string | number> = {
-    'icmpv6.nd.ra.cur_hop_limit': rawBytes[body],
-    // Managed and Other: "get your address from DHCPv6" and "get everything
-    // else from DHCPv6". A network where both are clear is pure SLAAC.
-    'icmpv6.nd.ra.flag.m': (flags & 0x80) !== 0 ? 1 : 0,
-    'icmpv6.nd.ra.flag.o': (flags & 0x40) !== 0 ? 1 : 0,
-    // Zero is meaningful and not missing: it says "I am not a default router",
-    // which is how a router announces it is going away.
-    'icmpv6.nd.ra.router_lifetime': (rawBytes[body + 2] << 8) | rawBytes[body + 3],
-  };
-
-  const prefixes: string[] = [];
-  for (const option of collectNdpOptions(rawBytes, body + 12, 3)) {
-    if (option.length < 30) continue;
-    prefixes.push(`${formatIpv6Address(option, 14)}/${option[0]}`);
-    if (prefixes.length === 1) {
-      out['icmpv6.opt.prefix.valid_lifetime'] =
-        ((option[2] << 24) | (option[3] << 16) | (option[4] << 8) | option[5]) >>> 0;
-      out['icmpv6.opt.prefix.preferred_lifetime'] =
-        ((option[6] << 24) | (option[7] << 16) | (option[8] << 8) | option[9]) >>> 0;
-    }
-  }
-  if (prefixes.length > 0) out['icmpv6.opt.prefix'] = prefixes.join(',');
-
-  const resolvers: string[] = [];
-  for (const option of collectNdpOptions(rawBytes, body + 12, 25)) {
-    // 2 reserved bytes and a 4-byte lifetime, then whole addresses.
-    for (let at = 6; at + 16 <= option.length; at += 16) {
-      resolvers.push(formatIpv6Address(option, at));
-    }
-  }
-  if (resolvers.length > 0) out['icmpv6.opt.rdnss'] = resolvers.join(',');
-  return out;
-}
-
-/**
- * "Neighbor Solicitation for fe80::17a6:fd9a:5a8c:e5bf from 44:15:24:5d:cc:62"
- *
- * Layout after the 4-byte ICMPv6 header: 4 reserved bytes, the 16-byte target
- * address, then options. Option type 1 is the sender's link-layer address.
- */
-function describeNeighborSolicitation(rawBytes: Uint8Array, transportOffset: number): string {
-  const targetOffset = transportOffset + 8;
-  if (targetOffset + 16 > rawBytes.length) return 'Neighbor Solicitation';
-
-  const target = formatIpv6Address(rawBytes, targetOffset);
-  const sourceLinkAddr = findNdpOption(rawBytes, targetOffset + 16, 1);
-  return sourceLinkAddr && sourceLinkAddr.length >= 6
-    ? `Neighbor Solicitation for ${target} from ${formatMac(sourceLinkAddr.subarray(0, 6))}`
-    : `Neighbor Solicitation for ${target}`;
-}
-
-/**
- * "Router Advertisement from 44:15:24:5d:cc:62"
- *
- * The router names itself with the same option a Neighbor Solicitation uses -
- * type 1, the sender's link-layer address - which is the one fact that
- * distinguishes two routers advertising on the same link. Without it every
- * advertisement in a capture reads identically, which is exactly the case
- * somebody opens a capture to tell apart.
- *
- * Layout after the 4-byte ICMPv6 header: hop limit, flags, router lifetime,
- * reachable time and retrans timer - 12 bytes - and then the options. The
- * option is optional, and an advertisement without one is named without it.
- */
-function describeRouterAdvertisement(rawBytes: Uint8Array, transportOffset: number): string {
-  const optionsOffset = transportOffset + 16;
-  if (optionsOffset > rawBytes.length) return 'Router Advertisement';
-  const sourceLinkAddr = findNdpOption(rawBytes, optionsOffset, 1);
-  return sourceLinkAddr && sourceLinkAddr.length >= 6
-    ? `Router Advertisement from ${formatMac(sourceLinkAddr.subarray(0, 6))}`
-    : 'Router Advertisement';
-}
-
-/**
- * "Neighbor Advertisement fe80::17a6:... (sol, ovr) is at 04:7c:16:52:db:17"
- *
- * Same layout as a solicitation, except the first reserved byte carries the
- * Router/Solicited/Override flags, and option type 2 is the target's
- * link-layer address.
- */
-function describeNeighborAdvertisement(rawBytes: Uint8Array, transportOffset: number): string {
-  const targetOffset = transportOffset + 8;
-  if (targetOffset + 16 > rawBytes.length) return 'Neighbor Advertisement';
-
-  const target = formatIpv6Address(rawBytes, targetOffset);
-  const flagBits = rawBytes[transportOffset + 4];
-  const flags: string[] = [];
-  if (flagBits & 0x80) flags.push('rtr');
-  if (flagBits & 0x40) flags.push('sol');
-  if (flagBits & 0x20) flags.push('ovr');
-  const flagText = flags.length > 0 ? ` (${flags.join(', ')})` : '';
-
-  const targetLinkAddr = findNdpOption(rawBytes, targetOffset + 16, 2);
-  return targetLinkAddr && targetLinkAddr.length >= 6
-    ? `Neighbor Advertisement ${target}${flagText} is at ${formatMac(targetLinkAddr.subarray(0, 6))}`
-    : `Neighbor Advertisement ${target}${flagText}`;
-}
-
-/**
- * Standard Internet checksum (RFC 1071) over the IPv4 header, with the
- * checksum field itself treated as zero - the same algorithm the sender
- * used to produce it, so a correct header always recomputes to the value
- * actually stored there.
- */
-/**
  * IANA protocol numbers, for the Protocol column when nothing dissects the
  * payload. Only the ones that actually turn up on a LAN or a VPN link - the
  * point is to name what a capture will really contain, not to mirror the whole
  * registry, and anything missing still gets an honest "IP Protocol N".
  */
-/** ICMPv4 type names, and the codes worth spelling out (RFC 792). */
-const ICMP_TYPE_NAMES: Record<number, string> = {
-  3: 'Destination unreachable', 4: 'Source quench', 5: 'Redirect', 9: 'Router advertisement',
-  10: 'Router solicitation', 11: 'Time-to-live exceeded', 12: 'Parameter problem',
-  13: 'Timestamp request', 14: 'Timestamp reply', 15: 'Information request', 16: 'Information reply',
-  17: 'Address mask request', 18: 'Address mask reply',
-};
-
-const ICMP_UNREACHABLE_CODES: Record<number, string> = {
-  0: 'Network unreachable', 1: 'Host unreachable', 2: 'Protocol unreachable', 3: 'Port unreachable',
-  4: 'Fragmentation needed', 5: 'Source route failed', 6: 'Destination network unknown',
-  7: 'Destination host unknown', 9: 'Network administratively prohibited',
-  10: 'Host administratively prohibited', 13: 'Communication administratively filtered',
-};
-
-const ICMP_REDIRECT_CODES: Record<number, string> = {
-  0: 'Redirect for network', 1: 'Redirect for host', 2: 'Redirect for TOS and network', 3: 'Redirect for TOS and host',
-};
-
-const ICMPV6_UNREACHABLE_CODES: Record<number, string> = {
-  0: 'no route to destination', 1: 'communication with destination administratively prohibited',
-  2: 'beyond scope of source address', 3: 'address unreachable', 4: 'port unreachable',
-  5: 'source address failed ingress/egress policy', 6: 'reject route to destination',
-};
-
 const IP_PROTOCOL_NAMES: Record<number, string> = {
   0: 'IPv6 Hop-by-Hop',
   2: 'IGMP',
@@ -1332,19 +1138,6 @@ const IP_PROTOCOL_NAMES: Record<number, string> = {
  * 8-byte units (a zero length would mean an infinite loop, so it terminates),
  * and the option data.
  */
-function findNdpOption(rawBytes: Uint8Array, optionsStart: number, wantedType: number): Uint8Array | null {
-  let offset = optionsStart;
-  while (offset + 2 <= rawBytes.length) {
-    const type = rawBytes[offset];
-    const lengthUnits = rawBytes[offset + 1];
-    if (lengthUnits === 0) return null;
-    const optionEnd = offset + lengthUnits * 8;
-    if (optionEnd > rawBytes.length) return null;
-    if (type === wantedType) return rawBytes.subarray(offset + 2, optionEnd);
-    offset = optionEnd;
-  }
-  return null;
-}
 
 /**
  * Every Neighbor Discovery option of one type, in order.
@@ -1355,16 +1148,3 @@ function findNdpOption(rawBytes: Uint8Array, optionsStart: number, wantedType: n
  * Shares the termination rules with it - a zero length would loop forever, and
  * an option claiming to run past the frame is truncated rather than trusted.
  */
-function collectNdpOptions(rawBytes: Uint8Array, optionsStart: number, wantedType: number): Uint8Array[] {
-  const found: Uint8Array[] = [];
-  let offset = optionsStart;
-  while (offset + 2 <= rawBytes.length) {
-    const lengthUnits = rawBytes[offset + 1];
-    if (lengthUnits === 0) break;
-    const optionEnd = offset + lengthUnits * 8;
-    if (optionEnd > rawBytes.length) break;
-    if (rawBytes[offset] === wantedType) found.push(rawBytes.subarray(offset + 2, optionEnd));
-    offset = optionEnd;
-  }
-  return found;
-}

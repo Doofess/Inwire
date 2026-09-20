@@ -79,6 +79,17 @@ export interface TransportResult {
    * to find, which is the same gap the extension-header walker fills.
    */
   protocolTokens?: string[];
+  /**
+   * The datagram an ICMP error quotes back, for the caller to recurse into.
+   *
+   * It is handed back rather than dissected in place because only
+   * `decodeNetworkLayer` holds the `layers` array the inner packet's own
+   * layers belong in - the same reason GRE and VXLAN recurse from there. The
+   * `end` is the quoted bytes' own bound: an error carries the original IP
+   * header plus eight bytes of what followed it, and NOT the datagram whose
+   * length that header declares.
+   */
+  embeddedNetwork?: { offset: number; etherType: number; end: number };
   streamId?: number;
   status?: Packet['status'];
   analysisFlags?: string[];

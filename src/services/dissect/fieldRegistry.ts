@@ -317,20 +317,112 @@ export const FIELDS: readonly FieldDef[] = [
   // --- ICMP ------------------------------------------------------------------
   uint('icmp.type', 'Type', 'icmp'),
   uint('icmp.code', 'Code', 'icmp'),
+  uint('icmp.checksum', 'Checksum', 'icmp'),
+  str('icmp.checksum.status', 'Checksum Status', 'icmp'),
+  // **The echo identity, which the tree has always drawn and never named.**
+  // `Identifier (BE)` and `Sequence Number (BE)` were rows with no abbrev on
+  // 528 inwire frames, so `icmp.seq == 35141` - about as ordinary a filter as
+  // exists - resolved to nothing at all. The reference draws the same sixteen
+  // bits twice, big-endian and little-endian, because most ping
+  // implementations count in host order and the wire value is the one nobody
+  // recognises; both are filterable there and both are here now.
+  uint('icmp.ident', 'Identifier (BE)', 'icmp'),
+  uint('icmp.ident_le', 'Identifier (LE)', 'icmp'),
+  uint('icmp.seq', 'Sequence Number (BE)', 'icmp'),
+  uint('icmp.seq_le', 'Sequence Number (LE)', 'icmp'),
+  { abbrev: 'icmp.resp_to', label: 'Request frame', type: 'uint', layer: 'icmp', generated: true },
+  { abbrev: 'icmp.resptime', label: 'Response time', type: 'uint', layer: 'icmp', generated: true },
+  // The echo payload. Tree-only deliberately: a ping may carry 65,500 bytes,
+  // and hex of that in the per-frame bag is 131 kB a frame against a tree that
+  // is built on demand and thrown away with the pane (ADR 0007). The reference
+  // names it and then hides the row, showing the bytes through its `data`
+  // dissector instead.
+  treeOnly(str('icmp.data', 'ICMP Data', 'icmp')),
+  // The four bytes between an error's code and the datagram it quotes. On
+  // three types they carry the actionable half of the message - the MTU that
+  // would have fitted, the offset of the header field that was wrong, the
+  // gateway to use instead - and on the rest they are unused and say so.
+  treeOnly(str('icmp.unused', 'Unused', 'icmp')),
+  uint('icmp.mtu', 'MTU of next hop', 'icmp'),
+  uint('icmp.pointer', 'Pointer', 'icmp'),
+  { abbrev: 'icmp.redir_gw', label: 'Gateway Address', type: 'ipv4', layer: 'icmp' },
+
   uint('icmpv6.type', 'Type', 'icmpv6'),
   uint('icmpv6.code', 'Code', 'icmpv6'),
+  uint('icmpv6.checksum', 'Checksum', 'icmpv6'),
+  str('icmpv6.checksum.status', 'Checksum Status', 'icmpv6'),
+  uint('icmpv6.echo.identifier', 'Identifier', 'icmpv6'),
+  uint('icmpv6.echo.sequence_number', 'Sequence', 'icmpv6'),
+  treeOnly(str('icmpv6.data', 'Data', 'icmpv6')),
+  treeOnly(str('icmpv6.reserved', 'Reserved', 'icmpv6')),
+  uint('icmpv6.mtu', 'MTU', 'icmpv6'),
+  uint('icmpv6.pointer', 'Pointer', 'icmpv6'),
+  // Neighbor Discovery. The target address is the whole content of a
+  // solicitation and an advertisement, and until the options became a subtree
+  // the tree for either message was Type and Code and nothing else.
+  { abbrev: 'icmpv6.nd.ns.target_address', label: 'Target Address', type: 'ipv6', layer: 'icmpv6' },
+  { abbrev: 'icmpv6.nd.na.target_address', label: 'Target Address', type: 'ipv6', layer: 'icmpv6' },
+  { abbrev: 'icmpv6.nd.rd.target_address', label: 'Target Address', type: 'ipv6', layer: 'icmpv6' },
+  treeOnly(str('icmpv6.nd.na.flag', 'Flags', 'icmpv6')),
+  treeOnly(bool('icmpv6.nd.na.flag.r', 'Router', 'icmpv6')),
+  treeOnly(bool('icmpv6.nd.na.flag.s', 'Solicited', 'icmpv6')),
+  treeOnly(bool('icmpv6.nd.na.flag.o', 'Override', 'icmpv6')),
+  treeOnly(uint('icmpv6.nd.na.flag.rsv', 'Reserved', 'icmpv6')),
   // Router Advertisement. How a passive observer learns an IPv6 network's
   // shape - the prefix hosts autoconfigure from, the resolvers they were
   // handed, and whether they were also told to use DHCPv6 - none of which is
   // recorded anywhere on the machine as having come from the router.
   uint('icmpv6.nd.ra.cur_hop_limit', 'Cur hop limit', 'icmpv6'),
+  treeOnly(str('icmpv6.nd.ra.flag', 'Flags', 'icmpv6')),
   uint('icmpv6.nd.ra.flag.m', 'Managed address configuration', 'icmpv6'),
   uint('icmpv6.nd.ra.flag.o', 'Other configuration', 'icmpv6'),
+  treeOnly(bool('icmpv6.nd.ra.flag.h', 'Home Agent', 'icmpv6')),
+  treeOnly(str('icmpv6.nd.ra.flag.prf', 'Prf (Default Router Preference)', 'icmpv6')),
+  treeOnly(bool('icmpv6.nd.ra.flag.p', 'ND Proxy', 'icmpv6')),
+  treeOnly(bool('icmpv6.nd.ra.flag.s', 'SNAC Router', 'icmpv6')),
+  treeOnly(uint('icmpv6.nd.ra.flag.rsv', 'Reserved', 'icmpv6')),
   uint('icmpv6.nd.ra.router_lifetime', 'Router lifetime', 'icmpv6'),
+  uint('icmpv6.nd.ra.reachable_time', 'Reachable time (ms)', 'icmpv6'),
+  uint('icmpv6.nd.ra.retrans_timer', 'Retrans timer (ms)', 'icmpv6'),
+  // The option subtree. `icmpv6.opt` is the parent row - FT_NONE in the
+  // reference, which is why its value is the parenthetical summary rather
+  // than a number.
+  treeOnly(str('icmpv6.opt', 'ICMPv6 Option', 'icmpv6')),
+  treeOnly(str('icmpv6.opt.type', 'Type', 'icmpv6')),
+  treeOnly(str('icmpv6.opt.length', 'Length', 'icmpv6')),
+  treeOnly(str('icmpv6.opt.reserved', 'Reserved', 'icmpv6')),
+  treeOnly(str('icmpv6.opt.linkaddr', 'Link-layer address', 'icmpv6')),
+  treeOnly(str('icmpv6.opt.src_linkaddr', 'Source Link-layer address', 'icmpv6')),
+  treeOnly(str('icmpv6.opt.target_linkaddr', 'Target Link-layer address', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.mtu', 'MTU', 'icmpv6')),
+  // **`icmpv6.opt.prefix` and `icmpv6.opt.rdnss` mean two things at once, and
+  // the reference is why.** It emits each of them once per option and matches
+  // a filter against ANY occurrence. The bag holds one value per key, so
+  // `routerAdvertisementFields` writes the comma-joined list the Network panel
+  // reads back, while the tree draws one row per option the way the reference
+  // does. Closing that needs the filter engine to read repeated rows, which is
+  // a change to the engine rather than to either writer.
   str('icmpv6.opt.prefix', 'Prefix', 'icmpv6'),
+  uint('icmpv6.opt.prefix.length', 'Prefix Length', 'icmpv6'),
+  treeOnly(str('icmpv6.opt.prefix.flag', 'Flag', 'icmpv6')),
+  treeOnly(bool('icmpv6.opt.prefix.flag.l', 'On-link Flag (L)', 'icmpv6')),
+  treeOnly(bool('icmpv6.opt.prefix.flag.a', 'Autonomous Address Configuration Flag (A)', 'icmpv6')),
+  treeOnly(bool('icmpv6.opt.prefix.flag.r', 'Router Address Flag (R)', 'icmpv6')),
+  treeOnly(bool('icmpv6.opt.prefix.flag.p', 'DHCPv6-PD Preferred Flag (P)', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.prefix.flag.reserved', 'Reserved', 'icmpv6')),
   uint('icmpv6.opt.prefix.valid_lifetime', 'Prefix valid lifetime', 'icmpv6'),
   uint('icmpv6.opt.prefix.preferred_lifetime', 'Prefix preferred lifetime', 'icmpv6'),
   str('icmpv6.opt.rdnss', 'Recursive DNS server', 'icmpv6'),
+  treeOnly(uint('icmpv6.opt.rdnss.lifetime', 'Lifetime', 'icmpv6')),
+  // Multicast Listener Report v2 (RFC 3810). Every Windows machine emits these
+  // on joining a link, so they are in any capture taken on one.
+  treeOnly(uint('icmpv6.mldr.nb_mcast_records', 'Number of Multicast Address Records', 'icmpv6')),
+  treeOnly(str('icmpv6.mldr.mar', 'Multicast Address Record', 'icmpv6')),
+  treeOnly(str('icmpv6.mldr.mar.record_type', 'Record Type', 'icmpv6')),
+  treeOnly(uint('icmpv6.mldr.mar.aux_data_len', 'Aux Data Len', 'icmpv6')),
+  treeOnly(uint('icmpv6.mldr.mar.nb_sources', 'Number of Sources', 'icmpv6')),
+  treeOnly(str('icmpv6.mldr.mar.multicast_address', 'Multicast Address', 'icmpv6')),
+  treeOnly(str('icmpv6.mldr.mar.source_address', 'Source Address', 'icmpv6')),
 
   // --- IGMP ------------------------------------------------------------------
   uint('igmp.type', 'Type', 'igmp'),
