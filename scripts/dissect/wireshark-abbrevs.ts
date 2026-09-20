@@ -29,6 +29,12 @@ import { FIELDS } from '../../src/services/dissect/fieldRegistry';
 
 const TSHARK_CANDIDATES = [
   process.env.TSHARK,
+  // On PATH. Absent from this list until now, which is why a Linux box with
+  // tshark anywhere but the two absolute paths below printed SKIP here while
+  // `synthetic.ts` - whose list has always had it - ran its whole suite. A
+  // check that skips silently on a machine that could run it is worse than one
+  // that is simply missing.
+  'tshark',
   'C:/Program Files/Wireshark/tshark.exe',
   'C:/Program Files (x86)/Wireshark/tshark.exe',
   '/usr/bin/tshark',
