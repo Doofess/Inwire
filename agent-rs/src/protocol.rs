@@ -46,6 +46,31 @@ impl Interface {
     }
 }
 
+/// Per-adapter traffic rates, for the Interfaces panel's sparklines.
+///
+/// **Not `capture_stats`.** That one says what the capture received and lost;
+/// this says what every adapter is carrying whether or not it is being captured
+/// on, which is the panel's question - *is traffic arriving on an adapter I am
+/// not capturing on?*
+///
+/// `intervalMs` is the agent's own cadence, which the app uses to size its
+/// history window rather than assuming one. `src/services/agentProtocol.ts`
+/// validates `name`, `packetsPerSec` and `bytesPerSec` per entry.
+///
+/// Beware the false friend next door: `struct InterfaceStats` in this file is
+/// the `capture_stats` drop counter and has nothing to do with this.
+pub fn interface_stats(interval_ms: u32, rates: &[crate::if_table::Rate]) -> Value {
+    json!({
+        "type": "interface_stats",
+        "intervalMs": interval_ms,
+        "interfaces": rates.iter().map(|r| json!({
+            "name": r.name,
+            "packetsPerSec": r.packets_per_sec,
+            "bytesPerSec": r.bytes_per_sec,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// A capture that stopped on its own, and why.
 ///
 /// `local-agent/agent.py`'s `report_capture_failure`, ported. Its docstring

@@ -59,6 +59,8 @@ pub mod wire;
 #[cfg(windows)]
 pub mod adapters;
 #[cfg(windows)]
+pub mod if_table;
+#[cfg(windows)]
 pub mod npcap;
 #[cfg(windows)]
 pub mod pipe;
