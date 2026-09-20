@@ -471,11 +471,58 @@ export const FIELDS: readonly FieldDef[] = [
   str('lldp.mgn.addr.ip4', 'Management Address', 'lldp'),
 
   // --- TLS -------------------------------------------------------------------
+  // **The record and handshake frames themselves**, which the tree has always
+  // drawn as the rows everything else hangs off and never named - so
+  // `tls.handshake` and `tls.record`, two of the most typed TLS filters there
+  // are, resolved to nothing. Tree-only: they are container rows with no value
+  // to carry, which is what FT_NONE means in the reference.
+  treeOnly(str('tls.record', 'Record Layer', 'tls')),
+  treeOnly(str('tls.handshake', 'Handshake Protocol', 'tls')),
+  treeOnly(str('tls.ignored_unknown_record', 'Ignored Unknown Record', 'tls')),
   uint('tls.record.content_type', 'Content Type', 'tls'),
+  // **TLS 1.3 writes `application_data` on the outside of every record after
+  // the handshake** and puts the real content type inside the ciphertext, so
+  // the reference renames the field rather than letting a reader take the
+  // outer byte for the record's kind. Same row, different name, decided by
+  // whether the record is encrypted.
+  treeOnly(uint('tls.record.opaque_type', 'Opaque Type', 'tls')),
   uint('tls.record.version', 'Version', 'tls'),
   uint('tls.record.length', 'Length', 'tls'),
+  treeOnly(str('tls.app_data', 'Encrypted Application Data', 'tls')),
   uint('tls.handshake.type', 'Handshake Type', 'tls'),
+  treeOnly(uint('tls.handshake.length', 'Length', 'tls')),
   uint('tls.handshake.version', 'Version', 'tls'),
+  // RFC 8446 §4.1.2: the value in this field MUST be ignored when
+  // supported_versions is present, so a row called `Version` beside a list
+  // naming TLS 1.3 is a row inviting the wrong conclusion. The reference
+  // renames it; so does this, on the same condition.
+  treeOnly(str('tls.handshake.legacy_version', 'Version (legacy)', 'tls')),
+  treeOnly(str('tls.handshake.random', 'Random', 'tls')),
+  treeOnly(str('tls.handshake.session_id', 'Session ID', 'tls')),
+  treeOnly(uint('tls.handshake.session_id_length', 'Session ID Length', 'tls')),
+  treeOnly(uint('tls.handshake.cipher_suites_length', 'Cipher Suites Length', 'tls')),
+  treeOnly(str('tls.handshake.ciphersuites', 'Cipher Suites', 'tls')),
+  treeOnly(uint('tls.handshake.comp_methods_length', 'Compression Methods Length', 'tls')),
+  treeOnly(str('tls.handshake.comp_methods', 'Compression Methods', 'tls')),
+  treeOnly(uint('tls.handshake.comp_method', 'Compression Method', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_length', 'Extensions Length', 'tls')),
+  // The extension subtree. Every extension was a Type and a Length row with
+  // neither named, on 87 inwire frames - which is the thing the hello is
+  // mostly MADE of, and `tls.handshake.extension.type == 65037` (ECH) was
+  // unanswerable.
+  treeOnly(str('tls.handshake.extension', 'Extension', 'tls')),
+  treeOnly(str('tls.handshake.extension.type', 'Type', 'tls')),
+  treeOnly(uint('tls.handshake.extension.len', 'Length', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_supported_groups_length', 'Supported Groups List Length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_supported_groups', 'Supported Groups List', 'tls')),
+  // The signature algorithms, split into the hash and signature halves RFC
+  // 8446 §4.2.3 defines them as - which is what makes "still offering SHA-1"
+  // a filter somebody can write rather than a string they have to eyeball.
+  treeOnly(uint('tls.handshake.sig_hash_alg_len', 'Signature Hash Algorithms Length', 'tls')),
+  treeOnly(str('tls.handshake.sig_hash_algs', 'Signature Algorithms', 'tls')),
+  treeOnly(str('tls.handshake.sig_hash_alg', 'Signature Algorithm', 'tls')),
+  treeOnly(uint('tls.handshake.sig_hash_hash', 'Signature Hash Algorithm Hash', 'tls')),
+  treeOnly(uint('tls.handshake.sig_hash_sig', 'Signature Hash Algorithm Signature', 'tls')),
   uint('tls.handshake.ciphersuite', 'Cipher Suite', 'tls'),
   str('tls.handshake.extensions_server_name', 'Server Name', 'tls', { label: 'SNI', align: 'left' }),
   str('tls.handshake.extensions_alpn_str', 'ALPN Next Protocol', 'tls', { label: 'ALPN', align: 'left' }),

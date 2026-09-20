@@ -1127,8 +1127,8 @@ function versionField(name: string, v: number, abbrev: string): ProtocolField {
 function extensionFields(ext: Extension): ProtocolField[] {
   const b = ext.body;
   const children: ProtocolField[] = [
-    { name: 'Type', value: nameExtension(ext.type) },
-    { name: 'Length', value: b.length },
+    { name: 'Type', value: nameExtension(ext.type), abbrev: 'tls.handshake.extension.type' },
+    { name: 'Length', value: b.length, abbrev: 'tls.handshake.extension.len' },
   ];
   switch (ext.type) {
     case 0: {
@@ -1147,13 +1147,39 @@ function extensionFields(ext: Extension): ProtocolField[] {
       }
       break;
     case 10:
-      for (const g of u16List(b, 2)) children.push({ name: 'Supported Group', value: nameGroup(g), abbrev: 'tls.handshake.extensions_supported_group' });
+      if (b.length >= 2) children.push({ name: 'Supported Groups List Length', value: u16(b, 0), abbrev: 'tls.handshake.extensions_supported_groups_length' });
+      children.push({
+        name: 'Supported Groups List',
+        value: '',
+        abbrev: 'tls.handshake.extensions_supported_groups',
+        children: u16List(b, 2).map((g): ProtocolField => ({
+          name: 'Supported Group', value: nameGroup(g), abbrev: 'tls.handshake.extensions_supported_group',
+        })),
+      });
       break;
     case 11:
       if (b.length >= 1) for (const f of Array.from(b.subarray(1, 1 + b[0]))) children.push({ name: 'EC point format', value: `${EC_POINT_FORMAT_NAMES[f] ?? 'Unknown'} (${f})` });
       break;
     case 13:
-      for (const s of u16List(b, 2)) children.push({ name: 'Signature Algorithm', value: nameSignatureAlgorithm(s) });
+      // The reference splits each entry into its hash and signature halves,
+      // which is the pair RFC 8446 §4.2.3 defines it as and what makes
+      // `tls.handshake.sig_hash_hash == 2` - "still offering SHA-1" - a filter
+      // somebody can write.
+      if (b.length >= 2) children.push({ name: 'Signature Hash Algorithms Length', value: u16(b, 0), abbrev: 'tls.handshake.sig_hash_alg_len' });
+      children.push({
+        name: 'Signature Algorithms',
+        value: '',
+        abbrev: 'tls.handshake.sig_hash_algs',
+        children: u16List(b, 2).map((s): ProtocolField => ({
+          name: 'Signature Algorithm',
+          value: nameSignatureAlgorithm(s),
+          abbrev: 'tls.handshake.sig_hash_alg',
+          children: [
+            { name: 'Signature Hash Algorithm Hash', value: (s >> 8) & 0xff, abbrev: 'tls.handshake.sig_hash_hash' },
+            { name: 'Signature Hash Algorithm Signature', value: s & 0xff, abbrev: 'tls.handshake.sig_hash_sig' },
+          ],
+        })),
+      });
       break;
     case 45:
       if (b.length >= 1) for (const m of Array.from(b.subarray(1, 1 + b[0]))) children.push({ name: 'PSK Key Exchange Mode', value: `${PSK_KEY_EXCHANGE_MODE_NAMES[m] ?? 'Unknown'} (${m})` });
@@ -1188,22 +1214,40 @@ function extensionFields(ext: Extension): ProtocolField[] {
 
 function helloFields(h: HelloFacts): ProtocolField[] {
   const fields: ProtocolField[] = [
-    versionField('Version', h.version, 'tls.handshake.version'),
-    hexField('Random', h.random),
-    { name: 'Session ID Length', value: h.sessionId.length },
-    ...(h.sessionId.length > 0 ? [hexField('Session ID', h.sessionId)] : []),
-    { name: 'Cipher Suites Length', value: h.ciphers.length * 2 },
+    // **`legacy_version` when supported_versions is present**, which is what
+    // the reference calls this field on a TLS 1.3 hello and is not pedantry:
+    // RFC 8446 §4.1.2 says the value here MUST be ignored when the extension
+    // is there, so a row called `Version` beside a supported_versions list
+    // naming 1.3 is a row inviting the wrong conclusion.
+    h.supportedVersions.length > 0
+      ? { ...versionField('Version (legacy)', h.version, 'tls.handshake.legacy_version'),
+          description: 'RFC 8446: ignored when supported_versions is present' }
+      : versionField('Version', h.version, 'tls.handshake.version'),
+    { ...hexField('Random', h.random), abbrev: 'tls.handshake.random' },
+    { name: 'Session ID Length', value: h.sessionId.length, abbrev: 'tls.handshake.session_id_length' },
+    ...(h.sessionId.length > 0
+      ? [{ ...hexField('Session ID', h.sessionId), abbrev: 'tls.handshake.session_id' }] : []),
+    { name: 'Cipher Suites Length', value: h.ciphers.length * 2, abbrev: 'tls.handshake.cipher_suites_length' },
     {
       name: `Cipher Suites (${h.ciphers.length} suites)`,
       value: '',
+      abbrev: 'tls.handshake.ciphersuites',
       children: h.ciphers.map((c) => ({ name: 'Cipher Suite', value: nameCipher(c), abbrev: 'tls.handshake.ciphersuite' })),
     },
-    { name: 'Compression Methods Length', value: h.compression.length },
-    { name: 'Compression Methods', value: h.compression.map((c) => (c === 0 ? 'null (0)' : String(c))).join(', ') },
-    { name: 'Extensions Length', value: h.extensions.reduce((n, e) => n + 4 + e.body.length, 0) },
+    { name: 'Compression Methods Length', value: h.compression.length, abbrev: 'tls.handshake.comp_methods_length' },
+    {
+      name: 'Compression Methods',
+      value: h.compression.map((c) => (c === 0 ? 'null (0)' : String(c))).join(', '),
+      abbrev: 'tls.handshake.comp_methods',
+      children: h.compression.map((c): ProtocolField => ({
+        name: 'Compression Method', value: c === 0 ? 'null (0)' : String(c), abbrev: 'tls.handshake.comp_method',
+      })),
+    },
+    { name: 'Extensions Length', value: h.extensions.reduce((n, e) => n + 4 + e.body.length, 0), abbrev: 'tls.handshake.extensions_length' },
     ...h.extensions.map((e): ProtocolField => ({
       name: `Extension: ${nameExtension(e.type).replace(/ \(\d+\)$/, '')} (len=${e.body.length})`,
       value: '',
+      abbrev: 'tls.handshake.extension',
       children: extensionFields(e),
     })),
     { name: '[JA3 Fullstring]', value: h.ja3Full, generated: true, abbrev: 'tls.handshake.ja3_full' },
@@ -1226,15 +1270,21 @@ function helloFields(h: HelloFacts): ProtocolField[] {
 
 function serverHelloFields(s: ServerHelloFacts, conv: TlsConversationState): ProtocolField[] {
   const fields: ProtocolField[] = [
-    versionField('Version', s.version, 'tls.handshake.version'),
-    hexField('Random', s.random),
-    { name: 'Session ID Length', value: s.sessionId.length },
-    ...(s.sessionId.length > 0 ? [hexField('Session ID', s.sessionId)] : []),
+    s.selectedVersion !== null
+      ? { ...versionField('Version (legacy)', s.version, 'tls.handshake.legacy_version'),
+          description: 'RFC 8446: ignored when supported_versions is present' }
+      : versionField('Version', s.version, 'tls.handshake.version'),
+    { ...hexField('Random', s.random), abbrev: 'tls.handshake.random' },
+    { name: 'Session ID Length', value: s.sessionId.length, abbrev: 'tls.handshake.session_id_length' },
+    ...(s.sessionId.length > 0
+      ? [{ ...hexField('Session ID', s.sessionId), abbrev: 'tls.handshake.session_id' }] : []),
     { name: 'Cipher Suite', value: nameCipher(s.cipher), abbrev: 'tls.handshake.ciphersuite' },
-    { name: 'Compression Method', value: s.compression === 0 ? 'null (0)' : String(s.compression) },
+    { name: 'Compression Method', value: s.compression === 0 ? 'null (0)' : String(s.compression), abbrev: 'tls.handshake.comp_method' },
+    { name: 'Extensions Length', value: s.extensions.reduce((n, e) => n + 4 + e.body.length, 0), abbrev: 'tls.handshake.extensions_length' },
     ...s.extensions.map((e): ProtocolField => ({
       name: `Extension: ${nameExtension(e.type).replace(/ \(\d+\)$/, '')} (len=${e.body.length})`,
       value: '',
+      abbrev: 'tls.handshake.extension',
       children: extensionFields(e),
     })),
     { name: '[JA3S Fullstring]', value: s.ja3sFull, generated: true, abbrev: 'tls.handshake.ja3s_full' },
@@ -1342,14 +1392,23 @@ function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: 
     if (r.ignored) {
       fields.push({
         name: 'Ignored Unknown Record', value: `${r.length} bytes`, ...(r.range ? { rawBytesRange: r.range } : {}),
+        abbrev: 'tls.ignored_unknown_record',
         expertInfo: { category: 'Broken', message: 'Ignored Unknown Record' },
       });
       continue;
     }
     const versionName = nameVersion(labelVersion(r, conv));
     const children: ProtocolField[] = [
-      { name: 'Content Type', value: `${CONTENT_TYPE_NAMES[r.contentType] ?? 'Unknown'} (${r.contentType})`, abbrev: 'tls.record.content_type',
-        ...(r.range ? { rawBytesRange: [r.range[0], r.range[0]] as [number, number] } : {}) },
+      {
+        name: cursorEncrypted(r) ? 'Opaque Type' : 'Content Type',
+        value: `${CONTENT_TYPE_NAMES[r.contentType] ?? 'Unknown'} (${r.contentType})`,
+        // **TLS 1.3 puts the real content type INSIDE the ciphertext** and
+        // writes `application_data` on the outside of every record after the
+        // handshake, so the reference renames this field rather than letting a
+        // reader take the outer byte for the record's kind.
+        abbrev: cursorEncrypted(r) ? 'tls.record.opaque_type' : 'tls.record.content_type',
+        ...(r.range ? { rawBytesRange: [r.range[0], r.range[0]] as [number, number] } : {}),
+      },
       versionField('Version', r.version, 'tls.record.version'),
       { name: 'Length', value: r.length, abbrev: 'tls.record.length' },
     ];
@@ -1363,9 +1422,10 @@ function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: 
         const hs: ProtocolField = {
           name: `Handshake Protocol: ${name}`,
           value: '',
+          abbrev: 'tls.handshake',
           children: [
             { name: 'Handshake Type', value: `${name} (${type})`, abbrev: 'tls.handshake.type' },
-            { name: 'Length', value: len },
+            { name: 'Length', value: len, abbrev: 'tls.handshake.length' },
           ],
         };
         if (type === 1 && r.hello) hs.children!.push(...helloFields(r.hello));
@@ -1380,7 +1440,10 @@ function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: 
         { name: 'Description', value: `${ALERT_DESCRIPTION_NAMES[r.alert.description] ?? 'Unknown'} (${r.alert.description})`, abbrev: 'tls.alert_message.desc' },
       );
     } else if (r.contentType === CT_APPLICATION_DATA && r.range && r.decrypted === undefined) {
-      children.push({ name: 'Encrypted Application Data', value: `${r.length} bytes`, rawBytesRange: [r.range[0] + 5, r.range[1]] });
+      children.push({
+        name: 'Encrypted Application Data', value: `${r.length} bytes`,
+        abbrev: 'tls.app_data', rawBytesRange: [r.range[0] + 5, r.range[1]],
+      });
     }
     if (r.decrypted) children.push(...decryptedFields(r.decrypted, conv, now));
     else if (conv.keyNote !== undefined && r.contentType === CT_APPLICATION_DATA) {
@@ -1395,6 +1458,7 @@ function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: 
     fields.push({
       name: `${versionName} Record Layer: ${recordTitle(r)}`,
       value: '',
+      abbrev: 'tls.record',
       ...(r.range ? { rawBytesRange: r.range } : {}),
       children,
     });
