@@ -160,6 +160,32 @@ impl Default for FrameQueue {
 }
 
 #[cfg(test)]
+mod batch_bound_tests {
+    /// **Two different constants share the name `MAX_BATCH_RECORDS`**, and only
+    /// their ordering keeps a whole batch from being discarded in silence.
+    ///
+    /// This one (512) bounds a drain; `wire::MAX_BATCH_RECORDS` (0xFFFF) is
+    /// what the format's u16 count can describe. `encode_batch` refuses above
+    /// the latter, and `runtime.rs`'s pump answers that refusal with
+    /// `else { continue }` - no counter, no message, not even the `eprintln!`
+    /// the single-frame path gets. Roughly 512 already-sequenced frames would
+    /// vanish per batch.
+    ///
+    /// It is unreachable today only because 512 < 65535. Nothing enforced that,
+    /// and the shared name invites the edit that breaks it: raising this one in
+    /// the belief that it IS the format limit. Now it cannot compile.
+    #[test]
+    fn the_drain_bound_stays_inside_what_the_format_can_describe() {
+        assert!(
+            super::MAX_BATCH_RECORDS <= crate::wire::MAX_BATCH_RECORDS,
+            "a drain of {} records cannot be encoded into a batch bounded at {}",
+            super::MAX_BATCH_RECORDS,
+            crate::wire::MAX_BATCH_RECORDS,
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

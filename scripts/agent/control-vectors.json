@@ -103,6 +103,43 @@
     },
     {
       "message": {
+        "code": "capture_failed",
+        "iface": 2,
+        "message": "Capture stopped on interface 2: pcap_next_ex failed (-1): device removed",
+        "type": "error"
+      },
+      "note": "a capture that stopped on its own, with the reason"
+    },
+    {
+      "message": {
+        "code": "frame_too_long",
+        "iface": 0,
+        "message": "A 71680-byte frame cannot be framed - the record's length field is 16 bits. Receive offload is coalescing past 64 KB; further frames of this size are counted but not reported again.",
+        "type": "error"
+      },
+      "note": "a frame the wire format cannot describe - receive offload past 64 KB"
+    },
+    {
+      "message": {
+        "droppedAgent": 12,
+        "droppedOversize": 7,
+        "droppedPipe": 3,
+        "interfaces": [
+          {
+            "droppedKernel": 100,
+            "iface": 0,
+            "kernelReceived": 4100,
+            "received": 4000
+          }
+        ],
+        "intervalMs": 1000,
+        "seqHigh": 4096,
+        "type": "capture_stats"
+      },
+      "note": "capture_stats carrying the oversize stage"
+    },
+    {
+      "message": {
         "droppedAgent": 12,
         "droppedPipe": 3,
         "interfaces": [
