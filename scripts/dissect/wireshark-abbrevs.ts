@@ -101,6 +101,9 @@ const DERIVED: [string, string][] = [
     + '(`snmp.value.int`, `.octets`, `.oid`, ...)'],
   ['tcp.options.sack_perm', 'the option\'s presence; Wireshark has '
     + '`.present`/`.absent` as separate booleans'],
+  ['tcp.options.nop', 'the option\'s presence; Wireshark registers this name as '
+    + 'a sub-PROTOCOL rather than a field, so it is absent from `-G fields` '
+    + 'while still being a name a user can type'],
   ['tls.handshake.extensions_ech', 'the ECH extension\'s presence; Wireshark '
     + 'names only its inner parts'],
   ['tls.x509.subject_cn', 'read from the certificate inline; Wireshark reaches '

@@ -25,7 +25,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 let frame = 0;
 function seg(over: Partial<TcpSegment> & { timeUs: number }): TcpSegment {
   frame++;
-  return { frame, seq: 0, ack: 0, window: 65535, segLen: 0, syn: false, ack_: true, fin: false, rst: false, ...over };
+  return { frame, seq: 0, ack: 0, window: 65535, segLen: 0, syn: false, ack_: true, fin: false, rst: false, psh: false, ...over };
 }
 
 // --- a clean handshake raises nothing ------------------------------------------

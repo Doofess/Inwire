@@ -22,6 +22,8 @@
  * `inwire.` prefix.
  */
 
+import { ABBREV_BY_FLAG } from './tcpAnalysis';
+
 export type FieldType =
   | 'uint'      // unsigned integer, compared numerically
   | 'int'
@@ -208,6 +210,21 @@ export const FIELDS: readonly FieldDef[] = [
   bool('tcp.flags.reset', 'Reset', 'tcp'),
   bool('tcp.flags.push', 'Push', 'tcp'),
   bool('tcp.flags.ack', 'Acknowledgment', 'tcp'),
+  // The other five bits. Every one was already a row on screen, drawn by
+  // `TCP_FLAG_ROWS` and carrying no abbrev - so `tcp.flags.urg` matched
+  // nothing and the tree could not say which field it was showing.
+  bool('tcp.flags.urg', 'Urgent', 'tcp'),
+  bool('tcp.flags.ece', 'ECN-Echo', 'tcp'),
+  bool('tcp.flags.cwr', 'Congestion Window Reduced', 'tcp'),
+  bool('tcp.flags.ae', 'Accurate ECN', 'tcp'),
+  uint('tcp.flags.res', 'Reserved', 'tcp'),
+  uint('tcp.hdr_len', 'Header Length', 'tcp'),
+  uint('tcp.urgent_pointer', 'Urgent Pointer', 'tcp'),
+  // **The window as sent, beside `tcp.window_size` which is the scaled one.**
+  // Both were already drawn; only the scaled row was named, so a filter could
+  // not reach the number actually on the wire.
+  uint('tcp.window_size_value', 'Window', 'tcp'),
+  uint('tcp.window_size_scalefactor', 'Window size scaling factor', 'tcp'),
   uint('tcp.window_size', 'Calculated window size', 'tcp', { label: 'Window', align: 'right' }),
   uint('tcp.len', 'TCP Segment Len', 'tcp', { label: 'TCP len', align: 'right' }),
   uint('tcp.seq', 'Sequence Number', 'tcp'),
@@ -216,15 +233,81 @@ export const FIELDS: readonly FieldDef[] = [
   uint('tcp.ack_raw', 'Acknowledgment Number (raw)', 'tcp'),
   uint('tcp.checksum', 'Checksum', 'tcp'),
   str('tcp.checksum.status', 'Checksum Status', 'tcp'),
+  // The options region itself, then the two rows every option inside it
+  // carries. All three were absent, so the tree could not say where the fixed
+  // header ended or what kind an option was.
+  treeOnly(str('tcp.options', 'TCP Options', 'tcp')),
+  uint('tcp.option_kind', 'Kind', 'tcp'),
+  uint('tcp.option_len', 'Length', 'tcp'),
+  bool('tcp.options.nop', 'No-Operation (NOP)', 'tcp'),
   uint('tcp.options.mss_val', 'MSS Value', 'tcp'),
   uint('tcp.options.wscale.shift', 'Window Scale Shift', 'tcp'),
   bool('tcp.options.sack_perm', 'SACK Permitted', 'tcp'),
   uint('tcp.options.timestamp.tsval', 'Timestamp value', 'tcp'),
+  uint('tcp.options.timestamp.tsecr', 'Timestamp echo reply', 'tcp'),
+  uint('tcp.options.sack_le', 'TCP SACK Left Edge', 'tcp'),
+  uint('tcp.options.sack_re', 'TCP SACK Right Edge', 'tcp'),
   { abbrev: 'tcp.analysis.ack_rtt', label: 'The RTT to ACK the segment was', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.initial_rtt', label: 'iRTT', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.bytes_in_flight', label: 'Bytes in flight', type: 'uint', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.duplicate_ack_num', label: 'Duplicate ACK #', type: 'uint', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.duplicate_ack_frame', label: 'Duplicate to the ACK in frame', type: 'uint', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.analysis.acks_frame', label: 'This is an ACK to the segment in frame', type: 'uint', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.analysis.rto', label: 'The RTO for this segment was', type: 'time', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.analysis.rto_frame', label: 'RTO based on delta from frame', type: 'uint', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.analysis.push_bytes_sent', label: 'Bytes sent since last PSH flag', type: 'uint', layer: 'tcp', generated: true },
+  /*
+   * **The fifteen verdicts, which were computed and never named.**
+   *
+   * `dissect/tcpAnalysis.ts` reimplements Wireshark 4.6's
+   * `tcp_analyze_sequence_number` check for check and produces exactly these
+   * fifteen names - and not one of them was a registered field. They lived in
+   * `Packet.analysisFlags`, a string array, which `filter/compile.ts`
+   * special-cases by prefix. So the filter worked while the NAME did not
+   * exist: no autocomplete, nothing holding it to Wireshark's dictionary, no
+   * abbrev on the tree row, and `tree-coverage.ts` counting all fifteen as
+   * absent on a build that had computed every one of them.
+   *
+   * Registered and **not written into the bag**. The tree row carries the
+   * abbrev and `compile.ts` keeps reading `analysisFlags`, so a filter is
+   * answered with no per-frame cost at all - fifteen more keys on every TCP
+   * frame is exactly what ADRs 0016 to 0018 drive down. `registry.ts`'s
+   * completeness check is textual, so the abbrev literal in the dissector is
+   * what keeps this honest.
+   */
+  ...([
+    ['retransmission', 'This frame is a (suspected) retransmission'],
+    ['fast_retransmission', 'This frame is a (suspected) fast retransmission'],
+    ['spurious_retransmission', 'This frame is a (suspected) spurious retransmission'],
+    ['out_of_order', 'This frame is a (suspected) out-of-order segment'],
+    ['lost_segment', 'A segment before this frame was lost'],
+    ['ack_lost_segment', 'ACKed segment that was not captured'],
+    ['window_update', 'This is a TCP window update'],
+    ['window_full', 'This frame has filled the receive window of the peer'],
+    ['keep_alive', 'This is a TCP keep-alive segment'],
+    ['keep_alive_ack', 'This is an ACK to a TCP keep-alive segment'],
+    ['duplicate_ack', 'This is a TCP duplicate ack'],
+    ['zero_window_probe', 'This is a TCP zero-window-probe'],
+    ['zero_window', 'This is a ZeroWindow segment'],
+    ['zero_window_probe_ack', 'This is an ACK to a TCP zero-window-probe'],
+    ['reused_ports', 'A new tcp session is started with the same ports as an earlier session in this trace'],
+  ] as const).map(([flag, label]): FieldDef =>
+    // The name comes from `ABBREV_BY_FLAG` rather than being built here, so
+    // there is one spelling of it in the codebase and `registry.ts` can see a
+    // literal. See that table's own comment.
+    ({ abbrev: ABBREV_BY_FLAG[flag], label, type: 'bool', layer: 'tcp', generated: true })),
+  { abbrev: 'tcp.nxtseq', label: 'Next Sequence Number', type: 'uint', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.stream.pnum', label: 'Stream Packet Number', type: 'uint', layer: 'tcp', generated: true },
+  // **The stream index belongs to TCP.** It was emitted on the IP layer and
+  // answered as a filter only by a synthetic reader in `filter/fields.ts`, so
+  // it sat in tree-coverage's "a filter answers, the detail pane does not"
+  // list - the one section where every entry is a defect by construction.
+  { abbrev: 'tcp.stream', label: 'Stream index', type: 'uint', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.time_relative', label: 'Time since first frame in this TCP stream', type: 'time', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.time_delta', label: 'Time since previous frame in this TCP stream', type: 'time', layer: 'tcp', generated: true },
+  // Prose rather than the reference's numeric bitmask, which is a deliberate
+  // divergence recorded in `tcpStreamTracker.ts`.
+  treeOnly(str('tcp.completeness', 'Conversation completeness', 'tcp')),
   uint('udp.srcport', 'Source Port', 'udp', { label: 'Src port', align: 'right' }),
   uint('udp.dstport', 'Destination Port', 'udp', { label: 'Dst port', align: 'right' }),
   uint('udp.length', 'Length', 'udp'),

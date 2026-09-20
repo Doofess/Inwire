@@ -17,7 +17,7 @@
 import type { ExpertCategory, Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
 import type { TcpStreamTracker } from '../tcpStreamTracker';
-import { CATEGORY_BY_FLAG, type TcpAnalysis } from '../dissect/tcpAnalysis';
+import { ABBREV_BY_FLAG, CATEGORY_BY_FLAG, type TcpAnalysis, type TcpAnalysisFlag } from '../dissect/tcpAnalysis';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { freshTlsConversation, freshTlsCursor } from '../tcpStreamTracker';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './appStream';
@@ -54,11 +54,11 @@ const LDAP_PORTS = new Set([389, 3268]);
 // only, and the tree's menu greys out its filter items rather than offering
 // an expression nothing would answer.
 const TCP_FLAG_ROWS: { name: string; bitOffset: number; bitLength: number; set: string; unset: string; abbrev?: string }[] = [
-  { name: 'Reserved', bitOffset: 0, bitLength: 3, set: 'Set', unset: 'Not set' },
-  { name: 'Accurate ECN', bitOffset: 3, bitLength: 1, set: 'Set', unset: 'Not set' },
-  { name: 'Congestion Window Reduced', bitOffset: 4, bitLength: 1, set: 'Set', unset: 'Not set' },
-  { name: 'ECN-Echo', bitOffset: 5, bitLength: 1, set: 'Set', unset: 'Not set' },
-  { name: 'Urgent', bitOffset: 6, bitLength: 1, set: 'Set', unset: 'Not set' },
+  { name: 'Reserved', bitOffset: 0, bitLength: 3, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.res' },
+  { name: 'Accurate ECN', bitOffset: 3, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ae' },
+  { name: 'Congestion Window Reduced', bitOffset: 4, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.cwr' },
+  { name: 'ECN-Echo', bitOffset: 5, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ece' },
+  { name: 'Urgent', bitOffset: 6, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.urg' },
   { name: 'Acknowledgment', bitOffset: 7, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ack' },
   { name: 'Push', bitOffset: 8, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.push' },
   { name: 'Reset', bitOffset: 9, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.reset' },
@@ -187,6 +187,10 @@ export function dissectTcpTransport(
   if (tcpTracker && syn && tcpOptions?.windowScale !== undefined) {
     tcpTracker.setWindowScaleShift(srcIp, srcPort, dstIp, dstPort, tcpOptions.windowScale);
   }
+  // Read whether or not URG is set, which is the reference's behaviour: the
+  // two bytes are in every header, and a pointer with no URG flag is worth
+  // seeing rather than hiding.
+  const urgentPointer = (rawBytes[transportOffset + 18] << 8) | rawBytes[transportOffset + 19];
   const windowScaleShift = tcpTracker && !syn ? tcpTracker.getWindowScaleShift(srcIp, srcPort, dstIp, dstPort) : 0;
   const windowSize = rawWindow * 2 ** windowScaleShift;
 
@@ -219,6 +223,9 @@ export function dissectTcpTransport(
   let streamId: number | undefined;
   let status: Packet['status'] | undefined;
   let streamPacketNumber: number | undefined;
+  /** Seconds since this stream's first frame, and since its previous one. */
+  let sinceStreamStart: number | undefined;
+  let sincePreviousInStream: number | undefined;
   let conversationCompleteness: string | undefined;
   let isKeepAlive = false;
   let lostSegment = false;
@@ -226,7 +233,10 @@ export function dissectTcpTransport(
   let analysis: TcpAnalysis | undefined;
   if (tcpTracker) {
     streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
-    streamPacketNumber = tcpTracker.recordStreamPacket(streamId);
+    const position = tcpTracker.recordStreamPacket(streamId, tsUs);
+    streamPacketNumber = position.packetNumber;
+    sinceStreamStart = position.sinceFirst;
+    sincePreviousInStream = position.sincePrevious;
     tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst);
 
     // Asked before the analysis advances the direction, so it describes
@@ -234,7 +244,7 @@ export function dissectTcpTransport(
     tlsInOrder = tcpTracker.isAtOrPastExpected(srcIp, srcPort, dstIp, dstPort, seqNum);
     analysis = tcpTracker.analyze(srcIp, srcPort, dstIp, dstPort, {
       frame: frameId ?? 0, timeUs: tsUs ?? 0, seq: seqNum, ack: ackNum, window: rawWindow,
-      segLen: payloadLength, syn, ack_: ack, fin, rst, windowScaleOption: tcpOptions?.windowScale,
+      segLen: payloadLength, syn, ack_: ack, fin, rst, psh, windowScaleOption: tcpOptions?.windowScale,
       sackBlocks: tcpOptions?.sackBlocks.map((b) => ({ left: b.leftEdge, right: b.rightEdge })),
     });
     isKeepAlive = analysis.flags.includes('keep_alive');
@@ -617,6 +627,7 @@ export function dissectTcpTransport(
           // shows both the byte count and the raw nibble it decoded from.
           name: 'Header Length',
           value: `${tcpHeaderLen} bytes (${tcpHeaderLen / 4})`,
+          abbrev: 'tcp.hdr_len',
           rawBytesRange: [transportOffset + 12, transportOffset + 12],
           bitfield: { bitOffset: 0, bitLength: 4, totalBits: 8 },
         },
@@ -634,12 +645,24 @@ export function dissectTcpTransport(
           // ended, abruptly and on purpose.
           ...(rst ? { expertInfo: { category: 'Reset' as const, message: 'Connection reset (RST)' } } : {}),
         },
-        ...(expectedNextRel !== undefined ? [{ name: '[Next Sequence Number]', value: expectedNextRel, generated: true }] : []),
+        ...(expectedNextRel !== undefined
+          ? [{ name: '[Next Sequence Number]', value: expectedNextRel, generated: true, abbrev: 'tcp.nxtseq' }]
+          : []),
         // The window as sent, then the window after the scale factor from
         // this connection's SYN. Wireshark draws both, and `tcp.window_size`
         // is the scaled one - the number that actually bounds the sender.
-        { name: 'Window', value: rawWindow, rawBytesRange: [transportOffset + 14, transportOffset + 15] },
+        { name: 'Window', value: rawWindow, abbrev: 'tcp.window_size_value', rawBytesRange: [transportOffset + 14, transportOffset + 15] },
         { name: '[Calculated window size]', value: windowSize, generated: true, abbrev: 'tcp.window_size' },
+        // **-1 when the scale is not in play**, which is the reference's own
+        // encoding and not a missing value: it means no scaling, either
+        // because this is the SYN that advertises it or because one end never
+        // did. A 1 would claim the option was negotiated and multiplied by one.
+        {
+          name: '[Window size scaling factor]',
+          value: windowScaleShift > 0 ? 2 ** windowScaleShift : -1,
+          generated: true,
+          abbrev: 'tcp.window_size_scalefactor',
+        },
         { name: '[TCP Segment Len]', value: payloadLength, generated: true, abbrev: 'tcp.len' },
         {
           name: 'Checksum',
@@ -649,9 +672,54 @@ export function dissectTcpTransport(
           children: [{ name: '[Checksum Status]', value: checksum.status, generated: true, abbrev: 'tcp.checksum.status',
             ...(checksum.status === 'Bad' ? { expertInfo: { category: 'Broken' as const, message: 'Bad checksum' } } : {}) }],
         },
-        ...(streamPacketNumber !== undefined ? [{ name: '[Stream Packet Number]', value: streamPacketNumber, generated: true }] : []),
-        ...(conversationCompleteness !== undefined ? [{ name: '[Conversation completeness]', value: conversationCompleteness, generated: true }] : []),
-        ...(tcpOptions ? tcpOptions.fields : []),
+        {
+          name: 'Urgent Pointer',
+          value: urgentPointer,
+          abbrev: 'tcp.urgent_pointer',
+          rawBytesRange: [transportOffset + 18, transportOffset + 19],
+        },
+        // **The stream index, on the TCP layer where it belongs.** It was
+        // emitted on IP and answered as a filter only by a synthetic reader,
+        // so it sat in the one tree-coverage section where every entry is a
+        // defect: a filter the app accepts for a row the pane will not draw.
+        ...(streamId !== undefined
+          ? [{ name: '[Stream index]', value: streamId, generated: true, abbrev: 'tcp.stream' }]
+          : []),
+        ...(streamPacketNumber !== undefined
+          ? [{ name: '[Stream Packet Number]', value: streamPacketNumber, generated: true, abbrev: 'tcp.stream.pnum' }]
+          : []),
+        ...(sinceStreamStart !== undefined
+          ? [{
+            name: '[Time since first frame in this TCP stream]',
+            value: sinceStreamStart.toFixed(9),
+            generated: true,
+            abbrev: 'tcp.time_relative',
+          }]
+          : []),
+        ...(sincePreviousInStream !== undefined
+          ? [{
+            name: '[Time since previous frame in this TCP stream]',
+            value: sincePreviousInStream.toFixed(9),
+            generated: true,
+            abbrev: 'tcp.time_delta',
+          }]
+          : []),
+        ...(conversationCompleteness !== undefined
+          ? [{ name: '[Conversation completeness]', value: conversationCompleteness, generated: true, abbrev: 'tcp.completeness' }]
+          : []),
+        // **A parent, where they were flat siblings of Window and Checksum.**
+        // The reference nests them under one Options row and names that row
+        // `tcp.options`; without it there was no way to tell, in the tree,
+        // where the fixed header ended and the variable part began.
+        ...(tcpOptions && tcpOptions.fields.length > 0
+          ? [{
+            name: `Options: (${tcpHeaderLen - 20} bytes)`,
+            value: '',
+            abbrev: 'tcp.options',
+            rawBytesRange: [transportOffset + 20, transportOffset + tcpHeaderLen - 1] as [number, number],
+            children: tcpOptions.fields,
+          }]
+          : []),
         ...(analysis ? tcpAnalysisFields(analysis) : []),
       ],
     },
@@ -682,6 +750,20 @@ function parseTcpOptions(
   tsecr?: number;
 } {
   const fields: ProtocolField[] = [];
+  /**
+   * The two rows every option carries, whatever its kind.
+   *
+   * The reference draws Kind and Length under each option; this build drew
+   * neither, so `tcp.option_kind` and `tcp.option_len` were absent on every
+   * frame that had options at all. A helper rather than four copies, because
+   * the single-byte options have no length byte and must not claim one.
+   */
+  const optionHeader = (at: number, kind: number, length?: number): ProtocolField[] => [
+    { name: 'Kind', value: kind, abbrev: 'tcp.option_kind', rawBytesRange: [at, at] },
+    ...(length === undefined
+      ? []
+      : [{ name: 'Length', value: length, abbrev: 'tcp.option_len', rawBytesRange: [at + 1, at + 1] as [number, number] }]),
+  ];
   let mss: number | undefined;
   let windowScale: number | undefined;
   let sackPermitted = false;
@@ -693,9 +775,26 @@ function parseTcpOptions(
   let offset = optionsStart;
   while (offset < optionsEnd && offset < rawBytes.length) {
     const kind = rawBytes[offset];
-    if (kind === 0) break; // End of Option List
+    if (kind === 0) {
+      // **Drawn, then stop.** The list really does end here, but the byte is
+      // an option like any other and the reference shows it - breaking without
+      // a row lost the one option that says where the options stopped.
+      fields.push({
+        name: 'TCP Option - End of Option List (EOL)',
+        value: 'EOL',
+        rawBytesRange: [offset, offset],
+        children: optionHeader(offset, kind),
+      });
+      break;
+    }
     if (kind === 1) {
-      fields.push({ name: 'TCP Option - No-Operation (NOP)', value: 'NOP', rawBytesRange: [offset, offset] });
+      fields.push({
+        name: 'TCP Option - No-Operation (NOP)',
+        value: 'NOP',
+        abbrev: 'tcp.options.nop',
+        rawBytesRange: [offset, offset],
+        children: optionHeader(offset, kind),
+      });
       offset += 1;
       continue;
     }
@@ -707,15 +806,37 @@ function parseTcpOptions(
     if (kind === 2 && length === 4) {
       mss = (rawBytes[offset + 2] << 8) | rawBytes[offset + 3];
       infoParts.push(`MSS=${mss}`);
-      fields.push({ name: 'TCP Option - Maximum Segment Size', value: `MSS: ${mss}`, rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.mss_val' });
+      fields.push({
+        name: 'TCP Option - Maximum Segment Size',
+        value: `MSS: ${mss}`,
+        rawBytesRange: [offset, offset + length - 1],
+        abbrev: 'tcp.options.mss_val',
+        children: optionHeader(offset, kind, length),
+      });
     } else if (kind === 3 && length === 3) {
       windowScale = rawBytes[offset + 2];
       infoParts.push(`WS=${2 ** windowScale}`);
-      fields.push({ name: 'TCP Option - Window Scale', value: `${windowScale} (multiply by ${2 ** windowScale})`, rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.wscale.shift' });
+      fields.push({
+        name: 'TCP Option - Window Scale',
+        value: `${windowScale} (multiply by ${2 ** windowScale})`,
+        rawBytesRange: [offset, offset + length - 1],
+        abbrev: 'tcp.options.wscale.shift',
+        children: [
+          ...optionHeader(offset, kind, length),
+          { name: 'Shift count', value: windowScale, rawBytesRange: [offset + 2, offset + 2] },
+          { name: '[Multiplier]', value: 2 ** windowScale, generated: true },
+        ],
+      });
     } else if (kind === 4 && length === 2) {
       sackPermitted = true;
       infoParts.push('SACK_PERM');
-      fields.push({ name: 'TCP Option - SACK Permitted', value: 'True', rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.sack_perm' });
+      fields.push({
+        name: 'TCP Option - SACK Permitted',
+        value: 'True',
+        rawBytesRange: [offset, offset + length - 1],
+        abbrev: 'tcp.options.sack_perm',
+        children: optionHeader(offset, kind, length),
+      });
     } else if (kind === 5) {
       const blockCount = Math.floor((length - 2) / 8);
       for (let i = 0; i < blockCount; i++) {
@@ -723,14 +844,45 @@ function parseTcpOptions(
         const leftEdge = ((rawBytes[blockOffset] << 24) | (rawBytes[blockOffset + 1] << 16) | (rawBytes[blockOffset + 2] << 8) | rawBytes[blockOffset + 3]) >>> 0;
         const rightEdge = ((rawBytes[blockOffset + 4] << 24) | (rawBytes[blockOffset + 5] << 16) | (rawBytes[blockOffset + 6] << 8) | rawBytes[blockOffset + 7]) >>> 0;
         sackBlocks.push({ leftEdge, rightEdge });
-        fields.push({ name: `TCP Option - SACK Block ${i + 1}`, value: `${leftEdge}-${rightEdge}`, rawBytesRange: [blockOffset, blockOffset + 7] });
+        fields.push({
+          name: `TCP Option - SACK Block ${i + 1}`,
+          value: `${leftEdge}-${rightEdge}`,
+          rawBytesRange: [blockOffset, blockOffset + 7],
+          children: [
+            ...(i === 0 ? optionHeader(offset, kind, length) : []),
+            // **Named, and absolute.** The Info column maps these to relative
+            // numbers against the peer's base sequence; the tree cannot,
+            // because the option is parsed before the base is in scope here.
+            // Absolute-and-named beats relative-and-unnameable: a filter can
+            // reach them now, and the Info line still reads as Wireshark's.
+            { name: 'left edge', value: leftEdge, abbrev: 'tcp.options.sack_le', rawBytesRange: [blockOffset, blockOffset + 3] },
+            { name: 'right edge', value: rightEdge, abbrev: 'tcp.options.sack_re', rawBytesRange: [blockOffset + 4, blockOffset + 7] },
+          ],
+        });
       }
     } else if (kind === 8 && length === 10) {
       tsval = ((rawBytes[offset + 2] << 24) | (rawBytes[offset + 3] << 16) | (rawBytes[offset + 4] << 8) | rawBytes[offset + 5]) >>> 0;
       tsecr = ((rawBytes[offset + 6] << 24) | (rawBytes[offset + 7] << 16) | (rawBytes[offset + 8] << 8) | rawBytes[offset + 9]) >>> 0;
-      fields.push({ name: 'TCP Option - Timestamps', value: `TSval ${tsval}, TSecr ${tsecr}`, rawBytesRange: [offset, offset + length - 1], abbrev: 'tcp.options.timestamp.tsval' });
+      fields.push({
+        name: 'TCP Option - Timestamps',
+        value: `TSval ${tsval}, TSecr ${tsecr}`,
+        rawBytesRange: [offset, offset + length - 1],
+        abbrev: 'tcp.options.timestamp.tsval',
+        children: [
+          ...optionHeader(offset, kind, length),
+          // **TSecr had no field of its own.** It was decoded, rendered into
+          // the string above, returned from here, and consumed by nothing -
+          // which is also why the RTT it gives away for free was never taken.
+          { name: 'Timestamp echo reply', value: tsecr, abbrev: 'tcp.options.timestamp.tsecr', rawBytesRange: [offset + 6, offset + 9] },
+        ],
+      });
     } else {
-      fields.push({ name: `TCP Option - Unknown (Kind ${kind})`, value: `${length} bytes`, rawBytesRange: [offset, offset + length - 1] });
+      fields.push({
+        name: `TCP Option - Unknown (Kind ${kind})`,
+        value: `${length} bytes`,
+        rawBytesRange: [offset, offset + length - 1],
+        children: optionHeader(offset, kind, length),
+      });
     }
 
     offset += length;
@@ -743,7 +895,7 @@ function parseTcpOptions(
 function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
   const children: ProtocolField[] = [];
   if (a.ackOfFrame !== undefined) {
-    children.push({ name: '[This is an ACK to the segment in frame]', value: a.ackOfFrame, generated: true, linkToFrame: a.ackOfFrame });
+    children.push({ name: '[This is an ACK to the segment in frame]', value: a.ackOfFrame, generated: true, linkToFrame: a.ackOfFrame, abbrev: 'tcp.analysis.acks_frame' });
     children.push({ name: '[The RTT to ACK the segment was]', value: `${((a.ackRttUs ?? 0) / 1e6).toFixed(9)} seconds`, generated: true, abbrev: 'tcp.analysis.ack_rtt' });
   }
   if (a.initialRttUs !== undefined) {
@@ -751,6 +903,19 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
   }
   if (a.bytesInFlight !== undefined) {
     children.push({ name: '[Bytes in flight]', value: a.bytesInFlight, generated: true, abbrev: 'tcp.analysis.bytes_in_flight' });
+  }
+  if (a.pushBytesSent !== undefined) {
+    children.push({ name: '[Bytes sent since last PSH flag]', value: a.pushBytesSent, generated: true, abbrev: 'tcp.analysis.push_bytes_sent' });
+  }
+  // **Computed since this analysis was written and never drawn.** `rtoUs` and
+  // `rtoFrame` come out of `checkSequence` on a retransmission and went
+  // straight into the bin; the reference shows both, and the frame number is
+  // what makes the interval mean anything.
+  if (a.rtoUs !== undefined) {
+    children.push({ name: '[The RTO for this segment was]', value: `${(a.rtoUs / 1e6).toFixed(9)} seconds`, generated: true, abbrev: 'tcp.analysis.rto' });
+  }
+  if (a.rtoFrame !== undefined) {
+    children.push({ name: '[RTO based on delta from frame]', value: a.rtoFrame, generated: true, linkToFrame: a.rtoFrame, abbrev: 'tcp.analysis.rto_frame' });
   }
   if (a.flags.length > 0) {
     // The flag decides the category (`dissect/tcpAnalysis.ts`), which is where
@@ -760,10 +925,19 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
     children.push({
       name: '[TCP Analysis Flags]', value: '', generated: true,
       children: a.tags.map((tag, i) => {
-        const category = categoryOf(a.flags[i] ?? '');
+        const flag = a.flags[i] ?? '';
+        const category = categoryOf(flag);
         return {
           name: `[Expert Info (${category})]`,
           value: tag.replace(/^\[TCP |\]$/g, ''), generated: true,
+          // **The verdict's own name.** These fifteen were computed check for
+          // check against Wireshark's algorithm and published only into a
+          // string array, so the row that states one could not say which
+          // field it was - and `tcp.analysis.retransmission` was a filter
+          // that worked for a name that did not exist.
+          ...(flag in ABBREV_BY_FLAG
+            ? { abbrev: ABBREV_BY_FLAG[flag as TcpAnalysisFlag] }
+            : {}),
           expertInfo: { category, message: tag },
         };
       }),

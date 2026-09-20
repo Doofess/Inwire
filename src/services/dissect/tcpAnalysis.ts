@@ -42,6 +42,16 @@ export interface TcpDirectionState {
   lastAckTimeUs: number;
   /** Segment length of the last segment that advanced nextSeq. */
   lastAckLen: number;
+  /**
+   * Payload bytes sent in this direction since the last PSH, this one
+   * included.
+   *
+   * Wireshark's `push_bytes_sent`: it accumulates every segment's length and
+   * reports the total on the segment that carries PSH, then starts again. The
+   * number answers "how much did the sender batch up before asking for it to
+   * be delivered", which is why it is per direction and not per connection.
+   */
+  pushBytes: number;
   /** Raw window this direction last advertised. */
   window: number;
   /**
@@ -79,7 +89,7 @@ export interface TcpConnectionState {
 
 function freshDirection(): TcpDirectionState {
   return {
-    nextSeq: 0, nextSeqTimeUs: 0, nextSeqFrame: 0, maxSeqToBeAcked: 0, lastAck: 0, lastAckTimeUs: 0, lastAckLen: 0,
+    nextSeq: 0, nextSeqTimeUs: 0, nextSeqFrame: 0, maxSeqToBeAcked: 0, lastAck: 0, lastAckTimeUs: 0, lastAckLen: 0, pushBytes: 0,
     window: 0, windowSeen: false, winScale: -1, dupAckNum: 0, lastNonDupAckFrame: 0, lastWasKeepAlive: false, lastWasZeroWindowProbe: false,
     sackRanges: [], segments: [], synTimeUs: null, synSeen: false,
   };
@@ -101,6 +111,8 @@ export interface TcpSegment {
   ack_: boolean;
   fin: boolean;
   rst: boolean;
+  /** PSH, which is what closes a `push_bytes_sent` run. */
+  psh: boolean;
   /** Window scale option from a SYN, if present. */
   windowScaleOption?: number;
   /** SACK blocks this segment carries, in the peer's sequence space. */
@@ -127,6 +139,8 @@ export interface TcpAnalysis {
   partialAck?: boolean;
   initialRttUs?: number;
   bytesInFlight?: number;
+  /** Bytes sent since the previous PSH, on the segment that carries one. */
+  pushBytesSent?: number;
   /** For a retransmission: how long after the original, and which frame it was. */
   rtoUs?: number;
   rtoFrame?: number;
@@ -183,6 +197,38 @@ const PRINT_ORDER: [TcpAnalysisFlag, string][] = [
  * keep-alive are a peer applying back-pressure, which is TCP working, not TCP
  * failing - they were `warn` and `note` before and drew the eye for nothing.
  */
+/**
+ * Each verdict's registered field name.
+ *
+ * **Spelled out rather than built as `tcp.analysis.${flag}`**, for two reasons
+ * that both bite. `scripts/dissect/registry.ts` scans the dissection sources
+ * for dotted literals to find a field's writer, and a template literal is
+ * invisible to it - so all fifteen read as registered-with-no-writer. And a
+ * constructed name cannot be grepped: `tcp.analysis.retransmission` is what
+ * somebody reading a filter or a colour rule will search for, and it should
+ * find this table.
+ *
+ * The `Record<TcpAnalysisFlag, ...>` is what keeps it complete: a sixteenth
+ * verdict does not compile until it has a name.
+ */
+export const ABBREV_BY_FLAG: Record<TcpAnalysisFlag, string> = {
+  retransmission: 'tcp.analysis.retransmission',
+  fast_retransmission: 'tcp.analysis.fast_retransmission',
+  spurious_retransmission: 'tcp.analysis.spurious_retransmission',
+  out_of_order: 'tcp.analysis.out_of_order',
+  lost_segment: 'tcp.analysis.lost_segment',
+  ack_lost_segment: 'tcp.analysis.ack_lost_segment',
+  window_update: 'tcp.analysis.window_update',
+  window_full: 'tcp.analysis.window_full',
+  keep_alive: 'tcp.analysis.keep_alive',
+  keep_alive_ack: 'tcp.analysis.keep_alive_ack',
+  duplicate_ack: 'tcp.analysis.duplicate_ack',
+  zero_window_probe: 'tcp.analysis.zero_window_probe',
+  zero_window: 'tcp.analysis.zero_window',
+  zero_window_probe_ack: 'tcp.analysis.zero_window_probe_ack',
+  reused_ports: 'tcp.analysis.reused_ports',
+};
+
 export const CATEGORY_BY_FLAG: Record<TcpAnalysisFlag, ExpertCategory> = {
   retransmission: 'Loss',
   fast_retransmission: 'Loss',
@@ -452,6 +498,14 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   if (seglen > 0 && rev.lastAck !== 0 && !retransmitted) {
     const inFlight = (fwd.nextSeq - rev.lastAck) | 0;
     if (inFlight > 0) out.bytesInFlight = inFlight;
+  }
+  // **Accumulated on every segment, reported only on the one with PSH.** The
+  // run includes this segment, which is why the add comes first - a lone
+  // segment with PSH reports its own length rather than zero.
+  fwd.pushBytes += seglen;
+  if (s.psh) {
+    out.pushBytesSent = fwd.pushBytes;
+    fwd.pushBytes = 0;
   }
 
   out.nextSeq = fwd.nextSeq;
