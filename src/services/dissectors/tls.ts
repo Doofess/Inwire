@@ -1132,17 +1132,40 @@ function extensionFields(ext: Extension): ProtocolField[] {
   ];
   switch (ext.type) {
     case 0: {
+      // The name is one entry in a typed list, and the reference draws the
+      // list's frame around it: a length, then a type byte saying this entry
+      // is a host name rather than one of the forms nobody sends.
       const sni = parseSni(b);
+      if (b.length >= 5) {
+        children.push(
+          { name: 'Server Name list length', value: u16(b, 0), abbrev: 'tls.handshake.extensions_server_name_list_len' },
+          { name: 'Server Name Type', value: `host_name (${b[2]})`, abbrev: 'tls.handshake.extensions_server_name_type' },
+          { name: 'Server Name length', value: u16(b, 3), abbrev: 'tls.handshake.extensions_server_name_len' },
+        );
+      }
       if (sni !== null) children.push({ name: 'Server Name', value: sni, abbrev: 'tls.handshake.extensions_server_name' });
       break;
     }
-    case 16:
-      for (const proto of parseAlpn(b)) children.push({ name: 'ALPN Next Protocol', value: proto, abbrev: 'tls.handshake.extensions_alpn_str' });
+    case 16: {
+      const protocols = parseAlpn(b);
+      if (b.length >= 2) children.push({ name: 'ALPN Extension Length', value: u16(b, 0), abbrev: 'tls.handshake.extensions_alpn_len' });
+      children.push({
+        name: 'ALPN Protocol',
+        value: '',
+        abbrev: 'tls.handshake.extensions_alpn_list',
+        children: protocols.flatMap((proto): ProtocolField[] => [
+          { name: 'ALPN string length', value: proto.length, abbrev: 'tls.handshake.extensions_alpn_str_len' },
+          { name: 'ALPN Next Protocol', value: proto, abbrev: 'tls.handshake.extensions_alpn_str' },
+        ]),
+      });
       break;
+    }
     case 43:
       if (b.length >= 2 && b.length === 2) {
+        // A ServerHello names one version and carries no list length.
         children.push({ name: 'Supported Version', value: nameVersion(u16(b, 0)), abbrev: 'tls.handshake.extensions.supported_version' });
       } else {
+        if (b.length >= 1) children.push({ name: 'Supported Versions length', value: b[0], abbrev: 'tls.handshake.extensions.supported_versions_len' });
         for (const v of u16List(b, 1)) children.push({ name: 'Supported Version', value: nameVersion(v), abbrev: 'tls.handshake.extensions.supported_version' });
       }
       break;
@@ -1182,7 +1205,16 @@ function extensionFields(ext: Extension): ProtocolField[] {
       });
       break;
     case 45:
-      if (b.length >= 1) for (const m of Array.from(b.subarray(1, 1 + b[0]))) children.push({ name: 'PSK Key Exchange Mode', value: `${PSK_KEY_EXCHANGE_MODE_NAMES[m] ?? 'Unknown'} (${m})` });
+      if (b.length >= 1) {
+        children.push({ name: 'PSK Key Exchange Modes Length', value: b[0], abbrev: 'tls.extension.psk_ke_modes_length' });
+        for (const m of Array.from(b.subarray(1, 1 + b[0]))) {
+          children.push({
+            name: 'PSK Key Exchange Mode',
+            value: `${PSK_KEY_EXCHANGE_MODE_NAMES[m] ?? 'Unknown'} (${m})`,
+            abbrev: 'tls.extension.psk_ke_mode',
+          });
+        }
+      }
       break;
     case 51: {
       if (b.length < 2) break;
@@ -1192,6 +1224,7 @@ function extensionFields(ext: Extension): ProtocolField[] {
       let q = list ? 2 : 0;
       if (!list) q = 0;
       const stop = list ? Math.min(b.length, 2 + total) : b.length;
+      if (list) children.push({ name: 'Client Key Share Length', value: total, abbrev: 'tls.handshake.extensions_key_share_client_length' });
       while (q + 4 <= stop) {
         const group = u16(b, q);
         const len = u16(b, q + 2);
@@ -1200,6 +1233,15 @@ function extensionFields(ext: Extension): ProtocolField[] {
           value: `Group: ${nameGroup(group)}, Key Exchange length: ${len}`,
           abbrev: 'tls.handshake.extensions_key_share_group',
           ...(len >= 1000 ? { description: 'A share this large is a post-quantum (ML-KEM / Kyber) key.' } : {}),
+          children: [
+            { name: 'Key Exchange Length', value: len, abbrev: 'tls.handshake.extensions_key_share_key_exchange_length' },
+            // The share itself. Hex rather than a summary because it is what
+            // a reader compares against another capture when asking whether
+            // two connections reused a key.
+            ...(q + 4 + len <= b.length
+              ? [{ ...hexField('Key Exchange', b.subarray(q + 4, q + 4 + len)), abbrev: 'tls.handshake.extensions_key_share_key_exchange' }]
+              : []),
+          ],
         });
         q += 4 + len;
       }

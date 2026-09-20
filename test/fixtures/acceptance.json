@@ -69,7 +69,7 @@
           "ssdp": 13,
           "stp": 4,
           "tcp": 59,
-          "tls": 43,
+          "tls": 55,
           "udp": 5
         },
         "protosNamed": 21,
@@ -77,8 +77,8 @@
           "filterableNotInTree": 5
         },
         "counts": {
-          "absentDistinct": 503,
-          "valueMismatches": 126
+          "absentDistinct": 491,
+          "valueMismatches": 130
         },
         "unimplemented": {
           "quic": "A 479-line dissector with its own crypto that decrypts Initials and labels the Protocol column, publishing not one quic.* abbrev on either surface. 40 reference fields here. Recorded rather than floored at 0: a zero floor protects nothing and reads as measured-and-accepted.",
@@ -132,7 +132,7 @@
           "ssdp": 7,
           "stp": 4,
           "tcp": 59,
-          "tls": 42,
+          "tls": 54,
           "udp": 5
         },
         "protosNamed": 16,
@@ -140,8 +140,8 @@
           "filterableNotInTree": 5
         },
         "counts": {
-          "absentDistinct": 349,
-          "valueMismatches": 115
+          "absentDistinct": 337,
+          "valueMismatches": 118
         },
         "unimplemented": {
           "quic": "As inwire: no quic.* abbrev on either surface, against 37 reference fields."
