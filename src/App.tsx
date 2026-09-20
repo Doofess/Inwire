@@ -71,7 +71,6 @@ import {
   loadSessionMeta,
   saveSessionMeta,
 } from "./services/sessionStore";
-import { CustomDissectorEngine } from "./services/customDissectorEngine";
 import {
   ColorRulesEngine,
   COLOR_RULES_STORAGE_KEY,
@@ -1442,7 +1441,6 @@ export default function App() {
   }, [patchSideBar, sideBarPrefs.width]);
 
   // Engines
-  const dissectorEngine = useMemo(() => new CustomDissectorEngine(), []);
   /**
    * The colouring chain, and the engine built from it.
    *
@@ -2361,19 +2359,6 @@ export default function App() {
     }, (packet, forHost) => collector.observe(packet, forHost));
   }, []);
 
-  /**
-   * Called by the Custom Dissectors modal after every edit.
-   *
-   * It has nothing to do, and that is a gap rather than a design: it used to
-   * hand the engine to `PacketGenerator`, which never read it, and **nothing
-   * else in the app consults `CustomDissectorEngine` either** - no dissection
-   * path asks it about a frame. So the modal edits and stores rules that are
-   * never applied. Left wired rather than deleted, because this is the seam a
-   * working implementation would push through; the engine itself and its
-   * storage are untouched.
-   */
-  const handleUpdateDissectors = () => {};
-
   // **`dashboardContext` was here and is gone with the dock.** One memoised
   // object carrying the throttled packet feed, two theme facts and a stable
   // callback, held together so `Dock`'s `React.memo` could actually hold. That
@@ -2806,8 +2791,6 @@ export default function App() {
               surface would join this list rather than sit beside it. */}
           {sheet === 'settings' ? (
             <SettingsPane
-              dissectorEngine={dissectorEngine}
-              onUpdateDissectors={handleUpdateDissectors}
               agentLinkEnabled={agentLinkEnabled}
               agentHealth={agentHealth}
               onStartAgentService={startAgentService}

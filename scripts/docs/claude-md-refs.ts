@@ -97,6 +97,12 @@ const DELIBERATELY_ABSENT = new Map<string, string>([
   ['dockPrefs.ts', 'deleted with the dock; the pane shares live in interfacePrefs.ts'],
   ['dashboardPrefs.ts', 'deleted with the dock; it held DASHBOARD_RAIL_WIDTH and the widget config'],
   ['dashboardWidgets.tsx', 'deleted with the dock; there is no widget registry'],
+  // Custom Dissectors, which was a settings tab wired to nothing: no dissection
+  // path ever asked the engine about a frame, so the panel edited, validated
+  // and stored rules that were applied to none. Named here for the same reason
+  // as the dock's files - either one coming back would mean the surface had.
+  ['customDissectorEngine.ts', 'deleted with the Custom Dissectors tab; no dissection path ever consulted it'],
+  ['CustomDissectorsPanel.tsx', 'deleted with the Custom Dissectors tab; it stored rules nothing applied'],
   // **The application's bottom bar was named here and the entry is retired**,
   // because the thing it asserted is no longer the thing that matters.
   //

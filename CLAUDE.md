@@ -286,10 +286,23 @@ entries, **three already had a rail button** (Capture Statistics, Network,
 Settings), **Export/Import became** the one new rail button, and the rest went to
 Settings: the two passive name-resolution switches to `Interface` beside the two
 outbound lookups already there, and Custom Dissectors to a tab of its own beside
-Decryption - the pair that change what the dissector can **read** rather than
-what is shown. Nothing that duplicated a visible control survived, which was the
+Decryption. Nothing that duplicated a visible control survived, which was the
 menu's own stated rule turned on itself. The title row holds **no navigation**
 now, and `cmdk` left `dependencies` with it.
+
+**Custom Dissectors is deleted, and it was never wired to anything.**
+`App.handleUpdateDissectors` was `() => {}` with a comment admitting it: the
+engine was built in a `useMemo`, handed to the settings pane, and **no
+dissection path ever asked it about a frame**. Rules were edited, validated and
+stored, and applied to nothing. The comment called that "a gap rather than a
+design" and left the seam in place for an implementation that did not come -
+which is the reverse of this repository's rule everywhere else, because a
+surface that does nothing is worse than a missing one: it tells the user the
+feature exists. `customDissectorEngine.ts`, `CustomDissectorsPanel.tsx`, the
+tab, its two props and `CustomDissectorFieldDef`/`CustomDissectorRule` are all
+gone; Decryption is now alone in the pair that changes what the dissector can
+**read**. Nothing in the assertion suite covered any of it, which is its own
+small verdict on what it was worth.
 
 **The views are a drill-down and the title row has a back step.** `Packets` is
 the capture, `Frame Detail` is one frame of it, `Follow Stream` is one
@@ -1772,7 +1785,9 @@ the **offline basemap**: `tiles.openfreemap.org` is still in `OUTBOUND_HOSTS`
 **The shell had a second pass after that date, and §3 is where it is described,
 not here.** This table is a record of what landed when, so its Phase 7 row still
 names the dock - which was built in that phase and deleted after it. What changed
-since: the dock and its whole widget apparatus deleted, **Frame Detail promoted
+since: the dock and its whole widget apparatus deleted, **Custom Dissectors
+deleted** - tab, panel, engine and types, none of which any dissection path
+ever consulted - **Frame Detail promoted
 from a modal to a view** (so `Ctrl+2` is it and the three views after it each
 moved a key), **Find packet deleted** in favour of that view's go-to-frame box,
 the app-wide status bar reverted to `HexViewer`'s own footer, the filter row
