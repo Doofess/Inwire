@@ -465,10 +465,25 @@ could take, and the reason to prefer deleting a surface over guarding it.
 **Settings is a pane and it is the last modal that was a place.** It was
 `fixed inset-0`, a 70% scrim, a `max-w-5xl` panel at `max-h-[90vh]`, an X and a
 Close button - all of which said "you are somewhere else for a moment", about
-the surface that holds the dissector editor, the colour rules, the filter
-presets and the Update Center. `components/common/SettingsPane.tsx` takes the
-workspace card instead: no scrim, no radius, no border, because `<main>` is the
-card and a second one inside it is a card in a card.
+the surface that holds the filter presets, the decryption keys and the Update
+Center. `components/common/SettingsPane.tsx` takes the workspace card instead:
+no scrim, no radius, no border, because `<main>` is the card and a second one
+inside it is a card in a card.
+
+**Two of its tabs are deleted and the pane takes no `permissions` at all
+now.** The dissector editor went because nothing consulted its engine (above);
+**Colouring Rules went because the chain is shipped rather than chosen.**
+Colouring is the one part of this UI whose whole job is to be opinionated about
+which frames matter, and an opinion the user can rewrite is one the app can no
+longer stand behind: `parity-check.ts` compares `frame.coloring_rule.name`
+against tshark frame for frame, `packetThemes.ts` keys an appearance off every
+rule id it expects to exist, and the expert bands assume their own order - all
+three are statements about the chain in `services/colorRules.ts`. The editor's
+storage key is in `RETIRED_PREFERENCE_KEYS`, so a chain edited under the old
+build stops painting rather than painting something nobody can see or correct,
+and `scripts/color-rules/library.ts` fails if a loader for a stored chain comes
+back. `canChangeColorRules` and `canEditDissectors` left `Capabilities` with
+their readers.
 
 **It is deliberately NOT in `APP_VIEWS`**, and that is the half worth keeping.
 The list answers one question - is this a way of looking at the capture? -

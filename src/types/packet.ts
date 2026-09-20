@@ -392,8 +392,6 @@ export interface Capabilities {
   canCapture: boolean;
   canExportPcap: boolean;
   canViewPayloads: boolean;
-  canEditDissectors: boolean;
-  canChangeColorRules: boolean;
   canClearBuffer: boolean;
 }
 

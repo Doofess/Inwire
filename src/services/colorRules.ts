@@ -7,6 +7,18 @@ import type { PacketTheme } from './packetThemes';
 /**
  * The reference analyzer's default coloring rules, in its order and under its exact names.
  *
+ * **The chain is shipped and not chosen.** There was an editor for one
+ * revision - a Settings tab that reordered, recoloured and disabled rules, and
+ * stored the result under `inwire.colorRules` - and it is deleted. Colouring
+ * is the one part of this UI whose whole job is to be opinionated about which
+ * frames matter, and an opinion the user can rewrite is one the app can no
+ * longer stand behind: the parity harness compares `frame.coloring_rule.name`
+ * against tshark frame for frame, `packetThemes.ts` keys an appearance off
+ * every rule id it expects to exist, and the expert bands below assume their
+ * own order. All three are statements about THIS chain. The key is retired in
+ * `preferences.ts`, so a chain edited under the old build stops painting
+ * rather than painting something nobody can see or correct.
+ *
  * Order is the whole design: the chain is first-match-wins, so a retransmitted
  * RST is "Bad TCP" rather than "TCP RST", a plain RST on port 80 is "TCP RST"
  * rather than "HTTP", and an ARP broadcast is "ARP" rather than "Broadcast" -
@@ -392,46 +404,6 @@ function insertExtraRules(base: ColorRule[], extra: ColorRule[]): ColorRule[] {
 // ---------------------------------------------------------------------------
 // The user's chain
 // ---------------------------------------------------------------------------
-
-export const COLOR_RULES_STORAGE_KEY = 'inwire.colorRules';
-
-/**
- * Validates a stored chain.
- *
- * Field by field and rule by rule, the way every other preference in this app
- * is validated: a rule that has lost its filter is dropped rather than
- * discarding the whole chain, and a chain that ends up empty falls back to the
- * shipped one - a packet list with no colouring at all is not a state anybody
- * chose, and there would be no rule left in the editor to start from.
- */
-export function normalizeColorRules(raw: unknown): ColorRule[] | null {
-  if (!Array.isArray(raw)) return null;
-  const out: ColorRule[] = [];
-  const seen = new Set<string>();
-  for (const entry of raw) {
-    if (typeof entry !== 'object' || entry === null) continue;
-    const v = entry as Record<string, unknown>;
-    if (typeof v.id !== 'string' || typeof v.name !== 'string' || typeof v.filter !== 'string') continue;
-    if (seen.has(v.id)) continue;
-    seen.add(v.id);
-    out.push({
-      id: v.id,
-      name: v.name,
-      filter: v.filter,
-      enabled: typeof v.enabled === 'boolean' ? v.enabled : true,
-      ...(typeof v.bgColor === 'string' ? { bgColor: v.bgColor } : {}),
-      ...(typeof v.textColor === 'string' ? { textColor: v.textColor } : {}),
-      ...(typeof v.lightBgColor === 'string' ? { lightBgColor: v.lightBgColor } : {}),
-      ...(typeof v.lightTextColor === 'string' ? { lightTextColor: v.lightTextColor } : {}),
-    });
-  }
-  return out.length > 0 ? out : null;
-}
-
-/** A fresh copy of the shipped chain, for the editor's reset. */
-export function defaultColorRules(): ColorRule[] {
-  return DEFAULT_COLOR_RULES.map((r) => ({ ...r }));
-}
 
 interface CompiledRule {
   rule: ColorRule;
