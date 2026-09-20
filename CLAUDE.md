@@ -2093,6 +2093,26 @@ a demand-start service for ever. `docs/verification.md` holds the table, and the
 machine was put back. `npcap_access.py` is not ported and the Rust agent sends
 `None`, which falls back to the registry.
 
+**Every message the app can read, the Rust agent can now send**, and that is a
+check rather than a claim: `scripts/agent/message-coverage.ts` reads the
+`type: '...'` literals out of `agentProtocol.ts` and asserts each is emitted
+somewhere in `agent-rs/src/`. ADR 0037's "not ported" list had four entries and
+was written from what was consciously skipped rather than from the protocol,
+which is how `interface_stats` came to be missing from it — the app subscribed,
+the agent answered with a generic `state`, and the sparkline drew nothing with
+nothing erroring anywhere. All four are ported (`if_table.rs`, `adapters.rs`,
+`sockets.rs`, `agent_log.rs`) and the allow-list holds one entry, `packet`,
+which is the binary frame path and has no JSON form.
+
+**The two agents share one log file and one log format**, which is
+`agent_log.rs` matching `"%(asctime)s %(levelname)-7s %(message)s"` byte for
+byte — the level field is seven characters wide and `agent_log.py`'s parser
+strips exactly that computed width rather than a greedy `\s+`, because the
+agent indents some lines on purpose. A subscriber that connects after a swap
+therefore sees continuous history across both implementations. Until this
+landed the Rust agent wrote no log at all, and `service.rs` says what that
+cost: *"Nothing is attached to stderr under the SCM."*
+
 **The Python agent is still what ships**, and has every fix this work produced.
 What blocks the swap is `0030`/`0032`'s constraint rather than this one: a
 code-signing certificate, and elevation to replace the installed binary.
