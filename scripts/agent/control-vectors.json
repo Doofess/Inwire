@@ -103,6 +103,25 @@
     },
     {
       "message": {
+        "interfaces": [
+          {
+            "bytesPerSec": 1536.0,
+            "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}",
+            "packetsPerSec": 12.0
+          },
+          {
+            "bytesPerSec": 0.0,
+            "name": "\\Device\\NPF_{AFD92574-A48F-4DB3-B2DD-AC064979FDC7}",
+            "packetsPerSec": 0.0
+          }
+        ],
+        "intervalMs": 500,
+        "type": "interface_stats"
+      },
+      "note": "interface_stats: the rates the Interfaces panel draws"
+    },
+    {
+      "message": {
         "code": "capture_failed",
         "iface": 2,
         "message": "Capture stopped on interface 2: pcap_next_ex failed (-1): device removed",

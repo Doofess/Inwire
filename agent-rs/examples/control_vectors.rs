@@ -67,6 +67,23 @@ fn main() {
         protocol::state(CaptureState::Idle, &interfaces, None),
     );
     add(
+        "interface_stats: the rates the Interfaces panel draws",
+        protocol::interface_stats(500, &[
+            inwire_agent::if_table::Rate {
+                name: r"\Device\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}".to_string(),
+                packets_per_sec: 12.0,
+                bytes_per_sec: 1536.0,
+            },
+            // An adapter carrying nothing still reports, so the panel draws a
+            // flat line rather than leaving a row blank.
+            inwire_agent::if_table::Rate {
+                name: r"\Device\NPF_{AFD92574-A48F-4DB3-B2DD-AC064979FDC7}".to_string(),
+                packets_per_sec: 0.0,
+                bytes_per_sec: 0.0,
+            },
+        ]),
+    );
+    add(
         "a capture that stopped on its own, with the reason",
         protocol::capture_failed(2, "pcap_next_ex failed (-1): device removed"),
     );

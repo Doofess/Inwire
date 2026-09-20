@@ -41,6 +41,7 @@ use serde_json::Value;
 
 use crate::adapters;
 use crate::framing::{FRAME_BINARY, FRAME_JSON};
+use crate::if_table;
 use crate::npcap::{Npcap, Read};
 use crate::pipe::{self, Connection, PipeInstance};
 use crate::protocol::{self, CaptureState, Command, Interface, InterfaceStats, ParseError};
@@ -71,6 +72,19 @@ pub const FIRST_CLIENT_GRACE: Duration = Duration::from_secs(30);
 
 /// How often `capture_stats` goes out while capturing.
 pub const STATS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often `interface_stats` goes out to whoever subscribed.
+///
+/// 500 ms, matching `local-agent/agent.py`'s
+/// `INTERFACE_STATS_INTERVAL_SECONDS`, because the app sizes its history window
+/// from the `intervalMs` the message carries and the two agents drawing
+/// differently-scaled graphs would be a difference nobody could see the cause
+/// of.
+///
+/// **Deliberately not `STATS_INTERVAL`.** That one is 1 s and only ticks while
+/// a capture is running; these rates have to move on an idle adapter, which is
+/// the entire point of the panel.
+pub const INTERFACE_STATS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Signals a stop from any thread, and lets one thread wait for it.
 ///
@@ -135,6 +149,12 @@ struct Shared {
     /// The device NAME the app asked for, never a list position.
     selected: Mutex<Option<String>>,
     capture: Mutex<Option<CaptureHandles>>,
+    /// Clients that asked for `interface_stats`, by id.
+    ///
+    /// A set rather than a flag: several windows can watch the rates at once,
+    /// and unlike frames there is no reason to send them to one client alone -
+    /// these are facts about the machine, not about anybody's capture.
+    rate_watchers: Mutex<std::collections::HashSet<String>>,
     shutdown: Arc<Shutdown>,
 }
 
@@ -695,6 +715,12 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                 let interfaces = shared.interfaces.lock().unwrap().clone();
                 shared.broadcast(&protocol::state(CaptureState::Idle, &interfaces, None));
             }
+            Command::SubscribeInterfaceStats => {
+                shared.rate_watchers.lock().unwrap().insert(client.clone());
+            }
+            Command::UnsubscribeInterfaceStats => {
+                shared.rate_watchers.lock().unwrap().remove(&client);
+            }
             Command::SubscribeAdapters | Command::RefreshAdapters => {
                 // A whole snapshot, not a delta, and sent on subscribe rather
                 // than on a timer: a machine has a handful of adapters and the
@@ -720,6 +746,7 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
     // The client has gone. Deregister first, so nothing tries to send to it
     // while the capture is being torn down.
     shared.clients.lock().unwrap().remove(&client);
+    shared.rate_watchers.lock().unwrap().remove(&client);
     if shared.owner.lock().unwrap().as_deref() == Some(client.as_str()) {
         shared.stop_capture();
         let interfaces = shared.interfaces.lock().unwrap().clone();
@@ -768,6 +795,7 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
         owner: Mutex::new(None),
         selected: Mutex::new(None),
         capture: Mutex::new(None),
+        rate_watchers: Mutex::new(std::collections::HashSet::new()),
         shutdown: Arc::clone(&shutdown),
     });
 
@@ -804,6 +832,47 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
                 let _ = serve(Arc::clone(&shared), instance, client);
             }
         }));
+    }
+
+    // The rate sampler. One thread for the whole agent rather than one per
+    // subscriber: the OS counters are read once however many windows are
+    // watching, and a second reader would difference the same table against a
+    // different previous sample.
+    {
+        let shared = Arc::clone(&shared);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            let mut sampler = if_table::RateSampler::new();
+            while !shutdown.requested() {
+                thread::sleep(INTERFACE_STATS_INTERVAL);
+                let watchers: Vec<String> =
+                    shared.rate_watchers.lock().unwrap().iter().cloned().collect();
+                if watchers.is_empty() {
+                    continue;
+                }
+                let devices: Vec<String> = shared
+                    .interfaces
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i.name.clone())
+                    .collect();
+                let rates = sampler.rates(&devices);
+                // The first tick after a subscription has no interval behind it
+                // and yields nothing. Sending an empty list would draw a zero
+                // that was never measured.
+                if rates.is_empty() {
+                    continue;
+                }
+                let message = protocol::interface_stats(
+                    INTERFACE_STATS_INTERVAL.as_millis() as u32,
+                    &rates,
+                );
+                for watcher in watchers {
+                    shared.send_to(&watcher, &message);
+                }
+            }
+        });
     }
 
     // The idle watchdog, which is the whole of ADR 0035 on this side: the agent
