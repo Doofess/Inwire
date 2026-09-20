@@ -1288,10 +1288,87 @@ that `sc sdshow` prints the SACL only when run **elevated**, so an unelevated
 reading and an elevated one of the same service differ by a trailing `S:(AU;…)`
 and neither is wrong.
 
-Known gaps to expect rather than report: `npcapAccess` is absent from `hello`
-(not ported), so the Update Center's driver-access row falls back to the
-registry; and the socket table, adapter config and log subscriptions answer with
-a `state` message rather than data.
+The one known gap to expect rather than report: `npcapAccess` is absent from
+`hello` (not ported), so the Update Center's driver-access row falls back to the
+registry. The socket table, the adapter config, the log subscription and
+`interface_stats` were on that list and are not any more - see
+`scripts/agent/message-coverage.ts`, which fails `npm run check` if a message
+the app can read stops being one the agent can send.
+
+**Rebuild before swapping, and read what the script says it copied.**
+`switch-agent.ps1 -Rust` copies a built binary into Program Files rather than
+registering it where it was built, so a stale `target\` is a stale service -
+and on a machine with no MSVC linker the build lands in
+`target_64-pc-windows-gnuelease\` rather than `targetelease\`, which
+is a second way to install yesterday's work and be told it succeeded. The script
+now prints the path it chose and how many minutes old it is; that line is the
+thing to read.
+
+### Capturing on more than one adapter
+
+Every part of this is new with the multi-adapter selection and none of it can
+be checked without two adapters carrying traffic. Npcap's loopback device is
+the second adapter on any machine, and `Test-NetConnection 127.0.0.1 -Port 135`
+in a loop is enough to make it talk.
+
+1. **Both adapters deliver.** Pick two in the Interfaces panel, Start, and watch
+   the Frame layer's interface row change between frames. The packet list should
+   carry both adapters' traffic interleaved by time.
+2. **The counters are per adapter and the sequence is not.** Capture Health
+   shows a received count per interface; they must sum to the capture's frame
+   count, because the sequence number is one counter across every adapter and
+   `received` is one per adapter (`CaptureCounters`' own split in `agent.py`).
+3. **Pulling one adapter does not stop the other.** With two running, disable
+   one in Windows' adapter settings. Expected: an error naming *that* interface,
+   the other one still delivering frames, and the status bar still reading
+   Capturing. Disable the second as well and the capture goes idle. Reporting
+   idle on the first is the failure mode - it takes the surviving adapter's
+   frames off the screen while they are still arriving.
+4. **A selection the agent cannot honour is refused.** There is no UI for this;
+   it is the restored-session path. The whole selection is rejected with
+   `no_interfaces` naming the adapter that is gone, rather than capturing on
+   whichever ones remain.
+
+### A loopback capture is not read as Ethernet
+
+The one adapter on a Windows machine that is not Ethernet, and the reason
+`AgentInterface.linkType` exists.
+
+Capture on **Adapter for loopback traffic capture** with something talking to
+127.0.0.1. Expected: a Frame layer reading `Null/Loopback`, addresses of
+`127.0.0.1`, and real TCP or UDP above them. The failure is unmistakable and was
+what shipped: a Protocol column of `0x8006` and `0x8011`, source and destination
+columns showing MAC addresses like `00:34:38:16:40:00` **with vendors resolved
+from them**, and no transport layer at all - so Follow Stream, conversations and
+the expert list are empty for the whole capture.
+
+Then **export it both ways and open the files in Wireshark.** The pcapng's
+interface block and the classic pcap's file header must both say `NULL/Loopback`
+rather than Ethernet; a file that declares Ethernet makes Wireshark reproduce
+this app's own misparse from the file. Anonymise a loopback capture too: the
+anonymiser rewrites bytes at link-layer offsets, and one that assumed Ethernet
+wrote two MAC addresses over the IP version, TTL and protocol - corrupting the
+frame while leaving the addresses it was asked to remove exactly where they
+were.
+
+### The agent's log, and who owns a socket
+
+Both are new to the Rust agent and both are subscriptions, so the way they fail
+is a panel that stays empty with nothing erroring.
+
+- **Capture Health's log view** should show the backlog immediately on opening
+  and then new lines as they happen - starting a capture writes one. Because the
+  Rust agent writes the Python agent's own format to the same file, the backlog
+  after a swap should still contain lines from before it.
+- **The process column** should name the program behind a local socket.
+  Something obvious - a browser, or `Test-NetConnection` - is the thing to look
+  for. A pid the OS will not name shows the socket with no process rather than
+  disappearing.
+- **Run the agent unelevated beside the installed service** (`inwire-agent
+  debug` with `INWIRE_AGENT_PIPE` set) and expect one warning at startup that it
+  cannot write a log. That is correct: `%ProgramData%\Inwire` grants Users
+  write, while `agent.log` itself belongs to SYSTEM and Administrators. Lines
+  still reach subscribers and stderr; nothing is kept.
 
 ## 6. What is still owed
 
