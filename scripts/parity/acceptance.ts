@@ -19,7 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { Acceptance } from './acceptance-schema';
+import type { Acceptance, FixtureSpec } from './acceptance-schema';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ACCEPTANCE_PATH = 'test/fixtures/acceptance.json';
@@ -60,29 +60,80 @@ for (const [name, f] of fixtures) {
   check(`${name}: frames count agrees with the file's frame total`, f.counts.frames, f.frames);
   check(`${name}: README lists the file and its hash`,
     readme.includes(f.file) && readme.includes(f.sha256), true);
+
+  // --- and the tree's side of it (ADR 0039) -----------------------------------
+  //
+  // A separate object rather than more keys in `floors`, and the check above is
+  // exactly why: it asserts every floor is a percentage, so a layer count of 24
+  // would pass as one and a reference vocabulary of 120 would fail as one. The
+  // namespaces differ too - `floors` is keyed by display-column name with
+  // spaces and capitals, `tree.layers` by lowercase layer token.
+  const t = f.tree;
+  check(`${name}: has a tree block`, t !== undefined, true);
+  if (t === undefined) continue;
+  const notACount = (v: number): boolean => !(Number.isInteger(v) && v >= 0);
+  check(`${name}: every layer floor is a count`,
+    Object.entries(t.layers).filter(([, v]) => notACount(v)).map(([k]) => k), []);
+  check(`${name}: every ceiling is a count`,
+    Object.entries(t.ceilings).filter(([, v]) => notACount(v)).map(([k]) => k), []);
+  check(`${name}: every recorded count is a count`,
+    Object.entries(t.counts).filter(([, v]) => notACount(v)).map(([k]) => k), []);
+  check(`${name}: protosNamed is a count`, !notACount(t.protosNamed), true);
+  check(`${name}: every unimplemented layer says why`,
+    Object.entries(t.unimplemented).filter(([, why]) => why.trim().length === 0).map(([k]) => k), []);
+  // A layer is floored or declared unimplemented, never both - the second is
+  // the statement that the first is deliberately absent.
+  check(`${name}: no layer is both floored and unimplemented`,
+    Object.keys(t.layers).filter((k) => k in t.unimplemented), []);
 }
 
 // --- floors only rise ---------------------------------------------------------
 
-function committedFloors(): Record<string, Record<string, number>> | null {
+/**
+ * The whole committed fixture, not just its `floors`.
+ *
+ * Widened from `committedFloors()` when the tree gained floors of its own:
+ * four ratchets now read from it, and each needs a different part.
+ */
+function committedFixtures(): Record<string, FixtureSpec> | null {
   try {
     const text = execFileSync('git', ['show', `HEAD:${ACCEPTANCE_PATH}`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    const prev = JSON.parse(text) as Acceptance;
-    return Object.fromEntries(Object.entries(prev.fixtures).map(([n, f]) => [n, f.floors]));
+    return (JSON.parse(text) as Acceptance).fixtures;
   } catch {
     return null; // not committed yet, or no git - nothing to compare against
   }
 }
 
-const previous = committedFloors();
+const previous = committedFixtures();
 if (previous) {
   for (const [name, f] of fixtures) {
-    const before = previous[name] ?? {};
+    const before = previous[name];
+    // `?? 0` rather than an `in` guard, deliberately: **deleting** a floor is
+    // the cheapest way to lower one, and an absent key must read as zero so it
+    // fails here rather than quietly disappearing.
     check(`${name}: no floor was lowered since HEAD`,
-      Object.entries(before).filter(([col, v]) => (f.floors[col] ?? 0) < v).map(([col]) => col), []);
+      Object.entries(before?.floors ?? {}).filter(([col, v]) => (f.floors[col] ?? 0) < v).map(([col]) => col), []);
+
+    const was = before?.tree;
+    const now = f.tree;
+    if (was === undefined || now === undefined) continue;
+    check(`${name}: no tree floor was lowered since HEAD`,
+      Object.entries(was.layers).filter(([l, v]) => (now.layers[l] ?? 0) < v).map(([l]) => l), []);
+    check(`${name}: protosNamed did not fall since HEAD`, now.protosNamed >= was.protosNamed, true);
+    // **Ceilings only fall, for the same reason floors only rise.** The two
+    // numbers here count defects - a filter with no tree row behind it, and a
+    // value that disagrees with the reference - so letting one drift upward is
+    // the same act as lowering a floor, wearing the other sign.
+    check(`${name}: no ceiling was raised since HEAD`,
+      Object.entries(was.ceilings).filter(([k, v]) => (now.ceilings[k] ?? Infinity) > v).map(([k]) => k), []);
+    // An entry may only leave `unimplemented` by becoming a floor. Vanishing
+    // to nowhere would retire the statement without recording what replaced it.
+    check(`${name}: nothing left unimplemented without becoming a floor`,
+      Object.keys(was.unimplemented).filter((l) => !(l in now.unimplemented) && !(l in now.layers)), []);
   }
 } else {
-  console.log('skip  floors-only-rise (acceptance.json not in HEAD yet)');
+  console.log('skip  the ratchets - floors, tree floors, protosNamed, ceilings and '
+    + 'unimplemented (acceptance.json not in HEAD yet)');
 }
 
 console.log();

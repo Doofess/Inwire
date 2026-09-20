@@ -56,10 +56,6 @@ const NOT_TESTS: Record<string, string> = {
     + 'they captured; needs the Python agent registered as the service and the '
     + 'Rust one running on INWIRE_AGENT_PIPE beside it, and Windows',
   'parity/parity-check.ts': 'needs the untracked fixture captures and tshark ground truth (test/fixtures/README.md)',
-  'parity/tree-coverage.ts':
-    'measurement; diffs the protocol tree against `tshark -T pdml` and ranks what is '
-    + 'missing. There is no right answer to hold it to - the reference emits fields '
-    + 'nothing here should - so it reports rather than asserts. Needs the fixtures and tshark',
   'tcp/reassembly.ts': 'diagnostic; needs the fixtures, and reports rather than asserts (docs/decisions/0020)',
   'perf/clone-cost.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0007)',
   'perf/throughput.ts': 'measurement; needs the untracked fixture captures (test/fixtures/README.md)',

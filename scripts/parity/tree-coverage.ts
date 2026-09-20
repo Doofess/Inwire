@@ -1,7 +1,7 @@
 /**
  * Does the protocol tree hold what the reference analyzer's holds?
  *
- *   npx tsx scripts/parity/tree-coverage.ts [--fixture inwire|bulk] [--frames N] [--top N]
+ *   npx tsx scripts/parity/tree-coverage.ts [--fixture inwire|bulk] [--frames N] [--top N] [--values] [--write-floors]
  *
  * ## Why this exists
  *
@@ -22,27 +22,59 @@
  * output is a ranked list of what is missing, which is the thing that was
  * missing.
  *
- * ## What it is not
+ * ## What it is held to
  *
- * **A pass/fail gate, yet.** There is no right answer to hold this to: the
- * reference emits fields that are meaningless here, and a long tail nobody
- * wants. So it is a measurement, and `check.ts` skips it by name like
- * `throughput.ts` and `tree-cost.ts`. Choosing floors out of its output is a
- * separate decision, taken once there is an output to read.
+ * This file used to say *"a pass/fail gate, yet… choosing floors out of its
+ * output is a separate decision, taken once there is an output to read."*
+ * There is an output to read, and ADR 0039 is that decision. Four numbers per
+ * fixture, in `acceptance.json`'s `tree` block:
+ *
+ * - **`layers[layer]` — a floor, and a COUNT, never a ratio.** The number of
+ *   distinct abbrevs *both* sides emit in that layer. The denominator of a
+ *   coverage percentage is the **reference's** vocabulary, which grows when
+ *   Wireshark ships - so a ratio floor would fail a build that changed nothing,
+ *   on the very upgrade `test/fixtures/README.md` tells you to perform. A gate
+ *   that fails on its own prescribed maintenance is a gate people delete.
+ *   `wireshark-abbrevs.ts` won the same argument by checking `ours ⊆ theirs`,
+ *   which is immune to the reference growing and fails only on a rename.
+ *   The intersection, not our raw count, because a floor on our own output
+ *   would pass just as happily on an abbrev we invented.
+ * - **`protosNamed` — a floor.** How many of the protocols the reference names
+ *   here this build can name, through `frameProtocols` or a filter predicate.
+ * - **`ceilings` — two numbers that may only FALL.** `filterableNotInTree` is
+ *   the one place where every entry is a defect with no judgement call: the
+ *   app accepts a filter for a row the detail pane refuses to draw.
+ *   `valueMismatches` catches a decode regression flipping a value on every
+ *   frame. It is a ceiling at the measured number rather than a floor at zero
+ *   because `ourFrameFields` stringifies with `String(...)` against the
+ *   reference's *display* string, so adding a field it formats
+ *   `0x0800 (IPv4)` where we print `0x0800` raises the count - raising the
+ *   ceiling is a normal argued commit, not a defeat.
+ * - **`counts.absentDistinct` — recorded and NEVER enforced.** A ceiling on it
+ *   would turn a ranked measurement into a 600-item backlog, which is exactly
+ *   what ADR 0021 ended: *a bucket is a defect only until it is measured*. The
+ *   series is worth having; the chase is not.
+ *
+ * `--write-floors` records what it measured. `--frames N` is a prefix, so it
+ * turns the assertions off loudly rather than checking whole-file floors
+ * against a tenth of the evidence.
  *
  * Needs tshark and the untracked fixtures (test/fixtures/README.md). Skips
  * cleanly without either - a machine that cannot run a measurement has not
- * failed anything.
+ * failed anything, which is also the reason this can be in `npm run check`
+ * where `parity-check.ts` cannot: that one fails on a missing fixture, by
+ * design (ADR 0004).
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PcapService } from '../../src/services/pcapParser';
 import { knownFieldNames, protocolNames } from '../../src/services/filter/fields';
 import type { Packet, ProtocolField } from '../../src/types/packet';
+import type { Acceptance, TreeAcceptance } from './acceptance-schema';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '..', '..', 'test', 'fixtures');
@@ -302,6 +334,13 @@ function layerOf(abbrev: string): string {
   return dot === -1 ? abbrev : abbrev.slice(0, dot);
 }
 
+let failures = 0;
+/** One held expectation, in the PASS/FAIL shape every script here prints. */
+function report(name: string, pass: boolean, detail: string): void {
+  if (!pass) failures++;
+  console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${name}${pass ? '' : ` - ${detail}`}`);
+}
+
 const num = (value: number): string => value.toLocaleString('en-US');
 const pct = (part: number, whole: number): string =>
   whole === 0 ? '   n/a' : `${((part / whole) * 100).toFixed(1).padStart(5)}%`;
@@ -319,6 +358,18 @@ async function run(): Promise<void> {
   // differences are formatting it chose and we did not ("0x0800" against
   // "0x0800 (IPv4)"). Useful when reading one protocol, noise in a summary.
   const showValues = argv.includes('--values');
+  const writeFloors = argv.includes('--write-floors');
+  /**
+   * **A prefix cannot be checked against whole-file floors.**
+   *
+   * The floors are measured over every frame of a fixture. Holding a
+   * 500-frame prefix to them would fail on every layer the prefix happens not
+   * to contain, so the only honest answer is to stop asserting - loudly, not
+   * by quietly passing, because a gate that says PASS on a tenth of the
+   * evidence is worse than one that says nothing.
+   */
+  const wholeFile = !Number.isFinite(maxFrames);
+  const assertFloors = wholeFile && !writeFloors;
 
   /**
    * Names a filter here accepts, whether or not a tree row carries them.
@@ -343,9 +394,9 @@ async function run(): Promise<void> {
     return;
   }
 
-  const acceptance = JSON.parse(readFileSync(ACCEPTANCE, 'utf8')) as {
-    fixtures: Record<string, { file: string }>;
-  };
+  const acceptance = JSON.parse(readFileSync(ACCEPTANCE, 'utf8')) as Acceptance;
+  /** What `--write-floors` will put back, per fixture. */
+  const written: Record<string, TreeAcceptance> = {};
 
   for (const [name, spec] of Object.entries(acceptance.fixtures)) {
     if (only !== undefined && only !== name) continue;
@@ -445,7 +496,14 @@ async function run(): Promise<void> {
     console.log('='.repeat(78));
     console.log(`frames: reference ${num(referenceFrames)}, inwire ${num(packets.length)}, compared ${num(compared)}`);
     if (referenceFrames !== packets.length) {
-      console.log('WARN  frame counts differ - alignment here is by index, so the diff below is suspect.');
+      // **A failure, not a warning.** Alignment is by index, so a count
+      // mismatch makes every number below it meaningless - the floors would be
+      // checked against a diff of frames that are not the same frames.
+      // `parity-check.ts` treats its own row-count mismatch the same way.
+      console.log('FAIL  frame counts differ - alignment here is by index, so nothing below is '
+        + 'comparable. Re-generate the ground truth, or check the capture.');
+      failures++;
+      continue;
     }
 
     const entries = [...tally.entries()];
@@ -530,7 +588,91 @@ async function run(): Promise<void> {
       const fired = reattributeFired.has(rule.proto) ? 'fired ' : 'UNUSED';
       console.log(`  ${fired}  ${rule.family}.* counted under ${rule.proto}  (${rule.why})`);
     }
+
+    // --- what this fixture is held to ------------------------------------------
+
+    /**
+     * The floorable number per layer: abbrevs **both** sides emit.
+     *
+     * Not our raw count, which would pass on a name we invented, and not a
+     * ratio - see this file's header and ADR 0039. `entry.ours > 0` alone is
+     * what the table above prints, and the difference between the two is the
+     * INWIRE-ONLY list.
+     */
+    const shared = new Map<string, number>();
+    for (const [abbrev, entry] of entries) {
+      if (entry.ours === 0 || entry.theirs === 0) continue;
+      const layer = layerOverride.get(abbrev) ?? layerOf(abbrev);
+      shared.set(layer, (shared.get(layer) ?? 0) + 1);
+    }
+    const measured: TreeAcceptance = {
+      layers: Object.fromEntries([...shared.entries()].sort(([a], [b]) => a.localeCompare(b))),
+      protosNamed,
+      ceilings: { filterableNotInTree: filterOnly.length, valueMismatches: differing.length },
+      counts: { absentDistinct: absent.length },
+      unimplemented: spec.tree?.unimplemented ?? {},
+    };
+
+    if (writeFloors) {
+      written[name] = measured;
+      console.log('\n--- MEASURED (--write-floors) ---');
+      console.log(JSON.stringify(measured, null, 2).split('\n').map((l) => `  ${l}`).join('\n'));
+      continue;
+    }
+    if (!assertFloors) {
+      console.log(`\nSKIP  assertions: --frames ${num(maxFrames)} is a prefix and the floors are `
+        + 'whole-file. Run without --frames to check them.');
+      continue;
+    }
+
+    const held = spec.tree;
+    if (held === undefined) {
+      console.log(`\nFAIL  ${name}: no "tree" block in acceptance.json. `
+        + 'Run with --write-floors to record one.');
+      failures++;
+      continue;
+    }
+
+    console.log('\n--- HELD TO ---');
+    for (const [layer, floor] of Object.entries(held.layers)) {
+      const now = shared.get(layer) ?? 0;
+      report(`${name}: ${layer} keeps at least ${floor} shared abbrevs`, now >= floor,
+        `has ${now}`);
+    }
+    report(`${name}: names at least ${held.protosNamed} of the reference's protocols`,
+      protosNamed >= held.protosNamed, `names ${protosNamed}`);
+    for (const [what, ceiling] of Object.entries(held.ceilings)) {
+      const now = measured.ceilings[what] ?? 0;
+      report(`${name}: ${what} stays at or below ${ceiling}`, now <= ceiling, `is ${now}`);
+    }
+    // A layer declared unimplemented that has started emitting is not a
+    // failure here - it is a floor waiting to be written, and `acceptance.ts`
+    // is where that becomes one. Said out loud so it is not missed.
+    for (const layer of Object.keys(held.unimplemented)) {
+      if ((shared.get(layer) ?? 0) > 0) {
+        console.log(`  NOTE  ${name}: ${layer} is declared unimplemented and now emits `
+          + `${shared.get(layer)} shared abbrevs - run --write-floors and move it into layers.`);
+      }
+    }
   }
+
+  if (writeFloors) {
+    for (const [name, tree] of Object.entries(written)) {
+      if (acceptance.fixtures[name] !== undefined) acceptance.fixtures[name].tree = tree;
+    }
+    writeFileSync(ACCEPTANCE, `${JSON.stringify(acceptance, null, 2)}\n`);
+    console.log(`\nwrote tree floors for ${Object.keys(written).join(', ')} to acceptance.json`);
+    console.log('Hand-add `unimplemented` reasons for any layer at zero before committing.');
+    return;
+  }
+
+  console.log();
+  if (failures > 0) {
+    console.log(`${failures} tree check(s) FAILED`);
+    process.exit(1);
+  }
+  console.log('All tree coverage checks passed.');
+  process.exit(0);
 }
 
 run().catch((error: unknown) => {
