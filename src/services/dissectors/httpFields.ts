@@ -117,11 +117,19 @@ function uriRows(target: string): ProtocolField[] {
   if (mark !== -1) {
     const query = target.slice(mark + 1);
     rows.push({ name: 'Request URI Query', value: query, abbrev: 'http.request.uri.query' });
-    // Split on `&` only. A parameter whose VALUE contains an `=` is legal and
-    // common (base64 padding), so the name is everything before the first one
-    // and the rest is the value - which is why the whole `name=value` pair is
-    // what the field carries rather than either half.
-    for (const parameter of query.split('&').filter((p) => p.length > 0)) {
+    // **Split on `&` AND `+`, which is the reference's rule and not the
+    // obvious one.** `+` is an encoded space inside a value, so
+    // `?q=packet+capture` is one parameter by any reading of RFC 3986 - and
+    // the reference emits three for `?q=packet+capture&safe=off`: `q=packet`,
+    // `capture`, `safe=off`. Measured on its own output rather than assumed
+    // (`scripts/http/dissect.ts`), and matched, because the registry's promise
+    // is that a filter learnt in Wireshark answers the same here - which is a
+    // promise about values wherever a field is one a user types a literal into.
+    //
+    // A parameter whose VALUE contains an `=` is legal and common (base64
+    // padding), so the whole `name=value` pair is what the field carries
+    // rather than either half.
+    for (const parameter of query.split(/[&+]/).filter((p) => p.length > 0)) {
       rows.push({ name: 'Request URI Query Parameter', value: parameter, abbrev: 'http.request.uri.query.parameter' });
     }
   }
@@ -164,6 +172,14 @@ export interface HttpRowOptions {
    * report - see the row it suppresses.
    */
   datagram?: boolean;
+  /**
+   * The request this response answers, and how long it waited.
+   *
+   * Only a response has one, and only when the request was seen: a capture
+   * started mid-connection has responses whose requests are not in it, and the
+   * honest answer there is no row rather than a zero.
+   */
+  answers?: { frameId: number; elapsedUs: number };
 }
 
 /** One message's rows, in the reference's order. */
@@ -234,6 +250,24 @@ export function httpMessageRows(message: Http1Message, options: HttpRowOptions =
     }
   } else {
     rows.push({ name: '[Response]', value: true, generated: true, abbrev: 'http.response' });
+    if (options.answers !== undefined) {
+      // The two numbers that answer "was the server slow, or did it never
+      // reply at all" - which is the question anyone opens an HTTP capture
+      // with, and which this build could not answer at all.
+      rows.push({
+        name: '[Request in frame]',
+        value: options.answers.frameId,
+        generated: true,
+        abbrev: 'http.request_in',
+        linkToFrame: options.answers.frameId,
+      });
+      rows.push({
+        name: '[Time since request]',
+        value: `${(options.answers.elapsedUs / 1_000_000).toFixed(9)} seconds`,
+        generated: true,
+        abbrev: 'http.time',
+      });
+    }
   }
 
   // How the body is delimited, which is a fact about a STREAM: it is what
@@ -276,6 +310,12 @@ export function httpMessageFields(
   } else {
     out['http.response'] = 1;
     out['http.response.code'] = message.status ?? 0;
+    if (options.answers !== undefined) {
+      out['http.request_in'] = options.answers.frameId;
+      // Seconds, because that is the unit the reference's FT_RELATIVE_TIME
+      // filters in - `http.time > 1` is one second there and must be here.
+      out['http.time'] = options.answers.elapsedUs / 1_000_000;
+    }
     out['http.response.version'] = message.version;
     if (message.reason) out['http.response.phrase'] = message.reason;
   }

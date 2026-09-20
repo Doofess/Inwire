@@ -532,7 +532,10 @@ function isEncryptedRecord(record: TlsRecord, conv: TlsConversationState, cursor
  * encrypted - so the AEAD tag is the oracle. That is sound precisely because a
  * wrong key fails the tag: a guess cannot succeed by accident.
  */
-function decryptIfPossible(record: TlsRecord, conv: TlsConversationState, cursor: TlsRecordCursor): void {
+function decryptIfPossible(
+  record: TlsRecord, conv: TlsConversationState, cursor: TlsRecordCursor,
+  appFrame?: { id: number; tsUs: number },
+): void {
   const keys = conv.keys;
   if (!keys || record.body === null || cursor.role === 'unknown' || cursor.readOnly) return;
   if (!isEncryptedRecord(record, conv, cursor)) return;
@@ -550,7 +553,7 @@ function decryptIfPossible(record: TlsRecord, conv: TlsConversationState, cursor
       plaintextLength: opened.plaintext.length,
       epoch: epochs[index].name,
     };
-    readPlaintext(record.decrypted, opened.plaintext, opened.contentType, conv, cursor);
+    readPlaintext(record.decrypted, opened.plaintext, opened.contentType, conv, cursor, appFrame);
     return;
   }
 }
@@ -560,7 +563,9 @@ function readPlaintext(
   plaintext: Uint8Array,
   contentType: number,
   conv: TlsConversationState,
-  cursor: TlsRecordCursor
+  cursor: TlsRecordCursor,
+  /** Which frame the record arrived in, for `http.request_in` / `http.time`. */
+  appFrame?: { id: number; tsUs: number },
 ): void {
   if (contentType === CT_ALERT) {
     if (plaintext.length >= 2) view.alert = { level: plaintext[0], description: plaintext[1] };
@@ -593,20 +598,23 @@ function readPlaintext(
   const own = (isClient ? conv.appClient : conv.appServer)!;
   const peer = isClient ? conv.appServer : conv.appClient;
 
-  const app = dissectAppStream(plaintext, own, isClient, conv.alpn, peer);
+  const app = dissectAppStream(plaintext, own, isClient, conv.alpn, peer, appFrame);
   if (app.protocolLabel !== null) view.app = app;
 }
 
 // --- describing records --------------------------------------------------------
 
-function describeRecord(record: TlsRecord, conv: TlsConversationState, cursor: TlsRecordCursor): void {
+function describeRecord(
+  record: TlsRecord, conv: TlsConversationState, cursor: TlsRecordCursor,
+  appFrame?: { id: number; tsUs: number },
+): void {
   if (record.ignored) return;
   if (TLS_VERSION_NAMES[record.version] !== undefined) conv.lastRecordVersion = record.version;
   const body = record.body;
   switch (record.contentType) {
     case CT_APPLICATION_DATA:
       record.description = 'Application Data';
-      decryptIfPossible(record, conv, cursor);
+      decryptIfPossible(record, conv, cursor, appFrame);
       if (record.decrypted) record.description = describeDecrypted(record.decrypted);
       return;
     case CT_CHANGE_CIPHER_SPEC:
@@ -620,7 +628,7 @@ function describeRecord(record: TlsRecord, conv: TlsConversationState, cursor: T
         record.description = `Alert (${nameAlert(body[0], body[1])})`;
         return;
       }
-      decryptIfPossible(record, conv, cursor);
+      decryptIfPossible(record, conv, cursor, appFrame);
       if (record.decrypted?.alert) {
         record.alert = record.decrypted.alert;
         record.description = `Alert (${nameAlert(record.alert.level, record.alert.description)})`;
@@ -633,7 +641,7 @@ function describeRecord(record: TlsRecord, conv: TlsConversationState, cursor: T
       return;
     case CT_HANDSHAKE: {
       if (!body || cursor.encrypted) {
-        decryptIfPossible(record, conv, cursor);
+        decryptIfPossible(record, conv, cursor, appFrame);
         record.description = record.decrypted
           ? describeDecrypted(record.decrypted)
           : 'Encrypted Handshake Message';
@@ -720,6 +728,14 @@ function labelVersion(record: TlsRecord, conv: TlsConversationState): number {
 
 export interface TlsSegmentContext {
   frameId: number;
+  /**
+   * Capture time, epoch microseconds.
+   *
+   * Only `http.time` reads it, and only on a connection a key log opened -
+   * but without it a decrypted HTTP response is the one place this build
+   * could name the request it answers and not say how long it waited.
+   */
+  tsUs?: number;
   cursor: TlsRecordCursor;
   conversation: TlsConversationState;
   /** False for a retransmitted or out-of-order segment: read what is visible, advance nothing. */
@@ -960,7 +976,8 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     return contributed ? { kind: 'continuation' } : { kind: 'none' };
   }
 
-  for (const r of completed) describeRecord(r, conv, cursor);
+  const appFrame = ctx.tsUs !== undefined ? { id: ctx.frameId, tsUs: ctx.tsUs } : undefined;
+  for (const r of completed) describeRecord(r, conv, cursor, appFrame);
 
   const fields: Record<string, string | number> = {};
   const first = completed[0];

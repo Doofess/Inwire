@@ -509,6 +509,15 @@ export const FIELDS: readonly FieldDef[] = [
   // The authority and the target together, which neither the start line nor
   // the Host header carries alone.
   str('http.request.full_uri', 'Full request URI', 'http'),
+  // **The pairing, which needed no tracker.** Responses on one connection come
+  // back in the order the requests went out - that is what pipelining IS - so
+  // the queue lives with the connection in `appStream.ts` and a response takes
+  // the head of its peer's. `http.response_in` on the REQUEST is deliberately
+  // absent: it needs a patch to an earlier frame, the reference's own
+  // single-pass mode does not emit it either, and `dns.response_in` already
+  // sits in the coverage tool's INWIRE-ONLY list for exactly that reason.
+  { abbrev: 'http.request_in', label: 'Request in frame', type: 'uint', layer: 'http', generated: true },
+  { abbrev: 'http.time', label: 'Time since request', type: 'time', layer: 'http', generated: true },
   // Every header line's raw text, which the reference emits beside each named
   // header and hides. Repeated, so tree-only for the reason above.
   treeOnly(str('http.request.line', 'Request line', 'http')),

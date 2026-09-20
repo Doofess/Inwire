@@ -410,7 +410,7 @@ export function dissectTcpTransport(
         // consuming them twice would put the record layer out of step, but
         // a Server Hello sitting in one is still a Server Hello and
         // Wireshark labels it as one.
-        frameId: frameId ?? 0, cursor, conversation, inOrder: tlsInOrder, segmentSeq: seqNum, gap: lostSegment,
+        frameId: frameId ?? 0, tsUs, cursor, conversation, inOrder: tlsInOrder, segmentSeq: seqNum, gap: lostSegment,
       });
       if (outcome.kind === 'tls') {
         tlsResult = outcome.result;
@@ -452,6 +452,7 @@ export function dissectTcpTransport(
       const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
       const app = dissectAppStream(
         rawBytes.subarray(tcpPayloadStart, payloadEnd), own, serverIsDestination, conversation.alpn, peer,
+        frameId !== undefined && tsUs !== undefined ? { id: frameId, tsUs } : undefined,
       );
       if (app.protocolLabel !== null) httpResult = app;
     }
