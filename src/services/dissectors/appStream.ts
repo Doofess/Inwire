@@ -25,10 +25,33 @@ export interface AppDirection {
   http2: Http2Direction;
   /** The method of the last request, so a response to HEAD is framed correctly. */
   lastMethod?: string;
+  /**
+   * Requests this direction has sent and not yet seen answered, oldest first.
+   *
+   * **HTTP/1.1 needs no tracker and no key**, which is what separates this
+   * from `DnsTracker` and `IcmpEchoTracker`: responses on one connection come
+   * back in the order the requests went out - that is what pipelining IS, and
+   * it is the only rule RFC 9112 gives for matching them. So the pairing is a
+   * queue held with the connection, and a response takes the head of its
+   * peer's.
+   *
+   * Bounded, because a client that pipelines against a server that never
+   * answers would otherwise grow one entry per request for the life of the
+   * capture. Losing the oldest is right for the same reason it is right in
+   * `IcmpEchoTracker`: the response it was waiting for is the one least likely
+   * to still be coming.
+   */
+  pendingRequests: { frameId: number; tsUs: number }[];
 }
 
+/** Outstanding requests kept per direction. */
+const MAX_PENDING_REQUESTS = 64;
+
 export function freshAppDirection(): AppDirection {
-  return { protocol: 'unknown', http1: freshHttp1Direction(), http2: freshHttp2Direction() };
+  return {
+    protocol: 'unknown', http1: freshHttp1Direction(), http2: freshHttp2Direction(),
+    pendingRequests: [],
+  };
 }
 
 export interface AppStreamResult {
@@ -70,7 +93,14 @@ export function dissectAppStream(
   direction: AppDirection,
   fromClient: boolean,
   alpn: string | undefined,
-  peer: AppDirection | undefined
+  peer: AppDirection | undefined,
+  /**
+   * Which frame these bytes arrived in, for `http.request_in` and
+   * `http.time`. Optional because a caller that does not know - and the
+   * decrypted-TLS path did not, until this - gets the tree without those two
+   * rows rather than with a made-up number in them.
+   */
+  frame?: { id: number; tsUs: number },
 ): AppStreamResult {
   if (plaintext.length === 0) return EMPTY;
 
@@ -85,7 +115,7 @@ export function dissectAppStream(
 
   return direction.protocol === 'h2'
     ? readHttp2(plaintext, direction, fromClient)
-    : readHttp1(plaintext, direction, fromClient, peer);
+    : readHttp1(plaintext, direction, fromClient, peer, frame);
 }
 
 // --- HTTP/1.1 -----------------------------------------------------------------
@@ -94,7 +124,8 @@ function readHttp1(
   plaintext: Uint8Array,
   direction: AppDirection,
   fromClient: boolean,
-  peer: AppDirection | undefined
+  peer: AppDirection | undefined,
+  frame?: { id: number; tsUs: number },
 ): AppStreamResult {
   const result = dissectHttp1(plaintext, direction.http1, peer?.lastMethod);
   if (result.messages.length === 0) {
@@ -127,9 +158,24 @@ function readHttp1(
       : undefined;
     const mediaType = type === undefined ? '' : ` (${type.split(';')[0].trim()})`;
     info.push(`${message.summary} ${mediaType}`);
-    rows.push(...httpMessageRows(message));
-    Object.assign(fields, httpMessageFields(message));
-    if (message.kind === 'request' && fromClient) direction.lastMethod = message.method;
+
+    let answers: { frameId: number; elapsedUs: number } | undefined;
+    if (message.kind === 'request') {
+      if (fromClient) direction.lastMethod = message.method;
+      if (frame !== undefined) {
+        direction.pendingRequests.push({ frameId: frame.id, tsUs: frame.tsUs });
+        if (direction.pendingRequests.length > MAX_PENDING_REQUESTS) direction.pendingRequests.shift();
+      }
+    } else if (frame !== undefined && peer !== undefined) {
+      // The head of the peer's queue, consumed: a second response cannot claim
+      // the same request, and a response with no request left to claim is
+      // itself worth seeing as one.
+      const asked = peer.pendingRequests.shift();
+      if (asked !== undefined) answers = { frameId: asked.frameId, elapsedUs: frame.tsUs - asked.tsUs };
+    }
+
+    rows.push(...httpMessageRows(message, { answers }));
+    Object.assign(fields, httpMessageFields(message, { answers }));
   }
 
   const line = info.join('');
