@@ -151,6 +151,21 @@ struct CaptureHandles {
     /// under pressure and a frame too long to encode want opposite responses,
     /// and this file has a comment about exactly that conflation elsewhere.
     oversize: Arc<AtomicU64>,
+    /// What the owner's pipe had already shed when this capture started.
+    ///
+    /// **`droppedPipe` is the one counter that outlives its capture.** It sits
+    /// on the `Connection`, and the app holds one across many start/stop
+    /// cycles - so sending the raw total made capture #2 report capture #1's
+    /// shed packets as its own, and the app adds it straight into per-capture
+    /// loss. Every other stage here is already per-capture: the `FrameQueue` is
+    /// built inside `start_capture` and the driver's counters reset with the
+    /// handle. Without this the stages disagreed about what "this capture"
+    /// means inside one agent.
+    ///
+    /// `local-agent/agent.py` rebases it for the same reason, and says so: *"a
+    /// number that accumulated across every capture since the service started
+    /// would be read as belonging to the one on screen."*
+    dropped_pipe_base: u64,
     /// Why this capture stopped, when it stopped by itself.
     ///
     /// **A worker cannot tear its own capture down.** `stop_capture` joins the
@@ -246,7 +261,11 @@ impl Shared {
             .unwrap()
             .as_ref()
             .and_then(|owner| self.clients.lock().unwrap().get(owner).cloned())
-            .map(|connection| connection.outbound.dropped());
+            // Rebased, so the figure describes THIS capture - see
+            // `CaptureHandles::dropped_pipe_base`.
+            .map(|connection| {
+                connection.outbound.dropped().saturating_sub(handles.dropped_pipe_base)
+            });
         let mut stats = protocol::capture_stats(
             STATS_INTERVAL.as_millis() as u32,
             handles.seq.load(Ordering::Relaxed),
@@ -352,6 +371,15 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
     let kernel = Arc::new(Mutex::new(None::<(u32, u32)>));
     let oversize = Arc::new(AtomicU64::new(0));
     let fault = Arc::new(Mutex::new(None::<String>));
+    // Read before the first frame can be shed, so the subtraction below can
+    // never go negative.
+    let dropped_pipe_base = shared
+        .clients
+        .lock()
+        .unwrap()
+        .get(client)
+        .map(|c| c.outbound.dropped())
+        .unwrap_or(0);
     let mut workers = Vec::new();
 
     // The sniffer. Encodes on this thread, so the pump sees finished bytes
@@ -432,7 +460,7 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
             client.to_string(),
             Arc::clone(shared),
         );
-        let (ft, ov) = (Arc::clone(&fault), Arc::clone(&oversize));
+        let (ft, ov, base) = (Arc::clone(&fault), Arc::clone(&oversize), dropped_pipe_base);
         workers.push(thread::spawn(move || {
             let mut last_stats = Instant::now();
             while run.load(Ordering::SeqCst) && !shared.shutdown.requested() {
@@ -468,7 +496,7 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
                         .lock()
                         .unwrap()
                         .get(&owner)
-                        .map(|c| c.outbound.dropped());
+                        .map(|c| c.outbound.dropped().saturating_sub(base));
                     let stats = protocol::capture_stats(
                         STATS_INTERVAL.as_millis() as u32,
                         sq.load(Ordering::Relaxed),
@@ -498,6 +526,7 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
         kernel,
         oversize,
         fault,
+        dropped_pipe_base,
         iface,
         workers,
     });
