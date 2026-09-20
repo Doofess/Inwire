@@ -174,7 +174,16 @@ function capture(pipe: string, label: string): Promise<Record_[]> {
     socket.on('data', (chunk) => {
       for (const frame of reader.push(new Uint8Array(chunk))) {
         if (frame.kind === FRAME_BINARY) {
-          for (const r of decodePacketBatch(frame.payload)) {
+          // `decodePacketBatch` takes an ArrayBuffer, and a Uint8Array is not
+          // one however willingly `tsc` accepts it here - TS 5.8 finds the two
+          // structurally assignable, so the annotation is documentation rather
+          // than a guard and `new DataView(...)` is what says no, at runtime,
+          // on the first batch. The slice is `agent-interop.ts`'s, for the
+          // reason `pipeline.worker.ts` states: a view into a larger buffer
+          // would decode from the wrong offset in silence.
+          const b = frame.payload;
+          const batch = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
+          for (const r of decodePacketBatch(batch)) {
             records.push({ seq: r.seq, iface: r.iface, tsUs: r.tsUs, origLen: r.origLen, bytes: r.bytes });
           }
           continue;
