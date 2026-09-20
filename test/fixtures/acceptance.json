@@ -73,11 +73,11 @@
         },
         "protosNamed": 21,
         "ceilings": {
-          "filterableNotInTree": 10,
-          "valueMismatches": 67
+          "filterableNotInTree": 10
         },
         "counts": {
-          "absentDistinct": 621
+          "absentDistinct": 621,
+          "valueMismatches": 67
         },
         "unimplemented": {
           "quic": "A 479-line dissector with its own crypto that decrypts Initials and labels the Protocol column, publishing not one quic.* abbrev on either surface. 40 reference fields here. Recorded rather than floored at 0: a zero floor protects nothing and reads as measured-and-accepted.",
@@ -136,11 +136,11 @@
         },
         "protosNamed": 16,
         "ceilings": {
-          "filterableNotInTree": 9,
-          "valueMismatches": 60
+          "filterableNotInTree": 9
         },
         "counts": {
-          "absentDistinct": 455
+          "absentDistinct": 455,
+          "valueMismatches": 60
         },
         "unimplemented": {
           "quic": "As inwire: no quic.* abbrev on either surface, against 37 reference fields.",

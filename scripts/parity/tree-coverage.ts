@@ -41,19 +41,25 @@
  *   would pass just as happily on an abbrev we invented.
  * - **`protosNamed` — a floor.** How many of the protocols the reference names
  *   here this build can name, through `frameProtocols` or a filter predicate.
- * - **`ceilings` — two numbers that may only FALL.** `filterableNotInTree` is
+ * - **`ceilings.filterableNotInTree` — a number that may only FALL.** It is
  *   the one place where every entry is a defect with no judgement call: the
- *   app accepts a filter for a row the detail pane refuses to draw.
- *   `valueMismatches` catches a decode regression flipping a value on every
- *   frame. It is a ceiling at the measured number rather than a floor at zero
- *   because `ourFrameFields` stringifies with `String(...)` against the
- *   reference's *display* string, so adding a field it formats
- *   `0x0800 (IPv4)` where we print `0x0800` raises the count - raising the
- *   ceiling is a normal argued commit, not a defeat.
- * - **`counts.absentDistinct` — recorded and NEVER enforced.** A ceiling on it
- *   would turn a ranked measurement into a 600-item backlog, which is exactly
- *   what ADR 0021 ended: *a bucket is a defect only until it is measured*. The
- *   series is worth having; the chase is not.
+ *   app accepts a filter for a row the detail pane refuses to draw. Bounded by
+ *   *our* vocabulary, so the reference cannot grow it, and it falls whenever a
+ *   registered name gains the row it was always promising.
+ * - **`counts` — recorded and NEVER enforced.** `absentDistinct` because a
+ *   ceiling on it would turn a ranked measurement into a 600-item backlog,
+ *   which is exactly what ADR 0021 ended: *a bucket is a defect only until it
+ *   is measured*.
+ *
+ *   **`valueMismatches` is here and was briefly a ceiling, which was wrong.**
+ *   `ourFrameFields` stringifies with `String(...)` against the reference's
+ *   *display* string, so it counts formatting divergences and not defects -
+ *   our `Not set` against its `False`, our `20 bytes (5)` against its `20`.
+ *   It therefore **rises when a field is added**, which is the direction this
+ *   whole gate exists to encourage: naming the five TCP flag bits took it up
+ *   by five without a single value being wrong. A ceiling that punishes the
+ *   improvement it was built to reward is a ceiling people route around. The
+ *   series is still worth having, so it is recorded.
  *
  * `--write-floors` records what it measured. `--frames N` is a prefix, so it
  * turns the assertions off loudly rather than checking whole-file floors
@@ -608,8 +614,8 @@ async function run(): Promise<void> {
     const measured: TreeAcceptance = {
       layers: Object.fromEntries([...shared.entries()].sort(([a], [b]) => a.localeCompare(b))),
       protosNamed,
-      ceilings: { filterableNotInTree: filterOnly.length, valueMismatches: differing.length },
-      counts: { absentDistinct: absent.length },
+      ceilings: { filterableNotInTree: filterOnly.length },
+      counts: { absentDistinct: absent.length, valueMismatches: differing.length },
       unimplemented: spec.tree?.unimplemented ?? {},
     };
 
