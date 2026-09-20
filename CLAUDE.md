@@ -86,8 +86,17 @@ never lives in the process that parses hostile bytes. ADR 0033.
 - `npm run check` — lint, then every assertion script under `scripts/`,
   discovered by walking the directory.
 - One script on its own: `npx tsx scripts/capture/reader.ts`.
-- `npx tsx scripts/parity/parity-check.ts` — the dissection acceptance gate.
-  Skips without the untracked fixtures.
+- `npx tsx scripts/parity/parity-check.ts` — the dissection acceptance gate for
+  the packet-list **columns**. **It fails without the untracked fixtures**, it
+  does not skip — deliberately, because ADR 0004 wants "a failure that says how
+  to get it, not a silent skip". That is why it is in `check.ts`'s `NOT_TESTS`
+  and can never run under `npm run check`.
+- `npx tsx scripts/parity/tree-coverage.ts` — the same question for the
+  protocol **tree**, which nothing measured until ADR 0039. It *does* skip
+  cleanly without tshark or the fixtures, which is what lets it run under
+  `npm run check` where the line above cannot. Floors are **counts, not
+  percentages**: the denominator of a coverage ratio is Wireshark's vocabulary,
+  so a ratio would fail on a reference upgrade that changed nothing here.
 - `pyinstaller local-agent/inwire_agent.spec` — builds the agent to
   `local-agent/dist/inwire-agent-windows/` (a **directory**; see
   `local-agent/CLAUDE.md`).
@@ -1439,6 +1448,26 @@ Time, Length, Info and the matched colour rule against it, held to the floors in
 `test/fixtures/acceptance.json`. **Floors only rise** —
 `scripts/parity/acceptance.ts` fails a lowered one.
 
+**And the tree matches it too, which nothing checked until ADR 0039.** Those
+columns were the whole gate: `parity-check.ts` does not even build
+`packet.layers`, so a dissector that stopped emitting half its rows passed
+every check here, and *which rows does the reference have that we do not* had
+no answer at all. `scripts/parity/tree-coverage.ts` diffs `tshark -T pdml`
+against the union of the tree's abbrevs and the flat field bag.
+
+Its floors are **counts, never ratios**, and the reason generalises: the
+denominator of a coverage percentage is the *reference's* vocabulary, so a
+ratio would fail on the Wireshark upgrade `test/fixtures/README.md` instructs
+you to perform — a build that changed nothing, broken by its own oracle.
+`wireshark-abbrevs.ts` won the same argument by checking `ours ⊆ theirs`.
+Beside the floors sit two **ceilings that may only fall**
+(`filterableNotInTree`, where every entry is a filter the app accepts for a row
+the detail pane refuses to draw, and `valueMismatches`), and one number
+recorded and **never enforced** — the size of the ranked gap list, because a
+ceiling on it would turn a measurement into a backlog, which is what ADR 0021
+ended. A layer with no floor is named in `unimplemented` with a sentence, not
+floored at 0: a zero floor protects nothing and reads as measured-and-accepted.
+
 ## 6. Gotchas found only by running the packaged app
 
 Each of these type-checked, built, and failed silently at runtime.
@@ -2230,6 +2259,7 @@ plan a bump roughly every other release.
 | 0036 | The buffer sizes itself, and the renderer stands down before V8 aborts | accepted |
 | 0037 | The capture agent is Rust on Windows | accepted; **proven as a service; not yet what ships** |
 | 0038 | Bytes and rows are two arrivals; dissection is off the capture path | accepted |
+| 0039 | What the tree is held to: counts, not ratios | accepted |
 
 **ADR 0008 weakened, and it now says so itself.** Its argument was that key
 material "is exactly as old as the tab"; a desktop app open for days breaks

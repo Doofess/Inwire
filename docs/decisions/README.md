@@ -57,6 +57,7 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0036](0036-the-buffer-sizes-itself.md) | The packet buffer sizes itself from RAM and the V8 heap, and the renderer stands down before V8 aborts | Accepted 2026-09-19 |
 | [0037](0037-the-agent-is-rust-on-windows.md) | The capture agent is Rust on Windows — one 449 KB signed exe instead of a 34 MB tree, and the throughput argument was measured and dropped | Accepted 2026-09-19; **driven end to end, including as a registered service** |
 | [0038](0038-bytes-and-rows-are-two-arrivals.md) | Bytes and rows are two arrivals, so a frame reaches disk before anything dissects it — and a dissection that throws no longer loses the frame | Accepted 2026-09-19 |
+| [0039](0039-what-the-tree-is-held-to.md) | What the protocol tree is held to: counts and not ratios, because the denominator is the reference's vocabulary rather than ours | Accepted 2026-09-20 |
 
 ## Review outcome: amendments to the spec's execution order
 
