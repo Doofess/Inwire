@@ -125,7 +125,17 @@ if (previous) {
     // value that disagrees with the reference - so letting one drift upward is
     // the same act as lowering a floor, wearing the other sign.
     check(`${name}: no ceiling was raised since HEAD`,
-      Object.entries(was.ceilings).filter(([k, v]) => (now.ceilings[k] ?? Infinity) > v).map(([k]) => k), []);
+      Object.entries(was.ceilings)
+        .filter(([k]) => k in now.ceilings)
+        .filter(([k, v]) => now.ceilings[k] > v).map(([k]) => k), []);
+    // **A ceiling may only leave by becoming a recorded count.** Deleting one
+    // is the cheapest way to raise it to infinity, so vanishing to nowhere is
+    // a failure - but retiring a number that turned out to measure the wrong
+    // thing is a legitimate, argued move, and it has somewhere to go. Same
+    // shape as the `unimplemented` rule below: an entry leaves by changing
+    // category, never by disappearing.
+    check(`${name}: no ceiling vanished rather than becoming a count`,
+      Object.keys(was.ceilings).filter((k) => !(k in now.ceilings) && !(k in now.counts)), []);
     // An entry may only leave `unimplemented` by becoming a floor. Vanishing
     // to nowhere would retire the statement without recording what replaced it.
     check(`${name}: nothing left unimplemented without becoming a floor`,
