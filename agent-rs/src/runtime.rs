@@ -234,7 +234,7 @@ impl Shared {
 /// list rather than per device: it is one `GetAdaptersAddresses` either way and
 /// a per-device call would make the enumeration quadratic in adapters.
 fn read_interfaces(npcap: &Npcap) -> io::Result<Vec<Interface>> {
-    let friendly = adapters::friendly_names();
+    let friendly = adapters::adapter_facts();
     Ok(npcap
         .devices()?
         .into_iter()
@@ -245,6 +245,45 @@ fn read_interfaces(npcap: &Npcap) -> io::Result<Vec<Interface>> {
             name: device.name,
         })
         .collect())
+}
+
+/// The adapter report, joined to the capture devices the app knows.
+///
+/// Keyed by the capture device name rather than by the GUID, because that is
+/// what the app joins on - `isValidAdapterList` refuses an entry without one.
+/// An adapter Windows knows but Npcap cannot capture on is left out: it could
+/// never be attached to an interface, and the app has nowhere to put it.
+///
+/// `\Device\NPF_Loopback` carries no GUID and so joins to no Windows adapter.
+/// It is still reported, with nulls, because its presence is the fact the panel
+/// needs - and because a MAC it does not have cannot be missed.
+fn adapter_reports(shared: &Arc<Shared>) -> Vec<protocol::AdapterReport> {
+    let facts = adapters::adapter_facts();
+    let interfaces = shared.interfaces.lock().unwrap().clone();
+    interfaces
+        .iter()
+        .map(|iface| {
+            let entry = adapters::guid_of(&iface.name).and_then(|guid| facts.get(&guid));
+            protocol::AdapterReport {
+                id: iface.name.clone(),
+                name: iface.label.clone(),
+                description: Some(iface.label.clone()),
+                mac: entry.and_then(|f| f.mac.clone()),
+                status: entry.and_then(|f| f.status),
+                mtu: entry.and_then(|f| f.mtu),
+                ipv4: entry
+                    .map(|f| f.ipv4.iter().map(|a| (a.address.clone(), a.prefix_length)).collect())
+                    .unwrap_or_default(),
+                ipv6: entry
+                    .map(|f| {
+                        f.ipv6.iter().map(|a| (a.address.clone(), a.prefix_length, a.scope)).collect()
+                    })
+                    .unwrap_or_default(),
+                dns_servers: entry.map(|f| f.dns_servers.clone()).unwrap_or_default(),
+                dns_suffix: entry.and_then(|f| f.dns_suffix.clone()),
+            }
+        })
+        .collect()
 }
 
 /// Starts a capture on one adapter, owned by `client`.
@@ -542,6 +581,14 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                 }
                 let interfaces = shared.interfaces.lock().unwrap().clone();
                 shared.broadcast(&protocol::state(CaptureState::Idle, &interfaces, None));
+            }
+            Command::SubscribeAdapters | Command::RefreshAdapters => {
+                // A whole snapshot, not a delta, and sent on subscribe rather
+                // than on a timer: a machine has a handful of adapters and the
+                // message is a couple of kilobytes. The app subscribes from
+                // `hello`, so this is what fills `host.macs` and with it every
+                // frame's direction.
+                shared.send_to(&client, &protocol::adapter_config(&adapter_reports(&shared)));
             }
             _ => {
                 // Subscriptions this agent does not serve yet. Answered rather

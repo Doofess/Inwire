@@ -46,6 +46,94 @@ impl Interface {
     }
 }
 
+/// The adapter report: how this machine was *told* to behave.
+///
+/// **The app cannot decide a frame's direction without this**, and the cost of
+/// that is not a missing column. `hostFromAdapters` builds `host.macs` from
+/// here alone for a live capture; with it empty `directionFromMacs` answers
+/// `Unknown` for every frame, and the checksum verdict then validates every
+/// frame this machine sent against bytes the NIC had not finished writing -
+/// 30.3% of one measured capture painted `Broken`. See
+/// `scripts/dissect/checksum-verdict.ts`, which holds the app's half.
+///
+/// **`id` is the capture device name, not the GUID.** It is the join key to the
+/// interface list (`\Device\NPF_{GUID}` on Windows), and `isValidAdapterList`
+/// in `src/services/agentProtocol.ts` rejects an entry without one - an adapter
+/// that cannot be attached to a capture interface has nowhere to go.
+///
+/// Every other field may be null, and null means **not known** rather than
+/// zero, absent or disabled. That is the contract `AgentAdapter` states, and it
+/// is why this can report what `GetAdaptersAddresses` gives and stay honest
+/// about the DHCP lease fields it does not read.
+pub fn adapter_config(adapters: &[AdapterReport]) -> Value {
+    json!({
+        "type": "adapter_config",
+        "adapters": adapters.iter().map(AdapterReport::to_value).collect::<Vec<_>>(),
+    })
+}
+
+/// One adapter, already joined to the capture device it belongs to.
+pub struct AdapterReport {
+    /// The capture device name - the join key.
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub mac: Option<String>,
+    pub status: Option<&'static str>,
+    pub mtu: Option<u32>,
+    pub ipv4: Vec<(String, Option<u8>)>,
+    pub ipv6: Vec<(String, Option<u8>, Option<&'static str>)>,
+    pub dns_servers: Vec<String>,
+    pub dns_suffix: Option<String>,
+}
+
+impl AdapterReport {
+    fn to_value(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "mac": self.mac,
+            "status": self.status,
+            // Read from GetIfTable2 with the interface counters rather than
+            // here: TransmitLinkSpeed sits past ZoneIndices[16] in the adapter
+            // struct, and guessing at that offset to fill a cosmetic field is a
+            // worse trade than saying "not known".
+            "speedMbps": Value::Null,
+            "mtu": self.mtu,
+            // Not read. The lease fields need the DHCP client's own view, which
+            // GetAdaptersAddresses carries in a tail this does not declare.
+            "dhcpEnabled": Value::Null,
+            "dhcpServer": Value::Null,
+            "leaseObtained": Value::Null,
+            "leaseExpires": Value::Null,
+            "ipv4": self.ipv4.iter().map(|(address, prefix)| json!({
+                "address": address,
+                "prefixLength": prefix,
+                "broadcast": Value::Null,
+            })).collect::<Vec<_>>(),
+            "ipv6": self.ipv6.iter().map(|(address, prefix, scope)| json!({
+                "address": address,
+                "prefixLength": prefix,
+                "scope": scope,
+                // Whether an address is an RFC 4941 privacy address needs the
+                // suffix origin, which is a field past what is declared. Three
+                // states matter here and `null` is the honest third.
+                "temporary": Value::Null,
+            })).collect::<Vec<_>>(),
+            "gatewayV4": Value::Null,
+            "gatewayV6": Value::Null,
+            "gatewayMac": Value::Null,
+            "dnsServers": self.dns_servers,
+            "dnsSuffix": self.dns_suffix,
+            // Which provider answered for each group, so a value on screen can
+            // be traced. One provider here, and naming it is what lets the app
+            // tell this agent's answer from the Python one's.
+            "source": { "adapters": "GetAdaptersAddresses" },
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureState {
     Idle,
