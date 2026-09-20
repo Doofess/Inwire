@@ -135,7 +135,8 @@ struct Shared {
     clients: Mutex<HashMap<String, Arc<Connection>>>,
     /// Whose capture this is, or none.
     owner: Mutex<Option<String>>,
-    /// Which adapter the client chose, by its index in `interfaces`.
+    /// The device NAMES the client chose - `\Device\NPF_{GUID}` - never list
+    /// positions, and **all of them**.
     ///
     /// **Honoured rather than ignored, which it was for one run.** The runtime
     /// used to capture on `interfaces.first()` whatever the client asked for -
@@ -144,10 +145,20 @@ struct Shared {
     /// it with the app's own client is what found that; nothing in the unit
     /// tests could, because they never pick an adapter.
     ///
-    /// `None` until a client says. Capture then falls back to the first, which
-    /// is what the app's own default does on a fresh connection.
-    /// The device NAME the app asked for, never a list position.
-    selected: Mutex<Option<String>>,
+    /// **Then it took `chosen.first()`, which was the same failure one layer
+    /// up.** The comment defending that said "the app only ever sends one",
+    /// which is true of the mouse and false of the program: `App.tsx` forwards
+    /// a restored `meta.selectedInterfaces` verbatim and `useAgentConnection`
+    /// resyncs it on reconnect, so a session restored from a two-adapter
+    /// capture asked for two and was given one - with no error, no log, and a
+    /// status bar reading "2 adapters" over frames from one. Every *other*
+    /// selection fault here already had a code (`empty_interfaces`,
+    /// `bad_message`, `no_interfaces`); only this one was accepted and
+    /// silently truncated.
+    ///
+    /// Empty until a client says, and there is deliberately no fallback - see
+    /// `Command::StartCapture`.
+    selected: Mutex<Vec<String>>,
     capture: Mutex<Option<CaptureHandles>>,
     /// Clients that asked for `interface_stats`, by id.
     ///
@@ -158,13 +169,46 @@ struct Shared {
     shutdown: Arc<Shutdown>,
 }
 
+/// One selected adapter, inside a running capture.
+///
+/// **Per adapter rather than per capture**, which is the shape the wire format
+/// has always had: `capture_stats` carries an *array* of these and the record's
+/// `iface` field names one. The runtime held a single set and captured a single
+/// adapter, so the array had one entry by construction.
+struct CaptureInterface {
+    /// This adapter's index in the interface list, which is what goes in every
+    /// record's `iface` field and in its `capture_stats` entry.
+    iface: usize,
+    /// Frames the driver handed to *this* adapter's sniffer.
+    ///
+    /// Per adapter, where `seq` is per capture - the same split
+    /// `local-agent/agent.py`'s `CaptureCounters` makes, and for the same
+    /// reason: the sequence number orders the capture as a whole, while
+    /// "received" is what the app shows per row of the Interfaces list.
+    received: Arc<AtomicU64>,
+    /// `pcap_stats` for this adapter's handle: (recv, dropped).
+    kernel: Arc<Mutex<Option<(u32, u32)>>>,
+    /// Why this adapter's sniffer stopped, when it stopped by itself.
+    ///
+    /// **A worker cannot tear its own capture down.** `stop_capture` joins the
+    /// workers, so a worker calling it would wait for itself. So a dying worker
+    /// records the reason here instead, and everything that reads the capture's
+    /// state reads this too - which is what stops a dead capture reporting
+    /// `sniffing` for the rest of the session.
+    fault: Mutex<Option<String>>,
+}
+
 /// What a running capture owns, so stopping it is one place.
 struct CaptureHandles {
     running: Arc<AtomicBool>,
     queue: Arc<FrameQueue>,
     seq: Arc<AtomicU64>,
-    received: Arc<AtomicU64>,
-    kernel: Arc<Mutex<Option<(u32, u32)>>>,
+    /// One entry per selected adapter, in the order they were selected.
+    ///
+    /// An `Arc` around the whole roster as well as around each entry, because
+    /// every worker needs to answer *"am I the last one still alive?"* and the
+    /// answer is a property of the set rather than of any member.
+    interfaces: Arc<Vec<Arc<CaptureInterface>>>,
     /// Frames the driver handed over and the wire format could not describe -
     /// a fifth loss stage, beside the kernel, the sniffer queue and the pipe.
     /// Its own counter rather than folded into `droppedAgent`: a frame shed
@@ -186,16 +230,32 @@ struct CaptureHandles {
     /// number that accumulated across every capture since the service started
     /// would be read as belonging to the one on screen."*
     dropped_pipe_base: u64,
-    /// Why this capture stopped, when it stopped by itself.
-    ///
-    /// **A worker cannot tear its own capture down.** `stop_capture` joins the
-    /// workers, so a worker calling it would wait for itself. So a dying worker
-    /// records the reason here instead, and everything that reads the capture's
-    /// state reads this too - which is what stops a dead capture reporting
-    /// `sniffing` for the rest of the session.
-    fault: Arc<Mutex<Option<String>>>,
-    iface: usize,
     workers: Vec<thread::JoinHandle<()>>,
+}
+
+/// Whether one selected adapter is still reading.
+///
+/// A free function rather than a method so it reads as a predicate at the three
+/// call sites that ask the roster the same question.
+fn alive(per: &Arc<CaptureInterface>) -> bool {
+    per.fault.lock().unwrap().is_none()
+}
+
+/// The roster as `capture_stats`' per-interface array.
+///
+/// Read in roster order, which is selection order, so the array is stable
+/// across every tick of one capture - the app indexes its Interfaces rows by
+/// `iface` rather than by position, but a list that reordered itself between
+/// ticks would be a difference nobody could account for.
+fn interface_stats(roster: &[Arc<CaptureInterface>]) -> Vec<InterfaceStats> {
+    roster
+        .iter()
+        .map(|per| InterfaceStats {
+            iface: per.iface,
+            received: per.received.load(Ordering::Relaxed),
+            kernel: *per.kernel.lock().unwrap(),
+        })
+        .collect()
 }
 
 impl Shared {
@@ -223,10 +283,12 @@ impl Shared {
     /// against an empty list. That is the state
     /// `local-agent/agent.py`'s `report_capture_failure` was written to end,
     /// and porting the read loop without it brought it back.
+    /// With several adapters selected, one still reading is still a capture -
+    /// the same line `local-agent/agent.py`'s `mark_failed` draws.
     fn capture_state(&self) -> CaptureState {
         let held = self.capture.lock().unwrap();
         match held.as_ref() {
-            Some(handles) if handles.fault.lock().unwrap().is_none() => CaptureState::Sniffing,
+            Some(handles) if handles.interfaces.iter().any(alive) => CaptureState::Sniffing,
             _ => CaptureState::Idle,
         }
     }
@@ -242,9 +304,14 @@ impl Shared {
     /// **The first reason wins.** A failing read usually makes the next write
     /// fail too, and the second message would describe the consequence rather
     /// than the cause.
-    fn fail_capture(&self, fault: &Arc<Mutex<Option<String>>>, iface: usize, reason: String) {
+    fn fail_capture(
+        &self,
+        roster: &[Arc<CaptureInterface>],
+        per: &Arc<CaptureInterface>,
+        reason: String,
+    ) {
         {
-            let mut held = fault.lock().unwrap();
+            let mut held = per.fault.lock().unwrap();
             if held.is_some() {
                 return;
             }
@@ -252,10 +319,39 @@ impl Shared {
         }
         let owner = self.owner.lock().unwrap().clone();
         if let Some(owner) = owner {
-            self.send_to(&owner, &protocol::capture_failed(iface, &reason));
+            self.send_to(&owner, &protocol::capture_failed(per.iface, &reason));
+        }
+        // **Idle only once the last adapter has gone.** With several selected,
+        // one dying is a loss of part of the capture rather than the end of
+        // it - `local-agent/agent.py`'s `mark_failed` draws the line in the
+        // same place and stops only when "every selected interface failed".
+        // Reporting idle on the first would take the surviving adapters'
+        // frames off the screen while they were still arriving, and the app
+        // has the `iface` in the message to say which one went.
+        if roster.iter().any(alive) {
+            return;
         }
         let interfaces = self.interfaces.lock().unwrap().clone();
         self.broadcast(&protocol::state(CaptureState::Idle, &interfaces, None));
+    }
+
+    /// The owner's pipe has gone, which ends the capture on every adapter.
+    ///
+    /// **Not an adapter fault.** Nothing is wrong with any of them; there is
+    /// simply nowhere left to send what they capture, so every one is marked
+    /// and the sniffers stop filling a queue nobody will drain. The message
+    /// names the adapter whose pump noticed, which is the first - one fault
+    /// described once, rather than N copies of one sentence.
+    fn fail_transport(&self, roster: &[Arc<CaptureInterface>], reason: String) {
+        for per in roster.iter().skip(1) {
+            let mut held = per.fault.lock().unwrap();
+            if held.is_none() {
+                *held = Some(reason.clone());
+            }
+        }
+        if let Some(first) = roster.first() {
+            self.fail_capture(roster, first, reason);
+        }
     }
 
     /// Stops the capture if one is running, and answers its final figures.
@@ -292,11 +388,7 @@ impl Shared {
             handles.queue.dropped(),
             dropped_pipe,
             handles.oversize.load(Ordering::Relaxed),
-            &[InterfaceStats {
-                iface: handles.iface,
-                received: handles.received.load(Ordering::Relaxed),
-                kernel: *handles.kernel.lock().unwrap(),
-            }],
+            &interface_stats(&handles.interfaces),
         );
         // `queuedAtStop` is what the discard is about to throw away. Those frames
         // were captured and never delivered, and they were not lost to pressure -
@@ -376,21 +468,55 @@ fn adapter_reports(shared: &Arc<Shared>) -> Vec<protocol::AdapterReport> {
         .collect()
 }
 
-/// Starts a capture on one adapter, owned by `client`.
-fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize) -> io::Result<()> {
-    let mut capture = shared.npcap.open(device, true)?;
-    // Sized per core: Npcap splits the buffer into one segment per processor and
-    // drops when the segment for the receiving core is full, so a flat figure is
-    // that figure divided by the core count. See `session::kernel_buffer_bytes`.
-    capture.set_kernel_buffer(kernel_buffer_bytes(available_cores()) as i32)?;
+/// Starts a capture on every adapter in `chosen`, owned by `client`.
+///
+/// **Every one of them, which is the change.** This took a single `device` and
+/// a single `iface`, and the caller passed it `chosen.first()` - so a selection
+/// of two adapters captured one and said nothing. See `Shared::selected`.
+///
+/// One `FrameQueue` and one pump serve every adapter, because the queue is the
+/// capture's shared budget and the batch is the capture's: a pump per adapter
+/// would split the ordering window N ways and make the app's 100 ms flush
+/// reassemble what this side had just taken apart. The sniffers are one thread
+/// per adapter, which is what `local-agent/agent.py` does and is forced here
+/// anyway - a `Capture` is `Send` and not `Sync`, so a handle belongs to
+/// exactly one thread for its whole life.
+///
+/// **All the handles are opened before any thread starts.** Opening inside the
+/// spawn loop would leave a capture half-running when adapter #2 refused, with
+/// #1's sniffer already delivering frames under a call that returned an error.
+fn start_capture(shared: &Arc<Shared>, client: &str, chosen: &[Interface]) -> io::Result<()> {
+    let mut opened = Vec::new();
+    for interface in chosen {
+        let capture = shared.npcap.open(&interface.name, true)?;
+        // Sized per core: Npcap splits the buffer into one segment per processor
+        // and drops when the segment for the receiving core is full, so a flat
+        // figure is that figure divided by the core count. See
+        // `session::kernel_buffer_bytes`.
+        //
+        // Per handle, not per capture: the budget is the driver's per-adapter
+        // ring, so two adapters is two of these rather than one split in half.
+        capture.set_kernel_buffer(kernel_buffer_bytes(available_cores()) as i32)?;
+        opened.push((interface.id, capture));
+    }
 
     let running = Arc::new(AtomicBool::new(true));
     let queue = Arc::new(FrameQueue::with_defaults());
     let seq = Arc::new(AtomicU64::new(0));
-    let received = Arc::new(AtomicU64::new(0));
-    let kernel = Arc::new(Mutex::new(None::<(u32, u32)>));
     let oversize = Arc::new(AtomicU64::new(0));
-    let fault = Arc::new(Mutex::new(None::<String>));
+    let roster: Arc<Vec<Arc<CaptureInterface>>> = Arc::new(
+        opened
+            .iter()
+            .map(|(iface, _)| {
+                Arc::new(CaptureInterface {
+                    iface: *iface,
+                    received: Arc::new(AtomicU64::new(0)),
+                    kernel: Arc::new(Mutex::new(None)),
+                    fault: Mutex::new(None),
+                })
+            })
+            .collect(),
+    );
     // Read before the first frame can be shed, so the subtraction below can
     // never go negative.
     let dropped_pipe_base = shared
@@ -402,20 +528,29 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
         .unwrap_or(0);
     let mut workers = Vec::new();
 
-    // The sniffer. Encodes on this thread, so the pump sees finished bytes
-    // rather than live driver buffers - which is also what keeps a libpcap
-    // handle from ever crossing to another thread.
-    {
-        let (run, q, sq, rx, kn, shutdown) = (
+    // A sniffer per adapter. Encodes on its own thread, so the pump sees
+    // finished bytes rather than live driver buffers - which is also what keeps
+    // a libpcap handle from ever crossing to another thread.
+    //
+    // **The sequence number is taken from one counter across every adapter**,
+    // and `received` is counted per adapter. That is `CaptureCounters`' split in
+    // `agent.py`, and it is what the wire format asks for: `seq` orders the
+    // capture, `iface` says where a frame came from, and `capture_stats` reports
+    // "received" per interface.
+    for ((iface, mut capture), per) in opened.into_iter().zip(roster.iter()) {
+        let (run, q, sq, shutdown) = (
             Arc::clone(&running),
             Arc::clone(&queue),
             Arc::clone(&seq),
-            Arc::clone(&received),
-            Arc::clone(&kernel),
             Arc::clone(&shared.shutdown),
         );
-        let (ov, ft, sh, owner_id) =
-            (Arc::clone(&oversize), Arc::clone(&fault), Arc::clone(shared), client.to_string());
+        let (rx, kn, me) = (Arc::clone(&per.received), Arc::clone(&per.kernel), Arc::clone(per));
+        let (ov, sh, owner_id, all) = (
+            Arc::clone(&oversize),
+            Arc::clone(shared),
+            client.to_string(),
+            Arc::clone(&roster),
+        );
         workers.push(thread::spawn(move || {
             while run.load(Ordering::SeqCst) && !shutdown.requested() {
                 match capture.next() {
@@ -455,8 +590,13 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
                         // `continue` on this and spin a core at 100% for ever.
                         // Saying so is what was missing: without it the app
                         // keeps "Capturing" on screen against an empty list.
-                        run.store(false, Ordering::SeqCst);
-                        sh.fail_capture(&ft, iface, error.to_string());
+                        //
+                        // **This thread returns and `running` is left alone.**
+                        // The flag is the whole capture's, and one adapter
+                        // being pulled is not a reason to stop reading the
+                        // others - `fail_capture` reports idle only when the
+                        // last of them has gone.
+                        sh.fail_capture(&all, &me, error.to_string());
                         return;
                     }
                 }
@@ -471,16 +611,14 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
     // whole point of `drain` reporting why it stopped - the Python agent slept
     // on a full queue and capped itself at 16.5 MB/s.
     {
-        let (run, q, sq, rx, kn, owner, shared) = (
+        let (run, q, sq, owner, shared) = (
             Arc::clone(&running),
             Arc::clone(&queue),
             Arc::clone(&seq),
-            Arc::clone(&received),
-            Arc::clone(&kernel),
             client.to_string(),
             Arc::clone(shared),
         );
-        let (ft, ov, base) = (Arc::clone(&fault), Arc::clone(&oversize), dropped_pipe_base);
+        let (all, ov, base) = (Arc::clone(&roster), Arc::clone(&oversize), dropped_pipe_base);
         workers.push(thread::spawn(move || {
             let mut last_stats = Instant::now();
             while run.load(Ordering::SeqCst) && !shared.shutdown.requested() {
@@ -495,11 +633,13 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
                             if let Err(error) =
                                 connection.send(FRAME_BINARY, &payload, batch.len() as u64)
                             {
-                                // The owner's pipe has gone. The sniffer is
+                                // The owner's pipe has gone. The sniffers are
                                 // still filling a queue nobody will drain, so
-                                // this is a stop rather than a return.
+                                // this is a stop rather than a return - and it
+                                // is the whole capture's, on every adapter,
+                                // because none of them has anywhere to send to.
                                 run.store(false, Ordering::SeqCst);
-                                shared.fail_capture(&ft, iface, error.to_string());
+                                shared.fail_transport(&all, error.to_string());
                                 return;
                             }
                         }
@@ -523,11 +663,7 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
                         q.dropped(),
                         dropped_pipe,
                         ov.load(Ordering::Relaxed),
-                        &[InterfaceStats {
-                            iface,
-                            received: rx.load(Ordering::Relaxed),
-                            kernel: *kn.lock().unwrap(),
-                        }],
+                        &interface_stats(&all),
                     );
                     shared.send_to(&owner, &stats);
                 }
@@ -542,12 +678,9 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
         running,
         queue,
         seq,
-        received,
-        kernel,
+        interfaces: roster,
         oversize,
-        fault,
         dropped_pipe_base,
-        iface,
         workers,
     });
     *shared.owner.lock().unwrap() = Some(client.to_string());
@@ -648,10 +781,17 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                 // sniffer per. This used to read them as indices, so the app's
                 // message did not parse at all.
                 //
-                // One adapter: capture is single-interface here, and taking the
-                // first of several is a smaller lie than pretending to merge
-                // them - the app only ever sends one.
-                *shared.selected.lock().unwrap() = chosen.first().cloned();
+                // **All of them.** This took `chosen.first()` on the argument
+                // that "the app only ever sends one", which is true of the
+                // mouse and false of the program - see `Shared::selected`.
+                //
+                // Stored rather than validated here, because the list this
+                // would be checked against is re-read per connection and the
+                // adapter could go between the two messages anyway.
+                // `start_capture` resolves every name and refuses the whole
+                // selection if any of them is gone, which is one answer at the
+                // moment it matters instead of two that can disagree.
+                *shared.selected.lock().unwrap() = chosen;
                 let interfaces = shared.interfaces.lock().unwrap().clone();
                 shared.send_to(&client, &protocol::state(
                     shared.capture_state(),
@@ -681,21 +821,31 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                 // without having said where from". So an absent or unknown
                 // selection is a real fault, and saying so puts a sentence in
                 // front of somebody instead of an empty packet list.
-                let Some(wanted) = wanted else {
+                if wanted.is_empty() {
                     shared.send_to(&client, &protocol::error(
                         "no_interfaces",
                         "No adapter has been chosen. Send set_interfaces before start_capture.",
                     ));
                     return Ok(());
-                };
-                let Some(chosen) = interfaces.iter().find(|i| i.name == wanted).cloned() else {
-                    shared.send_to(&client, &protocol::error(
-                        "no_interfaces",
-                        &format!("No capture adapter named '{wanted}'. It may have been removed."),
-                    ));
-                    return Ok(());
-                };
-                if let Err(error) = start_capture(&shared, &client, &chosen.name, chosen.id) {
+                }
+                // **Every name resolved, and the whole selection refused if any
+                // of them cannot be.** Capturing on the ones that are left
+                // would be the silent truncation this fixed, arriving by
+                // another door: the app would show two adapters, one would
+                // deliver, and the only sign would be a row whose counters
+                // never moved.
+                let mut chosen = Vec::with_capacity(wanted.len());
+                for name in &wanted {
+                    let Some(found) = interfaces.iter().find(|i| &i.name == name).cloned() else {
+                        shared.send_to(&client, &protocol::error(
+                            "no_interfaces",
+                            &format!("No capture adapter named '{name}'. It may have been removed."),
+                        ));
+                        return Ok(());
+                    };
+                    chosen.push(found);
+                }
+                if let Err(error) = start_capture(&shared, &client, &chosen) {
                     shared.send_to(&client, &protocol::error(
                         "capture_failed",
                         &format!("Could not start capturing: {error}"),
@@ -793,7 +943,7 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
         interfaces: Mutex::new(interfaces),
         clients: Mutex::new(HashMap::new()),
         owner: Mutex::new(None),
-        selected: Mutex::new(None),
+        selected: Mutex::new(Vec::new()),
         capture: Mutex::new(None),
         rate_watchers: Mutex::new(std::collections::HashSet::new()),
         shutdown: Arc::clone(&shutdown),

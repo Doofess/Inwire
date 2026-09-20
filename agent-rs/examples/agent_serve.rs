@@ -209,6 +209,10 @@ fn main() -> std::io::Result<()> {
                                 sq.load(Ordering::Relaxed),
                                 q.dropped(),
                                 Some(conn2.outbound.dropped()),
+                                // This harness pre-dates the oversize counter
+                                // and cannot produce one: it reports 0 rather
+                                // than carrying a fifth stage it never measures.
+                                0,
                                 &[InterfaceStats {
                                     iface: 0,
                                     received: rx.load(Ordering::Relaxed),
@@ -245,6 +249,7 @@ fn main() -> std::io::Result<()> {
                     seq.load(Ordering::Relaxed),
                     queue.dropped(),
                     Some(conn.outbound.dropped()),
+                    0,
                     &[InterfaceStats {
                         iface: 0,
                         received: received.load(Ordering::Relaxed),
