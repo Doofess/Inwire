@@ -109,7 +109,7 @@ export function dissectReplay(
     const frame = frames[i];
     const { packet } = decodeRawEthernetPacket(
       frame.bytes, frame.id, frame.tsUs, frame.relativeTime, frame.timeDelta,
-      frame.origLen, tcp, icmp, quic, dns, undefined, undefined, l3, host,
+      frame.origLen, tcp, icmp, quic, dns, undefined, frame.linkType, l3, host,
     );
     // Only the last frame's tree is kept. The rest are dissected for their
     // effect on the trackers and thrown away, which is the whole mechanism.

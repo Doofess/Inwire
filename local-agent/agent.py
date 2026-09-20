@@ -549,14 +549,81 @@ def build_hello_message(version: str, state: str, interfaces, client_id: str = "
     }
 
 
+# What pcap_datalink() said about a device, remembered for the life of the
+# process. See datalink_of.
+_DATALINK_CACHE: dict = {}
+
+
+def datalink_of(device_name):
+    """The device's LINKTYPE_* value, or None when it could not be read.
+
+    **Neither agent used to say, so the app assumed Ethernet.** That is right
+    for every adapter on a Windows machine except Npcap's loopback device,
+    which is DLT_NULL - a 4-byte address family and then the IP header. Read as
+    Ethernet, bytes 12-13 land on the IP header's TTL and protocol, so a
+    loopback capture showed a stream of ethertypes 0x8006 and 0x8011: 0x80 is
+    the Windows default TTL, 0x06 and 0x11 are TCP and UDP. It also produced
+    two fabricated MAC addresses with vendors resolved from them, a direction
+    decided from those MACs, and no transport layer at all.
+
+    **libpcap will only answer about a handle it has open**, so asking costs a
+    pcap_open_live and a pcap_close per device - and the interface list is
+    re-read on every client connection (refresh_interfaces). Cached by device
+    name, which is safe because a device's link type is a property of what the
+    device IS: an Ethernet adapter does not become a loopback one. What can
+    change under a running agent is the SET of devices, and that is re-read per
+    connection exactly as before.
+
+    Opened NON-PROMISCUOUS and closed immediately: this is a question, not a
+    capture, and putting an adapter into promiscuous mode in order to list the
+    adapters would be a visible side effect of opening the app.
+
+    None on any failure - a device in use by something that will not share it,
+    a driver that has just removed it, or a scapy build without these symbols.
+    The app's own fallback is Ethernet, so a 1 returned here would be
+    indistinguishable from having asked and been told.
+    """
+    if device_name in _DATALINK_CACHE:
+        return _DATALINK_CACHE[device_name]
+
+    answer = None
+    try:
+        from scapy.libs.winpcapy import pcap_open_live, pcap_close, pcap_datalink
+        errbuf = ctypes.create_string_buffer(256)
+        handle = pcap_open_live(device_name.encode("utf-8"), 65535, 0, 100, errbuf)
+        if handle:
+            try:
+                answer = int(pcap_datalink(handle))
+            finally:
+                pcap_close(handle)
+    except Exception as exc:
+        log.debug("could not read the link type of %s: %s", device_name, exc)
+
+    _DATALINK_CACHE[device_name] = answer
+    return answer
+
+
 def interface_entries(interfaces) -> list:
     """The interface list as every message carries it.
 
     `id` is the position in this list and is what a packet's `iface` field
     refers to (docs/decisions/0005). It is an index rather than the device
     name so a packet costs four bytes of identity, not sixty.
+
+    `linkType` is **omitted when it could not be read** rather than sent as 1.
+    The app falls back to Ethernet either way, so a guess written into the
+    field would be indistinguishable from having asked - and an agent too old
+    to have looked would then be indistinguishable from one that looked and
+    found Ethernet. See datalink_of.
     """
-    return [{"id": i, "name": name, "label": label} for i, (name, label) in enumerate(interfaces)]
+    entries = []
+    for i, (name, label) in enumerate(interfaces):
+        entry = {"id": i, "name": name, "label": label}
+        link_type = datalink_of(name)
+        if link_type is not None:
+            entry["linkType"] = link_type
+        entries.append(entry)
+    return entries
 
 
 class SnifferController:

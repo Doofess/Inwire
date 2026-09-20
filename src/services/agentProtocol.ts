@@ -22,6 +22,24 @@ export interface AgentInterface {
   id?: number;
   name: string;
   label: string;
+  /**
+   * The adapter's `LINKTYPE_*` value, when the agent could read it.
+   *
+   * **Absent means "not said", and the fallback is Ethernet** - which is what
+   * every caller assumed before this field existed, correctly for every
+   * adapter on a Windows machine except Npcap's loopback device. That one is
+   * `LINKTYPE.NULL`: a 4-byte address family and then the IP header. Read as
+   * Ethernet, bytes 12-13 land on the IP header's TTL and protocol, so a
+   * loopback capture showed ethertypes `0x8006` and `0x8011` - 0x80 being the
+   * Windows default TTL and 0x06/0x11 TCP and UDP - two fabricated MAC
+   * addresses with vendors resolved from them, a direction decided from those
+   * MACs, and no transport layer at all.
+   *
+   * Optional rather than defaulted in the agent, because an agent that has
+   * looked and found Ethernet and an agent too old to look are different
+   * facts, and only the second may be overridden by a later answer.
+   */
+  linkType?: number;
 }
 
 export interface AgentHelloMessage {
@@ -383,6 +401,13 @@ function isValidInterfaceList(interfaces: unknown): interfaces is AgentInterface
     if (!i || typeof i !== 'object') return false;
     const entry = i as Record<string, unknown>;
     if (typeof entry.name !== 'string' || typeof entry.label !== 'string') return false;
+    // A link type that is not a non-negative integer is a malformed message
+    // rather than a missing field: it selects a dissector, and a NaN or a
+    // negative would fall through to Ethernet silently - which is the exact
+    // wrong reading this field exists to stop.
+    if (entry.linkType !== undefined
+      && !(typeof entry.linkType === 'number' && Number.isInteger(entry.linkType)
+        && entry.linkType >= 0)) return false;
     return entry.id === undefined || (typeof entry.id === 'number' && Number.isInteger(entry.id));
   });
 }

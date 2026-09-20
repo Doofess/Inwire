@@ -114,6 +114,7 @@ type FnFindAllDevs = unsafe extern "C" fn(*mut *mut PcapIf, *mut c_char) -> c_in
 type FnFreeAllDevs = unsafe extern "C" fn(*mut PcapIf);
 type FnSetBuff = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
 type FnSetMinToCopy = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
+type FnDatalink = unsafe extern "C" fn(*mut PcapT) -> c_int;
 
 /// The loaded library and its entry points.
 pub struct Npcap {
@@ -130,6 +131,7 @@ pub struct Npcap {
     setbuff: Option<FnSetBuff>,
     /// Npcap's too, and absent for the same reason - see `set_min_to_copy`.
     setmintocopy: Option<FnSetMinToCopy>,
+    datalink: FnDatalink,
 }
 
 #[derive(Debug)]
@@ -203,6 +205,7 @@ impl Npcap {
                 setmintocopy: sym(module, "pcap_setmintocopy")
                     .ok()
                     .map(|p| std::mem::transmute::<Farproc, FnSetMinToCopy>(p)),
+                datalink: std::mem::transmute::<Farproc, FnDatalink>(sym(module, "pcap_datalink")?),
             })
         }
     }
@@ -310,6 +313,23 @@ impl Capture<'_> {
             return Err(io::Error::other(self.error()));
         }
         Ok(true)
+    }
+
+    /// The `LINKTYPE_*` value of the frames this handle delivers.
+    ///
+    /// **Neither agent asked, and the app therefore assumed Ethernet.** That
+    /// is right for every adapter on this machine but one: Npcap's loopback
+    /// device is `DLT_NULL`, a 4-byte address family followed by the IP
+    /// header, and read as Ethernet its bytes 12-13 land on the IP header's
+    /// TTL and protocol - which is why a loopback capture showed a stream of
+    /// ethertypes `0x8006` and `0x8011`. 0x80 is the Windows default TTL; 0x06
+    /// and 0x11 are TCP and UDP.
+    ///
+    /// libpcap answers from the open handle and cannot be asked about a device
+    /// it has not opened, which is why this is read at enumeration and cached -
+    /// see `runtime::datalink_of`.
+    pub fn datalink(&self) -> c_int {
+        unsafe { (self.npcap.datalink)(self.handle) }
     }
 
     /// Asks the driver to hand frames over as soon as it has any.

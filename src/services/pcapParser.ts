@@ -131,8 +131,20 @@ function precisionFor(secondsPerTick: number): number {
 export class PcapService {
   /**
    * Generates a compliant binary Libpcap 2.4 file from packet stream
+   *
+   * **The header's link type is read from the frames, not assumed.** Classic
+   * pcap has exactly one for the whole file, which is the format's own limit
+   * and the reason the pcapng row says it keeps things this one cannot - but
+   * writing `1` unconditionally meant a loopback capture exported a file that
+   * declared Ethernet, so Wireshark reproduced this app's own misparse from
+   * the file rather than from the wire. A capture that mixes link types cannot
+   * be described by this format at all; the first frame's is written and the
+   * rest are as wrong as they have always been, which is one honest header
+   * instead of a fixed wrong one.
    */
   public static generatePcapBinary(packets: Packet[]): Blob {
+    const linkType = packets.find((p) => p.linkType !== undefined)?.linkType
+      ?? LINKTYPE.ETHERNET;
     let totalSize = 24; // Global header
     for (const p of packets) {
       totalSize += 16 + p.rawBytes.length; // 16 bytes pcap_pkthdr + raw bytes
@@ -155,7 +167,7 @@ export class PcapService {
     offset += 4;
     view.setUint32(offset, 65535, true); // Snaplen
     offset += 4;
-    view.setUint32(offset, 1, true); // LinkType: Ethernet (1)
+    view.setUint32(offset, linkType, true); // LinkType, from the frames
     offset += 4;
 
     // 2. Write Packet Records, in capture order. The buffer can hold frames
@@ -1234,6 +1246,12 @@ export function decodeRawEthernetPacket(
       ...(expert ? { expert } : {}),
       ...(resolvedNames && resolvedNames.length > 0 ? { resolved: resolvedNames } : {}),
       interfaceName: captureInterface?.label ?? 'eth0',
+      // **Only when it is not Ethernet**, so the common frame gains no slot -
+      // the same rule the `direction` spread above follows, and for the same
+      // reason. Carried rather than re-derived because a replay, the
+      // anonymiser and both export writers each need to know how to read this
+      // frame's first bytes, and none of them can reach the capture's source.
+      ...(linktype !== LINKTYPE.ETHERNET ? { linkType: linktype } : {}),
     },
     icmpMatchedRequestFrameId,
     infoPatches,

@@ -74,6 +74,7 @@ export interface LinkLayerResult {
 /** Wireshark's name and number for each link type, for the Frame layer. */
 const ENCAPSULATION: Record<number, string> = {
   [LINKTYPE.NULL]: 'NULL/Loopback (0)',
+  [LINKTYPE.LOOP]: 'OpenBSD loopback (108)',
   [LINKTYPE.ETHERNET]: 'Ethernet (1)',
   [LINKTYPE.RAW_IP]: 'Raw IP (101)',
   [LINKTYPE.LINUX_SLL]: 'Linux cooked-mode capture v1 (113)',
@@ -158,6 +159,11 @@ export function dissectLinkLayer(rawBytes: Uint8Array, linktype: number): LinkLa
       };
 
     case LINKTYPE.NULL:
+    // DLT_LOOP is DLT_NULL with the address family fixed big-endian.
+    // `dissectNull` reads both orders and lets the IP version nibble decide,
+    // so it is already right for this one - which is why this is a second
+    // label on the same case rather than a decoder of its own.
+    case LINKTYPE.LOOP:
       return dissectNull(rawBytes, encapsulation);
 
     case LINKTYPE.LINUX_SLL:

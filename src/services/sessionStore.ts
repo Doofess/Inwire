@@ -64,8 +64,23 @@ export interface SessionMeta {
    * costs a few hundred bytes for the whole session instead of ~90 bytes on
    * every one of up to 50,000 frames, and still restores a buffer that spans
    * more than one adapter correctly, since the lookup is per frame.
+   *
+   * **`linkType` rides the same table for the same reason**, and it matters
+   * more than the id does: a restore reads already-dissected rows back off
+   * disk, so the frames come back right whatever this says - but the detail
+   * pane rebuilds a tree by re-dissecting the conversation, and without the
+   * link type that replay reads a loopback frame as Ethernet and contradicts
+   * the row that opened it. The export writers need it for the same reason,
+   * one layer further out.
+   *
+   * **What this cannot cover is an imported capture restored later.** Its
+   * frames carry the file's own adapter names, which are not in this table -
+   * so they lose their link type exactly as they already lose their adapter
+   * id, and for the identical reason. Stated rather than worked around: the
+   * alternative is the link type on every stored frame, which is the per-frame
+   * cost this table exists to avoid.
    */
-  interfaces: { name: string; label: string }[];
+  interfaces: { name: string; label: string; linkType?: number }[];
   /** The relative-time origin, so restored packets keep their timeline. */
   captureStartMs: number | null;
   /** The last packet's epoch time, so the first new delta is honest. */
@@ -224,12 +239,23 @@ export async function loadSessionMeta(): Promise<SessionMeta | null> {
   return {
     selectedInterfaces: raw.selectedInterfaces.filter((i): i is string => typeof i === 'string'),
     interfaces: Array.isArray(raw.interfaces)
-      ? raw.interfaces.filter(
-          (i): i is { name: string; label: string } =>
+      ? raw.interfaces
+        .filter(
+          (i): i is Record<string, unknown> & { name: string; label: string } =>
             typeof i === 'object' && i !== null &&
             typeof (i as { name?: unknown }).name === 'string' &&
             typeof (i as { label?: unknown }).label === 'string',
         )
+        // Dropped rather than kept when it is not an integer, which is the
+        // rule `isValidInterfaceList` applies to the same field arriving from
+        // the agent: absent means Ethernet, and a NaN would reach a dissector
+        // switch and fall through to Ethernet anyway - silently, where this
+        // says so by being absent.
+        .map(({ name, label, linkType }) => (
+          typeof linkType === 'number' && Number.isInteger(linkType) && linkType >= 0
+            ? { name, label, linkType }
+            : { name, label }
+        ))
       : [],
     captureStartMs: typeof raw.captureStartMs === 'number' ? raw.captureStartMs : null,
     lastPacketMs: typeof raw.lastPacketMs === 'number' ? raw.lastPacketMs : null,

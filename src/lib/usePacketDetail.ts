@@ -48,6 +48,10 @@ export async function replayBundleFor(
     timeDelta: p.timeDelta,
     origLen: p.length,
     bytes: bytesById.get(p.id) ?? p.rawBytes,
+    // Absent for an Ethernet frame, which is every frame off an ordinary
+    // adapter. Carried per frame rather than per bundle because a conversation
+    // is one adapter's in practice but nothing in the five-tuple says so.
+    linkType: p.linkType,
   }));
 
   // A TCP conversation starts with a SYN. If the earliest frame we still hold

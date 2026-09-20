@@ -168,6 +168,12 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
         // resolution per interface, which is the thing classic pcap could
         // only express through the whole file's magic number.
         tsPrecision: outgoing.find((p) => p.interfaceName === name)?.tsPrecision ?? 6,
+        // Per IDB, which is the one thing classic pcap cannot say: a capture
+        // on an Ethernet adapter and Npcap's loopback at once is two link
+        // types in one file, and pcapng describes it. The field existed on
+        // `PcapngInterface` with no caller anywhere setting it, so every
+        // exported file declared Ethernet whatever it held.
+        linkType: outgoing.find((p) => p.interfaceName === name)?.linkType,
         // The counters describe the whole capture rather than this adapter's
         // share, so they are only written when there is exactly one adapter
         // to attribute them to.

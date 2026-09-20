@@ -38,11 +38,29 @@ pub struct Interface {
     pub id: usize,
     pub name: String,
     pub label: String,
+    /// This adapter's `LINKTYPE_*` value, when it could be read.
+    ///
+    /// **Neither agent used to say, so the app assumed Ethernet** - which is
+    /// right for every adapter here but Npcap's loopback device, and that one
+    /// is `DLT_NULL`. Read as Ethernet it produced fabricated MAC addresses
+    /// with vendors attached to them, a direction decided from those MACs, and
+    /// no transport layer at all.
+    ///
+    /// `None` when the device could not be opened to ask. Omitted from the
+    /// JSON rather than sent as 1, because the app's fallback is Ethernet
+    /// anyway and a guess written into the field would be indistinguishable
+    /// from having asked. `AgentInterface.linkType` is optional for the same
+    /// reason, and an agent that predates the field is a legal one.
+    pub link_type: Option<i32>,
 }
 
 impl Interface {
     fn to_value(&self) -> Value {
-        json!({ "id": self.id, "name": self.name, "label": self.label })
+        let mut value = json!({ "id": self.id, "name": self.name, "label": self.label });
+        if let (Some(link_type), Some(object)) = (self.link_type, value.as_object_mut()) {
+            object.insert("linkType".into(), json!(link_type));
+        }
+        value
     }
 }
 

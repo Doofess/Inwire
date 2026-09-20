@@ -469,13 +469,19 @@ export function useAgentConnection(host: AgentConnectionHost) {
     };
   }, [canCapture, agentLinkEnabled]);
 
-  // Which adapter each frame's `iface` index names. The Worker builds the
-  // Frame layer's interface rows from it.
+  // Which adapter each frame's `iface` index names, and how to read its
+  // frames. The Worker builds the Frame layer's interface rows from the first
+  // and picks a link-layer dissector with the second - it is the only side
+  // that dissects, so this is the only route either fact has.
   useEffect(() => {
     pipeline.setInterfaces(agentInterfaces.map((iface, index) => ({
       id: iface.id ?? index,
       name: iface.name,
       label: iface.label ?? iface.name,
+      // Forwarded rather than defaulted here. An agent that did not say and an
+      // agent that said Ethernet are different facts, and only the first may
+      // be overridden by a later answer.
+      linkType: iface.linkType,
     })));
   }, [agentInterfaces]);
 
