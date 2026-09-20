@@ -32,12 +32,22 @@ old name still refers to this file.
 - `acceptance.json` - tracked. Per fixture: the file, its hash, the per-column match
   floors the parity check holds the code to, and the counts tshark reports. A count
   is only enforced once its name is in `enforce`; the rest are printed as gaps.
+- `acceptance.json`'s `tree` block - what the protocol TREE is held to, which is a
+  different question from the columns and is measured by
+  `scripts/parity/tree-coverage.ts` (ADR 0039). **Counts, never percentages**: the
+  denominator of a coverage ratio is the reference's own vocabulary, so a ratio
+  floor would fail on the Wireshark upgrade the line above tells you to perform.
+  `layers` and `protosNamed` are floors and may only rise; the two `ceilings` may
+  only fall; `counts` is recorded and never enforced; `unimplemented` names a layer
+  whose floor is deliberately absent, and an entry may only leave it by becoming a
+  floor.
 
 ## Running
 
 ```
 ./scripts/parity/regen-ground-truth.sh          # once, and after a Wireshark upgrade
 npx tsx scripts/parity/parity-check.ts          # both fixtures, exit 1 on any regression
+npx tsx scripts/parity/tree-coverage.ts        # the tree; --write-floors to record it
 npx tsx scripts/parity/parity-check.ts inwire   # one
 npx tsx scripts/parity/parity-check.ts --write-floors   # after a phase raises a column
 ```
