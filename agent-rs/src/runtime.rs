@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::adapters;
+use crate::agent_log;
 use crate::framing::{FRAME_BINARY, FRAME_JSON};
 use crate::if_table;
 use crate::npcap::{Npcap, Read};
@@ -48,6 +49,7 @@ use crate::protocol::{self, CaptureState, Command, Interface, InterfaceStats, Pa
 use crate::session::{
     available_cores, kernel_buffer_bytes, Drain, FrameQueue, BATCH_INTERVAL_MS,
 };
+use crate::sockets;
 use crate::wire;
 
 /// How often the idle watchdog looks. Matches the Python agent's
@@ -85,6 +87,21 @@ pub const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// a capture is running; these rates have to move on an idle adapter, which is
 /// the entire point of the panel.
 pub const INTERFACE_STATS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How often the socket table is re-read for whoever subscribed.
+///
+/// One second, matching `local-agent/agent.py`'s
+/// `SOCKET_TABLE_INTERVAL_SECONDS`. The table is ~890 sockets and changes by
+/// one or two a second, so this is the rate at which a delta is worth sending
+/// at all - and reading it costs a few milliseconds, which is why it has a
+/// thread rather than sharing one with anything on a shorter tick.
+pub const SOCKET_TABLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often new log lines are forwarded to whoever subscribed.
+///
+/// A quarter second: a log viewer wants to feel live, and the cost of a tick
+/// with nothing to send is one lock and one comparison.
+pub const LOG_FORWARD_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Signals a stop from any thread, and lets one thread wait for it.
 ///
@@ -166,6 +183,28 @@ struct Shared {
     /// and unlike frames there is no reason to send them to one client alone -
     /// these are facts about the machine, not about anybody's capture.
     rate_watchers: Mutex<std::collections::HashSet<String>>,
+    /// Clients that asked for `socket_table`, by id.
+    ///
+    /// Beside `rate_watchers` rather than merged with it: the two have
+    /// different cadences and different costs, and a client can want process
+    /// attribution without the Interfaces panel open or the other way round.
+    socket_watchers: Mutex<std::collections::HashSet<String>>,
+    /// The shared reading the per-second deltas are differenced against.
+    ///
+    /// One for the whole agent, because the table is a fact about the machine
+    /// rather than about anybody's subscription - a second tracker would read
+    /// the same table again and difference it against a different previous.
+    /// A client that subscribes gets a full snapshot of its own from a
+    /// throwaway tracker, so it never needs this one to restart.
+    sockets: Mutex<sockets::SocketTracker>,
+    /// Clients that asked for `log`, and the log sequence each has been sent
+    /// up to.
+    ///
+    /// A position per client rather than one shared cursor: a second window
+    /// subscribing must not make the first one skip the lines the newcomer got
+    /// in its backlog, and a client that subscribes an hour late starts from
+    /// its own backlog rather than from wherever the other one had reached.
+    log_watchers: Mutex<HashMap<String, u64>>,
     shutdown: Arc<Shutdown>,
 }
 
@@ -317,6 +356,7 @@ impl Shared {
             }
             *held = Some(reason.clone());
         }
+        crate::log_warn!("capture stopped on interface {}: {reason}", per.iface);
         let owner = self.owner.lock().unwrap().clone();
         if let Some(owner) = owner {
             self.send_to(&owner, &protocol::capture_failed(per.iface, &reason));
@@ -633,7 +673,7 @@ fn start_capture(shared: &Arc<Shared>, client: &str, chosen: &[Interface]) -> io
                             // ever stops being true.
                             Err(error) => {
                                 ov.fetch_add(1, Ordering::Relaxed);
-                                eprintln!("dropping a frame: {error}");
+                                crate::log_warn!("dropping a frame: {error}");
                             }
                         }
                     }
@@ -765,11 +805,12 @@ fn start_capture(shared: &Arc<Shared>, client: &str, chosen: &[Interface]) -> io
 /// Serves one connected client until its pipe closes.
 fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io::Result<()> {
     let connection = Arc::new(Connection::new());
-    shared
-        .clients
-        .lock()
-        .unwrap()
-        .insert(client.clone(), Arc::clone(&connection));
+    let total = {
+        let mut clients = shared.clients.lock().unwrap();
+        clients.insert(client.clone(), Arc::clone(&connection));
+        clients.len()
+    };
+    crate::log_info!("client {client} connected ({total} total)");
 
     let writer_instance = Arc::clone(&instance);
     let outbound = Arc::clone(&connection.outbound);
@@ -812,7 +853,7 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
             // Binary from the client is not part of the protocol. Ignored rather
             // than treated as a framing failure: the stream position is still
             // known, so there is nothing to resynchronise.
-            eprintln!("ignoring a binary frame from {client}");
+            crate::log_warn!("ignoring a binary frame from {client}");
             return Ok(());
         }
         let text = String::from_utf8_lossy(&frame.payload).to_string();
@@ -866,6 +907,7 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                 // `start_capture` resolves every name and refuses the whole
                 // selection if any of them is gone, which is one answer at the
                 // moment it matters instead of two that can disagree.
+                crate::log_info!("set_interfaces: {} interface(s) selected", chosen.len());
                 *shared.selected.lock().unwrap() = chosen;
                 let interfaces = shared.interfaces.lock().unwrap().clone();
                 shared.send_to(&client, &protocol::state(
@@ -920,6 +962,7 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                     };
                     chosen.push(found);
                 }
+                crate::log_info!("start_capture requested on {} interface(s)", chosen.len());
                 if let Err(error) = start_capture(&shared, &client, &chosen) {
                     shared.send_to(&client, &protocol::error(
                         "capture_failed",
@@ -934,6 +977,7 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                 ));
             }
             Command::StopCapture => {
+                crate::log_info!("stop_capture requested");
                 if let Some(final_stats) = shared.stop_capture() {
                     shared.send_to(&client, &final_stats);
                 }
@@ -945,6 +989,47 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
             }
             Command::UnsubscribeInterfaceStats => {
                 shared.rate_watchers.lock().unwrap().remove(&client);
+            }
+            Command::SubscribeLogs => {
+                // **The backlog first, then live lines from here on.** The
+                // watermark is taken before the backlog is read rather than
+                // after, so a line written in between is sent twice rather
+                // than not at all - a duplicate in a log viewer is visible
+                // and harmless, a hole is neither.
+                let from = agent_log::watermark();
+                shared.log_watchers.lock().unwrap().insert(client.clone(), from);
+                shared.send_to(&client, &agent_log::log_message(agent_log::backlog()));
+            }
+            Command::UnsubscribeLogs => {
+                shared.log_watchers.lock().unwrap().remove(&client);
+            }
+            Command::SubscribeSockets => {
+                shared.socket_watchers.lock().unwrap().insert(client.clone());
+                // **This client's own full snapshot, now.** The shared ticker
+                // sends deltas, and a delta against a table this client never
+                // received would leave it permanently short of every socket
+                // that existed before it subscribed - the same reason
+                // `subscribe_logs` hands over a backlog. A throwaway tracker
+                // rather than the shared one, so a second window subscribing
+                // does not make the first one's next delta a full resend.
+                //
+                // Re-sending an add the next delta also carries is harmless:
+                // `flowAnnotations.ts` applies each message idempotently.
+                if let Some(snapshot) = sockets::SocketTracker::new().poll() {
+                    shared.send_to(&client, &snapshot);
+                }
+            }
+            Command::UnsubscribeSockets => {
+                let mut watchers = shared.socket_watchers.lock().unwrap();
+                watchers.remove(&client);
+                if watchers.is_empty() {
+                    // The next subscriber gets a snapshot of its own anyway,
+                    // but the shared tracker must not carry a table read
+                    // minutes ago into the first delta after it - every socket
+                    // that came and went in between would arrive as one
+                    // impossible burst.
+                    shared.sockets.lock().unwrap().reset();
+                }
             }
             Command::SubscribeAdapters | Command::RefreshAdapters => {
                 // A whole snapshot, not a delta, and sent on subscribe rather
@@ -970,8 +1055,24 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
 
     // The client has gone. Deregister first, so nothing tries to send to it
     // while the capture is being torn down.
-    shared.clients.lock().unwrap().remove(&client);
+    let left = {
+        let mut clients = shared.clients.lock().unwrap();
+        clients.remove(&client);
+        clients.len()
+    };
+    crate::log_info!("client {client} disconnected ({left} left)");
     shared.rate_watchers.lock().unwrap().remove(&client);
+    shared.log_watchers.lock().unwrap().remove(&client);
+    {
+        let mut watchers = shared.socket_watchers.lock().unwrap();
+        watchers.remove(&client);
+        // Same reason as `unsubscribe_sockets`: a stale previous reading would
+        // make the next delta a burst of everything that moved while nobody
+        // was listening.
+        if watchers.is_empty() {
+            shared.sockets.lock().unwrap().reset();
+        }
+    }
     if shared.owner.lock().unwrap().as_deref() == Some(client.as_str()) {
         shared.stop_capture();
         let interfaces = shared.interfaces.lock().unwrap().clone();
@@ -1021,6 +1122,9 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
         selected: Mutex::new(Vec::new()),
         capture: Mutex::new(None),
         rate_watchers: Mutex::new(std::collections::HashSet::new()),
+        socket_watchers: Mutex::new(std::collections::HashSet::new()),
+        sockets: Mutex::new(sockets::SocketTracker::new()),
+        log_watchers: Mutex::new(HashMap::new()),
         shutdown: Arc::clone(&shutdown),
     });
 
@@ -1041,7 +1145,7 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
                             // The one failure that must not be retried in a tight
                             // loop: if the name cannot be created at all, the
                             // agent has nothing to offer and says so once.
-                            eprintln!("could not create a pipe instance: {error}");
+                            crate::log_error!("could not create a pipe instance: {error}");
                             shutdown.request("the pipe could not be served");
                             return;
                         }
@@ -1100,6 +1204,76 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
         });
     }
 
+    // The log forwarder. **Polled rather than called back**, for the reason
+    // `agent_log`'s header gives: a sink invoked from inside `log!` would be
+    // re-entrant, because sending to a client can fail and a failure worth
+    // logging would call `log!` again from inside the lock it is holding.
+    //
+    // It also means a burst of logging costs one message rather than one per
+    // line, which matters because the noisiest thing the agent writes is a
+    // capture failing - the moment a subscriber is most likely watching.
+    {
+        let shared = Arc::clone(&shared);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            while !shutdown.requested() {
+                thread::sleep(LOG_FORWARD_INTERVAL);
+                let watchers: Vec<(String, u64)> = shared
+                    .log_watchers
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(client, from)| (client.clone(), *from))
+                    .collect();
+                for (client, from) in watchers {
+                    let (lines, next) = agent_log::since(from);
+                    if lines.is_empty() {
+                        continue;
+                    }
+                    shared.send_to(&client, &agent_log::log_message(lines));
+                    // Only if the client is still subscribed: an unsubscribe
+                    // that landed while this was building the message must not
+                    // be undone by writing the position back.
+                    if let Some(held) = shared.log_watchers.lock().unwrap().get_mut(&client) {
+                        *held = next;
+                    }
+                }
+            }
+        });
+    }
+
+    // The socket-table poller. Its own thread rather than a second job on the
+    // sampler's, because reading the table is a few milliseconds of blocking
+    // work against the sampler's one `GetIfTable2` - sharing a thread would
+    // make the sparkline stutter whenever attribution was on.
+    //
+    // **A failure here never takes a capture down.** The packet list is the
+    // product; a missing process name is a missing annotation, which is the
+    // same line `local-agent/agent.py`'s `_socket_loop` draws.
+    {
+        let shared = Arc::clone(&shared);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || {
+            while !shutdown.requested() {
+                thread::sleep(SOCKET_TABLE_INTERVAL);
+                let watchers: Vec<String> =
+                    shared.socket_watchers.lock().unwrap().iter().cloned().collect();
+                if watchers.is_empty() {
+                    continue;
+                }
+                // `None` means nothing opened or closed this second, which on
+                // an idle machine is most seconds - and an empty delta every
+                // second is a message that says nothing.
+                let Some(delta) = shared.sockets.lock().unwrap().poll() else {
+                    continue;
+                };
+                for watcher in watchers {
+                    shared.send_to(&watcher, &delta);
+                }
+            }
+        });
+    }
+
     // The idle watchdog, which is the whole of ADR 0035 on this side: the agent
     // stops ITSELF when the app has gone, rather than the app stopping it.
     {
@@ -1140,7 +1314,7 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
     }
 
     let reason = shutdown.wait();
-    eprintln!("shutting down: {reason}");
+    crate::log_info!("shutting down: {reason}");
     shared.stop_capture();
     // The acceptors are blocked in `accept`; a connection of our own is what
     // releases them, and each checks `requested()` immediately after.

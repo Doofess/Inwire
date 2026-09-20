@@ -59,6 +59,8 @@ pub mod wire;
 #[cfg(windows)]
 pub mod adapters;
 #[cfg(windows)]
+pub mod agent_log;
+#[cfg(windows)]
 pub mod if_table;
 #[cfg(windows)]
 pub mod npcap;
@@ -68,3 +70,5 @@ pub mod pipe;
 pub mod runtime;
 #[cfg(windows)]
 pub mod service;
+#[cfg(windows)]
+pub mod sockets;

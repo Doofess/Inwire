@@ -297,7 +297,7 @@ unsafe fn sockaddr_to_string(addr: &SocketAddress) -> Option<(u16, String)> {
 
 /// RFC 5952 text for an IPv6 address: lowercase hex, the longest run of zero
 /// groups collapsed once, and a run of one never collapsed.
-fn format_ipv6(bytes: &[u8; 16]) -> String {
+pub fn format_ipv6(bytes: &[u8; 16]) -> String {
     let groups: [u16; 8] =
         std::array::from_fn(|i| ((bytes[i * 2] as u16) << 8) | bytes[i * 2 + 1] as u16);
 
