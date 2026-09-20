@@ -321,27 +321,6 @@ export interface Packet {
   linkType?: number;
 }
 
-export interface CustomDissectorFieldDef {
-  name: string;
-  offset: number;
-  length: number; // in bytes
-  type: 'uint8' | 'uint16' | 'uint32' | 'string' | 'hex' | 'flags';
-  description?: string;
-}
-
-export interface CustomDissectorRule {
-  id: string;
-  name: string;
-  protocolName: string;
-  port?: number;
-  transport: 'TCP' | 'UDP' | 'ANY';
-  magicHeaderHex?: string; // e.g. "504B54" (PKT)
-  magicOffset?: number;
-  description: string;
-  enabled: boolean;
-  fields: CustomDissectorFieldDef[];
-}
-
 export interface ColorRule {
   id: string;
   name: string;

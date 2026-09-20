@@ -13,7 +13,6 @@ import {
   Accessibility,
   Key,
   Download,
-  Code,
 } from 'lucide-react';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
 import { UpdateCenterPanel } from './UpdateCenterPanel';
@@ -23,8 +22,6 @@ import { AccessibilitySettingsPanel } from './AccessibilitySettingsPanel';
 import { DisplayFiltersPanel } from './DisplayFiltersPanel';
 import { ColorRulesPanel } from './ColorRulesPanel';
 import { DecryptionSettingsPanel } from './DecryptionSettingsPanel';
-import { CustomDissectorsPanel } from '../dissectors/CustomDissectorsPanel';
-import type { CustomDissectorEngine } from '../../services/customDissectorEngine';
 import type { AgentLogEntry } from '../../services/agentProtocol';
 import type { ColorRule, FilterPresetLibrary, Capabilities } from '../../types/packet';
 import type { PacketTheme } from '../../services/packetThemes';
@@ -46,7 +43,7 @@ import type { CaptureStorageState } from '../../services/capture/captureProtocol
  * separate visits made a single story into two.
  */
 type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters' | 'colors'
-  | 'dissectors' | 'decryption' | 'driver' | 'updates';
+  | 'decryption' | 'driver' | 'updates';
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
@@ -67,7 +64,6 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // what the dissector can READ rather than what is shown: one adds a protocol,
   // the other supplies the keys to see inside one. It was a full-screen modal
   // off the hamburger menu until that menu was deleted.
-  { id: 'dissectors', label: 'Custom Dissectors', icon: Code },
   // After the two filter tabs and before the hardware one: a key log changes
   // what the dissector can read, which is the same kind of setting as a rule
   // that changes what is shown - and nothing to do with the driver.
@@ -140,10 +136,6 @@ interface SettingsPaneProps {
   onUnsubscribeAgentLog: () => void;
   onClearAgentLog: () => void;
 
-  /* --- Custom Dissectors, which was a modal off the deleted menu ---------- */
-  dissectorEngine: CustomDissectorEngine;
-  onUpdateDissectors: () => void;
-
   /* --- Network was here, and is its own sheet off the rail now ------------ */
 }
 
@@ -182,8 +174,6 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   onSubscribeAgentLog,
   onUnsubscribeAgentLog,
   onClearAgentLog,
-  dissectorEngine,
-  onUpdateDissectors,
 }) => {
   const [section, setSection] = useState<SettingsSection>('appearance');
   const bufferPercent = packetBufferBytes > 0
@@ -269,14 +259,6 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                 onChange={onColorRulesChange}
                 theme={packetTheme}
                 canEdit={permissions.canChangeColorRules}
-              />
-            )}
-
-            {section === 'dissectors' && (
-              <CustomDissectorsPanel
-                dissectorEngine={dissectorEngine}
-                onUpdateDissectors={onUpdateDissectors}
-                permissions={permissions}
               />
             )}
 

@@ -2,9 +2,11 @@
  * Packet numbers, and nothing else.
  *
  * It used to hold a `CustomDissectorEngine` too - taken in the constructor,
- * replaced by `setDissectorEngine` - and **never read it**. Nothing in this
- * class consulted the engine, so the field was a reference kept alive for no
- * reader. See `App.handleUpdateDissectors` for the gap that leaves.
+ * replaced by `setDissectorEngine` - and **never read it**. That engine, the
+ * settings tab that edited its rules and the two types they shared are all
+ * deleted now: no dissection path ever asked the engine about a frame, so the
+ * panel stored rules nothing applied, and a surface that does nothing is
+ * worse than a missing one because it says the feature exists.
  */
 export class PacketGenerator {
   private packetIdCounter = 1;
