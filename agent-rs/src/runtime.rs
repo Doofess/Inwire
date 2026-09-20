@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::adapters;
 use crate::framing::{FRAME_BINARY, FRAME_JSON};
 use crate::npcap::{Npcap, Read};
 use crate::pipe::{self, Connection, PipeInstance};
@@ -226,14 +227,21 @@ impl Shared {
 }
 
 /// Reads the adapters Npcap can capture on.
+///
+/// The label pairs Windows' connection name with Npcap's hardware description
+/// (`Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)`), which is what
+/// the Python agent shows and what a person recognises. Read once for the whole
+/// list rather than per device: it is one `GetAdaptersAddresses` either way and
+/// a per-device call would make the enumeration quadratic in adapters.
 fn read_interfaces(npcap: &Npcap) -> io::Result<Vec<Interface>> {
+    let friendly = adapters::friendly_names();
     Ok(npcap
         .devices()?
         .into_iter()
         .enumerate()
         .map(|(index, device)| Interface {
             id: index,
-            label: device.description.clone().unwrap_or_else(|| device.name.clone()),
+            label: adapters::label_for(&device.name, device.description.as_deref(), &friendly),
             name: device.name,
         })
         .collect())
