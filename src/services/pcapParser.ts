@@ -143,8 +143,12 @@ export class PcapService {
    * instead of a fixed wrong one.
    */
   public static generatePcapBinary(packets: Packet[]): Blob {
-    const linkType = packets.find((p) => p.linkType !== undefined)?.linkType
-      ?? LINKTYPE.ETHERNET;
+    // **The FIRST frame's, not the first non-Ethernet one.** `linkType` is
+    // absent on an Ethernet frame, so searching for a defined one would let a
+    // single loopback frame at the end of an Ethernet capture relabel the
+    // whole file - which is the wrong answer in the common case to be less
+    // wrong in a case this format cannot express at all.
+    const linkType = packets[0]?.linkType ?? LINKTYPE.ETHERNET;
     let totalSize = 24; // Global header
     for (const p of packets) {
       totalSize += 16 + p.rawBytes.length; // 16 bytes pcap_pkthdr + raw bytes
