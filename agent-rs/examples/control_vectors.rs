@@ -67,12 +67,32 @@ fn main() {
         protocol::state(CaptureState::Idle, &interfaces, None),
     );
     add(
+        "a capture that stopped on its own, with the reason",
+        protocol::capture_failed(2, "pcap_next_ex failed (-1): device removed"),
+    );
+    add(
+        "a frame the wire format cannot describe - receive offload past 64 KB",
+        protocol::frame_too_long(0, 71_680),
+    );
+    add(
+        "capture_stats carrying the oversize stage",
+        protocol::capture_stats(
+            1000,
+            4096,
+            12,
+            Some(3),
+            7,
+            &[InterfaceStats { iface: 0, received: 4000, kernel: Some((4100, 100)) }],
+        ),
+    );
+    add(
         "capture_stats with every counter readable",
         protocol::capture_stats(
             1000,
             4096,
             12,
             Some(3),
+            0,
             &[InterfaceStats { iface: 0, received: 4000, kernel: Some((4100, 100)) }],
         ),
     );
@@ -83,6 +103,7 @@ fn main() {
             10,
             0,
             Some(0),
+            0,
             &[
                 InterfaceStats { iface: 0, received: 10, kernel: Some((10, 0)) },
                 InterfaceStats { iface: 1, received: 5, kernel: None },
@@ -96,6 +117,7 @@ fn main() {
             10,
             0,
             None,
+            0,
             &[InterfaceStats { iface: 0, received: 10, kernel: Some((10, 0)) }],
         ),
     );

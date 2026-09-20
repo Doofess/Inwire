@@ -145,6 +145,20 @@ struct CaptureHandles {
     seq: Arc<AtomicU64>,
     received: Arc<AtomicU64>,
     kernel: Arc<Mutex<Option<(u32, u32)>>>,
+    /// Frames the driver handed over and the wire format could not describe -
+    /// a fifth loss stage, beside the kernel, the sniffer queue and the pipe.
+    /// Its own counter rather than folded into `droppedAgent`: a frame shed
+    /// under pressure and a frame too long to encode want opposite responses,
+    /// and this file has a comment about exactly that conflation elsewhere.
+    oversize: Arc<AtomicU64>,
+    /// Why this capture stopped, when it stopped by itself.
+    ///
+    /// **A worker cannot tear its own capture down.** `stop_capture` joins the
+    /// workers, so a worker calling it would wait for itself. So a dying worker
+    /// records the reason here instead, and everything that reads the capture's
+    /// state reads this too - which is what stops a dead capture reporting
+    /// `sniffing` for the rest of the session.
+    fault: Arc<Mutex<Option<String>>>,
     iface: usize,
     workers: Vec<thread::JoinHandle<()>>,
 }
@@ -165,12 +179,48 @@ impl Shared {
         }
     }
 
+    /// Whether a capture is running - which is **not** the same question as
+    /// whether a capture handle exists.
+    ///
+    /// This used to answer `is_some()`, and a capture whose reader had died
+    /// kept the handle, so the agent reported `sniffing` for the rest of the
+    /// session: no frames, no error, and a status bar reading "Capturing"
+    /// against an empty list. That is the state
+    /// `local-agent/agent.py`'s `report_capture_failure` was written to end,
+    /// and porting the read loop without it brought it back.
     fn capture_state(&self) -> CaptureState {
-        if self.capture.lock().unwrap().is_some() {
-            CaptureState::Sniffing
-        } else {
-            CaptureState::Idle
+        let held = self.capture.lock().unwrap();
+        match held.as_ref() {
+            Some(handles) if handles.fault.lock().unwrap().is_none() => CaptureState::Sniffing,
+            _ => CaptureState::Idle,
         }
+    }
+
+    /// Records why a capture died and tells the owner, once.
+    ///
+    /// Called from inside a worker, so it must not touch `stop_capture` - see
+    /// `CaptureHandles::fault`. The handles are reaped by whatever stops the
+    /// capture next: the client's own `stop_capture`, its disconnect, or the
+    /// shutdown path. Until then `capture_state` already reads `idle`, so
+    /// nothing downstream believes a capture is running.
+    ///
+    /// **The first reason wins.** A failing read usually makes the next write
+    /// fail too, and the second message would describe the consequence rather
+    /// than the cause.
+    fn fail_capture(&self, fault: &Arc<Mutex<Option<String>>>, iface: usize, reason: String) {
+        {
+            let mut held = fault.lock().unwrap();
+            if held.is_some() {
+                return;
+            }
+            *held = Some(reason.clone());
+        }
+        let owner = self.owner.lock().unwrap().clone();
+        if let Some(owner) = owner {
+            self.send_to(&owner, &protocol::capture_failed(iface, &reason));
+        }
+        let interfaces = self.interfaces.lock().unwrap().clone();
+        self.broadcast(&protocol::state(CaptureState::Idle, &interfaces, None));
     }
 
     /// Stops the capture if one is running, and answers its final figures.
@@ -202,6 +252,7 @@ impl Shared {
             handles.seq.load(Ordering::Relaxed),
             handles.queue.dropped(),
             dropped_pipe,
+            handles.oversize.load(Ordering::Relaxed),
             &[InterfaceStats {
                 iface: handles.iface,
                 received: handles.received.load(Ordering::Relaxed),
@@ -299,6 +350,8 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
     let seq = Arc::new(AtomicU64::new(0));
     let received = Arc::new(AtomicU64::new(0));
     let kernel = Arc::new(Mutex::new(None::<(u32, u32)>));
+    let oversize = Arc::new(AtomicU64::new(0));
+    let fault = Arc::new(Mutex::new(None::<String>));
     let mut workers = Vec::new();
 
     // The sniffer. Encodes on this thread, so the pump sees finished bytes
@@ -313,26 +366,49 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
             Arc::clone(&kernel),
             Arc::clone(&shared.shutdown),
         );
+        let (ov, ft, sh, owner_id) =
+            (Arc::clone(&oversize), Arc::clone(&fault), Arc::clone(shared), client.to_string());
         workers.push(thread::spawn(move || {
             while run.load(Ordering::SeqCst) && !shutdown.requested() {
                 match capture.next() {
                     Ok(Read::Timeout) => {}
                     Ok(Read::Frame { data, ts_us, wire_len }) => {
-                        let n = sq.fetch_add(1, Ordering::Relaxed);
                         rx.fetch_add(1, Ordering::Relaxed);
+                        // **Checked before a sequence number is taken.** The
+                        // encoder refuses a frame past 0xFFFF - rightly, since
+                        // a masked length desynchronises the decoder - but
+                        // taking the number first left a hole in the sequence
+                        // for a frame that was never sent, on top of counting
+                        // it as received and in no drop counter at all.
+                        if data.len() > 0xFFFF {
+                            let seen = ov.fetch_add(1, Ordering::Relaxed);
+                            if seen == 0 {
+                                sh.send_to(&owner_id, &protocol::frame_too_long(iface, data.len()));
+                            }
+                            continue;
+                        }
+                        let n = sq.fetch_add(1, Ordering::Relaxed);
                         match wire::encode_record(n as u32, iface as u16, ts_us, wire_len as usize, data) {
                             Ok(record) => q.push(record),
-                            // Refused rather than masked: a masked length
-                            // desynchronises the decoder and costs a whole batch.
-                            Err(error) => eprintln!("dropping a frame: {error}"),
+                            // Unreachable while the length check above is the
+                            // encoder's only failure, and counted rather than
+                            // printed so it cannot become invisible if that
+                            // ever stops being true.
+                            Err(error) => {
+                                ov.fetch_add(1, Ordering::Relaxed);
+                                eprintln!("dropping a frame: {error}");
+                            }
                         }
                     }
                     Err(error) => {
-                        // A removed adapter lands here. Stopping is right; the
-                        // Python agent used to `continue` on this and spin a
-                        // core at 100% for ever.
-                        eprintln!("capture failed: {error}");
+                        // A removed adapter lands here - an unplugged USB NIC,
+                        // a driver reset, a Wi-Fi adapter torn down by a roam.
+                        // Stopping is right; the Python agent used to
+                        // `continue` on this and spin a core at 100% for ever.
+                        // Saying so is what was missing: without it the app
+                        // keeps "Capturing" on screen against an empty list.
                         run.store(false, Ordering::SeqCst);
+                        sh.fail_capture(&ft, iface, error.to_string());
                         return;
                     }
                 }
@@ -356,6 +432,7 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
             client.to_string(),
             Arc::clone(shared),
         );
+        let (ft, ov) = (Arc::clone(&fault), Arc::clone(&oversize));
         workers.push(thread::spawn(move || {
             let mut last_stats = Instant::now();
             while run.load(Ordering::SeqCst) && !shared.shutdown.requested() {
@@ -367,10 +444,14 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
                         // Frames go to the owner alone. A second window would
                         // otherwise see sequence numbers that are not its own.
                         Some(connection) => {
-                            if connection
-                                .send(FRAME_BINARY, &payload, batch.len() as u64)
-                                .is_err()
+                            if let Err(error) =
+                                connection.send(FRAME_BINARY, &payload, batch.len() as u64)
                             {
+                                // The owner's pipe has gone. The sniffer is
+                                // still filling a queue nobody will drain, so
+                                // this is a stop rather than a return.
+                                run.store(false, Ordering::SeqCst);
+                                shared.fail_capture(&ft, iface, error.to_string());
                                 return;
                             }
                         }
@@ -393,6 +474,7 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
                         sq.load(Ordering::Relaxed),
                         q.dropped(),
                         dropped_pipe,
+                        ov.load(Ordering::Relaxed),
                         &[InterfaceStats {
                             iface,
                             received: rx.load(Ordering::Relaxed),
@@ -414,6 +496,8 @@ fn start_capture(shared: &Arc<Shared>, client: &str, device: &str, iface: usize)
         seq,
         received,
         kernel,
+        oversize,
+        fault,
         iface,
         workers,
     });

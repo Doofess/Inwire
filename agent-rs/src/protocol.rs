@@ -46,6 +46,43 @@ impl Interface {
     }
 }
 
+/// A capture that stopped on its own, and why.
+///
+/// `local-agent/agent.py`'s `report_capture_failure`, ported. Its docstring
+/// records what the Python agent was like without it: *"the app sat on
+/// 'capturing' with an empty list for as long as anyone cared to watch."*
+///
+/// The app side needs nothing new - `AgentErrorMessage` in
+/// `src/services/agentProtocol.ts` already declares `code` and `iface`, names
+/// `capture_failed` in its own comment, validates it and consumes it.
+pub fn capture_failed(iface: usize, reason: &str) -> Value {
+    json!({
+        "type": "error",
+        "code": "capture_failed",
+        "iface": iface,
+        "message": format!("Capture stopped on interface {iface}: {reason}"),
+    })
+}
+
+/// A frame the driver delivered and the wire format cannot describe.
+///
+/// Sent as well as counted, because a counter the app does not render is a
+/// loss nobody sees - and this file's own header is about exactly that: *"the
+/// agent logged 260,000 dropped frames in one afternoon and the app showed a
+/// clean, complete-looking list."* One message per capture, not one per frame.
+pub fn frame_too_long(iface: usize, bytes: usize) -> Value {
+    json!({
+        "type": "error",
+        "code": "frame_too_long",
+        "iface": iface,
+        "message": format!(
+            "A {bytes}-byte frame cannot be framed - the record's length field is 16 bits. \
+             Receive offload is coalescing past 64 KB; further frames of this size are counted \
+             but not reported again."
+        ),
+    })
+}
+
 /// The adapter report: how this machine was *told* to behave.
 ///
 /// **The app cannot decide a frame's direction without this**, and the cost of
@@ -215,6 +252,10 @@ pub fn capture_stats(
     seq_high: u64,
     dropped_agent: u64,
     dropped_pipe: Option<u64>,
+    // Frames the driver delivered that the wire format could not describe.
+    // Its own figure rather than folded into `dropped_agent`: a frame shed
+    // under pressure and a frame too long to encode want opposite responses.
+    dropped_oversize: u64,
     interfaces: &[InterfaceStats],
 ) -> Value {
     let entries: Vec<Value> = interfaces
@@ -238,6 +279,11 @@ pub fn capture_stats(
     // third case by a validator that already has one.
     if let Some(n) = dropped_pipe {
         message.insert("droppedPipe".into(), json!(n));
+    }
+    // Omitted when zero, which is the ordinary case, so the field's presence
+    // is itself the signal that receive offload is coalescing past 64 KB.
+    if dropped_oversize > 0 {
+        message.insert("droppedOversize".into(), json!(dropped_oversize));
     }
     message.insert("interfaces".into(), Value::Array(entries));
     Value::Object(message)
@@ -382,6 +428,7 @@ mod tests {
             42,
             3,
             None,
+            0,
             &[
                 InterfaceStats { iface: 0, received: 10, kernel: Some((12, 2)) },
                 InterfaceStats { iface: 1, received: 5, kernel: None },
@@ -396,8 +443,16 @@ mod tests {
             stats.get("droppedPipe").is_none(),
             "a counter with nothing to report is omitted, not sent as 0"
         );
-        assert_eq!(capture_stats(1000, 0, 0, Some(7), &[])["droppedPipe"], 7);
-        assert_eq!(capture_stats(1000, 0, 0, Some(0), &[])["droppedPipe"], 0);
+        assert_eq!(capture_stats(1000, 0, 0, Some(7), 0, &[])["droppedPipe"], 7);
+        assert_eq!(capture_stats(1000, 0, 0, Some(0), 0, &[])["droppedPipe"], 0);
+
+        // The oversize stage follows the same rule as the pipe one: omitted
+        // when there is nothing to report, so its presence is the signal.
+        assert!(
+            capture_stats(1000, 0, 0, None, 0, &[]).get("droppedOversize").is_none(),
+            "a stage with nothing to report is omitted, not sent as 0"
+        );
+        assert_eq!(capture_stats(1000, 0, 0, None, 5, &[])["droppedOversize"], 5);
     }
 
     /// **`set_interfaces` carries device NAMES, and this agent read indices.**
