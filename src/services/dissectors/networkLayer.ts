@@ -85,7 +85,7 @@ export interface NetworkContext {
   dnsTracker?: DnsTracker;
   l3Tracker?: L3Tracker;
   /** This machine sent the frame, so its checksums may not be filled in yet. */
-  sentByUs: boolean;
+  sentByUs: boolean | undefined;
 }
 
 /**
@@ -232,9 +232,14 @@ export function decodeNetworkLayer(
     // the bytes here were never the bytes that were sent.
     // ...and a header on a frame we sent, for the same reason: partial offload
     // leaves a non-zero wrong value that looks exactly like corruption.
-    const ipChecksumStatus = headerChecksumActual === 0 || origLen > ETHERNET_MAX_FRAME || sentByUs
-      ? 'Unverified'
-      : checksumCorrect ? 'Good' : 'Bad';
+    // The same shape as `checksumVerdict`: a header that verifies is Good
+    // whoever sent it, and only a FAILING one needs the direction - an unknown
+    // direction costs the accusation rather than the whole verdict.
+    const ipChecksumStatus =
+      headerChecksumActual === 0 || origLen > ETHERNET_MAX_FRAME || sentByUs === true ? 'Unverified'
+        : checksumCorrect ? 'Good'
+          : sentByUs === undefined ? 'Unverified'
+            : 'Bad';
     const ttlGuess = inferTtl(ttl);
     srcIp = `${rawBytes[l3Offset + 12]}.${rawBytes[l3Offset + 13]}.${rawBytes[l3Offset + 14]}.${rawBytes[l3Offset + 15]}`;
     dstIp = `${rawBytes[l3Offset + 16]}.${rawBytes[l3Offset + 17]}.${rawBytes[l3Offset + 18]}.${rawBytes[l3Offset + 19]}`;
@@ -817,8 +822,9 @@ function decodeTransportLayer(
    */
   pseudoHeader?: Uint8Array,
   /** See `checksumVerdict` - this machine sent the frame, so its checksums
-   *  may not have been filled in yet. */
-  sentByUs = false,
+   *  may not have been filled in yet. Undefined is "not known", which is a
+   *  third answer and not a synonym for `false`. */
+  sentByUs?: boolean,
 ): TransportResult | null {
   // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {

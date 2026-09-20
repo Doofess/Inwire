@@ -66,22 +66,44 @@ export function checksumVerdict(
    * make this call because it does not know which frames the host sent; it
    * settles for shipping TCP/UDP validation off by default. Knowing the
    * direction, the honest verdict is Unverified.
+   *
+   * **`undefined` is a third answer and must not collapse into `false`.** It
+   * means the direction could not be decided at all - no host identity, so
+   * `directionFromMacs` answered `Unknown` for every frame rather than for an
+   * odd one. Reading that as "not sent by us" asserts corruption on no
+   * evidence, and it is exactly what a live capture looked like while the
+   * agent sent no `adapter_config`: 3,891 and 3,594 "Bad checksum" findings,
+   * 30.3% and 24.4% of the list painted `Broken` (`pcapParser.ts`).
+   *
+   * `false` still means what it always did - a direction was decided and it
+   * was not `Out`. `Transit` is such a direction: somebody else's conversation
+   * on a mirror port says nothing about a NIC being mid-write, so its checksum
+   * is still checked. `scripts/dissect/checksum-verdict.ts` holds both halves,
+   * because the fix and its over-correction fail in opposite directions and
+   * only one of them is loud.
    */
-  sentByUs: boolean,
+  sentByUs: boolean | undefined,
 ): { status: 'Good' | 'Bad' | 'Unverified'; computed?: number } {
   if (pseudoHeader === undefined || stored === 0 || declaredEnd > rawBytes.length || declaredEnd - start > ETHERNET_MAX_FRAME - ETHERNET_IPV4_HEADER_BYTES) {
     return { status: 'Unverified' };
   }
-  if (sentByUs) return { status: 'Unverified' };
+  if (sentByUs === true) return { status: 'Unverified' };
   const computed = transportChecksum(pseudoHeader, rawBytes, start, declaredEnd);
-  // A verifying one's-complement sum is 0, and there is no protocol-specific
-  // case to add. UDP's "a checksum computing to 0 is transmitted as 0xffff"
-  // needs no second test here: summing that 0xffff back in over the whole
-  // datagram still verifies to 0. There was a `(udp && computed === 0 && ...)`
-  // disjunct for it, which could only be evaluated when `computed === 0` was
-  // already false - so it never ran, and the `udp` parameter it was the only
-  // reader of went with it.
-  return { status: computed === 0 ? 'Good' : 'Bad', computed };
+  // **A sum that verifies is Good whoever sent it.** Offload leaves a field
+  // unfinished; it cannot leave one that happens to be right, so a passing
+  // checksum needs no direction to be trusted. Only a FAILING one is ambiguous
+  // between corruption and a NIC mid-write - which is why the direction is
+  // consulted below rather than above, and why an unknown direction costs the
+  // accusation rather than the whole verdict.
+  if (computed === 0) return { status: 'Good', computed };
+  if (sentByUs === undefined) return { status: 'Unverified' };
+  // The verifying case is handled above. UDP's "a checksum computing to 0 is
+  // transmitted as 0xffff" needs no second test: summing that 0xffff back in
+  // over the whole datagram still verifies to 0. There was a
+  // `(udp && computed === 0 && ...)` disjunct for it, which could only be
+  // evaluated when `computed === 0` was already false - so it never ran, and
+  // the `udp` parameter it was the only reader of went with it.
+  return { status: 'Bad', computed };
 }
 
 // Surfacing a readable hostname/URL in the Info column is far more useful at
