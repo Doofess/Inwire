@@ -56,6 +56,10 @@ fn main() -> std::io::Result<()> {
             .find(|d| d.name == device)
             .and_then(|d| d.description)
             .unwrap_or_else(|| device.clone()),
+        // This harness names one device on the command line and never opens it
+        // twice. Saying nothing is the honest answer, and the app falls back
+        // to Ethernet - which is what this harness has always captured.
+        link_type: None,
     }];
 
     let instance = Arc::new(pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES)?);

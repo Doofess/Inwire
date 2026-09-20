@@ -446,9 +446,33 @@ mod tests {
 
     fn ifaces() -> Vec<Interface> {
         vec![
-            Interface { id: 0, name: r"\Device\NPF_{A}".into(), label: "Ethernet".into() },
-            Interface { id: 1, name: r"\Device\NPF_{B}".into(), label: "Wi-Fi".into() },
+            // One with a link type and one without, because absent and present
+            // are different messages: `linkType` is omitted rather than sent
+            // as 1, and the test below holds the pair apart.
+            Interface {
+                id: 0,
+                name: r"\Device\NPF_{A}".into(),
+                label: "Ethernet".into(),
+                link_type: Some(1),
+            },
+            Interface {
+                id: 1,
+                name: r"\Device\NPF_{B}".into(),
+                label: "Wi-Fi".into(),
+                link_type: None,
+            },
         ]
+    }
+
+    #[test]
+    fn an_unknown_link_type_is_omitted_rather_than_guessed() {
+        let h = hello("1.0.0", CaptureState::Idle, &ifaces(), "rs-1", None, None);
+        let list = h["interfaces"].as_array().expect("interfaces is a list");
+        assert_eq!(list[0]["linkType"], 1);
+        assert!(
+            list[1].get("linkType").is_none(),
+            "an adapter that could not be asked must not claim Ethernet",
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
 
+use crate::agent_log;
 use crate::runtime::{self, Shutdown};
 
 /// The name the SCM knows it by, and the name `sc start InwireAgent` uses.
@@ -84,11 +85,14 @@ pub fn run() -> windows_service::Result<()> {
 }
 
 fn service_main(_arguments: Vec<OsString>) {
+    // **Before anything that could fail.** Nothing is attached to stderr under
+    // the SCM, so until this runs there is nowhere for a start failure to be
+    // read - which is the shape this whole module exists to avoid, and which
+    // the agent had until the log was ported: every `eprintln!` in the crate
+    // went nowhere on exactly the machines they were written for.
+    agent_log::init(&agent_log::directory(), false);
     if let Err(error) = serve() {
-        // Nothing is attached to stderr under the SCM, so this is written where
-        // it can be read. A start failure that says nothing anywhere is the
-        // shape this whole module exists to avoid.
-        eprintln!("[inwire-agent] service failed: {error}");
+        crate::log_error!("service failed: {error}");
     }
 }
 
@@ -171,7 +175,7 @@ fn serve() -> windows_service::Result<()> {
     })?;
 
     if let Err(error) = result {
-        eprintln!("[inwire-agent] runtime failed: {error}");
+        crate::log_error!("runtime failed: {error}");
     }
     Ok(())
 }

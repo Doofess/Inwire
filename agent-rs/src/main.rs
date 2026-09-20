@@ -55,6 +55,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use inwire_agent::agent_log;
 use inwire_agent::runtime::{self, Shutdown};
 use inwire_agent::service::{self, DISPLAY_NAME, SERVICE_NAME};
 
@@ -287,7 +288,11 @@ fn stop() -> windows_service::Result<()> {
 /// surprising once and then it is the thing being tested.
 fn debug() -> windows_service::Result<()> {
     let shutdown = Arc::new(Shutdown::new());
-    eprintln!(
+    // `to_stderr` is true here and false under the SCM, which is the whole of
+    // `logging_setup.py`'s argument of the same name: run by hand there is a
+    // console worth writing to, and under the SCM there is not.
+    agent_log::init(&agent_log::directory(), true);
+    inwire_agent::log_info!(
         "[inwire-agent] {} - foreground on {}; Ctrl+C to stop",
         inwire_agent::VERSION,
         runtime::pipe_name(),

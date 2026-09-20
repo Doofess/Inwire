@@ -8,11 +8,13 @@
           {
             "id": 0,
             "label": "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)",
+            "linkType": 1,
             "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}"
           },
           {
             "id": 1,
             "label": "Adapter for loopback traffic capture",
+            "linkType": 0,
             "name": "\\Device\\NPF_Loopback"
           }
         ],
@@ -32,11 +34,13 @@
           {
             "id": 0,
             "label": "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)",
+            "linkType": 1,
             "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}"
           },
           {
             "id": 1,
             "label": "Adapter for loopback traffic capture",
+            "linkType": 0,
             "name": "\\Device\\NPF_Loopback"
           }
         ],
@@ -67,11 +71,13 @@
           {
             "id": 0,
             "label": "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)",
+            "linkType": 1,
             "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}"
           },
           {
             "id": 1,
             "label": "Adapter for loopback traffic capture",
+            "linkType": 0,
             "name": "\\Device\\NPF_Loopback"
           }
         ],
@@ -87,11 +93,13 @@
           {
             "id": 0,
             "label": "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)",
+            "linkType": 1,
             "name": "\\Device\\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}"
           },
           {
             "id": 1,
             "label": "Adapter for loopback traffic capture",
+            "linkType": 0,
             "name": "\\Device\\NPF_Loopback"
           }
         ],
@@ -215,6 +223,88 @@
         "type": "capture_stats"
       },
       "note": "capture_stats from a transport that cannot report pipe drops - the field is absent"
+    },
+    {
+      "message": {
+        "add": [
+          [
+            "tcp",
+            "10.0.0.4",
+            54321,
+            4242
+          ],
+          [
+            "udp",
+            "0.0.0.0",
+            5353,
+            0
+          ],
+          [
+            "tcp",
+            "fe80::1",
+            443,
+            4242
+          ]
+        ],
+        "full": true,
+        "gone": [],
+        "procs": {
+          "4242": {
+            "exe": "C:\\Program Files\\Chrome\\chrome.exe",
+            "name": "chrome.exe"
+          },
+          "8": {
+            "exe": "",
+            "name": "System"
+          }
+        },
+        "type": "socket_table"
+      },
+      "note": "socket_table: the snapshot that opens a subscription"
+    },
+    {
+      "message": {
+        "add": [
+          [
+            "tcp",
+            "10.0.0.4",
+            54400,
+            4242
+          ]
+        ],
+        "full": false,
+        "gone": [
+          [
+            "tcp",
+            "10.0.0.4",
+            54321
+          ]
+        ],
+        "procs": {
+          "4242": {
+            "exe": "C:\\Program Files\\Chrome\\chrome.exe",
+            "name": "chrome.exe"
+          }
+        },
+        "type": "socket_table"
+      },
+      "note": "socket_table: a delta, which is what every message after the first is"
+    },
+    {
+      "message": {
+        "add": [],
+        "full": false,
+        "gone": [
+          [
+            "udp",
+            "0.0.0.0",
+            5353
+          ]
+        ],
+        "procs": {},
+        "type": "socket_table"
+      },
+      "note": "socket_table: a delta that only closes sockets carries no processes"
     },
     {
       "message": {

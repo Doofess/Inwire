@@ -18,6 +18,7 @@
 //! the change it exists to catch.
 
 use inwire_agent::protocol::{self, CaptureState, Interface, InterfaceStats};
+use inwire_agent::sockets;
 use serde_json::{json, Value};
 
 fn main() {
@@ -26,11 +27,17 @@ fn main() {
             id: 0,
             name: r"\Device\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}".into(),
             label: "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)".into(),
+            link_type: Some(1),
         },
         Interface {
             id: 1,
             name: r"\Device\NPF_Loopback".into(),
+            // DLT_NULL, which is what this device really is - the one adapter
+            // on a Windows machine that is not Ethernet, and the reason the
+            // field exists. The fixture carries the interesting value rather
+            // than a second 1.
             label: "Adapter for loopback traffic capture".into(),
+            link_type: Some(0),
         },
     ];
 
@@ -136,6 +143,54 @@ fn main() {
             None,
             0,
             &[InterfaceStats { iface: 0, received: 10, kernel: Some((10, 0)) }],
+        ),
+    );
+    add(
+        "socket_table: the snapshot that opens a subscription",
+        sockets::socket_table(
+            true,
+            &[
+                (("tcp", "10.0.0.4".into(), 54321), 4242),
+                // A pid of 0 is a socket the OS will not attribute, and it is
+                // kept rather than dropped: an unattributed socket is not the
+                // same fact as no socket, and collapsing the two would let a
+                // frame fall through to a stale entry for a reused port.
+                (("udp", "0.0.0.0".into(), 5353), 0),
+                // No zone index. `fe80::1%eth0` would never compare equal to
+                // the address a captured frame carries.
+                (("tcp", "fe80::1".into(), 443), 4242),
+            ],
+            &[],
+            // Keyed by the pid AS A STRING, because JSON object keys are, and
+            // the app reads them back with `Number(...)`. The second pid is
+            // named with no path: a service can deny its own executable while
+            // freely giving its name, and the name alone is worth having.
+            serde_json::from_value(json!({
+                "4242": { "name": "chrome.exe", "exe": r"C:\Program Files\Chrome\chrome.exe" },
+                "8": { "name": "System", "exe": "" },
+            }))
+            .expect("an object"),
+        ),
+    );
+    add(
+        "socket_table: a delta, which is what every message after the first is",
+        sockets::socket_table(
+            false,
+            &[(("tcp", "10.0.0.4".into(), 54400), 4242)],
+            &[("tcp", "10.0.0.4".into(), 54321)],
+            serde_json::from_value(json!({
+                "4242": { "name": "chrome.exe", "exe": r"C:\Program Files\Chrome\chrome.exe" },
+            }))
+            .expect("an object"),
+        ),
+    );
+    add(
+        "socket_table: a delta that only closes sockets carries no processes",
+        sockets::socket_table(
+            false,
+            &[],
+            &[("udp", "0.0.0.0".into(), 5353)],
+            serde_json::Map::new(),
         ),
     );
     add(
