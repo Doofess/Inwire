@@ -603,6 +603,24 @@ export const FIELDS: readonly FieldDef[] = [
   uint('igmp.version', 'IGMP Version', 'igmp'),
   { abbrev: 'igmp.maddr', label: 'Multicast Address', type: 'ipv4', layer: 'igmp' },
   uint('igmp.num_grp_recs', 'Num Group Records', 'igmp'),
+  // The other ten, every one of which this dissector already drew with the
+  // right value, byte range and bitfield and never named. `treeOnly`: a v3
+  // report's record type and source count are read off the tree beside the
+  // group they describe, and nothing outside the detail pane asks for them.
+  //
+  // `igmp.num_src` appears twice - once per group record, and once on a v3
+  // query, where it counts the sources the querier is asking about rather
+  // than the ones a host is reporting.
+  treeOnly(uint('igmp.max_resp', 'Max Resp Time', 'igmp')),
+  treeOnly(uint('igmp.checksum', 'Checksum', 'igmp')),
+  treeOnly(uint('igmp.checksum.status', 'Checksum Status', 'igmp')),
+  treeOnly(str('igmp.reserved', 'Reserved', 'igmp')),
+  treeOnly(uint('igmp.record_type', 'Record Type', 'igmp')),
+  treeOnly(uint('igmp.aux_data_len', 'Aux Data Len', 'igmp')),
+  treeOnly(uint('igmp.num_src', 'Num Src', 'igmp')),
+  treeOnly(bool('igmp.s', 'S', 'igmp')),
+  treeOnly(uint('igmp.qrv', 'QRV', 'igmp')),
+  treeOnly(uint('igmp.qqic', 'QQIC', 'igmp')),
 
   // --- ARP -------------------------------------------------------------------
   uint('arp.opcode', 'Opcode', 'arp'),
