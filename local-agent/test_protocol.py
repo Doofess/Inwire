@@ -1612,14 +1612,37 @@ check("...of everything currently open", len(_fifth["add"]), len(_live))
 
 # The subscription itself: a client that arrives late gets its own snapshot
 # rather than a delta against a table it never had.
-_srv = agent.AgentServer()
-_sock_ws = _RecordingWS()
-_srv.connections.add(_sock_ws)
-_sock_states = []
-_srv.send_control = lambda message: _sock_states.append(message)
-_drive(_srv, _sock_ws, {"type": "subscribe_sockets"})
+#
+# `_handle_message` builds its own `SocketTracker()` with no source, so unlike
+# every check above it there is nothing to inject and it reads the machine's
+# real socket table. That is two problems rather than one. It needs a
+# privilege: `psutil.net_connections()` is root-only on macOS, and this raised
+# `psutil.AccessDenied` on the first CI run that ever got far enough to
+# execute it. And what it returns is whatever the machine happens to have open,
+# so the assertions below could only ever be about the message's SHAPE - the
+# one thing a test of a subscription should not have to settle for.
+#
+# Patching the module function fixes both. The pid is this process's own, so
+# the default namer resolves it without a second fake, and the snapshot is a
+# known one row long.
+_real_net_connections = sockets.psutil.net_connections
+sockets.psutil.net_connections = lambda kind="inet": [
+    _FakeConn(_TCP, "10.0.0.4", 54321, os.getpid()),
+]
+try:
+    _srv = agent.AgentServer()
+    _sock_ws = _RecordingWS()
+    _srv.connections.add(_sock_ws)
+    _sock_states = []
+    _srv.send_control = lambda message: _sock_states.append(message)
+    _drive(_srv, _sock_ws, {"type": "subscribe_sockets"})
+finally:
+    sockets.psutil.net_connections = _real_net_connections
+
 check("subscribing is answered with a socket_table", _sock_ws.sent[-1]["type"], "socket_table")
 check("...and that first one is a full snapshot", _sock_ws.sent[-1]["full"], True)
+check("...carrying the table the agent actually read", _sock_ws.sent[-1]["add"],
+      [["tcp", "10.0.0.4", 54321, os.getpid()]])
 check("...and broadcasts no state", _sock_states, [])
 check_true("...and registers the subscriber", _sock_ws in _srv.socket_subscribers)
 

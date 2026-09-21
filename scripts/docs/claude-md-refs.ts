@@ -153,6 +153,24 @@ const GENERATED = new Map<string, string>([
   // not on the runner, which is the worst shape an assertion can have.
   ['dist-electron/', 'written by electron/build.cjs during `npm run build`'],
   ['window-state.json', 'runtime, in userData: bounds and the title bar colour cache'],
+  // The four directories that line above describes and does not cover. They
+  // were missing from this table for as long as it has existed, and the check
+  // passed anyway on every machine it had ever run on - because every one of
+  // those machines had built at least once, so `dist/` and `release/` were
+  // there to be found. The first run on a runner with a clean checkout failed,
+  // naming all five references.
+  //
+  // Worth keeping as a lesson rather than just a fix: a check that reads the
+  // working tree is answering a question about THIS CLONE, and a developer's
+  // clone is the one place the answer is always yes. Nothing here was wrong
+  // about the documentation - `dist/` is exactly where Vite writes - so the
+  // report is the right outcome and the assertion was the wrong one.
+  ['dist/', "Vite's renderer build output, written by `npm run build`"],
+  ['release/', 'electron-builder output, written by `npm run pack`'],
+  ['release/win-unpacked/', 'the unpacked app inside it, which `npm run pack` produces'],
+  ['local-agent/dist/', "PyInstaller's output directory for the agent"],
+  ['local-agent/dist/inwire-agent-windows/',
+    'the --onedir tree inside it; a directory rather than one file (local-agent/CLAUDE.md)'],
 ]);
 
 /**
