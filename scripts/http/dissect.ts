@@ -19,9 +19,11 @@ import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { gzipSync } from 'fflate';
 import { Bytes, ethernet, internetChecksum, pcapOf } from '../parity/synthetic';
 import { PcapService } from '../../src/services/pcapParser';
 import { fieldValue } from '../../src/services/dissect/fieldAccess';
+import { http1LiveBodyBytes } from '../../src/services/dissectors/http1';
 import type { Packet, ProtocolField } from '../../src/types/packet';
 
 let failures = 0;
@@ -118,6 +120,112 @@ const FRAMES: { name: string; bytes: Uint8Array }[] = [
   },
 ];
 
+// --- a second connection, for the bodies -------------------------------------
+//
+// Its own five-tuple so its HTTP state is its own: the chunked exchange below
+// deliberately splits a body in a place the first connection never does, and
+// sharing a connection would let one exchange's leftovers explain the other's
+// result.
+const CLIENT_PORT_B = 51001;
+
+function segmentB(fromClient: boolean, seq: number, ack: number, body: Uint8Array): Uint8Array {
+  const tcp = Uint8Array.from([
+    ...new Bytes()
+      .u16(fromClient ? CLIENT_PORT_B : 80, fromClient ? 80 : CLIENT_PORT_B)
+      .u32(seq).u32(ack).u8(0x50, PSH_ACK).u16(64240, 0, 0).build(),
+    ...body,
+  ]);
+  return Uint8Array.from([
+    ...ethernet(0x0800).build(),
+    ...(fromClient ? ip(tcp, CLIENT, SERVER) : ip(tcp, SERVER, CLIENT)),
+  ]);
+}
+
+const ascii = (text: string): Uint8Array => Uint8Array.from([...text].map((c) => c.charCodeAt(0)));
+const concatBytes = (...parts: Uint8Array[]): Uint8Array => {
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
+};
+
+/**
+ * A chunked JSON body, split **between the last data byte of a chunk and the
+ * CRLF that closes it**.
+ *
+ * That split is the whole point of this exchange. `walkChunks` counts a
+ * chunk as `size + 2` so the framing resumes from one number wherever the
+ * segment boundary falls; a body collector that copies that many bytes
+ * appends the terminator, two stray bytes per chunk, and produces JSON that
+ * fails to parse in a way that reads as a decompression bug. Splitting here
+ * makes the two counters disagree on the wire rather than only in theory.
+ */
+const JSON_BODY = '{"alpha":1,"beta":"two","gamma":[3,4]}';
+const CHUNK_A = JSON_BODY.slice(0, 20);
+const CHUNK_B = JSON_BODY.slice(20);
+
+const CHUNKED_HEAD = ascii([
+  'HTTP/1.1 200 OK',
+  'Content-Type: application/json',
+  'Transfer-Encoding: chunked',
+  '', '',
+].join('\r\n'));
+
+// ...first chunk's size line and data, and NOT its CRLF.
+const CHUNKED_PART1 = concatBytes(
+  CHUNKED_HEAD,
+  ascii(`${CHUNK_A.length.toString(16)}\r\n${CHUNK_A}`),
+);
+// ...the CRLF the previous segment withheld, then the rest.
+const CHUNKED_PART2 = ascii(
+  `\r\n${CHUNK_B.length.toString(16)}\r\n${CHUNK_B}\r\n0\r\n\r\n`,
+);
+
+/** The same JSON, gzipped, sent with one Content-Length. */
+const GZIPPED = gzipSync(ascii(JSON_BODY));
+const GZIP_RESPONSE = concatBytes(
+  ascii([
+    'HTTP/1.1 200 OK',
+    'Content-Type: application/json',
+    'Content-Encoding: gzip',
+    `Content-Length: ${GZIPPED.length}`,
+    '', '',
+  ].join('\r\n')),
+  GZIPPED,
+);
+
+/** An encoding this build names and does not decode, which must not read as damage. */
+const BROTLI_RESPONSE = concatBytes(
+  ascii([
+    'HTTP/1.1 200 OK',
+    'Content-Type: text/plain',
+    'Content-Encoding: br',
+    'Content-Length: 4',
+    '', '',
+  ].join('\r\n')),
+  Uint8Array.from([0x1b, 0x2a, 0x00, 0x11]),
+);
+
+const GET_B = ascii('GET /a.json HTTP/1.1\r\nHost: example.test\r\n\r\n');
+const GET_B2 = ascii('GET /b.json HTTP/1.1\r\nHost: example.test\r\n\r\n');
+const GET_B3 = ascii('GET /c.txt HTTP/1.1\r\nHost: example.test\r\n\r\n');
+
+let cSeq = 3000;
+let sSeq = 4000;
+const clientB = (body: Uint8Array) => { const f = segmentB(true, cSeq, sSeq, body); cSeq += body.length; return f; };
+const serverB = (body: Uint8Array) => { const f = segmentB(false, sSeq, cSeq, body); sSeq += body.length; return f; };
+
+FRAMES.push(
+  { name: 'b-get', bytes: clientB(GET_B) },
+  { name: 'b-chunked-1', bytes: serverB(CHUNKED_PART1) },
+  { name: 'b-chunked-2', bytes: serverB(CHUNKED_PART2) },
+  { name: 'b-get2', bytes: clientB(GET_B2) },
+  { name: 'b-gzip', bytes: serverB(GZIP_RESPONSE) },
+  { name: 'b-get3', bytes: clientB(GET_B3) },
+  { name: 'b-brotli', bytes: serverB(BROTLI_RESPONSE) },
+);
+
 // --- dissecting ---------------------------------------------------------------
 
 const directory = mkdtempSync(join(tmpdir(), 'inwire-http-'));
@@ -145,6 +253,10 @@ const valueOf = (packet: Packet, abbrev: string): unknown =>
 const allValuesOf = (packet: Packet, abbrev: string): unknown[] =>
   rows(packet).filter((row) => row.abbrev === abbrev).map((row) => row.value);
 const at = (name: string): Packet => packets[FRAMES.findIndex((f) => f.name === name)];
+// The body's encoding row deliberately carries NO abbrev - the reference has
+// no field for that subtree - so it is found by the name it draws.
+const named = (packet: Packet, rowName: string): ProtocolField | undefined =>
+  rows(packet).find((row) => row.name === rowName);
 
 console.log('\n--- the request ---');
 {
@@ -224,6 +336,57 @@ console.log('\n--- the response, and what it answers ---');
   check('...and waited its own second', valueOf(second, 'http.time'), '1.000000000 seconds');
 }
 
+console.log('\n--- bodies ---');
+{
+  // **The assertion this whole section exists for.** The body was split
+  // between a chunk's last data byte and the CRLF that closes it, so a
+  // collector that copies `bodyRemaining` rather than the chunk's data
+  // length appends two stray bytes - and the failure is silent, because the
+  // result is still 38-ish bytes of almost-JSON.
+  const finished = at('b-chunked-2');
+  check('a chunked body is reassembled exactly, terminators excluded',
+    valueOf(finished, 'http.file_data'), JSON_BODY);
+  check('...and it parses, which is what the two stray bytes would break',
+    (() => { try { return JSON.parse(String(valueOf(finished, 'http.file_data'))).beta; } catch { return 'THREW'; } })(),
+    'two');
+  check('each chunk is drawn with its own size',
+    allValuesOf(finished, 'http.chunk_size'), [`${CHUNK_A.length} bytes`, `${CHUNK_B.length} bytes`]);
+  check('...and its own data, with no terminator in it',
+    allValuesOf(finished, 'http.chunk_data'), [CHUNK_A, CHUNK_B]);
+  check('the end of the chunked encoding was reached',
+    valueOf(finished, 'http.chunk_boundary'), '0');
+  // The head was in the PREVIOUS frame. A body is drawn where it finishes,
+  // which is the whole reason `Http1Result.bodies` is not parallel to
+  // `messages`.
+  check('the frame carrying the head has no body row',
+    valueOf(at('b-chunked-1'), 'http.file_data'), undefined);
+
+  const gzip = at('b-gzip');
+  check('a gzipped body is decompressed', valueOf(gzip, 'http.file_data'), JSON_BODY);
+  check('...and the row says both sizes',
+    named(gzip, 'Content-encoded entity body')?.value,
+    `gzip: ${GZIPPED.length} bytes -> ${JSON_BODY.length} bytes`);
+  check('Content-Length is parsed into a number a filter can compare',
+    valueOf(gzip, 'http.content_length'), GZIPPED.length);
+
+  // **`Unverifiable`, not `Broken`.** Nothing here is damaged - this build
+  // did not implement brotli, and grading it as damage would paint every
+  // frame of a brotli-served download red. See `httpBody.ts`.
+  const brotli = at('b-brotli');
+  const encodingRow = named(brotli, 'Content-encoded entity body');
+  check('an encoding this build does not implement is named, not decoded',
+    encodingRow?.value, 'br: 4 bytes, not decoded');
+  check('...and graded as unverifiable rather than as damage',
+    encodingRow?.expertInfo?.category, 'Unverifiable');
+
+  check('a request cookie is split into pairs',
+    allValuesOf(at('request'), 'http.cookie_pair'), ['session=abc123']);
+
+  // Every body finished, so nothing is still charged against the shared
+  // budget. A leak here is invisible until it silently stops reassembly.
+  check('the shared body budget is back to zero', http1LiveBodyBytes(), 0);
+}
+
 console.log('\n--- what must not happen ---');
 {
   // A request has nothing to answer, and a made-up zero would be worse than
@@ -271,6 +434,7 @@ if (tshark === null) {
     'http.request.uri.query', 'http.request.uri.query.parameter', 'http.request.full_uri',
     'http.host', 'http.request.line', 'http.response.code', 'http.response.phrase',
     'http.set_cookie', 'http.request_in', 'http.time',
+    'http.file_data', 'http.content_length', 'http.cookie_pair',
   ];
   const out = execFileSync(tshark, ['-r', capture, '-T', 'fields',
     ...columns.flatMap((c) => ['-e', c]), '-E', 'separator=|'], { encoding: 'utf8' });
@@ -310,6 +474,31 @@ if (tshark === null) {
   check('...and measures the same wait', row('response')['http.time'], '1.000000000');
   check('the reference pairs the second exchange the same way',
     [row('response2')['http.request_in'], row('response2')['http.time']], ['6', '1.000000000']);
+
+  // **The bodies, which is the half nothing else here can check.** The
+  // reference de-chunks and gunzips too, so its `http.file_data` is the
+  // finished body - the same string this build produces, byte for byte, or
+  // one of the two is wrong about where a chunk ends.
+  // `-T fields` renders a byte-string field as hex - unseparated here, though
+  // the same tshark separates other byte fields with colons, so both forms
+  // are handled rather than one being assumed from this run.
+  const asText = (hexOrText: string): string => {
+    if (/^[0-9a-f]{2}(:[0-9a-f]{2})+$/.test(hexOrText)) {
+      return hexOrText.split(':').map((b) => String.fromCharCode(Number.parseInt(b, 16))).join('');
+    }
+    if (/^([0-9a-f]{2})+$/.test(hexOrText) && hexOrText.length >= 8) {
+      return (hexOrText.match(/../g) ?? []).map((b) => String.fromCharCode(Number.parseInt(b, 16))).join('');
+    }
+    return hexOrText;
+  };
+  check('the reference de-chunks to the same body',
+    asText(row('b-chunked-2')['http.file_data']), JSON_BODY);
+  check('...and gunzips to the same body',
+    asText(row('b-gzip')['http.file_data']), JSON_BODY);
+  check('...and reads the same Content-Length',
+    row('b-gzip')['http.content_length'], String(GZIPPED.length));
+  check('the reference splits the cookie into the same pairs',
+    row('request')['http.cookie_pair'], 'session=abc123');
 }
 
 console.log();

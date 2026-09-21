@@ -905,6 +905,27 @@ export const FIELDS: readonly FieldDef[] = [
   str('http.connection', 'Connection', 'http'),
   str('http.content_encoding', 'Content-Encoding', 'http'),
   str('http.content_length_header', 'Content-Length', 'http'),
+
+  // --- the body, once there is one -----------------------------------------
+  //
+  // All `treeOnly`, and `http.file_data` is the one where that is not just
+  // the default. The reference's `http.file_data` holds the body BYTES, so
+  // `http.file_data contains "password"` is a query people already know how
+  // to write; a bag write of a byte COUNT under that name would answer it
+  // wrongly while looking right, which is the exact failure the registry's
+  // "a filter learnt in Wireshark works here" promise exists to prevent.
+  // If the bytes themselves ever become filterable, that is a `Uint8Array`
+  // field type this registry does not yet have - not a number.
+  //
+  // `http.content_length` is the PARSED number beside the raw
+  // `http.content_length_header` above, which is the reference's own split
+  // and the only form `http.content_length > 1000000` can be asked of.
+  treeOnly(str('http.file_data', 'File Data', 'http')),
+  treeOnly(uint('http.content_length', 'Content length', 'http')),
+  treeOnly(uint('http.chunk_size', 'Chunk size', 'http')),
+  treeOnly(str('http.chunk_data', 'Chunk data', 'http')),
+  treeOnly(str('http.chunk_boundary', 'Chunk boundary', 'http')),
+  treeOnly(str('http.cookie_pair', 'Cookie pair', 'http')),
   str('http.content_range', 'Content-Range', 'http'),
   str('http.content_type', 'Content-Type', 'http'),
   str('http.cookie', 'Cookie', 'http'),

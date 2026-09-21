@@ -25,6 +25,7 @@ import { analyzeTcpSegment, freshConnection, type TcpAnalysis, type TcpConnectio
 
 import type { TlsDecryptionKeys } from './tls/decrypt';
 import type { AppDirection } from './dissectors/appStream';
+import { releaseHttp1Body } from './dissectors/http1';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 import { freshSmb2Conversation, type Smb2ConversationState } from './dissectors/smb2';
 import { freshBgpDirection, type BgpDirectionState } from './dissectors/bgp';
@@ -455,6 +456,17 @@ export class TcpStreamTracker {
       if (oldest.done) break;
       const conn = this.connections.get(oldest.value);
       this.connections.delete(oldest.value);
+      // A half-collected HTTP body's bytes are charged against a budget
+      // shared by every connection, and this is the one path where collecting
+      // stops without the body finishing. Forgetting the connection without
+      // giving them back would spend a slice of that budget permanently - and
+      // enough evictions would stop body reassembly for the rest of the
+      // capture with nothing saying why. See `liveBodyBytes` in
+      // `dissectors/http1.ts`.
+      // Both the TLS-decrypted and the cleartext HTTP paths hang their
+      // `AppDirection` off `tls`, which is why one lookup covers both.
+      if (conn?.tls?.appClient !== undefined) releaseHttp1Body(conn.tls.appClient.http1);
+      if (conn?.tls?.appServer !== undefined) releaseHttp1Body(conn.tls.appServer.http1);
       // The stream index goes with it, or `byStreamId` becomes the leak this
       // eviction exists to stop. Indexes are never reused - `nextStreamId`
       // only ever counts up - so nothing can collide with the one just freed.

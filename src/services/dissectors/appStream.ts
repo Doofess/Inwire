@@ -9,7 +9,7 @@
  * - and by content when there is not, which is the ordinary case on port 80.
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
-import { httpMessageFields, httpMessageRows } from './httpFields';
+import { httpBodyRows, httpMessageFields, httpMessageRows } from './httpFields';
 import { dissectHttp1, freshHttp1Direction, looksLikeHttp1, type Http1Direction } from './http1';
 import {
   dissectHttp2, freshHttp2Direction, http2ErrorName, HTTP2_PREFACE,
@@ -132,14 +132,24 @@ function readHttp1(
     // Body bytes with no start line: the frame is part of a message whose head
     // was in an earlier one.
     if (result.bodyBytes === 0) return EMPTY;
+    const rows: ProtocolField[] = [
+      { name: 'Body', value: `${result.bodyBytes} bytes of a message that began in an earlier frame` },
+    ];
+    // **The frame that COMPLETES a body is where the body is drawn**, and it
+    // usually carries no start line at all - which is why this branch, the
+    // one that used to be a single "Continuation" row, is where a
+    // reassembled body most often appears.
+    const fields: Record<string, string | number> = {};
+    let summary = `Continuation (${result.bodyBytes} bytes)`;
+    for (const body of result.bodies) {
+      const { rows: bodyRows } = httpBodyRows(body);
+      rows.push(...bodyRows);
+      summary = `${body.message.summary} (reassembled body, ${body.bytes.length} bytes)`;
+    }
     return {
-      protocolLabel: 'HTTP', info: ['Continuation'],
-      layers: [{
-        name: 'Hypertext Transfer Protocol',
-        summary: `Continuation (${result.bodyBytes} bytes)`,
-        fields: [{ name: 'Body', value: `${result.bodyBytes} bytes of a message that began in an earlier frame` }],
-      }],
-      fields: {},
+      protocolLabel: 'HTTP', info: [result.bodies.length > 0 ? summary : 'Continuation'],
+      layers: [{ name: 'Hypertext Transfer Protocol', summary, fields: rows }],
+      fields,
     };
   }
 
@@ -176,6 +186,22 @@ function readHttp1(
 
     rows.push(...httpMessageRows(message, { answers }));
     Object.assign(fields, httpMessageFields(message, { answers }));
+
+    // A body that began and ended inside this same segment belongs under the
+    // message it is the body of, not in a separate frame's tree.
+    const body = result.bodies.find((candidate) => candidate.message === message);
+    if (body !== undefined) {
+      const { rows: bodyRows } = httpBodyRows(body);
+      rows.push(...bodyRows);
+    }
+  }
+
+  // Anything left finished here but started earlier - the pipelined case,
+  // where one segment carries the tail of one message and the head of the next.
+  for (const body of result.bodies) {
+    if (result.messages.includes(body.message)) continue;
+    const { rows: bodyRows } = httpBodyRows(body);
+    rows.push(...bodyRows);
   }
 
   const line = info.join('');
