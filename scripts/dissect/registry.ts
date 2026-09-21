@@ -203,6 +203,11 @@ const ENGINE_ALIASES = new Set([
   'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport',
   'tcp.stream',
   'eth.addr', 'ip.addr', 'ipv6.addr', 'tcp.port', 'udp.port',
+  // Answered from `Packet.analysisFlags` by the same prefix rule that answers
+  // the fifteen verdicts under it: a bare `tcp.analysis.flags` asks whether
+  // any of them fired. Second kind, like `tcp.stream` - the value was never
+  // in the bag, so routing it through one would write a second copy.
+  'tcp.analysis.flags',
 ]);
 check('...and no longer hand-lists a dissector field',
   [...FIELD_ABBREVS]

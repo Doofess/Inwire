@@ -277,6 +277,47 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(bool('tcp.completeness.data', 'Data', 'tcp')),
   treeOnly(bool('tcp.completeness.fin', 'FIN', 'tcp')),
   treeOnly(bool('tcp.completeness.rst', 'RST', 'tcp')),
+
+  // --- DNS: rows the message already drew, and two it did not ---------------
+  treeOnly(uint('dns.count.auth_rr', 'Authority RRs', 'dns')),
+  treeOnly(uint('dns.count.add_rr', 'Additional RRs', 'dns')),
+  treeOnly(bool('dns.flags.recavail', 'Recursion available', 'dns')),
+  treeOnly(bool('dns.flags.z', 'Z', 'dns')),
+  treeOnly(bool('dns.flags.authenticated', 'Answer authenticated', 'dns')),
+  treeOnly(bool('dns.flags.checkdisable', 'Non-authenticated data', 'dns')),
+  treeOnly(uint('dns.qry.class', 'Class', 'dns')),
+  treeOnly(uint('dns.resp.class', 'Class', 'dns')),
+  treeOnly(bool('dns.qry.qu', '"QU" question', 'dns')),
+  treeOnly(bool('dns.resp.cache_flush', 'Cache flush', 'dns')),
+  treeOnly(uint('dns.resp.len', 'Data length', 'dns')),
+  // Not in the bytes: the reference derives both, and a query for a 200-byte
+  // name with forty labels is exactly the shape worth filtering for.
+  treeOnly(uint('dns.qry.name.len', 'Name Length', 'dns')),
+  treeOnly(uint('dns.count.labels', 'Label Count', 'dns')),
+  treeOnly(str('dns.time', 'Time', 'dns')),
+
+  // The two subtree NODES themselves. Fifteen `tcp.analysis.*` verdicts have
+  // been named since they were ported; the containers they hang under were
+  // not, so `tcp.analysis` - a filter meaning "this segment has a finding at
+  // all", on 56% of frames here - answered nothing.
+  treeOnly(str('tcp.analysis', 'SEQ/ACK analysis', 'tcp')),
+  str('tcp.analysis.flags', 'TCP Analysis Flags', 'tcp'),
+
+  // The payload rows. UDP's already existed and was display-only; TCP had no
+  // row at all, so an empty ACK and 1,440 unread bytes looked the same.
+  treeOnly(str('tcp.payload', 'TCP payload', 'tcp')),
+  treeOnly(str('udp.payload', 'UDP payload', 'udp')),
+
+  // SOA carries seven fields and this build drew all seven without naming one,
+  // so the record saying who is authoritative for a zone, and how long a
+  // negative answer may be cached, could be read and not filtered on.
+  treeOnly(str('dns.soa.mname', 'Primary name server', 'dns')),
+  treeOnly(str('dns.soa.rname', 'Responsible authority mailbox', 'dns')),
+  treeOnly(str('dns.soa.serial_number', 'Serial Number', 'dns')),
+  treeOnly(str('dns.soa.refresh_interval', 'Refresh Interval', 'dns')),
+  treeOnly(str('dns.soa.retry_interval', 'Retry Interval', 'dns')),
+  treeOnly(str('dns.soa.expire_limit', 'Expire limit', 'dns')),
+  treeOnly(str('dns.soa.minimum_ttl', 'Minimum TTL', 'dns')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
   uint('ipv6.reassembled', 'Reassembled IPv6 fragments', 'ipv6'),
 

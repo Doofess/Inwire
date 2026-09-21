@@ -356,7 +356,7 @@ export function dissectUdpTransport(
           children: [{ name: '[Checksum Status]', value: udpVerdict.status, generated: true, abbrev: 'udp.checksum.status',
             ...(udpVerdict.status === 'Bad' ? { expertInfo: { category: 'Broken' as const, message: 'Bad checksum' } } : {}) }],
         },
-        { name: 'UDP payload', value: `${Math.max(0, udpLen - 8)} bytes`, rawBytesRange: [transportOffset + 8, transportOffset + Math.max(8, udpLen - 1)] },
+        { name: 'UDP payload', value: `${Math.max(0, udpLen - 8)} bytes`, abbrev: 'udp.payload', rawBytesRange: [transportOffset + 8, transportOffset + Math.max(8, udpLen - 1)] },
       ],
     },
   };

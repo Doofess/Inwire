@@ -807,6 +807,20 @@ export function dissectTcpTransport(
           }]
           : []),
         ...(analysis ? tcpAnalysisFields(analysis) : []),
+        // The payload itself, which had no row at all - so a segment whose
+        // payload no sub-dissector claimed showed a header and then nothing,
+        // with no way to tell an empty ACK from 1,440 unread bytes.
+        ...(payloadLength > 0
+          ? [{
+            name: 'TCP payload',
+            value: `${payloadLength} byte${payloadLength === 1 ? '' : 's'}`,
+            abbrev: 'tcp.payload',
+            rawBytesRange: [
+              transportOffset + tcpHeaderLen,
+              Math.min(rawBytes.length, transportOffset + tcpHeaderLen + payloadLength) - 1,
+            ] as [number, number],
+          }]
+          : []),
       ],
     },
   };
@@ -1009,7 +1023,7 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
     const categoryOf = (flag: string): ExpertCategory =>
       CATEGORY_BY_FLAG[flag as keyof typeof CATEGORY_BY_FLAG] ?? 'Note';
     children.push({
-      name: '[TCP Analysis Flags]', value: '', generated: true,
+      name: '[TCP Analysis Flags]', value: '', generated: true, abbrev: 'tcp.analysis.flags',
       children: a.tags.map((tag, i) => {
         const flag = a.flags[i] ?? '';
         const category = categoryOf(flag);
@@ -1030,7 +1044,7 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
     });
   }
   if (children.length === 0) return [];
-  return [{ name: '[SEQ/ACK analysis]', value: '', generated: true, children }];
+  return [{ name: '[SEQ/ACK analysis]', value: '', generated: true, abbrev: 'tcp.analysis', children }];
 }
 
 function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolField[] {

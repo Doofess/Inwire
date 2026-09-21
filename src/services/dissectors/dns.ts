@@ -32,15 +32,52 @@ function describeTtl(ttl: number): string {
   return `${ttl} (${parts.join(', ')})`;
 }
 
-function classField(rclass: number, cacheFlush: boolean, offset: number): ProtocolField[] {
+/**
+ * The class word, which a question and a record both carry and which the
+ * reference names differently in each - `dns.qry.class` against
+ * `dns.resp.class`, and the mDNS top bit `dns.qry.qu` ("is this a unicast
+ * question?") against `dns.resp.cache_flush` ("replace what you had"). Same
+ * two bytes, two genuinely different questions, so the caller says which.
+ */
+/** The name's length in characters, as the reference counts it. */
+function nameLength(name: string): number {
+  return name === '<Root>' ? 0 : name.length;
+}
+
+/** How many labels the name has. The root has none. */
+function labelCount(name: string): number {
+  return name === '' || name === '<Root>' ? 0 : name.split('.').filter((l) => l !== '').length;
+}
+
+/**
+ * A round-trip time in the unit the reference would print it in.
+ *
+ * It scales - microseconds under a millisecond, milliseconds above - and this
+ * row said "0.119000 milliseconds" where the reference says "119.000
+ * microseconds". The number under it is the same either way; `tree-coverage`
+ * compares PDML's `show`, which is neither of these (it is seconds), so this
+ * is a legibility fix rather than a parity one and lands in the recorded
+ * `valueMismatches` regardless.
+ */
+function describeElapsed(elapsedUs: number): string {
+  return elapsedUs < 1000
+    ? `${elapsedUs.toFixed(3)} microseconds`
+    : `${(elapsedUs / 1000).toFixed(6)} milliseconds`;
+}
+
+function classField(
+  rclass: number, cacheFlush: boolean, offset: number, section: 'qry' | 'resp',
+): ProtocolField[] {
   const range: [number, number] = [offset, offset + 1];
   return [
     {
       name: 'Class', value: `${rclass === 1 ? 'IN' : 'Unknown'} (0x${rclass.toString(16).padStart(4, '0')})`,
+      abbrev: section === 'qry' ? 'dns.qry.class' : 'dns.resp.class',
       rawBytesRange: range, bitfield: { bitOffset: 1, bitLength: 15, totalBits: 16 },
     },
     {
       name: 'Cache flush', value: cacheFlush ? 'True' : 'False',
+      abbrev: section === 'qry' ? 'dns.qry.qu' : 'dns.resp.cache_flush',
       rawBytesRange: range, bitfield: { bitOffset: 0, bitLength: 1, totalBits: 16 },
     },
   ];
@@ -70,13 +107,13 @@ function rdataFields(r: DnsRecord): ProtocolField[] {
       break;
     case 6:
       if (r.soa) out.push(
-        { name: 'Primary name server', value: r.soa.mname, rawBytesRange: range },
-        { name: 'Responsible authority\'s mailbox', value: r.soa.rname, rawBytesRange: range },
-        { name: 'Serial Number', value: r.soa.serial, rawBytesRange: range },
-        { name: 'Refresh Interval', value: describeTtl(r.soa.refresh), rawBytesRange: range },
-        { name: 'Retry Interval', value: describeTtl(r.soa.retry), rawBytesRange: range },
-        { name: 'Expire limit', value: describeTtl(r.soa.expire), rawBytesRange: range },
-        { name: 'Minimum TTL', value: describeTtl(r.soa.minimum), rawBytesRange: range },
+        { name: 'Primary name server', value: r.soa.mname, abbrev: 'dns.soa.mname', rawBytesRange: range },
+        { name: 'Responsible authority\'s mailbox', value: r.soa.rname, abbrev: 'dns.soa.rname', rawBytesRange: range },
+        { name: 'Serial Number', value: r.soa.serial, abbrev: 'dns.soa.serial_number', rawBytesRange: range },
+        { name: 'Refresh Interval', value: describeTtl(r.soa.refresh), abbrev: 'dns.soa.refresh_interval', rawBytesRange: range },
+        { name: 'Retry Interval', value: describeTtl(r.soa.retry), abbrev: 'dns.soa.retry_interval', rawBytesRange: range },
+        { name: 'Expire limit', value: describeTtl(r.soa.expire), abbrev: 'dns.soa.expire_limit', rawBytesRange: range },
+        { name: 'Minimum TTL', value: describeTtl(r.soa.minimum), abbrev: 'dns.soa.minimum_ttl', rawBytesRange: range },
       );
       break;
     case 64: case 65:
@@ -121,10 +158,10 @@ function recordField(r: DnsRecord): ProtocolField {
     { name: 'Type', value: `${dnsTypeName(r.type)} (${r.type})${typeDesc ? ` (${typeDesc})` : ''}`, rawBytesRange: [r.nameEnd, r.nameEnd + 1], abbrev: 'dns.resp.type' },
   ];
   if (r.type !== 41) {
-    children.push(...classField(r.rclass, r.cacheFlush, r.nameEnd + 2));
+    children.push(...classField(r.rclass, r.cacheFlush, r.nameEnd + 2, 'resp'));
     children.push({ name: 'Time to live', value: describeTtl(r.ttl), rawBytesRange: [r.nameEnd + 4, r.nameEnd + 7], abbrev: 'dns.resp.ttl' });
   }
-  children.push({ name: 'Data length', value: r.rdataLength, rawBytesRange: [r.nameEnd + 8, r.nameEnd + 9] });
+  children.push({ name: 'Data length', value: r.rdataLength, abbrev: 'dns.resp.len', rawBytesRange: [r.nameEnd + 8, r.nameEnd + 9] });
   children.push(...rdataFields(r));
   return { name: head, value: '', rawBytesRange: [r.start, r.end - 1], children };
 }
@@ -160,14 +197,15 @@ function dnsFlagFields(flags: number, flagsOffset: number): ProtocolField[] {
     row('Recursion desired', 7, 1, bit(7) ? 'Do query recursively' : 'Do not query recursively', 'dns.flags.recdesired'),
   );
   if (isResponse) {
-    rows.push(row('Recursion available', 8, 1, bit(8) ? 'Server can do recursive queries' : 'Server cannot do recursive queries'));
+    rows.push(row('Recursion available', 8, 1, bit(8) ? 'Server can do recursive queries' : 'Server cannot do recursive queries', 'dns.flags.recavail'));
   }
-  rows.push(row('Z', 9, 1, `reserved (${bit(9)})`));
+  rows.push(row('Z', 9, 1, `reserved (${bit(9)})`, 'dns.flags.z'));
   if (isResponse) {
     rows.push(row('Answer authenticated', 10, 1,
-      bit(10) ? 'Answer/authority portion was authenticated by the server' : 'Answer/authority portion was not authenticated by the server'));
+      bit(10) ? 'Answer/authority portion was authenticated by the server' : 'Answer/authority portion was not authenticated by the server',
+      'dns.flags.authenticated'));
   }
-  rows.push(row('Non-authenticated data', 11, 1, bit(11) ? 'Acceptable' : 'Unacceptable'));
+  rows.push(row('Non-authenticated data', 11, 1, bit(11) ? 'Acceptable' : 'Unacceptable', 'dns.flags.checkdisable'));
   if (isResponse) {
     rows.push(row('Reply code', 12, 4, `${rcode === 0 ? 'No error' : DNS_RCODE_NAMES[rcode] ?? 'Unknown'} (${rcode})`, 'dns.flags.rcode'));
   }
@@ -184,7 +222,13 @@ function querySection(msg: DnsMessage): ProtocolField[] {
       children: [
         { name: 'Name', value: q.name, rawBytesRange: [q.start, Math.max(q.start, q.nameEnd - 1)], abbrev: 'dns.qry.name' },
         { name: 'Type', value: `${dnsTypeName(q.type)} (${q.type})`, rawBytesRange: [q.nameEnd, q.nameEnd + 1], abbrev: 'dns.qry.type' },
-        ...classField(q.qclass, q.unicastResponse, q.nameEnd + 2),
+        ...classField(q.qclass, q.unicastResponse, q.nameEnd + 2, 'qry'),
+        // Two facts about the name that are not in the bytes: how long it is
+        // and how many labels it has. The reference draws both, and a query
+        // for a 200-byte name with forty labels is worth being able to see
+        // and to filter for.
+        { name: '[Name Length]', value: nameLength(q.name), generated: true, abbrev: 'dns.qry.name.len' },
+        { name: '[Label Count]', value: labelCount(q.name), generated: true, abbrev: 'dns.count.labels' },
       ],
     })),
   }];
@@ -250,7 +294,7 @@ export function buildDnsLayer(
   if (pairing?.requestFrame !== undefined) {
     generated.push(
       { name: '[Request In]', value: pairing.requestFrame, generated: true, linkToFrame: pairing.requestFrame, abbrev: 'dns.response_to' },
-      { name: '[Time]', value: `${((pairing.elapsedUs ?? 0) / 1000).toFixed(6)} milliseconds`, generated: true },
+      { name: '[Time]', value: describeElapsed(pairing.elapsedUs ?? 0), generated: true, abbrev: 'dns.time' },
     );
   }
   if (pairing?.responseFrame !== undefined) {
@@ -285,8 +329,8 @@ export function buildDnsLayer(
         },
         { name: 'Questions', value: msg.counts[0], rawBytesRange: [messageStart + 4, messageStart + 5], abbrev: 'dns.count.queries' },
         { name: 'Answer RRs', value: msg.counts[1], rawBytesRange: [messageStart + 6, messageStart + 7], abbrev: 'dns.count.answers' },
-        { name: 'Authority RRs', value: msg.counts[2], rawBytesRange: [messageStart + 8, messageStart + 9] },
-        { name: 'Additional RRs', value: msg.counts[3], rawBytesRange: [messageStart + 10, messageStart + 11] },
+        { name: 'Authority RRs', value: msg.counts[2], abbrev: 'dns.count.auth_rr', rawBytesRange: [messageStart + 8, messageStart + 9] },
+        { name: 'Additional RRs', value: msg.counts[3], abbrev: 'dns.count.add_rr', rawBytesRange: [messageStart + 10, messageStart + 11] },
         ...querySection(msg),
         ...recordSection('Answers', answers),
         ...recordSection('Authoritative nameservers', authority),

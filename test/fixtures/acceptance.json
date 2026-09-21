@@ -56,7 +56,7 @@
         "layers": {
           "arp": 5,
           "dhcp": 11,
-          "dns": 26,
+          "dns": 47,
           "eth": 7,
           "icmp": 11,
           "icmpv6": 50,
@@ -69,17 +69,17 @@
           "quic": 13,
           "ssdp": 13,
           "stp": 4,
-          "tcp": 68,
+          "tcp": 71,
           "tls": 56,
-          "udp": 10
+          "udp": 11
         },
         "protosNamed": 21,
         "ceilings": {
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 445,
-          "valueMismatches": 155
+          "absentDistinct": 420,
+          "valueMismatches": 168
         },
         "unimplemented": {
           "prp": "Parallel Redundancy Protocol - a 6-byte trailer this build does not read at all, on 20 frames. The one protocol the reference names here that nothing in this build can name."
@@ -121,7 +121,7 @@
       "tree": {
         "layers": {
           "arp": 5,
-          "dns": 26,
+          "dns": 47,
           "eth": 7,
           "icmp": 11,
           "icmpv6": 44,
@@ -132,17 +132,17 @@
           "quic": 13,
           "ssdp": 7,
           "stp": 4,
-          "tcp": 68,
+          "tcp": 71,
           "tls": 55,
-          "udp": 10
+          "udp": 11
         },
         "protosNamed": 16,
         "ceilings": {
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 291,
-          "valueMismatches": 142
+          "absentDistinct": 266,
+          "valueMismatches": 155
         },
         "unimplemented": {}
       }
