@@ -647,6 +647,79 @@ export const FIELDS: readonly FieldDef[] = [
   str('lldp.tlv.system_cap', 'Capabilities', 'lldp'),
   str('lldp.mgn.addr.ip4', 'Management Address', 'lldp'),
 
+  // --- LLDP: the TLV header, and the two organisations' own TLVs ------------
+  //
+  // `lldp.tlv.type` and `lldp.tlv.len` are on EVERY TLV including the ones
+  // this build does not decode, which is where they matter most: an
+  // undecoded TLV is exactly where a reader needs to know what the sender
+  // called it and how many bytes it claimed.
+  //
+  // All `treeOnly`. LLDP is one frame in the fixtures and every name here is
+  // either TLV framing or a bit of a capability word - read in the detail
+  // pane beside the thing it qualifies, never as a column or a colour rule.
+  treeOnly(uint('lldp.tlv.type', 'TLV Type', 'lldp')),
+  treeOnly(uint('lldp.tlv.len', 'TLV Length', 'lldp')),
+  treeOnly(str('lldp.pdu_type', 'LLDPDU Type', 'lldp')),
+  // The reference names a port id after the subtype that produced it, so a
+  // MAC-address port answers this rather than the generic `lldp.port.id`.
+  treeOnly({ abbrev: 'lldp.port.id.mac', label: 'Port Id', type: 'mac', layer: 'lldp' }),
+  treeOnly(str('lldp.orgtlv.oui', 'Organization Unique Code', 'lldp')),
+  treeOnly(uint('lldp.ieee.802_3.subtype', 'IEEE 802.3 Subtype', 'lldp')),
+  treeOnly(uint('lldp.ieee.802_3.mac_phy_auto_neg_status', 'Auto-Negotiation Support/Status', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.mac_phy_auto_neg_status.supported', 'Auto-Negotiation Supported', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.mac_phy_auto_neg_status.enabled', 'Auto-Negotiation Enabled', 'lldp')),
+  treeOnly(uint('lldp.ieee.802_3.pmd_mau_type', 'Operational MAU Type', 'lldp')),
+
+  // The sixteen advertised-capability bits, and the same sixteen read in the
+  // opposite bit order. The `_inv` half is deliberately the WRONG reading -
+  // see `pmdCapabilityRows` in dissectors/lldp.ts for why drawing it is what
+  // makes a far-end byte-order bug distinguishable from an odd advertisement.
+  treeOnly(uint('lldp.ieee.802_3.pmd_auto_neg_advertised_caps', 'PMD Auto-Negotiation Advertised Capability', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.1000base_tfd', '1000BASE-T (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.1000base_t', '1000BASE-T (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.1000base_xfd', '1000BASE-X (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.1000base_x', '1000BASE-X (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.fdx_bpause', 'Asymmetric and Symmetric PAUSE', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.fdx_spause', 'Symmetric PAUSE', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.fdx_apause', 'Asymmetric PAUSE', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.fdx_pause', 'PAUSE (for full-duplex links)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_t2fd', '100BASE-T2 (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_t2', '100BASE-T2 (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_txfd', '100BASE-TX (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_tx', '100BASE-TX (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_t4', '100BASE-T4', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.10base_tfd', '10BASE-T (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.10base_t', '10BASE-T (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.other', 'Other or unknown', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.1000base_tfd', '1000BASE-T (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.1000base_t', '1000BASE-T (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.1000base_xfd', '1000BASE-X (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.1000base_x', '1000BASE-X (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.fdx_bpause', 'Asymmetric and Symmetric PAUSE, inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.fdx_spause', 'Symmetric PAUSE, inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.fdx_apause', 'Asymmetric PAUSE, inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.fdx_pause', 'PAUSE (for full-duplex links), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_t2fd', '100BASE-T2 (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_t2', '100BASE-T2 (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_txfd', '100BASE-TX (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_tx', '100BASE-TX (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_t4', '100BASE-T4, inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.10base_tfd', '10BASE-T (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.10base_t', '10BASE-T (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.other', 'Other or unknown, inverse bitorder', 'lldp')),
+
+  // LLDP-MED: what an endpoint says it can do. A phone advertising Network
+  // Policy is asking the switch for a voice VLAN.
+  treeOnly(uint('lldp.media.subtype', 'Media Subtype', 'lldp')),
+  treeOnly(uint('lldp.media.subtype.caps', 'Media Capabilities', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.llpd', 'LLDP-MED Capabilities', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.network_policy', 'Network Policy', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.location_id', 'Location Identification', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.mdi_pse', 'Extended Power via MDI-PSE', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.mid_pd', 'Extended Power via MDI-PD', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.inventory', 'Inventory', 'lldp')),
+  treeOnly(uint('lldp.media.subtype.class', 'Class Type', 'lldp')),
+
   // --- TLS -------------------------------------------------------------------
   // **The record and handshake frames themselves**, which the tree has always
   // drawn as the rows everything else hangs off and never named - so
