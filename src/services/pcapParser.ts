@@ -3,7 +3,8 @@ import { applyInfoPatch } from './dissect/infoPatch';
 import { CATEGORY_RANK, expertItemsFor } from './expertInfo';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacName } from './macVendors';
-import { dissectArp, dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
+import { dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
+import { findEthertype } from './dissectors/dispatch';
 import { dissectLinkLayer } from './dissectors/linkLayer';
 import { L3Tracker } from './l3Tracker';
 import {
@@ -22,8 +23,6 @@ import { LINKTYPE, type InfoPatch } from './dissect/types';
 export type { InfoPatch } from './dissect/types';
 import { dissectCdp, CDP_SNAP_PID, CISCO_OUI } from './dissectors/cdp';
 import { DnsTracker } from './dnsTracker';
-import { dissectIeee1905 } from './dissectors/ieee1905';
-import { dissectLldp } from './dissectors/lldp';
 import { QuicFlowTracker } from './quicFlowTracker';
 import { displayProtocol, toBase64 } from './exportSchema';
 import { buildCsvText } from './tabularWriters';
@@ -1106,12 +1105,14 @@ export function decodeRawEthernetPacket(
   // DSAP 0x42 is the Spanning Tree Protocol's service access point.
   const isLlcFrame = link.llcOffset !== undefined && currentEtherType <= 1500;
   let l2Result: L2DissectorResult | null = null;
-  if (currentEtherType === 0x0806) {
-    l2Result = dissectArp(rawBytes, l3Offset);
-  } else if (currentEtherType === 0x893a) {
-    l2Result = dissectIeee1905(rawBytes, l3Offset);
-  } else if (currentEtherType === 0x88cc) {
-    l2Result = dissectLldp(rawBytes, l3Offset);
+  // ARP, IEEE 1905 and LLDP are ethertypes and nothing else, so they are
+  // registered in `dissectors/dispatch.ts` rather than spelled out here.
+  // CDP and STP below are NOT, and stay: CDP dispatches on a SNAP protocol id
+  // within an OUI and STP on the LLC DSAP, so an `ethertype` table holding
+  // either would be a table lying about its key.
+  const ethertypeEntry = findEthertype(currentEtherType);
+  if (ethertypeEntry !== null) {
+    l2Result = ethertypeEntry.dissect(rawBytes, l3Offset, rawBytes.length);
   } else if (currentEtherType === CDP_SNAP_PID && link.snapOui === CISCO_OUI) {
     // CDP is not an ethertype: 0x2000 is a protocol id under Cisco's OUI, and
     // is only CDP in that company. Dispatching on the pair is what keeps this

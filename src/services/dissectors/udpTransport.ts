@@ -26,7 +26,7 @@ import { dissectSsdp } from './ssdp';
 import { buildQuicLayer, dissectQuicDatagram } from './quic';
 import { buildQuicTlsLayer } from './tls';
 import { dissectNtp, dissectStun } from './udpApps';
-import { findUdpSubdissector } from './udpDispatch';
+import { findUdpPort } from './dispatch';
 
 /** Everything the UDP decode needs that is not the bytes themselves. */
 export interface UdpContext {
@@ -88,7 +88,7 @@ export function dissectUdpTransport(
   const isDhcpv6 = (srcPort === 546 || srcPort === 547) && (dstPort === 546 || dstPort === 547);
   // Which leaf protocol claims these ports, if any. Resolved once here rather
   // than as a branch per protocol - the table is in `dissectors/udpDispatch.ts`.
-  const subdissector = findUdpSubdissector(srcPort, dstPort, dstIp);
+  const subdissector = findUdpPort(srcPort, dstPort, dstIp);
 
   // The UDP header's Length field counts the 8-byte header itself, but
   // The reference analyzer's "Len=" - like TCP's - reports payload only.
