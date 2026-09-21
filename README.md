@@ -1,3 +1,5 @@
+<img src="logo/inwire-layers-256.png" width="76" align="right" alt="">
+
 # Inwire
 
 A Windows desktop network packet analyzer. Capture happens in a small Python
@@ -15,12 +17,11 @@ capture agent — one tarball, built from these sources — but no desktop app y
 
 ## How it works
 
-```
-  adapter ──▶ Npcap ──▶ agent service ──▶ named pipe ──▶ Inwire ──▶ capture store
-              driver    Python,           \\.\pipe\      Electron   four files
-                        LocalSystem,      inwire-agent   + React    under
-                        idle until asked                            %LOCALAPPDATA%
-```
+![Five processes, one direction of flow: the kernel driver hands frames to a
+privileged Python service, which pushes them over a named pipe to the Electron
+main process, which forwards the bytes untouched to a Worker that dissects them.
+The React UI only ever sees dissected rows, and hands every frame to a separate
+store process that owns the files on disk.](docs/images/processes.svg)
 
 The agent is the only privileged component and deliberately small: it sniffs,
 batches and streams raw bytes. It **dissects nothing** — a record carries no
@@ -34,6 +35,18 @@ The pipe is also what decides who may talk to the agent, and the operating syste
 makes that decision: its security descriptor grants the interactive user read and
 write, SYSTEM and administrators everything, and nobody else anything — not the
 network, not anonymous callers. Nothing to pair, no secret to paste, no port open.
+
+Once a frame is inside, it crosses exactly one process boundary as bytes and is
+never carried across another as a tree:
+
+![From the wire to a row on screen, in nine hops. The first three are the
+adapter, the driver and the agent; the rest are the pipe, the main process, the
+Worker that dissects, the capture store that writes to disk, and the flush that
+puts a row on screen.](docs/images/frame-path.svg)
+
+**[How Inwire works, illustrated →](docs/how-inwire-works.html)** — twelve pages
+on the same subject: what happens on every launch, where the capture lives, who
+may touch what, and the map from concept to file.
 
 ## Features
 
@@ -222,9 +235,15 @@ docs/decisions/  numbered architecture decisions, with the measurements behind t
 docs/ideas/      notes on things that are not built, each banner-marked as such
 docs/specs/      historic specifications; read the banner at the top of each first
 docs/verification.md  what only a person can check, and what each failure looks like
-test/fixtures/   the parity captures and the acceptance floors
+docs/how-inwire-works.html  the illustrated explainer, twelve pages
+test/fixtures/   the parity captures and the acceptance floors (not tracked)
 local-agent/     the Python capture agent, its tests and its PyInstaller build
+agent-rs/        the same agent in Rust - complete, measured, proven as a
+                 registered Windows service, and deliberately not what ships
+                 yet (docs/decisions/0037-the-agent-is-rust-on-windows.md)
 installer/       the unified Inno Setup installer
+logo/            the brand mark's sources; every icon is generated from
+                 src/lib/brandMark.ts rather than committed as art
 ```
 
 ## Notes
