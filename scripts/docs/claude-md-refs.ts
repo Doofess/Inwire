@@ -347,6 +347,35 @@ check('the README says nothing the browser build left behind',
   README_BANNED.filter((term) => readme.toLowerCase().includes(term.toLowerCase())), []);
 
 /**
+ * Features the README advertised after they were deleted.
+ *
+ * A separate list from the one above because the failure is a different one.
+ * Those terms describe an ARCHITECTURE that was replaced, and a visitor who
+ * reads them is merely misinformed about how the thing is built. These are
+ * things the README told a visitor the application would DO, which it will
+ * not - the worst sentence a public README can contain, because the only way
+ * to discover it is to install the app and go looking for the feature.
+ *
+ * Both of these were found by reading the README against CLAUDE.md's
+ * must-not-come-back banner on the way to publishing it, not by any check:
+ *
+ * - **Custom dissectors.** An editor that compiled a user's dissector at
+ *   runtime. Deleted in `56925bd`; `packetGenerator.ts` carries the only
+ *   surviving mention, as a note about what its constructor used to take.
+ * - **A reorderable colour chain.** There was a Settings tab for one revision.
+ *   The chain is shipped now, and `services/colorRules.ts` explains at length
+ *   why - the parity harness compares the matched rule name against tshark's,
+ *   so a chain the user can rewrite is one the harness cannot check.
+ *
+ * Matched case-insensitively as substrings, so the phrasing has to change
+ * rather than the capitalisation. Describing the deletion is still allowed:
+ * "the chain is shipped rather than configurable" contains neither phrase.
+ */
+const README_DELETED_FEATURES = ['custom dissector', 'reorderable'];
+check('the README promises no feature that was deleted',
+  README_DELETED_FEATURES.filter((t) => readme.toLowerCase().includes(t)), []);
+
+/**
  * The README's layer count, held to the list it cites.
  *
  * It said "57 dissected layers" while `LAYERS` held 60: the three X.509 tokens

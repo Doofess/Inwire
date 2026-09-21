@@ -76,7 +76,11 @@ may touch what, and the map from concept to file.
   rather than only the part still in memory.
 - **Expert information** in eight categories named after what to conclude
   (Broken, Reset, Security, Loss, CaptureGap, FlowControl, Unverifiable, Note),
-  each a colour rule at the head of a reorderable, first-match-wins chain.
+  each a colour rule at the head of the first-match-wins chain that paints the
+  packet list. The chain is shipped rather than configurable, deliberately:
+  colouring is the one part of this UI whose job is to be opinionated about
+  which frames matter, and the parity harness compares the rule each frame
+  matched against tshark's answer for the same frame.
 - **Follow Stream** for TCP, UDP and QUIC, with a **ladder view** drawing the
   conversation as two lanes and time running down.
 - **Statistics** — conversations, endpoints, protocol hierarchy, devices, expert
@@ -95,7 +99,6 @@ may touch what, and the map from concept to file.
 - **Passive name resolution.** Every name comes out of the capture — DNS and mDNS
   answers, TLS and QUIC server names, DHCP, LLDP — and is a rendering choice
   only, so filters and exports still see addresses.
-- **Custom dissectors** defined in the UI, no rebuild required.
 - **Export to pcap and pcapng**, plus PDF and CSV reports. pcapng carries what
   pcap cannot: per-adapter provenance, nanosecond timestamps, the names the
   capture taught us, and what the capture missed.
@@ -114,6 +117,15 @@ may touch what, and the map from concept to file.
 One installer, `Inwire-Setup.exe`. It installs the app, installs the capture
 agent beside it, and registers that agent as the `InwireAgent` LocalSystem
 service. Nothing per-user is provisioned, and the app itself never elevates.
+
+**There is no download yet, and that is deliberate rather than an oversight.**
+The installer compiles, but it is not code-signed, so SmartScreen would warn
+every person who ran it — and teaching people to click through that warning for
+a tool that installs a kernel driver and a LocalSystem service is precisely the
+habit this project should not be building. Signing waits on a certificate
+(`docs/decisions/0030-one-installer-two-destinations.md`). Until then, build it
+from source with the steps below; [Releases](../../releases) carries the notes
+for each version and will carry the binary when it can be signed.
 
 **Npcap is not bundled.** The capture driver is a prerequisite the app manages
 rather than a payload the installer ships. Inwire's Update Center
@@ -248,12 +260,12 @@ logo/            the brand mark's sources; every icon is generated from
 
 ## Notes
 
-- The repository is still named `NetView` on GitHub, which is what the app was
-  called; every URL here points at that name until it is renamed there. In the
-  tree the old name survives only where it must — `legacy_config_dir()`, the
-  installer's `Legacy*` defines, `LEGACY_KEY_PREFIX` and `LEGACY_DB_NAME` all
-  recognise what an *old* install left behind, and would stop working the moment
-  they said `Inwire`.
+- **The app used to be called NetView**, and in the tree that name survives only
+  where it must: `legacy_config_dir()`, the installer's `Legacy*` defines,
+  `LEGACY_KEY_PREFIX` and `LEGACY_DB_NAME` each recognise what an *old* install
+  left behind, and every one of them would stop working the moment it said
+  `Inwire`. Links to the old repository name still resolve — GitHub redirects a
+  renamed repository indefinitely — but nothing here points at it.
 - There is no role model. `Capabilities` in `src/types/packet.ts` is a flat set
   of six permissions, stated once in `App.tsx` and threaded to the components;
   the gates reading it are live, and are where a real model would plug in.
