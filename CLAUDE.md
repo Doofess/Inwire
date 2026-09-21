@@ -14,15 +14,13 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 > - a **phone layout** — the window minimum is 1024 and `md:` is 768
 > - **`nodeIntegration`** in the renderer, in any form, for any convenience
 > - **`thickFrame: false` and `roundedCorners: false`.** The window *is*
->   frameless and draws its own controls - that entry was reversed deliberately,
->   and the one it replaced was wrong on the facts. What it claimed frameless
->   costs, Electron's typings say those two options cost: `thickFrame` defaults
->   true and is the only reason edge resizing, the drop shadow and the window
->   animations survive; `roundedCorners` defaults true and is Windows 11's
->   radius. Neither is ever set, at any value, and `scripts/electron/shell.ts`
->   asserts the words do not appear (`electron/window.ts`)
+>   frameless and draws its own controls. `thickFrame` defaults true and is the
+>   only reason edge resizing, the drop shadow and the window animations
+>   survive; `roundedCorners` defaults true and is Windows 11's radius. Neither
+>   is ever set, at any value, and `scripts/electron/shell.ts` asserts the words
+>   do not appear (`electron/window.ts`)
 > - **`titleBarOverlay` / `titleBarStyle`.** Bringing either back means Windows
->   drawing a second set of caption buttons on top of the app's own - which
+>   drawing a second set of caption buttons on top of the app's own — which
 >   renders rather than throws
 > - **`window.destroy()` on the close path.** The quit guard is registered on
 >   the `close` event, so destroying skips the "unsaved frames" confirm and
@@ -33,8 +31,18 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 > - **a mirrored copy of Npcap.** It is fetched from npcap.com or not at all
 > - **in-process capture in the app** — a native capture addon in main or in a
 >   `utilityProcess`, or any capture handle opened by Electron. The separate
->   agent is a security and lifetime decision, not browser-era weight
->   (ADR 0033)
+>   agent is a security and lifetime decision, not browser-era weight (ADR 0033)
+> - **the surfaces that were replaced, each by something §3 names**: the dock
+>   and its widgets (`components/dock/`, `dockPrefs.ts`, `dashboardPrefs.ts`,
+>   `dashboardWidgets.tsx`, `scripts/session/dock.ts`), the hamburger menu
+>   (`AppMenu.tsx`), the accent header (`Header.tsx`), the filter row
+>   (`FilterRow.tsx`), Custom Dissectors (`customDissectorEngine.ts`,
+>   `CustomDissectorsPanel.tsx`) and the pairing token's `config.json`
+
+**`docs/history.md` holds what this document used to carry**: the post-mortems
+of surfaces that no longer exist, the arguments each live decision won against,
+and the migration's phase-by-phase record. Nothing in it describes current code.
+Read it when you want to know *why* something is not here; read this for what is.
 
 ## 1. What this is
 
@@ -47,9 +55,9 @@ pcapng import and export all happen client-side in TypeScript.
 
 Everything is local. There is no account, no backend, no telemetry, and no
 server of any kind in this repository. The only outbound requests are four
-optional lookups from the renderer and two from main - the update feed and
-npcap.com - all listed under **Invariants**, and every one of them behind a
-switch or a click.
+optional lookups from the renderer and two from main — the update feed and
+npcap.com — all listed under **Invariants**, and every one behind a switch or a
+click.
 
 What it is **not**, any more: a web app. There is no browser build, no
 `server.ts`, no Express, no hosted deployment. macOS and Linux still have a
@@ -58,10 +66,8 @@ them yet.
 
 **The agent survived that deletion on its own merits.** A page could not open a
 capture handle, which is why the agent was built — but that is no longer why it
-is here, and a session reading the topology below should not conclude it is
-weight the browser left behind. It is kept so Npcap can be installed
-**admin-only**, so a capture can outlive the window, and so the capture handle
-never lives in the process that parses hostile bytes. ADR 0033.
+is here. It is kept so Npcap can be installed **admin-only**, and so the capture
+handle never lives in the process that parses hostile bytes. ADR 0033.
 
 ## 2. Commands
 
@@ -85,6 +91,8 @@ never lives in the process that parses hostile bytes. ADR 0033.
   fails the build. `noImplicitReturns` is deliberately off.
 - `npm run check` — lint, then every assertion script under `scripts/`,
   discovered by walking the directory.
+- `npm run sync:version` — regenerates `local-agent/agent_version.py` from
+  `package.json`. See **One version number**.
 - One script on its own: `npx tsx scripts/capture/reader.ts`.
 - `npx tsx scripts/parity/parity-check.ts` — the dissection acceptance gate for
   the packet-list **columns**. **It fails without the untracked fixtures**, it
@@ -92,11 +100,11 @@ never lives in the process that parses hostile bytes. ADR 0033.
   to get it, not a silent skip". That is why it is in `check.ts`'s `NOT_TESTS`
   and can never run under `npm run check`.
 - `npx tsx scripts/parity/tree-coverage.ts` — the same question for the
-  protocol **tree**, which nothing measured until ADR 0039. It *does* skip
-  cleanly without tshark or the fixtures, which is what lets it run under
-  `npm run check` where the line above cannot. Floors are **counts, not
-  percentages**: the denominator of a coverage ratio is Wireshark's vocabulary,
-  so a ratio would fail on a reference upgrade that changed nothing here.
+  protocol **tree** (ADR 0039). It *does* skip cleanly without tshark or the
+  fixtures, which is what lets it run under `npm run check` where the line above
+  cannot. Floors are **counts, not percentages**: the denominator of a coverage
+  ratio is Wireshark's vocabulary, so a ratio would fail on a reference upgrade
+  that changed nothing here.
 - `pyinstaller local-agent/inwire_agent.spec` — builds the agent to
   `local-agent/dist/inwire-agent-windows/` (a **directory**; see
   `local-agent/CLAUDE.md`).
@@ -133,46 +141,40 @@ beside `electron/agentService.ts`.
 
 ### The agent — `local-agent/agent.py`
 
-Runs as LocalSystem, deliberately, for **two** reasons now (ADR 0033).
-It is what lets Npcap be installed **admin-only**, because with the agent
-holding the handle the app never needs to open one. And it keeps the
-capture handle and the driver's user-mode library out of the process that
-parses hostile bytes, and off Electron's native-module ABI.
+Runs as LocalSystem for **two** reasons (ADR 0033). It is what lets Npcap be
+installed **admin-only**, because with the agent holding the handle the app
+never needs to open one — Npcap's *default* install leaves the capture devices
+open to every local user, so any local account can read this machine's traffic
+and inject raw frames. And it keeps the capture handle and the driver's
+user-mode library out of the process that parses hostile bytes, and off
+Electron's native-module ABI.
 
-**There was a third and it is retired.** "A capture can outlive the window" —
-boot-time start, a ring buffer, unattended monitoring — was reason #2 and is no
-longer true. The service is **demand start**: the app asks the SCM for it at
+**There was a third and it is retired.** "A capture can outlive the window" is
+no longer true: the service is **demand start**, the app asks the SCM for it at
 `whenReady()` before the window is created, and the agent stops **itself** two
 watchdog ticks after its last client leaves. It stops itself rather than being
 stopped, because the app deliberately holds no `WP` (SERVICE_STOP) right and
 granting one would grant it to every interactive logon — so a second Windows
 user could stop a capture the first is running. A self-stop also survives the
 app being killed from Task Manager, which an `sc stop` on the quit path would
-not. ADR 0035. The Windows fact
-behind the first of those: Npcap's **default** install leaves the capture
-devices open to every local user, so any local account can read this machine's
-traffic and inject raw frames; restricting them to Administrators is the
-recommended install, and a LocalSystem agent is what makes that cost the user
-nothing. Sniffs nothing until a client sends `start_capture`, and stops when
-the last client disconnects. Reads frames with `pcap_next_ex` directly rather than through
-scapy's socket wrapper, raises the driver's kernel buffer with `pcap_setbuff`,
-and reports what the driver dropped via `pcap_stats`. Frames are queued on the
-sniffer thread, bounded by both a count and a byte budget, and drained into
-batched binary messages by one pump task.
+not. ADR 0035.
+
+Sniffs nothing until a client sends `start_capture`, and stops when the last
+client disconnects. Reads frames with `pcap_next_ex` directly rather than
+through scapy's socket wrapper, raises the driver's kernel buffer with
+`pcap_setbuff`, and reports what the driver dropped via `pcap_stats`. Frames
+are queued on the sniffer thread, bounded by both a count and a byte budget,
+and drained into batched binary messages by one pump task.
 
 **The kernel buffer is sized per core, not flat, and that is a finding rather
 than a preference.** Npcap splits an adapter's buffer into one segment per
 processor and drops a frame when the segment for the *receiving* core is full —
 so a flat 32 MB was 32/N MB of real slack against a burst, which is 1 MB per
-core on a 32-core machine: Npcap's own default, and a sixteenth of what asking
-for 32 MB was meant to buy. It is the shape that best explains a burst of
-hundreds of thousands of frames appearing as driver drops on a machine with free
-memory. 4 MB per core now, floored at the old 32 MB and capped at 256 MB because
-this is non-paged kernel memory. `docs/bursts-and-what-wireshark-does.md` is the
-whole comparison, including the two places we are ahead of Wireshark (four drop
-stages reported separately and per second, against its one scalar at capture
-end) and the one place we are behind (no snaplen lever, because the wire
-record's `capLen` is a `u16` and we dissect everything).
+core on a 32-core machine: Npcap's own default. 4 MB per core now, floored at
+the old 32 MB and capped at 256 MB because this is non-paged kernel memory.
+`docs/bursts-and-what-wireshark-does.md` is the whole comparison, including the
+one place we are behind: no snaplen lever, because the wire record's `capLen` is
+a `u16` and we dissect everything.
 
 It carries the driver's timestamps, a per-capture sequence number, and the
 interface index. It does **not** dissect: a record has no source, destination,
@@ -187,53 +189,39 @@ absent because a pipe answers over SMB unless the descriptor says otherwise.
 
 ### main — `electron/main.ts`
 
-A thin adapter over things only a privileged process can hold. It owns the
-`app://` handler, the window, the menu, the quit guard, the pipe client, the
-agent's service diagnosis, native save dialogs, and the capture store's
-lifetime. Every decision worth testing is in a module beside it: `appPaths.ts`,
-`window.ts`, `csp.ts`, `menu.ts`, `windowState.ts`, `saveTarget.ts`,
-`pipeTransport.ts`, `agentService.ts`, `windowColors.ts`.
+A thin adapter over things only a privileged process can hold: the `app://`
+handler, the window, the menu, the quit guard, the pipe client, the agent's
+service diagnosis, native save dialogs, and the capture store's lifetime. Every
+decision worth testing is in a module beside it: `appPaths.ts`, `window.ts`,
+`csp.ts`, `menu.ts`, `windowState.ts`, `saveTarget.ts`, `pipeTransport.ts`,
+`agentService.ts`, `windowColors.ts`.
 
 **The window is frameless and draws its own controls.** `frame: false`, and a
-32px title row carrying the app's own minimize / maximize / close. This reverses
-an earlier decision; the banner says which options must never come back and why.
+32px title row carrying the app's own minimize / maximize / close. What is lost
+and accepted: **Snap Layouts** (the flyout on a maximise-button hover — it needs
+`WM_NCHITTEST` to answer `HTMAXBUTTON` and Electron exposes no hook; Win+Arrow
+snapping is unaffected) and **Alt+Space** (there is no native caption to raise
+the system menu from). Both are in `docs/verification.md` as accepted losses
+rather than as things to re-check.
 
-**The premise the old decision rested on was two-thirds wrong**, which is worth
-recording because it is what made the reversal cheap. The comment in
-`window.ts` used to say `frame: false` would hand back "the resize borders, snap
-layouts, the system menu on Alt+Space and the shadow". Electron's typings say
-`thickFrame` (default **true**) is what keeps edge resizing, the drop shadow and
-the window animations, and `roundedCorners` (default **true**) is Windows 11's
-radius. A frameless window on defaults keeps all of it.
-
-What is actually lost, and accepted: **Snap Layouts** (the flyout on a
-maximise-button hover - it needs `WM_NCHITTEST` to answer `HTMAXBUTTON`, and
-Electron exposes no hook; Win+Arrow snapping is unaffected) and **Alt+Space**
-(there is no native caption to raise the system menu from). Both are in
-`docs/verification.md` as accepted losses rather than as things to re-check.
-
-Three things follow, each a trap with a comment on it:
+Three things follow, each a trap:
 
 - **The controls are ours, so they follow the cascade.** `WindowControls.tsx`,
-  46×32 with 10px glyphs - Windows' own metrics, because the target size and
+  46×32 with 10px glyphs — Windows' own metrics, because the target size and
   spacing are what muscle memory aims at. The dim on blur is `opacity` on the
-  row, not a pre-composited colour pushed over IPC, which is the whole
-  `mixHex`/`setTitleBarOverlay` apparatus deleted. One colour is hardcoded and
+  row, not a pre-composited colour pushed over IPC. One colour is hardcoded and
   only one: close hovers to `#c42b1c`, which is learned rather than designed.
 - **The ground is cached in `window-state.json`.** `backgroundColor` is fixed
-  when the window is constructed, before a renderer exists to report a theme -
+  when the window is constructed, before a renderer exists to report a theme —
   so the alternative is opening every window in one theme and correcting a beat
-  later. That was survivable when a native caption sat above the page; on a
-  frameless window the ground IS the app's surface, so it is a full-window
-  flash. `windowColors.ts` is the table, and the theme still lives in
-  `localStorage` - this is a cache of what it resolved to, written by the
-  renderer, never the source of truth. Same argument as window bounds, which is
-  why it is the same file.
-- **The reserve is a constant again, and that is what frameless bought.** Under
-  the overlay the button area had to come from `env(titlebar-area-width)`,
-  because Windows drew it at ~138px at 100% scaling and ~207px at 150%. The
-  buttons are elements now, so they are 138 CSS pixels at every scale factor;
-  `.titlebar-reserve` and the `env()` are gone.
+  later, which on a frameless window is a full-window flash. `windowColors.ts`
+  is the table; the theme still lives in `localStorage` and this is a cache of
+  what it resolved to, written by the renderer, never the source of truth. Same
+  argument as window bounds, which is why it is the same file.
+- **The button reserve is a constant**, 138 CSS pixels at every scale factor,
+  because the buttons are elements. Under the old overlay it had to come from
+  `env(titlebar-area-width)`, which Windows drew at ~138px at 100% scaling and
+  ~207px at 150%.
 
 `maximize`/`unmaximize`/`focus`/`blur` are forwarded to the renderer over
 `WINDOW_STATE_CHANNEL`, because a window drawing its own chrome has to know what
@@ -261,317 +249,23 @@ nowhere. A dead store is a handled state: `child.on('exit')` tells the renderer
 over a separate channel, because a `MessagePort` that goes quiet would hang
 every pending read for the life of the window.
 
-`execArgv: ['--max-old-space-size=2048']` is there and **does not work** — the
-flag arrives and V8's limit stays at its 4192 MB default, because the isolate
-already exists by the time Electron looks at it. `store/heapGuard.ts` enforces
-the ceiling instead, by sampling the heap and standing down deliberately with a
-message a V8 abort cannot give. See **What blocks watching the disk filter
-work**.
+`execArgv: ['--max-old-space-size=2048']` is there and **does not work** — see
+**The store's memory ceiling**.
 
 ### The renderer
 
-`sandbox: true`, `contextIsolation: true`, `nodeIntegration: false`, no
-service workers, every permission request denied. The preload is a **single
-CommonJS file** — a sandboxed preload cannot be ESM and cannot `require` a
-relative module, so `electron/build.cjs` bundles it.
+`sandbox: true`, `contextIsolation: true`, `nodeIntegration: false`, no service
+workers, every permission request denied. The preload is a **single CommonJS
+file** — a sandboxed preload cannot be ESM and cannot `require` a relative
+module, so `electron/build.cjs` bundles it.
 
-**The shell is a title row, a rail, a status bar and a side bar, and there is no
-menu and no filter row.** The first three are always there; the fourth is a
-column that expands out of the rail and is the only part of the chrome that has
-a width the user chose. It is described after the two cards below, because its
-geometry only makes sense once the rail's does.
-`Header.tsx` is deleted and its contents are split three ways; `AppMenu.tsx` -
-the hamburger drawer that hung off the title row - is deleted too. Of its seven
-entries, **three already had a rail button** (Capture Statistics, Network,
-Settings), **Export/Import became** the one new rail button, and the rest went to
-Settings: the two passive name-resolution switches to `Interface` beside the two
-outbound lookups already there, and Custom Dissectors to a tab of its own beside
-Decryption. Nothing that duplicated a visible control survived, which was the
-menu's own stated rule turned on itself. The title row holds **no navigation**
-now, and `cmdk` left `dependencies` with it.
-
-**Custom Dissectors is deleted, and it was never wired to anything.**
-`App.handleUpdateDissectors` was `() => {}` with a comment admitting it: the
-engine was built in a `useMemo`, handed to the settings pane, and **no
-dissection path ever asked it about a frame**. Rules were edited, validated and
-stored, and applied to nothing. The comment called that "a gap rather than a
-design" and left the seam in place for an implementation that did not come -
-which is the reverse of this repository's rule everywhere else, because a
-surface that does nothing is worse than a missing one: it tells the user the
-feature exists. `customDissectorEngine.ts`, `CustomDissectorsPanel.tsx`, the
-tab, its two props and `CustomDissectorFieldDef`/`CustomDissectorRule` are all
-gone; Decryption is now alone in the pair that changes what the dissector can
-**read**. Nothing in the assertion suite covered any of it, which is its own
-small verdict on what it was worth.
-
-**The views are a drill-down and the title row has a back step.** `Packets` is
-the capture, `Frame Detail` is one frame of it, `Follow Stream` is one
-conversation that frame belongs to - each reached from the surface above it, so
-each has a place to come back to and it is not always `Packets`. `backTargetFor`
-in `viewPrefs.ts` is that chain, as a TOTAL record so a new view cannot be added
-without deciding whether it is a root. Statistics and the Routing Map are roots:
-nothing drills into them, they are chosen from the rail, and a back step there
-would have to invent a destination.
-
-**Escape is a different key and stays one hop** - any non-Packets view to
-Packets, which is the exit rather than a step. That is why `stream` has two
-answers, and `scripts/session/view.ts` holds both. **The side bar is
-deliberately not in that chain**, which is the whole subject of ADR 0034: it is
-persisted, and this repository's own test is that a place is a setting while a
-detour is not, so an Escape that closed it would silently rewrite a stored
-preference AND make the documented one hop into two.
-
-**Follow Stream's own "Back to frame N" is deleted.** It was a way out that
-existed in one view's footer and nowhere else. What it did that was worth
-keeping - landing on the frame the stream was followed from - belongs to LEAVING
-a stream rather than to a button, so both ways out do it now and the script
-counts them.
-
-**The display filter is in the title row's centre, and there is no filter
-row.** That strip was 44px spanning the window to hold one line of text, and the
-rule it carried had been rewritten three times - "only Network hides it", then
-"no view hides it", then "it is rendered by NAMING Packets". All three argued
-about where to put a ROW; none asked why a filter had to live somewhere a view
-could hide it. It does not act on what is in view - `captureScan` answers it over
-the whole capture on disk - so it belongs to the app. **Applying a filter goes to
-Packets**, which answers the objection the other way round: a control that takes
-you to its subject is not a control with nothing to act on. Clearing does not
-navigate, because the empty filter selects the whole capture and every view
-already shows that.
-
-The field is `max-w-[26rem]`, centred in the WINDOW rather than in the space
-between the corner and the controls - those are 138 and ~210px, so centring on
-the leftover would read as off. `FILTER:` became a glyph and the placeholder
-became `e.g. tcp.port == 443`: it was three clauses of real syntax with nothing
-marking them as a sample, so an empty field read as a filter already applied.
-The content stays an EXPRESSION rather than becoming a prompt, because an
-expression is what goes in the box.
-
-**The field's right edge has a presets chevron again, and it is a toggle.** The
-one that was deleted only OPENED the list, which made it a second door onto a
-room whose first door is the whole width of the bar - clicking the field opens
-the presets. Closing is what the field cannot do: the only ways out were Escape
-and a click somewhere else, both of which have to be known rather than seen. It
-also decides the list when both could claim it - the completions and the presets
-share the space under the field, and the rule was "the half-typed word wins",
-which is right for clicking INTO the field and wrong for a control whose whole
-job is to show the presets. `FilterBar` records WHO opened the list rather than
-that it is open, which answers both with one state; the chevron tracks the
-VISIBLE list, so it never offers to close something nobody can see.
-
-**The banner went with the row**, and `FilterRow.tsx` with it. It named the agent
-fault above the packet list while the status bar names it below; one fault wants
-one place. The restore readout moved into the status bar's left group, which is
-where session state lives - in that row it was the first thing dropped when space
-ran short, which is a strange fate for the only sign the app is busy doing what
-it was asked.
-
-**The title row holds two controls: that back step and the detail panes'
-toggle.**
-`PanelBottom` beside the caption buttons, `w-9` rather than the 46px those take,
-because 46 is Windows' caption metric and a control of ours borrowing it claims
-to be part of that set. It was a switch in `Settings -> Interface`, and the
-distinction that moved it is the one that panel exists to make: a SETTING is
-chosen once, a CONTROL is reached for mid-task. The pane ARRANGEMENT stays in
-Settings, and still greys out when the panes are off, which is the only trace of
-the switch left there. `scripts/electron/window-chrome.ts` asserts the button
-carries `app-no-drag` - beside `WindowControls` rather than inside it, so it
-inherits nothing from that group's shared class - and that Settings has no second
-way in.
-
-**The back step sits immediately left of the filter field, with a `w-9` spacer
-mirroring it on the right.** It was in the 138px corner beside the mark, which
-is where an application usually puts one and is the argument it lost: the corner
-is the app's identity, a control appearing and disappearing there reads as part
-of the mark's block, and it was as far from the row's only other navigation as
-the row allows. The mirrored spacer is what keeps the field still - without it
-the centred group would be button plus field, so the filter would shift 18px on
-every view change that gained or lost a back step.
-
-**Its centre WAS the packet counter, and that is the one control it had.** The
-row used to show `windowTitleFor(...)` there - `Inwire` idle,
-`Ethernet - capturing - Inwire` capturing. That string is unchanged and still
-names the window for the OS through `useWindowTitle`, so the taskbar and Alt-Tab
-are as they were; what it stopped doing is spending the centre of the one strip
-nobody can look away from on the app's own name, which the mark at the corner
-already gives. `components/common/PacketCountsReadout.tsx` took the slot, and
-with it the **`+N UNSEARCHED` rescan button** - the only way in the app to re-run
-a whole-capture filter scan, which deleting the counts widget would otherwise
-have deleted. It carries `app-no-drag` itself; without it the button moves the
-window and never fires.
-
-`windowChrome.ts` argues against exactly this and the comment is kept: a number
-that changes is the most distracting thing that can go in a title bar. Its second
-half - "the count is already on screen, in the filter bar" - is what stopped
-being true, twice over: the filter bar's badge went, and then so did the widget
-that replaced it.
-
-**Network left the rail too, and for a reason worth keeping.** It was the third
-view, on Ctrl+3, and it failed the test the view list applies: a view is a way of
-looking at the capture. Network describes the *machine* - adapters, DNS, public
-identity - and nothing in it changes when a packet arrives. The tell was the
-filter row, which had to be hidden above Network and nowhere else, because a
-display filter there was a control with nothing in view to act on.
-
-**It is back on the rail, and it is a side bar PANEL.** The half of that
-decision that stood is the test itself - it is still not in `APP_VIEWS`, it has
-no `Ctrl+n` and no place in the numbering, and `viewPrefs.ts` still lands a
-stored `'network'` back on Packets. The half that kept moving is what followed
-from it, and it took four containers to settle: "not a view" was read as
-"therefore a Settings tab", and Settings is where the app is *configured* while
-Network configures nothing; so it became a **sheet** taking the workspace card,
-which is where a report worth one press belongs rather than three clicks inside
-a preferences panel.
-
-**The sheet is what the side bar corrected.** This panel's whole organising idea
-is the pairing - the OS says how the machine was told to behave, the capture
-shows what actually happened - and as a sheet it covered the capture in order to
-describe the machine the capture came from. "Observed (capture)" was a live
-column with its subject hidden behind it. In the column it sits beside the
-frames it is comparing against, which is the one arrangement where both halves
-of the test hold at once: it is not a view, and it is next to the thing it is
-about. Capture Health stays a Settings tab and is the other read-only report
-about this machine - the pair that belongs there is what the capture is losing
-and which version of the driver you have.
-
-Settings widened from `max-w-3xl` to `max-w-5xl` to take the dissector editor,
-which is two columns rather than a list of setting rows.
-
-**The map is a view and the charts are a Statistics tab**, which is where the
-dock's contents went. Both placements answer the same question the view list
-already asks - *is this a way of looking at the capture?* The map is: every arc
-on it is a conversation in the buffer and it changes when a packet arrives,
-which is exactly what Network could not say about itself before it became a
-Settings tab. The throughput plot and the size distribution are too, but they
-are the same aggregate the tables beside them already compute, drawn rather than
-tabulated - so they are a tab of `StatisticsPane`
-(`components/statistics/GraphsTab.tsx`)
-rather than a fourth view.
-
-One thing follows from that and is easy to undo by accident: **`GraphsTab`
-renders outside the pane's scroller.** Every other tab is a table and wants
-`overflow-y-auto`; `TrafficTimelineChart` measures its own container, so a
-parent that grows to fit its child would size the SVG from a box the SVG is
-itself defining.
-
-There was a second, and it is worth reading as a rule rather than as history:
-the map had a small copy in the packets view's bottom row, guarded on
-`view === 'packets'`, because `display: none` hides a MapLibre instance without
-unmounting it. **That copy is deleted.** The map is the view and nothing else,
-so "exactly one map is ever live" is a fact about the component tree instead of
-a condition somebody has to keep true - which is the strongest form the answer
-could take, and the reason to prefer deleting a surface over guarding it.
-
-**Settings is a pane and it is the last modal that was a place.** It was
-`fixed inset-0`, a 70% scrim, a `max-w-5xl` panel at `max-h-[90vh]`, an X and a
-Close button - all of which said "you are somewhere else for a moment", about
-the surface that holds the filter presets, the decryption keys and the Update
-Center. `components/common/SettingsPane.tsx` takes the workspace card instead:
-no scrim, no radius, no border, because `<main>` is the card and a second one
-inside it is a card in a card.
-
-**Two of its tabs are deleted and the pane takes no `permissions` at all
-now.** The dissector editor went because nothing consulted its engine (above);
-**Colouring Rules went because the chain is shipped rather than chosen.**
-Colouring is the one part of this UI whose whole job is to be opinionated about
-which frames matter, and an opinion the user can rewrite is one the app can no
-longer stand behind: `parity-check.ts` compares `frame.coloring_rule.name`
-against tshark frame for frame, `packetThemes.ts` keys an appearance off every
-rule id it expects to exist, and the expert bands assume their own order - all
-three are statements about the chain in `services/colorRules.ts`. The editor's
-storage key is in `RETIRED_PREFERENCE_KEYS`, so a chain edited under the old
-build stops painting rather than painting something nobody can see or correct,
-and `scripts/color-rules/library.ts` fails if a loader for a stored chain comes
-back. `canChangeColorRules` and `canEditDissectors` left `Capabilities` with
-their readers.
-
-**It is deliberately NOT in `APP_VIEWS`**, and that is the half worth keeping.
-The list answers one question - is this a way of looking at the capture? -
-and nothing in Settings changes when a packet arrives, which is the exact test
-that moved Network out of the list and into a tab of this pane. Putting Settings
-in would reverse that with no new argument and hand it a `Ctrl+N` it does not
-want. So it behaves like a sheet: it covers the workspace, the view underneath is
-untouched, and closing it puts that view back rather than navigating anywhere.
-
-Three ways out and no fourth. The title row's back step reads
-**"Back to &lt;the view underneath&gt;"** and closes it; Escape closes it before
-it closes anything else, outermost surface first; and the rail's Settings icon
-is a toggle carrying the same active marker a view does, because from the rail's
-side "this is what is on screen" is the same fact. The X and the Close button
-were the modal's and neither survived - a surface with four doors is one nobody
-knows how to leave. `scripts/session/view.ts` holds all of it.
-
-**There is one sheet and one slot, and the slot stays a union.** Settings is the
-whole list - Network was the second and is a side bar panel now - and `App`
-models it as `sheet: 'settings' | null` rather than a boolean. At one member the
-two are isomorphic, so keeping the union is a choice: it is what makes "the card
-holds exactly one surface" a fact the type carries. A boolean invites a second
-boolean beside it, which makes "both open" representable in a card that shows
-one, and every navigation that closes a sheet would then have to remember to
-close both. That argument was won once, and a union is what stops an edit
-re-opening it.
-
-**Landing on a view closes it, and that shipped broken.** The sheet renders
-INSTEAD of the view stack, so a rail click from inside Settings moved `view`
-underneath it and the active marker with it, and changed nothing on screen -
-every icon in the rail looked dead and the back step was the only way out. The
-close belongs to the TRANSITION rather than to the pane, and for the reason the
-sheet exists: the view underneath is deliberately untouched while Settings is
-open, so the only code that can know a view is being *chosen* is the code that
-chooses it. `handleViewChange` closes it - which covers the rail and `Ctrl+1..5`
-together, being the one door both go through - and so does `applyFilter`, whose
-field is in the title row and therefore reachable with the sheet up: it
-navigates to Packets, and a navigation nobody can see is the identical bug.
-Clearing navigates nowhere and so closes nothing. Both are asserted, because
-both fail silently.
-
-**The packet detail window is a view too, and it was the modal before that.** It was `fixed inset-0`, a scrim and a 92vh panel, opened by
-double-clicking a row and dismissed with Escape or an X - which meant the one
-surface that shows a frame in full could only be reached from the one surface
-that shows frames in summary, and was *dismissed* rather than *left*. It passes
-the same test the map passed: it is a way of looking at the capture, and what it
-looks at is one of the frames in the buffer.
-
-Four things fell out of the move, and each of them is a deletion rather than a
-port:
-
-- **No `detailPacketId`.** The modal kept a frame of its own, separate from the
-  list's selection, which is why closing it dropped you wherever the list had
-  been left. The pane reads `selectedPacket` like the bottom panes do, so
-  stepping frames in it moves the list, and leaving and coming back lands on the
-  frame being read.
-- **No second `usePacketDetail`.** The modal was mounted only while open, so its
-  own hook was the only one running; a pane sits beside a packet list that is
-  *hidden rather than unmounted*, whose panes already ask for exactly this
-  frame. `App` passes `selectedPacketDetail` in, because two hooks on one frame
-  would be two replay requests for one tree.
-- **No keyboard gate.** `useKeyboardNavigation` used to bail out entirely while
-  the modal was open. The hook binds Up/Down and the pane binds Left/Right, on
-  the same selection, so there is nothing to keep apart.
-- **No Escape of its own,** except one. `App` returns any non-Packets view to
-  Packets on Escape, in the bubble phase, last in the chain. The pane still
-  listens in the capture phase for exactly one thing - the meta rail summoned
-  over the canvas on a narrow window - and claims that key with
-  `stopPropagation`, which is the layering contract every popover here keeps.
-
-**Its empty state is the feature that replaced Find packet.** A view with a rail
-button can be opened with nothing selected, so the pane's no-frame state is its
-front door rather than an apology: `FrameNumberBox`, the same control the meta
-rail carries, asking for a frame number and nothing else. That is what makes
-`detail` restorable where `stream` is not - it needs nothing handed to it - and
-`scripts/session/view.ts` ties those two facts together, so a view rendered
-without a second condition has to be one `restoredView` will hand back.
-
-`services/graphPrefs.ts` (`inwire.graphs`) holds what the two charts are drawing.
-It is the surviving half of `inwire.dashboard`, and a new key rather than a
-rename because the old one was a `Record<string, string | number>` config bag
-validated against a widget catalogue - shaped that way so a settings list could
-be generated from it. There is no catalogue and no generated list; the fields are
-fields.
+**The shell is a title row, a rail, a status bar and a side bar.** There is no
+menu and no filter row. The first three are always there; the fourth is a column
+that expands out of the rail and is the only part of the chrome with a width the
+user chose.
 
 **Closed** — the rail and `<main>` float apart, which is VS Code's `.nosidebar`
-case. The title row carries the back step, the filter field with its presets
-chevron, and the detail panes' toggle.
+case.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -603,628 +297,433 @@ to supply. `<main>` keeps its own four borders and simply gets narrower.
 │ ● Capturing 04:12  Ethernet     0x42 'B'  44/178,200 ◍  │
 └─────────────────────────────────────────────────────────┘
 ```
-**`<main>` is a column again, and there is no dock.** It was a row for exactly
-one revision - the dock ran the pane's full height with the filter row beside
-it - and that arrangement existed to say that a widget summarising the whole
-capture had no business sitting under a row that narrows the list. Deleting the
-dock answered the same question by removing the thing that raised it.
 
-**The packets view's bottom row is two panes: the tree and the hex dump.** One
-divider, resizing the pane to its LEFT, and the tree's share is stored as a
-fraction with the dump taking the remainder (`detailsPaneRatio` in
-`interfacePrefs.ts`). The dump is the remainder because it is the pane with no
-minimum content width worth defending - the tree truncates field names, but a
-dump narrower than its own 16-byte row wraps into nonsense, so `flex-1` means it
-absorbs window resizes while the tree keeps the width the user chose.
+#### Views and navigation
 
-**There was a third pane at the head of the row, and it was the map.** It ran
-widest subject to narrowest - the map is the whole conversation between two
-places, the tree is one frame of it decoded, the dump is that frame's bytes - and
-deleting it takes back everything that arrangement cost: `geoPaneRatio`, the
-second divider, the render-time clamp that kept two independent shares from
-adding past 1, and the `view === 'packets'` guard that kept a second MapLibre
-instance from being built behind a hidden section. `detailsPaneRatio` is 0.5 with
-a 0.9 ceiling again, which is what it was before the map took a third of the row.
+**A view is a way of looking at the capture**, and that one question decides the
+list. `APP_VIEWS` order **is** the `Ctrl+1..5` numbering — there is no second
+table. Settings is not in it (nothing in it changes when a packet arrives) and
+neither is Network (it describes the *machine*).
 
-**The packet table's own header row wears the same ground as those bars.** It
-was `--secondary`, one step brighter, which made it the only column header in the
-window that did not match the pane titles under it; `HEADER_CHROME` in
-`PacketList.tsx` is `bg-card` now. A table's header row is the same kind of thing
-as a pane's title bar - the strip that names what is below it - and `--secondary`
-is the chrome's colour rather than a content surface's.
+**The views are a drill-down**: `Packets` is the capture, `Frame Detail` is one
+frame of it, `Follow Stream` is one conversation that frame belongs to. The
+title row's back step follows `backTargetFor` in `viewPrefs.ts`, a TOTAL record
+so a new view cannot be added without deciding whether it is a root — Statistics
+and the Routing Map are roots, and a back step there would have to invent a
+destination.
 
-**Both wear one title bar, and it is a component rather than a copied class
-string.** `components/common/PaneHeader.tsx`, fixed at `h-9`. They carried
-identical `px-4 py-2` headers and still sat at different heights, because
-vertical padding sizes a box from its CONTENTS: Hex View's bar holds copy
-buttons (~20px), the other holds 12px text (~16px). Four pixels, on adjacent
-panes, with a divider between them. The height is fixed here and the padding is
-horizontal only. The map wore the same bar for exactly as long as it was in the
-row; the Routing Map view has a side panel instead, which is where its located
-count lives.
+**Escape is a different key and stays one hop**, any non-Packets view to
+Packets, which is why `stream` has two answers. **The side bar is deliberately
+not in that chain** (ADR 0034): it is persisted, and a place is a setting while
+a detour is not, so an Escape that closed it would silently rewrite a stored
+preference AND make the documented one hop into two.
 
-**There is an application status bar, and it is the second attempt.** 24px at
-the window's bottom edge, `components/status/StatusBar.tsx`. The chrome is a
-**C**: the title row across the top, the rail down the left, the bar across the
-bottom, all one `--secondary` ground.
+**`stream` is a legal stored value that `restoredView` refuses**, because the
+conversation it named lived in a buffer that is being rebuilt — and that fact
+has to move with the JSX. `scripts/session/view.ts` reads the render guard for
+every view out of `App.tsx` and asserts that the one view needing a second
+condition — `stream`, which needs a target — is exactly the one `restoredView`
+refuses.
 
-**Between those two strips the rail, the side bar and `<main>` are CARDS**,
-which is VS Code's Modern UI arrangement ported rather than invented - read
-`src/vs/workbench/browser/media/floatingPanels.css` in `microsoft/vscode`, and
-`.part.activitybar.left` in particular, before changing any of it. **Both of
-that file's arrangements are live here and one boolean chooses**: with no panel
-open the rail and `<main>` float apart, and with one open the rail and the side
-bar meet flush while `<main>` floats beside them. Four facts, each load-bearing
-for the others:
+#### The title row
 
-- **A 4px gutter** on the band (`pl-1 pr-1 pb-1` in `App.tsx`) holds both cards
-  off the window on the left, the right and the bottom. They meet the title row
-  **flush** at the top, which is also VS Code's. The chrome's `--secondary`
-  shows in the gutter and is the cluster's backdrop, which is the first time
-  that ground has been visible at all.
-- **8px on the corners nothing covers, and a 4px gap between cards.** Closed,
-  every corner of both cards is rounded and they FLOAT apart: VS Code's
-  `.nosidebar` case, a rail with nothing to connect to that "closes up as a
-  standalone panel with every corner rounded". Open, the rail's two RIGHT
-  corners square and the side bar's two left ones do, because the seam runs
-  between them; the left corners are stated unconditionally in both files,
-  since they face the gutter and can never square, so the only corner an edit
-  can get wrong is the one that varies. 8px is `--vscode-cornerRadius-large`;
-  4px is `--vscode-spacing-size40`.
-- **The 4px gap is always one number on the element to the RIGHT**, never a
-  `mr-1` on the left card - VS Code's convention, and the reason is that two
-  margins are two numbers that have to agree. **Which element supplies it moves
-  with the arrangement**: closed it is `ml-1` on `<main>`, open it is the sash,
-  which is an in-flow `w-1` sibling and therefore IS the gap rather than sitting
-  in one. So `<main>`'s margin is conditional - `${sideBarOpen ? '' : 'ml-1'}` -
-  and doubling it is what a session adding the sash without touching `<main>`
-  would ship. `view.ts` asserts the pair.
-- **The radius does not break the square-corner rule, it steps around it.** The
-  rule is that nothing drawing against the window's OWN edge may carry a corner,
-  because Windows draws the only curve out there. The gutter means neither card
-  touches the window. Delete the gutter and the radius goes in the same commit.
-- **The rail draws all four of its borders in both arrangements, and the card
-  that meets it gives one up.** Closed there is nothing beside it and every card
-  closes its own outline. Open, the side bar takes `border border-l-0` - the
-  shorthand first, so the give-up is explicit rather than an omission - and the
-  rail draws the only seam. **Which side owns it is arithmetic, not taste**:
-  `w-11` under `border-box` is 42px of interior between two 1px borders, which
-  centres a 36px target on whole pixels, where handing the facing border away
-  leaves 43 and puts the icon column on a half pixel. `floatingPanels.css`
-  records the identical finding in its own words, which is why the rail draws
-  the seam in both codebases - and it is why the rail's `border border-border`
-  must stay complete and unconditional and must never become `border-r-0`.
+The mark, a back step, the filter field, the detail panes' toggle, the caption
+buttons. No navigation and no packet count; `useWindowTitle` still sends
+`windowTitleFor(...)` to main, so the taskbar and Alt-Tab are unchanged.
 
-**Neither strip draws an edge of its own, and that is arithmetic too.**
-`border-box` takes a border out of the element's height, so a `border-b` on the
-`h-8` title row leaves 31px for caption buttons that are 46x32 because Windows'
-are, and a `border-t` on the `h-6` bar makes it 23. The cards close their own
-edges instead. The gutter and the borders cost the rail 6px, which is why
-`scripts/session/view.ts` subtracts them: 680 - 32 - 24 - 4 - 2 = **618**.
+**The display filter is in the centre** because it belongs to the app rather
+than to a row a view could hide: it does not act on what is in view —
+`captureScan` answers it over the whole capture on disk. **Applying a filter
+goes to Packets**; clearing does not navigate, because the empty filter selects
+the whole capture and every view already shows that. The field is
+`max-w-[26rem]` and centred in the WINDOW, not in the space between the corner
+and the controls. The placeholder is `e.g. tcp.port == 443`, marked as a sample,
+because an unmarked expression reads as a filter already applied.
 
-**The first attempt is why the second one is shaped the way it is**, so the
-post-mortem is kept rather than replaced. It carried the byte inspector, and a
-full-width bar's natural left edge is the window's - while a line about the hex
-dump, a pane away from the thing it describes, starts under the rail. So the
-readout was pushed sideways with a CSS length built from `--details-pane-size`,
-and the bar was a row of two blocks so that a percentage would resolve against
-`<main>`'s content box rather than the window. All of that machinery existed to
-make a window-spanning bar look like it belonged somewhere narrower, which is
-the definition of a bar in the wrong place. It was deleted and the readout went
-back to Hex View's own footer.
+**Its presets chevron is a toggle**, because clicking the field already opens
+the presets and closing is what the field cannot do. It also decides the list
+when the completions and the presets both claim the space beneath: `FilterBar`
+records WHO opened the list rather than that it is open, and the chevron tracks
+the VISIBLE list so it never offers to close something nobody can see.
 
-**What was wrong was the alignment, not the bar.** A status bar groups its items
-left and right by PRIORITY and never by correspondence with what sits above
-them - `Ln 56, Col 2` is at the window's right edge in every editor that has
-one, and nobody expects it over the cursor. Adopting that rule deletes the
-machinery instead of rebuilding it: the byte readout is an ordinary right-group
-item with no inset, and there is no length anywhere in the bar built from a
-pane's size.
+**The back step carries a `w-9` spacer mirroring it on the right**, or the
+filter would shift 18px on every view change that gained or lost one.
 
-The second failure is the one worth remembering, because it is subtler than the
-indent. The bar could not read `HexViewer`'s local hover state, so it was handed
-a byte derived from `activeByteRange` - which is **also** what the protocol tree
-publishes for a one-byte field, so the bar answered "this byte" for a hover in a
-pane that was not the dump. The replacement is `services/hoveredByte.ts`, a
-store carrying the byte's **value** rather than an index. That choice is what
-makes the conflation impossible rather than merely avoided: the only code that
-can put a byte in the bar is code that already had the bytes in hand, which is a
-dump and never a tree.
-
-**The left group is the session and the right group is the frame.** Left: the
-agent link, the adapter, capture state with elapsed time, and dropped frames -
-in the order they fail in. Two of those were previously reachable only through a
-hover tooltip or a Settings tab, which is the gap `DriverInfoPanel` was written
-to close and this closes ambiently.
-
-**That is also what emptied that panel.** Four of its rows - Status, Version,
-Capture, Listening on - said what this strip now says permanently, and the first
-of them did it through a SECOND status label table that could disagree with
-`agentHealth.ts`'s. All four are deleted and the tab is **Capture Health**: the
-app's only full account of frames it lost, which has no other home, because four
-figures do not fit a 24px strip. ADR 0035.
-
-**The right group is the byte readout, the outbound indicator, then the packet
-counter.** The counter had the corner and the indicator sat between; they were
-swapped so the numbers are at the edge, which is what makes them findable
-without reading the bar. The trade is real either way - a right-aligned group
-shifts left as its widest member grows, so whichever item is not at the edge is
-the one that moves when the counts gain a digit. **The counter brings no cell
-padding**, being `PacketCountsReadout` moved here whole rather than a
-`StatusItem`, so the group carries `pr-2` - without it the numbers sat flush
-against the window while every item on the left had 8px, and the strip's two
-ends did not match.
-
-**The outbound indicator carries no glyph, and says `no lookups` or names
-them.** It was a shield when nothing was going out and a globe when something
-was, with the names hidden below `xl` - so the one item in the bar about *this
-app's own* behaviour was the one you had to hover to read, in a strip where
-everything else spells itself out. The state is the text now: `no lookups`
-against `geo-IP`, `rDNS` or both, spelt out in the tooltip. That also keeps
-`StatusItem`'s rule with no glyph to hang it on - the two states differ in what
-they SAY rather than in hue, which is why the warning colour is not on the text
-(`--warning` on `--secondary` is 4.06:1, under the floor).
-
-**The counter's share badge is deleted**, and `filterPercentage` with it. It
-read `100%` beside `2,224 / 2,224`, which is one figure said twice in the weaker
-unit; the pair of numbers says it exactly rather than rounded. The badges that
-remain report a whole-capture scan, which no pair of numbers on screen can
-describe.
-
-**A healthy agent read "Agent not reachable" in this bar**, and the shape of
-that is worth keeping. `agentSilentLabel` was a
-`Partial<Record<AgentHealth['kind'], string>>` of the five SILENT kinds with
-`?? 'Agent not reachable'` behind it. Its two callers - the rail's tooltip and
-the filter row's banner - only ask while the agent is silent, so the missing
-`connected` entry could not be reached; this bar's link item asks
-unconditionally, because its job is to name the state whatever it is. Capture
-ran perfectly and the bar said the agent was gone, with the tooltip beside it
-saying the opposite because that one was a conditional rather than a lookup.
-
-`Partial` meant the type could not object to the missing key, and the `??`
-turned the hole into a confident wrong answer rather than an absence anybody
-would see. It is `agentStatusLabel` now, a TOTAL record with no fallback, so a
-new kind will not compile without a label - and `scripts/electron/agent-health.ts`
-holds the part a type cannot: that the healthy states do not read as faults, and
-that the text agrees with `agentNeedsAttention` about whether a warning glyph is
-drawn. That file had claimed "every branch to a label" in prose and had never
-checked one.
-
-**Nothing in the bar is pressable.** Each item opened the Settings tab that
-fixes what it reports, and that is gone: the bar is a readout. `StatusItem`
-renders a `<span>` and has no `onClick` at all, so putting one back is the
-decision rather than a prop. The one real control in the strip is the packet
-counter's `+N UNSEARCHED` rescan, which is not a `StatusItem` - and a bar where
-most things react to a click is worse at advertising the one that does something
-than a bar where nothing does. `scripts/session/status-bar.ts` greps the whole
-directory, because the easy way to reintroduce a button is to skip the shared
-cell. Right: the byte readout, the packet counter, and an indicator
-for the app's own outbound lookups. An item renders nothing at all when its
-subject is absent, rather than showing a zero that was never measured -
-`droppedKernel` is `null` when the driver's counters could not be read and must
-never be folded into a total as 0.
-
-**The packet counter moved here from the title row**, which is where
-`windowChrome.ts` always argued it did not belong: a number that changes is the
-most distracting thing that can go in a title bar, and it was there only because
-nothing better existed. The title row's centre is empty now. `useWindowTitle`
-still sends `windowTitleFor(...)` to main, so the taskbar and Alt-Tab are
-unchanged.
-
-`--details-pane-size` stays on the **root** element even though only the panes
-read it. It was moved there so the FIRST bar could resolve against the same
-base; the second deliberately does not read it, and
-`scripts/session/status-bar.ts` fails if it ever starts - which turns a stale
-note into the marker for the rule.
-
-Moving the properties to the root fixed a bug as well as enabling the bar:
-`--geo-pane-size` had never been in the React style object at all, only in the
-imperative drag path, so the map pane had no width until somebody dragged
-something. The bar is gone and that fix is not. That property is gone with the pane; the trap it records is that a
-layout custom property written only by the drag path has no value until a drag.
-
-**The title row spans the window and the rail hangs below it**, which is what
-puts the app's mark at the true top-left corner. The segment under it is the two
-cards' own `border-t` and **the row does not draw it**, which is what lets the
-`h-8` row keep all 32 of its pixels for caption buttons that are 46x32 because
-Windows' are. The ground is unbroken across it: the row and the rail are both
-`bg-secondary`, and it runs from the mark down past the card's edge into the
-gutter and into Windows' own rounded corner - the OS's radius, not one this app
-draws (`roundedCorners` defaults true and is never set).
-
-**That chrome is `--secondary`, one step brighter than the panes.** It was
-`--card`, the same ground every titled surface uses, and the split is worth
-having: `--card` against `--background` is a 4/255 delta in Night, so the seam
-where the chrome meets `<main>` was invisible and the 1px border was the only
-thing the eye could follow along it. At `--secondary` the delta is 13/255 and
-the edge reads on its own. The border stays, because it is what carries the edge
-in Day. That argument was first made about a rounded notch cut out of the
-chrome; the corner is square now and the deltas are unchanged, because they were
-always about two grounds meeting rather than about a curve.
-
-**The `INWIRE` wordmark in the corner is deleted, and the mark took the rail's
-axis back.** The word named the app in a caption that already names it twice -
-`windowTitleFor(...)` still goes to main through `useWindowTitle`, so the taskbar
-and Alt-Tab are unchanged. With it gone the mark sits directly above the column
-of rail icons rather than 8px to their left; that alignment is why the mark used
-to live in a rail cell, and losing it was the stated cost of letting the word
-lead. Its block is `ml-1 w-13` - the rail's width AND the band's gutter, because
-the rail is a card and its axis is `gutter + width / 2` rather than half its own
-width. Matching only the width put the mark 4px off for one commit, so
-`scripts/session/view.ts` reads both halves out of the source.
-
-**`<main>` is inset into the corner that L makes, and all four of its corners
-are square.** Three of them always were - they run into the window's own edges,
-and a radius there would be the second curve inside Windows' that
-`TitleRow.tsx` refuses to draw. The top-left carried `rounded-tl-xl` on the
-argument that it is the one corner where two chrome edges meet rather than an
-edge of the window, so it was allowed to curve. **It is square now**, which
-makes the shell's rule general instead of nearly-general: no surface that meets
-the window draws a corner of its own, and the only curve at the window's edge is
-the one Windows puts there. This is a rule about the SHELL - the title row, the
-rail, this pane. Radii inside the workspace are untouched by it and are
-everywhere: 242 `rounded-*` utilities across the renderer, on buttons, cards,
-popovers and pills.
-
-**There is exactly one seam and only when the side bar is open**, between the
-rail and the column; `<main>` never has one, because a 4px gap always runs to
-its left and it closes its own outline. Both of VS Code's arrangements are in
-force here rather than one having replaced the other, so
-`scripts/session/view.ts` asserts the seam **as a pair** - the rail draws it and
-the side bar gives its border up - because the two failures are a **doubled**
-line and **no** line, and each is one line wrong in the opposite direction.
-What does not change with the arrangement is why a line is needed at all: at
-`--secondary` against `--background` the grounds differ by 13/255 in Night (the
-paragraph above has the deltas) and the border carries it in Day. The side bar
-is `bg-card` rather than `bg-secondary` for the same reason read across the
-seam - the rail is chrome and the column is a titled content surface, so
-card-against-secondary is a real ground change and the hairline reads. A
-`bg-secondary` column would merge into the rail and the seam would vanish.
-
-`overflow-hidden` stays and its reason changed. It was load-bearing for the
-curve - the deleted `FilterRow` painted its own `bg-background` straight into
-that corner, so without the clip the curve was drawn and then covered by the
-child sitting in it. With the corner square, what keeps it is that every child
-of the column scrolls inside it and their scrollers resolve against this box.
-
-**The side bar is a resizable column between the rail and `<main>`**, opened by
-four of the rail's buttons, and it **pushes** rather than overlays - `<main>`
-gets narrower, which is VS Code's arrangement and was chosen with the user over
-an overlay. `components/sidebar/` is the directory, `SideBar.tsx` is the card,
-and `sideBarPrefs.ts` is the state.
-
-**Nothing was pasted into it, and that was the rule the work was done under.**
-Each of the four was shaped by a constraint the column removes, so each one
-spends what it gains and the workarounds for the old container are deletions
-rather than ports:
-
-- **Interfaces** was a 288px Radix dropdown capped at `max-h-80` and dismissed on
-  select. The sparkline's `MAX_SPARKLINE_WIDTH = 130` was derived in its own
-  comment from `w-72` minus padding - wrong by construction in a column whose
-  width is a preference - so it is derived from the stored width now. Radix's
-  typeahead is **lost**, said plainly: it was reachable only while a menu was
-  open, had no affordance, and covered three to eight rows.
-- **Schedule** was capped at 512px tall, which is why only one field's calendar
-  could open - `CaptureSchedulePicker` said so in as many words. Two disclosures
-  now, and the countdown `describeSchedule(...)` was computing **only to fill a
-  rail tooltip** is the header's `detail` line: a live "Stops in 14:58".
-- **Export/Import** was a 768px modal with a scrim over an app whose subject is
-  on screen behind it. The export is a sequence and a column is the shape of
-  one. `ExportPanel`'s `pt-9` reservation for a floating validation banner is
-  deleted, not tuned - in a 300px column it was 36px whose only job was to be
-  empty. `ImportErrorDialog` **stays a modal**: a refusal that must be
-  acknowledged is a detour by every test here.
-- **Network** is above; `Compare`'s two columns stack, `CompareHeader` is
-  deleted, and the `w-40` nav went with them.
-
-**The persisted state is `inwire.sideBar`** - one key holding `panel`, `open`
-and `width`, so a restore is one storage event and one atomic apply.
-`MIN_SIDE_BAR_PX` is **170**, cited to VS Code's `sidebarPart.ts`, and
-deliberately NOT `MIN_PANE_PX` (220), which defends a hex dump's 16-byte row and
-has nothing to do with this. `restoredPanel()` sits beside `restoredView` even
-though it is the identity today: it is where a future panel that needs something
-handed to it declares itself unrestorable, and cutting the seam early is what
-stopped `stream` being scattered.
-
-**`Ctrl+B` toggles it**, VS Code's own key, through a ref in
-`useKeyboardNavigation` rather than a dep - this hook binds a `keydown` on
-`window` and re-registering it ten times a second during a capture is the exact
-thing its opening comment exists to prevent.
-
-**Escape does not close it and navigating does not close it**, which is the
-exact inverse of the sheet rule sitting a few lines away in the same file. ADR
-0034 is written for those two negatives specifically, because a negative
-decision leaves no code behind to explain itself, and
-`scripts/session/side-bar.ts` asserts them by reading the **bodies** of
-`handleViewChange`, `applyFilter` and the Escape effect - between two known
-ends, not by a character window, because the first version of that check failed
-on correct code (`useKeyboardNavigation`'s options object legitimately contains
-`setSideBar`, for `Ctrl+B`).
-
-**The sash is an in-flow `w-1` sibling and IS the 4px gap**, which is what VS
-Code's is. At rest it paints nothing - two card borders already draw the edge
-there and a third line is clutter - and it carries the full divider vocabulary:
-`role="separator"`, `aria-valuenow/min/max` in px, arrows with Shift for bigger
-steps, Home/End, and a reset on double-click, right-click and Enter.
-
-**Adapter sampling is tied to the panel's MOUNT**, not to an App effect keyed on
-which panel is open. Mount/unmount is the stronger tie because the subscription
-cannot outlive the display *by construction* - the same argument that deleted
-the second map. The notify callback goes through a **ref**: it has an empty dep
-list today, and the day it gains one a naked dep array would tear the
-subscription down and rebuild it on every App render, which is a write down the
-pipe thirty times a second with no symptom on screen.
-
-`ActivityRail.tsx` is 44px and starts below that row - there is no cell above
-its first group, because a cell would put the mark below the corner it is meant
-to occupy and cost height the rail has not got. **Three groups**: **capture**
-(Start/Stop, adapter, schedule, Export/Import, Network - in the order they are
-used), **views** (Packets, Frame Detail, Statistics, Routing Map, Follow
-Stream), and a bottom group of one, Settings, pinned with `mt-auto`.
-
-**Export/Import moved up into the capture group**, out of the bottom group where
-it sat with Settings. That group is for the application and this is about the
-*capture*: it writes the frames in hand out to a file, or reads a file in as the
-frames in hand, which is the same subject as the three controls above it.
-**Network followed it up**, for the same kind of reason read the other way round
-- it describes what this computer is connected to, which is where those frames
-are coming from. That leaves **Settings alone at the bottom**, which is VS
-Code's own arrangement and makes the divider above it mean something rather than
-merely separate: everything above opens a surface beside the workspace, the one
-below takes the workspace itself. Both moves cost nothing, because both groups
-gap the same and the deltas cancel.
-
-**There was a fourth group and it was the widgets.** Six icons toggling panels
-in the dock, with a 20px collapse header in the divider slot above them. All of
-it went with the dock; of the three widgets that were left, the map became a
-**view** in the group above and the traffic timeline and packet-size charts
-became a **tab of the Statistics pane**. None of them needed an open flag, a
-pin, a drag-reorder or an overlay.
-
-**The rail's Follow Stream button follows the SELECTION**, which is the one
-entry in the view group that is a verb rather than a place. It was wired like the
-other four - `streamAvailable` meant "a stream is already open" and the click was
-a bare `setView('stream')` - and that produced three symptoms which are all the
-same bug: selecting a frame on a TCP stream left the button disabled, following
-one from the Frame Detail pane enabled it, and from then on it reopened *that*
-stream for ever because nothing it read ever changed with the selection. It is
-`handleViewChange` in `App.tsx` now, which intercepts `stream` and routes it
-through `handleFollowStream` with the selected frame's target. **`Ctrl+5` goes
-through the same handler**, which is why that handler sits above
-`useKeyboardNavigation` rather than with the rest of the stream state: a `const`
-cannot be read before it is declared, and the alternative was the shortcut and
-the button meaning two different things.
-
-The button stays enabled while a stream is open even if the selection has none,
-so the view is reachable while reading a conversation, and so the icon does not
-flicker as somebody arrows past an ARP. The selection wins when both are true.
-
-**Find packet is deleted, and Frame Detail is a view.** Those are one change:
-the rail lost an icon from the capture group and gained one in the views group,
-and because both groups gap the same the two deltas are one icon plus one gap
-each and cancel - the strip is the same height with a different set of icons in
-it. `Ctrl+2` is Frame
-Detail now and Statistics, the Routing Map and Follow Stream each moved a key,
-which follows from `APP_VIEWS` order being the numbering rather than from a
-second table.
-
-What was lost is worth stating rather than glossing: Find packet was a substring
-match over protocol, addresses, info and id across the rows in hand, and the
-go-to-frame box that replaced it takes **a frame number and nothing else**. The
-argument for the trade is that the display filter already answers those questions
-in a language that says what it means, and answers them over the **whole capture
-on disk** rather than over the window - so the search was the weaker of two
-overlapping answers, and two search boxes in one window is what the rail exists
-to prevent. `inwire.packetSearch` is in `RETIRED_PREFERENCE_KEYS`.
-
-**There was an Updates button and it was a second Settings button.**
-`onOpenUpdates` and `onOpenSettings` were the same handler, and `updateAvailable`
-was passed `false` at the only call site, so its badge could never light.
-Export/Import took the slot. The Update Center is unchanged and still lives where
-ADR 0032 put it, at `Settings -> Updates`; if the badge is wanted back it needs a
-real `updateAvailable` first, and Settings is the icon to hang it on.
-
-11 icons at **36px**, two dividers and the bottom group's padding come to
-**452px** against the 618px the rail gets - a **680px** minimum window, less the
-32px title row above it, the **24px status bar** below, the cluster's 4px bottom
-gutter, and the card's own two 1px borders - 166px of slack. The last steps in
-that number are the rule worth carrying: **rearranging the strip is free and
-growing it is not.** Export/Import changing groups moved nothing, because both
-groups gap the same; Network arriving from Settings cost 38 - one 36px target
-and its gap - and Network changing groups afterwards moved nothing again. A rule
-derived once is a coincidence; the same arithmetic twice, in opposite
-directions, is a rule.
-`scripts/session/view.ts` adds that up from the Tailwind classes, holds each
-class to what the sum assumes, and prints "the rail is FULL" when the answer is
-no more icons. **The two strips are funded differently and that is deliberate**:
-the window minimum carries the title row, because the rail had no slack to spare
-when it arrived; the rail's own slack carries the status bar, because by then six
-deleted icons had left 154px and raising the minimum to 704 would have cost every
-small laptop 24px of window for a strip that fits without it.
-
-**The icons got bigger when six of them were deleted, and smaller again when
-the rail was narrowed.** The target went 36 → 44 → 36 and the glyph 20 → 24 →
-20, at 8px an icon each way. Six deleted icons and a 20px header paid for the
-first; the second is what a 44px rail costs, since a 44px target inside it would
-leave the button's edges touching the card's own. **The constant through all of
-it is 3px of air either side**, inside the card's two borders - that is the
-number to reason from, not the outer width, and 32-in-48, 36-in-56, 44-in-56 and
-36-in-44 are four points on the one line.
-
-That arithmetic has decided real design questions rather than merely recording
-them. It is why the two name-resolution switches went to Settings rather than the
-rail, and why the brand mark lives in the title row and not in a rail cell. Both
-still hold on their own arguments now that the number no longer forces them.
-
-**If the slack is ever spent, the views group is the one that scrolls.** It used
-to be the widgets group and there is no widgets group; capture has to stay
-reachable because it is how a capture starts, and the bottom group is pinned with
-`mt-auto`, so an overflow there does not scroll anything - it pushes Settings off
-the bottom edge.
-
-The active state is a **translucent fill in the theme's own accent** -
-`--primary` at 20%, `--foreground` on the glyph - and it never appears on hover:
-the active marker is the strongest indicator in the UI, and firing it on hover
-flashes it five times as a pointer crosses the rail. **It was two things, an
-`--accent` fill under a 2px left edge**, and the fill was the weaker half:
-`--accent` is one step off the rail's ground, so the edge did the work and the
-fill was barely a tint - weaker still once the rail moved to `--secondary`.
-Tinting with the accent HUE inverts that, and an edge in the same colour drawn
-over a button already filled with it is a second mark for one fact.
-
-Two numbers decided the details and both are Day's doing. A **solid** `--primary`
-fill reads as a button rather than a selection, so it is translucent. And
-`--primary` on a tint of ITSELF cannot reach 4.5:1 in Day at any alpha - it peaks
-at 3.97 and falls from there, because `#0b6bcb` is a mid-blue and the tint
-lightens toward it - so the accent-on-accent-tint pattern is out and the glyph
-takes `--foreground` instead. That is a fact about this palette rather than about
-the floor, which is why the glyph changed and the floor did not.
-`scripts/themes/registry.ts` reads the alpha **out of `ActivityRail.tsx`** and
-holds four numbers to it: the glyph's contrast on the composite, and the fill's
-deltaE from both the rail's ground and its own hover - the second being the pair
-that matters, since an active marker a hover can be mistaken for is not a
-marker.
-
-**The vocabulary is down to two marks and `railButton` takes one argument.**
-There were three shapes at the widest - the fill, an outline meaning "this
-control is ON", and a dot for a widget open in the dock. The outline's last two
-callers were the adapter and the schedule, and both open a side bar panel now,
-so both wear the fill: from the rail's side "this surface is on screen" is one
-fact however the surface is arranged. What the outline used to carry moved to
-the **dot**, which was already the schedule's and now means the same thing for
-both - *the thing behind this button has something to report*, an adapter that
-needs attention or a schedule that is set. The `'view' | 'toggle'` parameter
-went with the branch rather than being kept for a future caller, because a
-marker shape nothing draws is a shape the next session has to guess the meaning
-of; `view.ts` asserts both the signature and that no raw `ring-1 ring-inset`
-brings a second shape back without a name. 44 disagrees with
-`FrameMetaRail`'s 48 - this rail was 8px wider and is now 4px narrower, so the
-disagreement changed sign rather than went away - and that is accepted rather
-than overlooked: one is a group of icons inside a pane, the other is three groups
-in the window's chrome. `DASHBOARD_RAIL_WIDTH` was the other half of that
-sentence and went with `dashboardPrefs.ts`.
+**The detail panes' toggle is a CONTROL, not a setting** — reached for mid-task
+rather than chosen once, which is why it left `Settings → Interface`. The pane
+*arrangement* stays there and still greys out when the panes are off. It is
+`w-9` rather than the caption buttons' 46, which is Windows' metric and not ours
+to borrow.
 
 **The drag-region rule.** The title row is `.app-drag` and everything
-interactive in it is `.app-no-drag`; **the rail is entirely no-drag**, and has
-been since the top cell went with the brand mark. A control that forgets
-`no-drag` moves the window instead of being pressed, and the only symptom is a
-click that does nothing — which on the close button is a window that cannot be
-closed, so `scripts/electron/window-chrome.ts` asserts the class is on the
-shared button class rather than on each button. Both classes are in `index.css`
-and deliberately not `:root` custom properties: that block is the theme baseline
-and `scripts/themes/registry.ts` requires every token in it to be redeclared by
-every theme, which a layout constant has no business being.
+interactive in it is `.app-no-drag`; **the rail is entirely no-drag**. A control
+that forgets `no-drag` moves the window instead of being pressed, and the only
+symptom is a click that does nothing — on the close button, a window that cannot
+be closed. Both classes are in `index.css` and deliberately not `:root` custom
+properties, because `scripts/themes/registry.ts` requires every token in that
+block to be redeclared by every theme.
 
-`viewPrefs.ts` holds the active view, persisted — which argues against
-`DashboardAside`'s rule that "'which panel did I have open' is not a setting",
-and does so knowingly: a modal is a detour, a pane is a place. `stream` is a
-legal stored value that `restoredView` refuses to restore, because the
-conversation it named lived in a buffer that is being rebuilt. Those two facts
-have to move together and now do: `scripts/session/view.ts` reads the JSX guard
-for every view out of `App.tsx` and asserts that the one view needing a second
-condition to render - `stream`, which needs a target - is exactly the one
-`restoredView` refuses.
+`scripts/electron/window-chrome.ts` asserts the no-drag class sits on the shared
+button class rather than on each button, that the panes toggle carries it beside
+`WindowControls` rather than inheriting from that group, and that Settings has
+no second way in. `scripts/session/view.ts` asserts the mark's block is
+`ml-1 w-13` — the rail's width AND the band's gutter, because a card's axis is
+`gutter + width / 2`.
 
-**The dock is deleted, and so is everything under it.** It replaced a right-hand
-column, which had replaced a `DashboardAside` with a collapse-to-a-rail morph;
-what went with it this time is the whole apparatus rather than another
-relocation - `components/dock/`, `WidgetCard`, `WidgetOverlay`,
-`RenderedWidget`, `dashboardWidgets.tsx`, `DashboardWidgetList`, both preference
-keys (`inwire.dock`, `inwire.dashboard`), and the two assertion scripts that
-covered them.
+#### Settings, the one sheet
 
-The question that answers is the one the dock kept re-raising in a new shape:
-**what is a widget, if every widget that survives has somewhere better to be?**
-Six existed. Packet counts became the title row's readout; Protocol breakdown and
-Top talkers were deleted outright; the map became a view; and the traffic
-timeline and packet-size charts became a Statistics tab. Each of those is a
-surface with one home and its own controls, which is what a widget was
-simulating with an open flag, a pin, a drag-reorder, a per-widget config bag and
-a shared overlay.
+`components/common/SettingsPane.tsx` takes the workspace card: no scrim, no
+radius, no border, because `<main>` is the card and a second one inside it is a
+card in a card. It covers the workspace, the view underneath is untouched, and
+closing it puts that view back rather than navigating anywhere.
 
-Three things the dock knew that are worth not rediscovering:
+**The slot stays a union.** `App` models it as `sheet: 'settings' | null` rather
+than a boolean, which makes "the card holds exactly one surface" a fact the type
+carries — a boolean invites a second boolean beside it, and then "both open" is
+representable in a card that shows one.
 
-- **`LIST_RESERVE` was 640 and did not fit every column.** Measured: the fixed
-  columns take ~785px, so Protocol, Length and Info were off-screen at the
-  reserve and the list scrolled horizontally to reach them. It was still right,
-  for a reason about the window rather than the columns - a reserve large enough
-  to keep every column would have meant the dock could not open **at all** at the
-  1024 minimum. The constant is gone with the dock; the reasoning is the general
-  form of "guarantee the identity - frame number, time, both addresses - and let
-  the rest scroll". **It has a subject again**: `MAIN_RESERVE_PX` in
-  `sideBarPrefs.ts`, the width `usableSideBarWidth` keeps for `<main>` before it
-  narrows the side bar. It is **780**, not 480, and the 300px correction is the
-  reserve's own history repeating - 480 was picked as a number that felt like
-  enough, and the measurement behind the rule says the fixed columns take ~785,
-  so at 480 the identity this rule exists to guarantee would have been the
-  thing that scrolled. At the 1024 minimum 780 still leaves a 192px column,
-  which is above VS Code's own 170 floor, so the panel narrows rather than
-  being refused.
-- **A width or a share is stored unclamped and clamped at the point of use.**
-  `clampDockWidth` applied against the window, so narrowing shrank an open dock
-  and widening gave back the width the user chose; a width clamped on the way out
-  would never have grown back. That rule outlived the dock, and then outlived
-  the thing it applied to: it was two shares while the map was a pane in that
-  row - `detailsPaneRatio` and `geoPaneRatio`, stored independently with the
-  interaction ("the hex dump keeps at least a tenth") applied at the point of use
-  in `App.tsx`. One share has no interaction to defer, so the 0.1..0.9 ceiling in
-  the normalizer is the whole clamp again and `MIN_PANE_PX` is what stops either
-  pane being dragged to nothing. **The side bar is the rule's live subject**:
-  `inwire.sideBar` stores a width clamped only against `[170, 600]`, the window
-  never touches what is stored, and `usableSideBarWidth(stored, available)`
-  applies the reserve on the render path every time. The failure the split
-  prevents is silent and was caught in review: a drag or an arrow key that
-  committed the window-clamped figure would let two presses at a narrow window
-  permanently rewrite a 600px choice, and widening the window would never give
-  it back.
-- **`Dock` was the application's only `React.memo` boundary**, and the one that
-  replaced it is the hex pane. App re-renders ~10x a second during a capture and
-  every widget did a full pass over the buffer, so the dock had to absorb that;
-  the surviving surfaces are unmounted unless their view is active, which is a
-  stronger version of the same guarantee - except the dump, which is mounted
-  whenever Packets is and is the most expensive thing under App. `LinkedHexViewer`
-  in `components/packet-details/LinkedDetailPanes.tsx` is the boundary, and what
-  it rests on is worth knowing: `permissions` in `App.tsx` is a `useMemo` with an
-  empty dep list **for this reason alone**, because it was an object literal
-  rebuilt every render, and a changed prop is a memo that never hits and never
-  says so. The tree beside it is deliberately not memoized - `onSelectFrame`
-  closes over `packets`, so its identity changes on every flush and the memo
-  could not hold.
-- **The highlighted byte range is a store for the same reason the counter is.**
-  `services/byteRange.ts`. It is the cross-highlight between the two bottom panes
-  - hover a field, its bytes light up; hover a byte, its field lights up - so it
-  is state shared by two siblings and it lived in their common parent, which is
-  `App`. Every pointer move over a byte therefore re-rendered the whole
-  application; on a 64KB frame the dump alone is ~79 virtualized rows of 32
-  spans. The panes subscribe now and `App` holds nothing - it may `resetByteRange`
-  where the selection goes and may not publish, which
-  `scripts/session/byte-range.ts` asserts along with the memo's preconditions.
-  **It is not `hoveredByte.ts` and must not be merged with it**: that store
-  carries a byte's VALUE so only a dump can publish one, this carries a RANGE so
-  the tree can. `PacketDetailPane` subscribes to neither and keeps its own
-  `useState`, because it owns both halves of its own cross-highlight and is
-  already off App's render path.
-- **The dump's hover is delegated, not per byte.** Every byte is two elements,
+**Three ways out and no fourth**: the title row's back step, reading
+"Back to &lt;the view underneath&gt;"; Escape, outermost surface first; and the
+rail's Settings icon, a toggle carrying the same active marker a view does.
+
+**Landing on a view closes it, and the close belongs to the TRANSITION rather
+than to the pane** — the view underneath is untouched while the sheet is up, so
+only the code that *chooses* a view can know one is being chosen.
+`handleViewChange` closes it, which is the one door the rail and `Ctrl+1..5`
+share, and so does `applyFilter`, whose field is reachable with the sheet up and
+which navigates to Packets. Clearing navigates nowhere and closes nothing. Both
+are asserted, because a navigation nobody can see fails silently.
+
+**The colouring chain is shipped rather than chosen**, which is why there is no
+Colouring Rules tab: `parity-check.ts` compares `frame.coloring_rule.name`
+against tshark frame for frame, `packetThemes.ts` keys an appearance off every
+rule id it expects to exist, and the expert bands assume their own order — three
+statements about the chain in `services/colorRules.ts`. The editor's storage key
+is in `RETIRED_PREFERENCE_KEYS`, so a chain edited under an old build stops
+painting rather than painting something nobody can correct, and
+`scripts/color-rules/library.ts` fails if a loader for a stored chain comes back.
+
+#### The frame views
+
+**Frame Detail is a view, and four things are deletions rather than ports from
+the modal it replaced**: no `detailPacketId` (it reads `selectedPacket`, so
+stepping frames moves the list and coming back lands where you were), no second
+`usePacketDetail` (`App` passes `selectedPacketDetail` in, because two hooks on
+one frame are two replay requests for one tree), no keyboard gate (the hook
+binds Up/Down and the pane binds Left/Right on the same selection), and no
+Escape of its own — `App` returns any non-Packets view to Packets in the bubble
+phase, and the pane claims the capture phase for exactly one thing, the meta
+rail over the canvas, with `stopPropagation`.
+
+**Its empty state is its front door**: `FrameNumberBox`, asking for a frame
+number and nothing else, which is what makes `detail` restorable where `stream`
+is not.
+
+**The packets view's bottom row is two panes, the tree and the hex dump.** One
+divider resizing the pane to its LEFT; the tree's share is stored as a fraction
+(`detailsPaneRatio` in `interfacePrefs.ts`, 0.5 with a 0.9 ceiling) and the dump
+takes the remainder, because a dump narrower than its own 16-byte row wraps into
+nonsense where the tree merely truncates field names — so `flex-1` absorbs
+window resizes while the tree keeps the width the user chose. `MIN_PANE_PX`
+(220) stops either being dragged to nothing.
+
+**Both wear `components/common/PaneHeader.tsx`, fixed at `h-9`** — a component
+rather than a copied class string, because vertical padding sizes a box from its
+CONTENTS and identical `px-4 py-2` headers sat 4px apart on adjacent panes. The
+packet table's own header row is `bg-card` (`HEADER_CHROME` in `PacketList.tsx`)
+and not `--secondary`, which is the chrome's colour rather than a content
+surface's.
+
+**`GraphsTab` renders outside `StatisticsPane`'s scroller**, and that is easy to
+undo by accident: every other tab is a table and wants `overflow-y-auto`, but
+`TrafficTimelineChart` measures its own container, so a parent that grows to fit
+its child would size the SVG from a box the SVG is itself defining.
+
+**Exactly one MapLibre instance is ever live** — a fact about the component tree
+rather than a condition somebody keeps true, since the Routing Map is a view and
+there is no second copy. `display: none` hides a MapLibre instance without
+unmounting it, which is why guarding was the weaker answer.
+`services/graphPrefs.ts` (`inwire.graphs`) holds what the two charts draw.
+
+#### The card cluster
+
+**Between the two strips the rail, the side bar and `<main>` are CARDS**, which
+is VS Code's Modern UI arrangement ported rather than invented — read
+`src/vs/workbench/browser/media/floatingPanels.css` in `microsoft/vscode`, and
+`.part.activitybar.left` in particular, before changing any of it. **Both of
+that file's arrangements are live here and one boolean chooses.** Four facts,
+each load-bearing for the others:
+
+- **A 4px gutter** on the band (`pl-1 pr-1 pb-1` in `App.tsx`) holds both cards
+  off the window left, right and bottom, and they meet the title row **flush**
+  at the top. The chrome's `--secondary` shows in the gutter and is the
+  cluster's backdrop.
+- **8px on the corners nothing covers** (`--vscode-cornerRadius-large`), **4px
+  between cards** (`--vscode-spacing-size40`). Closed, every corner is rounded
+  and the cards FLOAT apart; open, the rail's two RIGHT corners square and the
+  side bar's two left ones do, because the seam runs between them. The left
+  corners are unconditional in both codebases — they face the gutter and can
+  never square — so the only corner an edit can get wrong is the one that
+  varies.
+- **The 4px gap is always one number on the element to the RIGHT**, never a
+  `mr-1` on the left card, because two margins are two numbers that have to
+  agree. **Which element supplies it moves with the arrangement**: closed it is
+  `ml-1` on `<main>`, open it is the sash, which IS the gap. So `<main>`'s
+  margin is conditional — `${sideBarOpen ? '' : 'ml-1'}` — and doubling it is
+  what a session adding the sash without touching `<main>` would ship.
+- **The radius does not break the square-corner rule, it steps around it.**
+  Nothing drawing against the window's OWN edge may carry a corner, because
+  Windows draws the only curve out there; the gutter means neither card touches
+  the window. Delete the gutter and the radius goes in the same commit.
+- **The rail draws all four borders in both arrangements and the card that meets
+  it gives one up** — the side bar takes `border border-l-0`, shorthand first so
+  the give-up is explicit rather than an omission. **Which side owns the seam is
+  arithmetic, not taste**: `w-11` under `border-box` is 42px of interior between
+  two 1px borders, which centres a 36px target on whole pixels, where handing
+  the facing border away leaves 43 and puts the icon column on a half pixel.
+  `floatingPanels.css` records the identical finding — so the rail's
+  `border border-border` must stay complete and must never become `border-r-0`.
+
+**Neither strip draws an edge of its own**, because `border-box` takes a border
+out of the element's height: a `border-b` on the `h-8` title row leaves 31px for
+caption buttons that are 46x32, and a `border-t` on the `h-6` bar makes it 23.
+The cards close their own edges, which costs the rail 6px —
+`scripts/session/view.ts` subtracts them: 680 − 32 − 24 − 4 − 2 = **618**.
+
+**`<main>` has four square corners and `overflow-hidden`.** No surface that
+meets the window draws a corner of its own. This is a rule about the SHELL;
+radii inside the workspace are untouched by it and are everywhere (242
+`rounded-*` utilities). The clip stays because every child of the column scrolls
+inside it and their scrollers resolve against this box.
+
+**One seam, and only when the side bar is open**, which is the same fact the
+grounds carry. The chrome is `--secondary` — a 13/255 delta against
+`--background` in Night, where `--card` was 4/255 and the seam was invisible —
+and the side bar is `bg-card` read across that seam, because the rail is chrome
+and the column is a titled content surface; a `bg-secondary` column would merge
+into the rail and the seam would vanish. The 1px border carries the edge in Day.
+`scripts/session/view.ts` asserts the seam **as a pair** — the rail draws it,
+the side bar gives its border up — because the two failures are a **doubled**
+line and **no** line, each one line wrong in the opposite direction. `<main>`
+never has a seam: a 4px gap always runs to its left.
+
+#### The side bar
+
+**A resizable column between the rail and `<main>`**, opened by four of the
+rail's buttons, and it **pushes** rather than overlays. `components/sidebar/` is
+the directory, `SideBar.tsx` is the card, `sideBarPrefs.ts` is the state. The
+four panels are Interfaces, Schedule, Export/Import and Network.
+`ImportErrorDialog` **stays a modal**: a refusal that must be acknowledged is a
+detour by every test here.
+
+**Network is a panel and not a view.** It is not in `APP_VIEWS`, it has no
+`Ctrl+n`, and `viewPrefs.ts` lands a stored `'network'` back on Packets. Its
+organising idea is the pairing — the OS says how the machine was told to behave,
+the capture shows what actually happened — so it has to sit *beside* the frames
+it is comparing against rather than on top of them. Capture Health stays a
+Settings tab and is the other read-only report about this machine.
+
+**The persisted state is `inwire.sideBar`** — one key holding `panel`, `open`
+and `width`, so a restore is one storage event and one atomic apply.
+`MIN_SIDE_BAR_PX` is **170**, cited to VS Code's `sidebarPart.ts`, and
+deliberately NOT `MIN_PANE_PX` (220), which defends a hex dump's 16-byte row.
+`restoredPanel()` sits beside `restoredView` even though it is the identity
+today: it is where a future panel that needs something handed to it declares
+itself unrestorable.
+
+**A width is stored unclamped and clamped at the point of use.** The store
+clamps only against `[170, 600]`, the window never touches what is stored, and
+`usableSideBarWidth(stored, available)` applies `MAIN_RESERVE_PX` on the render
+path every time. The failure the split prevents is silent: a drag that committed
+the window-clamped figure would let two presses at a narrow window permanently
+rewrite a 600px choice, and widening would never give it back.
+
+**`MAIN_RESERVE_PX` is 780**, the width kept for `<main>` before the panel
+narrows — measured, because the packet list's fixed columns take ~785px, and the
+rule is "guarantee the identity (frame number, time, both addresses) and let the
+rest scroll". At the 1024 minimum it still leaves a 192px column, above VS
+Code's own 170 floor, so the panel narrows rather than being refused.
+
+**`Ctrl+B` toggles it**, VS Code's own key, through a ref in
+`useKeyboardNavigation` rather than a dep — this hook binds a `keydown` on
+`window`, and re-registering it ten times a second during a capture is the exact
+thing its opening comment exists to prevent.
+
+**Escape does not close it and navigating does not close it**, the exact inverse
+of the sheet rule a few lines away in the same file. ADR 0034 exists for those
+two negatives specifically, because a negative decision leaves no code behind to
+explain itself. `scripts/session/side-bar.ts` asserts them by reading the
+**bodies** of `handleViewChange`, `applyFilter` and the Escape effect between
+two known ends, not by a character window — the first version of that check
+failed on correct code, because `useKeyboardNavigation`'s options object
+legitimately contains `setSideBar`.
+
+**The sash is an in-flow `w-1` sibling and IS the 4px gap.** At rest it paints
+nothing, two card borders already drawing that edge, and it carries the full
+divider vocabulary: `role="separator"`, `aria-valuenow/min/max` in px, arrows
+with Shift for bigger steps, Home/End, and a reset on double-click, right-click
+and Enter.
+
+**Adapter sampling is tied to the panel's MOUNT**, not to an App effect keyed on
+which panel is open, because a subscription that cannot outlive its display *by
+construction* is the stronger tie. The notify callback goes through a **ref**:
+its dep list is empty today, and the day it gains one a naked dep array would
+rebuild the subscription on every App render — a write down the pipe thirty
+times a second with no symptom on screen.
+
+#### The rail
+
+`ActivityRail.tsx` is 44px and starts below the title row — there is no cell
+above its first group, because a cell would put the mark below the corner it is
+meant to occupy and cost height the rail has not got. **Three groups**:
+**capture** (Start/Stop, adapter, schedule, Export/Import, Network — in the
+order they are used), **views** (Packets, Frame Detail, Statistics, Routing Map,
+Follow Stream), and a bottom group of one, Settings, pinned with `mt-auto`.
+Everything above the divider opens a surface beside the workspace; the one below
+takes the workspace itself.
+
+**The Follow Stream button follows the SELECTION**, the one entry in the view
+group that is a verb rather than a place: `handleViewChange` in `App.tsx`
+intercepts `stream` and routes it through `handleFollowStream` with the selected
+frame's target. **`Ctrl+5` goes through the same handler**, which is why that
+handler sits above `useKeyboardNavigation` rather than with the rest of the
+stream state — a `const` cannot be read before it is declared, and the
+alternative was the shortcut and the button meaning two different things. The
+button stays enabled while a stream is open even if the selection has none, so
+the view is reachable while reading a conversation and the icon does not flicker
+as somebody arrows past an ARP; the selection wins when both are true.
+
+**The strip is full at 452px of 618** — 11 icons at 36px, two dividers and the
+bottom group's padding, against a 680px minimum window less the title row, the
+status bar, the gutter and two borders. `scripts/session/view.ts` adds that up
+from the Tailwind classes, holds each class to what the sum assumes, and prints
+"the rail is FULL" when the answer is no more icons. The rule it produced:
+**rearranging the strip is free and growing it is not**, because every group
+gaps the same. **The constant through every icon resize is 3px of air either
+side**, inside the card's two borders — that is the number to reason from, not
+the outer width.
+
+**The two strips are funded differently and that is deliberate**: the window
+minimum carries the title row, because the rail had no slack to spare when it
+arrived; the rail's own slack carries the status bar, because raising the
+minimum to 704 would have cost every small laptop 24px of window for a strip
+that fits without it. **If the slack is ever spent, the views group scrolls** —
+capture has to stay reachable because it is how a capture starts, and the bottom
+group is pinned with `mt-auto`, so an overflow there pushes Settings off the
+edge rather than scrolling.
+
+**The active state is a translucent fill in the theme's own accent** —
+`--primary` at 20%, `--foreground` on the glyph — and **it never appears on
+hover**, because the active marker is the strongest indicator in the UI and
+firing it on hover flashes it five times as a pointer crosses the rail. Two
+facts about this palette fix the details: a **solid** fill reads as a button
+rather than a selection, and `--primary` on a tint of ITSELF cannot reach 4.5:1
+in Day at any alpha (it peaks at 3.97 and falls, `#0b6bcb` being a mid-blue the
+tint lightens toward), so the glyph takes `--foreground`.
+`scripts/themes/registry.ts` reads the alpha **out of `ActivityRail.tsx`** and
+holds four numbers to it, the load-bearing pair being the fill's deltaE from the
+rail's ground and from its own hover — an active marker a hover can be mistaken
+for is not a marker.
+
+**The vocabulary is two marks and `railButton` takes one argument.** The fill
+means *this surface is on screen*, however it is arranged; the **dot** means
+*the thing behind this button has something to report*. `view.ts` asserts the
+signature and that no raw `ring-1 ring-inset` brings a third shape back without
+a name. 44 disagrees with `FrameMetaRail`'s 48, accepted rather than overlooked:
+one is a group of icons inside a pane, the other is three groups in the chrome.
+
+#### The status bar
+
+24px at the window's bottom edge, `components/status/StatusBar.tsx`. The chrome
+is a **C**: the title row across the top, the rail down the left, the bar across
+the bottom, all one `--secondary` ground.
+
+**The left group is the session and the right group is the frame.** Left: the
+agent link, the adapter, capture state with elapsed time, dropped frames, and
+the restore readout — in the order they fail in. Right: the byte readout, the
+outbound-lookups indicator, then the packet counter at the edge, which is what
+makes the numbers findable without reading the bar. The counter brings no cell
+padding, being `PacketCountsReadout` moved here whole rather than a
+`StatusItem`, so the group carries `pr-2`.
+
+Five rules, all asserted by `scripts/session/status-bar.ts`, which greps the
+whole directory because the easy way to break one is to skip the shared cell:
+
+- **Nothing in the bar is pressable.** `StatusItem` renders a `<span>` with no
+  `onClick` at all, so putting one back is a decision rather than a prop. The
+  one real control is the packet counter's **`+N UNSEARCHED` rescan**, the only
+  way in the app to re-run a whole-capture filter scan — and a bar where most
+  things react to a click is worse at advertising the one that does something.
+- **An item renders nothing when its subject is absent**, rather than showing a
+  zero that was never measured. `droppedKernel` is `null` when the driver's
+  counters could not be read and must never be folded into a total as 0.
+- **No length in the bar is built from a pane's size.** A status bar groups by
+  PRIORITY, never by correspondence with what sits above it —
+  `Ln 56, Col 2` is at the window's right edge in every editor that has one. So
+  `--details-pane-size` stays on the root element even though only the panes
+  read it, and the check fails if the bar ever starts reading it.
+- **The hovered byte is a store carrying the byte's VALUE, not an index**
+  (`services/hoveredByte.ts`). The bar cannot read `HexViewer`'s local state,
+  and a byte derived from `activeByteRange` would also fire for the protocol
+  tree's one-byte fields. Carrying the value makes that conflation impossible
+  rather than merely avoided: only code that already had the bytes in hand can
+  publish one.
+- **The outbound indicator carries no glyph** and says `no lookups` or names
+  them (`geo-IP`, `rDNS` or both). The state is the text, because the one item
+  about *this app's own* behaviour should not be the one you hover to read. The
+  warning colour is deliberately not on it: `--warning` on `--secondary` is
+  4.06:1, under the floor.
+
+**`agentStatusLabel` is a TOTAL record with no fallback**, so a new kind will
+not compile without a label. Its predecessor was a `Partial` with
+`?? 'Agent not reachable'` behind it, which read correctly only because its
+callers asked while the agent was silent — this bar asks unconditionally, so a
+healthy agent read as gone. **A `Partial` with a `??` behind it turns a missing
+key into a confident wrong answer.** `scripts/electron/agent-health.ts` holds
+the part a type cannot: that healthy states do not read as faults, and that the
+text agrees with `agentNeedsAttention` about whether a warning glyph is drawn.
+
+#### Render-path facts that are easy to undo
+
+App re-renders ~10x a second during a capture, which is what all of these are
+about. `scripts/session/byte-range.ts` asserts the last three.
+
+- **`LinkedHexViewer` in `components/packet-details/LinkedDetailPanes.tsx` is
+  the application's only `React.memo` boundary.** Every other expensive surface
+  is unmounted unless its view is active, except the dump, mounted whenever
+  Packets is. What the memo rests on: `permissions` in `App.tsx` is a `useMemo`
+  with an empty dep list **for this reason alone**, because it was an object
+  literal rebuilt every render, and a changed prop is a memo that never hits and
+  never says so. The tree beside it is deliberately not memoized —
+  `onSelectFrame` closes over `packets`, so its identity changes on every flush.
+- **The highlighted byte range is a store** (`services/byteRange.ts`), because
+  the cross-highlight between the two bottom panes is state shared by two
+  siblings and it lived in `App`, where every pointer move over a byte
+  re-rendered the whole application — on a 64KB frame the dump alone is ~79
+  virtualized rows of 32 spans. `App` may `resetByteRange` where the selection
+  goes and may not publish. **It is not `hoveredByte.ts` and must not be merged
+  with it**: that store carries a byte's VALUE so only a dump can publish one,
+  this carries a RANGE so the tree can. `PacketDetailPane` subscribes to neither
+  and keeps its own `useState`, owning both halves of its own cross-highlight
+  and already off App's render path.
+- **The dump's hover is delegated, not per byte** — every byte is two elements,
   so a handler pair each was ~5,000 closures built and diffed per render on a
-  large frame; `HexDumpView` binds one `mouseover`/`mouseout` pair on its
-  container and reads `data-byte`. The `mouseout` has to check `relatedTarget`,
-  because it also fires when the pointer moves BETWEEN two cells and an
-  unconditional clear would blank the readout for a frame on every byte crossed.
-  The cells are `transition-colors` rather than `transition-all` for the same
-  class of reason: the hovered cell also takes `scale-110` and a shadow, and
-  `transition-all` declared the transition on all of them.
-- What survives unchanged is `services/packetCounts.ts`:
-  the counter publishes and its readout subscribes, because threading a
-  ten-times-a-second number down through props was the regression that shipped
-  once already (`b0ce1fc`).
+  large frame. `HexDumpView` binds one `mouseover`/`mouseout` pair and reads
+  `data-byte`. The `mouseout` must check `relatedTarget`, because it also fires
+  moving BETWEEN cells and an unconditional clear would blank the readout on
+  every byte crossed. The cells are `transition-colors` and not
+  `transition-all`, since the hovered cell also takes `scale-110` and a shadow.
+- **`services/packetCounts.ts`**: the counter publishes and its readout
+  subscribes, because threading a ten-times-a-second number down through props
+  was the regression that shipped once already (`b0ce1fc`).
 
 `lib/windowChrome.ts` is the renderer's half of the bridge: it reports the
 resolved theme and the window title to main, and subscribes once at module scope
 to maximized/focused.
 
 The React app never dissects and never parses an agent message. That is
-`src/workers/pipeline.worker.ts`, which holds the ordering window, the
-trackers, and `pcapParser.ts`.
+`src/workers/pipeline.worker.ts`, which holds the ordering window, the trackers,
+and `pcapParser.ts`.
 
 ### The frame path, end to end
 
@@ -1270,8 +769,7 @@ accepts only ports in its transfer list; an `ArrayBuffer` is cloned, not
 transferred. At the agent's ~256 kB batch about thirty times a second that is
 single-digit MB/s. Measured on the pipe itself: **4,000 batches of 64 kB —
 262 MB — in 539 ms, or 487 MB/s**, so the transport is not the ceiling. The
-cost of the cross-process clone specifically has **not** been measured; see
-**Direction**.
+cross-process clone's own cost is in **What the store actually costs**.
 
 ## 4. The capture format and the agent protocol
 
@@ -1299,28 +797,28 @@ Both ends refuse a declared length past `MAX_FRAME_BYTES` (8 MB) **before
 allocating anything** — the agent is a privileged service and a five-byte
 header must never ask for four gigabytes.
 
-Above the framing nothing changed when the WebSocket went. The 18-byte record
-in `local-agent/packet_batch.py` and `src/services/agentBinary.ts`, and every
-control message in `src/services/agentProtocol.ts`, are transport-agnostic.
-Both ends assert the same hand-written byte vectors — `scripts/agent/binary.ts`
-and `scripts/agent/pipe-framing.ts` against `local-agent/test_protocol.py` —
-which is the only thing keeping two implementations of one format in agreement.
+The 18-byte record in `local-agent/packet_batch.py` and
+`src/services/agentBinary.ts`, and every control message in
+`src/services/agentProtocol.ts`, are transport-agnostic. Both ends assert the
+same hand-written byte vectors — `scripts/agent/binary.ts` and
+`scripts/agent/pipe-framing.ts` against `local-agent/test_protocol.py` — which
+is the only thing keeping two implementations of one format in agreement.
 
-**Control messages are covered in both directions now, and the missing half
-cost a working capture.** `scripts/agent/control-vectors.json` holds what the
-agent *emits* and is checked against the app's parser; nothing held the agent to
-what the app *sends*. So the Rust agent could read `set_interfaces` as a list of
-adapter **indices** where the app and `agent.py` send device **names** — and be
-agreed with by an interop harness written from the Rust source and by a unit
-test asserting `[0,2]`. Three witnesses, none of them the app. The app's message
+**Control messages are covered in both directions, and the missing half cost a
+working capture.** `scripts/agent/control-vectors.json` holds what the agent
+*emits* and is checked against the app's parser; nothing held the agent to what
+the app *sends*. So the Rust agent could read `set_interfaces` as a list of
+adapter **indices** where the app and `agent.py` send device **names** — agreed
+with by an interop harness written from the Rust source and by a unit test
+asserting `[0,2]`. Three witnesses, none of them the app. The app's message
 failed to parse, the selection stayed unset, and `start_capture` fell back to
 adapter 0: a dead `WAN Miniport`, opened and reported as `sniffing`, delivering
 nothing. `scripts/agent/command-vectors.json` is the inbound fixture that closes
 it — produced by the app's own `encodeAgentCommand`, checked by
 `scripts/agent/command-vectors.ts` against the app and by `agent-rs`'s
-`command_vectors` test against the Rust parser. The lesson generalises past this
-bug: **a fixture only proves something if the end that authored it is not the
-end being tested.**
+`command_vectors` test against the Rust parser. The lesson generalises: **a
+fixture only proves something if the end that authored it is not the end being
+tested.**
 
 `src/services/agentLink.ts` is the vocabulary between main and the Worker.
 
@@ -1338,33 +836,21 @@ only place it is authored; everything else derives from it or is a literal that
 | `src/services/agentProtocol.ts` | `REQUIRED_AGENT_VERSION`, a literal, checked |
 | `installer/setup.iss` | `MyAppVersion`, a literal, checked |
 
-**There were six stamps and two scripts covering different subsets of them.**
-`local-agent/test_protocol.py` read the *legacy* `.iss` — and it is Python, so
-`scripts/check.ts` (which discovers TypeScript) never ran it;
-a second script read both `.iss` files and ran unprompted. Between them
-the shipping installer's stamps went unread by anything at all for months. The
-agent had a number of its own because it was once installed by its own
-installer against a web page of any age; one installer carries both halves now
-and replaces them in one transaction, so two numbers could only ever disagree
-by mistake.
-
-**It is still an ordering, and that is why the product jumped to 4.0.0.** The
-number is the left-hand side of `isAgentOutdated`, so an agent left behind by an
+**It is an ordering, and that is why the product jumped to 4.0.0.** The number
+is the left-hand side of `isAgentOutdated`, so an agent left behind by an
 earlier install must read as *older*; one that reads as newer than required
 shows in the UI as "not connected", a state with no instruction attached to it.
 Collapsing two numbers means the survivor has to be at least the highest either
-half ever shipped — the agent had shipped 3.9.0 while the app was on 1.0.0, so
-the product moved up rather than the agent moving down. The anti-reset floor is
-compared as numbers rather than as a string: `"3.10.0"` sorts before `"3.9.0"`
-lexically, so a string floor would reject the first version past 3.9 and every
-one after it.
+half ever shipped — the agent had shipped 3.9.0 while the app was on 1.0.0. The
+anti-reset floor is compared as numbers rather than as a string: `"3.10.0"`
+sorts before `"3.9.0"` lexically, so a string floor would reject the first
+version past 3.9 and every one after it.
 
 `MyAppVersion` is also what Windows compares to decide whether an install is an
-upgrade, which it always was. `local-agent/installer/setup.iss` keeps a frozen
-`MyAgentVersion "3.9.0"` and `MyAppVersion "1.0.0"`: nothing builds it, and it
-is the record of what an agent-only install actually put on a machine — which
-is what the unified installer reads in order to remove it. `version.ts` asserts
-those two stay frozen.
+upgrade. `local-agent/installer/setup.iss` keeps a frozen `MyAgentVersion
+"3.9.0"` and `MyAppVersion "1.0.0"`: nothing builds it, and it is the record of
+what an agent-only install actually put on a machine — which is what the unified
+installer reads in order to remove it. `version.ts` asserts those stay frozen.
 
 ## 5. Invariants
 
@@ -1413,36 +899,36 @@ land **before** signing — without `runAsNode: false` any local process can run
 the signed exe with `ELECTRON_RUN_AS_NODE=1` and pass every signature check.
 
 **CSP is served as a header, not a meta tag.** `electron/csp.ts`, applied in
-`hardenSession`. `OUTBOUND_HOSTS` is the whole list of places this app can
+`hardenSession`. `OUTBOUND_HOSTS` is the whole list of places the renderer can
 reach: **geojs** (map geolocation), **cloudflare-dns** (DoH reverse lookups),
 **ipapi.co** (the Network panel's public-identity section) and **openfreemap**
 (basemap tiles). Enforced by `scripts/electron/shell.ts`, which also asserts
 that the agent's old port `8999` is **not** in the policy — a `connect-src`
-entry nothing dials is a hole with no user. Three of the four are behind a consent switch and the fourth is not, and
-**which switch is not uniform**: geojs and ipapi.co are behind
-`nameResolution.geoIp`, the DoH resolver is behind `nameResolution.reverseDns`
-— they are two separate Settings rows — and the basemap tiles are behind
-neither, loading whenever the map is shown. See **Direction**.
+entry nothing dials is a hole with no user. Three of the four are behind a
+consent switch and **which switch is not uniform**: geojs and ipapi.co are
+behind `nameResolution.geoIp`, the DoH resolver behind
+`nameResolution.reverseDns` (two separate Settings rows), and the basemap tiles
+behind neither, loading whenever the map is shown. See **Direction**.
 
 **Main reaches two more hosts, and they are deliberately not in the policy.**
 The update feed and `npcap.com` are dialled by `net.fetch` in the main process,
 which is not a page and which no CSP governs — so a `connect-src` entry for
 either would grant the *renderer* permission to reach a host it never touches,
-which is the same hole with no user as `8999`. What is kept is the list:
-`MAIN_OUTBOUND_HOSTS` in `electron/csp.ts` records both with their purposes,
-and `shell.ts` asserts they are **absent** from the policy, that the recorded
-feed host is the one `updateCenter/manifest.ts` actually dials, and that the
-recorded Npcap host is the one its download allowlist admits. Both are behind
-an explicit action: the feed behind `inwire.updates`, which is off until asked,
-and Npcap behind a click.
+the same hole with no user as `8999`. What is kept is the list:
+`MAIN_OUTBOUND_HOSTS` in `electron/csp.ts` records both with their purposes, and
+`shell.ts` asserts they are **absent** from the policy, that the recorded feed
+host is the one `updateCenter/manifest.ts` actually dials, and that the recorded
+Npcap host is the one its download allowlist admits. Both are behind an explicit
+action: the feed behind `inwire.updates`, off until asked, and Npcap behind a
+click.
 
 **Cross-origin isolation is on.** `ISOLATION_HEADERS` in `electron/main.ts`
 sets COOP/COEP on every `app://` response, so `crossOriginIsolated` is true and
 `SharedArrayBuffer` exists. Nothing depends on it yet. Enforced by
 `scripts/electron/smoke.ts`, which evaluates `crossOriginIsolated` in the
 running window — so this is checked on every `npm run check`, not by hand. The
-one gap left is the build it drives: `smoke.ts` launches `dist/`, so the
-*packaged* app is still only verified by hand.
+one gap: `smoke.ts` launches `dist/`, so the *packaged* app is still only
+verified by hand.
 
 **The pipe's ACL is the authentication.** See the banner at the top.
 `local-agent/test_protocol.py` pins the SDDL's shape — `IU` present, `WD`/`AN`/
@@ -1488,12 +974,16 @@ denominator of a coverage percentage is the *reference's* vocabulary, so a
 ratio would fail on the Wireshark upgrade `test/fixtures/README.md` instructs
 you to perform — a build that changed nothing, broken by its own oracle.
 `wireshark-abbrevs.ts` won the same argument by checking `ours ⊆ theirs`.
-Beside the floors sit two **ceilings that may only fall**
-(`filterableNotInTree`, where every entry is a filter the app accepts for a row
-the detail pane refuses to draw, and `valueMismatches`), and one number
-recorded and **never enforced** — the size of the ranked gap list, because a
-ceiling on it would turn a measurement into a backlog, which is what ADR 0021
-ended. A layer with no floor is named in `unimplemented` with a sentence, not
+Beside the floors sits **one ceiling, which may only fall**:
+`filterableNotInTree`, where every entry is a filter the app accepts for a row
+the detail pane refuses to draw. Two more numbers are recorded and **never
+enforced** — `absentDistinct`, the size of the ranked gap list, and
+`valueMismatches` — because a ceiling on either would turn a measurement into a
+backlog, which is what ADR 0021 ended. `valueMismatches` was briefly a ceiling
+and that was wrong: most of its entries are the reference formatting a value
+differently by design (`eth.src` resolved to a vendor, `tcp.seq` annotated
+"(relative sequence number)"), so the number moves on changes that improve the
+tree. A layer with no floor is named in `unimplemented` with a sentence, not
 floored at 0: a zero floor protects nothing and reads as measured-and-accepted.
 
 ## 6. Gotchas found only by running the packaged app
@@ -1525,63 +1015,36 @@ first reply arrived; everything after did not — it works on the handshake,
 which is what gets tested, and stops on the traffic. `local-agent/pipe_server.py`
 now gives every operation its own `OVERLAPPED` with its own event.
 
-**A cached "is the style ready?" that a lost GPU context invalidated.** The
-tell in a terminal is Chromium's own `command_buffer_proxy_impl.cc ... GPU state
-invalid after WaitForGetOffsetInRange` - a driver reset, a GPU process crash or
+**A cached "is the style ready?" that a lost GPU context invalidated.** The tell
+in a terminal is Chromium's own `command_buffer_proxy_impl.cc ... GPU state
+invalid after WaitForGetOffsetInRange` — a driver reset, a GPU process crash or
 a laptop changing adapter, reaching the renderer as a lost WebGL context.
 
-MapLibre handles the WebGL half well: `_contextLost` calls `preventDefault()` so
-the browser will restore, snapshots the style, then **destroys it and sets
-`map.style = null`**; `_contextRestored` puts it back with `setStyle(...,
-{ diff: false })`, whose `style.load` is already `GeoMap`'s recovery path for a
-theme change - skin, declutter, land wall, sky, projection, arcs, a fresh
-`PinLayer`. What MapLibre cannot know is that `GeoMap` caches the answer to "may
-I touch the style?" in `styleReadyRef`, deliberately, because `isStyleLoaded()`
-asks a different and much slower question.
+`_contextLost` **destroys the style and sets `map.style = null`**;
+`_contextRestored` puts it back with `setStyle(..., { diff: false })`. What
+MapLibre cannot know is that `GeoMap` caches the answer to "may I touch the
+style?" in `styleReadyRef`, deliberately, because `isStyleLoaded()` asks a
+different and much slower question. Left true across the gap, every guard waved
+through a call against a style that no longer existed — and `_contextRestored`
+calls `resize()` before its own style has loaded, `resize()` fires `moveend`,
+`GeoMap` answers with `syncConnectionsLayer()`, and `addLayer` threw **Style is
+not done loading.** out of MapLibre's restore.
 
-Left true across the gap, every guard waved through a call against a style that
-no longer existed - and `_contextRestored` calls `resize()` before its own style
-has loaded, `resize()` fires `moveend`, `GeoMap` answers that with
-`syncConnectionsLayer()`, and `addLayer` threw **Style is not done loading.**
-out of MapLibre's restore, abandoning it before its closing `_update()`.
+**The cost was narrower than it first looked, and saying so is the point**: the
+layers come back either way, established by losing the context a second time
+with the bug in and out. What the stale flag bought was an uncaught exception on
+every GPU recovery, not lost data. The fix is one line in a `webglcontextlost`
+handler, because `syncConnectionsLayer` already reschedules when the style is
+not ready. `scripts/electron/gpu-restore-drive.ts`.
 
-**The cost was narrower than it first looked, and saying so is the point.** The
-layers do come back either way: `style.load` fires from the `setStyle`
-regardless. That was established by losing the context a second time and reading
-which custom layers MapLibre names in its own warning - both, with the bug in or
-out. What the stale flag bought was an uncaught exception on every GPU recovery,
-not lost data. The fix is one line in a `webglcontextlost` handler, because
-`syncConnectionsLayer` already reschedules when the style is not ready.
-`scripts/electron/gpu-restore-drive.ts`.
-
-**A `queue.shift()` inside a `find` predicate.** The dock's drag-reorder read
-
-```ts
-items.map((item) => (item.open ? items.find((i) => i.type === queue.shift())! : item))
-```
-
-which shifts once per element `find` **compares**, not once per open slot. The
-queue drained in the first couple of comparisons, `shift()` returned `undefined`,
-nothing matched, and the non-null assertion let `undefined` into the list - so the
-next render read `undefined.open` and took the renderer down. Deterministic on the
-first drag that actually moved anything, and it shipped because nothing in the
-suite could reach a `useCallback` in `App.tsx`.
-
-It was also **persisted**: `createPreferenceStore`'s `set` does not normalise, only
-`loadPreference` does, so the hole was written out as `null`. The key self-heals
-because `normalizeItems` skips those and appends the missing types closed - which
-is the whole argument for repairing rather than rejecting, arriving unasked.
-
-The arithmetic was moved out to `reorderItems` in `dockPrefs.ts`, beside
-`dockOrder`, where `scripts/session/dock.ts` could reach it and every refusal
-returned the list unchanged rather than asserting - and putting the bug back made
-that script throw the same `Cannot read properties of undefined` the renderer
-did. **Both files went with the dock and neither is here to run**; the entry is
-kept for the shape, which outlives its subject: a `shift()` inside a predicate
-runs once per *comparison*, not once per match, and a non-null assertion over a
-`find` is where `undefined` gets into a list. The general lesson is the one above
-it - a `useCallback` in `App.tsx` is unreachable from this suite, so arithmetic
-worth testing has to be lifted somewhere a script can import it.
+**A `queue.shift()` inside a `find` predicate** shifts once per element `find`
+**compares**, not once per match, and a non-null assertion over a `find` is
+where `undefined` gets into a list — which the next render reads as
+`undefined.open` and takes the renderer down. It was **persisted** too, because
+`createPreferenceStore`'s `set` does not normalise and only `loadPreference`
+does. The subject is deleted; the reason it shipped is not: **a `useCallback` in
+`App.tsx` is unreachable from this suite**, so arithmetic worth testing has to
+be lifted somewhere a script can import it.
 
 **`readSync` returns short counts.** Not an error, a partial read. `readExact`
 threw on short and recovery read that as a torn tail. `nodeBlockFile.ts` loops;
@@ -1611,51 +1074,73 @@ shape of success — so a missing service read as unknown and a failure to ask
 read as missing, sending somebody to reinstall over a working install.
 `scripts/electron/agent-health.ts`.
 
-**`Start-Process -ArgumentList ''` throws.** It does not run the program with
-no arguments — it fails parameter validation with *"Cannot validate argument on
+**`Start-Process -ArgumentList ''` throws.** It does not run the program with no
+arguments — it fails parameter validation with *"Cannot validate argument on
 parameter 'ArgumentList'. The argument is null or empty."* The component that
 takes no arguments is **Npcap**, deliberately, because the alternative is `/S`
 — so the Update Center failed on the one install it exists to perform, one
-second after the click, with "the installer could not be started" and no UAC
-prompt at all.
-
-Nothing in the 177-assertion suite could have caught it. The argument list was
-right, the marker parsing was right, and PowerShell's *parser* accepts the line
-— `[Parser]::ParseInput` returns no errors, and that check was already being
-run. It is the cmdlet's parameter validation that rejects it, at run time, only
-when the variable happens to be empty. Found by clicking the button on a real
-machine, which is the only thing that would have.
-
-Fixed by splatting a hashtable and omitting the key when there is nothing to
-pass, which keeps the command line a constant. `elevate.ts`; four assertions in
-`scripts/electron/update-center.ts`, including that no bare `-ArgumentList`
+second after the click, with no UAC prompt at all. Nothing in the suite could
+have caught it: the argument list was right, the marker parsing was right, and
+PowerShell's *parser* accepts the line (`[Parser]::ParseInput` returns no
+errors, and that check was already running). It is the cmdlet's parameter
+validation that rejects it, at run time, only when the variable happens to be
+empty. Fixed by splatting a hashtable and omitting the key when there is nothing
+to pass, which keeps the command line a constant. `elevate.ts`; four assertions
+in `scripts/electron/update-center.ts`, including that no bare `-ArgumentList`
 survives in either script.
+
+**A structured clone drops prototypes, and that made the whole disk path
+inert.** A buffered `Packet` carries its 33 commonest fields in a `FieldBlock` —
+a **class instance** — so once the store became a `utilityProcess` every frame
+arrived with a `cols` object that had no `read` on it and `encodeChunk` threw,
+for the life of every capture. It looked normal: `frames.iwbyt` grew,
+`index.iwidx` stayed empty, `ordinalOf` answered **-1**, which the app reads as
+"not addressable yet" and turns into `below = 0`, so the list showed the RAM
+window and said the window was the whole capture. Two things had to be true for
+it to hide, and both are now closed:
+
+- **Nothing crossed a boundary in a test.** Every assertion script handed
+  `CaptureHost` objects it had just built, in one JavaScript context.
+  `scripts/capture/store-protocol.ts` now puts every appended frame through
+  `v8.serialize`/`deserialize` first — the same serialiser a `postMessage` uses.
+- **Nothing reached the disk path in the app.** `smoke.ts` captures a few
+  thousand frames, which fit in the buffer. `scripts/electron/disk-drive.ts`
+  drives a capture past the RAM budget and asserts the two counts diverge.
+
+The fix is `src/services/capture/storePacket.ts`: frames are flattened at the
+boundary, dense columns folded back into `fields` — flattened rather than
+rehydrated because the block holds 4,096 rows and a batch is ~300 frames, so the
+same half-megabyte would cross fourteen times as it fills. **The second half is
+the part worth remembering**: `prepareBatch` calls `persist` *before* `absorb`
+and `CaptureClient.send` awaits the port, so the store is handed frames that do
+not yet have a block and the `postMessage` serialises them a microtask later —
+so a `plainForStore` that returned the packet unchanged when there was nothing
+to fold would have fixed nothing. **A message is a snapshot: it always copies.**
+`fieldAccess.ts` now throws a named error for a block with no methods, and
+`CaptureHost` logs the stack to stderr as well as the message to the app.
 
 ## 7. Testing
 
-Assertion scripts under `scripts/`, discovered by `scripts/check.ts` walking
-the directory; a handful are listed there as SKIP with a reason each
-(measurements with no right answer, or things needing the untracked fixtures). Plain `tsx`, no runner, no Electron, no browser. A script
-prints `PASS`/`FAIL` lines and exits non-zero.
+Assertion scripts under `scripts/`, discovered by `scripts/check.ts` walking the
+directory; a handful are listed there as SKIP with a reason each (measurements
+with no right answer, or things needing the untracked fixtures). Plain `tsx`, no
+runner, no Electron, no browser. A script prints `PASS`/`FAIL` lines and exits
+non-zero.
 
 **`docs/verification.md` is the other half**, and it is a real document rather
-than an aspiration: everything this repository knows to check and cannot check by
-itself - the window's own chrome against both themes and three scaling
-factors, Snap Layouts, the drag regions, the two bottom panes and their
-divider, the pipe's security descriptor taking effect (which needs a second
-Windows account), and the UAC prompt. Each item says what a failure *looks like*, because everything in it
-fails silently - which is the reason it is there and not in a script.
+than an aspiration: everything this repository knows to check and cannot check
+by itself — the window's own chrome against both themes and three scaling
+factors, Snap Layouts, the drag regions, the two bottom panes and their divider,
+the pipe's security descriptor taking effect (which needs a second Windows
+account), and the UAC prompt. Each item says what a failure *looks like*,
+because everything in it fails silently.
 
-Three rules keep it that way, and all three are now checked:
-
-1. `src/services/` and `src/lib/` must import no Electron and no `node:*` —
-   `scripts/capture/node-safe.ts`.
-2. `nodeBlockFile.ts` must not be reachable from `src/main.tsx` — the same
-   script, by walking the import graph from the renderer's entry point. The
-   failure names the chain, because "something reaches it" is not actionable
-   and "App.tsx -> captureClient.ts -> nodeBlockFile.ts" is.
-3. Both tsconfigs carry the same strictness flags —
-   `scripts/electron/tsconfigs.ts`.
+**Three rules keep the suite runnable under plain `tsx`**, and all three are
+invariants with enforcers in §5: no Electron or `node:*` under `src/services/`
+and `src/lib/`, `nodeBlockFile.ts` unreachable from `src/main.tsx`, and matching
+strictness flags in both tsconfigs. The reachability check walks the import
+graph and names the chain, because "something reaches it" is not actionable and
+"App.tsx -> captureClient.ts -> nodeBlockFile.ts" is.
 
 The fixtures are two real captures, untracked because they contain personal
 addresses (ADR 0004): `inwire` (general browsing) and `bulk` (a long TLS
@@ -1666,10 +1151,9 @@ per-column mismatch floors and the expert-category counts in
 
 **`scripts/capture/store-protocol.ts`** drives the store's whole message union
 through `CaptureHost` against a memory volume. It proves the protocol, not
-Electron's IPC — there is no `MessagePort` and no second process — and it opens
-with the rule that has a hanging UI behind it: every request answers, even when
-it fails. The scan's state machine is four of its assertions, each checked by
-putting the bug back.
+Electron's IPC, and it opens with the rule that has a hanging UI behind it:
+every request answers, even when it fails. The scan's state machine is four of
+its assertions, each checked by putting the bug back.
 
 **`scripts/session/capture-row-space.ts`** drives the arithmetic that decides
 what row *i* of the list is. Getting that wrong shows the wrong frame at the
@@ -1680,228 +1164,89 @@ exactly as many rows as the filter has matches over the whole capture.
 frames built byte by byte from an RFC, written to a real `.pcap`, handed to
 tshark, compared as exact strings.
 
-**Three files now build their own capture for the same reason, and what they
-have in common is worth stating: a measurement that cannot see a feature
-cannot defend it.** `tree-coverage.ts` reads the fixtures, and the fixtures
-turned out not to contain a single ICMP error frame, a single frame of real
-HTTP, or a single readable certificate - both captures negotiate TLS 1.3,
+**Three files build their own capture, and what they have in common is worth
+stating: a measurement that cannot see a feature cannot defend it.** The
+fixtures turned out not to contain a single ICMP error frame, a single frame of
+real HTTP, or a single readable certificate — both captures negotiate TLS 1.3,
 which encrypts the Certificate message, so tshark emits no `x509af.*` on them
 either. So `scripts/icmp/dissect.ts`, `scripts/http/dissect.ts` and
-`scripts/tls/certificate.ts` each build the frames, write a `.pcap`, dissect
-it with the real parser and cross-check the values against tshark's own
-answers for that file. Each skips the cross-check cleanly with no tshark and
-still runs its own assertions.
+`scripts/tls/certificate.ts` each build the frames, write a `.pcap`, dissect it
+with the real parser and cross-check against tshark's own answers for that file.
+Each skips the cross-check cleanly with no tshark and still runs its own
+assertions. The certificate one authors its DER rather than pasting a blob from
+`openssl`, so the structure reads as RFC 5280's own ASN.1 — the fields under
+test are the ones an `openssl req` one-liner does not emit.
 
 They pay for themselves in findings rather than in coverage: the reference
 splits a URI query on `+` as well as `&`, it files an unknown header under
-`http.request.line` on a connection and `http.unknown_header` in its SSDP
-NOTIFY path, and it emits every URI in a certificate - the SAN's, both access
-locations, the CRL point - under one name. None of that is visible to a count
-of abbrevs.
-
-The certificate one authors its DER rather than pasting a blob from `openssl`,
-so the structure reads as RFC 5280's own ASN.1. That is the same rule
-`synthetic.ts` states for frames, and it matters more here: the fields under
-test are the ones an `openssl req` one-liner does not emit.
+`http.request.line` on a connection and `http.unknown_header` in its SSDP NOTIFY
+path, and it emits every URI in a certificate under one name. None of that is
+visible to a count of abbrevs.
 
 **`scripts/electron/smoke.ts` drives the real app.** Playwright's
 `_electron.launch`, a real Electron process over a real named pipe against
 `scripts/electron/stubAgent.ts`, which speaks the production protocol: pick an
 adapter, Start, wait for rows, read the Info column. A pass means bytes went
-from a socket through main, a `MessagePort`, the Worker, the dissector and
-React onto the screen.
+from a socket through main, a `MessagePort`, the Worker, the dissector and React
+onto the screen. It exists because three of the worst bugs in the migration were
+invisible to every other script here — the maplibre worker URL, `node:os` in the
+preload, and COEP blocking `pipeline.worker` — and two of them were verified by
+reintroduction. Four things about running it:
 
-It exists because three of the worst bugs in the migration were invisible to
-every other script here and were all found by hand — the maplibre worker URL,
-`node:os` in the preload, and COEP blocking `pipeline.worker`. Verified by
-reintroducing two of them: the preload one reports the bridge `undefined`, and
-the COEP one reports the agent never connecting, because the Worker never
-loaded.
+- A **temporary profile** via `INWIRE_USER_DATA`, because the app prunes its
+  capture directory at startup and would otherwise delete a developer's stored
+  capture on every `npm run check`.
+- It tests whatever is in `dist/` — `npm run check` does not build, so it prints
+  the build's age and says so when that is over two hours.
+- Every locator carries a **30-second timeout**, because Playwright's default is
+  **none** and a control that never renders would hang the whole suite with no
+  output rather than fail.
+- It clears `setUnsavedCapture` before closing, because closing with frames in
+  the buffer opens `guardClose`'s native "Quit Inwire?" box, which is not in the
+  page and which no test can answer. Killing the process instead was tried and
+  is worse — `kill()` reaches main and orphans the GPU, renderer, store and
+  crashpad children.
 
-Four things about running it. It uses a **temporary profile** via
-`INWIRE_USER_DATA`, because the app prunes its capture directory at startup and
-would otherwise delete a developer's stored capture on every `npm run check`.
-It tests whatever is in `dist/` — `npm run check` does not build, so it prints
-the build's age and says so when that is over two hours. Every locator carries
-a 30-second timeout, because Playwright's default is **none** and a control
-that never renders would hang the whole suite with no output rather than fail.
-And it clears `setUnsavedCapture` before closing: closing with frames in the
-buffer opens `guardClose`'s native "Quit Inwire?" box, which is not in the page
-and which no test can answer. Killing the process instead was tried and is
-worse — `kill()` reaches main and orphans the GPU, renderer, store and crashpad
-children.
+**An import is not capped by memory.** `PcapService.streamCaptureFile` hands
+frames over as it dissects them; `App` writes each batch to the capture store
+and keeps the newest `framesForBudget(...)` in the buffer. What bounds the pass
+is `IMPORT_PATCH_WINDOW` — frames stay in reach of a patch for 100,000 frames,
+the same rule `captureWriter.ts` follows, because dissection amends frames it
+has already emitted by indexing into the array it is building.
+`scripts/capture/import-stream.ts` compares the streamed result field for field
+against the whole-array one **with the window forced small enough that frames
+actually leave it** — at the real 100,000 a test capture never fills it, and the
+first version of that comparison passed with the offset arithmetic removed
+entirely. Still true: the file is read with one `arrayBuffer()`, and the
+dissection blocks the main thread.
 
-**An import is no longer capped by memory.** `PcapService.streamCaptureFile`
-hands frames over as it dissects them; `App` writes each batch to the capture
-store and keeps the newest `framesForBudget(...)` in the buffer. A 400,000-frame
-file imports whole where it used to stop at ~181,000 and say the rest had not
-been loaded. What bounds the pass is `IMPORT_PATCH_WINDOW` - frames stay in
-reach of a patch for 100,000 frames, the same rule `captureWriter.ts` follows,
-because dissection amends frames it has already emitted by indexing into the
-array it is building. `scripts/capture/import-stream.ts` compares the streamed
-result field for field against the whole-array one, with the window forced
-small enough that frames actually leave it - at the real 100,000 a test capture
-never fills it, and the first version of that comparison passed with the offset
-arithmetic removed entirely.
+**Four drivers reach what plain `tsx` cannot.** All are in `NOT_TESTS` and run
+by hand:
 
-Still true of an import: the file is read with one `arrayBuffer()`, and the
-dissection blocks the main thread. Streaming changed where the frames end up,
-not who does the work.
-
-**`scripts/electron/gpu-restore-drive.ts` reaches the GPU.** It loses a real
-WebGL context under the running map and restores it, which is the one failure in
-this app that needs a live GL context to exist at all - so it cannot be a plain
-`tsx` script like everything else. In `NOT_TESTS`; run it by hand after anything
-touching GeoMap's style or layer lifecycle. It skips rather than fails on a
-machine with no map on screen, because the map only exists once geo-IP lookup
-has been consented to.
-
-**`scripts/electron/disk-drive.ts` and `import-drive.ts` reach the disk.** `smoke.ts` captures a
-few thousand frames, which fit in the RAM buffer, so it never touches a stored
-row; one drives a capture past the 128 MB budget until the window trims, then
-filters the whole capture and reads the top of the result back off disk; the
-other imports a 400,000-frame file and scrolls back to frame 1. One to two
-minutes each, so both are in `NOT_TESTS` and run by hand — after anything on
-the store path. They are what prove the half of the app that `smoke.ts`
-structurally cannot.
-
-**`scripts/electron/update-center-drive.ts` reaches the network and the
-registry.** It stands up an HTTP feed on a loopback port, points
-`INWIRE_UPDATE_FEED` at it and drives the real app against it - and it builds
-the manifest from **this machine's own installed Npcap version**, which is
-what lets the central assertion be exact: told the version it has, the row
-must read `up-to-date`; told one digit more, it must offer it. That pair is
-the `wpcap.dll` trap, and a build that read the libpcap number fails the
-first half on any machine with Npcap on it. It also drives the **driver-access
-row**, against whichever mode this machine is in: the label, the
-recommendation and the reinstall control appear together or not at all. In
-`NOT_TESTS`; run it by hand after anything on the update path. It installs
-nothing - the UAC prompt is the one step that stays with a person.
+- **`scripts/electron/gpu-restore-drive.ts`** loses a real WebGL context under
+  the running map and restores it. Run after anything touching GeoMap's style or
+  layer lifecycle. It skips rather than fails on a machine with no map on
+  screen, because the map only exists once geo-IP lookup has been consented to.
+- **`scripts/electron/disk-drive.ts`** drives a capture past the 128 MB budget
+  until the window trims, then filters the whole capture and reads the top of
+  the result back off disk.
+- **`import-drive.ts`** imports a 400,000-frame file and scrolls back to frame 1.
+  Both take one to two minutes and prove the half of the app `smoke.ts`
+  structurally cannot. Run after anything on the store path.
+- **`scripts/electron/update-center-drive.ts`** stands up an HTTP feed on a
+  loopback port, points `INWIRE_UPDATE_FEED` at it and drives the real app — and
+  it builds the manifest from **this machine's own installed Npcap version**,
+  which is what lets the central assertion be exact: told the version it has,
+  the row must read `up-to-date`; told one digit more, it must offer it. That
+  pair is the `wpcap.dll` trap, and a build that read the libpcap number fails
+  the first half on any machine with Npcap on it. It also drives the
+  **driver-access row** against whichever mode this machine is in. It installs
+  nothing — the UAC prompt is the one step that stays with a person.
 
 **To drive the app by hand**, `npx tsx scripts/electron/serveStub.ts` serves the
-same stub until Ctrl+C (`--burst n` for n frames per 100 ms tick); launch the app beside it and pick "Ethernet (stub)".
-Otherwise testing by hand needs the real service, which needs Administrator,
-Npcap and traffic — and a development machine that still has a pre-3.8.0 agent
-installed has no pipe at all, so the app shows "not connected" and there is
-nothing to click.
-
-## 8. Migration status
-
-*As of 2026-09-15.*
-
-Phases 1–5 of the Electron migration are done, and so is 7 but for its last
-item. The plan is
-`~/.claude/plans/lets-pick-up-where-agile-shore.md`, which was repurposed for
-the Update Center — its banner is the status of record for what was left.
-
-| Phase | What | Landed |
-|---|---|---|
-| 1 | The Electron shell, `app://inwire` | `ce9d4d8` |
-| 2 | The capture store on real files, in its own process | `9971b45`, `bcf3c58` |
-| 3 | The named pipe; the token deleted; the agent bundled | `677cc41`…`4bbbfc7` |
-| 4 | Native save dialogs | `8b7be01` |
-| 5 | The web page deleted | `6d97c46`…`4010d7b` |
-| 6 | Installer, signing, updates | **deprioritised** — `d2423f2`; see below |
-| 7 | Rebuild what the browser forced | `73e5c26`…`3879433`, `380976e`, `b07f165`; the offline basemap is what is left |
-| 8 | Import-to-disk; `captureScan` wired to the filter bar | **in progress** — `1bfcbf9`, `93cd08b`, `7c5dd21`, `992b1d5`; scaled scrolling is what is left |
-
-**Phase 6 is deprioritised, not blocked.** It waits on a code-signing
-certificate (EV or Azure Trusted Signing) outside this repository — but signing,
-the fuses, the VM matrix and the Npcap OEM licence were all set aside
-deliberately, because this is a machine the author works on rather than a fleet
-they ship to. The installer compiles; the fuses are still to flip, and must land
-**before** signing. Read the row as a choice, not a gap.
-
-**Phase 7 landed on 2026-09-13**, in the thirteen commits that row spans: the
-window's own title bar, the activity rail (56px then, 44 now), the dock that replaced the
-right-hand column, the hamburger's deletion, and Custom Dissectors and Network
-becoming Settings tabs. §3 describes the result. Its **no-GPU fallback landed
-with it** — `src/components/analytics/renderTier.ts`, two tiers rather than
-three, asserted by `scripts/perf/render-tier.ts`. What remains of the phase is
-the **offline basemap**: `tiles.openfreemap.org` is still in `OUTBOUND_HOSTS`
-(`electron/csp.ts`) and there is no `d3-geo`. See **Direction**.
-
-**The shell had a second pass after that date, and §3 is where it is described,
-not here.** This table is a record of what landed when, so its Phase 7 row still
-names the dock - which was built in that phase and deleted after it. What changed
-since: the dock and its whole widget apparatus deleted, **Custom Dissectors
-deleted** - tab, panel, engine and types, none of which any dissection path
-ever consulted - **Frame Detail promoted
-from a modal to a view** (so `Ctrl+2` is it and the three views after it each
-moved a key), **Find packet deleted** in favour of that view's go-to-frame box,
-the app-wide status bar reverted to `HexViewer`'s own footer, the filter row
-scoped to Packets alone, and the chrome moved from `--card` to `--secondary` with
-the `INWIRE` wordmark deleted. Read §3 for the result; read this row for the
-order things happened in.
-
-**The Npcap question is answered rather than blocking.** It was "does the
-silent install need an OEM licence", and the answer is yes - so the installer
-stopped installing it. See **The Update Center** and ADR 0032.
-
-**Phase 8's filter works end to end**, watched: a 178,200-frame capture with a
-115,476-frame window, `udp.srcport == 49152` matching 44 frames across the
-whole capture where the window alone holds 28, and the top of the filtered list
-reading frames 4,096 apart off disk. `scripts/electron/disk-drive.ts` is that
-run, kept.
-
-Getting there turned up the bug that had made the entire disk path inert since
-the store became a process — see **The bug that hid the whole disk path**.
-
-**The ADRs the migration owed are written**: 0027 (the app is a desktop app),
-0028 (where the store runs, with the boundary measured), 0030 (one installer),
-0031 (the whole-capture filter). 0029 was already there. 0032 followed, for
-the update path.
-
-### The bug that hid the whole disk path
-
-Recorded because it shipped, it was reported thousands of times, and nobody
-could see it.
-
-**The store stored no rows at all.** A buffered `Packet` carries its 33
-commonest fields in a `FieldBlock` — a **class instance** — and a structured
-clone drops prototypes. The moment the store became a `utilityProcess` rather
-than a Worker in the same context, every frame arrived with a `cols` object
-that had no `read` on it, `encodeChunk` threw `block.read is not a function`,
-`CaptureHost` caught it and posted a non-fatal `failure`, and the next append
-did the same. For the life of every capture.
-
-What that looked like: a capture directory whose `frames.iwbyt` grew and whose
-`index.iwidx` stayed empty. `chunkCount` 0. `ordinalOf` answering **-1** for
-every frame, which the app reads as "not addressable yet" and turns into
-`below = 0` — so the list showed the RAM window, said the window was the whole
-capture, and looked entirely normal. The restore, the scrollback below the
-window and the whole-capture filter were all inert.
-
-Two things had to be true for it to hide:
-
-- **Nothing crossed a boundary in a test.** Every assertion script handed
-  `CaptureHost` the objects it had just built, in one JavaScript context, where
-  the prototype survives. `scripts/capture/store-protocol.ts` now puts every
-  appended frame through `v8.serialize`/`deserialize` first, which is the same
-  serialiser a `postMessage` uses — and that reproduces it in a second.
-- **Nothing reached the disk path in the app.** `smoke.ts` captures a few
-  thousand frames, which fit in the buffer. `scripts/electron/disk-drive.ts`
-  now drives a capture past the RAM budget and asserts the two counts diverge,
-  which is the one thing that cannot be faked.
-
-The fix is `src/services/capture/storePacket.ts`: frames are flattened at the
-boundary, dense columns folded back into `fields`. Flattened rather than
-rehydrated because the block holds 4,096 rows and a batch is ~300 frames, so
-the same half-megabyte would cross fourteen times as it fills.
-
-**It has a second half, which is the part worth remembering.** `prepareBatch`
-calls `persist` *before* `absorb`, and `CaptureClient.send` awaits the port —
-so the store is handed frames that do not yet have a block, and the
-`postMessage` serialises them a microtask later, after the field writer has
-attached one. A `plainForStore` that returned the packet unchanged when there
-was nothing to fold therefore fixed nothing. **A message is a snapshot**: it
-always copies.
-
-`fieldAccess.ts` now throws a named error for a block with no methods, naming
-the rule and the fix rather than `read is not a function`, and `CaptureHost`
-logs the stack to stderr — which main pipes to a log — as well as the message
-to the app. The original was visible only as `state.error` in a panel nobody
-had open.
+same stub until Ctrl+C (`--burst n` for n frames per 100 ms tick); launch the
+app beside it and pick "Ethernet (stub)". Otherwise testing by hand needs the
+real service, which needs Administrator, Npcap and traffic.
 
 ### What the store actually costs
 
@@ -1929,11 +1274,11 @@ it is.
 
 ### The store's memory ceiling is enforced by us
 
-`execArgv: ['--max-old-space-size=2048']` in `electron/store/host.ts` **does
-not work**. The flag arrives — the store's own `process.execArgv` reads it
-back — and `heap_size_limit` is 4192 MB, V8's 64-bit default, because V8 fixes
-the limit when it creates the isolate. `v8.setFlagsFromString` at the top of
-the entry point does not move it either. Both measured against the running app,
+`execArgv: ['--max-old-space-size=2048']` in `electron/store/host.ts` **does not
+work**. The flag arrives — the store's own `process.execArgv` reads it back —
+and `heap_size_limit` is 4192 MB, V8's 64-bit default, because V8 fixes the
+limit when it creates the isolate. `v8.setFlagsFromString` at the top of the
+entry point does not move it either. Both measured against the running app,
 after the store was seen to die at 4,060 MB.
 
 `electron/store/heapGuard.ts` samples the heap every two seconds, warns once at
@@ -1941,10 +1286,34 @@ after the store was seen to die at 4,060 MB.
 the ceiling with a message — which a V8 abort cannot give. The wall is the
 lower of our 2 GB and 90% of V8's own limit. `scripts/capture/heap-guard.ts`.
 
-Still unfixed: the store's inbound queue is unbounded, and each pending
-`append` holds its frames. It has not been seen to matter since the throughput
-was measured — the store takes 31,000 frames a second and the app feeds it far
-less — so the 4 GB heap remains unexplained rather than diagnosed.
+Still unfixed: the store's inbound queue is unbounded, and each pending `append`
+holds its frames. It has not been seen to matter since the throughput was
+measured — the store takes 31,000 frames a second and the app feeds it far less
+— so the 4 GB heap remains unexplained rather than diagnosed.
+
+## 8. Status
+
+The Electron migration is done bar two items, and `docs/history.md` has the
+phase-by-phase record.
+
+**Signing and the fuses are deprioritised, not blocked.** They wait on a
+code-signing certificate (EV or Azure Trusted Signing) outside this repository —
+but signing, the fuses, the VM matrix and the Npcap OEM licence were all set
+aside deliberately, because this is a machine the author works on rather than a
+fleet they ship to. The installer compiles; the fuses are still to flip, and
+must land **before** signing.
+
+**The offline basemap is the last of "rebuild what the browser forced".**
+`tiles.openfreemap.org` is still in `OUTBOUND_HOSTS` (`electron/csp.ts`) and
+there is no `d3-geo`. See **Direction**. The no-GPU fallback landed —
+`src/components/analytics/renderTier.ts`, two tiers rather than three, asserted
+by `scripts/perf/render-tier.ts`.
+
+**The whole-capture filter works end to end**, watched: a 178,200-frame capture
+with a 115,476-frame window, `udp.srcport == 49152` matching 44 frames across
+the whole capture where the window alone holds 28, and the top of the filtered
+list reading frames 4,096 apart off disk. `scripts/electron/disk-drive.ts` is
+that run, kept. **Scaled scrolling is what is left.**
 
 ## 9. The Update Center
 
@@ -1956,12 +1325,13 @@ declared and have no consumer yet. `electron/updateCenter/` is the pipeline,
 `src/services/updateCenter.ts` is what the renderer accepts and calls things,
 `UpdateCenterPanel.tsx` arranges it and decides nothing.
 
-**The installer no longer installs Npcap.** It used to download it and run it
-with `/S` — Npcap's **OEM silent-install feature**, used against the free
-installer, whose licence does not grant it. The pin was also a compile-time
-`#define` (1.79, against a current 1.88), so correcting it meant shipping a new
-installer; and `[Run]` ignores exit codes, so a failed driver install produced a
-"successful" product install with no capture capability and nothing on screen.
+**The installer no longer installs Npcap.** It used to, with `/S` — Npcap's
+**OEM silent-install feature**, which the free licence does not grant. Two other
+things were wrong with it and are worth knowing before anyone proposes moving
+driver installs back into Inno: the version pin was a compile-time `#define`, so
+correcting it meant shipping a new installer, and `[Run]` ignores exit codes, so
+a failed driver install produced a "successful" product install with no capture
+capability and nothing on screen.
 
 ### The pipeline
 
@@ -2076,18 +1446,18 @@ works but kills a service the app deliberately has no rights to stop.
 
 ### The feed
 
-One JSON document at `UPDATE_FEED_URL` — `https://updates.inwire.app/manifest.json`,
-overridable by `INWIRE_UPDATE_FEED` in dev. **The domain does not resolve
-yet** — it is not registered — so every check is a quiet no-op until it does,
-which is the same path an offline machine takes and is already the ordinary
-case rather than an error.
+One JSON document at `UPDATE_FEED_URL` —
+`https://updates.inwire.app/manifest.json`, overridable by
+`INWIRE_UPDATE_FEED` in dev. **The domain does not resolve yet** — it is not
+registered — so every check is a quiet no-op until it does, which is the same
+path an offline machine takes.
 
-**Development does not take that path any more.** `npm run dev` and
-`npm run start:app` stand up `electron/devFeed.cjs` on a loopback port and
-point `INWIRE_UPDATE_FEED` at it, so a launch reaches a feed that answers
-instead of printing `net::ERR_NAME_NOT_RESOLVED` on every run — the shape that
-teaches somebody to stop reading their own log. An `INWIRE_UPDATE_FEED`
-already in the environment wins and no server is started.
+**Development does not take that path.** `npm run dev` and `npm run start:app`
+stand up `electron/devFeed.cjs` on a loopback port and point
+`INWIRE_UPDATE_FEED` at it, so a launch reaches a feed that answers instead of
+printing `net::ERR_NAME_NOT_RESOLVED` on every run — the shape that teaches
+somebody to stop reading their own log. An `INWIRE_UPDATE_FEED` already in the
+environment wins and no server is started.
 
 Its default manifest **offers nothing, and that is a constraint rather than a
 choice**: `DOWNLOAD_HOSTS` is `null` for `inwire`, `agent`, `oui` and `geoip`,
@@ -2096,14 +1466,12 @@ that is not https. A loopback feed is http, so those four rows can never
 validate there — and one malformed row for a known id rejects the *whole*
 document, which would trade `not reachable` for `could not be read`. Npcap is
 the exception, because its allowlist names npcap.com outright, so
-`--npcap <version>` is the one row that can be served. Every row then rests at
-`unknown`, exactly where an unreachable feed left it.
+`--npcap <version>` is the one row that can be served.
 
-It is the
-only remote input in this repository that can nominate an executable to be run
-elevated, so it is validated strictly and **rejected whole** — the opposite of
-how preferences are read, because a defaulted field here could mean "download
-this URL with no hash".
+It is the only remote input in this repository that can nominate an executable
+to be run elevated, so it is validated strictly and **rejected whole** — the
+opposite of how preferences are read, because a defaulted field here could mean
+"download this URL with no hash".
 
 The hash is not the interesting defence: whoever controls the feed writes the
 hash too. What stops a compromised feed nominating an arbitrary binary is the
@@ -2135,69 +1503,59 @@ than it is.
 The **Inwire row cannot be exercised yet**: there is no feed host and no
 signature, so it reads "Not checked". The Npcap row works today.
 
-### The state that had been a tooltip
+### "Driver missing" is not a link diagnosis
 
-`agentHealth` cannot express "driver missing" and still cannot, because it is a
-*link* diagnosis and the link is fine: `diagnoseAgent` short-circuits on
-`status === 'connected'`, and a driverless agent **is** connected — it answers,
+`agentHealth` cannot express it, because `diagnoseAgent` short-circuits on
+`status === 'connected'` and a driverless agent **is** connected — it answers,
 it is healthy, it has nothing to listen on. `DriverInfoPanel` (the Capture
 Health tab) describes that directly from the two facts it already has, and links
-to the tab that fixes it.
-Before this, the entire signal for the state a fresh install lands in was a
-hover tooltip on a header button.
+to the tab that fixes it. That tab is also the app's only full account of frames
+it lost, which has no other home: four figures do not fit a 24px strip. ADR 0035.
 
 ## 10. Direction
 
 Validated sequencing, recorded so a future session inherits the reasoning.
 These are **not** work in progress and get an ADR when each is started.
 
-**~~A Rust agent~~ — written, and in `agent-rs/`. ADR 0037.** This entry was the
-plan; the plan is done and the row below it is what is left of it. The
-throughput argument it rested on was **measured and dropped**: the Python
-sniffer thread costs 2.87 µs of work per frame at a utilisation of 0.003, and
-the frames that were being lost were lost to a sleep in the pump. What justified
-it instead: **449 KB in one file** against a 34 MB `--onedir` tree of unsigned
-`.pyd` files (signing a wrapper does not sign what the wrapper loads);
-**213 ms just to `import agent.py`**, which became load-bearing when demand start
-put the agent's cold start on the critical path of opening Inwire (ADR 0035);
-and two defects that are unrepresentable rather than fixed — a `Capture` is
-`Send` and not `Sync`, so a libpcap handle cannot cross to the event loop.
+**The Rust agent is written, in `agent-rs/`, and is not yet what ships.**
+ADR 0037. The throughput argument the plan rested on was **measured and
+dropped**: the Python sniffer thread costs 2.87 µs of work per frame at a
+utilisation of 0.003, and the frames being lost were lost to a sleep in the
+pump. What justified it instead: **449 KB in one file** against a 34 MB
+`--onedir` tree of unsigned `.pyd` files (signing a wrapper does not sign what
+the wrapper loads); **213 ms just to `import agent.py`**, load-bearing once
+demand start put the agent's cold start on the critical path of opening Inwire
+(ADR 0035); and a defect that is unrepresentable rather than fixed — a `Capture`
+is `Send` and not `Sync`, so a libpcap handle cannot cross to the event loop.
 
-**What is proven: the wire format, the pipe and the whole capture path, against
-the app's own client**, with conservation asserted to a residual of 0 over
-632,924 frames. **And the SCM's side, which this entry used to list as the
-gap.** Registered in the installed agent's place and driven elevated: the
-installer's own `--startup manual install` line registers `DEMAND_START`; an
-**unelevated** `sc start` reaches `RUNNING` in **16 ms at checkpoint 0**; the
-app's client moved **184,614 frames / 4,039 MB, residual 0** over the production
-pipe; the idle self-stop reports `STOPPED` **2,436 ms** later **with exit code
-0**, which is what stops the installer's `restart/5000` policy from resurrecting
-a demand-start service for ever. `docs/verification.md` holds the table, and the
-machine was put back. `npcap_access.py` is not ported and the Rust agent sends
-`None`, which falls back to the registry.
+**What is proven**: the wire format, the pipe and the whole capture path against
+the app's own client, with conservation asserted to a residual of 0 over 632,924
+frames — **and the SCM's side**, registered in the installed agent's place and
+driven elevated. An **unelevated** `sc start` reaches `RUNNING` in **16 ms at
+checkpoint 0**; the client moved **184,614 frames / 4,039 MB, residual 0** over
+the production pipe; the idle self-stop reports `STOPPED` **2,436 ms** later
+**with exit code 0**, which is what stops the installer's `restart/5000` policy
+from resurrecting a demand-start service for ever. `docs/verification.md` holds
+the table. `npcap_access.py` is not ported and the Rust agent sends `None`,
+which falls back to the registry.
 
-**Every message the app can read, the Rust agent can now send**, and that is a
-check rather than a claim: `scripts/agent/message-coverage.ts` reads the
-`type: '...'` literals out of `agentProtocol.ts` and asserts each is emitted
-somewhere in `agent-rs/src/`. ADR 0037's "not ported" list had four entries and
-was written from what was consciously skipped rather than from the protocol,
-which is how `interface_stats` came to be missing from it — the app subscribed,
-the agent answered with a generic `state`, and the sparkline drew nothing with
-nothing erroring anywhere. All four are ported (`if_table.rs`, `adapters.rs`,
-`sockets.rs`, `agent_log.rs`) and the allow-list holds one entry, `packet`,
-which is the binary frame path and has no JSON form.
+**Every message the app can read, the Rust agent can send**, and that is a check
+rather than a claim: `scripts/agent/message-coverage.ts` reads the `type: '...'`
+literals out of `agentProtocol.ts` and asserts each is emitted somewhere in
+`agent-rs/src/`. ADR 0037's "not ported" list was written from what was
+consciously skipped rather than from the protocol, which is how `interface_stats`
+came to be missing from it — the app subscribed, the agent answered with a
+generic `state`, and the sparkline drew nothing with nothing erroring anywhere.
+The allow-list now holds one entry, `packet`, the binary frame path, which has
+no JSON form.
 
-**The two agents share one log file and one log format**, which is
-`agent_log.rs` matching `"%(asctime)s %(levelname)-7s %(message)s"` byte for
-byte — the level field is seven characters wide and `agent_log.py`'s parser
-strips exactly that computed width rather than a greedy `\s+`, because the
-agent indents some lines on purpose. A subscriber that connects after a swap
-therefore sees continuous history across both implementations. Until this
-landed the Rust agent wrote no log at all, and `service.rs` says what that
-cost: *"Nothing is attached to stderr under the SCM."*
+**The two agents share one log file and one log format**: `agent_log.rs` matches
+`"%(asctime)s %(levelname)-7s %(message)s"` byte for byte, and `agent_log.py`'s
+parser strips exactly that computed seven-character width rather than a greedy
+`\s+`, because the agent indents some lines on purpose. A subscriber that
+connects after a swap sees continuous history across both implementations.
 
-**The Python agent is still what ships**, and has every fix this work produced.
-What blocks the swap is `0030`/`0032`'s constraint rather than this one: a
+**What blocks the swap** is `0030`/`0032`'s constraint rather than this one: a
 code-signing certificate, and elevation to replace the installed binary.
 `wpcap.dll` living in `System32\Npcap` and off the default DLL search path was
 the gotcha to carry over, and `npcap.rs` carries it.
@@ -2207,23 +1565,17 @@ the gotcha to carry over, and `npcap.rs` carries it.
 by stream and merged back into timestamp order; the renderer becomes a viewer
 that asks for rows. The store protocol was built so this is a relocation rather
 than a rewrite. **Trigger:** a profile showing the cross-process copy on the
-frame path, or a sustained rate above ~100 MB/s. Not before — and the first
-step is measuring `append` and `readBytes` **across the boundary**, which has
-**now been done** — `scripts/perf/store-boundary.ts`, and it does not say what
-this entry assumed. The hop is **5.26 µs a frame** against the writer's
-**26.68 µs**: 16% of the cost, 31,308 frames a second for the two together.
-Moving the store back in-process would buy that 16%, which is not an argument
-for anything. The trigger above still stands; the boundary is not it.
+frame path, or a sustained rate above ~100 MB/s.
 
-**Half of what this entry was for has landed, and the rest is still the same
-trigger.** ADR 0038 took the *write* off the dissector's critical path: bytes go
-to disk before anything dissects them, a frame whose dissection throws is no
-longer lost, and the writer never stalls behind a slow dissector. What it did
+**The boundary is measured and it is not the trigger.** The hop is 5.26 µs a
+frame against the writer's 26.68 — 16% of the cost (see **What the store
+actually costs**). ADR 0038 took the *write* off the dissector's critical path,
+which is half of what this entry was for: bytes go to disk before anything
+dissects them, and the writer never stalls behind a slow dissector. What it did
 **not** do is make dissection asynchronous — within one Worker, decoding and
 dissection are still serialized, so a dissector uniformly slower than arrival
-still backs up the Worker's own queue and everything lags together. That is what
-the `worker_threads` pool is for, and its trigger is unchanged: a profile, or a
-sustained rate above ~100 MB/s. Not a plan.
+backs up the Worker's own queue and everything lags together. That is what the
+pool is for, and its trigger is unchanged.
 
 **Offline by default, as a product invariant.** No outbound connection the user
 did not ask for. A packet analyzer that makes requests visible in the user's own
@@ -2237,25 +1589,17 @@ replaces it, and no native module lands without a measurement. The platform
 answers already chosen or available: `printToPDF` for reports, `net.fetch` for
 the updater, `dialog` for file I/O, `powerMonitor` for sleep gaps. The current
 `dependencies` list still carries `jspdf`, `jspdf-autotable`, `pdfjs-dist`,
-`exceljs` and `three` — the pass that weighs each against a platform API has
-**not** happened. All five are genuinely imported and reachable from
-`src/main.tsx`, which is the distinction that matters: they are **unweighed, not
-unused**, and a census is what establishes that rather than a reading of this
-paragraph.
+`exceljs` and `three` — the pass that weighs each has **not** happened. All five
+are genuinely imported and reachable from `src/main.tsx`, which is the
+distinction that matters: **unweighed, not unused**.
 
-**One was unused and is gone: `@heroicons/react`.** It was installed, 15 MB, imported by
-nothing anywhere in `src/`, `electron/` or `scripts/`. It came back for an
-afternoon as the candidate to replace Tabler and left again on evidence — no
-outline cut below 24px, in an app that draws most of its icons at 12 and 14,
-and 15 of 76 glyphs with no equivalent at all. **The icon set is
-`lucide-react`**: 76 distinct glyphs across 41 files, imported where they are
-used, held to one set by `scripts/themes/icon-set.ts` — which also insists
-`Map` and `Image` are aliased, because both shadow globals and `tsc` will not
-say so. It is worth the paragraph because it is the failure mode the dependency
-rule does not catch: the rule asks whether a dependency beats the platform, and
-a dependency nothing imports never gets asked. The cheap census is a grep per
-entry in `dependencies`, and it is worth repeating before any pass that weighs
-the five above.
+**The failure mode the rule does not catch is a dependency nothing imports** —
+the rule asks whether a dependency beats the platform, and one nothing imports
+never gets asked. The cheap census is a grep per entry in `dependencies`, worth
+repeating before any pass that weighs the five above. **The icon set is
+`lucide-react`**: 76 glyphs across 41 files, held to one set by
+`scripts/themes/icon-set.ts`, which also insists `Map` and `Image` are aliased,
+because both shadow globals and `tsc` will not say so.
 
 **Cross-origin isolation is in place** (see Invariants) but nothing uses it.
 `scripts/electron/smoke.ts` already asserts `crossOriginIsolated` against
@@ -2335,27 +1679,22 @@ change. They are the short form; the ADRs hold the reasoning.
 ### Data flow inside the renderer
 
 `App.tsx` is the application's controller with a view attached.
-`hooks/useKeyboardNavigation.ts` holds the window's shortcuts (everything reads
+`hooks/useKeyboardNavigation.ts` holds the window's shortcuts — everything reads
 through a ref, or a `keydown` listener would re-register ten times a second
-during a capture). **Space is scoped positively** — the body, or inside
+during a capture. **Space is scoped positively** — the body, or inside
 `[role="grid"]` — and not by excluding the controls that must not receive it.
 The old exclusion rule was correct only while nothing else in the window was
 focusable; with a dozen rail buttons, Space on a focused one both activated it
 and ran this handler's `preventDefault`, so the button's own activation was
 suppressed and capture toggled anyway. Scoped positively, every control added
-from here on is safe by default rather than by being remembered. `Ctrl+1..5`
-switch views, and `APP_VIEWS` order **is** the numbering; **`Ctrl+B` toggles the
-side bar**, VS Code's key, and reaches its handler through a ref for the reason
-in the parenthesis above rather than sitting in the dep array. **There is no
-detail-window gate any more**: this hook used to bail out entirely while
-`detailPacketId` was set, because a modal covered the window. Frame Detail is a
-view, so the hook binds Up and Down and the pane binds Left and Right, and both
-move the same selection. `hooks/usePacketBuffer.ts` holds the buffer — the arrival
-queues, the accounting, the dense-field writer, the flush.
-`hooks/useAgentConnection.ts` owns the agent link: status, version, interfaces,
-capture state, drop counters, adapters, the agent's own log, and the health
-diagnosis. Its four callbacks are held in a **ref**, not passed as effect deps,
-or a new callback identity each render would reconnect once per render.
+from here on is safe by default rather than by being remembered.
+
+`hooks/usePacketBuffer.ts` holds the buffer — the arrival queues, the
+accounting, the dense-field writer, the flush. `hooks/useAgentConnection.ts`
+owns the agent link: status, version, interfaces, capture state, drop counters,
+adapters, the agent's own log, and the health diagnosis. Its four callbacks are
+held in a **ref**, not passed as effect deps, or a new callback identity each
+render would reconnect once per render.
 
 The flush lives in `services/packetBuffer.ts`, not in the hook, so it can be
 called without React — which is what `scripts/session/ingest.ts` does, running
@@ -2375,19 +1714,16 @@ most common fields live in typed columns rather than in the bag
 is still the contract: a frame that never joined a buffer carries its whole bag.
 
 The buffer is bounded by **bytes**, not a frame count
-(`services/bufferBudget.ts`), because a frame is 60 bytes to 64 kB.
-
-**And the bound sizes itself to the machine** — `'auto'` is what ships, an
-eighth of physical RAM capped at half of V8's heap limit, with a 128 MB floor
-(ADR 0036). It was a fixed 512 MB, and the thing that had been holding it there
-was not memory: the buffer lives in the renderer's JS heap, V8 fixes that heap's
-limit when it creates the isolate — **4,192 MB, measured** — and past it V8
-aborts rather than degrading. The store had a watchdog for exactly this since it
-was seen to die at 4,060 MB (`electron/store/heapGuard.ts`); the renderer, which
-holds the buffer, had none. `src/services/rendererHeapGuard.ts` is that guard,
-and it is what makes a bigger number safe to ship. On a 32 GB machine the budget
-resolves to 2,096 MB and is bound by the heap rather than by RAM, which is the
-whole answer to "why not as much RAM as the machine has".
+(`services/bufferBudget.ts`), because a frame is 60 bytes to 64 kB. **And the
+bound sizes itself to the machine** — `'auto'` is what ships, an eighth of
+physical RAM capped at half of V8's heap limit, with a 128 MB floor (ADR 0036).
+The thing that had been holding it at a fixed 512 MB was not memory: the buffer
+lives in the renderer's JS heap, V8 fixes that heap's limit when it creates the
+isolate — **4,192 MB, measured** — and past it V8 aborts rather than degrading.
+`src/services/rendererHeapGuard.ts` is what makes a bigger number safe to ship.
+On a 32 GB machine the budget resolves to 2,096 MB and is bound by the heap
+rather than by RAM, which is the whole answer to "why not as much RAM as the
+machine has".
 
 ### The dissector
 
@@ -2421,7 +1757,7 @@ bareword is a layer test read from `Packet.frameProtocols` and nothing else. A
 name this build cannot produce matches nothing. `scripts/filter/engine.ts` holds
 a 50,000-frame pass to a 50 ms budget.
 
-### Enrichment, export and theming
+### Enrichment and export
 
 Name resolution is **passive** — every name comes out of the capture
 (`services/nameResolution.ts`). Direction (`services/direction.ts`, ADR 0019) is
@@ -2436,142 +1772,104 @@ the adapter, keep nanosecond timestamps, carry the names the capture taught us,
 and record what the capture missed. `services/anonymise.ts` is
 prefix-preserving over Crypto-PAn; MACs keep their OUI.
 
-**Typography is the faces the host OS ships** — on Windows, Segoe UI Variable
-on `--font-sans` for the chrome and Cascadia Mono on `--font-mono` for the
-data, declared once in `src/index.css` and nowhere else, and **no webfont is
-imported at all**. The system face is hand-hinted for the 12px most of the UI
-is set in, and it is the face every other window on the desktop wears. Windows
-is the only desktop today and macOS and Linux are coming, so the stacks lead
-with the named Windows faces and fall through to `system-ui` and
-`ui-monospace` — SF Pro and Menlo on a Mac, fontconfig's answer on Linux —
-which is the same decision in that OS's own words; the port's typography task
-is to look at what those resolve to on a real machine, not to pick faces. The tokens
-carried IBM Plex for one day (`7b4dded`) and Geist with JetBrains Mono before
-that. Plex closed the seam the unrelated pair showed under every table header
-and was retired on taste — square and dated beside the desktop — and Segoe
-with Cascadia closes the same seam, being Microsoft's two faces drawn for the
-same screen. Three facts were **measured against Chromium's DirectWrite path**
-rather than assumed, and `index.css` records them on the tokens:
-`"Segoe UI Variable"` does not resolve — DirectWrite exposes three
-optical-size families with five named weights each and no axis, so **Small**
-leads, being the cut for 12px and under; weight **500 snaps up to Semibold**
-in both faces, so `--font-weight-medium` is 400 **under
-`html[data-platform="win32"]`** — never in `@theme`, because SF Pro has a real
-Medium and a Mac should get it — and `font-medium` means Regular on Windows,
-which is Fluent's own ramp; `main.tsx` stamps the attribute from the bridge
-before the first render; and Segoe UI Variable's figures are
-proportional until `tnum` asks otherwise, which `body` does. **Cascadia Mono,
-not Cascadia Code** — Code ligates `->` and `==`, and an Info column is a
-place where the bytes must be drawn as written. Windows ships no Cascadia Mono
-Italic, so the mono italic in the protocol tree is a sheared roman; accepted.
-**There is no typeface picker.** The Accessibility tab used to offer Geist /
-Atkinson Hyperlegible / Nunito and rewrite `--font-sans` at runtime; it is
-deleted because a setting that moved the sans and not the mono put the seam
-back for exactly the readers who reached for it. **Atkinson Hyperlegible went
-with it, and that is a real loss, taken knowingly**: it was drawn to separate
-I/l/1 and O/0 for low-vision readers, Segoe does not do that job, and nothing
-replaced it. Reopening that question means a picker where every option
-carries a matched mono. `scripts/accessibility/fonts.ts` holds the rest: no
-`@fontsource` package installed or imported and no `@font-face`, the tokens
-leading with the named faces and ending in a generic, the medium remap present
-under the platform attribute and absent from `@theme`, the stamp in `main.tsx`,
-`tnum` on `body`, no `font-family` outside `index.css` that is not a
-token, and nothing writing either token at runtime. The one mix that survives
-is the map's place names, baked into openfreemap's glyph atlases where no CSS
-reaches; `.maplibregl-map` in `index.css` says so.
+### Typography
 
-Theming is **two** themes declared in `src/lib/themeOptions.ts` - Day and Night
-- each with a complete token block in `src/index.css` and a palette entry in
+**The faces the host OS ships** — on Windows, Segoe UI Variable on `--font-sans`
+and Cascadia Mono on `--font-mono`, declared once in `src/index.css` and nowhere
+else, with **no webfont imported at all**. The system face is hand-hinted for
+the 12px most of the UI is set in, and it is the face every other window on the
+desktop wears. The stacks lead with the named Windows faces and fall through to
+`system-ui` and `ui-monospace` — SF Pro and Menlo on a Mac, fontconfig's answer
+on Linux — which is the same decision in that OS's own words; the port's
+typography task is to look at what those resolve to, not to pick faces.
+
+**Cascadia Mono, not Cascadia Code** — Code ligates `->` and `==`, and an Info
+column is a place where the bytes must be drawn as written. Windows ships no
+Cascadia Mono Italic, so the mono italic in the protocol tree is a sheared
+roman; accepted. **There is no typeface picker**, because a setting that moved
+the sans and not the mono put the seam back for exactly the readers who reached
+for it; `docs/history.md` records what that cost.
+
+Three facts were **measured against Chromium's DirectWrite path** rather than
+assumed, and `index.css` records them on the tokens:
+
+- **`"Segoe UI Variable"` does not resolve.** DirectWrite exposes three
+  optical-size families with five named weights each and no axis, so **Small**
+  leads, being the cut for 12px and under.
+- **Weight 500 snaps up to Semibold** in both faces, so `--font-weight-medium`
+  is 400 **under `html[data-platform="win32"]`** — never in `@theme`, because SF
+  Pro has a real Medium and a Mac should get it. `font-medium` therefore means
+  Regular on Windows, which is Fluent's own ramp; `main.tsx` stamps the
+  attribute from the bridge before the first render.
+- **The figures are proportional** until `tnum` asks otherwise, which `body`
+  does.
+
+`scripts/accessibility/fonts.ts` holds the rest: no `@fontsource` package
+installed or imported and no `@font-face`, the tokens leading with the named
+faces and ending in a generic, the medium remap present under the platform
+attribute and absent from `@theme`, the stamp in `main.tsx`, `tnum` on `body`,
+no `font-family` outside `index.css` that is not a token, and nothing writing
+either token at runtime. The one mix that survives is the map's place names,
+baked into openfreemap's glyph atlases where no CSS reaches; `.maplibregl-map`
+in `index.css` says so.
+
+### Theming
+
+**Two themes** declared in `src/lib/themeOptions.ts` — Day and Night — each with
+a complete token block in `src/index.css` and a palette entry in
 `src/services/themePalettes.ts`, plus System, which is a rule for choosing
-between them rather than a third palette. Paper and Graphite were cut: each
-existed as the other survivor's warm counterweight, which was an argument for
-four and not one for keeping a spare of each. **Night took the `dark` id from
-Graphite**, and that was the cut paying for itself - next-themes writes
+between them rather than a third palette.
+
+**Night holds the `dark` id**, and that matters mechanically: next-themes writes
 `color-scheme` only for the literal strings `light` and `dark`, so while the
-neutral dark theme was stored as `midnight` the native scrollbars and form
+neutral dark theme was stored under another id the native scrollbars and form
 controls stayed on the light side of the divide for the theme most people use.
-`RETIRED_THEMES` lands every stored `midnight` and `paper` on a real one. **There is no Colourful setting**: the four
-`--chrome*` tokens painted a 64px accent header and a menu drawer that are both
-deleted, and by the end the only thing the switch still changed was making the
-brand mark invisible - white on white in Day and Paper. Its checks in
-`scripts/themes/registry.ts` went on passing throughout, because they measured
-the mark against `--chrome`, the bar it had stopped sitting on.
+`RETIRED_THEMES` lands every stored `midnight` and `paper` on a real one.
 
-**The brand mark is outside all of this.** It is a stack of five isometric
-plates - `src/lib/brandMark.ts`, ported from `logo/inwire-layers.svg` - and it
-carries its own colours rather than taking `currentColor`, because a stack given
-one colour is a silhouette of a hexagon. The rule is narrow and worth keeping:
-the colours live with the geometry, and `BrandMark.tsx` holds none. Two
-consequences are deliberate. **One ramp serves both themes**, so there is no
-per-theme mark to keep in step. And **there is no second half to match**: the
-`INWIRE` wordmark is deleted (§3), so the question this paragraph used to answer
-at length - whether a lockup's two halves may carry different colours - has no
-subject.
+Run `npm run check` after any colour edit — `scripts/themes/` enforces token
+completeness, contrast and CSS-vs-palette drift.
 
-**The box is 100 and the numbers are the author's.** `MARK_SIZE` was 256 while
-the mark was drawn at that size; this one is authored in a 100 box, so the box
-followed the art. The point is that the coordinates in the module read straight
-against `logo/inwire-layers.svg` with no arithmetic in between - scaling them to
-keep the old constant would have made every number a decimal.
+### The brand mark
 
-**Every plate is `--primary` at a different lightness.** `#0b6bcb`, hue 210,
-saturation 0.90, with L at 0.22 / 0.34 / 0.46 / 0.58 / 0.70. That is what makes
-five flat shapes read as one object rather than as five coloured tiles, and
-`scripts/brand/icon.ts` measures it rather than trusting it: it converts every
-fill and holds its hue and saturation to `MARK_ACCENT`'s own, so moving the
-accent moves the rule. The order is load-bearing too, and also asserted -
-darkest first, because the plates overlap and painter's order IS the depth.
-`#c42b1c` is deliberately absent: it is the close button's red and stays the
-alarm, and an icon that shares a hue with "this went wrong" spends it.
+**Outside the theme system.** It is a stack of five isometric plates —
+`src/lib/brandMark.ts`, ported from `logo/inwire-layers.svg` — and it carries
+its own colours rather than taking `currentColor`, because a stack given one
+colour is a silhouette of a hexagon. The rule is narrow and worth keeping: the
+colours live with the geometry, `BrandMark.tsx` holds none, and **one ramp
+serves both themes** so there is no per-theme mark to keep in step.
 
-**The mark is tiered**, and the boundary is measured rather than chosen.
-`primary` is five plates at **32px and up**; `small` is **every other plate** -
-three - and is used **below 32**, which is what the title row's own 16px mark
-gets. 32 is where five plates stop resolving: the gap is 9 in a 100 box, so
-2.9px at 32 and 1.4px at 16, and at 1.4px the stack is one blue lump. Taking
-every other plate rather than redrawing is what keeps the two tiers one mark:
-same span, same ends of the ramp, twice the gap - so `small` is three bands at
-the same 2.9px that works at 32. `icon.ts` asserts all of that, including that
-the two tiers fill the identical box.
+**One source, every icon generated from it.** The art is ported into
+`brandMark.ts` rather than committed as the artist's `.ico`, because a binary
+dropped in beside the pipeline is exactly the drift the regenerate-and-compare
+check exists to catch. `logo/` holds the author's originals and nothing builds
+from them. `electron/resources/icon.ico` is named explicitly in
+`electron-builder.yml` and written from the same buffer as
+`local-agent/icon.ico`; `BrowserWindow` takes the same file.
 
-**Flat fills, no gradient**, so the no-gradient rule survives intact and the
-bounds stay readable off the path data. That rule is not style: every artefact
-below is rasterised from this one source down to 16px, where a gradient is mush.
+`scripts/brand/icon.ts` measures the rest rather than trusting it:
 
-**There is no background behind the icon, anywhere.** Every PNG is RGBA with
-alpha 0 in the corners and in the gaps between the plates, and the `.ico`
-payloads are those PNGs verbatim. The mark before this one painted an opaque
-`#0c0a09` square behind itself, on the argument that Windows composites against
-grounds nobody can predict - which is true, and is an argument for a mark that
-reads on any ground rather than for shipping a black tile into the taskbar,
-Alt-Tab and Explorer. `icon.ts` decodes the top-left pixel of every committed
-raster and asserts alpha 0; it can do that in ten lines rather than with a PNG
-decoder because on the first pixel of the first row every PNG filter type
-reduces to the identity.
-
-**Two marks came before this one and both are worth a sentence.** The first was
-generated rather than drawn - one ribbon spiralling round a sphere, a spiral spec
-and a projection emitting about 140 flat fills per tier. The second was a head-on
-RJ45 connector, drawn, with eight contacts and a bevelled cavity. What has not
-changed across all three is the module's JOB: one source, every icon generated
-from it, colours there and not in the component - which is why the art is ported
-into `brandMark.ts` each time rather than committed as the artist's `.ico`. A
-binary dropped in beside the pipeline is exactly the drift the
-regenerate-and-compare check exists to catch. `logo/` holds the author's
-originals and nothing builds from them; `icon.ts` asserts that
-`electron-builder.yml` names a file this pipeline writes.
-
-**`Inwire.exe` had no icon at all until this landed** - `electron-builder.yml`
-had no `win.icon` and `directories.buildResources` pointed at a folder that did
-not exist, so the packaged app shipped Electron's default and nothing in the
-suite could see it. It is `electron/resources/icon.ico` now, named explicitly,
-written from the same buffer as `local-agent/icon.ico` with `icon.ts` asserting
-the two are byte-identical. `BrowserWindow` takes the same file, which is what
-`npm run dev` and `npm run start:app` show.
-
-Run `npm run check` after any colour edit —
-`scripts/themes/` enforces token completeness, contrast and CSS-vs-palette
-drift.
+- **Every plate is `--primary` at a different lightness** — `#0b6bcb`, hue 210,
+  saturation 0.90, L at 0.22 / 0.34 / 0.46 / 0.58 / 0.70 — which is what makes
+  five flat shapes read as one object rather than five coloured tiles. The check
+  converts every fill and holds hue and saturation to `MARK_ACCENT`'s own, so
+  moving the accent moves the rule. The order is load-bearing too: darkest
+  first, because the plates overlap and painter's order IS the depth. `#c42b1c`
+  is deliberately absent — it is the close button's red and stays the alarm.
+- **The mark is tiered and the boundary is measured.** `primary` is five plates
+  at **32px and up**; `small` is **every other plate** — three — below 32, which
+  is what the title row's 16px mark gets. 32 is where five plates stop
+  resolving: the gap is 9 in a 100 box, so 2.9px at 32 and 1.4px at 16, and at
+  1.4px the stack is one blue lump. Taking every other plate rather than
+  redrawing keeps the two tiers one mark — same span, same ends of the ramp,
+  twice the gap — and both fill the identical box.
+- **Flat fills, no gradient**, because every artefact is rasterised from this
+  one source down to 16px, where a gradient is mush.
+- **No background behind the icon, anywhere.** Every PNG is RGBA with alpha 0 in
+  the corners and in the gaps between plates, and the `.ico` payloads are those
+  PNGs verbatim. The check decodes the top-left pixel of every committed raster
+  and asserts alpha 0 — ten lines rather than a PNG decoder, because on the
+  first pixel of the first row every PNG filter type reduces to the identity.
+- **The two `.ico` files are byte-identical.**
 
 ### Vite config quirks — read the inline comments before touching
 
@@ -2588,8 +1886,8 @@ directory handles and electron-builder finishes a pack by **renaming**
 `vite.config.ts` reads `DISABLE_HMR`; `electron/main.ts` reads
 `INWIRE_DEV_SERVER`, set by `npm run dev`. `updateCenter/manifest.ts` reads
 `INWIRE_UPDATE_FEED`, set by both dev commands to the loopback feed and read
-once rather than baked into a build. All have working defaults. There is
-no `.env` of any kind. The root-level `security_spec.md` that described a
-Firebase backend is gone; what was worth keeping - the twelve denial tests any
-future sharing feature would have to pass - is
-`docs/ideas/sharing-threat-model.md`, under a banner saying none of it exists.
+once rather than baked into a build. All have working defaults. There is no
+`.env` of any kind. The root-level `security_spec.md` that described a Firebase
+backend is gone; what was worth keeping — the twelve denial tests any future
+sharing feature would have to pass — is `docs/ideas/sharing-threat-model.md`,
+under a banner saying none of it exists.
