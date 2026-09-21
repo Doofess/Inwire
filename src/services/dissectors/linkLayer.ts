@@ -108,12 +108,18 @@ export function macAddressFields(mac: string, offset: number, isDestination = fa
   const groupAddress = (firstByte & 0x01) !== 0;
 
   return [
-    { name: 'Address', value: resolveMacVendor(mac), rawBytesRange: [offset, offset + 5] },
+    // Wireshark's own label for `eth.addr` is 'Address', and it emits one
+    // under each of Source and Destination - so both carry the abbrev here.
+    { name: 'Address', value: resolveMacVendor(mac), abbrev: 'eth.addr', rawBytesRange: [offset, offset + 5] },
     {
       name: 'LG bit',
       value: locallyAdministered
         ? 'Locally administered address (this is NOT the factory default)'
         : 'Globally unique address (factory default)',
+      // Only the destination's row is `eth.lg`, for the same reason `eth.ig`
+      // below is: an abbrev names one field, and the source's LG bit is a
+      // different fact about a different address.
+      ...(isDestination ? { abbrev: 'eth.lg' } : {}),
       rawBytesRange: [offset, offset + 2],
       bitfield: { bitOffset: 6, bitLength: 1, totalBits: 24 },
     },

@@ -309,33 +309,35 @@ export function decodeNetworkLayer(
       summary: `Internet Protocol Version 4, Src: ${srcIp}, Dst: ${dstIp}`,
       rawBytesRange: [l3Offset, l3Offset + ipHeaderLen - 1],
       fields: [
-        { name: 'Version', value: '4', rawBytesRange: [l3Offset, l3Offset] },
-        { name: 'Header Length', value: `${ipHeaderLen} bytes`, rawBytesRange: [l3Offset, l3Offset] },
+        { name: 'Version', value: '4', abbrev: 'ip.version', rawBytesRange: [l3Offset, l3Offset] },
+        { name: 'Header Length', value: `${ipHeaderLen} bytes`, abbrev: 'ip.hdr_len', rawBytesRange: [l3Offset, l3Offset] },
         {
           // Named, not numbered. IPv6 has shown "EF PHB" and "ECT(0)" since
           // this phase's first half; IPv4 printed 46 and 2, so the same
           // traffic read differently depending on which version carried it.
           name: 'Differentiated Services Field',
           value: `0x${tos.toString(16).padStart(2, '0')} (DSCP: ${dscpName(dscp)}, ECN: ${ecnName(ecn)})`,
+          abbrev: 'ip.dsfield',
           rawBytesRange: [l3Offset + 1, l3Offset + 1],
           children: [
             { name: 'Differentiated Services Codepoint', value: `${dscpName(dscp)} (${dscp})`, abbrev: 'ip.dsfield.dscp', rawBytesRange: [l3Offset + 1, l3Offset + 1] },
             { name: 'Explicit Congestion Notification', value: `${ecnName(ecn)} (${ecn})`, abbrev: 'ip.dsfield.ecn', rawBytesRange: [l3Offset + 1, l3Offset + 1] },
           ],
         },
-        { name: 'Total Length', value: ipTotalLen, rawBytesRange: [l3Offset + 2, l3Offset + 3] },
-        { name: 'Identification', value: `0x${identification.toString(16).padStart(4, '0')} (${identification})`, rawBytesRange: [l3Offset + 4, l3Offset + 5] },
+        { name: 'Total Length', value: ipTotalLen, abbrev: 'ip.len', rawBytesRange: [l3Offset + 2, l3Offset + 3] },
+        { name: 'Identification', value: `0x${identification.toString(16).padStart(4, '0')} (${identification})`, abbrev: 'ip.id', rawBytesRange: [l3Offset + 4, l3Offset + 5] },
         {
           name: 'Flags',
           value: `0x${((flagsAndFragOffset >> 13) & 0x7).toString(16).padStart(2, '0')}`,
+          abbrev: 'ip.flags',
           rawBytesRange: [l3Offset + 6, l3Offset + 6],
           children: [
-            { name: 'Reserved bit', value: ipReservedBit === 1 ? 'Set' : 'Not set', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
-            { name: "Don't fragment", value: dontFragment === 1 ? 'Set' : 'Not set', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
-            { name: 'More fragments', value: moreFragments === 1 ? 'Set' : 'Not set', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
+            { name: 'Reserved bit', value: ipReservedBit === 1 ? 'Set' : 'Not set', abbrev: 'ip.flags.rb', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
+            { name: "Don't fragment", value: dontFragment === 1 ? 'Set' : 'Not set', abbrev: 'ip.flags.df', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
+            { name: 'More fragments', value: moreFragments === 1 ? 'Set' : 'Not set', abbrev: 'ip.flags.mf', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
           ],
         },
-        { name: 'Fragment Offset', value: fragmentOffset, rawBytesRange: [l3Offset + 6, l3Offset + 7] },
+        { name: 'Fragment Offset', value: fragmentOffset, abbrev: 'ip.frag_offset', rawBytesRange: [l3Offset + 6, l3Offset + 7] },
         {
           name: 'Time to Live (TTL)',
           value: ttl,
@@ -370,8 +372,8 @@ export function decodeNetworkLayer(
             },
           ],
         },
-        { name: 'Source Address', value: srcIp, abbrev: 'ip.src', rawBytesRange: [l3Offset + 12, l3Offset + 15] },
-        { name: 'Destination Address', value: dstIp, abbrev: 'ip.dst', rawBytesRange: [l3Offset + 16, l3Offset + 19] },
+        { name: 'Source Address', value: srcIp, abbrev: 'ip.src', rawBytesRange: [l3Offset + 12, l3Offset + 15], children: [{ name: 'Source or Destination Address', value: srcIp, abbrev: 'ip.addr', rawBytesRange: [l3Offset + 12, l3Offset + 12 + 3] }] },
+        { name: 'Destination Address', value: dstIp, abbrev: 'ip.dst', rawBytesRange: [l3Offset + 16, l3Offset + 19], children: [{ name: 'Source or Destination Address', value: dstIp, abbrev: 'ip.addr', rawBytesRange: [l3Offset + 16, l3Offset + 16 + 3] }] },
       ],
     };
 
@@ -613,26 +615,34 @@ export function decodeNetworkLayer(
         {
           name: 'Version',
           value: '6',
+          abbrev: 'ipv6.version',
           rawBytesRange: [l3Offset, l3Offset],
           bitfield: { bitOffset: 0, bitLength: 4, totalBits: 8 },
         },
         ...ipv6TrafficClassFields(rawBytes, l3Offset),
         {
           name: 'Flow Label',
-          value: `0x${(((rawBytes[l3Offset + 1] & 0x0f) << 16) | (rawBytes[l3Offset + 2] << 8) | rawBytes[l3Offset + 3]).toString(16).padStart(5, '0')}`,
+          value: `0x${(((rawBytes[l3Offset + 1] & 0x0f) << 16) | (rawBytes[l3Offset + 2] << 8) | rawBytes[l3Offset + 3]).toString(16).padStart(6, '0')}`,
+          abbrev: 'ipv6.flow',
           rawBytesRange: [l3Offset + 1, l3Offset + 3],
           bitfield: { bitOffset: 4, bitLength: 20, totalBits: 24 },
         },
-        { name: 'Payload Length', value: ipv6PayloadLen, rawBytesRange: [l3Offset + 4, l3Offset + 5] },
+        { name: 'Payload Length', value: ipv6PayloadLen, abbrev: 'ipv6.plen', rawBytesRange: [l3Offset + 4, l3Offset + 5] },
         { name: 'Next Header', value: describeIpv6NextHeader(nextHeader), abbrev: 'ipv6.nxt', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
         { name: 'Hop Limit', value: hopLimit, abbrev: 'ipv6.hlim', rawBytesRange: [l3Offset + 7, l3Offset + 7] },
         {
           name: 'Source Address', value: srcIp, abbrev: 'ipv6.src', rawBytesRange: [l3Offset + 8, l3Offset + 23],
-          children: [{ name: '[Address Space]', value: ipv6AddressSpace(srcIp), generated: true }],
+          children: [
+            { name: 'Source or Destination Address', value: srcIp, abbrev: 'ipv6.addr', rawBytesRange: [l3Offset + 8, l3Offset + 23] },
+            { name: '[Address Space]', value: ipv6AddressSpace(srcIp), abbrev: 'ipv6.src_addr_space', generated: true },
+          ],
         },
         {
           name: 'Destination Address', value: dstIp, abbrev: 'ipv6.dst', rawBytesRange: [l3Offset + 24, l3Offset + 39],
-          children: [{ name: '[Address Space]', value: ipv6AddressSpace(dstIp), generated: true }],
+          children: [
+            { name: 'Source or Destination Address', value: dstIp, abbrev: 'ipv6.addr', rawBytesRange: [l3Offset + 24, l3Offset + 39] },
+            { name: '[Address Space]', value: ipv6AddressSpace(dstIp), abbrev: 'ipv6.dst_addr_space', generated: true },
+          ],
         },
       ],
     };
@@ -1047,18 +1057,21 @@ function ipv6TrafficClassFields(rawBytes: Uint8Array, l3Offset: number): Protoco
     {
       name: 'Traffic Class',
       value: `0x${trafficClass.toString(16).padStart(2, '0')} (DSCP: ${dscpName(dscp)}, ECN: ${ecnName(ecn)})`,
+      abbrev: 'ipv6.tclass',
       rawBytesRange: [l3Offset, l3Offset + 3],
       bitfield: { bitOffset: 4, bitLength: 8, totalBits: 32 },
       children: [
         {
           name: 'Differentiated Services Codepoint',
           value: `${dscpName(dscp)} (${dscp})`,
+          abbrev: 'ipv6.tclass.dscp',
           rawBytesRange: [l3Offset, l3Offset + 3],
           bitfield: { bitOffset: 4, bitLength: 6, totalBits: 32 },
         },
         {
           name: 'Explicit Congestion Notification',
           value: `${ecnName(ecn)} (${ecn})`,
+          abbrev: 'ipv6.tclass.ecn',
           rawBytesRange: [l3Offset, l3Offset + 3],
           bitfield: { bitOffset: 10, bitLength: 2, totalBits: 32 },
         },

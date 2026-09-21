@@ -198,6 +198,50 @@ export const FIELDS: readonly FieldDef[] = [
   bool('ip.flags.mf', 'More fragments', 'ip'),
   uint('ip.frag_offset', 'Fragment Offset', 'ip'),
   uint('ip.opt.type', 'Option type', 'ip'),
+
+  // The rows below were drawn - with the right value, byte range and bitfield -
+  // long before they were named, which made them invisible to the filter
+  // engine, to "Apply as filter" and to `scripts/parity/tree-coverage.ts`
+  // alike. They are `treeOnly` rather than filterable because every one of
+  // them is either a constant given the layer token (`ip.version` is 4
+  // whenever `ip` is present, which is what the bareword already says) or a
+  // decomposition of bytes the bag holds. Filterability is bought per field on
+  // evidence of demand; a bag write here would also put four of them over
+  // `dense-fields.ts`'s 20%-of-frames threshold and into `DENSE_FIELDS`.
+  treeOnly(uint('ip.version', 'Version', 'ip')),
+  treeOnly(uint('ip.dsfield', 'Differentiated Services Field', 'ip')),
+  treeOnly(uint('ip.len', 'Total Length', 'ip')),
+  treeOnly(uint('ip.flags', 'Flags', 'ip')),
+  treeOnly(bool('ip.flags.rb', 'Reserved bit', 'ip')),
+  treeOnly(uint('ipv6.version', 'Version', 'ipv6')),
+  treeOnly(uint('ipv6.tclass', 'Traffic Class', 'ipv6')),
+  treeOnly(uint('ipv6.tclass.dscp', 'Differentiated Services Codepoint', 'ipv6')),
+  treeOnly(uint('ipv6.tclass.ecn', 'Explicit Congestion Notification', 'ipv6')),
+  treeOnly(uint('ipv6.flow', 'Flow Label', 'ipv6')),
+  treeOnly(uint('ipv6.plen', 'Payload Length', 'ipv6')),
+
+  // --- the either-end names, which the filter engine already answered --------
+  //
+  // `eth.addr`, `ip.addr`, `ipv6.addr`, `tcp.port` and `udp.port` have always
+  // worked in the filter bar, through `ALIASES` in `filter/fields.ts` - and
+  // `resolveField` consults that map BEFORE the registry, so registering them
+  // here changes nothing about how a filter is answered. What it buys is the
+  // row: these five were the whole of `tree-coverage.ts`'s
+  // `filterableNotInTree` ceiling, the one list where every entry is a defect
+  // with no judgement call - the app accepted the filter and the detail pane
+  // refused to draw it.
+  //
+  // `treeOnly` for the same reason: the value is already in the bag twice
+  // under the two end-specific names, and a third copy would buy nothing.
+  treeOnly({ abbrev: 'eth.addr', label: 'Address', type: 'mac', layer: 'eth' }),
+  treeOnly({ abbrev: 'ip.addr', label: 'Source or Destination Address', type: 'ipv4', layer: 'ip' }),
+  treeOnly({ abbrev: 'ipv6.addr', label: 'Source or Destination Address', type: 'ipv6', layer: 'ipv6' }),
+  treeOnly(uint('tcp.port', 'Source or Destination Port', 'tcp')),
+  treeOnly(uint('udp.port', 'Source or Destination Port', 'udp')),
+  treeOnly(bool('eth.lg', 'LG bit', 'eth')),
+  treeOnly(str('ipv6.src_addr_space', 'Source Address Space', 'ipv6')),
+  treeOnly(str('ipv6.dst_addr_space', 'Destination Address Space', 'ipv6')),
+  treeOnly(str('tcp.flags.str', 'TCP Flags', 'tcp')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
   uint('ipv6.reassembled', 'Reassembled IPv6 fragments', 'ipv6'),
 

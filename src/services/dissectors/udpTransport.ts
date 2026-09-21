@@ -341,8 +341,8 @@ export function dissectUdpTransport(
       summary: `User Datagram Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
       rawBytesRange: [transportOffset, transportOffset + 7],
       fields: [
-        { name: 'Source Port', value: srcPort, abbrev: 'udp.srcport', rawBytesRange: [transportOffset, transportOffset + 1] },
-        { name: 'Destination Port', value: dstPort, abbrev: 'udp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3] },
+        { name: 'Source Port', value: srcPort, abbrev: 'udp.srcport', rawBytesRange: [transportOffset, transportOffset + 1], children: [{ name: 'Source or Destination Port', value: srcPort, abbrev: 'udp.port', rawBytesRange: [transportOffset, transportOffset + 1] }] },
+        { name: 'Destination Port', value: dstPort, abbrev: 'udp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3], children: [{ name: 'Source or Destination Port', value: dstPort, abbrev: 'udp.port', rawBytesRange: [transportOffset + 2, transportOffset + 3] }] },
         { name: 'Length', value: udpLen, abbrev: 'udp.length', rawBytesRange: [transportOffset + 4, transportOffset + 5] },
         {
           name: 'Checksum',

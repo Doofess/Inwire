@@ -192,10 +192,17 @@ check('the filter engine resolves its field names through the registry',
 //
 // Everything else a dissector publishes must not be spelled out anywhere in
 // the engine - it should arrive through the registry or not at all.
+//
+// The five either-end names below are the first kind in the sentence above,
+// and they are spelled out in the engine BECAUSE they are aliases: `resolveField`
+// consults `ALIASES` before the registry, so the engine's copy is the one that
+// answers. They are registered anyway, as `treeOnly`, so the detail pane can
+// draw the row - which is what took `filterableNotInTree` to zero.
 const ENGINE_ALIASES = new Set([
   'ipv6.src', 'ipv6.dst', 'eth.src', 'eth.dst',
   'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport',
   'tcp.stream',
+  'eth.addr', 'ip.addr', 'ipv6.addr', 'tcp.port', 'udp.port',
 ]);
 check('...and no longer hand-lists a dissector field',
   [...FIELD_ABBREVS]

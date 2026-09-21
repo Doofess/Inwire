@@ -53,18 +53,40 @@ const LDAP_PORTS = new Set([389, 3268]);
 // without one are drawn and not published; a row with no abbrev is display
 // only, and the tree's menu greys out its filter items rather than offering
 // an expression nothing would answer.
-const TCP_FLAG_ROWS: { name: string; bitOffset: number; bitLength: number; set: string; unset: string; abbrev?: string }[] = [
-  { name: 'Reserved', bitOffset: 0, bitLength: 3, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.res' },
-  { name: 'Accurate ECN', bitOffset: 3, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ae' },
-  { name: 'Congestion Window Reduced', bitOffset: 4, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.cwr' },
-  { name: 'ECN-Echo', bitOffset: 5, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ece' },
-  { name: 'Urgent', bitOffset: 6, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.urg' },
-  { name: 'Acknowledgment', bitOffset: 7, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ack' },
-  { name: 'Push', bitOffset: 8, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.push' },
-  { name: 'Reset', bitOffset: 9, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.reset' },
-  { name: 'Syn', bitOffset: 10, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.syn' },
-  { name: 'Fin', bitOffset: 11, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.fin' },
+const TCP_FLAG_ROWS: { name: string; bitOffset: number; bitLength: number; set: string; unset: string; abbrev?: string; char: string }[] = [
+  { name: 'Reserved', bitOffset: 0, bitLength: 3, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.res', char: 'R' },
+  { name: 'Accurate ECN', bitOffset: 3, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ae', char: 'E' },
+  { name: 'Congestion Window Reduced', bitOffset: 4, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.cwr', char: 'C' },
+  { name: 'ECN-Echo', bitOffset: 5, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ece', char: 'E' },
+  { name: 'Urgent', bitOffset: 6, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.urg', char: 'U' },
+  { name: 'Acknowledgment', bitOffset: 7, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ack', char: 'A' },
+  { name: 'Push', bitOffset: 8, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.push', char: 'P' },
+  { name: 'Reset', bitOffset: 9, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.reset', char: 'R' },
+  { name: 'Syn', bitOffset: 10, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.syn', char: 'S' },
+  { name: 'Fin', bitOffset: 11, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.fin', char: 'F' },
 ];
+
+/**
+ * The twelve flag bits as one string - `·······AP···` - which is how the
+ * reference analyzer renders them and the fastest way to read a segment's
+ * intent without expanding the subtree.
+ *
+ * One character per bit, most significant first, so the index into the string
+ * IS `bitOffset`. Reserved spans three bits and therefore three characters,
+ * each answering for its own bit rather than for the field: a string that
+ * said `RRR` because any one of them was set would be the only row here that
+ * lied about which bit it meant.
+ */
+function tcpFlagsString(window12: number): string {
+  let out = '';
+  for (const row of TCP_FLAG_ROWS) {
+    for (let i = 0; i < row.bitLength; i++) {
+      const shift = 12 - row.bitOffset - i - 1;
+      out += ((window12 >> shift) & 1) === 1 ? row.char : '·';
+    }
+  }
+  return out;
+}
 
 /** Everything the TCP decode needs that is not the bytes themselves. */
 export interface TcpContext {
@@ -607,8 +629,8 @@ export function dissectTcpTransport(
       summary: `Transmission Control Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
       rawBytesRange: [transportOffset, transportOffset + tcpHeaderLen - 1],
       fields: [
-        { name: 'Source Port', value: srcPort, abbrev: 'tcp.srcport', rawBytesRange: [transportOffset, transportOffset + 1] },
-        { name: 'Destination Port', value: dstPort, abbrev: 'tcp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3] },
+        { name: 'Source Port', value: srcPort, abbrev: 'tcp.srcport', rawBytesRange: [transportOffset, transportOffset + 1], children: [{ name: 'Source or Destination Port', value: srcPort, abbrev: 'tcp.port', rawBytesRange: [transportOffset, transportOffset + 1] }] },
+        { name: 'Destination Port', value: dstPort, abbrev: 'tcp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3], children: [{ name: 'Source or Destination Port', value: dstPort, abbrev: 'tcp.port', rawBytesRange: [transportOffset + 2, transportOffset + 3] }] },
         {
           name: 'Sequence Number',
           value: `${relSeq} (relative sequence number)`,
@@ -957,7 +979,7 @@ function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolF
   // it without repeating the mid-byte window arithmetic.
   const window12 = ((rawBytes[transportOffset + 12] & 0x0f) << 8) | rawBytes[transportOffset + 13];
 
-  return TCP_FLAG_ROWS.map(row => {
+  return [...TCP_FLAG_ROWS.map(row => {
     const shift = 12 - row.bitOffset - row.bitLength;
     const mask = (1 << row.bitLength) - 1;
     const isSet = ((window12 >> shift) & mask) !== 0;
@@ -973,5 +995,14 @@ function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolF
         windowStartBit: 4,
       },
     };
-  });
+  }),
+  // Last, as the reference draws it: the summary is read after the bits it
+  // summarises, and putting it first would push the twelve rows down a line
+  // for a string that only repeats them.
+  {
+    name: 'TCP Flags',
+    value: tcpFlagsString(window12),
+    abbrev: 'tcp.flags.str',
+    rawBytesRange: [transportOffset + 12, transportOffset + 13] as [number, number],
+  }];
 }
