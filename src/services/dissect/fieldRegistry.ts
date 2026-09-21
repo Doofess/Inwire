@@ -244,9 +244,23 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly({ abbrev: 'eth.addr', label: 'Address', type: 'mac', layer: 'eth' }),
   treeOnly({ abbrev: 'ip.addr', label: 'Source or Destination Address', type: 'ipv4', layer: 'ip' }),
   treeOnly({ abbrev: 'ipv6.addr', label: 'Source or Destination Address', type: 'ipv6', layer: 'ipv6' }),
+  // The `_host` half of the same rows. Identical to the `addr` names until
+  // name resolution is on, at which point `addr` stays an address and `host`
+  // becomes a name - which is the whole reason the reference keeps both.
+  treeOnly({ abbrev: 'ip.src_host', label: 'Source Host', type: 'ipv4', layer: 'ip' }),
+  treeOnly({ abbrev: 'ip.dst_host', label: 'Destination Host', type: 'ipv4', layer: 'ip' }),
+  treeOnly({ abbrev: 'ip.host', label: 'Source or Destination Host', type: 'ipv4', layer: 'ip' }),
+  treeOnly({ abbrev: 'ipv6.src_host', label: 'Source Host', type: 'ipv6', layer: 'ipv6' }),
+  treeOnly({ abbrev: 'ipv6.dst_host', label: 'Destination Host', type: 'ipv6', layer: 'ipv6' }),
+  treeOnly({ abbrev: 'ipv6.host', label: 'Source or Destination Host', type: 'ipv6', layer: 'ipv6' }),
   treeOnly(uint('tcp.port', 'Source or Destination Port', 'tcp')),
   treeOnly(uint('udp.port', 'Source or Destination Port', 'udp')),
   treeOnly(bool('eth.lg', 'LG bit', 'eth')),
+  // The 802.3 reading of bytes 12-13, and the pad that follows a short frame.
+  treeOnly(uint('eth.len', 'Length', 'eth')),
+  treeOnly(str('eth.padding', 'Padding', 'eth')),
+  treeOnly(str('eth.trailer', 'Trailer', 'eth')),
+  treeOnly(str('eth.padding_bad', 'Didn\'t find padding of zeros', 'eth')),
   treeOnly(str('ipv6.src_addr_space', 'Source Address Space', 'ipv6')),
   treeOnly(str('ipv6.dst_addr_space', 'Destination Address Space', 'ipv6')),
   treeOnly(str('tcp.flags.str', 'TCP Flags', 'tcp')),
@@ -678,6 +692,10 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(uint('igmp.qqic', 'QQIC', 'igmp')),
 
   // --- ARP -------------------------------------------------------------------
+  treeOnly(str('arp.hw.type', 'Hardware type', 'arp')),
+  treeOnly(str('arp.proto.type', 'Protocol type', 'arp')),
+  treeOnly(uint('arp.hw.size', 'Hardware size', 'arp')),
+  treeOnly(uint('arp.proto.size', 'Protocol size', 'arp')),
   uint('arp.opcode', 'Opcode', 'arp'),
   { abbrev: 'arp.src.hw_mac', label: 'Sender MAC address', type: 'mac', layer: 'arp' },
   { abbrev: 'arp.src.proto_ipv4', label: 'Sender IP address', type: 'ipv4', layer: 'arp' },

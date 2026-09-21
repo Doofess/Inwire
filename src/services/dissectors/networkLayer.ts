@@ -75,6 +75,45 @@ export interface NetworkDecode {
 
 /** Everything the decode needs that is neither the bytes nor the state above. */
 /**
+ * Every name the reference hangs under an address row: `addr`, `*_host` and
+ * `host`.
+ *
+ * All four families spelled out as literals rather than composed from
+ * `${family}.${side}_host`, which is the rule this branch learnt twice: the
+ * registry's scanner reads quoted dotted literals out of the dissection
+ * sources, so a name assembled at run time is invisible to it - and to grep.
+ * A composed field name is a field name nothing is holding to anything.
+ *
+ * The reference marks all of these `hide="yes"`: they exist to be typed into
+ * a filter bar, not to be read in a detail pane. That is why they were the
+ * largest gap left on either fixture and nobody had noticed - 4,226 frames of
+ * `ip.*_host` and 8,400 of `ipv6.*_host`, none of them visible in the
+ * reference's own tree either.
+ */
+const HOST_ALIASES = {
+  ip: {
+    Source: { addr: 'ip.addr', own: 'ip.src_host', shared: 'ip.host' },
+    Destination: { addr: 'ip.addr', own: 'ip.dst_host', shared: 'ip.host' },
+  },
+  ipv6: {
+    Source: { addr: 'ipv6.addr', own: 'ipv6.src_host', shared: 'ipv6.host' },
+    Destination: { addr: 'ipv6.addr', own: 'ipv6.dst_host', shared: 'ipv6.host' },
+  },
+} as const;
+
+function hostAliasRows(
+  family: 'ip' | 'ipv6', address: string, at: [number, number],
+  side: 'Source' | 'Destination',
+): ProtocolField[] {
+  const names = HOST_ALIASES[family][side];
+  return [
+    { name: 'Source or Destination Address', value: address, abbrev: names.addr, rawBytesRange: at },
+    { name: `${side} Host`, value: address, abbrev: names.own, rawBytesRange: at },
+    { name: 'Source or Destination Host', value: address, abbrev: names.shared, rawBytesRange: at },
+  ];
+}
+
+/**
  * The `[Stream index]` row under an IP layer.
  *
  * Nothing happens on a quoted datagram: `context.quoted` means these bytes are
@@ -452,8 +491,15 @@ export function decodeNetworkLayer(
             },
           ],
         },
-        { name: 'Source Address', value: srcIp, abbrev: 'ip.src', rawBytesRange: [l3Offset + 12, l3Offset + 15], children: [{ name: 'Source or Destination Address', value: srcIp, abbrev: 'ip.addr', rawBytesRange: [l3Offset + 12, l3Offset + 12 + 3] }] },
-        { name: 'Destination Address', value: dstIp, abbrev: 'ip.dst', rawBytesRange: [l3Offset + 16, l3Offset + 19], children: [{ name: 'Source or Destination Address', value: dstIp, abbrev: 'ip.addr', rawBytesRange: [l3Offset + 16, l3Offset + 16 + 3] }] },
+        // **`_host` beside `addr`, and it is not the same row twice.** Both
+        // hold this address, but they answer different questions once name
+        // resolution is on: `ip.addr` stays the address and `ip.host` becomes
+        // the name. With resolution off they read alike, which is exactly why
+        // the reference marks all three `hide="yes"` - they are filter names
+        // rather than rows anybody reads. `filter/fields.ts` is what makes
+        // them worth emitting.
+        { name: 'Source Address', value: srcIp, abbrev: 'ip.src', rawBytesRange: [l3Offset + 12, l3Offset + 15], children: hostAliasRows('ip', srcIp, [l3Offset + 12, l3Offset + 15], 'Source') },
+        { name: 'Destination Address', value: dstIp, abbrev: 'ip.dst', rawBytesRange: [l3Offset + 16, l3Offset + 19], children: hostAliasRows('ip', dstIp, [l3Offset + 16, l3Offset + 19], 'Destination') },
       ],
     };
 
@@ -709,14 +755,14 @@ export function decodeNetworkLayer(
         {
           name: 'Source Address', value: srcIp, abbrev: 'ipv6.src', rawBytesRange: [l3Offset + 8, l3Offset + 23],
           children: [
-            { name: 'Source or Destination Address', value: srcIp, abbrev: 'ipv6.addr', rawBytesRange: [l3Offset + 8, l3Offset + 23] },
+            ...hostAliasRows('ipv6', srcIp, [l3Offset + 8, l3Offset + 23], 'Source'),
             { name: '[Address Space]', value: ipv6AddressSpace(srcIp), abbrev: 'ipv6.src_addr_space', generated: true },
           ],
         },
         {
           name: 'Destination Address', value: dstIp, abbrev: 'ipv6.dst', rawBytesRange: [l3Offset + 24, l3Offset + 39],
           children: [
-            { name: 'Source or Destination Address', value: dstIp, abbrev: 'ipv6.addr', rawBytesRange: [l3Offset + 24, l3Offset + 39] },
+            ...hostAliasRows('ipv6', dstIp, [l3Offset + 24, l3Offset + 39], 'Destination'),
             { name: '[Address Space]', value: ipv6AddressSpace(dstIp), abbrev: 'ipv6.dst_addr_space', generated: true },
           ],
         },

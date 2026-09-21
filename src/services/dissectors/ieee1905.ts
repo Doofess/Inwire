@@ -538,6 +538,31 @@ function asText(b: Uint8Array, p: number, n: number): string {
  * CMDU header layout from `start`: message version (1), reserved (1),
  * message type (2), message id (2), fragment id (1), flags (1); then TLVs.
  */
+/**
+ * The byte after a CMDU's End-of-message TLV, or -1 if there isn't one.
+ *
+ * Exists for `eth.padding`: a 1905 message is the only thing either fixture
+ * carries whose length is stated by a terminator rather than by a header
+ * field, so `declaredPayloadEnd` cannot read it the way it reads IPv4's Total
+ * Length. Four frames of `inwire` are padded 1905 messages, and without this
+ * they were the only padded frames drawing no pad.
+ *
+ * A second walk of the TLVs rather than a value threaded out of the
+ * dissector, because the caller runs before any of the layers above Ethernet
+ * are built - and it runs on 41 frames of 12,858.
+ */
+export function ieee1905MessageEnd(rawBytes: Uint8Array, start: number): number {
+  let cursor = start + 8;
+  while (cursor + 3 <= rawBytes.length) {
+    const tlvType = rawBytes[cursor];
+    const tlvLength = ((rawBytes[cursor + 1] << 8) | rawBytes[cursor + 2]) & 0x3fff;
+    cursor += 3 + tlvLength;
+    if (cursor > rawBytes.length) return -1;
+    if (tlvType === 0x00) return cursor;
+  }
+  return -1;
+}
+
 export function dissectIeee1905(rawBytes: Uint8Array, start: number): Ieee1905DissectorResult | null {
   if (start + 8 > rawBytes.length) return null;
 

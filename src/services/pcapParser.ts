@@ -5,7 +5,7 @@ import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacName } from './macVendors';
 import { dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
 import { findEthertype } from './dissectors/dispatch';
-import { dissectLinkLayer } from './dissectors/linkLayer';
+import { declaredPayloadEnd, dissectLinkLayer, ethernetTrailerRows } from './dissectors/linkLayer';
 import { L3Tracker } from './l3Tracker';
 import {
   Direction, directionFromAddresses, directionFromMacs, directionFromOffload,
@@ -1101,6 +1101,17 @@ export function decodeRawEthernetPacket(
 
   const l3Offset = link.l3Offset;
   const currentEtherType = link.etherType;
+
+  // The pad on a minimum-length frame, on the Ethernet layer for the same
+  // reason `eth.stream` is: the reference files both under `eth`. Read here
+  // rather than in `dissectLinkLayer` because the length that decides where
+  // the payload stops belongs to the layer above, and the link layer has not
+  // looked at it yet.
+  if (link.layers.length > 0) {
+    link.layers[0].fields.push(
+      ...ethernetTrailerRows(rawBytes, declaredPayloadEnd(rawBytes, l3Offset, currentEtherType)),
+    );
+  }
 
   // Link-layer protocols that carry no IP header. These have to be dispatched
   // before the IPv4/IPv6 branches, and without them a frame keeps this

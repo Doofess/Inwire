@@ -70,15 +70,21 @@ export function dissectArp(rawBytes: Uint8Array, l3Offset: number): L2DissectorR
       summary: `Address Resolution Protocol (${opcodeName})`,
       rawBytesRange: [l3Offset, l3Offset + 27],
       fields: [
-        { name: 'Hardware type', value: hardwareType === 1 ? 'Ethernet (1)' : `${hardwareType}`, rawBytesRange: [l3Offset, l3Offset + 1] },
-        { name: 'Protocol type', value: protocolType === 0x0800 ? 'IPv4 (0x0800)' : `0x${protocolType.toString(16).padStart(4, '0')}`, rawBytesRange: [l3Offset + 2, l3Offset + 3] },
-        { name: 'Hardware size', value: rawBytes[l3Offset + 4], rawBytesRange: [l3Offset + 4, l3Offset + 4] },
-        { name: 'Protocol size', value: rawBytes[l3Offset + 5], rawBytesRange: [l3Offset + 5, l3Offset + 5] },
-        { name: 'Opcode', value: `${opcodeName} (${opcode})`, rawBytesRange: [l3Offset + 6, l3Offset + 7] },
-        { name: 'Sender MAC address', value: senderMac, rawBytesRange: [l3Offset + 8, l3Offset + 13] },
-        { name: 'Sender IP address', value: senderIp, rawBytesRange: [l3Offset + 14, l3Offset + 17] },
-        { name: 'Target MAC address', value: targetMac, rawBytesRange: [l3Offset + 18, l3Offset + 23] },
-        { name: 'Target IP address', value: targetIp, rawBytesRange: [l3Offset + 24, l3Offset + 27] },
+        // The four fixed header fields, which were drawn from the first
+        // version of this dissector and never named - so `arp.hw.type` and
+        // the three beside it resolved to nothing, on every ARP frame in
+        // both captures. The five below them were named in the bag only,
+        // which counts for the measurement and not for the detail pane's
+        // Apply as Filter; naming the rows costs nothing and fixes that.
+        { name: 'Hardware type', value: hardwareType === 1 ? 'Ethernet (1)' : `${hardwareType}`, abbrev: 'arp.hw.type', rawBytesRange: [l3Offset, l3Offset + 1] },
+        { name: 'Protocol type', value: protocolType === 0x0800 ? 'IPv4 (0x0800)' : `0x${protocolType.toString(16).padStart(4, '0')}`, abbrev: 'arp.proto.type', rawBytesRange: [l3Offset + 2, l3Offset + 3] },
+        { name: 'Hardware size', value: rawBytes[l3Offset + 4], abbrev: 'arp.hw.size', rawBytesRange: [l3Offset + 4, l3Offset + 4] },
+        { name: 'Protocol size', value: rawBytes[l3Offset + 5], abbrev: 'arp.proto.size', rawBytesRange: [l3Offset + 5, l3Offset + 5] },
+        { name: 'Opcode', value: `${opcodeName} (${opcode})`, abbrev: 'arp.opcode', rawBytesRange: [l3Offset + 6, l3Offset + 7] },
+        { name: 'Sender MAC address', value: senderMac, abbrev: 'arp.src.hw_mac', rawBytesRange: [l3Offset + 8, l3Offset + 13] },
+        { name: 'Sender IP address', value: senderIp, abbrev: 'arp.src.proto_ipv4', rawBytesRange: [l3Offset + 14, l3Offset + 17] },
+        { name: 'Target MAC address', value: targetMac, abbrev: 'arp.dst.hw_mac', rawBytesRange: [l3Offset + 18, l3Offset + 23] },
+        { name: 'Target IP address', value: targetIp, abbrev: 'arp.dst.proto_ipv4', rawBytesRange: [l3Offset + 24, l3Offset + 27] },
       ],
     },
   };
