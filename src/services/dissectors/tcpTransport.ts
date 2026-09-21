@@ -194,7 +194,7 @@ export function dissectTcpTransport(
   else if (srcPort === 80 || dstPort === 80) proto = 'HTTP';
   else if (srcPort === 22 || dstPort === 22) proto = 'SSH';
 
-  const tcpOptions = tcpHeaderLen > 20 ? parseTcpOptions(rawBytes, transportOffset + 20, transportOffset + tcpHeaderLen) : null;
+  const tcpOptions = tcpHeaderLen > 20 ? parseTcpOptions(rawBytes, transportOffset + 20, transportOffset + tcpHeaderLen, ackNum) : null;
   // Handshake-only options. SACK blocks are handled further down, once the
   // stream tracker is available, because their edges display relative to the
   // peer's sequence space just like Ack= does.
@@ -286,6 +286,8 @@ export function dissectTcpTransport(
   let lostSegment = false;
   let tlsInOrder = true;
   let analysis: TcpAnalysis | undefined;
+  /** Whether this frame's FIN opened the close or answered it. */
+  let finRole: 'active' | 'passive' | undefined;
   if (tcpTracker) {
     streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
     const position = tcpTracker.recordStreamPacket(streamId, tsUs);
@@ -293,6 +295,7 @@ export function dissectTcpTransport(
     sinceStreamStart = position.sinceFirst;
     sincePreviousInStream = position.sincePrevious;
     tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst, payloadLength > 0);
+    if (fin) finRole = tcpTracker.noteFin(srcIp, srcPort, dstIp, dstPort);
 
     // Asked before the analysis advances the direction, so it describes
     // where the stream stood when this segment arrived.
@@ -793,6 +796,14 @@ export function dissectTcpTransport(
             children: completenessFields(completenessMask),
           }]
           : []),
+        // **What this frame DOES to the connection**, which the flag bits
+        // above state and do not interpret. The reference draws these as
+        // generated rows and they are the filters anyone reaches for on a
+        // capture full of short-lived connections: `tcp.connection.rst` finds
+        // every refused or dropped one without a flag expression, and
+        // `tcp.connection.fin_active` answers "which end hung up first" -
+        // which a flag cannot, because both ends send the same flag.
+        ...connectionRows(syn, ack, fin, rst, finRole),
         // **A parent, where they were flat siblings of Window and Checksum.**
         // The reference nests them under one Options row and names that row
         // `tcp.options`; without it there was no way to tell, in the tree,
@@ -837,7 +848,16 @@ export function dissectTcpTransport(
 function parseTcpOptions(
   rawBytes: Uint8Array,
   optionsStart: number,
-  optionsEnd: number
+  optionsEnd: number,
+  /**
+   * This segment's own cumulative ACK, raw.
+   *
+   * Needed only for D-SACK, which is defined against it (RFC 2883): a first
+   * SACK block at or below the ACK is reporting data the receiver already
+   * has. Passed in rather than re-read here so there is one place that
+   * decodes the header.
+   */
+  ackNumber: number,
 ): {
   fields: ProtocolField[];
   mss?: number;
@@ -882,6 +902,7 @@ function parseTcpOptions(
       fields.push({
         name: 'TCP Option - End of Option List (EOL)',
         value: 'EOL',
+        abbrev: 'tcp.options.eol',
         rawBytesRange: [offset, offset],
         children: optionHeader(offset, kind),
       });
@@ -906,12 +927,21 @@ function parseTcpOptions(
     if (kind === 2 && length === 4) {
       mss = (rawBytes[offset + 2] << 8) | rawBytes[offset + 3];
       infoParts.push(`MSS=${mss}`);
+      // **The option row is named after the OPTION; the value is a child.**
+      // That is the reference's arrangement - `tcp.options.mss` is the option
+      // and `tcp.options.mss_val` the number inside it - and it matters for
+      // more than tidiness: the two have different byte ranges, so a reader
+      // clicking the value highlights the two bytes rather than the whole
+      // option. Same for the two below.
       fields.push({
         name: 'TCP Option - Maximum Segment Size',
         value: `MSS: ${mss}`,
         rawBytesRange: [offset, offset + length - 1],
-        abbrev: 'tcp.options.mss_val',
-        children: optionHeader(offset, kind, length),
+        abbrev: 'tcp.options.mss',
+        children: [
+          ...optionHeader(offset, kind, length),
+          { name: 'MSS Value', value: mss, abbrev: 'tcp.options.mss_val', rawBytesRange: [offset + 2, offset + 3] },
+        ],
       });
     } else if (kind === 3 && length === 3) {
       windowScale = rawBytes[offset + 2];
@@ -920,11 +950,14 @@ function parseTcpOptions(
         name: 'TCP Option - Window Scale',
         value: `${windowScale} (multiply by ${2 ** windowScale})`,
         rawBytesRange: [offset, offset + length - 1],
-        abbrev: 'tcp.options.wscale.shift',
+        abbrev: 'tcp.options.wscale',
         children: [
           ...optionHeader(offset, kind, length),
-          { name: 'Shift count', value: windowScale, rawBytesRange: [offset + 2, offset + 2] },
-          { name: '[Multiplier]', value: 2 ** windowScale, generated: true },
+          { name: 'Shift count', value: windowScale, abbrev: 'tcp.options.wscale.shift', rawBytesRange: [offset + 2, offset + 2] },
+          // Drawn since the option was first read, and never named. It is the
+          // number that actually applies to every window field on the
+          // connection, which makes it the one worth filtering on.
+          { name: '[Multiplier]', value: 2 ** windowScale, generated: true, abbrev: 'tcp.options.wscale.multiplier' },
         ],
       });
     } else if (kind === 4 && length === 2) {
@@ -939,27 +972,62 @@ function parseTcpOptions(
       });
     } else if (kind === 5) {
       const blockCount = Math.floor((length - 2) / 8);
+      const blockRows: ProtocolField[] = [];
       for (let i = 0; i < blockCount; i++) {
         const blockOffset = offset + 2 + i * 8;
         const leftEdge = ((rawBytes[blockOffset] << 24) | (rawBytes[blockOffset + 1] << 16) | (rawBytes[blockOffset + 2] << 8) | rawBytes[blockOffset + 3]) >>> 0;
         const rightEdge = ((rawBytes[blockOffset + 4] << 24) | (rawBytes[blockOffset + 5] << 16) | (rawBytes[blockOffset + 6] << 8) | rawBytes[blockOffset + 7]) >>> 0;
         sackBlocks.push({ leftEdge, rightEdge });
-        fields.push({
-          name: `TCP Option - SACK Block ${i + 1}`,
+        // **RFC 2883 D-SACK: the FIRST block only, and only when it reports
+        // data the receiver has already acknowledged.** Either it sits at or
+        // below the cumulative ACK - "I got that again" - or it is contained
+        // within the second block, which is how a D-SACK is reported when
+        // there is also a genuine hole. Both tests are on the raw sequence
+        // space, which is what the option carries.
+        //
+        // It says something no other field does: the sender retransmitted
+        // something that had already arrived, so the loss it reacted to was
+        // not loss. That is a spurious retransmission, and it is the
+        // difference between a lossy path and an impatient timer.
+        const isDsack = i === 0 && (
+          seqLessOrEqual(rightEdge, ackNumber)
+          || (blockCount > 1 && isContainedInSecondBlock(rawBytes, offset, leftEdge, rightEdge))
+        );
+        blockRows.push({
+          name: isDsack ? 'D-SACK Sequence' : `TCP SACK Block ${i + 1}`,
           value: `${leftEdge}-${rightEdge}`,
+          abbrev: isDsack ? 'tcp.options.sack.dsack' : undefined,
           rawBytesRange: [blockOffset, blockOffset + 7],
           children: [
-            ...(i === 0 ? optionHeader(offset, kind, length) : []),
             // **Named, and absolute.** The Info column maps these to relative
             // numbers against the peer's base sequence; the tree cannot,
             // because the option is parsed before the base is in scope here.
             // Absolute-and-named beats relative-and-unnameable: a filter can
             // reach them now, and the Info line still reads as Wireshark's.
-            { name: 'left edge', value: leftEdge, abbrev: 'tcp.options.sack_le', rawBytesRange: [blockOffset, blockOffset + 3] },
-            { name: 'right edge', value: rightEdge, abbrev: 'tcp.options.sack_re', rawBytesRange: [blockOffset + 4, blockOffset + 7] },
+            {
+              name: isDsack ? 'D-SACK left edge' : 'left edge', value: leftEdge,
+              abbrev: isDsack ? 'tcp.options.sack.dsack_le' : 'tcp.options.sack_le',
+              rawBytesRange: [blockOffset, blockOffset + 3],
+            },
+            {
+              name: isDsack ? 'D-SACK right edge' : 'right edge', value: rightEdge,
+              abbrev: isDsack ? 'tcp.options.sack.dsack_re' : 'tcp.options.sack_re',
+              rawBytesRange: [blockOffset + 4, blockOffset + 7],
+            },
           ],
         });
       }
+      fields.push({
+        name: 'TCP Option - SACK',
+        value: blockRows.map((row) => row.value).join(' '),
+        abbrev: 'tcp.options.sack',
+        rawBytesRange: [offset, offset + length - 1],
+        children: [
+          ...optionHeader(offset, kind, length),
+          { name: 'TCP SACK Count', value: blockCount, generated: true, abbrev: 'tcp.options.sack.count' },
+          ...blockRows,
+        ],
+      });
     } else if (kind === 8 && length === 10) {
       tsval = ((rawBytes[offset + 2] << 24) | (rawBytes[offset + 3] << 16) | (rawBytes[offset + 4] << 8) | rawBytes[offset + 5]) >>> 0;
       tsecr = ((rawBytes[offset + 6] << 24) | (rawBytes[offset + 7] << 16) | (rawBytes[offset + 8] << 8) | rawBytes[offset + 9]) >>> 0;
@@ -1078,4 +1146,64 @@ function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolF
     abbrev: 'tcp.flags.str',
     rawBytesRange: [transportOffset + 12, transportOffset + 13] as [number, number],
   }];
+}
+
+/**
+ * `a <= b` in TCP's 32-bit sequence space, which wraps.
+ *
+ * A plain `<=` is wrong across the wrap: a sequence just past 2^32 is a small
+ * number, and comparing it to a large one reads as far behind rather than
+ * just ahead. The signed difference is the standard answer (RFC 1982) and is
+ * what `tcpAnalysis.ts` uses for the same reason.
+ */
+function seqLessOrEqual(a: number, b: number): boolean {
+  return ((a - b) | 0) <= 0;
+}
+
+/**
+ * Whether the first SACK block sits inside the second.
+ *
+ * RFC 2883's other D-SACK form: when there is also a genuine hole, the
+ * duplicate is reported as a first block contained within the second, which
+ * is otherwise a nonsense ordering - SACK blocks are not required to be
+ * sorted, but a block inside another says something no ordinary SACK does.
+ */
+function isContainedInSecondBlock(
+  rawBytes: Uint8Array, optionOffset: number, leftEdge: number, rightEdge: number,
+): boolean {
+  const at = optionOffset + 10;
+  if (at + 7 >= rawBytes.length) return false;
+  const secondLeft = ((rawBytes[at] << 24) | (rawBytes[at + 1] << 16) | (rawBytes[at + 2] << 8) | rawBytes[at + 3]) >>> 0;
+  const secondRight = ((rawBytes[at + 4] << 24) | (rawBytes[at + 5] << 16) | (rawBytes[at + 6] << 8) | rawBytes[at + 7]) >>> 0;
+  return seqLessOrEqual(secondLeft, leftEdge) && seqLessOrEqual(rightEdge, secondRight);
+}
+
+/**
+ * The reference's `tcp.connection.*` rows: what this frame does to the
+ * connection, rather than which bits it has set.
+ *
+ * All `FT_NONE` in the reference's dictionary - presence IS the value - so
+ * each is drawn only on the frame it is true of, and a filter naming one
+ * matches exactly those frames.
+ *
+ * A SYN with ACK is the acknowledge and not a second request, which is why
+ * the first two are exclusive rather than both firing on a SYN-ACK.
+ */
+function connectionRows(
+  syn: boolean, ack: boolean, fin: boolean, rst: boolean,
+  finRole: 'active' | 'passive' | undefined,
+): ProtocolField[] {
+  const rows: ProtocolField[] = [];
+  if (syn && !ack) rows.push({ name: '[Connection establish request (SYN)]', value: true, generated: true, abbrev: 'tcp.connection.syn' });
+  if (syn && ack) rows.push({ name: '[Connection establish acknowledge (SYN+ACK)]', value: true, generated: true, abbrev: 'tcp.connection.synack' });
+  if (fin) {
+    rows.push({ name: '[Connection finish (FIN)]', value: true, generated: true, abbrev: 'tcp.connection.fin' });
+    if (finRole === 'active') {
+      rows.push({ name: '[This frame initiates the connection closing]', value: true, generated: true, abbrev: 'tcp.connection.fin_active' });
+    } else if (finRole === 'passive') {
+      rows.push({ name: '[This frame undergoes the connection closing]', value: true, generated: true, abbrev: 'tcp.connection.fin_passive' });
+    }
+  }
+  if (rst) rows.push({ name: '[Connection reset (RST)]', value: true, generated: true, abbrev: 'tcp.connection.rst' });
+  return rows;
 }

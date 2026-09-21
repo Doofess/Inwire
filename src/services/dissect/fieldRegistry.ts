@@ -429,6 +429,41 @@ export const FIELDS: readonly FieldDef[] = [
   uint('tcp.options.timestamp.tsecr', 'Timestamp echo reply', 'tcp'),
   uint('tcp.options.sack_le', 'TCP SACK Left Edge', 'tcp'),
   uint('tcp.options.sack_re', 'TCP SACK Right Edge', 'tcp'),
+
+  // --- the options as OPTIONS, and what a SACK block is reporting ----------
+  //
+  // `tcp.options.mss`, `.wscale`, `.sack` and `.eol` name the option itself
+  // where `.mss_val` and `.wscale.shift` name the number inside it - the
+  // reference's own split, and the reason a reader clicking the value gets
+  // its two bytes rather than the whole option. Like `tcp.options.nop`
+  // above, all four are registered by the reference as sub-PROTOCOLS rather
+  // than fields, so `wireshark-abbrevs.ts` carries them as exemptions with
+  // that argument spelled out.
+  treeOnly(str('tcp.options.mss', 'Maximum Segment Size', 'tcp')),
+  treeOnly(str('tcp.options.wscale', 'Window Scale', 'tcp')),
+  treeOnly(uint('tcp.options.wscale.multiplier', 'Multiplier', 'tcp')),
+  treeOnly(str('tcp.options.sack', 'SACK', 'tcp')),
+  treeOnly(str('tcp.options.eol', 'End of Option List (EOL)', 'tcp')),
+  treeOnly(uint('tcp.options.sack.count', 'TCP SACK Count', 'tcp')),
+  // RFC 2883. A D-SACK says the sender retransmitted something that had
+  // already arrived - so whatever loss it reacted to was not loss, and the
+  // retransmission was spurious. Nothing else in a capture says that.
+  treeOnly(str('tcp.options.sack.dsack', 'D-SACK Sequence', 'tcp')),
+  treeOnly(uint('tcp.options.sack.dsack_le', 'TCP D-SACK Left Edge', 'tcp')),
+  treeOnly(uint('tcp.options.sack.dsack_re', 'TCP D-SACK Right Edge', 'tcp')),
+
+  // --- what a frame does to the connection ---------------------------------
+  //
+  // `FT_NONE` in the reference: presence is the value, so each is drawn only
+  // on the frame it is true of. `tcp.connection.fin_active` is the one that
+  // earns its place - a FIN flag is on both halves of a close and says
+  // nothing about which end hung up first, which is usually the question.
+  treeOnly(bool('tcp.connection.syn', 'Connection establish request (SYN)', 'tcp')),
+  treeOnly(bool('tcp.connection.synack', 'Connection establish acknowledge (SYN+ACK)', 'tcp')),
+  treeOnly(bool('tcp.connection.fin', 'Connection finish (FIN)', 'tcp')),
+  treeOnly(bool('tcp.connection.fin_active', 'This frame initiates the connection closing', 'tcp')),
+  treeOnly(bool('tcp.connection.fin_passive', 'This frame undergoes the connection closing', 'tcp')),
+  treeOnly(bool('tcp.connection.rst', 'Connection reset (RST)', 'tcp')),
   { abbrev: 'tcp.analysis.ack_rtt', label: 'The RTT to ACK the segment was', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.initial_rtt', label: 'iRTT', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.bytes_in_flight', label: 'Bytes in flight', type: 'uint', layer: 'tcp', generated: true },

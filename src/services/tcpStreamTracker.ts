@@ -278,6 +278,11 @@ interface TcpConnection {
   sawData: boolean;
   sawFin: boolean;
   sawRst: boolean;
+  /**
+   * Which endpoint sent the first FIN, so a later one on the other side reads
+   * as the passive half of the close rather than a second active one.
+   */
+  finFrom?: 'a' | 'b';
   /** Wireshark's sequence analysis state, shared by both directions. */
   analysis?: TcpConnectionState;
   /** What both ends of the TLS conversation have agreed on. */
@@ -736,6 +741,27 @@ export class TcpStreamTracker {
     if (hasData) conn.sawData = true;
     if (fin) conn.sawFin = true;
     if (rst) conn.sawRst = true;
+  }
+
+  /**
+   * Records which side sent the first FIN, and says whether this one is it.
+   *
+   * "Active" and "passive" close are the reference's words, and the
+   * distinction is the useful half of a FIN: it is the difference between a
+   * client that finished and a server that dropped it, which a flag alone
+   * cannot tell you because both frames carry the same flag.
+   *
+   * Idempotent on purpose - a retransmitted FIN is the same direction, so it
+   * still reads as the active one rather than becoming the passive close of
+   * itself.
+   */
+  public noteFin(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number,
+  ): 'active' | 'passive' {
+    const found = this.locate(srcIp, srcPort, dstIp, dstPort);
+    const side = found.senderIsA ? 'a' : 'b';
+    if (found.conn.finFrom === undefined) found.conn.finFrom = side;
+    return found.conn.finFrom === side ? 'active' : 'passive';
   }
 
   /**
