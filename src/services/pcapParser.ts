@@ -832,6 +832,13 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   // not double - which is the trap `appStream.ts` records for HTTP/2.
   'QUIC IETF': 'quic',
   'Hypertext Transfer Protocol': 'http',
+  // The body's own dissector, which the reference makes a protocol of its own
+  // below HTTP - so a JSON API response reads `...tcp:http:json` and the
+  // bareword `json` answers. `dissectors/mediaType.ts` chooses between them.
+  'JavaScript Object Notation': 'json',
+  'Line-based text data': 'data-text-lines',
+  'Media Type': 'media',
+  'Data': 'data',
   'HyperText Transfer Protocol 2': 'http2',
   'HyperText Transfer Protocol Version 3': 'http3',
   'Ethernet II': 'eth',

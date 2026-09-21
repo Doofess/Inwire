@@ -207,9 +207,29 @@ const BROTLI_RESPONSE = concatBytes(
   Uint8Array.from([0x1b, 0x2a, 0x00, 0x11]),
 );
 
+/**
+ * 4,000 open brackets.
+ *
+ * Valid JSON prefix, one nesting level per byte, and the shape that takes a
+ * recursive parser's stack out - which in a Worker is not an exception
+ * anybody catches, it is the capture ending. `json.ts` checks its depth
+ * BEFORE recursing; this is what proves the check is where it says it is.
+ */
+const DEEP_JSON = '['.repeat(4000);
+const DEEP_RESPONSE = concatBytes(
+  ascii([
+    'HTTP/1.1 200 OK',
+    'Content-Type: application/json',
+    `Content-Length: ${DEEP_JSON.length}`,
+    '', '',
+  ].join('\r\n')),
+  ascii(DEEP_JSON),
+);
+
 const GET_B = ascii('GET /a.json HTTP/1.1\r\nHost: example.test\r\n\r\n');
 const GET_B2 = ascii('GET /b.json HTTP/1.1\r\nHost: example.test\r\n\r\n');
 const GET_B3 = ascii('GET /c.txt HTTP/1.1\r\nHost: example.test\r\n\r\n');
+const GET_B4 = ascii('GET /deep.json HTTP/1.1\r\nHost: example.test\r\n\r\n');
 
 let cSeq = 3000;
 let sSeq = 4000;
@@ -224,6 +244,8 @@ FRAMES.push(
   { name: 'b-gzip', bytes: serverB(GZIP_RESPONSE) },
   { name: 'b-get3', bytes: clientB(GET_B3) },
   { name: 'b-brotli', bytes: serverB(BROTLI_RESPONSE) },
+  { name: 'b-get4', bytes: clientB(GET_B4) },
+  { name: 'b-deep', bytes: serverB(DEEP_RESPONSE) },
 );
 
 // --- dissecting ---------------------------------------------------------------
@@ -381,6 +403,41 @@ console.log('\n--- bodies ---');
 
   check('a request cookie is split into pairs',
     allValuesOf(at('request'), 'http.cookie_pair'), ['session=abc123']);
+
+  // --- the media-type handoff ---
+  //
+  // A body is a protocol of its own BELOW HTTP, which is what makes the
+  // bareword answer. Nesting the same rows under HTTP would draw identically
+  // and leave `json` matching nothing.
+  check('a JSON body becomes its own layer in the protocol chain',
+    finished.frameProtocols?.slice(-2), ['http', 'json']);
+  check('...with the object, its members and their keys',
+    [
+      allValuesOf(finished, 'json.key'),
+      allValuesOf(finished, 'json.value.number'),
+      allValuesOf(finished, 'json.value.string'),
+    ],
+    [['alpha', 'beta', 'gamma'], [1, 3, 4], ['two']]);
+  check('a gzipped JSON body is handed on DECODED, not as gzip',
+    allValuesOf(at('b-gzip'), 'json.key'), ['alpha', 'beta', 'gamma']);
+
+  const text = at('b-brotli');
+  // `text/plain` with an encoding this build cannot undo: the body is four
+  // bytes of brotli, so handing it to the line dissector would draw noise as
+  // if it were text. It is NOT handed on, because it never decoded.
+  check('a body that could not be decoded is not handed to a media dissector',
+    text.frameProtocols?.includes('data-text-lines'), false);
+
+  // **4,000 levels of nesting, which is the shape that ends a Worker.** The
+  // capture reaching this point at all is most of the assertion - a recursive
+  // parser with its depth check in the wrong place does not fail here, it
+  // takes the process down and the run prints nothing.
+  const deep = at('b-deep');
+  check('a deeply nested body is bounded rather than fatal',
+    rows(deep).find((r) => r.name === '[JSON not fully read]')?.value,
+    'nested deeper than 64 levels; the rest is not drawn');
+  check('...and the layer is still there, with what it did read',
+    deep.frameProtocols?.slice(-1), ['json']);
 
   // Every body finished, so nothing is still charged against the shared
   // budget. A leak here is invisible until it silently stops reassembly.

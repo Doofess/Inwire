@@ -107,6 +107,14 @@ export const LAYERS = [
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'tftp', 'bfd', 'coap', 'ptp',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'smb2', 'kerberos', 'http', 'http2', 'http3',
+  // **What a message BODY is**, which the reference makes four protocols of
+  // rather than fields on HTTP - so a JSON API response's chain really does
+  // read `...tcp:http:json`. `data-text-lines` keeps its hyphens because that
+  // is the name a user types, and `filter/lexer.ts`'s `WORD` class includes
+  // `-` (checked, not hoped for). `data-text-lines` owns no fields: it is a
+  // protocol with nothing but lines under it, which is why nothing below
+  // carries that prefix.
+  'json', 'media', 'data', 'data-text-lines',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -926,6 +934,32 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(str('http.chunk_data', 'Chunk data', 'http')),
   treeOnly(str('http.chunk_boundary', 'Chunk boundary', 'http')),
   treeOnly(str('http.cookie_pair', 'Cookie pair', 'http')),
+
+  // --- and what the body turns out to BE ------------------------------------
+  //
+  // `json.key` is the one here anybody types: `json.key == "error"` finds
+  // every API response that failed, across every endpoint, without knowing
+  // any of their shapes. It is `treeOnly` all the same - the bag is built for
+  // every frame and kept for as long as the frame is (ADR 0007), and a
+  // document with two hundred keys would put two hundred entries in it.
+  //
+  // **`media.type` is `FT_BYTES` in the reference**, holding the body rather
+  // than the MIME string its name suggests. Matched, because the alternative
+  // is a name people already know answering a different question here - the
+  // same trap `http.file_data` carries.
+  treeOnly(str('json.object', 'Object', 'json')),
+  treeOnly(str('json.array', 'Array', 'json')),
+  treeOnly(str('json.member', 'Member', 'json')),
+  treeOnly(str('json.key', 'Key', 'json')),
+  treeOnly(str('json.value.string', 'String value', 'json')),
+  treeOnly(uint('json.value.number', 'Number value', 'json')),
+  treeOnly(bool('json.value.true', 'True value', 'json')),
+  treeOnly(bool('json.value.false', 'False value', 'json')),
+  treeOnly(str('json.value.null', 'Null value', 'json')),
+  treeOnly(str('media.type', 'Media type', 'media')),
+  treeOnly(str('data.data', 'Data', 'data')),
+  treeOnly(uint('data.len', 'Length', 'data')),
+  treeOnly(str('data.text', 'Text', 'data')),
   str('http.content_range', 'Content-Range', 'http'),
   str('http.content_type', 'Content-Type', 'http'),
   str('http.cookie', 'Cookie', 'http'),
