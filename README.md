@@ -13,7 +13,7 @@ It is **not a web app**: no browser build, nothing hosted, and the renderer is
 served to Electron from a custom `app://inwire` scheme. macOS and Linux have the
 capture agent — one tarball, built from these sources — but no desktop app yet.
 
-![CI](https://github.com/Doofess/NetView/actions/workflows/ci.yml/badge.svg)
+[![CI](https://github.com/Doofess/Inwire/actions/workflows/ci.yml/badge.svg)](https://github.com/Doofess/Inwire/actions/workflows/ci.yml)
 
 ## How it works
 
