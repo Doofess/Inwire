@@ -689,6 +689,49 @@ export const FIELDS: readonly FieldDef[] = [
   str('http2.headers.user_agent', 'User-Agent', 'http2'),
   str('http2.headers.content_type', 'Content-Type', 'http2'),
 
+  // --- QUIC ------------------------------------------------------------------
+  //
+  // **The gap ADR 0039's tree coverage found.** `dissectors/quic.ts` reads every
+  // one of these off the wire, decrypts what it can, and until this block
+  // existed published none of them - `test/fixtures/acceptance.json` recorded
+  // `quic` under `unimplemented` against 40 reference fields on `inwire` and 37
+  // on `bulk`, rather than floored at 0, because a zero floor protects nothing
+  // and reads as measured-and-accepted.
+  //
+  // Split between the bag and the tree on the standing per-frame-cost rule
+  // (ADRs 0016-0018): the six a person actually filters on are bag-backed, and
+  // the header's own accounting - the two connection-id lengths, the token
+  // length, the Length field - is `treeOnly`. They are on screen for the one
+  // frame someone opened, which is the right place to pay for them.
+  //
+  // Everything below the packet number needs the payload decrypted, so it is
+  // present on Initial packets and on nothing else unless a key log was loaded.
+  // `treeOnly` rather than bag-backed, and not for cost: the fact it carries is
+  // already filterable through `quic.long.packet_type`, which is absent on a
+  // short header and present on every long one.
+  treeOnly(uint('quic.header_form', 'Header Form', 'quic')),
+  uint('quic.long.packet_type', 'Packet Type', 'quic'),
+  uint('quic.version', 'Version', 'quic'),
+  treeOnly(uint('quic.dcil', 'Destination Connection ID Length', 'quic')),
+  // The connection IDs are `bytes` - a hex string, compared as one - because
+  // that is what they are on the wire and what the reference calls them. They
+  // are the join key for a QUIC conversation the way a stream index is for TCP,
+  // which is why these two carry a bag write where the lengths beside them
+  // do not.
+  { abbrev: 'quic.dcid', label: 'Destination Connection ID', type: 'bytes', layer: 'quic' },
+  treeOnly(uint('quic.scil', 'Source Connection ID Length', 'quic')),
+  { abbrev: 'quic.scid', label: 'Source Connection ID', type: 'bytes', layer: 'quic' },
+  treeOnly(uint('quic.token_length', 'Token Length', 'quic')),
+  treeOnly(uint('quic.length', 'Length', 'quic')),
+  uint('quic.packet_number', 'Packet Number', 'quic'),
+  uint('quic.frame_type', 'Frame Type', 'quic'),
+  treeOnly(uint('quic.crypto.offset', 'Offset', 'quic')),
+  treeOnly(uint('quic.crypto.length', 'Length', 'quic')),
+  treeOnly(uint('quic.stream.stream_id', 'Stream ID', 'quic')),
+  treeOnly(uint('quic.stream.offset', 'Offset', 'quic')),
+  treeOnly(uint('quic.stream.length', 'Length', 'quic')),
+  treeOnly(bool('quic.stream.fin', 'Fin', 'quic')),
+
   // --- HTTP/3 ----------------------------------------------------------------
   // Only ever present when a key log opened the QUIC packets that carried it:
   // unlike TLS over TCP, where the record layer is in the clear even when its

@@ -66,6 +66,7 @@
           "ipv6": 5,
           "llc": 3,
           "lldp": 4,
+          "quic": 13,
           "ssdp": 13,
           "stp": 4,
           "tcp": 59,
@@ -77,11 +78,10 @@
           "filterableNotInTree": 5
         },
         "counts": {
-          "absentDistinct": 491,
-          "valueMismatches": 130
+          "absentDistinct": 478,
+          "valueMismatches": 136
         },
         "unimplemented": {
-          "quic": "A 479-line dissector with its own crypto that decrypts Initials and labels the Protocol column, publishing not one quic.* abbrev on either surface. 40 reference fields here. Recorded rather than floored at 0: a zero floor protects nothing and reads as measured-and-accepted.",
           "prp": "Parallel Redundancy Protocol - a 6-byte trailer this build does not read at all, on 20 frames. The one protocol the reference names here that nothing in this build can name."
         }
       }
@@ -129,6 +129,7 @@
           "ip": 13,
           "ipv6": 4,
           "llc": 3,
+          "quic": 13,
           "ssdp": 7,
           "stp": 4,
           "tcp": 59,
@@ -140,12 +141,10 @@
           "filterableNotInTree": 5
         },
         "counts": {
-          "absentDistinct": 337,
-          "valueMismatches": 118
+          "absentDistinct": 324,
+          "valueMismatches": 123
         },
-        "unimplemented": {
-          "quic": "As inwire: no quic.* abbrev on either surface, against 37 reference fields."
-        }
+        "unimplemented": {}
       }
     }
   }

@@ -16,6 +16,7 @@
  * tail here - and none in the reference analyzer either.
  */
 import { toHex } from '../addressFormat';
+import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 
 /** Long-header packet types for QUIC v1 (RFC 9000). */
 const LONG_PACKET_TYPES_V1: Record<number, string> = {
@@ -61,10 +62,20 @@ function frameTypeName(type: number): string {
  * everything else. The reference analyzer does the same, which is why its Info reads
  * "PADDING, PING, PADDING" rather than one PADDING per byte.
  */
-function summarizeFrames(payload: Uint8Array): { names: string[]; crypto: CryptoFragment[]; streams: StreamFragment[] } {
+function summarizeFrames(payload: Uint8Array): {
+  names: string[];
+  crypto: CryptoFragment[];
+  streams: StreamFragment[];
+  records: QuicFrameRecord[];
+} {
   const names: string[] = [];
   const crypto: CryptoFragment[] = [];
   const streams: StreamFragment[] = [];
+  // One record per NAME, not per frame on the wire: a run of PADDING collapses
+  // to a single entry below, and the tree has to agree with the Info column
+  // about how many frames a packet carried. Wireshark draws one PADDING row per
+  // run too, with the run's length on it.
+  const records: QuicFrameRecord[] = [];
   const end = payload.length;
   let offset = 0;
 
@@ -75,7 +86,10 @@ function summarizeFrames(payload: Uint8Array): { names: string[]; crypto: Crypto
     let cursor = typeVarint.nextOffset;
 
     const name = frameTypeName(type);
-    if (name !== 'PADDING' || names[names.length - 1] !== 'PADDING') names.push(name);
+    if (name !== 'PADDING' || names[names.length - 1] !== 'PADDING') {
+      names.push(name);
+      records.push({ type, name });
+    }
 
     // Skip the frame body so the next frame type is read from the right place.
     // A frame whose body doesn't parse means the rest of the payload can't be
@@ -127,6 +141,9 @@ function summarizeFrames(payload: Uint8Array): { names: string[]; crypto: Crypto
         const dataEnd = dataStart + lengthVarint.value;
         if (dataEnd > end) { ok = false; break; }
         crypto.push({ offset: offsetVarint.value, data: payload.slice(dataStart, dataEnd) });
+        const record = records[records.length - 1];
+        record.cryptoOffset = offsetVarint.value;
+        record.cryptoLength = lengthVarint.value;
         cursor = dataEnd;
         break;
       }
@@ -162,6 +179,11 @@ function summarizeFrames(payload: Uint8Array): { names: string[]; crypto: Crypto
           streamId: idVarint.value, offset: streamOffset,
           data: payload.slice(dataStart, dataEnd), fin: (type & 0x01) !== 0,
         });
+        const record = records[records.length - 1];
+        record.streamId = idVarint.value;
+        record.streamOffset = streamOffset;
+        record.streamLength = dataEnd - dataStart;
+        record.streamFin = (type & 0x01) !== 0;
         cursor = dataEnd;
         break;
       }
@@ -185,7 +207,7 @@ function summarizeFrames(payload: Uint8Array): { names: string[]; crypto: Crypto
     offset = cursor;
   }
 
-  return { names, crypto, streams };
+  return { names, crypto, streams, records };
 }
 
 /**
@@ -221,6 +243,61 @@ export interface CryptoFragment {
   data: Uint8Array;
 }
 
+/**
+ * One frame inside a decrypted packet payload, for the tree.
+ *
+ * Separate from `CryptoFragment`/`StreamFragment`, which are what the *tracker*
+ * consumes to reassemble across packets. This is what the *detail pane* draws,
+ * so it keeps lengths and offsets rather than bytes - a CRYPTO frame's bytes
+ * are already carried by the fragment beside it and copying them twice per
+ * frame is exactly the per-frame cost ADRs 0016-0018 exist to hold down.
+ */
+export interface QuicFrameRecord {
+  type: number;
+  name: string;
+  cryptoOffset?: number;
+  cryptoLength?: number;
+  streamId?: number;
+  streamOffset?: number;
+  streamLength?: number;
+  streamFin?: boolean;
+}
+
+/**
+ * One QUIC packet's header, as read rather than as rendered.
+ *
+ * **The Info string is not built from this and must not be.** `info` is held to
+ * the reference analyzer frame for frame by `scripts/parity/parity-check.ts`
+ * (the Info floors) and by the `quicRows` counts in
+ * `test/fixtures/acceptance.json`, so it is assembled exactly where it always
+ * was. This record is the same facts kept rather than discarded, which is what
+ * the tree and the field bag are built from (ADR 0039).
+ *
+ * Every member is optional past `headerForm` and `typeName` because a QUIC
+ * header is not one shape: a short header has no version and no connection-id
+ * length, Version Negotiation has no packet type, and Retry has no Length. A
+ * row is drawn only where the fact was actually read, which is the same rule
+ * the status bar keeps - never show a zero that was never measured.
+ */
+export interface QuicPacketRecord {
+  headerForm: 'long' | 'short';
+  /** `Initial`, `Handshake`, `Protected Payload (KP0)`, ... */
+  typeName: string;
+  /** The long header's 2-bit type field, as it sits on the wire. */
+  longPacketType?: number;
+  version?: number;
+  dcid?: string;
+  dcidLength?: number;
+  scid?: string;
+  scidLength?: number;
+  tokenLength?: number;
+  /** The header's own Length field: packet number plus protected payload. */
+  payloadLength?: number;
+  /** Only ever present when the packet could be decrypted. */
+  packetNumber?: number;
+  frames: QuicFrameRecord[];
+}
+
 export interface QuicDissectorResult {
   info: string;
   /** CRYPTO frames decrypted out of this datagram's Initial packets. */
@@ -230,6 +307,15 @@ export interface QuicDissectorResult {
   /** Connection IDs this header advertised, hex-encoded; empty for short headers. */
   connectionIds: string[];
   isLongHeader: boolean;
+  /**
+   * Every packet coalesced into this datagram, in wire order.
+   *
+   * `info` summarizes the datagram with the LAST packet, which is what the
+   * reference analyzer does; the tree draws all of them, which is also what it
+   * does. Both readings come from here now rather than one of them being the
+   * only one kept.
+   */
+  packets: QuicPacketRecord[];
   /** Where the next coalesced packet starts, or `end` if this was the last. */
   nextPacketOffset: number;
 }
@@ -243,7 +329,9 @@ export interface QuicDissectorResult {
  * Exported because HTTP/3 uses this exact encoding for its own frame types,
  * lengths and settings (RFC 9114 §7), and `dissectors/http3.ts` had a second
  * copy of it. The import runs http3 -> quic, which is the way the layering
- * already points; there is no cycle, `quic.ts` imports only `addressFormat`.
+ * already points; there is no cycle. `quic.ts`'s only other imports are
+ * `addressFormat` and a TYPE-only one from `types/packet`, which `buildQuicLayer`
+ * below needs and which erases at compile time.
  * `qpack.ts`'s prefix integer is a DIFFERENT encoding (HPACK's, RFC 7541 §5.1)
  * and must not be folded in here.
  */
@@ -309,6 +397,13 @@ function dissectQuic(
         streamFragments: frames.streams,
         connectionIds: [],
         isLongHeader: false,
+        packets: [{
+          headerForm: 'short',
+          typeName: 'Protected Payload (KP0)',
+          ...(knownConnectionId ? { dcid: knownConnectionId, dcidLength: dcidLength } : {}),
+          packetNumber: decrypted.packetNumber,
+          frames: frames.records,
+        }],
         nextPacketOffset: end,
       };
     }
@@ -325,6 +420,12 @@ function dissectQuic(
       streamFragments: [],
       connectionIds: [],
       isLongHeader: false,
+      packets: [{
+        headerForm: 'short',
+        typeName: 'Protected Payload (KP0)',
+        ...(knownConnectionId ? { dcid: knownConnectionId, dcidLength: dcidLength } : {}),
+        frames: [],
+      }],
       /** A short header runs to the end of the datagram; nothing follows it. */
       nextPacketOffset: end,
     };
@@ -337,7 +438,12 @@ function dissectQuic(
 
   // Version 0 means Version Negotiation, which has no packet-type field.
   if (version === 0) {
-    return { info: 'Version Negotiation', cryptoFragments: [], streamFragments: [], connectionIds: [], isLongHeader: true, nextPacketOffset: end };
+    return {
+      info: 'Version Negotiation',
+      cryptoFragments: [], streamFragments: [], connectionIds: [], isLongHeader: true,
+      packets: [{ headerForm: 'long', typeName: 'Version Negotiation', version: 0, frames: [] }],
+      nextPacketOffset: end,
+    };
   }
 
   const dcidLen = bytes[start + 5];
@@ -368,17 +474,24 @@ function dissectQuic(
   // datagram. Retry and Version Negotiation have no Length and run to the end.
   let nextPacketOffset = end;
   let packetNumberOffset = -1;
+  // Hoisted out of the block below because the tree draws them. They stay
+  // `null` rather than 0 where the header has no such field at all - Retry
+  // carries neither, and only Initial carries a token.
+  let tokenLength: number | null = null;
+  let headerPayloadLength: number | null = null;
   if (packetType !== 'Retry') {
     let cursor = scidLenOffset + 1 + scidLen;
     if (packetType === 'Initial') {
       // Initial packets prepend a token, itself length-prefixed.
-      const tokenLength = readVarint(bytes, cursor, end);
-      if (!tokenLength) return null;
-      cursor = tokenLength.nextOffset + tokenLength.value;
+      const token = readVarint(bytes, cursor, end);
+      if (!token) return null;
+      tokenLength = token.value;
+      cursor = token.nextOffset + token.value;
     }
     const payloadLength = readVarint(bytes, cursor, end);
-    if (payloadLength) packetNumberOffset = payloadLength.nextOffset;
     if (payloadLength) {
+      packetNumberOffset = payloadLength.nextOffset;
+      headerPayloadLength = payloadLength.value;
       const candidate = payloadLength.nextOffset + payloadLength.value;
       if (candidate > cursor && candidate <= end) nextPacketOffset = candidate;
     }
@@ -391,6 +504,19 @@ function dissectQuic(
   // them - the decryptor answers null otherwise, and the packet stays a name.
   const cryptoFragments: CryptoFragment[] = [];
   const streamFragments: StreamFragment[] = [];
+  const record: QuicPacketRecord = {
+    headerForm: 'long',
+    typeName: packetType,
+    longPacketType: typeBits,
+    version,
+    dcid: dcidHex,
+    dcidLength: dcidLen,
+    scid: scidHex,
+    scidLength: scidLen,
+    ...(tokenLength === null ? {} : { tokenLength }),
+    ...(headerPayloadLength === null ? {} : { payloadLength: headerPayloadLength }),
+    frames: [],
+  };
   const kind: QuicPacketKind | null =
     packetType === 'Initial' ? 'initial'
       : packetType === 'Handshake' ? 'handshake'
@@ -404,6 +530,8 @@ function dissectQuic(
       parts.push(...frames.names);
       cryptoFragments.push(...frames.crypto);
       streamFragments.push(...frames.streams);
+      record.packetNumber = decrypted.packetNumber;
+      record.frames = frames.records;
     }
   }
 
@@ -413,6 +541,7 @@ function dissectQuic(
     streamFragments,
     connectionIds: [dcidHex, scidHex].filter(id => id.length > 0),
     isLongHeader: true,
+    packets: [record],
     nextPacketOffset,
   };
 }
@@ -447,11 +576,12 @@ export function dissectQuicDatagram(
   const connectionIds: string[] = [];
   const cryptoFragments: CryptoFragment[] = [];
   const streamFragments: StreamFragment[] = [];
+  const packets: QuicPacketRecord[] = [];
   let sawLongHeader = false;
 
   // Bounded so a packet that fails to advance can't spin; real datagrams
   // coalesce a handful of packets at most.
-  for (let packets = 0; packets < 8 && offset < end; packets++) {
+  for (let seen = 0; seen < 8 && offset < end; seen++) {
     // Resolved per PACKET, not per datagram. A short header carries a
     // connection id with no length in front of it, so it can only be read by
     // matching against the ids this flow has already shown - and in a
@@ -469,11 +599,126 @@ export function dissectQuicDatagram(
     connectionIds.push(...result.connectionIds);
     cryptoFragments.push(...result.cryptoFragments);
     streamFragments.push(...result.streamFragments);
+    packets.push(...result.packets);
     sawLongHeader = sawLongHeader || result.isLongHeader;
 
     if (result.nextPacketOffset <= offset) break;
     offset = result.nextPacketOffset;
   }
 
-  return last ? { ...last, connectionIds, cryptoFragments, streamFragments, isLongHeader: sawLongHeader } : null;
+  return last
+    ? { ...last, connectionIds, cryptoFragments, streamFragments, packets, isLongHeader: sawLongHeader }
+    : null;
+}
+
+/**
+ * The QUIC layer for the detail tree, and the fields a filter can read.
+ *
+ * **This is what ADR 0039's tree coverage found missing.** Until it existed
+ * this dissector parsed every header field, decrypted what it could, named the
+ * Protocol column and wrote the Info string - and published *not one* `quic.*`
+ * abbrev on either surface, against 40 the reference emits on the `inwire`
+ * fixture. `test/fixtures/acceptance.json` recorded that under `unimplemented`
+ * rather than floored at 0, which is what a measurement is for.
+ *
+ * One layer per datagram with a subtree per packet, for the reason
+ * `buildHttp3Layer` groups by stream: `frameProtocols` is derived from the
+ * layer NAMES in order (`pcapParser.ts`), so a datagram coalescing a Handshake
+ * and a 1-RTT packet would otherwise put two `quic` tokens in the hierarchy,
+ * where a repeated token reads as a protocol nested inside itself.
+ *
+ * The layer name is the reference's, so `PROTOCOL_NAME_MAP` can map it back to
+ * the `quic` token that `protocolTokens` already pushes - the splice in
+ * `pcapParser.ts` filters a token a layer already supplies, so the bareword
+ * does not double.
+ */
+export function buildQuicLayer(
+  packets: readonly QuicPacketRecord[],
+  summary: string
+): { layer: ProtocolLayer; fields: Record<string, string | number> } | null {
+  if (packets.length === 0) return null;
+
+  const rows: ProtocolField[] = [];
+  const fields: Record<string, string | number> = {};
+
+  for (const packet of packets) {
+    const children: ProtocolField[] = [
+      {
+        name: 'Header Form',
+        value: packet.headerForm === 'long' ? 'Long Header (1)' : 'Short Header (0)',
+        abbrev: 'quic.header_form',
+      },
+    ];
+
+    if (packet.longPacketType !== undefined) {
+      children.push({
+        name: 'Packet Type',
+        value: `${packet.typeName} (${packet.longPacketType})`,
+        abbrev: 'quic.long.packet_type',
+      });
+      fields['quic.long.packet_type'] = packet.longPacketType;
+    }
+    if (packet.version !== undefined) {
+      children.push({
+        name: 'Version',
+        value: `0x${packet.version.toString(16).padStart(8, '0')}`,
+        abbrev: 'quic.version',
+      });
+      fields['quic.version'] = packet.version;
+    }
+    if (packet.dcidLength !== undefined) {
+      children.push({ name: 'Destination Connection ID Length', value: packet.dcidLength, abbrev: 'quic.dcil' });
+    }
+    if (packet.dcid !== undefined && packet.dcid.length > 0) {
+      children.push({ name: 'Destination Connection ID', value: packet.dcid, abbrev: 'quic.dcid' });
+      fields['quic.dcid'] = packet.dcid;
+    }
+    if (packet.scidLength !== undefined) {
+      children.push({ name: 'Source Connection ID Length', value: packet.scidLength, abbrev: 'quic.scil' });
+    }
+    if (packet.scid !== undefined && packet.scid.length > 0) {
+      children.push({ name: 'Source Connection ID', value: packet.scid, abbrev: 'quic.scid' });
+      fields['quic.scid'] = packet.scid;
+    }
+    if (packet.tokenLength !== undefined) {
+      children.push({ name: 'Token Length', value: packet.tokenLength, abbrev: 'quic.token_length' });
+    }
+    if (packet.payloadLength !== undefined) {
+      children.push({ name: 'Length', value: packet.payloadLength, abbrev: 'quic.length' });
+    }
+    if (packet.packetNumber !== undefined) {
+      children.push({ name: 'Packet Number', value: packet.packetNumber, abbrev: 'quic.packet_number' });
+      fields['quic.packet_number'] = packet.packetNumber;
+    }
+
+    for (const frame of packet.frames) {
+      const frameRows: ProtocolField[] = [
+        { name: 'Frame Type', value: `${frame.name} (0x${frame.type.toString(16)})`, abbrev: 'quic.frame_type' },
+      ];
+      if (frame.cryptoOffset !== undefined) {
+        frameRows.push({ name: 'Offset', value: frame.cryptoOffset, abbrev: 'quic.crypto.offset' });
+      }
+      if (frame.cryptoLength !== undefined) {
+        frameRows.push({ name: 'Length', value: frame.cryptoLength, abbrev: 'quic.crypto.length' });
+      }
+      if (frame.streamId !== undefined) {
+        frameRows.push({ name: 'Stream ID', value: frame.streamId, abbrev: 'quic.stream.stream_id' });
+      }
+      if (frame.streamOffset !== undefined) {
+        frameRows.push({ name: 'Offset', value: frame.streamOffset, abbrev: 'quic.stream.offset' });
+      }
+      if (frame.streamLength !== undefined) {
+        frameRows.push({ name: 'Length', value: frame.streamLength, abbrev: 'quic.stream.length' });
+      }
+      if (frame.streamFin !== undefined) {
+        frameRows.push({ name: 'Fin', value: frame.streamFin, abbrev: 'quic.stream.fin' });
+      }
+      children.push({ name: frame.name, value: '', isExpanded: true, children: frameRows });
+      fields['quic.frame_type'] = frame.type;
+    }
+
+    rows.push({ name: packet.typeName, value: '', isExpanded: true, children });
+  }
+
+  return { layer: { name: 'QUIC IETF', summary, fields: rows }, fields };
 }

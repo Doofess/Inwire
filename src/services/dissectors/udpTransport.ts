@@ -23,7 +23,7 @@ import { detectUdpPayload } from './heuristics';
 import { buildHttp3Layer } from './http3';
 import { dissectNbns } from './nbns';
 import { dissectSsdp } from './ssdp';
-import { dissectQuicDatagram } from './quic';
+import { buildQuicLayer, dissectQuicDatagram } from './quic';
 import { buildQuicTlsLayer } from './tls';
 import { dissectNtp, dissectStun } from './udpApps';
 import { findUdpSubdissector } from './udpDispatch';
@@ -214,6 +214,17 @@ export function dissectUdpTransport(
         protocolLabel = 'QUIC';
         protocolTokens.push('quic');
         info = quic.info;
+
+        // First into `extraLayers`, because everything else this datagram
+        // carries is carried *by* the connection these headers describe - the
+        // TLS handshake below and the HTTP/3 pushed last. `frameProtocols` is
+        // read off the layer names in order, so the stack has to read
+        // `udp:quic:tls:http3` rather than putting QUIC after its own payload.
+        const quicLayer = buildQuicLayer(quic.packets, quic.info);
+        if (quicLayer) {
+          extraLayers.push(quicLayer.layer);
+          Object.assign(quicFields, quicLayer.fields);
+        }
 
         // The TLS handshake rides in CRYPTO frames, reassembled across
         // Initial packets by the flow tracker. This is the only way a
