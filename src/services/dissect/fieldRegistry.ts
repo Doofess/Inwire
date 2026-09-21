@@ -464,6 +464,18 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(bool('tcp.connection.fin_active', 'This frame initiates the connection closing', 'tcp')),
   treeOnly(bool('tcp.connection.fin_passive', 'This frame undergoes the connection closing', 'tcp')),
   treeOnly(bool('tcp.connection.rst', 'Connection reset (RST)', 'tcp')),
+
+  // --- a PDU that spanned segments -----------------------------------------
+  //
+  // `tcp.segment` is `FT_FRAMENUM` in the reference, which is why its row
+  // carries `linkToFrame`: the point of the subtree is that the frames which
+  // carried a PDU are reachable, not merely listed. This build tracked every
+  // one of them from the day TLS records were first followed across
+  // segments, and spent it all on a single composed string.
+  treeOnly(str('tcp.segments', 'Reassembled TCP Segments', 'tcp')),
+  treeOnly(uint('tcp.segment', 'TCP Segment', 'tcp')),
+  treeOnly(uint('tcp.segment.count', 'Segment count', 'tcp')),
+  treeOnly(uint('tcp.reassembled.length', 'Reassembled TCP length', 'tcp')),
   { abbrev: 'tcp.analysis.ack_rtt', label: 'The RTT to ACK the segment was', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.initial_rtt', label: 'iRTT', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.bytes_in_flight', label: 'Bytes in flight', type: 'uint', layer: 'tcp', generated: true },

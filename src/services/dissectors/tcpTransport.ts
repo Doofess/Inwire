@@ -26,6 +26,7 @@ import { dissectLdap, looksLikeLdap, freshLdapConversation, type LdapResult } fr
 import { dissectKerberos, looksLikeKerberos, KERBEROS_PORT, type KerberosResult } from './kerberos';
 import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2Result } from './smb2';
 import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
+import type { TcpReassembly } from './tls';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
 
 /**
@@ -342,6 +343,7 @@ export function dissectTcpTransport(
   // known. Only streams that look like TLS pay for cursor state: port 443, a
   // direction that already has a cursor, or a plausible record header.
   let reassembledFrom: number[] | undefined;
+  let reassemblies: TcpReassembly[] | undefined;
   let labelPatches: { frameId: number; protocolLabel: string }[] | undefined;
   // A segment out of order is still dissected - Wireshark reassembles it and
   // labels it with what it carries - but a retransmission is not: its bytes
@@ -474,6 +476,7 @@ export function dissectTcpTransport(
       if (outcome.kind === 'tls') {
         tlsResult = outcome.result;
         reassembledFrom = outcome.result.reassembledFrom;
+        reassemblies = outcome.result.reassemblies;
         labelPatches = outcome.result.labelPatches;
         // `tls.stream` is assigned here rather than inside the TLS decoder
         // because this is where the connection is identified. It is a sequence
@@ -804,6 +807,14 @@ export function dissectTcpTransport(
         // `tcp.connection.fin_active` answers "which end hung up first" -
         // which a flag cannot, because both ends send the same flag.
         ...connectionRows(syn, ack, fin, rst, finRole),
+        // **A PDU that spanned segments, drawn where TCP reassembled it.**
+        // This build tracked every contributing frame and every byte count
+        // from the day TLS records were first followed across segments, and
+        // spent all of it on one composed string inside the TLS record. The
+        // reference draws a subtree with a row per frame, each a link - which
+        // is the difference between reading "#289(1428), #290(1164)" and
+        // clicking through to frame 289.
+        ...reassemblyRows(reassemblies),
         // **A parent, where they were flat siblings of Window and Checksum.**
         // The reference nests them under one Options row and names that row
         // `tcp.options`; without it there was no way to tell, in the tree,
@@ -1206,4 +1217,49 @@ function connectionRows(
   }
   if (rst) rows.push({ name: '[Connection reset (RST)]', value: true, generated: true, abbrev: 'tcp.connection.rst' });
   return rows;
+}
+
+/**
+ * The reference's `[N Reassembled TCP Segments]` subtree, one per PDU this
+ * frame completed.
+ *
+ * Every number here was already tracked - `TlsRecordCursor.contributions`
+ * has carried `{frame, bytes}` since records were first followed across
+ * segments. What was missing is that each contributor becomes its own row
+ * with `linkToFrame`, so the frames that carried a PDU are reachable rather
+ * than merely listed.
+ *
+ * Byte OFFSETS are computed by running sum rather than stored, which is safe
+ * for the one reason worth stating: contributions are appended in arrival
+ * order and a record is only completed once, so the sum is the same walk the
+ * reassembly itself did.
+ */
+function reassemblyRows(reassemblies: TcpReassembly[] | undefined): ProtocolField[] {
+  if (reassemblies === undefined || reassemblies.length === 0) return [];
+  return reassemblies.map((pdu) => {
+    let at = 0;
+    const segments: ProtocolField[] = pdu.contributions.map((c) => {
+      const row: ProtocolField = {
+        name: `Frame: ${c.frame}, payload: ${at}-${at + c.bytes - 1} (${c.bytes} bytes)`,
+        value: c.frame,
+        abbrev: 'tcp.segment',
+        generated: true,
+        linkToFrame: c.frame,
+      };
+      at += c.bytes;
+      return row;
+    });
+    const summary = pdu.contributions.map((c) => `#${c.frame}(${c.bytes})`).join(', ');
+    return {
+      name: `[${pdu.contributions.length} Reassembled TCP Segments (${pdu.length} bytes)]`,
+      value: summary,
+      abbrev: 'tcp.segments',
+      generated: true,
+      children: [
+        ...segments,
+        { name: 'Segment count', value: pdu.contributions.length, generated: true, abbrev: 'tcp.segment.count' },
+        { name: 'Reassembled TCP length', value: pdu.length, generated: true, abbrev: 'tcp.reassembled.length' },
+      ],
+    };
+  });
 }

@@ -62,6 +62,9 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
 const CT_CHANGE_CIPHER_SPEC = 20;
 const CT_ALERT = 21;
 const CT_HANDSHAKE = 22;
+/** A TLS record header: content type, version, length. */
+const TLS_HEADER_BYTES = 5;
+
 const CT_APPLICATION_DATA = 23;
 /**
  * The highest content type that counts as a record header.
@@ -746,6 +749,12 @@ export interface TlsSegmentContext {
   gap: boolean;
 }
 
+/** One reassembled TCP PDU: how long it was, and which frames carried it. */
+export interface TcpReassembly {
+  length: number;
+  contributions: { frame: number; bytes: number }[];
+}
+
 export interface TlsSegmentResult {
   protocolLabel: string;
   info: string;
@@ -754,6 +763,15 @@ export interface TlsSegmentResult {
   records: TlsRecord[];
   /** Frames whose Info gets " [TCP PDU reassembled in <frameId>]". */
   reassembledFrom: number[];
+  /**
+   * One entry per record this frame completed that spanned segments.
+   *
+   * Carried out to `tcpTransport.ts` rather than drawn here, because the rows
+   * it becomes are `tcp.*` - they describe TCP's reassembly, not TLS's - and
+   * a `tcp.segments` subtree hanging inside the TLS tree would put them under
+   * the wrong layer for a reader even though the names would still resolve.
+   */
+  reassemblies?: TcpReassembly[];
   /** Frames whose Protocol label the negotiated version just settled. */
   labelPatches?: { frameId: number; protocolLabel: string }[];
   /**
@@ -844,7 +862,14 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     cursor.contentType = h.contentType; cursor.version = h.version; cursor.recordLength = h.length;
     cursor.remaining = h.length - avail;
     cursor.recordEndSeq = (ctx.segmentSeq + (bodyStart - start) + h.length) >>> 0;
-    cursor.contributions = [{ frame, bytes: avail }];
+    // **`+ 5`: the record header belongs to the frame that carried it.**
+    // `recordLength` is the BODY length and stays so - it is what
+    // `tls.record.length` reports, and the reference agrees. But a
+    // reassembled TCP PDU is the whole record, header included, so the frame
+    // holding the header contributed five bytes more than its body share.
+    // Without this every reassembly reported itself five bytes short, which
+    // is exactly what the reference's own totals caught.
+    cursor.contributions = [{ frame, bytes: avail + TLS_HEADER_BYTES }];
     cursor.contributors = [];
     // A new record inherits nothing from the one that went before it.
     cursor.holed = false;
@@ -997,8 +1022,22 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   fields['tls.record.version'] = first.version;
   fields['tls.record.length'] = first.length;
   const reassembledFrom: number[] = [];
+  const reassemblies: TcpReassembly[] = [];
   for (const r of completed) {
     for (const f of r.reassembledFrom) if (!reassembledFrom.includes(f)) reassembledFrom.push(f);
+    // A record that spanned segments is a reassembled TCP PDU, and the
+    // reference draws it as one - `tcp.segments` with a row per contributing
+    // frame - rather than as the single note this build had. The data was
+    // already here; only the shape was missing.
+    if (r.reassembledFrom.length > 0 && r.contributions.length > 0) {
+      // Summed rather than taken from `r.length`, which is the record BODY.
+      // The sum is what the frames actually carried, so it stays right
+      // wherever the header fell - including the case where the header
+      // itself straddled a segment boundary and its bytes are spread across
+      // two contributions.
+      const carried = r.contributions.reduce((total, c) => total + c.bytes, 0);
+      reassemblies.push({ length: carried, contributions: r.contributions });
+    }
     if (r.handshakeTypes && r.handshakeTypes.length > 0) fields['tls.handshake.type'] = r.handshakeTypes[0];
     if (r.hello) {
       const h = r.hello;
@@ -1086,7 +1125,7 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   return {
     kind: 'tls',
     result: {
-      protocolLabel, info, fields, layer, records: completed, reassembledFrom, labelPatches,
+      protocolLabel, info, fields, layer, records: completed, reassembledFrom, reassemblies, labelPatches,
       appProtocolLabel, appLayers, protocolTokens,
     },
   };

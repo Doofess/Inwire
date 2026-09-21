@@ -252,7 +252,19 @@ function segmentAt(bytes: Uint8Array, frameId: number, seq: number, gap: boolean
   if (r4.kind === 'tls') {
     check('...with Application Data as its Info', r4.result.info, 'Application Data');
     check('...naming the earlier frames to be marked "[TCP PDU reassembled in 4]"', r4.result.reassembledFrom, [2, 3]);
-    check('...and a reassembly note with the byte split', r4.result.records[0].contributions, [{ frame: 2, bytes: 1423 }, { frame: 3, bytes: 1428 }, { frame: 4, bytes: 1267 }]);
+    // **1428 for frame 2, not 1423**, and the five bytes of difference are
+    // the record header. A contribution is what the frame carried OF THE
+    // PDU, and the PDU is the whole record - so the frame holding the header
+    // contributed it. This assertion pinned 1423 until the reference's own
+    // totals were compared against ours and every reassembly came out five
+    // bytes short: it was encoding the bug rather than the behaviour.
+    check('...and a reassembly note with the byte split, header included',
+      r4.result.records[0].contributions,
+      [{ frame: 2, bytes: 1428 }, { frame: 3, bytes: 1428 }, { frame: 4, bytes: 1267 }]);
+    // 1428 + 1428 + 1267 = 4123 = the 4,118-byte body plus its 5-byte header,
+    // which is the number the reference prints in the subtree's own title.
+    check('...which sums to the record as it sat on the wire',
+      r4.result.records[0].contributions.reduce((n, c) => n + c.bytes, 0), 5 + 4118);
     check('...as a flag for filters', r4.result.fields['tls.reassembled'], 1);
   }
   check('the cursor is back at a record boundary', cursor.remaining, 0);
