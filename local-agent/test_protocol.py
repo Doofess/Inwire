@@ -1667,6 +1667,20 @@ check("...and describes that without dividing by it", _on.describe(), "capture p
 # Real elapsed time, not a fabricated number: the invariant below is that the
 # measured halves fit inside the wall clock, and feeding it timings that never
 # actually elapsed would assert nothing while appearing to.
+#
+# The elapsed values are KEPT, so the mean can be checked against the numbers
+# that were actually fed in. It used to be checked against the range
+# `900.0 <= callbackUs <= 3000.0`, which is a statement about how long
+# `time.sleep(0.001)` takes - true on a workstation and not on a shared CI
+# runner, where the macOS job overshot 3 ms and failed both halves. That is a
+# flake rather than a finding: a wall-clock ceiling on a virtualised machine
+# measures the hypervisor.
+#
+# Comparing against the mean is also the stronger check. The range would have
+# passed on any number that happened to land inside it, including one measured
+# from the wrong half; this one fails unless the profile averaged exactly the
+# values it was given.
+_cbs, _reads = [], []
 for _ in range(4):
     _t0 = time.perf_counter()
     time.sleep(0.001)
@@ -1674,12 +1688,19 @@ for _ in range(4):
     _t1 = time.perf_counter()
     time.sleep(0.001)
     _read = time.perf_counter() - _t1
+    _cbs.append(_cb)
+    _reads.append(_read)
     _on.frame(_cb, _read, _read)
 _snap = _on.snapshot()
 check("frames are counted", _snap["frames"], 4)
 check_true("the callback share is the mean of what was measured",
-           900.0 <= _snap["callbackUs"] <= 3000.0)
-check_true("...and so is the copy share", 900.0 <= _snap["copyUs"] <= 3000.0)
+           abs(_snap["callbackUs"] - (sum(_cbs) / len(_cbs)) * 1e6) < 0.05)
+check_true("...and so is the copy share",
+           abs(_snap["copyUs"] - (sum(_reads) / len(_reads)) * 1e6) < 0.05)
+# The sleeps have to have actually elapsed, or the two checks above would be
+# comparing zero against zero and passing.
+check_true("...and the timings are real elapsed time, not zeroes",
+           _snap["callbackUs"] >= 900.0 and _snap["copyUs"] >= 900.0)
 check("every frame's read was timed on this branch", _snap["readFrames"], 4)
 check_true("what a frame COSTS is the copy plus the callback",
            abs((_snap["callbackUs"] + _snap["copyUs"]) - _snap["busyUs"]) < 0.05)
