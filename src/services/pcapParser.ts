@@ -827,6 +827,11 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Session Initiation Protocol': 'sip',
   'Real-time Transport Control Protocol': 'rtcp',
   'Transport Layer Security': 'tls',
+  // The reference's own name for the layer, so the map can hand back the `quic`
+  // token that `udpTransport.ts` also pushes through `protocolTokens`. The
+  // splice below filters a token a layer already supplies, so the bareword does
+  // not double - which is the trap `appStream.ts` records for HTTP/2.
+  'QUIC IETF': 'quic',
   'Hypertext Transfer Protocol': 'http',
   'HyperText Transfer Protocol 2': 'http2',
   'HyperText Transfer Protocol Version 3': 'http3',
