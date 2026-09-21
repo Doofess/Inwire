@@ -284,8 +284,11 @@ export const INWIRE_EXTRA_RULES: ColorRule[] = [
   // chain. This is where the whole expert system reaches the packet list, and
   // it goes through the ordinary colour-rules machinery rather than a second
   // painter: one system owns a row's colour, `Packet.colorSlot` memoises it
-  // for free, the minimap picks it up for free, and every band is reorderable
-  // and disable-able in Settings like any other.
+  // for free, and the minimap picks it up for free. This sentence used to end
+  // "and every band is reorderable and disable-able in Settings like any
+  // other", which was true for the one revision the editor existed and has
+  // been wrong ever since - see the header of this file. The bands are shipped
+  // in `CATEGORY_ORDER` like the rest of the chain.
   //
   // It replaces a single "Expert Warnings" band keyed on
   // `inwire.expert.severity`, which shipped **disabled** because it painted
