@@ -1,0 +1,34 @@
+version: 2
+
+updates:
+  # This is the one that would have caught `actions/checkout@v7` - three actions
+  # pinned to major versions that do not exist, failing every run since the
+  # workflow was written. Nothing else here has an opinion about a workflow file:
+  # `scripts/check.ts` only discovers TypeScript, and an action reference is not
+  # a path, so `claude-md-refs.ts` never resolves it.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the patch noise rather than fifteen. Majors stay separate,
+      # because for this tree they are rarely mechanical - Electron in
+      # particular gets security fixes for three majors, so a bump is a decision
+      # about which three, not a version number.
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Deliberately manual. Electron's major line is chosen against its support
+      # window, and electron-builder follows whatever Electron is pinned to.
+      - dependency-name: electron
+        update-types: [version-update:semver-major]
+      - dependency-name: electron-builder
+        update-types: [version-update:semver-major]

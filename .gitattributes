@@ -8,9 +8,12 @@
 # shebang line unparseable.
 *.sh text eol=lf
 
-# Never touched: recorded byte-for-byte or not text at all.
+# Never touched: recorded byte-for-byte or not text at all. `.psv` is tshark's
+# pipe-separated ground truth for the parity harness - text, but recorded output
+# that must not be normalized.
 *.pcap  binary
 *.pcapng binary
+*.psv   binary
 *.png   binary
 *.jpg   binary
 *.ico   binary
@@ -24,3 +27,17 @@
 # and inspecting what a dependency change did to the tree is the one time you
 # actually want to read it.
 package-lock.json linguist-generated=true
+
+# Documentation, so the language bar describes the code rather than the prose.
+# There is a lot of prose here on purpose - CLAUDE.md alone is ~110 KB and the
+# ADR set is 39 files - and without this GitHub reports the repository as
+# substantially Markdown, which is true by byte count and misleading about what
+# the project is. `linguist-documentation` keeps them out of the statistics
+# while leaving them fully diffable and searchable.
+CLAUDE.md          linguist-documentation=true
+local-agent/CLAUDE.md linguist-documentation=true
+docs/**            linguist-documentation=true
+
+# The illustrated explainer is a single self-contained HTML file with twelve
+# inline SVG diagrams. Without this it is counted as an HTML project.
+docs/how-inwire-works.html linguist-vendored=true

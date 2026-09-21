@@ -1,0 +1,86 @@
+name: Bug report
+description: Something behaves differently from how it is documented to behave.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two notes before you start.
+
+        **If this is a security issue, do not file it here.** Use
+        [Security Advisories](../../security/advisories/new) instead — see `SECURITY.md`.
+
+        **Please do not attach a capture without reading it first.** A `.pcap`
+        contains whoever's traffic was on the wire, and issues here are public.
+        `Export → Anonymise` will prefix-preserve the addresses if you need to
+        share one.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a capture on ...
+        2. Apply the filter ...
+        3. The Info column reads ... where the reference analyzer reads ...
+    validations:
+      required: true
+
+  - type: input
+    id: inwire-version
+    attributes:
+      label: Inwire version
+      description: "`Settings → Updates` shows it. The capture agent shares this number."
+      placeholder: "4.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: npcap-version
+    attributes:
+      label: Npcap version
+      description: >
+        `Settings → Updates` reports it. Please take it from there rather than
+        from `wpcap.dll`, which reports the libpcap API version it implements
+        (1.10.x) and not Npcap's own.
+      placeholder: "1.89"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Where did the frames come from
+      options:
+        - Live capture
+        - An imported .pcap or .pcapng file
+        - Both, or not sure
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: false
+
+  - type: textarea
+    id: agent-log
+    attributes:
+      label: Agent log
+      description: >
+        Only if the problem involves capture starting, stopping or dropping
+        frames. `Settings → Capture Health` shows the agent's own log.
+      render: text
+    validations:
+      required: false
