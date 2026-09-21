@@ -17,7 +17,6 @@
   "main": "dist-electron/main.cjs",
   "scripts": {
     "dev": "node electron/dev.cjs",
-    "dev:web": "vite --port=3000 --host=127.0.0.1",
     "build": "vite build && npm run build:electron",
     "build:electron": "node electron/build.cjs",
     "start:app": "npm run build && node electron/start.cjs",
