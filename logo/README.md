@@ -22,23 +22,39 @@ The mark sits in a 100×100 box spanning x 10–90, y 12–88, so it carries abo
 
 ## Files
 
+These are the author's originals. **Nothing builds from them.**
+
 | File | Use |
 |---|---|
-| `inwire-layers.svg` | Source. Scales to anything. |
-| `inwire.ico` | Windows / Electron, 16–256. |
-| `inwire.icns` | macOS / Electron, 32–1024. |
-| `png/` | 16, 20, 24, 32, 48, 64, 128, 256, 512, 1024 — all transparent. |
+| `inwire-layers.svg` | The source drawing, and the thing `src/lib/brandMark.ts` was ported from. |
+| `inwire-layers-256.png` | The README's mark. |
+| `inwire-layers-512.png`, `inwire-layers-1024.png` | Raster copies for anywhere a vector will not do. |
+| `inwire.ico`, `inwire.icns` | The hand-made icons, kept as a record. Neither is what ships. |
 
-## Electron
+## What actually ships, and why it is not from here
 
-```json
-"build": {
-  "win":   { "icon": "build/inwire.ico" },
-  "mac":   { "icon": "build/inwire.icns" },
-  "linux": { "icon": "build/png/inwire-layers-512.png" }
-}
-```
+The geometry lives **twice on purpose**: here as the drawing, and in
+`src/lib/brandMark.ts` as the thing the app renders. Every shipped artefact is
+generated from the TypeScript by `scripts/brand/render-icons.ts`, and
+`scripts/brand/icon.ts` regenerates and compares on every `npm run check` — so
+a plate that moves in one place fails the build rather than drifting.
 
-## One caveat
+| Generated file | Who reads it |
+|---|---|
+| `electron/resources/icon.ico` | `Inwire.exe`, named in `electron-builder.yml`, and `BrowserWindow` |
+| `local-agent/icon.ico` | the agent executable and the Inno wizard's `SetupIconFile` |
+| `public/icon.svg` | the renderer's favicon |
 
-At 16 px the five plates collapse into a blue lump — five distinct bands can't survive in 16 rows of pixels. 32 px holds fine. If the tray icon bothers you, a three-layer cut of the same mark for 16/20 px fixes it.
+The two `.ico` files are asserted **byte-identical**. Dropping a hand-made
+binary in beside that pipeline is exactly the drift the comparison exists to
+catch, which is why `inwire.ico` here is a record and not an input.
+
+## One caveat, and it has since been answered
+
+At 16 px the five plates collapse into a blue lump — the gap is 9 in a 100 box,
+so 1.4 px at 16, and five distinct bands can't survive that. 32 px holds fine.
+
+`brandMark.ts` fixes it by taking **every other plate** below 32 px: three
+plates, same span, same two ends of the ramp, twice the gap. Taking alternate
+plates rather than redrawing is what keeps the two tiers one mark, and both
+fill the identical box.

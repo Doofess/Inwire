@@ -27,7 +27,7 @@ they are slow or reach outside the process. They cover the half of the app
 below is not also debugging the store.
 
 ```
-npm run build && npm run check          # 143 scripts, the fast suite
+npm run build && npm run check          # 156 scripts, the fast suite
 npx tsx scripts/electron/disk-drive.ts          # ~2 min: past the RAM budget, onto disk
 npx tsx scripts/electron/import-drive.ts        # ~1 min: 400,000 frames, scroll to frame 1
 npx tsx scripts/electron/update-center-drive.ts # ~1 min: a loopback feed, the real app

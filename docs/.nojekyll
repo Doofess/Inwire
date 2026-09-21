@@ -1,0 +1,8 @@
+Serve this directory as plain static files.
+
+Without this, GitHub Pages runs Jekyll over it: every `.md` in `docs/` and
+`docs/decisions/` would be rendered as a page, anything beginning with `_`
+would be dropped silently, and Liquid would try to interpret `{{` and `{%`
+wherever they appear in the prose. None of that is wanted here - the only
+document this site exists to serve is `how-inwire-works.html`, which is a
+single self-contained file with its own CSS and twelve inline SVGs.
