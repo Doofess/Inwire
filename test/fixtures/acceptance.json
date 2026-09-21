@@ -66,7 +66,7 @@
           "ipv6": 15,
           "llc": 8,
           "lldp": 4,
-          "quic": 13,
+          "quic": 17,
           "ssdp": 13,
           "stp": 18,
           "tcp": 71,
@@ -78,7 +78,7 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 401,
+          "absentDistinct": 397,
           "valueMismatches": 175
         },
         "unimplemented": {
@@ -129,7 +129,7 @@
           "ip": 20,
           "ipv6": 14,
           "llc": 8,
-          "quic": 13,
+          "quic": 17,
           "ssdp": 7,
           "stp": 18,
           "tcp": 71,
@@ -141,7 +141,7 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 247,
+          "absentDistinct": 243,
           "valueMismatches": 162
         },
         "unimplemented": {}

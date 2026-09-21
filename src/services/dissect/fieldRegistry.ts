@@ -348,6 +348,15 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(bool('llc.ssap.cr', 'CR Bit', 'llc')),
   treeOnly(str('llc.control.ftype', 'Frame type', 'llc')),
   treeOnly(str('llc.control.u_modifier_cmd', 'Command', 'llc')),
+  // QUIC's first byte, which this dissector read and never showed. The fixed
+  // bit is the cheapest test for 'is this UDP payload QUIC at all'; the spin
+  // bit flips once per round trip, so a passive observer can measure RTT on
+  // a connection it cannot read a byte of. Both are outside header
+  // protection, which is why they are here and the reserved bits are not.
+  treeOnly(bool('quic.fixed_bit', 'Fixed Bit', 'quic')),
+  treeOnly(bool('quic.spin_bit', 'Spin Bit', 'quic')),
+  treeOnly(uint('quic.packet_length', 'Packet Length', 'quic')),
+  treeOnly(str('quic.frame', 'Frame', 'quic')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
   uint('ipv6.reassembled', 'Reassembled IPv6 fragments', 'ipv6'),
 
