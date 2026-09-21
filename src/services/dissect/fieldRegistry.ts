@@ -829,6 +829,19 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(str('tls.handshake.extensions_ec_point_format', 'EC point format', 'tls')),
   treeOnly(uint('tls.compress_certificate.algorithms_length', 'Algorithms Length', 'tls')),
   treeOnly(str('tls.compress_certificate.algorithm', 'Algorithm', 'tls')),
+  // Encrypted ClientHello. Every one of these describes the envelope rather
+  // than the hello inside it - the payload stays ciphertext - but the config
+  // id and the HPKE suite are what change when a provider rotates its keys,
+  // and are the only part of an ECH connection a passive reader can follow.
+  treeOnly(str('tls.ech.client_hello_type', 'Client Hello type', 'tls')),
+  treeOnly(str('tls.ech.hpke.keyconfig.cipher_suite', 'Cipher Suite', 'tls')),
+  treeOnly(str('tls.ech.hpke.keyconfig.cipher_suite.kdf_id', 'KDF Id', 'tls')),
+  treeOnly(str('tls.ech.hpke.keyconfig.cipher_suite.aead_id', 'AEAD Id', 'tls')),
+  treeOnly(uint('tls.ech.config_id', 'Config Id', 'tls')),
+  treeOnly(uint('tls.ech.enc_length', 'Enc length', 'tls')),
+  treeOnly(str('tls.ech.enc', 'Enc', 'tls')),
+  treeOnly(uint('tls.ech.payload_length', 'Payload length', 'tls')),
+  treeOnly(str('tls.ech.payload', 'Payload', 'tls')),
   treeOnly(uint('tls.handshake.extensions_alps_len', 'ALPS Extension Length', 'tls')),
   treeOnly(str('tls.handshake.extensions_alps_alpn_list', 'Supported ALPS List', 'tls')),
   treeOnly(uint('tls.handshake.extensions_alps_alpn_str_len', 'ALPS string length', 'tls')),

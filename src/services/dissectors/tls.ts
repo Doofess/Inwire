@@ -1365,9 +1365,56 @@ function extensionFields(ext: Extension): ProtocolField[] {
       // the transport's settings appear in the clear at all.
       children.push(...quicParameterRows(b));
       break;
-    case 0xfe0d:
-      children.push({ name: 'Note', value: b.length <= 1 ? 'GREASE (outer)' : `${b.length} bytes - real or GREASE; see the SNI heuristic`, generated: true });
+    case 0xfe0d: {
+      // Encrypted ClientHello (draft-ietf-tls-esni). The outer form carries
+      // everything a reader can have without the server's private key: which
+      // HPKE suite encrypted the inner hello, which of the server's published
+      // configs it was encrypted to, the ephemeral public key, and the
+      // ciphertext. None of that decrypts anything here - what it buys is the
+      // ability to tell two ECH clients apart, and to see a config id change
+      // when a provider rotates its keys.
+      //
+      // `type` discriminates outer(0) from inner(1), and an inner hello is one
+      // byte with nothing after it: by the time anyone can read an inner
+      // ClientHello it has already been decrypted out of an outer one, so the
+      // fields below would be describing the wrong message.
+      if (b.length < 1) break;
+      const kind = b[0];
+      children.push({
+        name: 'Client Hello type', value: `${ECH_HELLO_TYPE_NAMES[kind] ?? 'Unknown'} (${kind})`,
+        abbrev: 'tls.ech.client_hello_type',
+      });
+      // 1 type + 2 kdf + 2 aead + 1 config_id + 2 enc length.
+      if (kind !== 0 || b.length < 8) break;
+      const kdf = u16(b, 1);
+      const aead = u16(b, 3);
+      const kdfName = HPKE_KDF_NAMES[kdf] ?? 'Unknown';
+      const aeadName = HPKE_AEAD_NAMES[aead] ?? 'Unknown';
+      children.push({
+        name: 'Cipher Suite', value: `${kdfName}/${aeadName}`,
+        abbrev: 'tls.ech.hpke.keyconfig.cipher_suite',
+        children: [
+          { name: 'KDF Id', value: `${kdfName} (${kdf})`, abbrev: 'tls.ech.hpke.keyconfig.cipher_suite.kdf_id' },
+          { name: 'AEAD Id', value: `${aeadName} (${aead})`, abbrev: 'tls.ech.hpke.keyconfig.cipher_suite.aead_id' },
+        ],
+      });
+      children.push({ name: 'Config Id', value: b[5], abbrev: 'tls.ech.config_id' });
+      const encLen = u16(b, 6);
+      children.push({ name: 'Enc length', value: encLen, abbrev: 'tls.ech.enc_length' });
+      if (8 + encLen > b.length) break;
+      children.push({ ...hexField('Enc', b.subarray(8, 8 + encLen)), abbrev: 'tls.ech.enc' });
+      const payloadAt = 8 + encLen;
+      if (payloadAt + 2 > b.length) break;
+      const payloadLen = u16(b, payloadAt);
+      children.push({ name: 'Payload length', value: payloadLen, abbrev: 'tls.ech.payload_length' });
+      if (payloadAt + 2 + payloadLen <= b.length) {
+        children.push({
+          ...hexField('Payload', b.subarray(payloadAt + 2, payloadAt + 2 + payloadLen)),
+          abbrev: 'tls.ech.payload',
+        });
+      }
       break;
+    }
   }
   // **An extension nothing above decomposed still shows its bytes.** The
   // reference calls them `tls.handshake.extension.data`, and drawing them is
@@ -1382,6 +1429,24 @@ function extensionFields(ext: Extension): ProtocolField[] {
 /** RFC 8879 §7.3. */
 const CERT_COMPRESSION_NAMES: Record<number, string> = {
   1: 'zlib (1)', 2: 'brotli (2)', 3: 'zstd (3)',
+};
+
+const ECH_HELLO_TYPE_NAMES: Record<number, string> = {
+  0: 'Outer Client Hello', 1: 'Inner Client Hello',
+};
+
+// RFC 9180's HPKE registries, spelled as the reference spells them - these are
+// matched against `tshark -G values` rather than written from the RFC, because
+// the RFC's own labels differ ("HKDF-SHA256" against the registry's
+// "HKDF-SHA256", but "ChaCha20Poly1305" against "ChaCha20-Poly1305") and the
+// measurement compares displayed strings.
+const HPKE_KDF_NAMES: Record<number, string> = {
+  0: 'Reserved', 1: 'HKDF-SHA256', 2: 'HKDF-SHA384', 3: 'HKDF-SHA512',
+};
+
+const HPKE_AEAD_NAMES: Record<number, string> = {
+  0: 'Reserved', 1: 'AES-128-GCM', 2: 'AES-256-GCM', 3: 'ChaCha20Poly1305',
+  0xffff: 'Export-only',
 };
 
 function asciiOf(bytes: Uint8Array): string {
