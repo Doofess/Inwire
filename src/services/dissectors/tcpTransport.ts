@@ -25,6 +25,7 @@ import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
 import { dissectLdap, looksLikeLdap, freshLdapConversation, type LdapResult } from './ldap';
 import { dissectKerberos, looksLikeKerberos, KERBEROS_PORT, type KerberosResult } from './kerberos';
 import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2Result } from './smb2';
+import { dataLayer } from './mediaType';
 import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
 import type { TcpReassembly } from './tls';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
@@ -635,6 +636,23 @@ export function dissectTcpTransport(
       ? [tlsResult.layer, ...(tlsResult.appLayers ?? [])]
       : httpResult
       ? httpResult.layers
+      // Nothing above claimed these bytes, so they are the reference's `data`
+      // protocol - the chain's end, drawn rather than dropped.
+      //
+      // **`tlsOnThisConnection` is the whole of the difficulty.** A segment
+      // carrying the middle of a TLS record produces no layer of its own, and
+      // calling that unclaimed raised `data` on 390 frames the reference
+      // attributes to TLS reassembly instead. "No layer came back" is not the
+      // same question as "nobody wanted these bytes".
+      //
+      // The bounds test is the same one `udpTransport.ts` explains: a quoted
+      // datagram inside an ICMP error carries eight bytes of transport header
+      // and a length field describing a frame nobody captured.
+      : payloadLength > 0 && !tlsOnThisConnection
+        && transportOffset + tcpHeaderLen + payloadLength <= rawBytes.length
+      ? [dataLayer(rawBytes.subarray(
+        transportOffset + tcpHeaderLen, transportOffset + tcpHeaderLen + payloadLength,
+      ))]
       : undefined,
     // The certificate's rows sit inside the TLS layer's tree, so there is no
     // layer name for `frameProtocols` to read `x509ce` off - the same position

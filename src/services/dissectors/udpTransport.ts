@@ -26,6 +26,7 @@ import { dissectSsdp } from './ssdp';
 import { buildQuicLayer, dissectQuicDatagram } from './quic';
 import { buildQuicTlsLayer } from './tls';
 import { dissectNtp, dissectStun } from './udpApps';
+import { dataLayer } from './mediaType';
 import { findUdpPort } from './dispatch';
 
 /** Everything the UDP decode needs that is not the bytes themselves. */
@@ -320,7 +321,22 @@ export function dissectUdpTransport(
     srcPort,
     dstPort,
     info,
-    extraLayers,
+    // Nothing claimed the datagram, so its payload is the reference's `data`
+    // protocol. UDP needs no equivalent of TCP's `tlsOnThisConnection` guard:
+    // a datagram is claimed or it is not, with no reassembly state that could
+    // make "produced no layer" mean something other than "unclaimed".
+    //
+    // **The bytes have to actually be there**, which is not the same as the
+    // header saying how many there are. An ICMP error quotes its datagram's
+    // IP header and the first eight bytes after it - exactly a UDP header and
+    // nothing else - while that header still declares the whole original
+    // length. Reading the declared length raised a `Data` layer on every
+    // quoted datagram, over bytes past the end of the frame, and
+    // `scripts/icmp/dissect.ts` caught it on the commit that introduced it.
+    extraLayers: extraLayers.length === 0 && udpPayloadLen > 0
+      && udpPayloadStart + udpPayloadLen <= rawBytes.length
+      ? [dataLayer(rawBytes.subarray(udpPayloadStart, udpPayloadStart + udpPayloadLen))]
+      : extraLayers,
     protocolTokens,
     dnsMatchedQueryFrameId,
     resolvedNames,

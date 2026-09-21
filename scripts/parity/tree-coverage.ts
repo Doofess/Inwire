@@ -127,12 +127,17 @@ const NOT_OURS = [
   /^frame(\.|$)/,
   /^_ws\./,
   /^fake-field-wrapper$/,
-  // `data` is not a protocol. It is the reference's marker for *the absence of
-  // dissection* - `data.data`, `data.len`, `data.text` on a payload nothing
-  // claimed - and this build represents that state by emitting no rows at all.
-  // Counting it as a gap would ask us to add three fields whose meaning is
-  // "there is nothing here".
-  /^data(\.|$)/,
+  // `data` used to be exempt here, on the argument that it marks *the absence
+  // of dissection* and that this build "represents that state by emitting no
+  // rows at all". **That premise stopped being true and the exemption went
+  // with it.** The rows exist now - `dissectors/mediaType.ts` raises the
+  // reference's `Data` layer for any payload that reaches the end of its
+  // dissector chain unclaimed, on 1,902 frames of `inwire` and 187 of `bulk`.
+  //
+  // Keeping it would have been the exact failure `wireshark-abbrevs.ts` calls
+  // a stale exemption: a claim that stays in the file after the thing it
+  // claims has changed. The bare `data` protocol name is the one piece still
+  // absent, and it is counted rather than excused.
 ];
 const ignored = (abbrev: string): boolean => NOT_OURS.some((pattern) => pattern.test(abbrev));
 

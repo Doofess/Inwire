@@ -97,8 +97,49 @@ export const MEDIA_DISSECTORS: readonly MediaEntry[] = [
 ];
 
 /**
- * The catch-all, which is two different protocols in the reference and is
- * kept as two here.
+ * The `Data` layer, for bytes nothing claimed.
+ *
+ * **Not only for message bodies.** The reference raises this for any payload
+ * that reaches the end of its dissector chain unclaimed - a TCP segment on a
+ * port nobody registered, a UDP datagram of an unknown protocol, the bytes
+ * after an ICMP header - and it is the single commonest thing in both
+ * fixtures that this build had no layer for: 2,183 frames on `inwire`, 237 on
+ * `bulk`.
+ *
+ * It was registered and unreachable before this, because the only caller was
+ * the HTTP body path and neither capture carries cleartext HTTP. That is what
+ * a registered name emitted on zero frames looks like from the inside, and it
+ * is why the audit that found it looked for exactly that shape.
+ *
+ * **`data.data` is `FT_BYTES`**, so the value is hex rather than a text
+ * preview. A preview was what the body path drew, and it is wrong for the
+ * same reason `media.type` and `http.file_data` are traps: the name says one
+ * thing and the dictionary says another.
+ *
+ * Colon-separated, because that is the reference's `show` and `show` is what
+ * the measurement compares - its `showname` runs the same bytes together, so
+ * reading the human-facing line would have produced a mismatch on every
+ * frame. `icmp.data` two files over already draws it this way.
+ */
+export function dataLayer(bytes: Uint8Array): ProtocolLayer {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    if (i > 0) hex += ':';
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return {
+    name: 'Data',
+    summary: `Data (${bytes.length} byte${bytes.length === 1 ? '' : 's'})`,
+    fields: [
+      { name: 'Data', value: hex, abbrev: 'data.data' },
+      { name: 'Length', value: bytes.length, abbrev: 'data.len' },
+    ],
+  };
+}
+
+/**
+ * The catch-all for a message body, which is two different protocols in the
+ * reference and is kept as two here.
  *
  * `media` is "a body whose type was declared and which nothing decodes";
  * `data` is "bytes with no type at all". They are not interchangeable: the
@@ -112,16 +153,7 @@ export const MEDIA_DISSECTORS: readonly MediaEntry[] = [
  */
 function fallbackLayer(bytes: Uint8Array, type: string | undefined): ProtocolLayer {
   const preview = previewLine(decoder.decode(bytes.subarray(0, MAX_LINE)));
-  if (type === undefined || type.length === 0) {
-    return {
-      name: 'Data',
-      summary: `Data (${bytes.length} byte${bytes.length === 1 ? '' : 's'})`,
-      fields: [
-        { name: 'Data', value: preview, abbrev: 'data.data' },
-        { name: 'Length', value: bytes.length, abbrev: 'data.len' },
-      ],
-    };
-  }
+  if (type === undefined || type.length === 0) return dataLayer(bytes);
   return {
     name: 'Media Type',
     summary: `Media Type: ${type} (${bytes.length} byte${bytes.length === 1 ? '' : 's'})`,
