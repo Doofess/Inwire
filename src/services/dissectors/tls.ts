@@ -254,6 +254,7 @@ export interface ServerHelloFacts {
 }
 
 function u16(b: Uint8Array, p: number): number { return (b[p] << 8) | b[p + 1]; }
+function u32(b: Uint8Array, p: number): number { return ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0; }
 
 function parseExtensions(b: Uint8Array, p: number, end: number): Extension[] {
   const out: Extension[] = [];
@@ -747,6 +748,20 @@ export interface TlsSegmentContext {
   segmentSeq: number;
   /** True when data before this segment was never captured. */
   gap: boolean;
+  /**
+   * The TLS port this connection is on, for naming what the encrypted
+   * records carry when nothing else can.
+   *
+   * **This is what the reference uses, and it is not ALPN.** In TLS 1.3 the
+   * selected ALPN travels in EncryptedExtensions, so on a capture with no
+   * key log it is not readable - and every Application Data record on the
+   * inwire fixture still gets named. The reference is reporting the
+   * dissector registered on the port, which for 443 is HTTP. Checked rather
+   * than assumed: all 824 of its `tls.app_data_proto` rows say "Hypertext
+   * Transfer Protocol" on connections whose hellos offered `h2,http/1.1`
+   * and `h3`, which ALPN alone would have split three ways.
+   */
+  serverPort?: number;
 }
 
 /** One reassembled TCP PDU: how long it was, and which frames carried it. */
@@ -1080,7 +1095,7 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   // A record that describes itself as nothing is omitted rather than joined as
   // an empty element, which would leave a leading ", " in front of the next.
   const info = completed.map((r) => r.description).filter((d) => d !== '').join(', ');
-  const layer = buildTlsLayer(completed, conv, frame);
+  const layer = buildTlsLayer(completed, conv, frame, ctx.serverPort);
 
   // What the decryption produced, gathered across the frame's records.
   let appProtocolLabel: string | undefined;
@@ -1286,11 +1301,85 @@ function extensionFields(ext: Extension): ProtocolField[] {
       }
       break;
     }
+    case 11: {
+      // Supported EC point formats. Uncompressed is the only one anybody
+      // negotiates, and the extension survives because TLS 1.2 requires it
+      // to be offered - so its value is as a fingerprint input rather than
+      // as a choice, which is exactly why JA3 reads it.
+      if (b.length < 1) break;
+      const count = b[0];
+      children.push({ name: 'EC point formats Length', value: count, abbrev: 'tls.handshake.extensions_ec_point_formats_length' });
+      children.push({
+        name: 'Elliptic curves point formats', value: `${count} format${count === 1 ? '' : 's'}`,
+        abbrev: 'tls.handshake.extensions_ec_point_formats',
+        children: Array.from(b.subarray(1, Math.min(1 + count, b.length)), (format) => ({
+          name: 'EC point format',
+          value: `${EC_POINT_FORMAT_NAMES[format] ?? 'Unknown'} (${format})`,
+          abbrev: 'tls.handshake.extensions_ec_point_format',
+        })),
+      });
+      break;
+    }
+    case 27: {
+      // RFC 8879 certificate compression. Worth naming because a server that
+      // offers it can send a certificate chain this build would otherwise
+      // see as a Certificate message it cannot parse.
+      if (b.length < 1) break;
+      const bytesLen = b[0];
+      children.push({ name: 'Algorithms Length', value: bytesLen, abbrev: 'tls.compress_certificate.algorithms_length' });
+      for (let q = 1; q + 1 < Math.min(1 + bytesLen, b.length); q += 2) {
+        children.push({
+          name: 'Algorithm', value: CERT_COMPRESSION_NAMES[u16(b, q)] ?? `Unknown (${u16(b, q)})`,
+          abbrev: 'tls.compress_certificate.algorithm',
+        });
+      }
+      break;
+    }
+    case 17513: {
+      // ALPS (Application-Layer Protocol Settings), Chrome's extension for
+      // settings that would otherwise wait for the first HTTP/2 frame.
+      if (b.length < 2) break;
+      const listLen = u16(b, 0);
+      children.push({ name: 'ALPS Extension Length', value: listLen, abbrev: 'tls.handshake.extensions_alps_len' });
+      const entries: ProtocolField[] = [];
+      for (let q = 2; q < Math.min(2 + listLen, b.length);) {
+        const len = b[q];
+        if (q + 1 + len > b.length) break;
+        entries.push({ name: 'ALPS string length', value: len, abbrev: 'tls.handshake.extensions_alps_alpn_str_len' });
+        entries.push({
+          name: 'ALPS Next Protocol', value: asciiOf(b.subarray(q + 1, q + 1 + len)),
+          abbrev: 'tls.handshake.extensions_alps_alpn_str',
+        });
+        q += 1 + len;
+      }
+      children.push({
+        name: 'Supported ALPS List', value: '', abbrev: 'tls.handshake.extensions_alps_alpn_list', children: entries,
+      });
+      break;
+    }
     case 0xfe0d:
       children.push({ name: 'Note', value: b.length <= 1 ? 'GREASE (outer)' : `${b.length} bytes - real or GREASE; see the SNI heuristic`, generated: true });
       break;
   }
+  // **An extension nothing above decomposed still shows its bytes.** The
+  // reference calls them `tls.handshake.extension.data`, and drawing them is
+  // what makes an extension this build has never heard of readable at all -
+  // which matters more for the unknown ones than for the known.
+  if (children.length === 2 && b.length > 0) {
+    children.push({ ...hexField('Data', b), abbrev: 'tls.handshake.extension.data' });
+  }
   return children;
+}
+
+/** RFC 8879 §7.3. */
+const CERT_COMPRESSION_NAMES: Record<number, string> = {
+  1: 'zlib (1)', 2: 'brotli (2)', 3: 'zstd (3)',
+};
+
+function asciiOf(bytes: Uint8Array): string {
+  let out = '';
+  for (const byte of bytes) out += byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.';
+  return out;
 }
 
 function helloFields(h: HelloFacts): ProtocolField[] {
@@ -1304,7 +1393,25 @@ function helloFields(h: HelloFacts): ProtocolField[] {
       ? { ...versionField('Version (legacy)', h.version, 'tls.handshake.legacy_version'),
           description: 'RFC 8446: ignored when supported_versions is present' }
       : versionField('Version', h.version, 'tls.handshake.version'),
-    { ...hexField('Random', h.random), abbrev: 'tls.handshake.random' },
+    {
+      ...hexField('Random', h.random), abbrev: 'tls.handshake.random',
+      // **Thirty-two bytes that are not all random.** The first four were
+      // `gmt_unix_time` in TLS 1.0-1.2 and are drawn as a clock because the
+      // reference draws them as one - and because a sender that still fills
+      // them in is leaking its wall clock to every observer, which is worth
+      // being able to see. RFC 8446 made all 32 random, so a modern hello
+      // shows a nonsense date here and that IS the correct reading.
+      children: h.random.length >= 32
+        ? [
+          {
+            name: 'GMT Unix Time',
+            value: new Date(u32(h.random, 0) * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC'),
+            abbrev: 'tls.handshake.random_time',
+          },
+          { ...hexField('Random Bytes', h.random.subarray(4, 32)), abbrev: 'tls.handshake.random_bytes' },
+        ]
+        : undefined,
+    },
     { name: 'Session ID Length', value: h.sessionId.length, abbrev: 'tls.handshake.session_id_length' },
     ...(h.sessionId.length > 0
       ? [{ ...hexField('Session ID', h.sessionId), abbrev: 'tls.handshake.session_id' }] : []),
@@ -1467,7 +1574,7 @@ function certificateFields(certs: CertificateSummary[], conv: TlsConversationSta
   });
 }
 
-function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: number, now: Date = new Date()): ProtocolLayer {
+function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: number, serverPort: number | undefined, now: Date = new Date()): ProtocolLayer {
   const fields: ProtocolField[] = [];
   for (const r of records) {
     if (r.ignored) {
@@ -1536,8 +1643,16 @@ function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: 
         name: `[Reassembled TCP segments (${r.length} bytes)]`, value: parts, generated: true, abbrev: 'tls.reassembled',
       });
     }
+    if (r.contentType === CT_APPLICATION_DATA) {
+      const appProto = appProtocolName(conv.alpn, serverPort);
+      if (appProto !== undefined) {
+        children.push({
+          name: '[Application Data Protocol]', value: appProto, generated: true, abbrev: 'tls.app_data_proto',
+        });
+      }
+    }
     fields.push({
-      name: `${versionName} Record Layer: ${recordTitle(r)}`,
+      name: `${versionName} Record Layer: ${recordTitle(r, appProtocolName(conv.alpn, serverPort))}`,
       value: '',
       abbrev: 'tls.record',
       ...(r.range ? { rawBytesRange: r.range } : {}),
@@ -1609,13 +1724,47 @@ function cursorEncrypted(r: TlsRecord): boolean {
   return r.description === 'Encrypted Handshake Message';
 }
 
-function recordTitle(r: TlsRecord): string {
+/**
+ * What the plaintext inside an Application Data record is, by name.
+ *
+ * **Known without decrypting anything**, which is the whole point: ALPN is
+ * negotiated in the clear, so a record nobody can read still has a protocol,
+ * and the reference says so on every one of them - 824 frames of the inwire
+ * fixture. This build computed the same fact, used it to pick a decoder, and
+ * never told the reader.
+ *
+ * The strings are the reference's own dissector names, which are also the
+ * keys in `PROTOCOL_NAME_MAP` (`pcapParser.ts`) - so the name drawn here and
+ * the name of the layer that appears once a key log opens the record are the
+ * same string, rather than two spellings of one thing.
+ *
+ * An ALPN this build does not decode gets no row: naming it would claim a
+ * handoff that is not going to happen.
+ */
+function appProtocolName(alpn: string | undefined, serverPort: number | undefined): string | undefined {
+  switch (alpn) {
+    case 'http/1.0': case 'http/1.1': return 'Hypertext Transfer Protocol';
+    case 'h2': case 'h2c': return 'HyperText Transfer Protocol 2';
+    case 'h3': return 'HyperText Transfer Protocol Version 3';
+    default: break;
+  }
+  // The port's registered protocol, which is the reference's own answer and
+  // the only one available on a 1.3 handshake nobody holds the keys to. More
+  // honest than it looks: it is also what this build hands the plaintext to
+  // if a key log ever opens the connection.
+  return serverPort === 443 || serverPort === 8443 ? 'Hypertext Transfer Protocol' : undefined;
+}
+
+function recordTitle(r: TlsRecord, appProto: string | undefined): string {
   switch (r.contentType) {
     case CT_HANDSHAKE: return `Handshake Protocol: ${r.description}`;
     case CT_APPLICATION_DATA:
       return r.decrypted
         ? `Application Data Protocol: ${r.description}`
-        : 'Application Data Protocol: Application Data';
+        // The reference names the protocol here even when it could not read
+        // the record, because ALPN told it. `info` is built from
+        // `r.description` and is untouched by this.
+        : `Application Data Protocol: ${appProto ?? 'Application Data'}`;
     case CT_ALERT: return r.alert ? `Alert (${ALERT_LEVEL_NAMES[r.alert.level] ?? 'Unknown'}): ${ALERT_DESCRIPTION_NAMES[r.alert.description] ?? 'Unknown'}` : 'Encrypted Alert';
     case CT_CHANGE_CIPHER_SPEC: return 'Change Cipher Spec Protocol: Change Cipher Spec';
     default: return r.description;

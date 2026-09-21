@@ -803,6 +803,36 @@ export const FIELDS: readonly FieldDef[] = [
   // renames it; so does this, on the same condition.
   treeOnly(str('tls.handshake.legacy_version', 'Version (legacy)', 'tls')),
   treeOnly(str('tls.handshake.random', 'Random', 'tls')),
+  // The first four of those 32 bytes were `gmt_unix_time` before RFC 8446
+  // made the whole field random. A sender still filling them in is leaking
+  // its wall clock to every observer on the path, which is worth being able
+  // to ask about - and on a modern hello the nonsense date IS the answer.
+  treeOnly(str('tls.handshake.random_time', 'GMT Unix Time', 'tls')),
+  treeOnly(str('tls.handshake.random_bytes', 'Random Bytes', 'tls')),
+
+  // --- what the record CONTAINS, known without reading it ------------------
+  //
+  // ALPN is negotiated in the clear, so an Application Data record nobody can
+  // decrypt still has a protocol. This build computed it, used it to pick a
+  // decoder and never told the reader; the reference says it on 824 frames of
+  // the inwire fixture.
+  treeOnly(str('tls.app_data_proto', 'Application Data Protocol', 'tls')),
+
+  // --- extensions this build drew as a length and nothing else -------------
+  //
+  // `tls.handshake.extension.data` is the one that matters most, and it is
+  // the one for extensions NOT listed here: an extension this build has
+  // never heard of now shows its bytes instead of its size.
+  treeOnly(str('tls.handshake.extension.data', 'Data', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_ec_point_formats_length', 'EC point formats Length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_ec_point_formats', 'Elliptic curves point formats', 'tls')),
+  treeOnly(str('tls.handshake.extensions_ec_point_format', 'EC point format', 'tls')),
+  treeOnly(uint('tls.compress_certificate.algorithms_length', 'Algorithms Length', 'tls')),
+  treeOnly(str('tls.compress_certificate.algorithm', 'Algorithm', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_alps_len', 'ALPS Extension Length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_alps_alpn_list', 'Supported ALPS List', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_alps_alpn_str_len', 'ALPS string length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_alps_alpn_str', 'ALPS Next Protocol', 'tls')),
   treeOnly(str('tls.handshake.session_id', 'Session ID', 'tls')),
   treeOnly(uint('tls.handshake.session_id_length', 'Session ID Length', 'tls')),
   treeOnly(uint('tls.handshake.cipher_suites_length', 'Cipher Suites Length', 'tls')),

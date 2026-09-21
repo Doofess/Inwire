@@ -472,6 +472,8 @@ export function dissectTcpTransport(
         // a Server Hello sitting in one is still a Server Hello and
         // Wireshark labels it as one.
         frameId: frameId ?? 0, tsUs, cursor, conversation, inOrder: tlsInOrder, segmentSeq: seqNum, gap: lostSegment,
+        // Whichever end is the TLS port; the other is an ephemeral client one.
+        serverPort: dstPort === 443 ? dstPort : srcPort === 443 ? srcPort : dstPort,
       });
       if (outcome.kind === 'tls') {
         tlsResult = outcome.result;
