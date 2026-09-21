@@ -1414,6 +1414,127 @@ export const FIELDS: readonly FieldDef[] = [
   // --- IEEE 1905.1 -----------------------------------------------------------
   uint('ieee1905.message_type', 'Message type', 'ieee1905'),
   uint('ieee1905.message_id', 'Message id', 'ieee1905'),
+
+  // --- IEEE 1905.1a / EasyMesh: the CMDU header and every TLV body ---------
+  //
+  // This layer was 2 of 97 - the worst in the fixtures - because the TLV run
+  // after the 8-byte header was never read at all. All `treeOnly`: a mesh
+  // control frame is read by expanding it, and none of this belongs in a
+  // column, a colour rule or a replay seed.
+  //
+  // `ap_extended_metrics.Broadcast_bytes_sent`'s capital B is the reference's
+  // own inconsistency with the six counters beside it. Matched, not tidied -
+  // `wireshark-abbrevs.ts` holds every name here to `tshark -G fields`.
+  treeOnly(uint('ieee1905.message_version', 'Message version', 'ieee1905')),
+  treeOnly(uint('ieee1905.message_reserved', 'Message reserved', 'ieee1905')),
+  treeOnly(uint('ieee1905.fragment_id', 'Fragment id', 'ieee1905')),
+  treeOnly(uint('ieee1905.flags', 'Flags', 'ieee1905')),
+  treeOnly(bool('ieee1905.last_fragment', 'Last fragment', 'ieee1905')),
+  treeOnly(bool('ieee1905.relay_indicator', 'Relay indicator', 'ieee1905')),
+
+  // The TLV framing: a type, then a length whose top two bits are reserved.
+  treeOnly(uint('ieee1905.tlv_type', 'TLV type', 'ieee1905')),
+  treeOnly(uint('ieee1905.tlv_length', 'TLV length', 'ieee1905')),
+  treeOnly(uint('ieee1905.tlv_length.reserved', 'TLV length reserved', 'ieee1905')),
+  treeOnly(uint('ieee1905.tlv_length.length', 'TLV length length', 'ieee1905')),
+
+  // Addresses and media types, which appear in half the TLV types.
+  treeOnly({ abbrev: 'ieee1905.1905_al_mac_addr', label: '1905 AL MAC address type', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.mac_addr', label: 'MAC address type', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.local_intf.mac_address', label: 'Local interface MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.neighbor_al_mac_addr', label: 'Neighbor MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.responder_al_mac_addr', label: 'Responder MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.receiving_al_mac_addr', label: 'Receiving AL MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.dev_info.media_type', 'Media type', 'ieee1905')),
+  treeOnly(uint('ieee1905.media_type.bits_15_to_8', 'Media type bits 15 to 8', 'ieee1905')),
+  treeOnly(uint('ieee1905.media_type.bits_7_to_0', 'Media type bits 7 to 0', 'ieee1905')),
+
+  // Device information and the neighbour lists - the topology half.
+  treeOnly(uint('ieee1905.dev_info.local_int_cnt', 'Local interface count', 'ieee1905')),
+  treeOnly(uint('ieee1905.dev_info.spec_info_len', 'Special info length', 'ieee1905')),
+  treeOnly(str('ieee1905.dev_info.spec_info', 'Special info', 'ieee1905')),
+  treeOnly(uint('ieee1905.neighbor_flags', 'IEEE1905 neighbor flags', 'ieee1905')),
+  treeOnly(bool('ieee1905.bridges', 'IEEE1905 bridges', 'ieee1905')),
+
+  // The link metrics, which is what a mesh actually argues about.
+  treeOnly(uint('ieee1905.bridgeFlag', 'IEEE 802.1 bridge flag', 'ieee1905')),
+  treeOnly(uint('ieee1905.packetErrors', 'Packet errors', 'ieee1905')),
+  treeOnly(uint('ieee1905.transmittedPackets', 'Transmitted packets', 'ieee1905')),
+  treeOnly(uint('ieee1905.packets_received', 'Packets received', 'ieee1905')),
+  treeOnly(uint('ieee1905.macThroughputCapacity', 'MAC throughput capacity', 'ieee1905')),
+  treeOnly(uint('ieee1905.linkAvailability', 'Link availability', 'ieee1905')),
+  treeOnly(uint('ieee1905.phyRate', 'Phy rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.rssi', 'RSSI', 'ieee1905')),
+
+  treeOnly(str('ieee1905.vendor_specific.oui', 'Vendor specific OUI', 'ieee1905')),
+  treeOnly(str('ieee1905.vendor_specific.info', 'Vendor specific information', 'ieee1905')),
+  treeOnly(uint('ieee1905.supported_service.service_count', 'Supported service count', 'ieee1905')),
+  treeOnly(uint('ieee1905.supported_service.service', 'Supported service', 'ieee1905')),
+  treeOnly(uint('ieee1905.multi_ap_version', 'Multi-AP Profile', 'ieee1905')),
+
+  // The operational BSS list, and who is associated to each.
+  treeOnly(uint('ieee1905.ap_bss_radio_count', 'AP operational BSS radio count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.ap_radio_identifier', label: 'AP radio identifier', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.ap_bss_intf_count', 'AP operational interface count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.ap_bss_local_intf_addr', label: 'AP operational local interface MAC addr', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.ap_bss_local_intf_ssid_len', 'AP operational BSS local interface SSID len', 'ieee1905')),
+  treeOnly(str('ieee1905.ap_bss_local_intf_ssid', 'AP operational BSS local interface SSID', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_client.bss_count', 'Included BSS count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_client.bss', label: 'Associated BSS', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_client.client_count', 'Associated client count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_client.mac_addr', label: 'Associated client MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_client.time_since', 'Time since last association', 'ieee1905')),
+
+  // AP metrics: how busy the radio is and what it thinks it can still carry.
+  treeOnly({ abbrev: 'ieee1905.ap_metrics.bssid', label: 'Multi-AP agent BSSID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.ap_metrics.channel_util', 'Channel utilization', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_metrics.sta_count', 'BSS STA count', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_metrics.flags', 'Estimated Service Parameters Flags', 'ieee1905')),
+  treeOnly(bool('ieee1905.ap_metrics.include_ac_eq_be_params', 'Estimated Service Parameters for AC=BE', 'ieee1905')),
+  treeOnly(bool('ieee1905.ap_metrics.include_ac_eq_bk_params', 'Estimated Service Parameters for AC=BK', 'ieee1905')),
+  treeOnly(bool('ieee1905.ap_metrics.include_ac_eq_vo_params', 'Estimated Service Parameters for AC=VO', 'ieee1905')),
+  treeOnly(bool('ieee1905.ap_metrics.include_ac_eq_vi_params', 'Estimated Service Parameters for AC=VI', 'ieee1905')),
+  treeOnly(str('ieee1905.ap_metrics.est_param_be', 'Estimated service parameters AC=BE', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.ap_extended_metrics.bssid', label: 'BSSID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.ap_extended_metrics.unicast_bytes_sent', 'UnicastBytesSent', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.unicast_bytes_received', 'UnicastBytesReceived', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.multicast_bytes_sent', 'MulticastBytesSent', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.multicast_bytes_received', 'MulticastBytesReceived', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.Broadcast_bytes_sent', 'BroadcastBytesSent', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.broadcast_bytes_received', 'BroadcastBytesReceived', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.radio_metrics.radio_id', label: 'Radio unique ID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.radio_metrics.noise', 'Noise', 'ieee1905')),
+  treeOnly(uint('ieee1905.radio_metrics.transmit', 'Transmit', 'ieee1905')),
+  treeOnly(uint('ieee1905.radio_metrics.receive_self', 'ReceiveSelf', 'ieee1905')),
+  treeOnly(uint('ieee1905.radio_metrics.receive_other', 'ReceiveOther', 'ieee1905')),
+
+  // Per-station metrics: the mesh's own view of every client on it.
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_link_metrics.mac_addr', label: 'MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.bssid_count', 'Number of BSSIDs for STA', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_link_metrics.bssid', label: 'STA BSSID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.time_delta', 'Measurement time delta', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.down_rate', 'Downlink data rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.up_rate', 'Uplink data rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.rcpi', 'Measured uplink RCPI for STA', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_extended_link_metrics.mac_addr', label: 'Associated STA MAC Address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.count', 'BSSID count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_extended_link_metrics.bssid', label: 'BSSID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.lddlr', 'Last Data Downlink Rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.ldulr', 'Last Data Uplink Rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.ur', 'Utilization Receive', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.ut', 'Utilization Transmit', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_traffic_stats.mac_addr', label: 'Associated STA MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.bytes_sent', 'Bytes Sent', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.bytes_rcvd', 'Bytes Received', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.packets_sent', 'Packets Sent', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.packets_rcvd', 'Packets Received', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.tx_pkt_errs', 'Tx Packet Errors', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.rx_packet_errs', 'Rx Packet Errors', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.retrans_count', 'Retransmission Count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_wf6_sta_status_report.mac_addr', label: 'MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.tid_count', 'Number of Wi-Fi 6 TIDs', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.tid', 'TID', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.queue_size', 'Queue Size', 'ieee1905')),
 ];
 
 export const FIELD_BY_ABBREV: ReadonlyMap<string, FieldDef> = new Map(FIELDS.map((f) => [f.abbrev, f]));
