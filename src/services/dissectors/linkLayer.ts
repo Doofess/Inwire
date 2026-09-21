@@ -35,6 +35,30 @@ import { labelForEtherType } from './l2';
 /** An ethertype value at or below this is really an 802.3 length. */
 const MAX_802_3_LENGTH = 1500;
 
+/**
+ * The unnumbered-format command, from the five bits `000. 00..` of the
+ * control byte.
+ *
+ * Only the handful an ordinary capture contains are named; anything else is
+ * shown as its number rather than guessed at, which is the same rule the SAP
+ * table above follows.
+ */
+function unnumberedCommand(control: number): string {
+  const cmd = ((control & 0xe0) >> 3) | ((control & 0x0c) >> 2);
+  const named: Record<number, string> = {
+    0x00: 'Unnumbered Information',
+    0x03: 'Disconnected Mode',
+    0x04: 'Unnumbered Poll',
+    0x08: 'Disconnect',
+    0x0c: 'Unnumbered Acknowledgment',
+    0x0f: 'Set Asynchronous Balanced Mode Extended',
+    0x11: 'Frame Reject',
+    0x17: 'Exchange Identification',
+    0x1c: 'Test',
+  };
+  return `${named[cmd] ?? 'Unknown'} (0x${cmd.toString(16).padStart(2, '0')})`;
+}
+
 export interface LinkLayerResult {
   /** The link-layer tree layers, outermost first. Empty for raw IP. */
   layers: ProtocolLayer[];
@@ -321,6 +345,15 @@ function readLlc(rawBytes: Uint8Array, out: LinkLayerResult): void {
       abbrev: 'llc.dsap',
       rawBytesRange: [at, at] as [number, number],
       children: [{
+        // The seven bits that are the service access point, which the
+        // reference draws above the IG bit because that is the order they sit
+        // in: `0100 001. = SAP`, then `.... ...0 = IG Bit`.
+        name: 'SAP',
+        value: sapName(dsap),
+        abbrev: 'llc.dsap.sap',
+        rawBytesRange: [at, at] as [number, number],
+        bitfield: { bitOffset: 0, bitLength: 7, totalBits: 8 },
+      }, {
         name: `.... ...${dsap & 1} = IG Bit`,
         value: (dsap & 1) ? 'Group' : 'Individual',
         rawBytesRange: [at, at] as [number, number],
@@ -332,8 +365,15 @@ function readLlc(rawBytes: Uint8Array, out: LinkLayerResult): void {
       abbrev: 'llc.ssap',
       rawBytesRange: [at + 1, at + 1] as [number, number],
       children: [{
+        name: 'SAP',
+        value: sapName(ssap),
+        abbrev: 'llc.ssap.sap',
+        rawBytesRange: [at + 1, at + 1] as [number, number],
+        bitfield: { bitOffset: 0, bitLength: 7, totalBits: 8 },
+      }, {
         name: `.... ...${ssap & 1} = CR Bit`,
         value: (ssap & 1) ? 'Response' : 'Command',
+        abbrev: 'llc.ssap.cr',
         rawBytesRange: [at + 1, at + 1] as [number, number],
       }],
     },
@@ -344,6 +384,25 @@ function readLlc(rawBytes: Uint8Array, out: LinkLayerResult): void {
         : `0x${control.toString(16).padStart(2, '0')}`,
       abbrev: 'llc.control',
       rawBytesRange: [at + 2, at + 1 + controlLen] as [number, number],
+      // What the control byte says it is. An unnumbered frame carries the
+      // command in five scattered bits - 000. 00.. - which is why it is read
+      // here rather than left as two hex digits.
+      children: unnumbered
+        ? [
+          {
+            name: 'Frame type', value: `Unnumbered frame (0x0${control & 0x03})`,
+            abbrev: 'llc.control.ftype',
+            rawBytesRange: [at + 2, at + 2] as [number, number],
+            bitfield: { bitOffset: 6, bitLength: 2, totalBits: 8 },
+          },
+          {
+            name: 'Command',
+            value: unnumberedCommand(control),
+            abbrev: 'llc.control.u_modifier_cmd',
+            rawBytesRange: [at + 2, at + 2] as [number, number],
+          },
+        ]
+        : [],
     },
   ];
 

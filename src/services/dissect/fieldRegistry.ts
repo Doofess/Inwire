@@ -318,6 +318,36 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(str('dns.soa.retry_interval', 'Retry Interval', 'dns')),
   treeOnly(str('dns.soa.expire_limit', 'Expire limit', 'dns')),
   treeOnly(str('dns.soa.minimum_ttl', 'Minimum TTL', 'dns')),
+
+  // --- STP: the fields a spanning tree is actually diagnosed from ----------
+  //
+  // The four timers were eight bytes this build read past. Max Age and Hello
+  // Time are how long a switch waits before deciding the root is gone, and
+  // Forward Delay is why a port takes thirty seconds to pass traffic - the
+  // three numbers anyone debugging a convergence problem reaches for first.
+  treeOnly(uint('stp.protocol', 'Protocol Identifier', 'stp')),
+  uint('stp.flags', 'BPDU flags', 'stp'),
+  treeOnly(bool('stp.flags.tc', 'Topology Change', 'stp')),
+  treeOnly(bool('stp.flags.tcack', 'Topology Change Acknowledgment', 'stp')),
+  treeOnly(uint('stp.root.prio', 'Root Bridge Priority', 'stp')),
+  treeOnly(uint('stp.root.ext', 'Root Bridge System ID Extension', 'stp')),
+  { abbrev: 'stp.root.hw', label: 'Root Bridge System ID', type: 'mac', layer: 'stp', treeOnly: true },
+  treeOnly(uint('stp.bridge.prio', 'Bridge Priority', 'stp')),
+  treeOnly(uint('stp.bridge.ext', 'Bridge System ID Extension', 'stp')),
+  { abbrev: 'stp.bridge.hw', label: 'Bridge System ID', type: 'mac', layer: 'stp', treeOnly: true },
+  uint('stp.msg_age', 'Message Age', 'stp'),
+  uint('stp.max_age', 'Max Age', 'stp'),
+  uint('stp.hello', 'Hello Time', 'stp'),
+  uint('stp.forward', 'Forward Delay', 'stp'),
+  // LLC's own bits. The DSAP and SSAP bytes are a seven-bit service access
+  // point plus one flag each, and the control byte of an unnumbered frame
+  // carries its command in five scattered bits - all of which were drawn as
+  // two hex digits and nothing else.
+  treeOnly(str('llc.dsap.sap', 'SAP', 'llc')),
+  treeOnly(str('llc.ssap.sap', 'SAP', 'llc')),
+  treeOnly(bool('llc.ssap.cr', 'CR Bit', 'llc')),
+  treeOnly(str('llc.control.ftype', 'Frame type', 'llc')),
+  treeOnly(str('llc.control.u_modifier_cmd', 'Command', 'llc')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
   uint('ipv6.reassembled', 'Reassembled IPv6 fragments', 'ipv6'),
 

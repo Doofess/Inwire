@@ -64,11 +64,11 @@
           "igmp": 4,
           "ip": 21,
           "ipv6": 15,
-          "llc": 3,
+          "llc": 8,
           "lldp": 4,
           "quic": 13,
           "ssdp": 13,
-          "stp": 4,
+          "stp": 18,
           "tcp": 71,
           "tls": 56,
           "udp": 11
@@ -78,8 +78,8 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 420,
-          "valueMismatches": 168
+          "absentDistinct": 401,
+          "valueMismatches": 175
         },
         "unimplemented": {
           "prp": "Parallel Redundancy Protocol - a 6-byte trailer this build does not read at all, on 20 frames. The one protocol the reference names here that nothing in this build can name."
@@ -128,10 +128,10 @@
           "ieee1905": 2,
           "ip": 20,
           "ipv6": 14,
-          "llc": 3,
+          "llc": 8,
           "quic": 13,
           "ssdp": 7,
-          "stp": 4,
+          "stp": 18,
           "tcp": 71,
           "tls": 55,
           "udp": 11
@@ -141,8 +141,8 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 266,
-          "valueMismatches": 155
+          "absentDistinct": 247,
+          "valueMismatches": 162
         },
         "unimplemented": {}
       }

@@ -1,4 +1,4 @@
-import { ProtocolLayer } from '../../types/packet';
+import { ProtocolField, ProtocolLayer } from '../../types/packet';
 import { formatMac, formatIpv4Address } from '../addressFormat';
 
 /**
@@ -103,6 +103,28 @@ function formatBridgeId(rawBytes: Uint8Array, offset: number): { text: string; p
  *
  * `llcOffset` points at the DSAP byte, so the BPDU itself begins 3 bytes later.
  */
+/**
+ * Message Age, Max Age, Hello Time and Forward Delay.
+ *
+ * Each is a `u16` of 256ths of a second - 0x0200 is two seconds - which is
+ * why they are divided rather than shown raw, and why the reference prints
+ * "2" against a value of 512.
+ */
+function stpTimerRows(rawBytes: Uint8Array, bpdu: number): ProtocolField[] {
+  const timers: [string, string, number][] = [
+    ['Message Age', 'stp.msg_age', 27],
+    ['Max Age', 'stp.max_age', 29],
+    ['Hello Time', 'stp.hello', 31],
+    ['Forward Delay', 'stp.forward', 33],
+  ];
+  return timers.map(([name, abbrev, at]) => ({
+    name,
+    value: ((rawBytes[bpdu + at] << 8) | rawBytes[bpdu + at + 1]) / 256,
+    abbrev,
+    rawBytesRange: [bpdu + at, bpdu + at + 1] as [number, number],
+  }));
+}
+
 export function dissectStp(rawBytes: Uint8Array, llcOffset: number): L2DissectorResult | null {
   const bpdu = llcOffset + 3;
   if (rawBytes.length < bpdu + 4) return null;
@@ -125,9 +147,9 @@ export function dissectStp(rawBytes: Uint8Array, llcOffset: number): L2Dissector
         summary: 'Spanning Tree Protocol, Topology Change Notification',
         rawBytesRange: [llcOffset, bpdu + 3],
         fields: [
-          { name: 'Protocol Identifier', value: 'Spanning Tree Protocol (0x0000)', rawBytesRange: [bpdu, bpdu + 1] },
-          { name: 'Protocol Version Identifier', value: version, rawBytesRange: [bpdu + 2, bpdu + 2] },
-          { name: 'BPDU Type', value: 'Topology Change Notification (0x80)', rawBytesRange: [bpdu + 3, bpdu + 3] },
+          { name: 'Protocol Identifier', value: 'Spanning Tree Protocol (0x0000)', abbrev: 'stp.protocol', rawBytesRange: [bpdu, bpdu + 1] },
+          { name: 'Protocol Version Identifier', value: version, abbrev: 'stp.version', rawBytesRange: [bpdu + 2, bpdu + 2] },
+          { name: 'BPDU Type', value: 'Topology Change Notification (0x80)', abbrev: 'stp.type', rawBytesRange: [bpdu + 3, bpdu + 3] },
         ],
       },
     };
@@ -155,38 +177,71 @@ export function dissectStp(rawBytes: Uint8Array, llcOffset: number): L2Dissector
       'stp.version': version,
       'stp.root.cost': rootCost,
       'stp.port': portId,
+      'stp.flags': flags,
+      'stp.msg_age': ((rawBytes[bpdu + 27] << 8) | rawBytes[bpdu + 28]) / 256,
+      'stp.max_age': ((rawBytes[bpdu + 29] << 8) | rawBytes[bpdu + 30]) / 256,
+      'stp.hello': ((rawBytes[bpdu + 31] << 8) | rawBytes[bpdu + 32]) / 256,
+      'stp.forward': ((rawBytes[bpdu + 33] << 8) | rawBytes[bpdu + 34]) / 256,
     },
     layer: {
       name: 'Spanning Tree Protocol',
       summary: `Spanning Tree Protocol, ${info}`,
       rawBytesRange: [llcOffset, Math.min(rawBytes.length - 1, bpdu + 34)],
       fields: [
-        { name: 'Protocol Identifier', value: 'Spanning Tree Protocol (0x0000)', rawBytesRange: [bpdu, bpdu + 1] },
-        { name: 'Protocol Version Identifier', value: version, rawBytesRange: [bpdu + 2, bpdu + 2] },
-        { name: 'BPDU Type', value: `${bpduType === 0x02 ? 'Rapid/Multiple' : 'Configuration'} (0x${bpduType.toString(16).padStart(2, '0')})`, rawBytesRange: [bpdu + 3, bpdu + 3] },
-        { name: 'BPDU flags', value: `0x${flags.toString(16).padStart(2, '0')}`, rawBytesRange: [bpdu + 4, bpdu + 4] },
+        { name: 'Protocol Identifier', value: 'Spanning Tree Protocol (0x0000)', abbrev: 'stp.protocol', rawBytesRange: [bpdu, bpdu + 1] },
+        { name: 'Protocol Version Identifier', value: version, abbrev: 'stp.version', rawBytesRange: [bpdu + 2, bpdu + 2] },
+        { name: 'BPDU Type', value: `${bpduType === 0x02 ? 'Rapid/Multiple' : 'Configuration'} (0x${bpduType.toString(16).padStart(2, '0')})`, abbrev: 'stp.type', rawBytesRange: [bpdu + 3, bpdu + 3] },
+        {
+          name: 'BPDU flags',
+          value: `0x${flags.toString(16).padStart(2, '0')}`,
+          abbrev: 'stp.flags',
+          rawBytesRange: [bpdu + 4, bpdu + 4],
+          // The two bits every BPDU carries. A topology change is the single
+          // most operationally interesting thing a BPDU says - it is what a
+          // flapping link looks like from the switch side - and it was inside
+          // a hex byte nobody could filter on.
+          children: [
+            {
+              name: 'Topology Change Acknowledgment', value: (flags & 0x80) !== 0 ? 'Yes' : 'No',
+              abbrev: 'stp.flags.tcack', rawBytesRange: [bpdu + 4, bpdu + 4],
+              bitfield: { bitOffset: 0, bitLength: 1, totalBits: 8 },
+            },
+            {
+              name: 'Topology Change', value: (flags & 0x01) !== 0 ? 'Yes' : 'No',
+              abbrev: 'stp.flags.tc', rawBytesRange: [bpdu + 4, bpdu + 4],
+              bitfield: { bitOffset: 7, bitLength: 1, totalBits: 8 },
+            },
+          ],
+        },
         {
           name: 'Root Identifier',
           value: root.text,
           rawBytesRange: [bpdu + 5, bpdu + 12],
           children: [
-            { name: 'Root Bridge Priority', value: root.priority },
-            { name: 'Root Bridge System ID Extension', value: root.sysIdExt },
-            { name: 'Root Bridge System ID', value: root.mac },
+            { name: 'Root Bridge Priority', value: root.priority, abbrev: 'stp.root.prio' },
+            { name: 'Root Bridge System ID Extension', value: root.sysIdExt, abbrev: 'stp.root.ext' },
+            { name: 'Root Bridge System ID', value: root.mac, abbrev: 'stp.root.hw' },
           ],
         },
-        { name: 'Root Path Cost', value: rootCost, rawBytesRange: [bpdu + 13, bpdu + 16] },
+        { name: 'Root Path Cost', value: rootCost, abbrev: 'stp.root.cost', rawBytesRange: [bpdu + 13, bpdu + 16] },
         {
           name: 'Bridge Identifier',
           value: bridge.text,
           rawBytesRange: [bpdu + 17, bpdu + 24],
           children: [
-            { name: 'Bridge Priority', value: bridge.priority },
-            { name: 'Bridge System ID Extension', value: bridge.sysIdExt },
-            { name: 'Bridge System ID', value: bridge.mac },
+            { name: 'Bridge Priority', value: bridge.priority, abbrev: 'stp.bridge.prio' },
+            { name: 'Bridge System ID Extension', value: bridge.sysIdExt, abbrev: 'stp.bridge.ext' },
+            { name: 'Bridge System ID', value: bridge.mac, abbrev: 'stp.bridge.hw' },
           ],
         },
-        { name: 'Port identifier', value: `0x${portId.toString(16).padStart(4, '0')}`, rawBytesRange: [bpdu + 25, bpdu + 26] },
+        { name: 'Port identifier', value: `0x${portId.toString(16).padStart(4, '0')}`, abbrev: 'stp.port', rawBytesRange: [bpdu + 25, bpdu + 26] },
+        // The four timers, eight bytes this build read past. They are the
+        // whole of a spanning tree's convergence behaviour: Max Age and Hello
+        // Time say how long a switch waits before deciding the root is gone,
+        // and Forward Delay is why a port takes thirty seconds to pass
+        // traffic. Carried in 1/256 of a second and shown in seconds, as the
+        // reference shows them.
+        ...stpTimerRows(rawBytes, bpdu),
       ],
     },
   };
