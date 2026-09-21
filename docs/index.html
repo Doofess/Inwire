@@ -1,0 +1,51 @@
+<!doctype html>
+<!--
+  GitHub Pages serves this directory, and Pages serves `index.html` for the
+  site root. The document people are being sent to is `how-inwire-works.html`,
+  which is not called `index` for a reason: it is a printable A4 explainer that
+  predates Pages and is referenced by that name from the README and from
+  `.gitattributes` (where it is marked `linguist-vendored`, or the repository
+  reads as an HTML project). Renaming it to suit the web server would break
+  both, so the redirect lives here instead.
+
+  Meta-refresh rather than a server rule, because Pages offers no redirects on
+  a project site. The link below is the fallback: a reader who arrives with
+  refresh disabled gets a destination rather than a blank page.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inwire — how it works</title>
+<meta http-equiv="refresh" content="0; url=how-inwire-works.html">
+<link rel="canonical" href="how-inwire-works.html">
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; color: #111827;
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  main { min-height: 100%; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; padding: 24px;
+    text-align: center; }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: -.01em; margin: 0; }
+  p { margin: 0; color: #6b7280; font-size: 14px; line-height: 1.5; }
+  a { color: #0b6bcb; }
+</style>
+</head>
+<body>
+<main>
+  <!-- logo/inwire-layers.svg, verbatim. Darkest first: the plates overlap, so
+       painter's order is the depth. -->
+  <svg width="64" height="64" viewBox="0 0 100 100" role="img" aria-label="Inwire">
+    <path d="M50 48 L90 68 L50 88 L10 68 Z" fill="#06386A"/>
+    <path d="M50 39 L90 59 L50 79 L10 59 Z" fill="#0957A4"/>
+    <path d="M50 30 L90 50 L50 70 L10 50 Z" fill="#0C75DF"/>
+    <path d="M50 21 L90 41 L50 61 L10 41 Z" fill="#3494F4"/>
+    <path d="M50 12 L90 32 L50 52 L10 32 Z" fill="#6EB2F7"/>
+  </svg>
+  <h1>How Inwire works</h1>
+  <p>
+    Redirecting to the illustrated explainer.<br>
+    If nothing happens, <a href="how-inwire-works.html">open it directly</a>.
+  </p>
+</main>
+</body>
+</html>
