@@ -2141,7 +2141,7 @@ check("right-to-left marks are stripped, so the name matches the capture list",
       adapters._text("\u200f\u200fEthernet 2"), "Ethernet 2")
 check("a name that is only marks is nothing, not whitespace", adapters._text("\u200f\u200f"), None)
 
-check("an IPv6 scope is named", adapters.address_scope("2001:db8::1"), "global")
+check("an IPv6 scope is named", adapters.address_scope("2606:4700:4700::1111"), "global")
 check("...link-local", adapters.address_scope("fe80::1"), "link-local")
 check("...and a unique local address", adapters.address_scope("fd00::1"), "ula")
 check("an unparseable address has no scope rather than a wrong one",

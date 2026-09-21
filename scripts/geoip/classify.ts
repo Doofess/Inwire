@@ -36,7 +36,10 @@ const CASES: [string, IpClass, string][] = [
   ['8.8.8.8', 'public', 'Google DNS'],
   ['1.1.1.1', 'public', 'Cloudflare DNS'],
   ['81.31.203.153', 'public', 'ordinary IPv4 host'],
-  ['2001:db8:422c:9100::1', 'public', 'ordinary IPv6 host'],
+  // A real, well-known public address rather than a made-up one: the
+  // documentation range 2001:db8::/32 is classified `reserved` a few lines
+  // down in geoIpService, so it cannot stand in for an ordinary host here.
+  ['2606:4700:4700::1111', 'public', 'ordinary IPv6 host'],
   ['172.15.0.1', 'public', 'just below the private 172.16-31 block'],
   ['172.32.0.1', 'public', 'just above the private 172.16-31 block'],
   ['100.63.255.255', 'public', 'just below CGNAT'],

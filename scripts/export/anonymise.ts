@@ -95,7 +95,10 @@ function sharedPrefix(a: Uint8Array, b: Uint8Array): number {
   const a = new Anonymiser();
   const addresses = [
     '2001:db8:1:1::1', '2001:db8:1:1::2', '2001:db8:1:2::1', '2001:db8:2::1',
-    '2001:db8:422c:9100::1', '2001:db8:422c:9100::2',
+    // A second allocation, so the pairs above are not all inside one /32 and
+    // the shared-prefix property is tested across a real boundary as well as
+    // within one.
+    '2606:4700:5:5::1', '2606:4700:5:5::2',
   ];
   const mapped = new Map(addresses.map((x) => [x, a.ipv6Address(x)]));
   let ok = true;
