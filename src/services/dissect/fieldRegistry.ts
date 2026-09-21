@@ -242,6 +242,41 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(str('ipv6.src_addr_space', 'Source Address Space', 'ipv6')),
   treeOnly(str('ipv6.dst_addr_space', 'Destination Address Space', 'ipv6')),
   treeOnly(str('tcp.flags.str', 'TCP Flags', 'tcp')),
+
+  // --- the per-layer conversation indices ------------------------------------
+  //
+  // The reference assigns a conversation index at every layer, and this build
+  // had only `tcp.stream`. These four are the rest, plus TLS's own sequence.
+  //
+  // **These are the only fields in this wave that are NOT `treeOnly`**, and the
+  // reason is not that somebody wants to filter on them - it is
+  // `services/pipeline/replay.ts`. A detail tree is rebuilt by replaying one
+  // conversation through fresh trackers, which would number it 0; the Worker
+  // recovers the right number by reading it back off the target packet with
+  // `fieldValue`, so it has to be in the bag to be recoverable. Filtering is
+  // the bonus, not the argument. `eth.stream` and `ipv6.stream` land on 100%
+  // and 65% of fixture frames, so both are declared in `DENSE_FIELDS` as
+  // `dense-fields.ts` requires.
+  uint('eth.stream', 'Stream index', 'eth'),
+  uint('ip.stream', 'Stream index', 'ip'),
+  uint('ipv6.stream', 'Stream index', 'ipv6'),
+  uint('udp.stream', 'Stream index', 'udp'),
+  treeOnly(uint('udp.stream.pnum', 'Stream Packet Number', 'udp')),
+  treeOnly(str('udp.time_relative', 'Time since first frame', 'udp')),
+  treeOnly(str('udp.time_delta', 'Time since previous frame', 'udp')),
+  uint('tls.stream', 'Stream index', 'tls'),
+
+  // The six completeness bits.  beside them has been drawn
+  // since the tracker learned to summarise a handshake; these say WHICH of the
+  // six things the capture actually contains, which is how a reader finds out
+  // that a stream's relative sequence numbers are relative to a guess.
+  treeOnly(str('tcp.completeness.str', 'Completeness Flags', 'tcp')),
+  treeOnly(bool('tcp.completeness.syn', 'SYN', 'tcp')),
+  treeOnly(bool('tcp.completeness.syn-ack', 'SYN-ACK', 'tcp')),
+  treeOnly(bool('tcp.completeness.ack', 'ACK', 'tcp')),
+  treeOnly(bool('tcp.completeness.data', 'Data', 'tcp')),
+  treeOnly(bool('tcp.completeness.fin', 'FIN', 'tcp')),
+  treeOnly(bool('tcp.completeness.rst', 'RST', 'tcp')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
   uint('ipv6.reassembled', 'Reassembled IPv6 fragments', 'ipv6'),
 

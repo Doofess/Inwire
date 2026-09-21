@@ -652,6 +652,7 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
     case 'replay': {
       const { layers } = dissectReplay(
         command.frames, command.truncated, command.streamId, command.retroactive, host,
+        command.seeds,
       );
       // The process came down with the request rather than being looked up
       // here: this store is a moving picture of open sockets, and a frame

@@ -16,6 +16,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { pipeline, type ReplayBundle } from '../services/pipelineClient';
+import { seedsFor } from '../services/pipeline/replay';
 import { streamPackets, targetForPacket } from '../services/followStream';
 import { bytesAreRecoverable, hasBytes, packetBytes, packetsBytes } from '../services/packetBytes';
 import { fieldValue } from '../services/dissect/fieldAccess';
@@ -86,7 +87,13 @@ export async function replayBundleFor(
     }
     : undefined;
 
-  return { frames, truncated, streamId: packet.streamId, retroactive, process };
+  return {
+    frames, truncated, streamId: packet.streamId, retroactive, process,
+    // Every layer's conversation index, read off the frame for the same reason
+    // `streamId` is: the replay rebuilds one conversation from a five-tuple
+    // bundle through fresh trackers, which would number it 0.
+    seeds: seedsFor(packet),
+  };
 }
 
 /**

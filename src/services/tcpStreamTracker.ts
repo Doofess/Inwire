@@ -234,6 +234,14 @@ interface TcpDirection {
 interface TcpConnection {
   /** Assigned by `getStreamId` in order of first appearance, not on creation. */
   streamId?: number;
+  /**
+   * `tls.stream`, assigned the first time this connection produces a TLS
+   * record - which is why it is not `streamId`. The reference numbers TLS
+   * conversations in their own sequence: on this repo's fixture `tcp.stream`
+   * 1, 2, 3 carry `tls.stream` 0, 1, 2, because the connections in between
+   * never spoke TLS.
+   */
+  tlsStreamId?: number;
   /** Frames seen on this connection, which is `recordStreamPacket`'s answer. */
   packets: number;
   /**
@@ -255,6 +263,20 @@ interface TcpConnection {
   sawSyn: boolean;
   sawSynAck: boolean;
   sawFinOrRst: boolean;
+  /**
+   * The rest of the reference's completeness bits.
+   *
+   * `sawFinOrRst` above answers "did this conversation end", which is what the
+   * plain-English summary needs; these answer "which of the six things did
+   * this capture actually contain", which is a different and more useful
+   * question - it is how you find out that a stream you are about to analyse
+   * is missing its handshake, and therefore that every relative sequence
+   * number in it is relative to a guess.
+   */
+  sawAck: boolean;
+  sawData: boolean;
+  sawFin: boolean;
+  sawRst: boolean;
   /** Wireshark's sequence analysis state, shared by both directions. */
   analysis?: TcpConnectionState;
   /** What both ends of the TLS conversation have agreed on. */
@@ -275,7 +297,10 @@ interface TcpConnection {
 }
 
 function freshTcpConnection(): TcpConnection {
-  return { packets: 0, sawSyn: false, sawSynAck: false, sawFinOrRst: false, a: {}, b: {} };
+  return {
+    packets: 0, sawSyn: false, sawSynAck: false, sawFinOrRst: false,
+    sawAck: false, sawData: false, sawFin: false, sawRst: false, a: {}, b: {},
+  };
 }
 
 /**
@@ -310,6 +335,7 @@ export class TcpStreamTracker {
   /** The same records by stream index, for the callers that hold only that. */
   private byStreamId = new Map<number, TcpConnection>();
   private nextStreamId = 0;
+  private nextTlsStreamId = 0;
   /**
    * The connection the last lookup found. Every call made while dissecting one
    * frame asks about the same connection, so this is what keeps the
@@ -621,6 +647,22 @@ export class TcpStreamTracker {
     return conn.tls;
   }
 
+  /**
+   * `tls.stream`: this connection's place in the sequence of TLS conversations,
+   * assigned on first use like `getStreamId` and for the same reason - a
+   * connection that never speaks TLS must not consume a number.
+   */
+  public getTlsStreamId(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
+    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.tlsStreamId ??= this.nextTlsStreamId++;
+    return conn.tlsStreamId;
+  }
+
+  /** As `seedNextStreamId`, for the TLS sequence. See `L3Tracker.seedNextIndices`. */
+  public seedNextTlsStreamId(next: number): void {
+    if (this.nextTlsStreamId === 0) this.nextTlsStreamId = next;
+  }
+
   /** LDAP's per-connection counters, created on first use. */
   public ldapConversation(srcIp: string, srcPort: number, dstIp: string, dstPort: number): LdapConversationState {
     const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
@@ -668,12 +710,20 @@ export class TcpStreamTracker {
     return { packetNumber, sinceFirst, sincePrevious };
   }
 
-  public updateConnectionState(streamId: number, syn: boolean, ack: boolean, fin: boolean, rst: boolean): void {
+  public updateConnectionState(
+    streamId: number, syn: boolean, ack: boolean, fin: boolean, rst: boolean, hasData = false,
+  ): void {
     const conn = this.byStreamId.get(streamId);
     if (conn === undefined) return;
     if (syn && !ack) conn.sawSyn = true;
     if (syn && ack) conn.sawSynAck = true;
     if (fin || rst) conn.sawFinOrRst = true;
+    // The reference counts a bare ACK, not the ACK flag on a SYN-ACK - which
+    // is already its own bit and would otherwise set two.
+    if (ack && !syn) conn.sawAck = true;
+    if (hasData) conn.sawData = true;
+    if (fin) conn.sawFin = true;
+    if (rst) conn.sawRst = true;
   }
 
   /**
@@ -681,6 +731,27 @@ export class TcpStreamTracker {
    * The reference analyzer's internal numeric completeness bitmask, since that's an
    * implementation detail nobody reading this UI needs to decode.
    */
+  /**
+   * The reference's six completeness bits as its own bitmask.
+   *
+   * The plain-English summary beside this deliberately does not print the
+   * number (see `getConversationCompleteness`), and that stands - but the
+   * individual bits are not an implementation detail, they are six separate
+   * facts about what the capture contains, and each one is a filter somebody
+   * would type: `tcp.completeness.syn == 0` finds every stream whose
+   * handshake was missed.
+   */
+  public getCompletenessMask(streamId: number): number {
+    const conn = this.byStreamId.get(streamId);
+    if (!conn) return 0;
+    return (conn.sawSyn ? 1 : 0)
+      | (conn.sawSynAck ? 2 : 0)
+      | (conn.sawAck ? 4 : 0)
+      | (conn.sawData ? 8 : 0)
+      | (conn.sawFin ? 16 : 0)
+      | (conn.sawRst ? 32 : 0);
+  }
+
   public getConversationCompleteness(streamId: number): string {
     const conn = this.byStreamId.get(streamId);
     if (!conn) return 'Incomplete';
@@ -694,6 +765,7 @@ export class TcpStreamTracker {
     this.connections.clear();
     this.byStreamId.clear();
     this.nextStreamId = 0;
+    this.nextTlsStreamId = 0;
 this.lastKey = undefined;
     this.lastLookup = undefined;
     this.evicted = 0;

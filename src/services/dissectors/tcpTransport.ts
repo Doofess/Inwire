@@ -88,6 +88,38 @@ function tcpFlagsString(window12: number): string {
   return out;
 }
 
+/**
+ * The six things a TCP conversation may contain, in the reference's bit order
+ * and with its own letters. A capture missing SYN and SYN-ACK is one whose
+ * relative sequence numbers are relative to wherever the capture started,
+ * which is the single most useful thing this subtree says.
+ */
+const COMPLETENESS_BITS: { name: string; bit: number; char: string }[] = [
+  { name: 'RST', bit: 32, char: 'R' },
+  { name: 'FIN', bit: 16, char: 'F' },
+  { name: 'Data', bit: 8, char: 'D' },
+  { name: 'ACK', bit: 4, char: 'A' },
+  { name: 'SYN-ACK', bit: 2, char: 'S' },
+  { name: 'SYN', bit: 1, char: 'S' },
+];
+
+function completenessFields(mask: number): ProtocolField[] {
+  const str = mask === 0
+    // The reference's own spelling for "none of them", rather than six dots,
+    // because six dots and a missing row look the same at a glance.
+    ? '[ Null ]'
+    : COMPLETENESS_BITS.map((b) => ((mask & b.bit) !== 0 ? b.char : '·')).join('');
+  return [
+    { name: 'Completeness Flags', value: str, abbrev: 'tcp.completeness.str', generated: true },
+    ...COMPLETENESS_BITS.map((b) => ({
+      name: b.name,
+      value: (mask & b.bit) !== 0 ? 'Present' : 'Absent',
+      abbrev: `tcp.completeness.${b.name.toLowerCase()}`,
+      generated: true,
+    })),
+  ];
+}
+
 /** Everything the TCP decode needs that is not the bytes themselves. */
 export interface TcpContext {
   srcIp: string;
@@ -249,6 +281,7 @@ export function dissectTcpTransport(
   let sinceStreamStart: number | undefined;
   let sincePreviousInStream: number | undefined;
   let conversationCompleteness: string | undefined;
+  let completenessMask = 0;
   let isKeepAlive = false;
   let lostSegment = false;
   let tlsInOrder = true;
@@ -259,7 +292,7 @@ export function dissectTcpTransport(
     streamPacketNumber = position.packetNumber;
     sinceStreamStart = position.sinceFirst;
     sincePreviousInStream = position.sincePrevious;
-    tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst);
+    tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst, payloadLength > 0);
 
     // Asked before the analysis advances the direction, so it describes
     // where the stream stood when this segment arrived.
@@ -299,6 +332,7 @@ export function dissectTcpTransport(
     }
 
     conversationCompleteness = tcpTracker.getConversationCompleteness(streamId);
+    completenessMask = tcpTracker.getCompletenessMask(streamId);
   }
 
   // The TLS record layer, now that the segment's place in the stream is
@@ -438,6 +472,20 @@ export function dissectTcpTransport(
         tlsResult = outcome.result;
         reassembledFrom = outcome.result.reassembledFrom;
         labelPatches = outcome.result.labelPatches;
+        // `tls.stream` is assigned here rather than inside the TLS decoder
+        // because this is where the connection is identified. It is a sequence
+        // of its own, not `tcp.stream`: a connection only takes a number once
+        // it has actually produced a record.
+        if (tcpTracker !== undefined) {
+          const tlsStream = tcpTracker.getTlsStreamId(srcIp, srcPort, dstIp, dstPort);
+          tlsResult.layer.fields.push({
+            name: '[Stream index]', value: tlsStream, generated: true, abbrev: 'tls.stream',
+          });
+          // Into the bag as well as onto the row, for the same reason the four
+          // `*.stream` indices are: `seedsFor` reads it back off the frame so a
+          // replay can be told what this conversation was called.
+          tlsResult.fields['tls.stream'] = tlsStream;
+        }
       }
     }
   }
@@ -732,7 +780,18 @@ export function dissectTcpTransport(
           }]
           : []),
         ...(conversationCompleteness !== undefined
-          ? [{ name: '[Conversation completeness]', value: conversationCompleteness, generated: true, abbrev: 'tcp.completeness' }]
+          ? [{
+            name: '[Conversation completeness]',
+            value: conversationCompleteness,
+            generated: true,
+            abbrev: 'tcp.completeness',
+            // The summary above stays plain English - the reference prints
+            // "Incomplete, ESTABLISHED (7)" and the number is an internal
+            // bitmask nobody reading a UI should have to decode. The bits
+            // underneath are a different thing: six separate statements about
+            // what this capture contains, each one a filter worth typing.
+            children: completenessFields(completenessMask),
+          }]
           : []),
         // **A parent, where they were flat siblings of Window and Checksum.**
         // The reference nests them under one Options row and names that row

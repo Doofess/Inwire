@@ -1077,6 +1077,22 @@ export function decodeRawEthernetPacket(
     ...link.layers,
   ];
 
+  // `eth.stream`: the conversation between two MAC addresses, which is the one
+  // conversation index that exists on every frame - an ARP or an STP BPDU has
+  // no IP pair and no ports, and is still traffic between two stations.
+  //
+  // On `link.layers[0]` rather than on the Frame layer, because that is the
+  // Ethernet layer and the reference files the field under `eth`. A capture
+  // with no link layer at all (raw IP) has no row to hang it on and gets none.
+  if (link.srcMac !== undefined && link.dstMac !== undefined
+    && l3Tracker !== undefined && link.layers.length > 0) {
+    const ethFacts = l3Tracker.ethStream(link.srcMac, link.dstMac, tsUs);
+    link.layers[0].fields.push({
+      name: '[Stream index]', value: ethFacts.index, generated: true, abbrev: 'eth.stream',
+    });
+    filterFields['eth.stream'] = ethFacts.index;
+  }
+
   const l3Offset = link.l3Offset;
   const currentEtherType = link.etherType;
 

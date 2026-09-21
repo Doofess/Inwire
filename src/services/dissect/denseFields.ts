@@ -34,6 +34,16 @@ export const DENSE_FIELDS: readonly DenseKey[] = [
   { abbrev: 'eth.dst', width: 'str' },
   { abbrev: 'eth.ig', width: 'u8' },
   { abbrev: 'eth.type', width: 'u16' },
+  // The conversation index, on every frame that has a link layer at all.
+  //
+  // `u16` rather than a width taken from the protocol, because no protocol
+  // bounds it: it is a counter this build assigns, and this file's own rule
+  // carves out exactly that case - "where a field is computed rather than read
+  // off the wire and no protocol bounds it, the column widens at runtime
+  // instead". `FieldBlock.widen` moves it to `u32` on the 65,536th
+  // conversation without truncating, which is the behaviour that makes the
+  // smaller starting width safe.
+  { abbrev: 'eth.stream', width: 'u16' },
 
   // IPv4. Sparse in both fixtures, which are IPv6-heavy; dense on most networks.
   { abbrev: 'ip.src', width: 'str' },
@@ -47,6 +57,16 @@ export const DENSE_FIELDS: readonly DenseKey[] = [
   { abbrev: 'ipv6.dst', width: 'str' },
   { abbrev: 'ipv6.hlim', width: 'u8' },
   { abbrev: 'ipv6.nxt', width: 'u8' },
+  // Same argument as `eth.stream`. `ipv6.stream` is on 65% of this repo's
+  // fixture frames and `ip.stream` on 33%, so both are over
+  // `dense-fields.ts`'s threshold; `udp.stream` is on 33% of them too.
+  { abbrev: 'ip.stream', width: 'u16' },
+  { abbrev: 'ipv6.stream', width: 'u16' },
+  { abbrev: 'udp.stream', width: 'u16' },
+  // Sparse on a general browsing capture and dense on a long TLS transfer -
+  // `bulk` is one, and that is what put this here. A TLS conversation index is
+  // only as common as TLS, which on most captures of a browser is most frames.
+  { abbrev: 'tls.stream', width: 'u16' },
 
   { abbrev: 'tcp.srcport', width: 'u16' },
   { abbrev: 'tcp.dstport', width: 'u16' },

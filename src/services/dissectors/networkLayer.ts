@@ -74,6 +74,86 @@ export interface NetworkDecode {
 }
 
 /** Everything the decode needs that is neither the bytes nor the state above. */
+/**
+ * The `[Stream index]` row under an IP layer.
+ *
+ * Nothing happens on a quoted datagram: `context.quoted` means these bytes are
+ * a router's description of a packet somebody else sent, and giving it a
+ * conversation index would both invent a conversation and shift every real
+ * one's number by one.
+ */
+function ipStreamRow(
+  context: NetworkContext, family: 'ip' | 'ipv6', src: string, dst: string,
+  filterFields: Record<string, string | number>,
+): ProtocolField[] {
+  if (context.quoted || context.l3Tracker === undefined) return [];
+  const facts = family === 'ip'
+    ? context.l3Tracker.ipStream(src, dst, context.tsUs)
+    : context.l3Tracker.ipv6Stream(src, dst, context.tsUs);
+  filterFields[`${family}.stream`] = facts.index;
+  return [{ name: '[Stream index]', value: facts.index, generated: true, abbrev: `${family}.stream` }];
+}
+
+/**
+ * UDP's conversation index and its two clocks, plus the `[Timestamps]` subtree
+ * every other transport still gets.
+ *
+ * The two timestamp rows were frame-relative for every protocol, under labels
+ * the reference uses for **stream**-relative numbers. TCP has had the real
+ * thing since it gained `tcp.time_relative` and `tcp.time_delta`, computed
+ * from per-connection clocks in `tcpStreamTracker.ts`; UDP had the labels and
+ * not the numbers. It has both now, from the same conversation record that
+ * answers `udp.stream`, and everything else keeps the frame-relative pair it
+ * always had rather than gaining a wrong stream-relative one.
+ */
+function udpConversationRows(
+  context: NetworkContext, ipProtocolNum: number, src: string, dst: string,
+  transport: { layer: ProtocolLayer; srcPort?: number; dstPort?: number },
+  filterFields: Record<string, string | number>,
+  relativeTime: number, timeDelta: number,
+): ProtocolField[] {
+  const facts = !context.quoted
+    && ipProtocolNum === 17
+    && context.l3Tracker !== undefined
+    && transport.srcPort !== undefined
+    && transport.dstPort !== undefined
+    ? context.l3Tracker.udpStream(src, transport.srcPort, dst, transport.dstPort, context.tsUs)
+    : undefined;
+
+  if (facts === undefined) {
+    return [{
+      name: '[Timestamps]',
+      value: '',
+      generated: true,
+      children: [
+        { name: '[Time since first frame]', value: `${relativeTime.toFixed(9)} seconds`, generated: true },
+        { name: '[Time since previous frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
+      ],
+    }];
+  }
+
+  filterFields['udp.stream'] = facts.index;
+  return [
+    { name: '[Stream index]', value: facts.index, generated: true, abbrev: 'udp.stream' },
+    { name: '[Stream Packet Number]', value: facts.pnum, generated: true, abbrev: 'udp.stream.pnum' },
+    {
+      name: '[Timestamps]',
+      value: '',
+      generated: true,
+      children: [
+        {
+          name: '[Time since first frame]', value: `${facts.sinceFirst.toFixed(9)} seconds`,
+          generated: true, abbrev: 'udp.time_relative',
+        },
+        {
+          name: '[Time since previous frame]', value: `${facts.sincePrev.toFixed(9)} seconds`,
+          generated: true, abbrev: 'udp.time_delta',
+        },
+      ],
+    },
+  ];
+}
+
 export interface NetworkContext {
   id: number;
   tsUs: number;
@@ -394,6 +474,8 @@ export function decodeNetworkLayer(
       }
     }
 
+    ipLayer.fields.push(...ipStreamRow(context, 'ip', srcIp, dstIp, filterFields));
+
     layers.push(ipLayer);
 
     const transportOffset = l3Offset + ipHeaderLen;
@@ -560,15 +642,9 @@ export function decodeNetworkLayer(
       layers.push(transport.layer);
       // Timing lives here, not in the transport decoder, so the [Timestamps]
       // subtree the reference analyzer nests under UDP/TCP is attached from this side.
-      transport.layer.fields.push({
-        name: '[Timestamps]',
-        value: '',
-        generated: true,
-        children: [
-          { name: '[Time since first frame]', value: `${relativeTime.toFixed(9)} seconds`, generated: true },
-          { name: '[Time since previous frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
-        ],
-      });
+      transport.layer.fields.push(...udpConversationRows(
+        context, ipProtocolNum, srcIp, dstIp, transport, filterFields, relativeTime, timeDelta,
+      ));
       if (transport.extraLayers) layers.push(...transport.extraLayers);
       if (transport.embeddedNetwork) decodeQuotedDatagram(transport.embeddedNetwork);
       if (transport.protocolTokens) transportTokens = transport.protocolTokens;
@@ -646,6 +722,8 @@ export function decodeNetworkLayer(
         },
       ],
     };
+    ipv6Layer.fields.push(...ipStreamRow(context, 'ipv6', srcIp, dstIp, filterFields));
+
     layers.push(ipv6Layer);
 
     // A zero IPv6 payload length is only legal for a jumbogram (RFC 2675),
@@ -812,15 +890,9 @@ export function decodeNetworkLayer(
       layers.push(transport.layer);
       // Timing lives here, not in the transport decoder, so the [Timestamps]
       // subtree the reference analyzer nests under UDP/TCP is attached from this side.
-      transport.layer.fields.push({
-        name: '[Timestamps]',
-        value: '',
-        generated: true,
-        children: [
-          { name: '[Time since first frame]', value: `${relativeTime.toFixed(9)} seconds`, generated: true },
-          { name: '[Time since previous frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
-        ],
-      });
+      transport.layer.fields.push(...udpConversationRows(
+        context, effectiveNextHeader, srcIp, dstIp, transport, filterFields, relativeTime, timeDelta,
+      ));
       if (transport.extraLayers) layers.push(...transport.extraLayers);
       if (transport.embeddedNetwork) decodeQuotedDatagram(transport.embeddedNetwork);
       if (transport.protocolTokens) transportTokens = transport.protocolTokens;
