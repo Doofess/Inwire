@@ -12,13 +12,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  web:
-    name: Web app (type-check, assertions, build)
-    runs-on: ubuntu-latest
+  app:
+    # NOT "Web app". The job name is what shows in the checks tab, which is one
+    # of the few places a visitor reads, and this stopped being a web app when
+    # the browser build was deleted - the README says so in as many words.
+    name: App (type-check, assertions, build, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the platform this app actually ships on - named pipes,
+        # Npcap, an Inno installer - and it was the one platform CI never ran.
+        # The suite is safe here: the scripts that need a real capture device,
+        # the installed service or a packaged build are in `check.ts`'s
+        # NOT_TESTS, and the rest self-skip when `dist/` or playwright is
+        # missing.
+        os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: npm
@@ -30,6 +43,10 @@ jobs:
       # theme contract (token completeness, contrast floors, CSS-vs-palette
       # drift), the protocol dissectors, the filter grammar and the agent
       # protocol version triple. This is the gate that matters.
+      #
+      # Deliberately BEFORE the build: every `dist/`-dependent script then
+      # reports SKIP rather than failing, which is the honest answer when there
+      # is nothing to launch.
       - name: Type-check and run assertion scripts
         run: npm run check
 
@@ -48,9 +65,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
