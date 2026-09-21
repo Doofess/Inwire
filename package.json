@@ -13,6 +13,19 @@
     "url": "https://github.com/Doofess/Inwire/issues"
   },
   "homepage": "https://github.com/Doofess/Inwire#readme",
+  "keywords": [
+    "packet-analyzer",
+    "protocol-analyzer",
+    "network",
+    "pcap",
+    "pcapng",
+    "npcap",
+    "electron",
+    "wireshark"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {

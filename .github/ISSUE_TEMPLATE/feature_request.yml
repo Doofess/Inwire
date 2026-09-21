@@ -1,0 +1,31 @@
+name: Feature request
+description: Something Inwire should do and does not.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The task rather than the feature, if you can — it is often possible to
+        answer the question a different way with what is already there.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you think should happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: reference
+    attributes:
+      label: How another analyzer does it
+      description: >
+        Optional, but useful. Where a field or a filter already has a name in
+        Wireshark, Inwire uses that name deliberately, so that a filter you
+        already know works unchanged.
+    validations:
+      required: false
