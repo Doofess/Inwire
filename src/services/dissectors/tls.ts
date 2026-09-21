@@ -1357,6 +1357,14 @@ function extensionFields(ext: Extension): ProtocolField[] {
       });
       break;
     }
+    case 57:
+      // QUIC transport parameters (RFC 9000 §18), carried in the TLS
+      // handshake because QUIC has no separate negotiation of its own. This
+      // is where a client states its flow-control limits, its idle timeout
+      // and its connection id - so on an h3 connection it is the only place
+      // the transport's settings appear in the clear at all.
+      children.push(...quicParameterRows(b));
+      break;
     case 0xfe0d:
       children.push({ name: 'Note', value: b.length <= 1 ? 'GREASE (outer)' : `${b.length} bytes - real or GREASE; see the SNI heuristic`, generated: true });
       break;
@@ -1769,4 +1777,134 @@ function recordTitle(r: TlsRecord, appProto: string | undefined): string {
     case CT_CHANGE_CIPHER_SPEC: return 'Change Cipher Spec Protocol: Change Cipher Spec';
     default: return r.description;
   }
+}
+
+/**
+ * A QUIC variable-length integer (RFC 9000 §16).
+ *
+ * The top two bits of the first byte say how many bytes the whole thing
+ * occupies - 1, 2, 4 or 8 - and the remaining 62 bits at most are the value.
+ * Returned as a `number` rather than a `bigint` because every parameter this
+ * reads is a byte count, a stream count or a millisecond timeout, none of
+ * which approach 2^53; the one place that would matter is a GREASE parameter
+ * type, which is drawn as hex instead for exactly that reason.
+ */
+function quicVarint(b: Uint8Array, at: number): { value: number; size: number } | null {
+  if (at >= b.length) return null;
+  const size = 1 << (b[at] >> 6);
+  if (at + size > b.length) return null;
+  let value = b[at] & 0x3f;
+  for (let i = 1; i < size; i++) value = value * 256 + b[at + i];
+  return { value, size };
+}
+
+/**
+ * RFC 9000 §18.2, RFC 9221, RFC 9368, and Google's private block.
+ *
+ * **Each abbrev is written out rather than composed from the name**, and
+ * that is not style. `scripts/dissect/registry.ts` finds field names by
+ * scanning for quoted `layer.field` literals, so a
+ * `` abbrev: `tls.quic.parameter.${named}` `` would be invisible to it AND
+ * to `wireshark-abbrevs.ts` - a name this build invented would ship with
+ * every check green. Spelled out, all twenty-two are held to
+ * `tshark -G fields` like everything else.
+ *
+ * `shape` says what the value is: a varint gets a typed row with a number,
+ * bytes get one with hex, and `none` means the reference has no field for
+ * the payload, so only `type`, `length` and `value` are drawn.
+ */
+const QUIC_PARAMETERS: Record<number, { name: string; abbrev?: string; shape: 'varint' | 'bytes' | 'none' }> = {
+  0x00: { name: 'original_destination_connection_id', abbrev: 'tls.quic.parameter.original_destination_connection_id', shape: 'bytes' },
+  0x01: { name: 'max_idle_timeout', abbrev: 'tls.quic.parameter.max_idle_timeout', shape: 'varint' },
+  0x02: { name: 'stateless_reset_token', abbrev: 'tls.quic.parameter.stateless_reset_token', shape: 'bytes' },
+  0x03: { name: 'max_udp_payload_size', abbrev: 'tls.quic.parameter.max_udp_payload_size', shape: 'varint' },
+  0x04: { name: 'initial_max_data', abbrev: 'tls.quic.parameter.initial_max_data', shape: 'varint' },
+  0x05: { name: 'initial_max_stream_data_bidi_local', abbrev: 'tls.quic.parameter.initial_max_stream_data_bidi_local', shape: 'varint' },
+  0x06: { name: 'initial_max_stream_data_bidi_remote', abbrev: 'tls.quic.parameter.initial_max_stream_data_bidi_remote', shape: 'varint' },
+  0x07: { name: 'initial_max_stream_data_uni', abbrev: 'tls.quic.parameter.initial_max_stream_data_uni', shape: 'varint' },
+  0x08: { name: 'initial_max_streams_bidi', abbrev: 'tls.quic.parameter.initial_max_streams_bidi', shape: 'varint' },
+  0x09: { name: 'initial_max_streams_uni', abbrev: 'tls.quic.parameter.initial_max_streams_uni', shape: 'varint' },
+  0x0a: { name: 'ack_delay_exponent', abbrev: 'tls.quic.parameter.ack_delay_exponent', shape: 'varint' },
+  0x0b: { name: 'max_ack_delay', abbrev: 'tls.quic.parameter.max_ack_delay', shape: 'varint' },
+  0x0c: { name: 'disable_active_migration', shape: 'none' },
+  0x0d: { name: 'preferred_address', shape: 'none' },
+  0x0e: { name: 'active_connection_id_limit', abbrev: 'tls.quic.parameter.active_connection_id_limit', shape: 'varint' },
+  0x0f: { name: 'initial_source_connection_id', abbrev: 'tls.quic.parameter.initial_source_connection_id', shape: 'bytes' },
+  0x10: { name: 'retry_source_connection_id', abbrev: 'tls.quic.parameter.retry_source_connection_id', shape: 'bytes' },
+  0x11: { name: 'version_information', shape: 'none' },
+  0x20: { name: 'max_datagram_frame_size', abbrev: 'tls.quic.parameter.max_datagram_frame_size', shape: 'varint' },
+  0x3127: { name: 'google.initial_rtt', abbrev: 'tls.quic.parameter.google.initial_rtt', shape: 'varint' },
+  0x3128: { name: 'google.connection_options', abbrev: 'tls.quic.parameter.google.connection_options', shape: 'bytes' },
+  0x3129: { name: 'google.user_agent', abbrev: 'tls.quic.parameter.google.user_agent', shape: 'bytes' },
+};
+
+function quicParameterRows(b: Uint8Array): ProtocolField[] {
+  const rows: ProtocolField[] = [];
+  let at = 0;
+  while (at < b.length) {
+    const type = quicVarint(b, at);
+    if (type === null) break;
+    const length = quicVarint(b, at + type.size);
+    if (length === null) break;
+    const valueAt = at + type.size + length.size;
+    if (valueAt + length.value > b.length) break;
+    const value = b.subarray(valueAt, valueAt + length.value);
+
+    // **GREASE is drawn as hex, not as a number.** Its types are chosen from
+    // `31 * N + 27` across the whole 62-bit space, so the value routinely
+    // exceeds what a JS number holds exactly - and a parameter whose only
+    // purpose is to be ignored is not worth losing precision over.
+    const isGreaseType = type.size === 8 || (type.value - 27) % 31 === 0;
+    const spec = QUIC_PARAMETERS[type.value];
+    const named = spec?.name;
+    const typeLabel = named ?? (isGreaseType ? 'GREASE' : 'Unknown');
+
+    const children: ProtocolField[] = [
+      {
+        name: 'Type',
+        value: isGreaseType && named === undefined
+          ? `GREASE (0x${hexOf(b.subarray(at, at + type.size))})`
+          : `${typeLabel} (0x${type.value.toString(16).padStart(2, '0')})`,
+        abbrev: 'tls.quic.parameter.type',
+      },
+      { name: 'Length', value: length.value, abbrev: 'tls.quic.parameter.length' },
+      { ...hexField('Value', value), abbrev: 'tls.quic.parameter.value' },
+    ];
+
+    if (spec?.shape === 'varint' && spec.abbrev !== undefined) {
+      const inner = quicVarint(value, 0);
+      if (inner !== null) children.push({ name: spec.name, value: inner.value, abbrev: spec.abbrev });
+    } else if (spec?.shape === 'bytes' && spec.abbrev !== undefined) {
+      children.push({ ...hexField(spec.name, value), abbrev: spec.abbrev });
+    } else if (type.value === 0x11 && value.length >= 4) {
+      // RFC 9368 version information: the version the sender chose, then
+      // every other one it would have accepted. Worth reading because a
+      // connection that negotiated down is otherwise indistinguishable from
+      // one that only ever offered the version it used.
+      children.push({
+        name: 'Chosen Version', value: `0x${hexOf(value.subarray(0, 4))}`,
+        abbrev: 'tls.quic.parameter.vi.chosen_version',
+      });
+      for (let q = 4; q + 4 <= value.length; q += 4) {
+        children.push({
+          name: 'Other Version', value: `0x${hexOf(value.subarray(q, q + 4))}`,
+          abbrev: 'tls.quic.parameter.vi.other_version',
+        });
+      }
+    }
+
+    rows.push({
+      name: `Parameter: ${typeLabel} (len=${length.value})`,
+      value: '',
+      children,
+    });
+    at = valueAt + length.value;
+  }
+  return rows;
+}
+
+function hexOf(bytes: Uint8Array): string {
+  let out = '';
+  for (const byte of bytes) out += byte.toString(16).padStart(2, '0');
+  return out;
 }

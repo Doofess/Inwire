@@ -833,6 +833,44 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(str('tls.handshake.extensions_alps_alpn_list', 'Supported ALPS List', 'tls')),
   treeOnly(uint('tls.handshake.extensions_alps_alpn_str_len', 'ALPS string length', 'tls')),
   treeOnly(str('tls.handshake.extensions_alps_alpn_str', 'ALPS Next Protocol', 'tls')),
+
+  // --- QUIC's transport parameters, which ride in the TLS handshake --------
+  //
+  // QUIC has no negotiation of its own, so extension 57 of the ClientHello
+  // is where a client states its flow-control limits, its idle timeout and
+  // its connection id. On an h3 connection it is the only place the
+  // transport's settings appear in the clear at all - everything after the
+  // handshake is encrypted.
+  //
+  // `tls.quic.parameter.type` is `FT_UINT64` in the reference and its GREASE
+  // values run to the full 62 bits, which is why the row draws those as hex
+  // rather than as a number a JS double would round.
+  treeOnly(str('tls.quic.parameter.type', 'Type', 'tls')),
+  treeOnly(uint('tls.quic.parameter.length', 'Length', 'tls')),
+  treeOnly(str('tls.quic.parameter.value', 'Value', 'tls')),
+  treeOnly(uint('tls.quic.parameter.max_idle_timeout', 'max_idle_timeout', 'tls')),
+  treeOnly(uint('tls.quic.parameter.max_udp_payload_size', 'max_udp_payload_size', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_data', 'initial_max_data', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_stream_data_bidi_local', 'initial_max_stream_data_bidi_local', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_stream_data_bidi_remote', 'initial_max_stream_data_bidi_remote', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_stream_data_uni', 'initial_max_stream_data_uni', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_streams_bidi', 'initial_max_streams_bidi', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_streams_uni', 'initial_max_streams_uni', 'tls')),
+  treeOnly(uint('tls.quic.parameter.ack_delay_exponent', 'ack_delay_exponent', 'tls')),
+  treeOnly(uint('tls.quic.parameter.max_ack_delay', 'max_ack_delay', 'tls')),
+  treeOnly(uint('tls.quic.parameter.active_connection_id_limit', 'active_connection_id_limit', 'tls')),
+  treeOnly(uint('tls.quic.parameter.max_datagram_frame_size', 'max_datagram_frame_size', 'tls')),
+  treeOnly(str('tls.quic.parameter.original_destination_connection_id', 'original_destination_connection_id', 'tls')),
+  treeOnly(str('tls.quic.parameter.stateless_reset_token', 'stateless_reset_token', 'tls')),
+  treeOnly(str('tls.quic.parameter.initial_source_connection_id', 'initial_source_connection_id', 'tls')),
+  treeOnly(str('tls.quic.parameter.retry_source_connection_id', 'retry_source_connection_id', 'tls')),
+  treeOnly(uint('tls.quic.parameter.google.initial_rtt', 'Google initial_rtt', 'tls')),
+  treeOnly(str('tls.quic.parameter.google.connection_options', 'Google connection_options', 'tls')),
+  treeOnly(str('tls.quic.parameter.google.user_agent', 'Google user_agent', 'tls')),
+  // RFC 9368. A connection that negotiated down is otherwise
+  // indistinguishable from one that only ever offered what it used.
+  treeOnly(str('tls.quic.parameter.vi.chosen_version', 'Chosen Version', 'tls')),
+  treeOnly(str('tls.quic.parameter.vi.other_version', 'Other Version', 'tls')),
   treeOnly(str('tls.handshake.session_id', 'Session ID', 'tls')),
   treeOnly(uint('tls.handshake.session_id_length', 'Session ID Length', 'tls')),
   treeOnly(uint('tls.handshake.cipher_suites_length', 'Cipher Suites Length', 'tls')),
