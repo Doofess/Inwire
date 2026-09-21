@@ -55,7 +55,7 @@
       "tree": {
         "layers": {
           "arp": 5,
-          "dhcp": 11,
+          "dhcp": 42,
           "dns": 47,
           "eth": 7,
           "icmp": 11,
@@ -78,8 +78,8 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 397,
-          "valueMismatches": 175
+          "absentDistinct": 366,
+          "valueMismatches": 187
         },
         "unimplemented": {
           "prp": "Parallel Redundancy Protocol - a 6-byte trailer this build does not read at all, on 20 frames. The one protocol the reference names here that nothing in this build can name."

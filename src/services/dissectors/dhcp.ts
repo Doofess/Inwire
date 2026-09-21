@@ -45,6 +45,31 @@ const OPTION_NAMES: Record<number, string> = {
 
 const HARDWARE_TYPE_NAMES: Record<number, string> = { 1: 'Ethernet', 6: 'IEEE 802', 15: 'Frame Relay', 16: 'ATM', 20: 'Serial Line' };
 
+/**
+ * The options whose payload is a list of IPv4 addresses, and the name the
+ * reference gives each address inside it.
+ *
+ * Deliberately shorter than the case list that produces those addresses: an
+ * entry here is a promise that `scripts/dissect/wireshark-abbrevs.ts` can
+ * match the name against `tshark -G fields`, so options the fixtures do not
+ * carry are left to render as the option row's own comma-joined value rather
+ * than named from memory. Add one when a capture proves the name.
+ */
+const ADDRESS_OPTION_ABBREVS: Record<number, string> = {
+  1: 'dhcp.option.subnet_mask',
+  3: 'dhcp.option.router',
+  6: 'dhcp.option.domain_name_server',
+  50: 'dhcp.option.requested_ip_address',
+  54: 'dhcp.option.dhcp_server_id',
+};
+
+/** The same rule, for the options whose payload is a string. */
+const TEXT_OPTION_ABBREVS: Record<number, string> = {
+  12: 'dhcp.option.hostname',
+  15: 'dhcp.option.domain_name',
+  60: 'dhcp.option.vendor_class_id',
+};
+
 export interface DhcpResult {
   protocolLabel: 'DHCP' | 'DHCPv6';
   info: string;
@@ -63,6 +88,32 @@ const ip4 = (b: Uint8Array, p: number) => `${b[p]}.${b[p + 1]}.${b[p + 2]}.${b[p
 const mac = (b: Uint8Array, p: number, n: number) => Array.from(b.subarray(p, p + n)).map((x) => x.toString(16).padStart(2, '0')).join(':');
 const u32 = (b: Uint8Array, p: number) => ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0;
 const text = (b: Uint8Array, p: number, n: number) => utf8Decoder.decode(b.subarray(p, p + n)).replace(/\0+$/, '');
+/** Colon-separated, which is how the reference shows every opaque byte run here. */
+const hexRun = (b: Uint8Array, p: number, n: number) => mac(b, p, n);
+/** True when every byte in the range is zero - "not given", not "empty string". */
+const allZero = (b: Uint8Array, p: number, n: number) => {
+  for (let q = p; q < p + n; q++) if (b[q] !== 0) return false;
+  return true;
+};
+
+/**
+ * RFC 4702's flags byte on option 81, which is four reserved bits and four
+ * that say who is allowed to write the DNS records for this lease. Worth
+ * decomposing rather than printing as `0x00`: `S` and `O` together are the
+ * whole negotiation over whether the client or the server owns the A record,
+ * and `E` decides whether the name that follows is a DNS wire-format name or
+ * ASCII - which is why the name is read the way it is two rows below.
+ */
+function fqdnFlagRows(flagsByte: number, at: number): ProtocolField[] {
+  const range: [number, number] = [at, at];
+  return [
+    { name: 'Reserved flags', value: `0x${(flagsByte >> 4).toString(16)}`, abbrev: 'dhcp.fqdn.mbz', rawBytesRange: range },
+    { name: 'Server DDNS', value: flagsByte & 0x08 ? 'Only if client requests' : 'Some server updates', abbrev: 'dhcp.fqdn.n', rawBytesRange: range },
+    { name: 'Encoding', value: flagsByte & 0x04 ? 'Binary encoding' : 'ASCII encoding', abbrev: 'dhcp.fqdn.e', rawBytesRange: range },
+    { name: 'Server overrides', value: flagsByte & 0x02 ? 'Override' : 'No override', abbrev: 'dhcp.fqdn.o', rawBytesRange: range },
+    { name: 'Server', value: flagsByte & 0x01 ? 'Server' : 'Client', abbrev: 'dhcp.fqdn.s', rawBytesRange: range },
+  ];
+}
 
 /** BOOTP/DHCP on UDP 67/68. */
 export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResult | null {
@@ -92,7 +143,22 @@ export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResu
   const fields = result.fields;
   while (p < end) {
     const code = b[p];
-    if (code === 255) { optionFields.push({ name: 'Option: (255) End', value: '', rawBytesRange: [p, p] }); break; }
+    if (code === 255) {
+      optionFields.push({
+        name: 'Option: (255) End', value: '', abbrev: 'dhcp.option.type', rawBytesRange: [p, p],
+        children: [{ name: 'Option End', value: 255, abbrev: 'dhcp.option.end', rawBytesRange: [p, p] }],
+      });
+      // Everything after End is padding to the 300-byte BOOTP minimum. Drawn
+      // rather than dropped because "the message ends here and the rest is
+      // zeros" and "the capture was cut short" look identical in a hex pane.
+      if (p + 1 < end && allZero(b, p + 1, end - p - 1)) {
+        optionFields.push({
+          name: 'Padding', value: hexRun(b, p + 1, end - p - 1),
+          abbrev: 'dhcp.option.padding', rawBytesRange: [p + 1, end - 1],
+        });
+      }
+      break;
+    }
     if (code === 0) { p++; continue; }
     if (p + 1 >= end) break;
     const len = b[p + 1];
@@ -100,11 +166,31 @@ export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResu
     if (v + len > end) break;
     const name = OPTION_NAMES[code] ?? 'Unknown';
     let value = '';
+    /**
+     * The option's payload decoded into named rows - what the reference hangs
+     * under the option beside `Length` and the raw `Value`. Built per option
+     * and empty for the ones nothing here decodes, which is why the push below
+     * spreads it rather than testing it.
+     */
+    const typed: ProtocolField[] = [];
     switch (code) {
-      case 53: messageType = b[v]; value = `${MESSAGE_TYPE_NAMES[b[v]] ?? 'Unknown'} (${b[v]})`; break;
+      case 53:
+        messageType = b[v];
+        value = `${MESSAGE_TYPE_NAMES[b[v]] ?? 'Unknown'} (${b[v]})`;
+        typed.push({ name: 'DHCP', value, abbrev: 'dhcp.option.dhcp', rawBytesRange: [v, v] });
+        break;
       case 1: case 3: case 6: case 28: case 42: case 44: case 50: case 54: case 118: {
         const addrs: string[] = [];
-        for (let q = v; q + 4 <= v + len; q += 4) addrs.push(ip4(b, q));
+        // One row per address, not one row for the list: option 6 routinely
+        // carries two resolvers and "which one did this lease hand out" is a
+        // per-address question.
+        for (let q = v; q + 4 <= v + len; q += 4) {
+          addrs.push(ip4(b, q));
+          const perAddress = ADDRESS_OPTION_ABBREVS[code];
+          if (perAddress !== undefined) {
+            typed.push({ name, value: ip4(b, q), abbrev: perAddress, rawBytesRange: [q, q + 3] });
+          }
+        }
         value = addrs.join(', ');
         if (code === 50) fields['dhcp.option.requested_ip_address'] = addrs[0] ?? '';
         if (code === 54) fields['dhcp.option.dhcp_server_id'] = addrs[0] ?? '';
@@ -112,17 +198,33 @@ export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResu
       }
       case 12: case 15: case 60: case 66: case 67: case 56: {
         value = text(b, v, len);
+        const textAbbrev = TEXT_OPTION_ABBREVS[code];
+        if (textAbbrev !== undefined) typed.push({ name, value, abbrev: textAbbrev, rawBytesRange: [v, v + len - 1] });
         if (code === 12) { result.hostname = value; fields['dhcp.option.hostname'] = value; }
         if (code === 60) { result.vendorClass = value; fields['dhcp.option.vendor_class_id'] = value; }
         if (code === 15) fields['dhcp.option.domain_name'] = value;
         break;
       }
-      case 51: case 58: case 59: case 2: value = `(${u32(b, v)}s) ${describeSeconds(u32(b, v))}`; break;
+      case 51: case 58: case 59: case 2:
+        value = `(${u32(b, v)}s) ${describeSeconds(u32(b, v))}`;
+        if (code === 51) {
+          typed.push({
+            name: 'IP Address Lease Time', value: `${describeSeconds(u32(b, v))} (${u32(b, v)})`,
+            abbrev: 'dhcp.option.ip_address_lease_time', rawBytesRange: [v, v + 3],
+          });
+        }
+        break;
       case 55: {
         const list = Array.from(b.subarray(v, v + len));
         result.parameterRequestList = list;
         value = list.map((c) => `${OPTION_NAMES[c] ?? 'Unknown'} (${c})`).join(', ');
         fields['dhcp.option.request_list_item'] = list.join(',');
+        for (let q = 0; q < list.length; q++) {
+          typed.push({
+            name: 'Parameter Request List Item', value: `(${list[q]}) ${OPTION_NAMES[list[q]] ?? 'Unknown'}`,
+            abbrev: 'dhcp.option.request_list_item', rawBytesRange: [v + q, v + q],
+          });
+        }
         break;
       }
       case 57: value = String((b[v] << 8) | b[v + 1]); break;
@@ -130,6 +232,10 @@ export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResu
         const kind = b[v];
         value = kind === 1 && len === 7 ? `Ethernet: ${mac(b, v + 1, 6)}` : `type ${kind}: ${mac(b, v + 1, len - 1)}`;
         fields['dhcp.client_id'] = value;
+        if (kind === 1 && len === 7) {
+          typed.push({ name: 'Hardware type', value: `${HARDWARE_TYPE_NAMES[kind] ?? 'Unknown'} (0x${kind.toString(16).padStart(2, '0')})`, abbrev: 'dhcp.hw.type', rawBytesRange: [v, v] });
+          typed.push({ name: 'Client MAC address', value: mac(b, v + 1, 6), abbrev: 'dhcp.hw.mac_addr', rawBytesRange: [v + 1, v + 6] });
+        }
         break;
       }
       case 81: {
@@ -137,15 +243,27 @@ export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResu
         const fqdn = text(b, v + 3, len - 3);
         value = `flags 0x${flagsByte.toString(16).padStart(2, '0')}, ${fqdn}`;
         fields['dhcp.fqdn.name'] = fqdn;
+        typed.push({
+          name: 'Flags', value: `0x${flagsByte.toString(16).padStart(2, '0')}`,
+          abbrev: 'dhcp.fqdn.flags', rawBytesRange: [v, v], isExpanded: true,
+          children: fqdnFlagRows(flagsByte, v),
+        });
+        typed.push({ name: 'A-RR result', value: b[v + 1], abbrev: 'dhcp.fqdn.rcode1', rawBytesRange: [v + 1, v + 1] });
+        typed.push({ name: 'PTR-RR result', value: b[v + 2], abbrev: 'dhcp.fqdn.rcode2', rawBytesRange: [v + 2, v + 2] });
+        typed.push({ name: 'Client name', value: fqdn, abbrev: 'dhcp.fqdn.name', rawBytesRange: [v + 3, v + len - 1] });
         break;
       }
       case 93: value = String((b[v] << 8) | b[v + 1]); break;
       case 119: value = `${len} bytes (domain search list)`; break;
-      default: value = Array.from(b.subarray(v, v + len)).map((x) => x.toString(16).padStart(2, '0')).join(':');
+      default: value = hexRun(b, v, len);
     }
     optionFields.push({
-      name: `Option: (${code}) ${name}`, value, rawBytesRange: [p, v + len - 1],
-      children: [{ name: 'Length', value: len, rawBytesRange: [p + 1, p + 1] }],
+      name: `Option: (${code}) ${name}`, value, abbrev: 'dhcp.option.type', rawBytesRange: [p, v + len - 1],
+      children: [
+        { name: 'Length', value: len, abbrev: 'dhcp.option.length', rawBytesRange: [p + 1, p + 1] },
+        { name: 'Value', value: hexRun(b, v, len), abbrev: 'dhcp.option.value', rawBytesRange: [v, v + len - 1] },
+        ...typed,
+      ],
     });
     p = v + len;
   }
@@ -165,18 +283,46 @@ export function dissectDhcp(b: Uint8Array, start: number, end: number): DhcpResu
     rawBytesRange: [start, end - 1],
     fields: [
       { name: 'Message type', value: op === 1 ? 'Boot Request (1)' : op === 2 ? 'Boot Reply (2)' : String(op), rawBytesRange: [start, start], abbrev: 'dhcp.type' },
-      { name: 'Hardware type', value: `${HARDWARE_TYPE_NAMES[htype] ?? 'Unknown'} (0x${htype.toString(16).padStart(2, '0')})`, rawBytesRange: [start + 1, start + 1] },
-      { name: 'Hardware address length', value: hlen, rawBytesRange: [start + 2, start + 2] },
-      { name: 'Hops', value: hops, rawBytesRange: [start + 3, start + 3] },
+      { name: 'Hardware type', value: `${HARDWARE_TYPE_NAMES[htype] ?? 'Unknown'} (0x${htype.toString(16).padStart(2, '0')})`, rawBytesRange: [start + 1, start + 1], abbrev: 'dhcp.hw.type' },
+      { name: 'Hardware address length', value: hlen, rawBytesRange: [start + 2, start + 2], abbrev: 'dhcp.hw.len' },
+      { name: 'Hops', value: hops, rawBytesRange: [start + 3, start + 3], abbrev: 'dhcp.hops' },
       { name: 'Transaction ID', value: `0x${xid.toString(16).padStart(8, '0')}`, rawBytesRange: [start + 4, start + 7], abbrev: 'dhcp.id' },
-      { name: 'Seconds elapsed', value: secs, rawBytesRange: [start + 8, start + 9] },
-      { name: 'Bootp flags', value: `0x${flags.toString(16).padStart(4, '0')}, ${flags & 0x8000 ? 'Broadcast' : 'Unicast'}`, rawBytesRange: [start + 10, start + 11] },
-      { name: 'Client IP address', value: ciaddr, rawBytesRange: [start + 12, start + 15] },
+      { name: 'Seconds elapsed', value: secs, rawBytesRange: [start + 8, start + 9], abbrev: 'dhcp.secs' },
+      {
+        name: 'Bootp flags', value: `0x${flags.toString(16).padStart(4, '0')}, ${flags & 0x8000 ? 'Broadcast' : 'Unicast'}`,
+        rawBytesRange: [start + 10, start + 11], abbrev: 'dhcp.flags', isExpanded: true,
+        children: [
+          // One bit of the sixteen is defined, and it is the one that decides
+          // whether a client with no address yet can be answered at all.
+          { name: 'Broadcast flag', value: flags & 0x8000 ? 'Broadcast' : 'Unicast', abbrev: 'dhcp.flags.bc', rawBytesRange: [start + 10, start + 11] },
+          { name: 'Reserved flags', value: `0x${(flags & 0x7fff).toString(16).padStart(4, '0')}`, abbrev: 'dhcp.flags.reserved', rawBytesRange: [start + 10, start + 11] },
+        ],
+      },
+      { name: 'Client IP address', value: ciaddr, rawBytesRange: [start + 12, start + 15], abbrev: 'dhcp.ip.client' },
       { name: 'Your (client) IP address', value: yiaddr, rawBytesRange: [start + 16, start + 19], abbrev: 'dhcp.ip.your' },
-      { name: 'Next server IP address', value: siaddr, rawBytesRange: [start + 20, start + 23] },
-      { name: 'Relay agent IP address', value: giaddr, rawBytesRange: [start + 24, start + 27] },
+      { name: 'Next server IP address', value: siaddr, rawBytesRange: [start + 20, start + 23], abbrev: 'dhcp.ip.server' },
+      { name: 'Relay agent IP address', value: giaddr, rawBytesRange: [start + 24, start + 27], abbrev: 'dhcp.ip.relay' },
       { name: 'Client MAC address', value: chaddr, rawBytesRange: [start + 28, start + 28 + Math.max(1, Math.min(16, hlen)) - 1], abbrev: 'dhcp.hw.mac_addr' },
-      { name: 'Magic cookie', value: 'DHCP', rawBytesRange: [start + 236, start + 239] },
+      // BOOTP's address field is a fixed 16 bytes whatever `hlen` says, so on
+      // Ethernet ten of them are slack. Named because a non-zero byte in here
+      // is either a different hardware type or a sender that did not clear
+      // its buffer - and the second one has leaked memory before.
+      ...(hlen > 0 && hlen < 16 ? [{
+        name: 'Client hardware address padding', value: hexRun(b, start + 28 + hlen, 16 - hlen),
+        rawBytesRange: [start + 28 + hlen, start + 43] as [number, number], abbrev: 'dhcp.hw.addr_padding',
+      }] : []),
+      // `sname` and `file` are BOOTP's network-boot fields, almost always
+      // empty on a DHCP lease - and when they are not, `sname` is the only
+      // place the server names itself in plain text.
+      {
+        name: allZero(b, start + 44, 64) ? 'Server host name not given' : 'Server host name',
+        value: text(b, start + 44, 64), rawBytesRange: [start + 44, start + 107], abbrev: 'dhcp.server',
+      },
+      {
+        name: allZero(b, start + 108, 128) ? 'Boot file name not given' : 'Boot file name',
+        value: text(b, start + 108, 128), rawBytesRange: [start + 108, start + 235], abbrev: 'dhcp.file',
+      },
+      { name: 'Magic cookie', value: 'DHCP', rawBytesRange: [start + 236, start + 239], abbrev: 'dhcp.cookie' },
       ...optionFields,
     ],
   };

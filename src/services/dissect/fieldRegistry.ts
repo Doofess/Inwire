@@ -1237,6 +1237,53 @@ export const FIELDS: readonly FieldDef[] = [
   str('dhcp.fqdn.name', 'Client FQDN', 'dhcp'),
   { abbrev: 'dhcp.hw.mac_addr', label: 'Client MAC address', type: 'mac', layer: 'dhcp' },
   { abbrev: 'dhcp.ip.your', label: 'Your (client) IP address', type: 'ipv4', layer: 'dhcp' },
+
+  // --- the rest of the BOOTP header, and the shape of an option -------------
+  //
+  // Eleven of these were drawn with the right value and byte range and no
+  // name; the rest are rows this dissector had the bytes for and never built.
+  // `treeOnly` under the rule in the block above: DHCP is two frames in a
+  // browsing capture and every one of these is either a constant given the
+  // layer, a decomposition of bytes the bag already holds, or the TLV framing
+  // itself - none of it is a column, a colour rule or a replay seed.
+  //
+  // `dhcp.option.type` is the option row, and it repeats once per option;
+  // `dhcp.option.value` is the raw payload the reference hides by default and
+  // draws anyway, because an option this build does not decode still has to
+  // show its bytes somewhere.
+  treeOnly(uint('dhcp.hw.type', 'Hardware type', 'dhcp')),
+  treeOnly(uint('dhcp.hw.len', 'Hardware address length', 'dhcp')),
+  treeOnly(uint('dhcp.hops', 'Hops', 'dhcp')),
+  treeOnly(uint('dhcp.secs', 'Seconds elapsed', 'dhcp')),
+  treeOnly(uint('dhcp.flags', 'Bootp flags', 'dhcp')),
+  treeOnly(bool('dhcp.flags.bc', 'Broadcast flag', 'dhcp')),
+  treeOnly(uint('dhcp.flags.reserved', 'Reserved flags', 'dhcp')),
+  treeOnly({ abbrev: 'dhcp.ip.client', label: 'Client IP address', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly({ abbrev: 'dhcp.ip.server', label: 'Next server IP address', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly({ abbrev: 'dhcp.ip.relay', label: 'Relay agent IP address', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly(str('dhcp.hw.addr_padding', 'Client hardware address padding', 'dhcp')),
+  treeOnly(str('dhcp.server', 'Server host name', 'dhcp')),
+  treeOnly(str('dhcp.file', 'Boot file name', 'dhcp')),
+  treeOnly(str('dhcp.cookie', 'Magic cookie', 'dhcp')),
+  treeOnly(uint('dhcp.option.type', 'Option', 'dhcp')),
+  treeOnly(uint('dhcp.option.length', 'Length', 'dhcp')),
+  treeOnly(str('dhcp.option.value', 'Value', 'dhcp')),
+  treeOnly(uint('dhcp.option.end', 'Option End', 'dhcp')),
+  treeOnly(str('dhcp.option.padding', 'Padding', 'dhcp')),
+  treeOnly({ abbrev: 'dhcp.option.subnet_mask', label: 'Subnet Mask', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly({ abbrev: 'dhcp.option.router', label: 'Router', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly({ abbrev: 'dhcp.option.domain_name_server', label: 'Domain Name Server', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly(uint('dhcp.option.ip_address_lease_time', 'IP Address Lease Time', 'dhcp')),
+  // RFC 4702's flags byte: who may write this lease's DNS records, and in
+  // which encoding the name that follows is written.
+  treeOnly(uint('dhcp.fqdn.flags', 'Flags', 'dhcp')),
+  treeOnly(uint('dhcp.fqdn.mbz', 'Reserved flags', 'dhcp')),
+  treeOnly(bool('dhcp.fqdn.n', 'Server DDNS', 'dhcp')),
+  treeOnly(bool('dhcp.fqdn.e', 'Encoding', 'dhcp')),
+  treeOnly(bool('dhcp.fqdn.o', 'Server overrides', 'dhcp')),
+  treeOnly(bool('dhcp.fqdn.s', 'Server', 'dhcp')),
+  treeOnly(uint('dhcp.fqdn.rcode1', 'A-RR result', 'dhcp')),
+  treeOnly(uint('dhcp.fqdn.rcode2', 'PTR-RR result', 'dhcp')),
   uint('dhcpv6.msgtype', 'Message type', 'dhcpv6'),
   uint('dhcpv6.xid', 'Transaction ID', 'dhcpv6'),
   str('dhcpv6.duid.bytes', 'DUID', 'dhcpv6'),
