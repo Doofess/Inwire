@@ -80,7 +80,7 @@ const EXTENSION_NAMES: Record<number, string> = {
   54: 'connection_id', 55: 'external_id_hash', 56: 'external_session_id', 57: 'quic_transport_parameters',
   58: 'ticket_request', 59: 'dnssec_chain', 60: 'sequence_number_encryption_algorithms',
   61: 'rrc', 62: 'tls_flags', 0xfd00: 'ech_outer_extensions', 0xfe0d: 'encrypted_client_hello',
-  0xff01: 'renegotiation_info', 0x4469: 'application_settings', 0x44cd: 'application_settings',
+  0xff01: 'renegotiation_info', 0x4469: 'application_settings_old', 0x44cd: 'application_settings',
   0xffce: 'encrypted_server_name',
 };
 

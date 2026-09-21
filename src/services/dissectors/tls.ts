@@ -1234,9 +1234,6 @@ function extensionFields(ext: Extension): ProtocolField[] {
         })),
       });
       break;
-    case 11:
-      if (b.length >= 1) for (const f of Array.from(b.subarray(1, 1 + b[0]))) children.push({ name: 'EC point format', value: `${EC_POINT_FORMAT_NAMES[f] ?? 'Unknown'} (${f})` });
-      break;
     case 13:
       // The reference splits each entry into its hash and signature halves,
       // which is the pair RFC 8446 §4.2.3 defines it as and what makes
@@ -1335,9 +1332,18 @@ function extensionFields(ext: Extension): ProtocolField[] {
       }
       break;
     }
-    case 17513: {
-      // ALPS (Application-Layer Protocol Settings), Chrome's extension for
-      // settings that would otherwise wait for the first HTTP/2 frame.
+    // ALPS (Application-Layer Protocol Settings), Chrome's extension for
+    // settings that would otherwise wait for the first HTTP/2 frame.
+    //
+    // **Both codepoints, and the old one alone is what shipped.** Chrome moved
+    // ALPS from 17513 to 17613 when the wire format changed, and this case was
+    // written against the draft number - so it never once matched a frame in
+    // either fixture, where every ALPS extension is 17613. Nothing failed: the
+    // four names were registered, spelled correctly, and referenced by a row
+    // that could not run, which is the one thing none of the three gates here
+    // can see. The bodies are identical, so both are read.
+    case 17513:
+    case 17613: {
       if (b.length < 2) break;
       const listLen = u16(b, 0);
       children.push({ name: 'ALPS Extension Length', value: listLen, abbrev: 'tls.handshake.extensions_alps_len' });
