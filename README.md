@@ -39,7 +39,7 @@ network, not anonymous callers. Nothing to pair, no secret to paste, no port ope
 
 - **Live capture** from any adapter, with throughput sparklines in the picker so
   you can see which one is carrying traffic before you commit.
-- **57 dissected layers** — Ethernet/VLAN/LLC, Linux cooked capture, IPv4/IPv6
+- **60 dissected layers** — Ethernet/VLAN/LLC, Linux cooked capture, IPv4/IPv6
   with fragment reassembly, TCP/UDP, DNS, TLS, QUIC, HTTP/1.1 through HTTP/3,
   DHCP, LDAP, SMB2, Kerberos, SIP, SNMP, RADIUS, BGP, OSPF and the rest, plus GRE
   and VXLAN dissected *through*. The list is `LAYERS` in
@@ -200,7 +200,7 @@ python local-agent/test_protocol.py
 
 The second of those, the agent's own suite, also locks its protocol version
 across the three places it appears — `agent.py`, `src/services/agentProtocol.ts`,
-`local-agent/installer/setup.iss` — and refuses a reset, because that version is
+`installer/setup.iss` — and refuses a reset, because that version is
 an ordering rather than a label. Both suites run on every push and pull request.
 
 ## Layout

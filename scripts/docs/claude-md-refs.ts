@@ -39,6 +39,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { LAYERS } from '../../src/services/dissect/fieldRegistry';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -312,7 +313,14 @@ check('every `npm run` the document names is a real script',
   [...new Set(named)].filter((s) => !scripts.includes(s)), []);
 
 // The reverse, which is how a new script goes undocumented.
-const EXEMPT = new Set(['dev:web', 'build:electron', 'clean']);
+//
+// `dev:web` used to be exempted here and is deleted: a bare Vite server on
+// port 3000 was the browser build's entry point, and the renderer cannot run
+// under one any more - `window.inwire` is the preload bridge and only exists
+// under Electron, so the page it served would have been broken from the first
+// render. It was the last thing in the visible tree that contradicted the
+// README's "It is not a web app".
+const EXEMPT = new Set(['build:electron', 'clean']);
 check('every script worth naming is named',
   scripts.filter((s) => !EXEMPT.has(s) && !named.includes(s)), []);
 
@@ -337,6 +345,25 @@ const README_BANNED = [
 ];
 check('the README says nothing the browser build left behind',
   README_BANNED.filter((term) => readme.toLowerCase().includes(term.toLowerCase())), []);
+
+/**
+ * The README's layer count, held to the list it cites.
+ *
+ * It said "57 dissected layers" while `LAYERS` held 60: the three X.509 tokens
+ * were appended and the prose was not. Nothing here could see it - a number is
+ * not a path, so the reference walk above never looked at it - and it is the
+ * most quotable figure in the document, which is the worst place for a stale
+ * one.
+ *
+ * Checkable only because the sentence names its own source. That is the
+ * general form: a figure in prose that cites where it comes from can be held
+ * to it, and one that does not cannot be held to anything.
+ */
+const layerClaim = readme.match(/\*\*(\d+) dissected layers\*\*/);
+check('the README states a layer count', layerClaim !== null, true);
+if (layerClaim !== null) {
+  check("...and it is the registry's own", Number(layerClaim[1]), LAYERS.length);
+}
 
 // `npm run start` served the built bundle over Express and is gone. The README
 // lists its commands inside fences rather than in backticks, so this reads the
