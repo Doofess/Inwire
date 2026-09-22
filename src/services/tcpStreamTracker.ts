@@ -25,6 +25,7 @@ import { analyzeTcpSegment, freshConnection, type TcpAnalysis, type TcpConnectio
 
 import type { TlsDecryptionKeys } from './tls/decrypt';
 import type { AppDirection } from './dissectors/appStream';
+import { releaseHttp1Body } from './dissectors/http1';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 import { freshSmb2Conversation, type Smb2ConversationState } from './dissectors/smb2';
 import { freshBgpDirection, type BgpDirectionState } from './dissectors/bgp';
@@ -234,6 +235,14 @@ interface TcpDirection {
 interface TcpConnection {
   /** Assigned by `getStreamId` in order of first appearance, not on creation. */
   streamId?: number;
+  /**
+   * `tls.stream`, assigned the first time this connection produces a TLS
+   * record - which is why it is not `streamId`. The reference numbers TLS
+   * conversations in their own sequence: on this repo's fixture `tcp.stream`
+   * 1, 2, 3 carry `tls.stream` 0, 1, 2, because the connections in between
+   * never spoke TLS.
+   */
+  tlsStreamId?: number;
   /** Frames seen on this connection, which is `recordStreamPacket`'s answer. */
   packets: number;
   /**
@@ -255,6 +264,25 @@ interface TcpConnection {
   sawSyn: boolean;
   sawSynAck: boolean;
   sawFinOrRst: boolean;
+  /**
+   * The rest of the reference's completeness bits.
+   *
+   * `sawFinOrRst` above answers "did this conversation end", which is what the
+   * plain-English summary needs; these answer "which of the six things did
+   * this capture actually contain", which is a different and more useful
+   * question - it is how you find out that a stream you are about to analyse
+   * is missing its handshake, and therefore that every relative sequence
+   * number in it is relative to a guess.
+   */
+  sawAck: boolean;
+  sawData: boolean;
+  sawFin: boolean;
+  sawRst: boolean;
+  /**
+   * Which endpoint sent the first FIN, so a later one on the other side reads
+   * as the passive half of the close rather than a second active one.
+   */
+  finFrom?: 'a' | 'b';
   /** Wireshark's sequence analysis state, shared by both directions. */
   analysis?: TcpConnectionState;
   /** What both ends of the TLS conversation have agreed on. */
@@ -275,7 +303,10 @@ interface TcpConnection {
 }
 
 function freshTcpConnection(): TcpConnection {
-  return { packets: 0, sawSyn: false, sawSynAck: false, sawFinOrRst: false, a: {}, b: {} };
+  return {
+    packets: 0, sawSyn: false, sawSynAck: false, sawFinOrRst: false,
+    sawAck: false, sawData: false, sawFin: false, sawRst: false, a: {}, b: {},
+  };
 }
 
 /**
@@ -310,6 +341,7 @@ export class TcpStreamTracker {
   /** The same records by stream index, for the callers that hold only that. */
   private byStreamId = new Map<number, TcpConnection>();
   private nextStreamId = 0;
+  private nextTlsStreamId = 0;
   /**
    * The connection the last lookup found. Every call made while dissecting one
    * frame asks about the same connection, so this is what keeps the
@@ -429,6 +461,17 @@ export class TcpStreamTracker {
       if (oldest.done) break;
       const conn = this.connections.get(oldest.value);
       this.connections.delete(oldest.value);
+      // A half-collected HTTP body's bytes are charged against a budget
+      // shared by every connection, and this is the one path where collecting
+      // stops without the body finishing. Forgetting the connection without
+      // giving them back would spend a slice of that budget permanently - and
+      // enough evictions would stop body reassembly for the rest of the
+      // capture with nothing saying why. See `liveBodyBytes` in
+      // `dissectors/http1.ts`.
+      // Both the TLS-decrypted and the cleartext HTTP paths hang their
+      // `AppDirection` off `tls`, which is why one lookup covers both.
+      if (conn?.tls?.appClient !== undefined) releaseHttp1Body(conn.tls.appClient.http1);
+      if (conn?.tls?.appServer !== undefined) releaseHttp1Body(conn.tls.appServer.http1);
       // The stream index goes with it, or `byStreamId` becomes the leak this
       // eviction exists to stop. Indexes are never reused - `nextStreamId`
       // only ever counts up - so nothing can collide with the one just freed.
@@ -621,6 +664,22 @@ export class TcpStreamTracker {
     return conn.tls;
   }
 
+  /**
+   * `tls.stream`: this connection's place in the sequence of TLS conversations,
+   * assigned on first use like `getStreamId` and for the same reason - a
+   * connection that never speaks TLS must not consume a number.
+   */
+  public getTlsStreamId(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
+    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.tlsStreamId ??= this.nextTlsStreamId++;
+    return conn.tlsStreamId;
+  }
+
+  /** As `seedNextStreamId`, for the TLS sequence. See `L3Tracker.seedNextIndices`. */
+  public seedNextTlsStreamId(next: number): void {
+    if (this.nextTlsStreamId === 0) this.nextTlsStreamId = next;
+  }
+
   /** LDAP's per-connection counters, created on first use. */
   public ldapConversation(srcIp: string, srcPort: number, dstIp: string, dstPort: number): LdapConversationState {
     const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
@@ -668,12 +727,41 @@ export class TcpStreamTracker {
     return { packetNumber, sinceFirst, sincePrevious };
   }
 
-  public updateConnectionState(streamId: number, syn: boolean, ack: boolean, fin: boolean, rst: boolean): void {
+  public updateConnectionState(
+    streamId: number, syn: boolean, ack: boolean, fin: boolean, rst: boolean, hasData = false,
+  ): void {
     const conn = this.byStreamId.get(streamId);
     if (conn === undefined) return;
     if (syn && !ack) conn.sawSyn = true;
     if (syn && ack) conn.sawSynAck = true;
     if (fin || rst) conn.sawFinOrRst = true;
+    // The reference counts a bare ACK, not the ACK flag on a SYN-ACK - which
+    // is already its own bit and would otherwise set two.
+    if (ack && !syn) conn.sawAck = true;
+    if (hasData) conn.sawData = true;
+    if (fin) conn.sawFin = true;
+    if (rst) conn.sawRst = true;
+  }
+
+  /**
+   * Records which side sent the first FIN, and says whether this one is it.
+   *
+   * "Active" and "passive" close are the reference's words, and the
+   * distinction is the useful half of a FIN: it is the difference between a
+   * client that finished and a server that dropped it, which a flag alone
+   * cannot tell you because both frames carry the same flag.
+   *
+   * Idempotent on purpose - a retransmitted FIN is the same direction, so it
+   * still reads as the active one rather than becoming the passive close of
+   * itself.
+   */
+  public noteFin(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number,
+  ): 'active' | 'passive' {
+    const found = this.locate(srcIp, srcPort, dstIp, dstPort);
+    const side = found.senderIsA ? 'a' : 'b';
+    if (found.conn.finFrom === undefined) found.conn.finFrom = side;
+    return found.conn.finFrom === side ? 'active' : 'passive';
   }
 
   /**
@@ -681,6 +769,27 @@ export class TcpStreamTracker {
    * The reference analyzer's internal numeric completeness bitmask, since that's an
    * implementation detail nobody reading this UI needs to decode.
    */
+  /**
+   * The reference's six completeness bits as its own bitmask.
+   *
+   * The plain-English summary beside this deliberately does not print the
+   * number (see `getConversationCompleteness`), and that stands - but the
+   * individual bits are not an implementation detail, they are six separate
+   * facts about what the capture contains, and each one is a filter somebody
+   * would type: `tcp.completeness.syn == 0` finds every stream whose
+   * handshake was missed.
+   */
+  public getCompletenessMask(streamId: number): number {
+    const conn = this.byStreamId.get(streamId);
+    if (!conn) return 0;
+    return (conn.sawSyn ? 1 : 0)
+      | (conn.sawSynAck ? 2 : 0)
+      | (conn.sawAck ? 4 : 0)
+      | (conn.sawData ? 8 : 0)
+      | (conn.sawFin ? 16 : 0)
+      | (conn.sawRst ? 32 : 0);
+  }
+
   public getConversationCompleteness(streamId: number): string {
     const conn = this.byStreamId.get(streamId);
     if (!conn) return 'Incomplete';
@@ -694,6 +803,7 @@ export class TcpStreamTracker {
     this.connections.clear();
     this.byStreamId.clear();
     this.nextStreamId = 0;
+    this.nextTlsStreamId = 0;
 this.lastKey = undefined;
     this.lastLookup = undefined;
     this.evicted = 0;

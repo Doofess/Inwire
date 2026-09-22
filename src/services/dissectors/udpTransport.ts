@@ -26,7 +26,8 @@ import { dissectSsdp } from './ssdp';
 import { buildQuicLayer, dissectQuicDatagram } from './quic';
 import { buildQuicTlsLayer } from './tls';
 import { dissectNtp, dissectStun } from './udpApps';
-import { findUdpSubdissector } from './udpDispatch';
+import { dataLayer } from './mediaType';
+import { findUdpPort } from './dispatch';
 
 /** Everything the UDP decode needs that is not the bytes themselves. */
 export interface UdpContext {
@@ -88,7 +89,7 @@ export function dissectUdpTransport(
   const isDhcpv6 = (srcPort === 546 || srcPort === 547) && (dstPort === 546 || dstPort === 547);
   // Which leaf protocol claims these ports, if any. Resolved once here rather
   // than as a branch per protocol - the table is in `dissectors/udpDispatch.ts`.
-  const subdissector = findUdpSubdissector(srcPort, dstPort, dstIp);
+  const subdissector = findUdpPort(srcPort, dstPort, dstIp);
 
   // The UDP header's Length field counts the 8-byte header itself, but
   // The reference analyzer's "Len=" - like TCP's - reports payload only.
@@ -320,7 +321,22 @@ export function dissectUdpTransport(
     srcPort,
     dstPort,
     info,
-    extraLayers,
+    // Nothing claimed the datagram, so its payload is the reference's `data`
+    // protocol. UDP needs no equivalent of TCP's `tlsOnThisConnection` guard:
+    // a datagram is claimed or it is not, with no reassembly state that could
+    // make "produced no layer" mean something other than "unclaimed".
+    //
+    // **The bytes have to actually be there**, which is not the same as the
+    // header saying how many there are. An ICMP error quotes its datagram's
+    // IP header and the first eight bytes after it - exactly a UDP header and
+    // nothing else - while that header still declares the whole original
+    // length. Reading the declared length raised a `Data` layer on every
+    // quoted datagram, over bytes past the end of the frame, and
+    // `scripts/icmp/dissect.ts` caught it on the commit that introduced it.
+    extraLayers: extraLayers.length === 0 && udpPayloadLen > 0
+      && udpPayloadStart + udpPayloadLen <= rawBytes.length
+      ? [dataLayer(rawBytes.subarray(udpPayloadStart, udpPayloadStart + udpPayloadLen))]
+      : extraLayers,
     protocolTokens,
     dnsMatchedQueryFrameId,
     resolvedNames,
@@ -341,8 +357,8 @@ export function dissectUdpTransport(
       summary: `User Datagram Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
       rawBytesRange: [transportOffset, transportOffset + 7],
       fields: [
-        { name: 'Source Port', value: srcPort, abbrev: 'udp.srcport', rawBytesRange: [transportOffset, transportOffset + 1] },
-        { name: 'Destination Port', value: dstPort, abbrev: 'udp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3] },
+        { name: 'Source Port', value: srcPort, abbrev: 'udp.srcport', rawBytesRange: [transportOffset, transportOffset + 1], children: [{ name: 'Source or Destination Port', value: srcPort, abbrev: 'udp.port', rawBytesRange: [transportOffset, transportOffset + 1] }] },
+        { name: 'Destination Port', value: dstPort, abbrev: 'udp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3], children: [{ name: 'Source or Destination Port', value: dstPort, abbrev: 'udp.port', rawBytesRange: [transportOffset + 2, transportOffset + 3] }] },
         { name: 'Length', value: udpLen, abbrev: 'udp.length', rawBytesRange: [transportOffset + 4, transportOffset + 5] },
         {
           name: 'Checksum',
@@ -356,7 +372,7 @@ export function dissectUdpTransport(
           children: [{ name: '[Checksum Status]', value: udpVerdict.status, generated: true, abbrev: 'udp.checksum.status',
             ...(udpVerdict.status === 'Bad' ? { expertInfo: { category: 'Broken' as const, message: 'Bad checksum' } } : {}) }],
         },
-        { name: 'UDP payload', value: `${Math.max(0, udpLen - 8)} bytes`, rawBytesRange: [transportOffset + 8, transportOffset + Math.max(8, udpLen - 1)] },
+        { name: 'UDP payload', value: `${Math.max(0, udpLen - 8)} bytes`, abbrev: 'udp.payload', rawBytesRange: [transportOffset + 8, transportOffset + Math.max(8, udpLen - 1)] },
       ],
     },
   };

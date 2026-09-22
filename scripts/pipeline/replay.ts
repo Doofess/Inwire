@@ -27,7 +27,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
-import { dissectReplay } from '../../src/services/pipeline/replay';
+import { dissectReplay, seedsFor } from '../../src/services/pipeline/replay';
 import { inferHostIdentity } from '../../src/services/hostIdentity';
 import { streamPackets, targetForPacket } from '../../src/services/followStream';
 import type { ReplayFrame } from '../../src/services/pipeline/protocol';
@@ -144,7 +144,7 @@ async function main() {
     const retroactive = typeof responseIn === 'number'
       ? { frameId: packet.id, responseInFrame: responseIn }
       : undefined;
-    const { layers } = dissectReplay(frames, false, packet.streamId, retroactive, host);
+    const { layers } = dissectReplay(frames, false, packet.streamId, retroactive, host, seedsFor(packet));
     check(`${label} (frame ${packet.id}, ${frames.length} replayed) rebuilds identically`,
       render(layers), render(packet.layers));
   }
@@ -158,7 +158,9 @@ async function main() {
   if (tcpFrame) {
     const frames = bundleFor(tcpFrame, buffer);
     const unseeded = render(dissectReplay(frames, false, undefined, undefined, host).layers);
-    const seeded = render(dissectReplay(frames, false, tcpFrame.streamId, undefined, host).layers);
+    const seeded = render(dissectReplay(
+      frames, false, tcpFrame.streamId, undefined, host, seedsFor(tcpFrame),
+    ).layers);
     checkTrue('an unseeded replay gets the stream index wrong', unseeded !== seeded);
     check('...and a seeded one gets it right', seeded, render(tcpFrame.layers));
   }

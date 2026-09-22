@@ -30,10 +30,35 @@ import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import { formatMac } from '../addressFormat';
 import { resolveMacVendor } from '../macVendors';
 import { LINKTYPE } from '../dissect/types';
+import { ieee1905MessageEnd } from './ieee1905';
 import { labelForEtherType } from './l2';
 
 /** An ethertype value at or below this is really an 802.3 length. */
 const MAX_802_3_LENGTH = 1500;
+
+/**
+ * The unnumbered-format command, from the five bits `000. 00..` of the
+ * control byte.
+ *
+ * Only the handful an ordinary capture contains are named; anything else is
+ * shown as its number rather than guessed at, which is the same rule the SAP
+ * table above follows.
+ */
+function unnumberedCommand(control: number): string {
+  const cmd = ((control & 0xe0) >> 3) | ((control & 0x0c) >> 2);
+  const named: Record<number, string> = {
+    0x00: 'Unnumbered Information',
+    0x03: 'Disconnected Mode',
+    0x04: 'Unnumbered Poll',
+    0x08: 'Disconnect',
+    0x0c: 'Unnumbered Acknowledgment',
+    0x0f: 'Set Asynchronous Balanced Mode Extended',
+    0x11: 'Frame Reject',
+    0x17: 'Exchange Identification',
+    0x1c: 'Test',
+  };
+  return `${named[cmd] ?? 'Unknown'} (0x${cmd.toString(16).padStart(2, '0')})`;
+}
 
 export interface LinkLayerResult {
   /** The link-layer tree layers, outermost first. Empty for raw IP. */
@@ -108,12 +133,18 @@ export function macAddressFields(mac: string, offset: number, isDestination = fa
   const groupAddress = (firstByte & 0x01) !== 0;
 
   return [
-    { name: 'Address', value: resolveMacVendor(mac), rawBytesRange: [offset, offset + 5] },
+    // Wireshark's own label for `eth.addr` is 'Address', and it emits one
+    // under each of Source and Destination - so both carry the abbrev here.
+    { name: 'Address', value: resolveMacVendor(mac), abbrev: 'eth.addr', rawBytesRange: [offset, offset + 5] },
     {
       name: 'LG bit',
       value: locallyAdministered
         ? 'Locally administered address (this is NOT the factory default)'
         : 'Globally unique address (factory default)',
+      // Only the destination's row is `eth.lg`, for the same reason `eth.ig`
+      // below is: an abbrev names one field, and the source's LG bit is a
+      // different fact about a different address.
+      ...(isDestination ? { abbrev: 'eth.lg' } : {}),
       rawBytesRange: [offset, offset + 2],
       bitfield: { bitOffset: 6, bitLength: 1, totalBits: 24 },
     },
@@ -143,6 +174,101 @@ function etherTypeFromVersion(bytes: Uint8Array, offset: number): number {
   if (offset >= bytes.length) return 0;
   const version = bytes[offset] >> 4;
   return version === 6 ? 0x86dd : version === 4 ? 0x0800 : 0;
+}
+
+/**
+ * The shortest frame Ethernet will carry, with the FCS excluded because a
+ * capture taken through a driver does not include one. A sender that has less
+ * than this to say pads up to it, and the pad is what these rows are about.
+ */
+const MIN_ETHERNET_FRAME = 60;
+
+/**
+ * Where the layer above says its own bytes stop, or -1 when it does not say.
+ *
+ * Every answer here is a length the protocol states about itself, never a
+ * guess from the frame - which is the whole reason this can be trusted to
+ * decide what the bytes after it are.
+ */
+export function declaredPayloadEnd(rawBytes: Uint8Array, l3Offset: number, etherType: number): number {
+  const u16 = (at: number): number => (rawBytes[at] << 8) | rawBytes[at + 1];
+  // An 802.3 frame's bytes 12-13 are a length, and it counts from here.
+  if (etherType <= MAX_802_3_LENGTH) return l3Offset + etherType;
+  if (etherType === 0x0800 && l3Offset + 4 <= rawBytes.length) return l3Offset + u16(l3Offset + 2);
+  if (etherType === 0x86dd && l3Offset + 6 <= rawBytes.length) return l3Offset + 40 + u16(l3Offset + 4);
+  // ARP over Ethernet/IPv4 is 28 bytes and says so only through its four size
+  // fields, which are fixed for every frame either capture contains.
+  if (etherType === 0x0806) return l3Offset + 28;
+  // A 1905 CMDU states its length with a terminator rather than a header
+  // field, so it needs its own dissector's walk to answer this at all.
+  if (etherType === 0x893a) return ieee1905MessageEnd(rawBytes, l3Offset);
+  return -1;
+}
+
+/**
+ * The bytes after the payload, on a frame that was padded to the minimum.
+ *
+ * **Only the minimum-length case, and the boundary is principled rather than
+ * lazy.** The reference also draws a trailer on 180 larger frames here, and on
+ * every one of them the trailer stops exactly four bytes short of the end -
+ * because it has decided those four are an FCS. That decision is the one
+ * `eth.fcs` is refused for: getting it wrong invents a bad checksum, which
+ * `scripts/expert/categories.ts` forbids outright. A frame of exactly 60 bytes
+ * whose payload ends earlier needs no such decision - the sender padded it,
+ * and the pad is the rest.
+ *
+ * **`eth.padding_bad` carries no expert note, deliberately.** The reference
+ * files it as a Note, and doing the same would add one to 1,618 frames of this
+ * fixture - a category painting an eighth of the list for something that is
+ * almost always a NIC declining to zero its own buffer. That is precisely the
+ * "says nothing about the wire" class `ExpertCategory`'s own comments describe
+ * cleaning out. The row is drawn, the filter name works, and the expert system
+ * is left alone.
+ */
+export function ethernetTrailerRows(rawBytes: Uint8Array, declaredEnd: number): ProtocolField[] {
+  if (rawBytes.length !== MIN_ETHERNET_FRAME) return [];
+  if (declaredEnd <= 0 || declaredEnd >= rawBytes.length) return [];
+  // **The leading run of zeros is the padding; whatever follows is a
+  // trailer, and the two coexist.** Read as all-or-nothing first - a tail
+  // either entirely zeros or entirely a trailer - which is right on 2,014 of
+  // the 2,023 frames here and wrong on nine, where a one-byte pad is followed
+  // by five bytes of something. Those nine are the only reason this is a
+  // scan rather than a test, and they are also why `padding_bad` has to mean
+  // "no padding at all" rather than "not all padding".
+  let pad = declaredEnd;
+  while (pad < rawBytes.length && rawBytes[pad] === 0) pad++;
+
+  const rows: ProtocolField[] = [];
+  if (pad > declaredEnd) {
+    rows.push({
+      name: 'Padding', value: hexColons(rawBytes, declaredEnd, pad), abbrev: 'eth.padding',
+      rawBytesRange: [declaredEnd, pad - 1],
+    });
+  }
+  if (pad < rawBytes.length) {
+    rows.push({
+      name: 'Trailer', value: hexColons(rawBytes, pad, rawBytes.length), abbrev: 'eth.trailer',
+      rawBytesRange: [pad, rawBytes.length - 1],
+    });
+    if (pad === declaredEnd) {
+      rows.push({
+        name: 'Didn\'t find padding of zeros, and an undecoded trailer exists. '
+          + 'There may be padding of non-zeros.',
+        value: '', abbrev: 'eth.padding_bad', generated: true,
+      });
+    }
+  }
+  return rows;
+}
+
+/** The reference's FT_BYTES rendering, which is what its `show` carries. */
+function hexColons(bytes: Uint8Array, start: number, end: number): string {
+  let out = '';
+  for (let i = start; i < end && i < bytes.length; i++) {
+    if (out.length > 0) out += ':';
+    out += bytes[i].toString(16).padStart(2, '0');
+  }
+  return out;
 }
 
 export function dissectLinkLayer(rawBytes: Uint8Array, linktype: number): LinkLayerResult {
@@ -203,7 +329,10 @@ function dissectEthernet(rawBytes: Uint8Array, encapsulation: string): LinkLayer
         // An 802.3 frame's bytes 12-13 are a length, not a type, and calling
         // it "Type: 0x0027 (Unknown)" is a straightforwardly wrong reading of
         // the wire.
-        ? { name: 'Length', value: etherType, rawBytesRange: [12, 13] }
+        // The comment below was acted on and the row still had no name, so
+        // `eth.len` - the reference's own name for exactly this reading -
+        // resolved to nothing on all 105 802.3 frames here.
+        ? { name: 'Length', value: etherType, abbrev: 'eth.len', rawBytesRange: [12, 13] }
         : { name: 'Type', value: `0x${etherType.toString(16).padStart(4, '0')} (${describeEtherType(etherType)})`, abbrev: 'eth.type', rawBytesRange: [12, 13] },
       { name: '[Stream index]', value: 0, generated: true },
     ],
@@ -315,6 +444,15 @@ function readLlc(rawBytes: Uint8Array, out: LinkLayerResult): void {
       abbrev: 'llc.dsap',
       rawBytesRange: [at, at] as [number, number],
       children: [{
+        // The seven bits that are the service access point, which the
+        // reference draws above the IG bit because that is the order they sit
+        // in: `0100 001. = SAP`, then `.... ...0 = IG Bit`.
+        name: 'SAP',
+        value: sapName(dsap),
+        abbrev: 'llc.dsap.sap',
+        rawBytesRange: [at, at] as [number, number],
+        bitfield: { bitOffset: 0, bitLength: 7, totalBits: 8 },
+      }, {
         name: `.... ...${dsap & 1} = IG Bit`,
         value: (dsap & 1) ? 'Group' : 'Individual',
         rawBytesRange: [at, at] as [number, number],
@@ -326,8 +464,15 @@ function readLlc(rawBytes: Uint8Array, out: LinkLayerResult): void {
       abbrev: 'llc.ssap',
       rawBytesRange: [at + 1, at + 1] as [number, number],
       children: [{
+        name: 'SAP',
+        value: sapName(ssap),
+        abbrev: 'llc.ssap.sap',
+        rawBytesRange: [at + 1, at + 1] as [number, number],
+        bitfield: { bitOffset: 0, bitLength: 7, totalBits: 8 },
+      }, {
         name: `.... ...${ssap & 1} = CR Bit`,
         value: (ssap & 1) ? 'Response' : 'Command',
+        abbrev: 'llc.ssap.cr',
         rawBytesRange: [at + 1, at + 1] as [number, number],
       }],
     },
@@ -338,6 +483,25 @@ function readLlc(rawBytes: Uint8Array, out: LinkLayerResult): void {
         : `0x${control.toString(16).padStart(2, '0')}`,
       abbrev: 'llc.control',
       rawBytesRange: [at + 2, at + 1 + controlLen] as [number, number],
+      // What the control byte says it is. An unnumbered frame carries the
+      // command in five scattered bits - 000. 00.. - which is why it is read
+      // here rather than left as two hex digits.
+      children: unnumbered
+        ? [
+          {
+            name: 'Frame type', value: `Unnumbered frame (0x0${control & 0x03})`,
+            abbrev: 'llc.control.ftype',
+            rawBytesRange: [at + 2, at + 2] as [number, number],
+            bitfield: { bitOffset: 6, bitLength: 2, totalBits: 8 },
+          },
+          {
+            name: 'Command',
+            value: unnumberedCommand(control),
+            abbrev: 'llc.control.u_modifier_cmd',
+            rawBytesRange: [at + 2, at + 2] as [number, number],
+          },
+        ]
+        : [],
     },
   ];
 

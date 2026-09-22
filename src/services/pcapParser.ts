@@ -3,8 +3,9 @@ import { applyInfoPatch } from './dissect/infoPatch';
 import { CATEGORY_RANK, expertItemsFor } from './expertInfo';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacName } from './macVendors';
-import { dissectArp, dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
-import { dissectLinkLayer } from './dissectors/linkLayer';
+import { dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
+import { findEthertype } from './dissectors/dispatch';
+import { declaredPayloadEnd, dissectLinkLayer, ethernetTrailerRows } from './dissectors/linkLayer';
 import { L3Tracker } from './l3Tracker';
 import {
   Direction, directionFromAddresses, directionFromMacs, directionFromOffload,
@@ -22,8 +23,6 @@ import { LINKTYPE, type InfoPatch } from './dissect/types';
 export type { InfoPatch } from './dissect/types';
 import { dissectCdp, CDP_SNAP_PID, CISCO_OUI } from './dissectors/cdp';
 import { DnsTracker } from './dnsTracker';
-import { dissectIeee1905 } from './dissectors/ieee1905';
-import { dissectLldp } from './dissectors/lldp';
 import { QuicFlowTracker } from './quicFlowTracker';
 import { displayProtocol, toBase64 } from './exportSchema';
 import { buildCsvText } from './tabularWriters';
@@ -833,6 +832,13 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   // not double - which is the trap `appStream.ts` records for HTTP/2.
   'QUIC IETF': 'quic',
   'Hypertext Transfer Protocol': 'http',
+  // The body's own dissector, which the reference makes a protocol of its own
+  // below HTTP - so a JSON API response reads `...tcp:http:json` and the
+  // bareword `json` answers. `dissectors/mediaType.ts` chooses between them.
+  'JavaScript Object Notation': 'json',
+  'Line-based text data': 'data-text-lines',
+  'Media Type': 'media',
+  'Data': 'data',
   'HyperText Transfer Protocol 2': 'http2',
   'HyperText Transfer Protocol Version 3': 'http3',
   'Ethernet II': 'eth',
@@ -1077,8 +1083,35 @@ export function decodeRawEthernetPacket(
     ...link.layers,
   ];
 
+  // `eth.stream`: the conversation between two MAC addresses, which is the one
+  // conversation index that exists on every frame - an ARP or an STP BPDU has
+  // no IP pair and no ports, and is still traffic between two stations.
+  //
+  // On `link.layers[0]` rather than on the Frame layer, because that is the
+  // Ethernet layer and the reference files the field under `eth`. A capture
+  // with no link layer at all (raw IP) has no row to hang it on and gets none.
+  if (link.srcMac !== undefined && link.dstMac !== undefined
+    && l3Tracker !== undefined && link.layers.length > 0) {
+    const ethFacts = l3Tracker.ethStream(link.srcMac, link.dstMac, tsUs);
+    link.layers[0].fields.push({
+      name: '[Stream index]', value: ethFacts.index, generated: true, abbrev: 'eth.stream',
+    });
+    filterFields['eth.stream'] = ethFacts.index;
+  }
+
   const l3Offset = link.l3Offset;
   const currentEtherType = link.etherType;
+
+  // The pad on a minimum-length frame, on the Ethernet layer for the same
+  // reason `eth.stream` is: the reference files both under `eth`. Read here
+  // rather than in `dissectLinkLayer` because the length that decides where
+  // the payload stops belongs to the layer above, and the link layer has not
+  // looked at it yet.
+  if (link.layers.length > 0) {
+    link.layers[0].fields.push(
+      ...ethernetTrailerRows(rawBytes, declaredPayloadEnd(rawBytes, l3Offset, currentEtherType)),
+    );
+  }
 
   // Link-layer protocols that carry no IP header. These have to be dispatched
   // before the IPv4/IPv6 branches, and without them a frame keeps this
@@ -1090,12 +1123,14 @@ export function decodeRawEthernetPacket(
   // DSAP 0x42 is the Spanning Tree Protocol's service access point.
   const isLlcFrame = link.llcOffset !== undefined && currentEtherType <= 1500;
   let l2Result: L2DissectorResult | null = null;
-  if (currentEtherType === 0x0806) {
-    l2Result = dissectArp(rawBytes, l3Offset);
-  } else if (currentEtherType === 0x893a) {
-    l2Result = dissectIeee1905(rawBytes, l3Offset);
-  } else if (currentEtherType === 0x88cc) {
-    l2Result = dissectLldp(rawBytes, l3Offset);
+  // ARP, IEEE 1905 and LLDP are ethertypes and nothing else, so they are
+  // registered in `dissectors/dispatch.ts` rather than spelled out here.
+  // CDP and STP below are NOT, and stay: CDP dispatches on a SNAP protocol id
+  // within an OUI and STP on the LLC DSAP, so an `ethertype` table holding
+  // either would be a table lying about its key.
+  const ethertypeEntry = findEthertype(currentEtherType);
+  if (ethertypeEntry !== null) {
+    l2Result = ethertypeEntry.dissect(rawBytes, l3Offset, rawBytes.length);
   } else if (currentEtherType === CDP_SNAP_PID && link.snapOui === CISCO_OUI) {
     // CDP is not an ethertype: 0x2000 is a protocol id under Cisco's OUI, and
     // is only CDP in that company. Dispatching on the pair is what keeps this

@@ -33,6 +33,7 @@ import type { TransportResult } from '../dissect/types';
 import type { IcmpEchoTracker } from '../icmpEchoTracker';
 import { formatIpv6Address, formatMac } from '../addressFormat';
 import { checksumVerdict } from '../dissect/transportShared';
+import { dataLayer } from './mediaType';
 
 /** Everything the decode needs that is neither the bytes nor the offset. */
 export interface IcmpContext {
@@ -508,6 +509,20 @@ export function dissectIcmp(
     info,
     icmpMatchedRequestFrameId,
     embeddedNetwork,
+    // **The same bytes as the `ICMP Data` row above, as the layer the
+    // reference actually shows.** That row's comment says the reference names
+    // `icmp.data` and then hides it, drawing these bytes through its `data`
+    // dissector instead - so the honest reading is that both exist, and this
+    // build had the named row and not the layer. Only an echo: an error
+    // message's trailing bytes are a quoted datagram, which `embeddedNetwork`
+    // recurses into rather than calling undissected.
+    ...((isEchoRequest || isEchoReply) && messageEnd > transportOffset + 8
+      ? {
+        extraLayers: [dataLayer(rawBytes.subarray(
+          transportOffset + 8, Math.min(messageEnd, rawBytes.length),
+        ))],
+      }
+      : {}),
     layer: {
       name: isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol',
       summary: `${isIcmpv6 ? 'Internet Control Message Protocol v6' : 'Internet Control Message Protocol'}, ${info}`,

@@ -12,9 +12,12 @@
  *
  * The same code reads a TLS-decrypted stream whose ALPN was `http/1.1`.
  *
- * Bodies are not reassembled and not decompressed. The frame carrying a start
- * line is labelled with it; a frame carrying only body bytes is a
- * continuation, which is what Wireshark shows with body desegmentation off.
+ * **Bodies are reassembled here and decoded in `httpBody.ts`.** A body is
+ * collected across as many arrivals as it takes and handed back on the
+ * segment that COMPLETES it, which is not necessarily the one that carried
+ * the head - that is what `Http1Result.bodies` is for, and it is why a
+ * finished body carries the message it belongs to rather than the caller
+ * having to remember.
  */
 
 const CR = 0x0d;
@@ -23,6 +26,69 @@ const LF = 0x0a;
 const MAX_START_LINE = 8 * 1024;
 /** Header block ceiling, matching what servers commonly enforce. */
 const MAX_HEADER_BLOCK = 64 * 1024;
+
+/**
+ * How much of one message's body is kept.
+ *
+ * A megabyte is far past the point where reading a body in a detail pane
+ * stops being how anyone works, and it is the whole of almost every API
+ * response and HTML page. Past it the tree says how much was dropped, which
+ * is a different thing from a body that was never collected.
+ */
+const MAX_BODY_BYTES = 1024 * 1024;
+
+/**
+ * How many separate pieces one body may be collected in.
+ *
+ * Not a size bound - `MAX_BODY_BYTES` is that. This one exists because a
+ * chunked body may legally be sent one byte per chunk, and a million-element
+ * array of one-byte views costs far more than the megabyte it holds.
+ */
+const MAX_BODY_PIECES = 2048;
+
+/**
+ * The ceiling across every body being collected at once, anywhere.
+ *
+ * **This is the bound that actually binds.** The per-message cap multiplied
+ * by `tcpStreamTracker.ts`'s 16,384 connections and two directions each is
+ * 32 GiB of headroom, so the per-message cap alone is not a bound on the
+ * process at all. Everything in flight shares this instead.
+ */
+const MAX_TOTAL_BODY_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Bytes held by every body currently being collected.
+ *
+ * Module-level, which makes it per-pipeline-Worker and therefore per-capture.
+ * **It is only correct because every path that stops collecting gives its
+ * bytes back**: a completed body in `finishBody`, a replaced one in
+ * `startBody`, and an evicted connection through `releaseHttp1Body`, which
+ * `tcpStreamTracker.ts` calls from `evictPastCap`. A path that forgets costs
+ * a permanent slice of the budget, and enough of them stop body collection
+ * for the rest of the capture with nothing saying why.
+ */
+let liveBodyBytes = 0;
+
+/** For an assertion script, which needs to see the counter return to zero. */
+export function http1LiveBodyBytes(): number {
+  return liveBodyBytes;
+}
+
+/** Why a body is shorter than the sender said it would be. */
+export type BodyTruncation = 'message' | 'pieces' | 'total' | 'framing';
+
+export interface Http1Body {
+  /** The message this is the body of, whichever frame its head arrived in. */
+  message: Http1Message;
+  /** The bytes as they were on the wire - still compressed, if they were. */
+  bytes: Uint8Array;
+  /** How many body bytes passed by, including any this did not keep. */
+  observed: number;
+  /** Null when the whole body is here. */
+  truncated: BodyTruncation | null;
+  /** Each chunk's size and where its data sat, for a chunked body. */
+  chunks: { size: number; at: number }[];
+}
 
 const METHODS = new Set([
   'GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE', 'PATCH',
@@ -69,10 +135,114 @@ export interface Http1Direction {
   untilClose: boolean;
   /** True once this direction has shown a start line, so a mid-stream capture is known as such. */
   seenStart: boolean;
+
+  /**
+   * The message whose body is being collected, or null when none is.
+   *
+   * Held rather than passed because a body routinely finishes in a frame that
+   * carries no head at all, and the row it produces has to say which message
+   * it belongs to.
+   */
+  bodyOwner: Http1Message | null;
+  /** Collected pieces, oldest first. Joined once, in `finishBody`. */
+  body: Uint8Array[];
+  bodyLength: number;
+  bodyObserved: number;
+  bodyTruncated: BodyTruncation | null;
+  /** Chunk sizes and their offsets within the collected body. */
+  bodyChunks: { size: number; at: number }[];
+  /**
+   * Bytes of the CURRENT chunk's DATA still to copy.
+   *
+   * **A second counter beside `bodyRemaining`, and the reason is the one bug
+   * this whole feature is most likely to ship with.** `walkChunks` sets
+   * `bodyRemaining = size + 2`, folding the CRLF that closes every chunk into
+   * the same number so that a body split anywhere resumes from one value.
+   * That is right for FRAMING and wrong for COPYING: taking `bodyRemaining`
+   * bytes appends the terminator too, two stray bytes per chunk, and the
+   * result is a JSON body that fails to parse in a way that looks exactly
+   * like a decompression bug. Data always precedes the terminator inside a
+   * chunk, so the first `chunkDataRemaining` of any span is body and the rest
+   * is not.
+   */
+  chunkDataRemaining: number;
+  /** Set when a chunk header did not parse, so the finished body says so. */
+  bodyFramingLost: boolean;
 }
 
 export function freshHttp1Direction(): Http1Direction {
-  return { pending: new Uint8Array(0), bodyRemaining: 0, chunked: false, trailer: false, untilClose: false, seenStart: false };
+  return {
+    pending: new Uint8Array(0), bodyRemaining: 0, chunked: false, trailer: false,
+    untilClose: false, seenStart: false,
+    bodyOwner: null, body: [], bodyLength: 0, bodyObserved: 0, bodyTruncated: null,
+    bodyChunks: [], chunkDataRemaining: 0, bodyFramingLost: false,
+  };
+}
+
+/**
+ * Gives a half-collected body's bytes back to the shared budget.
+ *
+ * Called when the connection holding this direction is forgotten, which is
+ * the one way a body stops being collected without finishing. See
+ * `liveBodyBytes`.
+ */
+export function releaseHttp1Body(direction: Http1Direction): void {
+  liveBodyBytes -= direction.bodyLength;
+  if (liveBodyBytes < 0) liveBodyBytes = 0;
+  direction.body = [];
+  direction.bodyLength = 0;
+  direction.bodyOwner = null;
+}
+
+/** Begins collecting the body of `message`, dropping anything half-collected. */
+function startBody(direction: Http1Direction, message: Http1Message): void {
+  releaseHttp1Body(direction);
+  direction.bodyOwner = message;
+  direction.bodyObserved = 0;
+  direction.bodyTruncated = null;
+  direction.bodyChunks = [];
+}
+
+/** Keeps as much of `piece` as the three bounds allow. */
+function appendBody(direction: Http1Direction, piece: Uint8Array): void {
+  direction.bodyObserved += piece.length;
+  if (direction.bodyOwner === null || piece.length === 0) return;
+  if (direction.bodyTruncated !== null) return;
+  if (direction.body.length >= MAX_BODY_PIECES) { direction.bodyTruncated = 'pieces'; return; }
+
+  const perMessage = MAX_BODY_BYTES - direction.bodyLength;
+  const shared = MAX_TOTAL_BODY_BYTES - liveBodyBytes;
+  const room = Math.min(perMessage, shared);
+  if (room <= 0) {
+    direction.bodyTruncated = perMessage <= 0 ? 'message' : 'total';
+    return;
+  }
+  const take = Math.min(room, piece.length);
+  // `slice`, not `subarray`: the caller's buffer is the segment, and holding a
+  // view of it would pin the whole segment for as long as the body lives.
+  direction.body.push(piece.slice(0, take));
+  direction.bodyLength += take;
+  liveBodyBytes += take;
+  if (take < piece.length) direction.bodyTruncated = perMessage <= shared ? 'message' : 'total';
+}
+
+/** Joins the collected pieces and hands the budget back. */
+function finishBody(direction: Http1Direction, truncation: BodyTruncation | null = null): Http1Body | null {
+  const message = direction.bodyOwner;
+  if (message === null) return null;
+  const bytes = new Uint8Array(direction.bodyLength);
+  let at = 0;
+  for (const piece of direction.body) { bytes.set(piece, at); at += piece.length; }
+  const body: Http1Body = {
+    message, bytes, observed: direction.bodyObserved,
+    truncated: truncation ?? direction.bodyTruncated,
+    chunks: direction.bodyChunks,
+  };
+  releaseHttp1Body(direction);
+  direction.bodyChunks = [];
+  direction.bodyTruncated = null;
+  direction.bodyObserved = 0;
+  return body;
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
@@ -172,6 +342,14 @@ export interface Http1Result {
   messages: Http1Message[];
   /** Bytes of body this segment carried, for the "Continuation" case. */
   bodyBytes: number;
+  /**
+   * Bodies that FINISHED in this segment.
+   *
+   * Usually empty, and not parallel to `messages`: a body that spans ten
+   * frames is reported once, on the tenth, and the message it belongs to had
+   * its head in the first.
+   */
+  bodies: Http1Body[];
 }
 
 /**
@@ -189,26 +367,39 @@ export function dissectHttp1(
   let bytes = concat(direction.pending, data);
   direction.pending = new Uint8Array(0);
   const messages: Http1Message[] = [];
+  const bodies: Http1Body[] = [];
   let bodyBytes = 0;
   let p = 0;
 
   for (;;) {
-    if (direction.untilClose) { bodyBytes += bytes.length - p; return { messages, bodyBytes }; }
+    if (direction.untilClose) { bodyBytes += bytes.length - p; return { messages, bodyBytes, bodies }; }
 
     if (direction.chunked) {
+      const before = direction.chunked;
       const consumed = walkChunks(bytes, p, direction);
       bodyBytes += consumed - p;
       p = consumed;
-      if (direction.chunked) { direction.pending = bytes.subarray(p).slice(); return { messages, bodyBytes }; }
+      if (direction.chunked) { direction.pending = bytes.subarray(p).slice(); return { messages, bodyBytes, bodies }; }
+      // `walkChunks` clears `chunked` two ways: the trailer ended, or a chunk
+      // header did not parse. The second leaves a body that is missing its
+      // tail, and saying which is what `bodyFramingLost` is for.
+      if (before) {
+        const done = finishBody(direction, direction.bodyFramingLost ? 'framing' : null);
+        direction.bodyFramingLost = false;
+        if (done !== null) bodies.push(done);
+      }
       continue;
     }
 
     if (direction.bodyRemaining > 0) {
       const take = Math.min(direction.bodyRemaining, bytes.length - p);
+      appendBody(direction, bytes.subarray(p, p + take));
       direction.bodyRemaining -= take;
       bodyBytes += take;
       p += take;
-      if (direction.bodyRemaining > 0) return { messages, bodyBytes };
+      if (direction.bodyRemaining > 0) return { messages, bodyBytes, bodies };
+      const done = finishBody(direction);
+      if (done !== null) bodies.push(done);
       continue;
     }
 
@@ -217,24 +408,24 @@ export function dissectHttp1(
     if (!direction.seenStart && !looksLikeHttp1(bytes, p, bytes.length)) {
       // Not a message start and this direction has never shown one, so this is
       // not HTTP - or is the tail of a message whose head we never captured.
-      return { messages, bodyBytes };
+      return { messages, bodyBytes, bodies };
     }
 
     const boundary = endOfHeaders(bytes, p);
     if (boundary === null) {
-      if (bytes.length - p > MAX_HEADER_BLOCK) return { messages, bodyBytes };
+      if (bytes.length - p > MAX_HEADER_BLOCK) return { messages, bodyBytes, bodies };
       direction.pending = bytes.subarray(p).slice();
-      return { messages, bodyBytes };
+      return { messages, bodyBytes, bodies };
     }
 
     const block = decoder.decode(bytes.subarray(p, boundary.at));
     const newlineIndex = block.indexOf('\n');
     const startLine = (newlineIndex === -1 ? block : block.slice(0, newlineIndex)).replace(/\r$/, '');
-    if (startLine.length > MAX_START_LINE) return { messages, bodyBytes };
+    if (startLine.length > MAX_START_LINE) return { messages, bodyBytes, bodies };
     const headers = parseHeaders(newlineIndex === -1 ? '' : block.slice(newlineIndex + 1));
 
     const message = parseStartLine(startLine, headers);
-    if (message === null) return { messages, bodyBytes };
+    if (message === null) return { messages, bodyBytes, bodies };
 
     const framing = bodyFraming(message, message.kind === 'response' ? lastRequestMethod : undefined);
     message.bodyFraming = framing.description;
@@ -245,9 +436,17 @@ export function dissectHttp1(
     direction.bodyRemaining = framing.length;
     direction.chunked = framing.chunked;
     direction.untilClose = framing.untilClose;
+    direction.chunkDataRemaining = 0;
+    // **A body that runs until the connection closes is deliberately not
+    // collected.** There is no completion event on that path - the framing IS
+    // "until FIN" - so the bytes would be held for the life of the connection
+    // with nothing able to release them, which is the shape of a leak rather
+    // than of a bound.
+    if (framing.length > 0 || framing.chunked) startBody(direction, message);
+    else releaseHttp1Body(direction);
   }
 
-  return { messages, bodyBytes };
+  return { messages, bodyBytes, bodies };
 }
 
 function parseStartLine(line: string, headers: Http1Header[]): Http1Message | null {
@@ -302,6 +501,15 @@ function walkChunks(bytes: Uint8Array, from: number, direction: Http1Direction):
 
     if (direction.bodyRemaining > 0) {
       const take = Math.min(direction.bodyRemaining, bytes.length - p);
+      // Of the bytes taken here, the first `chunkDataRemaining` are the
+      // chunk's data and anything after them is its CRLF. Copying `take` of
+      // them would append the terminator - see `chunkDataRemaining`, where
+      // the whole of this is written down, and the assertion in
+      // `scripts/http/dissect.ts` that splits a body between its last data
+      // byte and that CRLF.
+      const dataTake = Math.min(direction.chunkDataRemaining, take);
+      if (dataTake > 0) appendBody(direction, bytes.subarray(p, p + dataTake));
+      direction.chunkDataRemaining -= dataTake;
       direction.bodyRemaining -= take;
       p += take;
       if (direction.bodyRemaining > 0) return p;
@@ -318,14 +526,17 @@ function walkChunks(bytes: Uint8Array, from: number, direction: Http1Direction):
       // Not a chunk header. The framing is lost, and guessing at where the
       // next message starts would be worse than admitting it.
       direction.chunked = false;
+      direction.bodyFramingLost = true;
       return bytes.length;
     }
     p = lineEnd + 1;
 
     if (size === 0) { direction.trailer = true; continue; }
+    direction.bodyChunks.push({ size, at: direction.bodyLength });
     // The CRLF that closes every chunk is counted with the chunk, so a body
     // split anywhere - including between the data and its terminator - resumes
     // from one number rather than from a position in a two-step dance.
     direction.bodyRemaining = size + 2;
+    direction.chunkDataRemaining = size;
   }
 }

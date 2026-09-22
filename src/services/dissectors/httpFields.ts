@@ -35,7 +35,22 @@
  * where the URI decomposes: path, query, and one row per query parameter.
  */
 import type { ProtocolField } from '../../types/packet';
-import type { Http1Header, Http1Message } from './http1';
+import type { Http1Body, Http1Header, Http1Message } from './http1';
+import { decodeHttpBody, type DecodedBody } from './httpBody';
+
+/**
+ * How much of a body's text is drawn on its own row.
+ *
+ * The bytes are all kept and all handed to the media-type dissector; this is
+ * only what the one-line `http.file_data` row shows, because a row carrying a
+ * megabyte of minified JavaScript is a row nothing can render.
+ */
+const BODY_PREVIEW = 2048;
+
+/** Chunk rows drawn before the tree stops and says how many it stopped at. */
+const MAX_CHUNK_ROWS = 64;
+
+const bodyDecoder = new TextDecoder('utf-8', { fatal: false });
 
 /**
  * Header names HTTP has a field of its own for, lower-cased.
@@ -216,8 +231,17 @@ export function httpMessageRows(message: Http1Message, options: HttpRowOptions =
 
   const rawLineAbbrev = isRequest ? 'http.request.line' : 'http.response.line';
   for (const header of message.headers) {
-    const named = HEADER_ABBREV[header.name.toLowerCase()];
+    const lower = header.name.toLowerCase();
+    const named = HEADER_ABBREV[lower];
     const raw = `${header.name}: ${header.value}`;
+    const parsed = structuredHeaderRows(lower, header.value);
+    if (parsed.length > 0) {
+      rows.push({
+        name: header.name, value: header.value, abbrev: named ?? 'http.unknown_header',
+        children: [...(named ? [{ name: 'Raw line', value: raw, abbrev: rawLineAbbrev }] : []), ...parsed],
+      });
+      continue;
+    }
     rows.push({
       name: header.name,
       // **The reference's `http.unknown_header` carries the whole raw line and
@@ -278,6 +302,161 @@ export function httpMessageRows(message: Http1Message, options: HttpRowOptions =
   }
   return rows;
 }
+
+/**
+ * The headers whose value has structure worth drawing, decomposed.
+ *
+ * Deliberately short. An entry here is a promise that
+ * `scripts/dissect/wireshark-abbrevs.ts` can match the child's name against
+ * `tshark -G fields`, so a header whose parts the reference has no name for
+ * stays one row with its raw value rather than being decomposed into names
+ * invented here.
+ *
+ * `Content-Length` is the one that earns its place twice: the reference
+ * carries the raw header as `http.content_length_header` and the PARSED
+ * number as `http.content_length`, and only the second is a number a filter
+ * can compare - `http.content_length > 1000000` is the query, and it cannot
+ * be asked of a string.
+ */
+function structuredHeaderRows(lower: string, value: string): ProtocolField[] {
+  if (lower === 'content-length') {
+    const length = Number.parseInt(value, 10);
+    if (!Number.isFinite(length) || length < 0) return [];
+    return [{ name: 'Content length', value: length, abbrev: 'http.content_length', generated: true }];
+  }
+  if (lower === 'cookie') {
+    // `a=1; b=2` - one row per pair, because a session cookie sitting beside
+    // nine tracking ones is the thing worth seeing and the joined string
+    // hides it.
+    const pairs = value.split(';').map((part) => part.trim()).filter((part) => part.length > 0);
+    if (pairs.length === 0) return [];
+    return pairs.map((pair) => ({ name: 'Cookie pair', value: pair, abbrev: 'http.cookie_pair' }));
+  }
+  return [];
+}
+
+/** Printable text for a row, with the unprintable bytes shown as dots. */
+function previewOf(bytes: Uint8Array): string {
+  const slice = bytes.subarray(0, BODY_PREVIEW);
+  const text = bodyDecoder.decode(slice);
+  // Control characters make a row unreadable and, worse, a tab or a newline
+  // inside one silently changes the shape of the pane.
+  const clean = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '.');
+  return bytes.length > BODY_PREVIEW ? `${clean}...` : clean;
+}
+
+/**
+ * A finished body, as rows: how it was framed, how it was encoded, and what
+ * it says.
+ *
+ * Returned as `{ rows, decoded }` rather than rows alone because the caller
+ * hands the decoded bytes on to the media-type dissector, and decoding twice
+ * would mean decompressing twice.
+ */
+export function httpBodyRows(body: Http1Body): { rows: ProtocolField[]; decoded: DecodedBody } {
+  const rows: ProtocolField[] = [];
+  const encodingHeader = headerValue(body.message.headers, 'content-encoding');
+  const decoded = decodeHttpBody(body.bytes, encodingHeader);
+
+  if (body.chunks.length > 0) {
+    // One row per chunk, which is how a reader sees that a server is sending
+    // a megabyte in 8-byte pieces - a shape that costs far more in frames
+    // than in bytes and is invisible in any total.
+    const shown = body.chunks.slice(0, MAX_CHUNK_ROWS);
+    const chunkRows: ProtocolField[] = shown.map((chunk, index) => ({
+      name: `Chunk ${index + 1}`,
+      value: `${chunk.size} bytes`,
+      abbrev: 'http.chunk_size',
+      children: [{
+        name: 'Chunk data',
+        value: previewOf(body.bytes.subarray(chunk.at, chunk.at + chunk.size)),
+        abbrev: 'http.chunk_data',
+      }],
+    }));
+    if (body.chunks.length > shown.length) {
+      chunkRows.push({
+        name: '[Chunks not drawn]', generated: true,
+        value: `${body.chunks.length - shown.length} more, of ${body.chunks.length} in this body`,
+      });
+    }
+    // The zero-length chunk and the blank line after it. Drawn because a body
+    // that ends without them is one this build guessed the end of.
+    chunkRows.push({
+      name: 'End of chunked encoding', value: body.truncated === 'framing' ? 'not reached' : '0',
+      abbrev: 'http.chunk_boundary',
+    });
+    rows.push({
+      name: 'HTTP chunked response', value: `${body.chunks.length} chunks, ${body.bytes.length} bytes`,
+      isExpanded: false, children: chunkRows,
+    });
+  }
+
+  if (decoded.decompressed) {
+    rows.push({
+      name: 'Content-encoded entity body',
+      // No abbrev: the reference has no field for this subtree - checked
+      // against `tshark -G fields`, where `http.content_encoded_entity_body`
+      // does not exist. Reusing `http.content_encoding` would put two rows
+      // under one name, and the header's is the one a filter means.
+      value: `${decoded.encoding}: ${body.bytes.length} bytes -> ${decoded.bytes.length} bytes`,
+      description: 'The body as it was on the wire, and as it reads once the encoding is undone',
+    });
+  } else if (decoded.unsupported !== undefined) {
+    rows.push({
+      name: 'Content-encoded entity body',
+      // No abbrev: the reference has no field for this subtree - checked
+      // against `tshark -G fields`, where `http.content_encoded_entity_body`
+      // does not exist. Reusing `http.content_encoding` would put two rows
+      // under one name, and the header's is the one a filter means.
+      value: `${decoded.encoding}: ${body.bytes.length} bytes, not decoded`,
+      // `Unverifiable`, not `Broken`. Nothing here is known to be wrong - this
+      // build did not look. See `httpBody.ts`, where the grading is argued.
+      expertInfo: {
+        category: 'Unverifiable',
+        message: `Content-Encoding ${decoded.unsupported} is not decoded by this build; the body is shown as sent`,
+      },
+    });
+  } else if (decoded.error !== undefined) {
+    rows.push({
+      name: 'Content-encoded entity body',
+      // No abbrev: the reference has no field for this subtree - checked
+      // against `tshark -G fields`, where `http.content_encoded_entity_body`
+      // does not exist. Reusing `http.content_encoding` would put two rows
+      // under one name, and the header's is the one a filter means.
+      value: `${decoded.encoding}: could not be decoded`,
+      // Tried and failed, which IS a defect in the bytes - most often a
+      // capture that began mid-transfer.
+      expertInfo: { category: 'Broken', message: `Decompressing the ${decoded.encoding} body failed: ${decoded.error}` },
+    });
+  }
+
+  if (body.truncated !== null) {
+    rows.push({
+      name: '[Body truncated]', generated: true,
+      value: TRUNCATION_REASON[body.truncated],
+      expertInfo: { category: 'Unverifiable', message: `Only ${body.bytes.length} of ${body.observed} body bytes were kept` },
+    });
+  }
+
+  // The body itself. The row carries the text rather than a byte count
+  // because that is what the reference's `http.file_data` holds and what
+  // `http.file_data contains "..."` has to answer against - a length under
+  // this name would be a different fact wearing a name people already know.
+  rows.push({
+    name: 'File Data',
+    value: decoded.bytes.length === 0 ? '' : previewOf(decoded.bytes),
+    abbrev: 'http.file_data',
+    description: `${decoded.bytes.length} bytes`,
+  });
+  return { rows, decoded };
+}
+
+const TRUNCATION_REASON: Record<NonNullable<Http1Body['truncated']>, string> = {
+  message: 'past this build\'s per-message ceiling',
+  pieces: 'too many separate pieces to keep',
+  total: 'the shared body budget was full',
+  framing: 'a chunk header did not parse, so the end was never found',
+};
 
 /**
  * The filterable half.

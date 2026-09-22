@@ -22,6 +22,7 @@ import type { AgentCommand, AgentMessage } from '../agentProtocol';
 import type { AgentServiceFacts } from '../agentLink';
 import type { Packet } from '../../types/packet';
 import type { NetworkFacts } from '../networkFacts';
+import type { StreamSeeds } from './replay';
 import type { InfoPatch } from '../pcapParser';
 
 /** Where a connection stands, in the terms `agentHealth.ts` diagnoses from. */
@@ -130,7 +131,7 @@ export type ToPipeline =
    */
   | {
       type: 'replay'; id: number; frames: ReplayFrame[]; truncated: boolean;
-      streamId?: number; retroactive?: InfoPatch;
+      streamId?: number; seeds?: StreamSeeds; retroactive?: InfoPatch;
       /** See ReplayBundle.process - a fact the bytes do not contain. */
       process?: { pid: number; name: string; exe: string };
     };

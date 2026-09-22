@@ -107,6 +107,14 @@ export const LAYERS = [
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'tftp', 'bfd', 'coap', 'ptp',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'smb2', 'kerberos', 'http', 'http2', 'http3',
+  // **What a message BODY is**, which the reference makes four protocols of
+  // rather than fields on HTTP - so a JSON API response's chain really does
+  // read `...tcp:http:json`. `data-text-lines` keeps its hyphens because that
+  // is the name a user types, and `filter/lexer.ts`'s `WORD` class includes
+  // `-` (checked, not hoped for). `data-text-lines` owns no fields: it is a
+  // protocol with nothing but lines under it, which is why nothing below
+  // carries that prefix.
+  'json', 'media', 'data', 'data-text-lines',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -198,6 +206,179 @@ export const FIELDS: readonly FieldDef[] = [
   bool('ip.flags.mf', 'More fragments', 'ip'),
   uint('ip.frag_offset', 'Fragment Offset', 'ip'),
   uint('ip.opt.type', 'Option type', 'ip'),
+
+  // The rows below were drawn - with the right value, byte range and bitfield -
+  // long before they were named, which made them invisible to the filter
+  // engine, to "Apply as filter" and to `scripts/parity/tree-coverage.ts`
+  // alike. They are `treeOnly` rather than filterable because every one of
+  // them is either a constant given the layer token (`ip.version` is 4
+  // whenever `ip` is present, which is what the bareword already says) or a
+  // decomposition of bytes the bag holds. Filterability is bought per field on
+  // evidence of demand; a bag write here would also put four of them over
+  // `dense-fields.ts`'s 20%-of-frames threshold and into `DENSE_FIELDS`.
+  treeOnly(uint('ip.version', 'Version', 'ip')),
+  treeOnly(uint('ip.dsfield', 'Differentiated Services Field', 'ip')),
+  treeOnly(uint('ip.len', 'Total Length', 'ip')),
+  treeOnly(uint('ip.flags', 'Flags', 'ip')),
+  treeOnly(bool('ip.flags.rb', 'Reserved bit', 'ip')),
+  treeOnly(uint('ipv6.version', 'Version', 'ipv6')),
+  treeOnly(uint('ipv6.tclass', 'Traffic Class', 'ipv6')),
+  treeOnly(uint('ipv6.tclass.dscp', 'Differentiated Services Codepoint', 'ipv6')),
+  treeOnly(uint('ipv6.tclass.ecn', 'Explicit Congestion Notification', 'ipv6')),
+  treeOnly(uint('ipv6.flow', 'Flow Label', 'ipv6')),
+  treeOnly(uint('ipv6.plen', 'Payload Length', 'ipv6')),
+
+  // --- the either-end names, which the filter engine already answered --------
+  //
+  // `eth.addr`, `ip.addr`, `ipv6.addr`, `tcp.port` and `udp.port` have always
+  // worked in the filter bar, through `ALIASES` in `filter/fields.ts` - and
+  // `resolveField` consults that map BEFORE the registry, so registering them
+  // here changes nothing about how a filter is answered. What it buys is the
+  // row: these five were the whole of `tree-coverage.ts`'s
+  // `filterableNotInTree` ceiling, the one list where every entry is a defect
+  // with no judgement call - the app accepted the filter and the detail pane
+  // refused to draw it.
+  //
+  // `treeOnly` for the same reason: the value is already in the bag twice
+  // under the two end-specific names, and a third copy would buy nothing.
+  treeOnly({ abbrev: 'eth.addr', label: 'Address', type: 'mac', layer: 'eth' }),
+  treeOnly({ abbrev: 'ip.addr', label: 'Source or Destination Address', type: 'ipv4', layer: 'ip' }),
+  treeOnly({ abbrev: 'ipv6.addr', label: 'Source or Destination Address', type: 'ipv6', layer: 'ipv6' }),
+  // The `_host` half of the same rows. Identical to the `addr` names until
+  // name resolution is on, at which point `addr` stays an address and `host`
+  // becomes a name - which is the whole reason the reference keeps both.
+  treeOnly({ abbrev: 'ip.src_host', label: 'Source Host', type: 'ipv4', layer: 'ip' }),
+  treeOnly({ abbrev: 'ip.dst_host', label: 'Destination Host', type: 'ipv4', layer: 'ip' }),
+  treeOnly({ abbrev: 'ip.host', label: 'Source or Destination Host', type: 'ipv4', layer: 'ip' }),
+  treeOnly({ abbrev: 'ipv6.src_host', label: 'Source Host', type: 'ipv6', layer: 'ipv6' }),
+  treeOnly({ abbrev: 'ipv6.dst_host', label: 'Destination Host', type: 'ipv6', layer: 'ipv6' }),
+  treeOnly({ abbrev: 'ipv6.host', label: 'Source or Destination Host', type: 'ipv6', layer: 'ipv6' }),
+  treeOnly(uint('tcp.port', 'Source or Destination Port', 'tcp')),
+  treeOnly(uint('udp.port', 'Source or Destination Port', 'udp')),
+  treeOnly(bool('eth.lg', 'LG bit', 'eth')),
+  // The 802.3 reading of bytes 12-13, and the pad that follows a short frame.
+  treeOnly(uint('eth.len', 'Length', 'eth')),
+  treeOnly(str('eth.padding', 'Padding', 'eth')),
+  treeOnly(str('eth.trailer', 'Trailer', 'eth')),
+  treeOnly(str('eth.padding_bad', 'Didn\'t find padding of zeros', 'eth')),
+  treeOnly(str('ipv6.src_addr_space', 'Source Address Space', 'ipv6')),
+  treeOnly(str('ipv6.dst_addr_space', 'Destination Address Space', 'ipv6')),
+  treeOnly(str('tcp.flags.str', 'TCP Flags', 'tcp')),
+
+  // --- the per-layer conversation indices ------------------------------------
+  //
+  // The reference assigns a conversation index at every layer, and this build
+  // had only `tcp.stream`. These four are the rest, plus TLS's own sequence.
+  //
+  // **These are the only fields in this wave that are NOT `treeOnly`**, and the
+  // reason is not that somebody wants to filter on them - it is
+  // `services/pipeline/replay.ts`. A detail tree is rebuilt by replaying one
+  // conversation through fresh trackers, which would number it 0; the Worker
+  // recovers the right number by reading it back off the target packet with
+  // `fieldValue`, so it has to be in the bag to be recoverable. Filtering is
+  // the bonus, not the argument. `eth.stream` and `ipv6.stream` land on 100%
+  // and 65% of fixture frames, so both are declared in `DENSE_FIELDS` as
+  // `dense-fields.ts` requires.
+  uint('eth.stream', 'Stream index', 'eth'),
+  uint('ip.stream', 'Stream index', 'ip'),
+  uint('ipv6.stream', 'Stream index', 'ipv6'),
+  uint('udp.stream', 'Stream index', 'udp'),
+  treeOnly(uint('udp.stream.pnum', 'Stream Packet Number', 'udp')),
+  treeOnly(str('udp.time_relative', 'Time since first frame', 'udp')),
+  treeOnly(str('udp.time_delta', 'Time since previous frame', 'udp')),
+  uint('tls.stream', 'Stream index', 'tls'),
+
+  // The six completeness bits.  beside them has been drawn
+  // since the tracker learned to summarise a handshake; these say WHICH of the
+  // six things the capture actually contains, which is how a reader finds out
+  // that a stream's relative sequence numbers are relative to a guess.
+  treeOnly(str('tcp.completeness.str', 'Completeness Flags', 'tcp')),
+  treeOnly(bool('tcp.completeness.syn', 'SYN', 'tcp')),
+  treeOnly(bool('tcp.completeness.syn-ack', 'SYN-ACK', 'tcp')),
+  treeOnly(bool('tcp.completeness.ack', 'ACK', 'tcp')),
+  treeOnly(bool('tcp.completeness.data', 'Data', 'tcp')),
+  treeOnly(bool('tcp.completeness.fin', 'FIN', 'tcp')),
+  treeOnly(bool('tcp.completeness.rst', 'RST', 'tcp')),
+
+  // --- DNS: rows the message already drew, and two it did not ---------------
+  treeOnly(uint('dns.count.auth_rr', 'Authority RRs', 'dns')),
+  treeOnly(uint('dns.count.add_rr', 'Additional RRs', 'dns')),
+  treeOnly(bool('dns.flags.recavail', 'Recursion available', 'dns')),
+  treeOnly(bool('dns.flags.z', 'Z', 'dns')),
+  treeOnly(bool('dns.flags.authenticated', 'Answer authenticated', 'dns')),
+  treeOnly(bool('dns.flags.checkdisable', 'Non-authenticated data', 'dns')),
+  treeOnly(uint('dns.qry.class', 'Class', 'dns')),
+  treeOnly(uint('dns.resp.class', 'Class', 'dns')),
+  treeOnly(bool('dns.qry.qu', '"QU" question', 'dns')),
+  treeOnly(bool('dns.resp.cache_flush', 'Cache flush', 'dns')),
+  treeOnly(uint('dns.resp.len', 'Data length', 'dns')),
+  // Not in the bytes: the reference derives both, and a query for a 200-byte
+  // name with forty labels is exactly the shape worth filtering for.
+  treeOnly(uint('dns.qry.name.len', 'Name Length', 'dns')),
+  treeOnly(uint('dns.count.labels', 'Label Count', 'dns')),
+  treeOnly(str('dns.time', 'Time', 'dns')),
+
+  // The two subtree NODES themselves. Fifteen `tcp.analysis.*` verdicts have
+  // been named since they were ported; the containers they hang under were
+  // not, so `tcp.analysis` - a filter meaning "this segment has a finding at
+  // all", on 56% of frames here - answered nothing.
+  treeOnly(str('tcp.analysis', 'SEQ/ACK analysis', 'tcp')),
+  str('tcp.analysis.flags', 'TCP Analysis Flags', 'tcp'),
+
+  // The payload rows. UDP's already existed and was display-only; TCP had no
+  // row at all, so an empty ACK and 1,440 unread bytes looked the same.
+  treeOnly(str('tcp.payload', 'TCP payload', 'tcp')),
+  treeOnly(str('udp.payload', 'UDP payload', 'udp')),
+
+  // SOA carries seven fields and this build drew all seven without naming one,
+  // so the record saying who is authoritative for a zone, and how long a
+  // negative answer may be cached, could be read and not filtered on.
+  treeOnly(str('dns.soa.mname', 'Primary name server', 'dns')),
+  treeOnly(str('dns.soa.rname', 'Responsible authority mailbox', 'dns')),
+  treeOnly(str('dns.soa.serial_number', 'Serial Number', 'dns')),
+  treeOnly(str('dns.soa.refresh_interval', 'Refresh Interval', 'dns')),
+  treeOnly(str('dns.soa.retry_interval', 'Retry Interval', 'dns')),
+  treeOnly(str('dns.soa.expire_limit', 'Expire limit', 'dns')),
+  treeOnly(str('dns.soa.minimum_ttl', 'Minimum TTL', 'dns')),
+
+  // --- STP: the fields a spanning tree is actually diagnosed from ----------
+  //
+  // The four timers were eight bytes this build read past. Max Age and Hello
+  // Time are how long a switch waits before deciding the root is gone, and
+  // Forward Delay is why a port takes thirty seconds to pass traffic - the
+  // three numbers anyone debugging a convergence problem reaches for first.
+  treeOnly(uint('stp.protocol', 'Protocol Identifier', 'stp')),
+  uint('stp.flags', 'BPDU flags', 'stp'),
+  treeOnly(bool('stp.flags.tc', 'Topology Change', 'stp')),
+  treeOnly(bool('stp.flags.tcack', 'Topology Change Acknowledgment', 'stp')),
+  treeOnly(uint('stp.root.prio', 'Root Bridge Priority', 'stp')),
+  treeOnly(uint('stp.root.ext', 'Root Bridge System ID Extension', 'stp')),
+  { abbrev: 'stp.root.hw', label: 'Root Bridge System ID', type: 'mac', layer: 'stp', treeOnly: true },
+  treeOnly(uint('stp.bridge.prio', 'Bridge Priority', 'stp')),
+  treeOnly(uint('stp.bridge.ext', 'Bridge System ID Extension', 'stp')),
+  { abbrev: 'stp.bridge.hw', label: 'Bridge System ID', type: 'mac', layer: 'stp', treeOnly: true },
+  uint('stp.msg_age', 'Message Age', 'stp'),
+  uint('stp.max_age', 'Max Age', 'stp'),
+  uint('stp.hello', 'Hello Time', 'stp'),
+  uint('stp.forward', 'Forward Delay', 'stp'),
+  // LLC's own bits. The DSAP and SSAP bytes are a seven-bit service access
+  // point plus one flag each, and the control byte of an unnumbered frame
+  // carries its command in five scattered bits - all of which were drawn as
+  // two hex digits and nothing else.
+  treeOnly(str('llc.dsap.sap', 'SAP', 'llc')),
+  treeOnly(str('llc.ssap.sap', 'SAP', 'llc')),
+  treeOnly(bool('llc.ssap.cr', 'CR Bit', 'llc')),
+  treeOnly(str('llc.control.ftype', 'Frame type', 'llc')),
+  treeOnly(str('llc.control.u_modifier_cmd', 'Command', 'llc')),
+  // QUIC's first byte, which this dissector read and never showed. The fixed
+  // bit is the cheapest test for 'is this UDP payload QUIC at all'; the spin
+  // bit flips once per round trip, so a passive observer can measure RTT on
+  // a connection it cannot read a byte of. Both are outside header
+  // protection, which is why they are here and the reserved bits are not.
+  treeOnly(bool('quic.fixed_bit', 'Fixed Bit', 'quic')),
+  treeOnly(bool('quic.spin_bit', 'Spin Bit', 'quic')),
+  treeOnly(uint('quic.packet_length', 'Packet Length', 'quic')),
+  treeOnly(str('quic.frame', 'Frame', 'quic')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
   uint('ipv6.reassembled', 'Reassembled IPv6 fragments', 'ipv6'),
 
@@ -262,6 +443,53 @@ export const FIELDS: readonly FieldDef[] = [
   uint('tcp.options.timestamp.tsecr', 'Timestamp echo reply', 'tcp'),
   uint('tcp.options.sack_le', 'TCP SACK Left Edge', 'tcp'),
   uint('tcp.options.sack_re', 'TCP SACK Right Edge', 'tcp'),
+
+  // --- the options as OPTIONS, and what a SACK block is reporting ----------
+  //
+  // `tcp.options.mss`, `.wscale`, `.sack` and `.eol` name the option itself
+  // where `.mss_val` and `.wscale.shift` name the number inside it - the
+  // reference's own split, and the reason a reader clicking the value gets
+  // its two bytes rather than the whole option. Like `tcp.options.nop`
+  // above, all four are registered by the reference as sub-PROTOCOLS rather
+  // than fields, so `wireshark-abbrevs.ts` carries them as exemptions with
+  // that argument spelled out.
+  treeOnly(str('tcp.options.mss', 'Maximum Segment Size', 'tcp')),
+  treeOnly(str('tcp.options.wscale', 'Window Scale', 'tcp')),
+  treeOnly(uint('tcp.options.wscale.multiplier', 'Multiplier', 'tcp')),
+  treeOnly(str('tcp.options.sack', 'SACK', 'tcp')),
+  treeOnly(str('tcp.options.eol', 'End of Option List (EOL)', 'tcp')),
+  treeOnly(uint('tcp.options.sack.count', 'TCP SACK Count', 'tcp')),
+  // RFC 2883. A D-SACK says the sender retransmitted something that had
+  // already arrived - so whatever loss it reacted to was not loss, and the
+  // retransmission was spurious. Nothing else in a capture says that.
+  treeOnly(str('tcp.options.sack.dsack', 'D-SACK Sequence', 'tcp')),
+  treeOnly(uint('tcp.options.sack.dsack_le', 'TCP D-SACK Left Edge', 'tcp')),
+  treeOnly(uint('tcp.options.sack.dsack_re', 'TCP D-SACK Right Edge', 'tcp')),
+
+  // --- what a frame does to the connection ---------------------------------
+  //
+  // `FT_NONE` in the reference: presence is the value, so each is drawn only
+  // on the frame it is true of. `tcp.connection.fin_active` is the one that
+  // earns its place - a FIN flag is on both halves of a close and says
+  // nothing about which end hung up first, which is usually the question.
+  treeOnly(bool('tcp.connection.syn', 'Connection establish request (SYN)', 'tcp')),
+  treeOnly(bool('tcp.connection.synack', 'Connection establish acknowledge (SYN+ACK)', 'tcp')),
+  treeOnly(bool('tcp.connection.fin', 'Connection finish (FIN)', 'tcp')),
+  treeOnly(bool('tcp.connection.fin_active', 'This frame initiates the connection closing', 'tcp')),
+  treeOnly(bool('tcp.connection.fin_passive', 'This frame undergoes the connection closing', 'tcp')),
+  treeOnly(bool('tcp.connection.rst', 'Connection reset (RST)', 'tcp')),
+
+  // --- a PDU that spanned segments -----------------------------------------
+  //
+  // `tcp.segment` is `FT_FRAMENUM` in the reference, which is why its row
+  // carries `linkToFrame`: the point of the subtree is that the frames which
+  // carried a PDU are reachable, not merely listed. This build tracked every
+  // one of them from the day TLS records were first followed across
+  // segments, and spent it all on a single composed string.
+  treeOnly(str('tcp.segments', 'Reassembled TCP Segments', 'tcp')),
+  treeOnly(uint('tcp.segment', 'TCP Segment', 'tcp')),
+  treeOnly(uint('tcp.segment.count', 'Segment count', 'tcp')),
+  treeOnly(uint('tcp.reassembled.length', 'Reassembled TCP length', 'tcp')),
   { abbrev: 'tcp.analysis.ack_rtt', label: 'The RTT to ACK the segment was', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.initial_rtt', label: 'iRTT', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.bytes_in_flight', label: 'Bytes in flight', type: 'uint', layer: 'tcp', generated: true },
@@ -444,8 +672,30 @@ export const FIELDS: readonly FieldDef[] = [
   uint('igmp.version', 'IGMP Version', 'igmp'),
   { abbrev: 'igmp.maddr', label: 'Multicast Address', type: 'ipv4', layer: 'igmp' },
   uint('igmp.num_grp_recs', 'Num Group Records', 'igmp'),
+  // The other ten, every one of which this dissector already drew with the
+  // right value, byte range and bitfield and never named. `treeOnly`: a v3
+  // report's record type and source count are read off the tree beside the
+  // group they describe, and nothing outside the detail pane asks for them.
+  //
+  // `igmp.num_src` appears twice - once per group record, and once on a v3
+  // query, where it counts the sources the querier is asking about rather
+  // than the ones a host is reporting.
+  treeOnly(uint('igmp.max_resp', 'Max Resp Time', 'igmp')),
+  treeOnly(uint('igmp.checksum', 'Checksum', 'igmp')),
+  treeOnly(uint('igmp.checksum.status', 'Checksum Status', 'igmp')),
+  treeOnly(str('igmp.reserved', 'Reserved', 'igmp')),
+  treeOnly(uint('igmp.record_type', 'Record Type', 'igmp')),
+  treeOnly(uint('igmp.aux_data_len', 'Aux Data Len', 'igmp')),
+  treeOnly(uint('igmp.num_src', 'Num Src', 'igmp')),
+  treeOnly(bool('igmp.s', 'S', 'igmp')),
+  treeOnly(uint('igmp.qrv', 'QRV', 'igmp')),
+  treeOnly(uint('igmp.qqic', 'QQIC', 'igmp')),
 
   // --- ARP -------------------------------------------------------------------
+  treeOnly(str('arp.hw.type', 'Hardware type', 'arp')),
+  treeOnly(str('arp.proto.type', 'Protocol type', 'arp')),
+  treeOnly(uint('arp.hw.size', 'Hardware size', 'arp')),
+  treeOnly(uint('arp.proto.size', 'Protocol size', 'arp')),
   uint('arp.opcode', 'Opcode', 'arp'),
   { abbrev: 'arp.src.hw_mac', label: 'Sender MAC address', type: 'mac', layer: 'arp' },
   { abbrev: 'arp.src.proto_ipv4', label: 'Sender IP address', type: 'ipv4', layer: 'arp' },
@@ -469,6 +719,79 @@ export const FIELDS: readonly FieldDef[] = [
   str('lldp.tlv.system.desc', 'System Description', 'lldp'),
   str('lldp.tlv.system_cap', 'Capabilities', 'lldp'),
   str('lldp.mgn.addr.ip4', 'Management Address', 'lldp'),
+
+  // --- LLDP: the TLV header, and the two organisations' own TLVs ------------
+  //
+  // `lldp.tlv.type` and `lldp.tlv.len` are on EVERY TLV including the ones
+  // this build does not decode, which is where they matter most: an
+  // undecoded TLV is exactly where a reader needs to know what the sender
+  // called it and how many bytes it claimed.
+  //
+  // All `treeOnly`. LLDP is one frame in the fixtures and every name here is
+  // either TLV framing or a bit of a capability word - read in the detail
+  // pane beside the thing it qualifies, never as a column or a colour rule.
+  treeOnly(uint('lldp.tlv.type', 'TLV Type', 'lldp')),
+  treeOnly(uint('lldp.tlv.len', 'TLV Length', 'lldp')),
+  treeOnly(str('lldp.pdu_type', 'LLDPDU Type', 'lldp')),
+  // The reference names a port id after the subtype that produced it, so a
+  // MAC-address port answers this rather than the generic `lldp.port.id`.
+  treeOnly({ abbrev: 'lldp.port.id.mac', label: 'Port Id', type: 'mac', layer: 'lldp' }),
+  treeOnly(str('lldp.orgtlv.oui', 'Organization Unique Code', 'lldp')),
+  treeOnly(uint('lldp.ieee.802_3.subtype', 'IEEE 802.3 Subtype', 'lldp')),
+  treeOnly(uint('lldp.ieee.802_3.mac_phy_auto_neg_status', 'Auto-Negotiation Support/Status', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.mac_phy_auto_neg_status.supported', 'Auto-Negotiation Supported', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.mac_phy_auto_neg_status.enabled', 'Auto-Negotiation Enabled', 'lldp')),
+  treeOnly(uint('lldp.ieee.802_3.pmd_mau_type', 'Operational MAU Type', 'lldp')),
+
+  // The sixteen advertised-capability bits, and the same sixteen read in the
+  // opposite bit order. The `_inv` half is deliberately the WRONG reading -
+  // see `pmdCapabilityRows` in dissectors/lldp.ts for why drawing it is what
+  // makes a far-end byte-order bug distinguishable from an odd advertisement.
+  treeOnly(uint('lldp.ieee.802_3.pmd_auto_neg_advertised_caps', 'PMD Auto-Negotiation Advertised Capability', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.1000base_tfd', '1000BASE-T (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.1000base_t', '1000BASE-T (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.1000base_xfd', '1000BASE-X (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.1000base_x', '1000BASE-X (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.fdx_bpause', 'Asymmetric and Symmetric PAUSE', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.fdx_spause', 'Symmetric PAUSE', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.fdx_apause', 'Asymmetric PAUSE', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.fdx_pause', 'PAUSE (for full-duplex links)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_t2fd', '100BASE-T2 (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_t2', '100BASE-T2 (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_txfd', '100BASE-TX (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_tx', '100BASE-TX (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.100base_t4', '100BASE-T4', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.10base_tfd', '10BASE-T (full duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.10base_t', '10BASE-T (half duplex mode)', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps.other', 'Other or unknown', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.1000base_tfd', '1000BASE-T (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.1000base_t', '1000BASE-T (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.1000base_xfd', '1000BASE-X (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.1000base_x', '1000BASE-X (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.fdx_bpause', 'Asymmetric and Symmetric PAUSE, inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.fdx_spause', 'Symmetric PAUSE, inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.fdx_apause', 'Asymmetric PAUSE, inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.fdx_pause', 'PAUSE (for full-duplex links), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_t2fd', '100BASE-T2 (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_t2', '100BASE-T2 (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_txfd', '100BASE-TX (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_tx', '100BASE-TX (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.100base_t4', '100BASE-T4, inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.10base_tfd', '10BASE-T (full duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.10base_t', '10BASE-T (half duplex mode), inverse bitorder', 'lldp')),
+  treeOnly(bool('lldp.ieee.802_3.pmd_auto_neg_advertised_caps_inv.other', 'Other or unknown, inverse bitorder', 'lldp')),
+
+  // LLDP-MED: what an endpoint says it can do. A phone advertising Network
+  // Policy is asking the switch for a voice VLAN.
+  treeOnly(uint('lldp.media.subtype', 'Media Subtype', 'lldp')),
+  treeOnly(uint('lldp.media.subtype.caps', 'Media Capabilities', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.llpd', 'LLDP-MED Capabilities', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.network_policy', 'Network Policy', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.location_id', 'Location Identification', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.mdi_pse', 'Extended Power via MDI-PSE', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.mid_pd', 'Extended Power via MDI-PD', 'lldp')),
+  treeOnly(bool('lldp.media.subtype.caps.inventory', 'Inventory', 'lldp')),
+  treeOnly(uint('lldp.media.subtype.class', 'Class Type', 'lldp')),
 
   // --- TLS -------------------------------------------------------------------
   // **The record and handshake frames themselves**, which the tree has always
@@ -498,6 +821,87 @@ export const FIELDS: readonly FieldDef[] = [
   // renames it; so does this, on the same condition.
   treeOnly(str('tls.handshake.legacy_version', 'Version (legacy)', 'tls')),
   treeOnly(str('tls.handshake.random', 'Random', 'tls')),
+  // The first four of those 32 bytes were `gmt_unix_time` before RFC 8446
+  // made the whole field random. A sender still filling them in is leaking
+  // its wall clock to every observer on the path, which is worth being able
+  // to ask about - and on a modern hello the nonsense date IS the answer.
+  treeOnly(str('tls.handshake.random_time', 'GMT Unix Time', 'tls')),
+  treeOnly(str('tls.handshake.random_bytes', 'Random Bytes', 'tls')),
+
+  // --- what the record CONTAINS, known without reading it ------------------
+  //
+  // ALPN is negotiated in the clear, so an Application Data record nobody can
+  // decrypt still has a protocol. This build computed it, used it to pick a
+  // decoder and never told the reader; the reference says it on 824 frames of
+  // the inwire fixture.
+  treeOnly(str('tls.app_data_proto', 'Application Data Protocol', 'tls')),
+
+  // --- extensions this build drew as a length and nothing else -------------
+  //
+  // `tls.handshake.extension.data` is the one that matters most, and it is
+  // the one for extensions NOT listed here: an extension this build has
+  // never heard of now shows its bytes instead of its size.
+  treeOnly(str('tls.handshake.extension.data', 'Data', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_ec_point_formats_length', 'EC point formats Length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_ec_point_formats', 'Elliptic curves point formats', 'tls')),
+  treeOnly(str('tls.handshake.extensions_ec_point_format', 'EC point format', 'tls')),
+  treeOnly(uint('tls.compress_certificate.algorithms_length', 'Algorithms Length', 'tls')),
+  treeOnly(str('tls.compress_certificate.algorithm', 'Algorithm', 'tls')),
+  // Encrypted ClientHello. Every one of these describes the envelope rather
+  // than the hello inside it - the payload stays ciphertext - but the config
+  // id and the HPKE suite are what change when a provider rotates its keys,
+  // and are the only part of an ECH connection a passive reader can follow.
+  treeOnly(str('tls.ech.client_hello_type', 'Client Hello type', 'tls')),
+  treeOnly(str('tls.ech.hpke.keyconfig.cipher_suite', 'Cipher Suite', 'tls')),
+  treeOnly(str('tls.ech.hpke.keyconfig.cipher_suite.kdf_id', 'KDF Id', 'tls')),
+  treeOnly(str('tls.ech.hpke.keyconfig.cipher_suite.aead_id', 'AEAD Id', 'tls')),
+  treeOnly(uint('tls.ech.config_id', 'Config Id', 'tls')),
+  treeOnly(uint('tls.ech.enc_length', 'Enc length', 'tls')),
+  treeOnly(str('tls.ech.enc', 'Enc', 'tls')),
+  treeOnly(uint('tls.ech.payload_length', 'Payload length', 'tls')),
+  treeOnly(str('tls.ech.payload', 'Payload', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_alps_len', 'ALPS Extension Length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_alps_alpn_list', 'Supported ALPS List', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_alps_alpn_str_len', 'ALPS string length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_alps_alpn_str', 'ALPS Next Protocol', 'tls')),
+
+  // --- QUIC's transport parameters, which ride in the TLS handshake --------
+  //
+  // QUIC has no negotiation of its own, so extension 57 of the ClientHello
+  // is where a client states its flow-control limits, its idle timeout and
+  // its connection id. On an h3 connection it is the only place the
+  // transport's settings appear in the clear at all - everything after the
+  // handshake is encrypted.
+  //
+  // `tls.quic.parameter.type` is `FT_UINT64` in the reference and its GREASE
+  // values run to the full 62 bits, which is why the row draws those as hex
+  // rather than as a number a JS double would round.
+  treeOnly(str('tls.quic.parameter.type', 'Type', 'tls')),
+  treeOnly(uint('tls.quic.parameter.length', 'Length', 'tls')),
+  treeOnly(str('tls.quic.parameter.value', 'Value', 'tls')),
+  treeOnly(uint('tls.quic.parameter.max_idle_timeout', 'max_idle_timeout', 'tls')),
+  treeOnly(uint('tls.quic.parameter.max_udp_payload_size', 'max_udp_payload_size', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_data', 'initial_max_data', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_stream_data_bidi_local', 'initial_max_stream_data_bidi_local', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_stream_data_bidi_remote', 'initial_max_stream_data_bidi_remote', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_stream_data_uni', 'initial_max_stream_data_uni', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_streams_bidi', 'initial_max_streams_bidi', 'tls')),
+  treeOnly(uint('tls.quic.parameter.initial_max_streams_uni', 'initial_max_streams_uni', 'tls')),
+  treeOnly(uint('tls.quic.parameter.ack_delay_exponent', 'ack_delay_exponent', 'tls')),
+  treeOnly(uint('tls.quic.parameter.max_ack_delay', 'max_ack_delay', 'tls')),
+  treeOnly(uint('tls.quic.parameter.active_connection_id_limit', 'active_connection_id_limit', 'tls')),
+  treeOnly(uint('tls.quic.parameter.max_datagram_frame_size', 'max_datagram_frame_size', 'tls')),
+  treeOnly(str('tls.quic.parameter.original_destination_connection_id', 'original_destination_connection_id', 'tls')),
+  treeOnly(str('tls.quic.parameter.stateless_reset_token', 'stateless_reset_token', 'tls')),
+  treeOnly(str('tls.quic.parameter.initial_source_connection_id', 'initial_source_connection_id', 'tls')),
+  treeOnly(str('tls.quic.parameter.retry_source_connection_id', 'retry_source_connection_id', 'tls')),
+  treeOnly(uint('tls.quic.parameter.google.initial_rtt', 'Google initial_rtt', 'tls')),
+  treeOnly(str('tls.quic.parameter.google.connection_options', 'Google connection_options', 'tls')),
+  treeOnly(str('tls.quic.parameter.google.user_agent', 'Google user_agent', 'tls')),
+  // RFC 9368. A connection that negotiated down is otherwise
+  // indistinguishable from one that only ever offered what it used.
+  treeOnly(str('tls.quic.parameter.vi.chosen_version', 'Chosen Version', 'tls')),
+  treeOnly(str('tls.quic.parameter.vi.other_version', 'Other Version', 'tls')),
   treeOnly(str('tls.handshake.session_id', 'Session ID', 'tls')),
   treeOnly(uint('tls.handshake.session_id_length', 'Session ID Length', 'tls')),
   treeOnly(uint('tls.handshake.cipher_suites_length', 'Cipher Suites Length', 'tls')),
@@ -655,6 +1059,53 @@ export const FIELDS: readonly FieldDef[] = [
   str('http.connection', 'Connection', 'http'),
   str('http.content_encoding', 'Content-Encoding', 'http'),
   str('http.content_length_header', 'Content-Length', 'http'),
+
+  // --- the body, once there is one -----------------------------------------
+  //
+  // All `treeOnly`, and `http.file_data` is the one where that is not just
+  // the default. The reference's `http.file_data` holds the body BYTES, so
+  // `http.file_data contains "password"` is a query people already know how
+  // to write; a bag write of a byte COUNT under that name would answer it
+  // wrongly while looking right, which is the exact failure the registry's
+  // "a filter learnt in Wireshark works here" promise exists to prevent.
+  // If the bytes themselves ever become filterable, that is a `Uint8Array`
+  // field type this registry does not yet have - not a number.
+  //
+  // `http.content_length` is the PARSED number beside the raw
+  // `http.content_length_header` above, which is the reference's own split
+  // and the only form `http.content_length > 1000000` can be asked of.
+  treeOnly(str('http.file_data', 'File Data', 'http')),
+  treeOnly(uint('http.content_length', 'Content length', 'http')),
+  treeOnly(uint('http.chunk_size', 'Chunk size', 'http')),
+  treeOnly(str('http.chunk_data', 'Chunk data', 'http')),
+  treeOnly(str('http.chunk_boundary', 'Chunk boundary', 'http')),
+  treeOnly(str('http.cookie_pair', 'Cookie pair', 'http')),
+
+  // --- and what the body turns out to BE ------------------------------------
+  //
+  // `json.key` is the one here anybody types: `json.key == "error"` finds
+  // every API response that failed, across every endpoint, without knowing
+  // any of their shapes. It is `treeOnly` all the same - the bag is built for
+  // every frame and kept for as long as the frame is (ADR 0007), and a
+  // document with two hundred keys would put two hundred entries in it.
+  //
+  // **`media.type` is `FT_BYTES` in the reference**, holding the body rather
+  // than the MIME string its name suggests. Matched, because the alternative
+  // is a name people already know answering a different question here - the
+  // same trap `http.file_data` carries.
+  treeOnly(str('json.object', 'Object', 'json')),
+  treeOnly(str('json.array', 'Array', 'json')),
+  treeOnly(str('json.member', 'Member', 'json')),
+  treeOnly(str('json.key', 'Key', 'json')),
+  treeOnly(str('json.value.string', 'String value', 'json')),
+  treeOnly(uint('json.value.number', 'Number value', 'json')),
+  treeOnly(bool('json.value.true', 'True value', 'json')),
+  treeOnly(bool('json.value.false', 'False value', 'json')),
+  treeOnly(str('json.value.null', 'Null value', 'json')),
+  treeOnly(str('media.type', 'Media type', 'media')),
+  treeOnly(str('data.data', 'Data', 'data')),
+  treeOnly(uint('data.len', 'Length', 'data')),
+  treeOnly(str('data.text', 'Text', 'data')),
   str('http.content_range', 'Content-Range', 'http'),
   str('http.content_type', 'Content-Type', 'http'),
   str('http.cookie', 'Cookie', 'http'),
@@ -1078,6 +1529,53 @@ export const FIELDS: readonly FieldDef[] = [
   str('dhcp.fqdn.name', 'Client FQDN', 'dhcp'),
   { abbrev: 'dhcp.hw.mac_addr', label: 'Client MAC address', type: 'mac', layer: 'dhcp' },
   { abbrev: 'dhcp.ip.your', label: 'Your (client) IP address', type: 'ipv4', layer: 'dhcp' },
+
+  // --- the rest of the BOOTP header, and the shape of an option -------------
+  //
+  // Eleven of these were drawn with the right value and byte range and no
+  // name; the rest are rows this dissector had the bytes for and never built.
+  // `treeOnly` under the rule in the block above: DHCP is two frames in a
+  // browsing capture and every one of these is either a constant given the
+  // layer, a decomposition of bytes the bag already holds, or the TLV framing
+  // itself - none of it is a column, a colour rule or a replay seed.
+  //
+  // `dhcp.option.type` is the option row, and it repeats once per option;
+  // `dhcp.option.value` is the raw payload the reference hides by default and
+  // draws anyway, because an option this build does not decode still has to
+  // show its bytes somewhere.
+  treeOnly(uint('dhcp.hw.type', 'Hardware type', 'dhcp')),
+  treeOnly(uint('dhcp.hw.len', 'Hardware address length', 'dhcp')),
+  treeOnly(uint('dhcp.hops', 'Hops', 'dhcp')),
+  treeOnly(uint('dhcp.secs', 'Seconds elapsed', 'dhcp')),
+  treeOnly(uint('dhcp.flags', 'Bootp flags', 'dhcp')),
+  treeOnly(bool('dhcp.flags.bc', 'Broadcast flag', 'dhcp')),
+  treeOnly(uint('dhcp.flags.reserved', 'Reserved flags', 'dhcp')),
+  treeOnly({ abbrev: 'dhcp.ip.client', label: 'Client IP address', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly({ abbrev: 'dhcp.ip.server', label: 'Next server IP address', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly({ abbrev: 'dhcp.ip.relay', label: 'Relay agent IP address', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly(str('dhcp.hw.addr_padding', 'Client hardware address padding', 'dhcp')),
+  treeOnly(str('dhcp.server', 'Server host name', 'dhcp')),
+  treeOnly(str('dhcp.file', 'Boot file name', 'dhcp')),
+  treeOnly(str('dhcp.cookie', 'Magic cookie', 'dhcp')),
+  treeOnly(uint('dhcp.option.type', 'Option', 'dhcp')),
+  treeOnly(uint('dhcp.option.length', 'Length', 'dhcp')),
+  treeOnly(str('dhcp.option.value', 'Value', 'dhcp')),
+  treeOnly(uint('dhcp.option.end', 'Option End', 'dhcp')),
+  treeOnly(str('dhcp.option.padding', 'Padding', 'dhcp')),
+  treeOnly({ abbrev: 'dhcp.option.subnet_mask', label: 'Subnet Mask', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly({ abbrev: 'dhcp.option.router', label: 'Router', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly({ abbrev: 'dhcp.option.domain_name_server', label: 'Domain Name Server', type: 'ipv4', layer: 'dhcp' }),
+  treeOnly(uint('dhcp.option.ip_address_lease_time', 'IP Address Lease Time', 'dhcp')),
+  // RFC 4702's flags byte: who may write this lease's DNS records, and in
+  // which encoding the name that follows is written.
+  treeOnly(uint('dhcp.fqdn.flags', 'Flags', 'dhcp')),
+  treeOnly(uint('dhcp.fqdn.mbz', 'Reserved flags', 'dhcp')),
+  treeOnly(bool('dhcp.fqdn.n', 'Server DDNS', 'dhcp')),
+  treeOnly(bool('dhcp.fqdn.e', 'Encoding', 'dhcp')),
+  treeOnly(bool('dhcp.fqdn.o', 'Server overrides', 'dhcp')),
+  treeOnly(bool('dhcp.fqdn.s', 'Server', 'dhcp')),
+  treeOnly(uint('dhcp.fqdn.rcode1', 'A-RR result', 'dhcp')),
+  treeOnly(uint('dhcp.fqdn.rcode2', 'PTR-RR result', 'dhcp')),
   uint('dhcpv6.msgtype', 'Message type', 'dhcpv6'),
   uint('dhcpv6.xid', 'Transaction ID', 'dhcpv6'),
   str('dhcpv6.duid.bytes', 'DUID', 'dhcpv6'),
@@ -1117,6 +1615,127 @@ export const FIELDS: readonly FieldDef[] = [
   // --- IEEE 1905.1 -----------------------------------------------------------
   uint('ieee1905.message_type', 'Message type', 'ieee1905'),
   uint('ieee1905.message_id', 'Message id', 'ieee1905'),
+
+  // --- IEEE 1905.1a / EasyMesh: the CMDU header and every TLV body ---------
+  //
+  // This layer was 2 of 97 - the worst in the fixtures - because the TLV run
+  // after the 8-byte header was never read at all. All `treeOnly`: a mesh
+  // control frame is read by expanding it, and none of this belongs in a
+  // column, a colour rule or a replay seed.
+  //
+  // `ap_extended_metrics.Broadcast_bytes_sent`'s capital B is the reference's
+  // own inconsistency with the six counters beside it. Matched, not tidied -
+  // `wireshark-abbrevs.ts` holds every name here to `tshark -G fields`.
+  treeOnly(uint('ieee1905.message_version', 'Message version', 'ieee1905')),
+  treeOnly(uint('ieee1905.message_reserved', 'Message reserved', 'ieee1905')),
+  treeOnly(uint('ieee1905.fragment_id', 'Fragment id', 'ieee1905')),
+  treeOnly(uint('ieee1905.flags', 'Flags', 'ieee1905')),
+  treeOnly(bool('ieee1905.last_fragment', 'Last fragment', 'ieee1905')),
+  treeOnly(bool('ieee1905.relay_indicator', 'Relay indicator', 'ieee1905')),
+
+  // The TLV framing: a type, then a length whose top two bits are reserved.
+  treeOnly(uint('ieee1905.tlv_type', 'TLV type', 'ieee1905')),
+  treeOnly(uint('ieee1905.tlv_length', 'TLV length', 'ieee1905')),
+  treeOnly(uint('ieee1905.tlv_length.reserved', 'TLV length reserved', 'ieee1905')),
+  treeOnly(uint('ieee1905.tlv_length.length', 'TLV length length', 'ieee1905')),
+
+  // Addresses and media types, which appear in half the TLV types.
+  treeOnly({ abbrev: 'ieee1905.1905_al_mac_addr', label: '1905 AL MAC address type', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.mac_addr', label: 'MAC address type', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.local_intf.mac_address', label: 'Local interface MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.neighbor_al_mac_addr', label: 'Neighbor MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.responder_al_mac_addr', label: 'Responder MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly({ abbrev: 'ieee1905.receiving_al_mac_addr', label: 'Receiving AL MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.dev_info.media_type', 'Media type', 'ieee1905')),
+  treeOnly(uint('ieee1905.media_type.bits_15_to_8', 'Media type bits 15 to 8', 'ieee1905')),
+  treeOnly(uint('ieee1905.media_type.bits_7_to_0', 'Media type bits 7 to 0', 'ieee1905')),
+
+  // Device information and the neighbour lists - the topology half.
+  treeOnly(uint('ieee1905.dev_info.local_int_cnt', 'Local interface count', 'ieee1905')),
+  treeOnly(uint('ieee1905.dev_info.spec_info_len', 'Special info length', 'ieee1905')),
+  treeOnly(str('ieee1905.dev_info.spec_info', 'Special info', 'ieee1905')),
+  treeOnly(uint('ieee1905.neighbor_flags', 'IEEE1905 neighbor flags', 'ieee1905')),
+  treeOnly(bool('ieee1905.bridges', 'IEEE1905 bridges', 'ieee1905')),
+
+  // The link metrics, which is what a mesh actually argues about.
+  treeOnly(uint('ieee1905.bridgeFlag', 'IEEE 802.1 bridge flag', 'ieee1905')),
+  treeOnly(uint('ieee1905.packetErrors', 'Packet errors', 'ieee1905')),
+  treeOnly(uint('ieee1905.transmittedPackets', 'Transmitted packets', 'ieee1905')),
+  treeOnly(uint('ieee1905.packets_received', 'Packets received', 'ieee1905')),
+  treeOnly(uint('ieee1905.macThroughputCapacity', 'MAC throughput capacity', 'ieee1905')),
+  treeOnly(uint('ieee1905.linkAvailability', 'Link availability', 'ieee1905')),
+  treeOnly(uint('ieee1905.phyRate', 'Phy rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.rssi', 'RSSI', 'ieee1905')),
+
+  treeOnly(str('ieee1905.vendor_specific.oui', 'Vendor specific OUI', 'ieee1905')),
+  treeOnly(str('ieee1905.vendor_specific.info', 'Vendor specific information', 'ieee1905')),
+  treeOnly(uint('ieee1905.supported_service.service_count', 'Supported service count', 'ieee1905')),
+  treeOnly(uint('ieee1905.supported_service.service', 'Supported service', 'ieee1905')),
+  treeOnly(uint('ieee1905.multi_ap_version', 'Multi-AP Profile', 'ieee1905')),
+
+  // The operational BSS list, and who is associated to each.
+  treeOnly(uint('ieee1905.ap_bss_radio_count', 'AP operational BSS radio count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.ap_radio_identifier', label: 'AP radio identifier', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.ap_bss_intf_count', 'AP operational interface count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.ap_bss_local_intf_addr', label: 'AP operational local interface MAC addr', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.ap_bss_local_intf_ssid_len', 'AP operational BSS local interface SSID len', 'ieee1905')),
+  treeOnly(str('ieee1905.ap_bss_local_intf_ssid', 'AP operational BSS local interface SSID', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_client.bss_count', 'Included BSS count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_client.bss', label: 'Associated BSS', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_client.client_count', 'Associated client count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_client.mac_addr', label: 'Associated client MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_client.time_since', 'Time since last association', 'ieee1905')),
+
+  // AP metrics: how busy the radio is and what it thinks it can still carry.
+  treeOnly({ abbrev: 'ieee1905.ap_metrics.bssid', label: 'Multi-AP agent BSSID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.ap_metrics.channel_util', 'Channel utilization', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_metrics.sta_count', 'BSS STA count', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_metrics.flags', 'Estimated Service Parameters Flags', 'ieee1905')),
+  treeOnly(bool('ieee1905.ap_metrics.include_ac_eq_be_params', 'Estimated Service Parameters for AC=BE', 'ieee1905')),
+  treeOnly(bool('ieee1905.ap_metrics.include_ac_eq_bk_params', 'Estimated Service Parameters for AC=BK', 'ieee1905')),
+  treeOnly(bool('ieee1905.ap_metrics.include_ac_eq_vo_params', 'Estimated Service Parameters for AC=VO', 'ieee1905')),
+  treeOnly(bool('ieee1905.ap_metrics.include_ac_eq_vi_params', 'Estimated Service Parameters for AC=VI', 'ieee1905')),
+  treeOnly(str('ieee1905.ap_metrics.est_param_be', 'Estimated service parameters AC=BE', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.ap_extended_metrics.bssid', label: 'BSSID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.ap_extended_metrics.unicast_bytes_sent', 'UnicastBytesSent', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.unicast_bytes_received', 'UnicastBytesReceived', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.multicast_bytes_sent', 'MulticastBytesSent', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.multicast_bytes_received', 'MulticastBytesReceived', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.Broadcast_bytes_sent', 'BroadcastBytesSent', 'ieee1905')),
+  treeOnly(uint('ieee1905.ap_extended_metrics.broadcast_bytes_received', 'BroadcastBytesReceived', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.radio_metrics.radio_id', label: 'Radio unique ID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.radio_metrics.noise', 'Noise', 'ieee1905')),
+  treeOnly(uint('ieee1905.radio_metrics.transmit', 'Transmit', 'ieee1905')),
+  treeOnly(uint('ieee1905.radio_metrics.receive_self', 'ReceiveSelf', 'ieee1905')),
+  treeOnly(uint('ieee1905.radio_metrics.receive_other', 'ReceiveOther', 'ieee1905')),
+
+  // Per-station metrics: the mesh's own view of every client on it.
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_link_metrics.mac_addr', label: 'MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.bssid_count', 'Number of BSSIDs for STA', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_link_metrics.bssid', label: 'STA BSSID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.time_delta', 'Measurement time delta', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.down_rate', 'Downlink data rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.up_rate', 'Uplink data rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_link_metrics.rcpi', 'Measured uplink RCPI for STA', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_extended_link_metrics.mac_addr', label: 'Associated STA MAC Address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.count', 'BSSID count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_extended_link_metrics.bssid', label: 'BSSID', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.lddlr', 'Last Data Downlink Rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.ldulr', 'Last Data Uplink Rate', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.ur', 'Utilization Receive', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_extended_link_metrics.ut', 'Utilization Transmit', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_sta_traffic_stats.mac_addr', label: 'Associated STA MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.bytes_sent', 'Bytes Sent', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.bytes_rcvd', 'Bytes Received', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.packets_sent', 'Packets Sent', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.packets_rcvd', 'Packets Received', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.tx_pkt_errs', 'Tx Packet Errors', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.rx_packet_errs', 'Rx Packet Errors', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_sta_traffic_stats.retrans_count', 'Retransmission Count', 'ieee1905')),
+  treeOnly({ abbrev: 'ieee1905.assoc_wf6_sta_status_report.mac_addr', label: 'MAC address', type: 'mac', layer: 'ieee1905' }),
+  treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.tid_count', 'Number of Wi-Fi 6 TIDs', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.tid', 'TID', 'ieee1905')),
+  treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.queue_size', 'Queue Size', 'ieee1905')),
 ];
 
 export const FIELD_BY_ABBREV: ReadonlyMap<string, FieldDef> = new Map(FIELDS.map((f) => [f.abbrev, f]));

@@ -19,6 +19,133 @@
  * runs inside the pipeline Worker.
  */
 
+/**
+ * How many conversations each per-layer index remembers.
+ *
+ * Matches `tcpStreamTracker.ts`'s `MAX_CONNECTIONS` deliberately: these are the
+ * same kind of object bounded for the same reason (docs/decisions/0014), and
+ * two different caps would only invite the question of which was right.
+ */
+const MAX_CONVERSATIONS = 16384;
+
+/** What a conversation index knows about one conversation. */
+interface ConversationFacts {
+  /** Assigned in order of first appearance, and never reused. */
+  index: number;
+  /** This frame's position in the conversation, counting from 1. */
+  pnum: number;
+  /** Seconds since the conversation's first frame. */
+  sinceFirst: number;
+  /** Seconds since the conversation's previous frame. */
+  sincePrev: number;
+}
+
+interface ConversationRecord {
+  index: number;
+  packets: number;
+  firstTsUs: number;
+  lastTsUs: number;
+}
+
+/**
+ * A conversation index: the thing that turns an endpoint pair into the small
+ * integer the reference analyzer calls `eth.stream`, `ip.stream`, `ipv6.stream`
+ * or `udp.stream`.
+ *
+ * ## Why this is an arrival-order counter and not a hash
+ *
+ * A hash of the tuple would be tempting: it needs no state, it is stable
+ * across a replay with no seeding, and it would pass every assertion in this
+ * repository. It is also wrong in the one way that matters. These numbers are
+ * the reference's numbers - somebody reads `ip.stream == 3` off Wireshark and
+ * types it here - so an index that is internally consistent but disagrees with
+ * Wireshark answers a different question while looking like the same one.
+ * Arrival order is not an implementation detail of this field; it IS the
+ * field.
+ *
+ * That choice is what forces `seedNext`, and through it the five stream
+ * indices into `Packet.fields`: a replay rebuilds one conversation from a
+ * five-tuple bundle and would otherwise call it 0. See `seedNextIndices`.
+ *
+ * Bounded like every other tracker here. An index is never reused: evicting a
+ * conversation forgets it, and if it comes back it is a new one with a new
+ * number, which is what `tcpStreamTracker.ts`'s `evictPastCap` does and for
+ * the same reason - the alternative is two conversations answering to one id.
+ */
+class ConversationIndex {
+  private readonly seen = new Map<string, ConversationRecord>();
+  private next = 0;
+  private evictedCount = 0;
+  /**
+   * The last conversation looked up, remembered by its ENDPOINTS rather than
+   * by its key.
+   *
+   * Consecutive frames share a conversation almost always - overwhelmingly so
+   * for the MAC pair, which is consulted on every frame. Both orders are
+   * checked because a conversation's two directions arrive interleaved, and
+   * they are the same conversation.
+   *
+   * **Comparing the endpoints rather than a composed key was an optimisation
+   * that did not work, and saying so is the point.** The reasoning was that a
+   * hit should not have to build the key string at all; three runs each side
+   * measured 27,315 f/s against 27,499 for the composed-key version, which is
+   * no better and inside the noise. So the ~2.8% these indices cost is not the
+   * concatenation, and whoever tries to buy it back should look at the Map
+   * probe, the per-conversation record, or the four extra tree rows - not
+   * here. This form is kept only because it allocates less for the same
+   * speed; it is not the reason anything got faster, because nothing did.
+   */
+  private lastA?: string;
+  private lastB?: string;
+  private lastRecord?: ConversationRecord;
+
+  observe(a: string, b: string, tsUs: number): ConversationFacts {
+    let record: ConversationRecord | undefined;
+    if (this.lastRecord !== undefined
+      && ((this.lastA === a && this.lastB === b) || (this.lastA === b && this.lastB === a))) {
+      record = this.lastRecord;
+    } else {
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+      record = this.seen.get(key);
+      if (record === undefined) {
+        if (this.seen.size >= MAX_CONVERSATIONS) {
+          const oldest = this.seen.keys().next();
+          if (!oldest.done) { this.seen.delete(oldest.value); this.evictedCount++; }
+        }
+        record = { index: this.next++, packets: 0, firstTsUs: tsUs, lastTsUs: tsUs };
+        this.seen.set(key, record);
+      }
+      this.lastA = a;
+      this.lastB = b;
+      this.lastRecord = record;
+    }
+
+    record.packets++;
+    const sinceFirst = (tsUs - record.firstTsUs) / 1_000_000;
+    // The first frame of a conversation has no previous one, and the reference
+    // prints 0 rather than omitting the row.
+    const sincePrev = record.packets === 1 ? 0 : (tsUs - record.lastTsUs) / 1_000_000;
+    record.lastTsUs = tsUs;
+    return { index: record.index, pnum: record.packets, sinceFirst, sincePrev };
+  }
+
+  /** See `L3Tracker.seedNextIndices`. */
+  seedNext(index: number): void {
+    if (this.next === 0) this.next = index;
+  }
+
+  get evicted(): number { return this.evictedCount; }
+
+  reset(): void {
+    this.seen.clear();
+    this.next = 0;
+    this.evictedCount = 0;
+    this.lastA = undefined;
+    this.lastB = undefined;
+    this.lastRecord = undefined;
+  }
+}
+
 /** How many datagrams' worth of fragments are remembered at once. */
 const MAX_TRACKED_DATAGRAMS = 2048;
 /** How many ARP bindings are remembered. */
@@ -83,10 +210,74 @@ export interface ArpConflict {
 }
 
 export class L3Tracker {
+  private readonly ethIndex = new ConversationIndex();
+  private readonly ipIndex = new ConversationIndex();
+  private readonly ipv6Index = new ConversationIndex();
+  private readonly udpIndex = new ConversationIndex();
   private fragments = new Map<string, FragmentInfo>();
   private parts = new Map<string, FragmentPart[]>();
   private retainedBytes = 0;
   private arpBindings = new Map<string, { mac: string; frame: number }>();
+
+  /** `eth.stream`: the conversation between two MAC addresses. */
+  ethStream(srcMac: string, dstMac: string, tsUs: number): ConversationFacts {
+    return this.ethIndex.observe(srcMac, dstMac, tsUs);
+  }
+
+  /**
+   * `ip.stream` / `ipv6.stream`: the conversation between two addresses.
+   *
+   * Keyed on the addresses alone, with no ports - which is the reference's
+   * keying, and the reason a browser opening forty connections to one host
+   * shows forty `tcp.stream` values and one `ip.stream`.
+   */
+  ipStream(src: string, dst: string, tsUs: number): ConversationFacts {
+    return this.ipIndex.observe(src, dst, tsUs);
+  }
+
+  ipv6Stream(src: string, dst: string, tsUs: number): ConversationFacts {
+    return this.ipv6Index.observe(src, dst, tsUs);
+  }
+
+  /** `udp.stream`, keyed on the unordered four-tuple. */
+  udpStream(src: string, srcPort: number, dst: string, dstPort: number, tsUs: number): ConversationFacts {
+    return this.udpIndex.observe(`${src}:${srcPort}`, `${dst}:${dstPort}`, tsUs);
+  }
+
+  /**
+   * Starts each index where a replay says it should, mirroring
+   * `TcpStreamTracker.seedNextStreamId`.
+   *
+   * A detail tree is rebuilt by replaying one conversation through fresh
+   * trackers (`services/pipeline/replay.ts`), and the bundle is selected by a
+   * five-tuple - so a fresh index sees exactly one conversation and would call
+   * it 0, where the packet list says 37. `scripts/pipeline/replay.ts` holds the
+   * replayed tree to exact string equality with the eager one, so that
+   * disagreement is a build failure rather than a cosmetic one.
+   *
+   * Seeding sets the NEXT index rather than restoring the table, so it is exact
+   * only while the bundle holds one conversation per index. For `ip`, `ipv6`
+   * and `udp` it does, by construction. For `eth` it holds while the
+   * conversation kept one MAC pair - a Wi-Fi roam or a NIC failover mid-stream
+   * gives a wrong number on the frames after the change. That is the same
+   * approximation `seedNextStreamId` already accepts, and it is written down
+   * rather than fixed because the alternative is shipping the whole table into
+   * every replay message.
+   */
+  seedNextIndices(seeds: { eth?: number; ip?: number; ipv6?: number; udp?: number }): void {
+    if (seeds.eth !== undefined) this.ethIndex.seedNext(seeds.eth);
+    if (seeds.ip !== undefined) this.ipIndex.seedNext(seeds.ip);
+    if (seeds.ipv6 !== undefined) this.ipv6Index.seedNext(seeds.ipv6);
+    if (seeds.udp !== undefined) this.udpIndex.seedNext(seeds.udp);
+  }
+
+  /** Conversations forgotten to the cap, per index - the counter ADR 0014 wants. */
+  get evictedConversations(): { eth: number; ip: number; ipv6: number; udp: number } {
+    return {
+      eth: this.ethIndex.evicted, ip: this.ipIndex.evicted,
+      ipv6: this.ipv6Index.evicted, udp: this.udpIndex.evicted,
+    };
+  }
 
   /**
    * Records one fragment and returns what is known about its datagram.
@@ -190,6 +381,10 @@ export class L3Tracker {
     this.parts.clear();
     this.retainedBytes = 0;
     this.arpBindings.clear();
+    this.ethIndex.reset();
+    this.ipIndex.reset();
+    this.ipv6Index.reset();
+    this.udpIndex.reset();
   }
 }
 

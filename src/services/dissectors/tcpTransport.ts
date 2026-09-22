@@ -25,7 +25,9 @@ import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
 import { dissectLdap, looksLikeLdap, freshLdapConversation, type LdapResult } from './ldap';
 import { dissectKerberos, looksLikeKerberos, KERBEROS_PORT, type KerberosResult } from './kerberos';
 import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2Result } from './smb2';
+import { dataLayer } from './mediaType';
 import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
+import type { TcpReassembly } from './tls';
 import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
 
 /**
@@ -53,18 +55,72 @@ const LDAP_PORTS = new Set([389, 3268]);
 // without one are drawn and not published; a row with no abbrev is display
 // only, and the tree's menu greys out its filter items rather than offering
 // an expression nothing would answer.
-const TCP_FLAG_ROWS: { name: string; bitOffset: number; bitLength: number; set: string; unset: string; abbrev?: string }[] = [
-  { name: 'Reserved', bitOffset: 0, bitLength: 3, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.res' },
-  { name: 'Accurate ECN', bitOffset: 3, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ae' },
-  { name: 'Congestion Window Reduced', bitOffset: 4, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.cwr' },
-  { name: 'ECN-Echo', bitOffset: 5, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ece' },
-  { name: 'Urgent', bitOffset: 6, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.urg' },
-  { name: 'Acknowledgment', bitOffset: 7, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ack' },
-  { name: 'Push', bitOffset: 8, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.push' },
-  { name: 'Reset', bitOffset: 9, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.reset' },
-  { name: 'Syn', bitOffset: 10, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.syn' },
-  { name: 'Fin', bitOffset: 11, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.fin' },
+const TCP_FLAG_ROWS: { name: string; bitOffset: number; bitLength: number; set: string; unset: string; abbrev?: string; char: string }[] = [
+  { name: 'Reserved', bitOffset: 0, bitLength: 3, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.res', char: 'R' },
+  { name: 'Accurate ECN', bitOffset: 3, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ae', char: 'E' },
+  { name: 'Congestion Window Reduced', bitOffset: 4, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.cwr', char: 'C' },
+  { name: 'ECN-Echo', bitOffset: 5, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ece', char: 'E' },
+  { name: 'Urgent', bitOffset: 6, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.urg', char: 'U' },
+  { name: 'Acknowledgment', bitOffset: 7, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.ack', char: 'A' },
+  { name: 'Push', bitOffset: 8, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.push', char: 'P' },
+  { name: 'Reset', bitOffset: 9, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.reset', char: 'R' },
+  { name: 'Syn', bitOffset: 10, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.syn', char: 'S' },
+  { name: 'Fin', bitOffset: 11, bitLength: 1, set: 'Set', unset: 'Not set', abbrev: 'tcp.flags.fin', char: 'F' },
 ];
+
+/**
+ * The twelve flag bits as one string - `·······AP···` - which is how the
+ * reference analyzer renders them and the fastest way to read a segment's
+ * intent without expanding the subtree.
+ *
+ * One character per bit, most significant first, so the index into the string
+ * IS `bitOffset`. Reserved spans three bits and therefore three characters,
+ * each answering for its own bit rather than for the field: a string that
+ * said `RRR` because any one of them was set would be the only row here that
+ * lied about which bit it meant.
+ */
+function tcpFlagsString(window12: number): string {
+  let out = '';
+  for (const row of TCP_FLAG_ROWS) {
+    for (let i = 0; i < row.bitLength; i++) {
+      const shift = 12 - row.bitOffset - i - 1;
+      out += ((window12 >> shift) & 1) === 1 ? row.char : '·';
+    }
+  }
+  return out;
+}
+
+/**
+ * The six things a TCP conversation may contain, in the reference's bit order
+ * and with its own letters. A capture missing SYN and SYN-ACK is one whose
+ * relative sequence numbers are relative to wherever the capture started,
+ * which is the single most useful thing this subtree says.
+ */
+const COMPLETENESS_BITS: { name: string; bit: number; char: string }[] = [
+  { name: 'RST', bit: 32, char: 'R' },
+  { name: 'FIN', bit: 16, char: 'F' },
+  { name: 'Data', bit: 8, char: 'D' },
+  { name: 'ACK', bit: 4, char: 'A' },
+  { name: 'SYN-ACK', bit: 2, char: 'S' },
+  { name: 'SYN', bit: 1, char: 'S' },
+];
+
+function completenessFields(mask: number): ProtocolField[] {
+  const str = mask === 0
+    // The reference's own spelling for "none of them", rather than six dots,
+    // because six dots and a missing row look the same at a glance.
+    ? '[ Null ]'
+    : COMPLETENESS_BITS.map((b) => ((mask & b.bit) !== 0 ? b.char : '·')).join('');
+  return [
+    { name: 'Completeness Flags', value: str, abbrev: 'tcp.completeness.str', generated: true },
+    ...COMPLETENESS_BITS.map((b) => ({
+      name: b.name,
+      value: (mask & b.bit) !== 0 ? 'Present' : 'Absent',
+      abbrev: `tcp.completeness.${b.name.toLowerCase()}`,
+      generated: true,
+    })),
+  ];
+}
 
 /** Everything the TCP decode needs that is not the bytes themselves. */
 export interface TcpContext {
@@ -140,7 +196,7 @@ export function dissectTcpTransport(
   else if (srcPort === 80 || dstPort === 80) proto = 'HTTP';
   else if (srcPort === 22 || dstPort === 22) proto = 'SSH';
 
-  const tcpOptions = tcpHeaderLen > 20 ? parseTcpOptions(rawBytes, transportOffset + 20, transportOffset + tcpHeaderLen) : null;
+  const tcpOptions = tcpHeaderLen > 20 ? parseTcpOptions(rawBytes, transportOffset + 20, transportOffset + tcpHeaderLen, ackNum) : null;
   // Handshake-only options. SACK blocks are handled further down, once the
   // stream tracker is available, because their edges display relative to the
   // peer's sequence space just like Ack= does.
@@ -227,17 +283,21 @@ export function dissectTcpTransport(
   let sinceStreamStart: number | undefined;
   let sincePreviousInStream: number | undefined;
   let conversationCompleteness: string | undefined;
+  let completenessMask = 0;
   let isKeepAlive = false;
   let lostSegment = false;
   let tlsInOrder = true;
   let analysis: TcpAnalysis | undefined;
+  /** Whether this frame's FIN opened the close or answered it. */
+  let finRole: 'active' | 'passive' | undefined;
   if (tcpTracker) {
     streamId = tcpTracker.getStreamId(srcIp, srcPort, dstIp, dstPort);
     const position = tcpTracker.recordStreamPacket(streamId, tsUs);
     streamPacketNumber = position.packetNumber;
     sinceStreamStart = position.sinceFirst;
     sincePreviousInStream = position.sincePrevious;
-    tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst);
+    tcpTracker.updateConnectionState(streamId, syn, ack, fin, rst, payloadLength > 0);
+    if (fin) finRole = tcpTracker.noteFin(srcIp, srcPort, dstIp, dstPort);
 
     // Asked before the analysis advances the direction, so it describes
     // where the stream stood when this segment arrived.
@@ -277,12 +337,14 @@ export function dissectTcpTransport(
     }
 
     conversationCompleteness = tcpTracker.getConversationCompleteness(streamId);
+    completenessMask = tcpTracker.getCompletenessMask(streamId);
   }
 
   // The TLS record layer, now that the segment's place in the stream is
   // known. Only streams that look like TLS pay for cursor state: port 443, a
   // direction that already has a cursor, or a plausible record header.
   let reassembledFrom: number[] | undefined;
+  let reassemblies: TcpReassembly[] | undefined;
   let labelPatches: { frameId: number; protocolLabel: string }[] | undefined;
   // A segment out of order is still dissected - Wireshark reassembles it and
   // labels it with what it carries - but a retransmission is not: its bytes
@@ -411,11 +473,28 @@ export function dissectTcpTransport(
         // a Server Hello sitting in one is still a Server Hello and
         // Wireshark labels it as one.
         frameId: frameId ?? 0, tsUs, cursor, conversation, inOrder: tlsInOrder, segmentSeq: seqNum, gap: lostSegment,
+        // Whichever end is the TLS port; the other is an ephemeral client one.
+        serverPort: dstPort === 443 ? dstPort : srcPort === 443 ? srcPort : dstPort,
       });
       if (outcome.kind === 'tls') {
         tlsResult = outcome.result;
         reassembledFrom = outcome.result.reassembledFrom;
+        reassemblies = outcome.result.reassemblies;
         labelPatches = outcome.result.labelPatches;
+        // `tls.stream` is assigned here rather than inside the TLS decoder
+        // because this is where the connection is identified. It is a sequence
+        // of its own, not `tcp.stream`: a connection only takes a number once
+        // it has actually produced a record.
+        if (tcpTracker !== undefined) {
+          const tlsStream = tcpTracker.getTlsStreamId(srcIp, srcPort, dstIp, dstPort);
+          tlsResult.layer.fields.push({
+            name: '[Stream index]', value: tlsStream, generated: true, abbrev: 'tls.stream',
+          });
+          // Into the bag as well as onto the row, for the same reason the four
+          // `*.stream` indices are: `seedsFor` reads it back off the frame so a
+          // replay can be told what this conversation was called.
+          tlsResult.fields['tls.stream'] = tlsStream;
+        }
       }
     }
   }
@@ -557,6 +636,23 @@ export function dissectTcpTransport(
       ? [tlsResult.layer, ...(tlsResult.appLayers ?? [])]
       : httpResult
       ? httpResult.layers
+      // Nothing above claimed these bytes, so they are the reference's `data`
+      // protocol - the chain's end, drawn rather than dropped.
+      //
+      // **`tlsOnThisConnection` is the whole of the difficulty.** A segment
+      // carrying the middle of a TLS record produces no layer of its own, and
+      // calling that unclaimed raised `data` on 390 frames the reference
+      // attributes to TLS reassembly instead. "No layer came back" is not the
+      // same question as "nobody wanted these bytes".
+      //
+      // The bounds test is the same one `udpTransport.ts` explains: a quoted
+      // datagram inside an ICMP error carries eight bytes of transport header
+      // and a length field describing a frame nobody captured.
+      : payloadLength > 0 && !tlsOnThisConnection
+        && transportOffset + tcpHeaderLen + payloadLength <= rawBytes.length
+      ? [dataLayer(rawBytes.subarray(
+        transportOffset + tcpHeaderLen, transportOffset + tcpHeaderLen + payloadLength,
+      ))]
       : undefined,
     // The certificate's rows sit inside the TLS layer's tree, so there is no
     // layer name for `frameProtocols` to read `x509ce` off - the same position
@@ -607,8 +703,8 @@ export function dissectTcpTransport(
       summary: `Transmission Control Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
       rawBytesRange: [transportOffset, transportOffset + tcpHeaderLen - 1],
       fields: [
-        { name: 'Source Port', value: srcPort, abbrev: 'tcp.srcport', rawBytesRange: [transportOffset, transportOffset + 1] },
-        { name: 'Destination Port', value: dstPort, abbrev: 'tcp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3] },
+        { name: 'Source Port', value: srcPort, abbrev: 'tcp.srcport', rawBytesRange: [transportOffset, transportOffset + 1], children: [{ name: 'Source or Destination Port', value: srcPort, abbrev: 'tcp.port', rawBytesRange: [transportOffset, transportOffset + 1] }] },
+        { name: 'Destination Port', value: dstPort, abbrev: 'tcp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3], children: [{ name: 'Source or Destination Port', value: dstPort, abbrev: 'tcp.port', rawBytesRange: [transportOffset + 2, transportOffset + 3] }] },
         {
           name: 'Sequence Number',
           value: `${relSeq} (relative sequence number)`,
@@ -710,8 +806,35 @@ export function dissectTcpTransport(
           }]
           : []),
         ...(conversationCompleteness !== undefined
-          ? [{ name: '[Conversation completeness]', value: conversationCompleteness, generated: true, abbrev: 'tcp.completeness' }]
+          ? [{
+            name: '[Conversation completeness]',
+            value: conversationCompleteness,
+            generated: true,
+            abbrev: 'tcp.completeness',
+            // The summary above stays plain English - the reference prints
+            // "Incomplete, ESTABLISHED (7)" and the number is an internal
+            // bitmask nobody reading a UI should have to decode. The bits
+            // underneath are a different thing: six separate statements about
+            // what this capture contains, each one a filter worth typing.
+            children: completenessFields(completenessMask),
+          }]
           : []),
+        // **What this frame DOES to the connection**, which the flag bits
+        // above state and do not interpret. The reference draws these as
+        // generated rows and they are the filters anyone reaches for on a
+        // capture full of short-lived connections: `tcp.connection.rst` finds
+        // every refused or dropped one without a flag expression, and
+        // `tcp.connection.fin_active` answers "which end hung up first" -
+        // which a flag cannot, because both ends send the same flag.
+        ...connectionRows(syn, ack, fin, rst, finRole),
+        // **A PDU that spanned segments, drawn where TCP reassembled it.**
+        // This build tracked every contributing frame and every byte count
+        // from the day TLS records were first followed across segments, and
+        // spent all of it on one composed string inside the TLS record. The
+        // reference draws a subtree with a row per frame, each a link - which
+        // is the difference between reading "#289(1428), #290(1164)" and
+        // clicking through to frame 289.
+        ...reassemblyRows(reassemblies),
         // **A parent, where they were flat siblings of Window and Checksum.**
         // The reference nests them under one Options row and names that row
         // `tcp.options`; without it there was no way to tell, in the tree,
@@ -726,6 +849,20 @@ export function dissectTcpTransport(
           }]
           : []),
         ...(analysis ? tcpAnalysisFields(analysis) : []),
+        // The payload itself, which had no row at all - so a segment whose
+        // payload no sub-dissector claimed showed a header and then nothing,
+        // with no way to tell an empty ACK from 1,440 unread bytes.
+        ...(payloadLength > 0
+          ? [{
+            name: 'TCP payload',
+            value: `${payloadLength} byte${payloadLength === 1 ? '' : 's'}`,
+            abbrev: 'tcp.payload',
+            rawBytesRange: [
+              transportOffset + tcpHeaderLen,
+              Math.min(rawBytes.length, transportOffset + tcpHeaderLen + payloadLength) - 1,
+            ] as [number, number],
+          }]
+          : []),
       ],
     },
   };
@@ -742,7 +879,16 @@ export function dissectTcpTransport(
 function parseTcpOptions(
   rawBytes: Uint8Array,
   optionsStart: number,
-  optionsEnd: number
+  optionsEnd: number,
+  /**
+   * This segment's own cumulative ACK, raw.
+   *
+   * Needed only for D-SACK, which is defined against it (RFC 2883): a first
+   * SACK block at or below the ACK is reporting data the receiver already
+   * has. Passed in rather than re-read here so there is one place that
+   * decodes the header.
+   */
+  ackNumber: number,
 ): {
   fields: ProtocolField[];
   mss?: number;
@@ -787,6 +933,7 @@ function parseTcpOptions(
       fields.push({
         name: 'TCP Option - End of Option List (EOL)',
         value: 'EOL',
+        abbrev: 'tcp.options.eol',
         rawBytesRange: [offset, offset],
         children: optionHeader(offset, kind),
       });
@@ -811,12 +958,21 @@ function parseTcpOptions(
     if (kind === 2 && length === 4) {
       mss = (rawBytes[offset + 2] << 8) | rawBytes[offset + 3];
       infoParts.push(`MSS=${mss}`);
+      // **The option row is named after the OPTION; the value is a child.**
+      // That is the reference's arrangement - `tcp.options.mss` is the option
+      // and `tcp.options.mss_val` the number inside it - and it matters for
+      // more than tidiness: the two have different byte ranges, so a reader
+      // clicking the value highlights the two bytes rather than the whole
+      // option. Same for the two below.
       fields.push({
         name: 'TCP Option - Maximum Segment Size',
         value: `MSS: ${mss}`,
         rawBytesRange: [offset, offset + length - 1],
-        abbrev: 'tcp.options.mss_val',
-        children: optionHeader(offset, kind, length),
+        abbrev: 'tcp.options.mss',
+        children: [
+          ...optionHeader(offset, kind, length),
+          { name: 'MSS Value', value: mss, abbrev: 'tcp.options.mss_val', rawBytesRange: [offset + 2, offset + 3] },
+        ],
       });
     } else if (kind === 3 && length === 3) {
       windowScale = rawBytes[offset + 2];
@@ -825,11 +981,14 @@ function parseTcpOptions(
         name: 'TCP Option - Window Scale',
         value: `${windowScale} (multiply by ${2 ** windowScale})`,
         rawBytesRange: [offset, offset + length - 1],
-        abbrev: 'tcp.options.wscale.shift',
+        abbrev: 'tcp.options.wscale',
         children: [
           ...optionHeader(offset, kind, length),
-          { name: 'Shift count', value: windowScale, rawBytesRange: [offset + 2, offset + 2] },
-          { name: '[Multiplier]', value: 2 ** windowScale, generated: true },
+          { name: 'Shift count', value: windowScale, abbrev: 'tcp.options.wscale.shift', rawBytesRange: [offset + 2, offset + 2] },
+          // Drawn since the option was first read, and never named. It is the
+          // number that actually applies to every window field on the
+          // connection, which makes it the one worth filtering on.
+          { name: '[Multiplier]', value: 2 ** windowScale, generated: true, abbrev: 'tcp.options.wscale.multiplier' },
         ],
       });
     } else if (kind === 4 && length === 2) {
@@ -844,27 +1003,62 @@ function parseTcpOptions(
       });
     } else if (kind === 5) {
       const blockCount = Math.floor((length - 2) / 8);
+      const blockRows: ProtocolField[] = [];
       for (let i = 0; i < blockCount; i++) {
         const blockOffset = offset + 2 + i * 8;
         const leftEdge = ((rawBytes[blockOffset] << 24) | (rawBytes[blockOffset + 1] << 16) | (rawBytes[blockOffset + 2] << 8) | rawBytes[blockOffset + 3]) >>> 0;
         const rightEdge = ((rawBytes[blockOffset + 4] << 24) | (rawBytes[blockOffset + 5] << 16) | (rawBytes[blockOffset + 6] << 8) | rawBytes[blockOffset + 7]) >>> 0;
         sackBlocks.push({ leftEdge, rightEdge });
-        fields.push({
-          name: `TCP Option - SACK Block ${i + 1}`,
+        // **RFC 2883 D-SACK: the FIRST block only, and only when it reports
+        // data the receiver has already acknowledged.** Either it sits at or
+        // below the cumulative ACK - "I got that again" - or it is contained
+        // within the second block, which is how a D-SACK is reported when
+        // there is also a genuine hole. Both tests are on the raw sequence
+        // space, which is what the option carries.
+        //
+        // It says something no other field does: the sender retransmitted
+        // something that had already arrived, so the loss it reacted to was
+        // not loss. That is a spurious retransmission, and it is the
+        // difference between a lossy path and an impatient timer.
+        const isDsack = i === 0 && (
+          seqLessOrEqual(rightEdge, ackNumber)
+          || (blockCount > 1 && isContainedInSecondBlock(rawBytes, offset, leftEdge, rightEdge))
+        );
+        blockRows.push({
+          name: isDsack ? 'D-SACK Sequence' : `TCP SACK Block ${i + 1}`,
           value: `${leftEdge}-${rightEdge}`,
+          abbrev: isDsack ? 'tcp.options.sack.dsack' : undefined,
           rawBytesRange: [blockOffset, blockOffset + 7],
           children: [
-            ...(i === 0 ? optionHeader(offset, kind, length) : []),
             // **Named, and absolute.** The Info column maps these to relative
             // numbers against the peer's base sequence; the tree cannot,
             // because the option is parsed before the base is in scope here.
             // Absolute-and-named beats relative-and-unnameable: a filter can
             // reach them now, and the Info line still reads as Wireshark's.
-            { name: 'left edge', value: leftEdge, abbrev: 'tcp.options.sack_le', rawBytesRange: [blockOffset, blockOffset + 3] },
-            { name: 'right edge', value: rightEdge, abbrev: 'tcp.options.sack_re', rawBytesRange: [blockOffset + 4, blockOffset + 7] },
+            {
+              name: isDsack ? 'D-SACK left edge' : 'left edge', value: leftEdge,
+              abbrev: isDsack ? 'tcp.options.sack.dsack_le' : 'tcp.options.sack_le',
+              rawBytesRange: [blockOffset, blockOffset + 3],
+            },
+            {
+              name: isDsack ? 'D-SACK right edge' : 'right edge', value: rightEdge,
+              abbrev: isDsack ? 'tcp.options.sack.dsack_re' : 'tcp.options.sack_re',
+              rawBytesRange: [blockOffset + 4, blockOffset + 7],
+            },
           ],
         });
       }
+      fields.push({
+        name: 'TCP Option - SACK',
+        value: blockRows.map((row) => row.value).join(' '),
+        abbrev: 'tcp.options.sack',
+        rawBytesRange: [offset, offset + length - 1],
+        children: [
+          ...optionHeader(offset, kind, length),
+          { name: 'TCP SACK Count', value: blockCount, generated: true, abbrev: 'tcp.options.sack.count' },
+          ...blockRows,
+        ],
+      });
     } else if (kind === 8 && length === 10) {
       tsval = ((rawBytes[offset + 2] << 24) | (rawBytes[offset + 3] << 16) | (rawBytes[offset + 4] << 8) | rawBytes[offset + 5]) >>> 0;
       tsecr = ((rawBytes[offset + 6] << 24) | (rawBytes[offset + 7] << 16) | (rawBytes[offset + 8] << 8) | rawBytes[offset + 9]) >>> 0;
@@ -928,7 +1122,7 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
     const categoryOf = (flag: string): ExpertCategory =>
       CATEGORY_BY_FLAG[flag as keyof typeof CATEGORY_BY_FLAG] ?? 'Note';
     children.push({
-      name: '[TCP Analysis Flags]', value: '', generated: true,
+      name: '[TCP Analysis Flags]', value: '', generated: true, abbrev: 'tcp.analysis.flags',
       children: a.tags.map((tag, i) => {
         const flag = a.flags[i] ?? '';
         const category = categoryOf(flag);
@@ -949,7 +1143,7 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
     });
   }
   if (children.length === 0) return [];
-  return [{ name: '[SEQ/ACK analysis]', value: '', generated: true, children }];
+  return [{ name: '[SEQ/ACK analysis]', value: '', generated: true, abbrev: 'tcp.analysis', children }];
 }
 
 function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolField[] {
@@ -957,7 +1151,7 @@ function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolF
   // it without repeating the mid-byte window arithmetic.
   const window12 = ((rawBytes[transportOffset + 12] & 0x0f) << 8) | rawBytes[transportOffset + 13];
 
-  return TCP_FLAG_ROWS.map(row => {
+  return [...TCP_FLAG_ROWS.map(row => {
     const shift = 12 - row.bitOffset - row.bitLength;
     const mask = (1 << row.bitLength) - 1;
     const isSet = ((window12 >> shift) & mask) !== 0;
@@ -972,6 +1166,120 @@ function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolF
         totalBits: 12,
         windowStartBit: 4,
       },
+    };
+  }),
+  // Last, as the reference draws it: the summary is read after the bits it
+  // summarises, and putting it first would push the twelve rows down a line
+  // for a string that only repeats them.
+  {
+    name: 'TCP Flags',
+    value: tcpFlagsString(window12),
+    abbrev: 'tcp.flags.str',
+    rawBytesRange: [transportOffset + 12, transportOffset + 13] as [number, number],
+  }];
+}
+
+/**
+ * `a <= b` in TCP's 32-bit sequence space, which wraps.
+ *
+ * A plain `<=` is wrong across the wrap: a sequence just past 2^32 is a small
+ * number, and comparing it to a large one reads as far behind rather than
+ * just ahead. The signed difference is the standard answer (RFC 1982) and is
+ * what `tcpAnalysis.ts` uses for the same reason.
+ */
+function seqLessOrEqual(a: number, b: number): boolean {
+  return ((a - b) | 0) <= 0;
+}
+
+/**
+ * Whether the first SACK block sits inside the second.
+ *
+ * RFC 2883's other D-SACK form: when there is also a genuine hole, the
+ * duplicate is reported as a first block contained within the second, which
+ * is otherwise a nonsense ordering - SACK blocks are not required to be
+ * sorted, but a block inside another says something no ordinary SACK does.
+ */
+function isContainedInSecondBlock(
+  rawBytes: Uint8Array, optionOffset: number, leftEdge: number, rightEdge: number,
+): boolean {
+  const at = optionOffset + 10;
+  if (at + 7 >= rawBytes.length) return false;
+  const secondLeft = ((rawBytes[at] << 24) | (rawBytes[at + 1] << 16) | (rawBytes[at + 2] << 8) | rawBytes[at + 3]) >>> 0;
+  const secondRight = ((rawBytes[at + 4] << 24) | (rawBytes[at + 5] << 16) | (rawBytes[at + 6] << 8) | rawBytes[at + 7]) >>> 0;
+  return seqLessOrEqual(secondLeft, leftEdge) && seqLessOrEqual(rightEdge, secondRight);
+}
+
+/**
+ * The reference's `tcp.connection.*` rows: what this frame does to the
+ * connection, rather than which bits it has set.
+ *
+ * All `FT_NONE` in the reference's dictionary - presence IS the value - so
+ * each is drawn only on the frame it is true of, and a filter naming one
+ * matches exactly those frames.
+ *
+ * A SYN with ACK is the acknowledge and not a second request, which is why
+ * the first two are exclusive rather than both firing on a SYN-ACK.
+ */
+function connectionRows(
+  syn: boolean, ack: boolean, fin: boolean, rst: boolean,
+  finRole: 'active' | 'passive' | undefined,
+): ProtocolField[] {
+  const rows: ProtocolField[] = [];
+  if (syn && !ack) rows.push({ name: '[Connection establish request (SYN)]', value: true, generated: true, abbrev: 'tcp.connection.syn' });
+  if (syn && ack) rows.push({ name: '[Connection establish acknowledge (SYN+ACK)]', value: true, generated: true, abbrev: 'tcp.connection.synack' });
+  if (fin) {
+    rows.push({ name: '[Connection finish (FIN)]', value: true, generated: true, abbrev: 'tcp.connection.fin' });
+    if (finRole === 'active') {
+      rows.push({ name: '[This frame initiates the connection closing]', value: true, generated: true, abbrev: 'tcp.connection.fin_active' });
+    } else if (finRole === 'passive') {
+      rows.push({ name: '[This frame undergoes the connection closing]', value: true, generated: true, abbrev: 'tcp.connection.fin_passive' });
+    }
+  }
+  if (rst) rows.push({ name: '[Connection reset (RST)]', value: true, generated: true, abbrev: 'tcp.connection.rst' });
+  return rows;
+}
+
+/**
+ * The reference's `[N Reassembled TCP Segments]` subtree, one per PDU this
+ * frame completed.
+ *
+ * Every number here was already tracked - `TlsRecordCursor.contributions`
+ * has carried `{frame, bytes}` since records were first followed across
+ * segments. What was missing is that each contributor becomes its own row
+ * with `linkToFrame`, so the frames that carried a PDU are reachable rather
+ * than merely listed.
+ *
+ * Byte OFFSETS are computed by running sum rather than stored, which is safe
+ * for the one reason worth stating: contributions are appended in arrival
+ * order and a record is only completed once, so the sum is the same walk the
+ * reassembly itself did.
+ */
+function reassemblyRows(reassemblies: TcpReassembly[] | undefined): ProtocolField[] {
+  if (reassemblies === undefined || reassemblies.length === 0) return [];
+  return reassemblies.map((pdu) => {
+    let at = 0;
+    const segments: ProtocolField[] = pdu.contributions.map((c) => {
+      const row: ProtocolField = {
+        name: `Frame: ${c.frame}, payload: ${at}-${at + c.bytes - 1} (${c.bytes} bytes)`,
+        value: c.frame,
+        abbrev: 'tcp.segment',
+        generated: true,
+        linkToFrame: c.frame,
+      };
+      at += c.bytes;
+      return row;
+    });
+    const summary = pdu.contributions.map((c) => `#${c.frame}(${c.bytes})`).join(', ');
+    return {
+      name: `[${pdu.contributions.length} Reassembled TCP Segments (${pdu.length} bytes)]`,
+      value: summary,
+      abbrev: 'tcp.segments',
+      generated: true,
+      children: [
+        ...segments,
+        { name: 'Segment count', value: pdu.contributions.length, generated: true, abbrev: 'tcp.segment.count' },
+        { name: 'Reassembled TCP length', value: pdu.length, generated: true, abbrev: 'tcp.reassembled.length' },
+      ],
     };
   });
 }

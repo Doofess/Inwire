@@ -104,6 +104,17 @@ const DERIVED: [string, string][] = [
   ['tcp.options.nop', 'the option\'s presence; Wireshark registers this name as '
     + 'a sub-PROTOCOL rather than a field, so it is absent from `-G fields` '
     + 'while still being a name a user can type'],
+  // The same argument as `tcp.options.nop` directly above, and checked the
+  // same way: `tshark -G protocols` lists all four - "TCP Option - Maximum
+  // segment size", "TCP Option - Window Scale", "TCP Option - SACK", "TCP
+  // Option - End of Option List (EOL)" - so each is a name a user can type
+  // and a name `-G fields` will never contain. They name the OPTION; the
+  // numbers inside them (`tcp.options.mss_val`, `tcp.options.wscale.shift`,
+  // `tcp.options.sack_le`) are ordinary fields and are not exempted.
+  ['tcp.options.mss', 'the option itself; a sub-PROTOCOL in Wireshark, as `tcp.options.nop` is'],
+  ['tcp.options.wscale', 'the option itself; a sub-PROTOCOL in Wireshark, as `tcp.options.nop` is'],
+  ['tcp.options.sack', 'the option itself; a sub-PROTOCOL in Wireshark, as `tcp.options.nop` is'],
+  ['tcp.options.eol', 'the option itself; a sub-PROTOCOL in Wireshark, as `tcp.options.nop` is'],
   ['tls.handshake.extensions_ech', 'the ECH extension\'s presence; Wireshark '
     + 'names only its inner parts'],
   ['tls.x509.subject_cn', 'read from the certificate inline; Wireshark reaches '

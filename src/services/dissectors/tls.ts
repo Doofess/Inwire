@@ -62,6 +62,9 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
 const CT_CHANGE_CIPHER_SPEC = 20;
 const CT_ALERT = 21;
 const CT_HANDSHAKE = 22;
+/** A TLS record header: content type, version, length. */
+const TLS_HEADER_BYTES = 5;
+
 const CT_APPLICATION_DATA = 23;
 /**
  * The highest content type that counts as a record header.
@@ -251,6 +254,7 @@ export interface ServerHelloFacts {
 }
 
 function u16(b: Uint8Array, p: number): number { return (b[p] << 8) | b[p + 1]; }
+function u32(b: Uint8Array, p: number): number { return ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0; }
 
 function parseExtensions(b: Uint8Array, p: number, end: number): Extension[] {
   const out: Extension[] = [];
@@ -744,6 +748,26 @@ export interface TlsSegmentContext {
   segmentSeq: number;
   /** True when data before this segment was never captured. */
   gap: boolean;
+  /**
+   * The TLS port this connection is on, for naming what the encrypted
+   * records carry when nothing else can.
+   *
+   * **This is what the reference uses, and it is not ALPN.** In TLS 1.3 the
+   * selected ALPN travels in EncryptedExtensions, so on a capture with no
+   * key log it is not readable - and every Application Data record on the
+   * inwire fixture still gets named. The reference is reporting the
+   * dissector registered on the port, which for 443 is HTTP. Checked rather
+   * than assumed: all 824 of its `tls.app_data_proto` rows say "Hypertext
+   * Transfer Protocol" on connections whose hellos offered `h2,http/1.1`
+   * and `h3`, which ALPN alone would have split three ways.
+   */
+  serverPort?: number;
+}
+
+/** One reassembled TCP PDU: how long it was, and which frames carried it. */
+export interface TcpReassembly {
+  length: number;
+  contributions: { frame: number; bytes: number }[];
 }
 
 export interface TlsSegmentResult {
@@ -754,6 +778,15 @@ export interface TlsSegmentResult {
   records: TlsRecord[];
   /** Frames whose Info gets " [TCP PDU reassembled in <frameId>]". */
   reassembledFrom: number[];
+  /**
+   * One entry per record this frame completed that spanned segments.
+   *
+   * Carried out to `tcpTransport.ts` rather than drawn here, because the rows
+   * it becomes are `tcp.*` - they describe TCP's reassembly, not TLS's - and
+   * a `tcp.segments` subtree hanging inside the TLS tree would put them under
+   * the wrong layer for a reader even though the names would still resolve.
+   */
+  reassemblies?: TcpReassembly[];
   /** Frames whose Protocol label the negotiated version just settled. */
   labelPatches?: { frameId: number; protocolLabel: string }[];
   /**
@@ -844,7 +877,14 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     cursor.contentType = h.contentType; cursor.version = h.version; cursor.recordLength = h.length;
     cursor.remaining = h.length - avail;
     cursor.recordEndSeq = (ctx.segmentSeq + (bodyStart - start) + h.length) >>> 0;
-    cursor.contributions = [{ frame, bytes: avail }];
+    // **`+ 5`: the record header belongs to the frame that carried it.**
+    // `recordLength` is the BODY length and stays so - it is what
+    // `tls.record.length` reports, and the reference agrees. But a
+    // reassembled TCP PDU is the whole record, header included, so the frame
+    // holding the header contributed five bytes more than its body share.
+    // Without this every reassembly reported itself five bytes short, which
+    // is exactly what the reference's own totals caught.
+    cursor.contributions = [{ frame, bytes: avail + TLS_HEADER_BYTES }];
     cursor.contributors = [];
     // A new record inherits nothing from the one that went before it.
     cursor.holed = false;
@@ -997,8 +1037,22 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   fields['tls.record.version'] = first.version;
   fields['tls.record.length'] = first.length;
   const reassembledFrom: number[] = [];
+  const reassemblies: TcpReassembly[] = [];
   for (const r of completed) {
     for (const f of r.reassembledFrom) if (!reassembledFrom.includes(f)) reassembledFrom.push(f);
+    // A record that spanned segments is a reassembled TCP PDU, and the
+    // reference draws it as one - `tcp.segments` with a row per contributing
+    // frame - rather than as the single note this build had. The data was
+    // already here; only the shape was missing.
+    if (r.reassembledFrom.length > 0 && r.contributions.length > 0) {
+      // Summed rather than taken from `r.length`, which is the record BODY.
+      // The sum is what the frames actually carried, so it stays right
+      // wherever the header fell - including the case where the header
+      // itself straddled a segment boundary and its bytes are spread across
+      // two contributions.
+      const carried = r.contributions.reduce((total, c) => total + c.bytes, 0);
+      reassemblies.push({ length: carried, contributions: r.contributions });
+    }
     if (r.handshakeTypes && r.handshakeTypes.length > 0) fields['tls.handshake.type'] = r.handshakeTypes[0];
     if (r.hello) {
       const h = r.hello;
@@ -1041,7 +1095,7 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   // A record that describes itself as nothing is omitted rather than joined as
   // an empty element, which would leave a leading ", " in front of the next.
   const info = completed.map((r) => r.description).filter((d) => d !== '').join(', ');
-  const layer = buildTlsLayer(completed, conv, frame);
+  const layer = buildTlsLayer(completed, conv, frame, ctx.serverPort);
 
   // What the decryption produced, gathered across the frame's records.
   let appProtocolLabel: string | undefined;
@@ -1086,7 +1140,7 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   return {
     kind: 'tls',
     result: {
-      protocolLabel, info, fields, layer, records: completed, reassembledFrom, labelPatches,
+      protocolLabel, info, fields, layer, records: completed, reassembledFrom, reassemblies, labelPatches,
       appProtocolLabel, appLayers, protocolTokens,
     },
   };
@@ -1180,9 +1234,6 @@ function extensionFields(ext: Extension): ProtocolField[] {
         })),
       });
       break;
-    case 11:
-      if (b.length >= 1) for (const f of Array.from(b.subarray(1, 1 + b[0]))) children.push({ name: 'EC point format', value: `${EC_POINT_FORMAT_NAMES[f] ?? 'Unknown'} (${f})` });
-      break;
     case 13:
       // The reference splits each entry into its hash and signature halves,
       // which is the pair RFC 8446 §4.2.3 defines it as and what makes
@@ -1247,11 +1298,167 @@ function extensionFields(ext: Extension): ProtocolField[] {
       }
       break;
     }
-    case 0xfe0d:
-      children.push({ name: 'Note', value: b.length <= 1 ? 'GREASE (outer)' : `${b.length} bytes - real or GREASE; see the SNI heuristic`, generated: true });
+    case 11: {
+      // Supported EC point formats. Uncompressed is the only one anybody
+      // negotiates, and the extension survives because TLS 1.2 requires it
+      // to be offered - so its value is as a fingerprint input rather than
+      // as a choice, which is exactly why JA3 reads it.
+      if (b.length < 1) break;
+      const count = b[0];
+      children.push({ name: 'EC point formats Length', value: count, abbrev: 'tls.handshake.extensions_ec_point_formats_length' });
+      children.push({
+        name: 'Elliptic curves point formats', value: `${count} format${count === 1 ? '' : 's'}`,
+        abbrev: 'tls.handshake.extensions_ec_point_formats',
+        children: Array.from(b.subarray(1, Math.min(1 + count, b.length)), (format) => ({
+          name: 'EC point format',
+          value: `${EC_POINT_FORMAT_NAMES[format] ?? 'Unknown'} (${format})`,
+          abbrev: 'tls.handshake.extensions_ec_point_format',
+        })),
+      });
       break;
+    }
+    case 27: {
+      // RFC 8879 certificate compression. Worth naming because a server that
+      // offers it can send a certificate chain this build would otherwise
+      // see as a Certificate message it cannot parse.
+      if (b.length < 1) break;
+      const bytesLen = b[0];
+      children.push({ name: 'Algorithms Length', value: bytesLen, abbrev: 'tls.compress_certificate.algorithms_length' });
+      for (let q = 1; q + 1 < Math.min(1 + bytesLen, b.length); q += 2) {
+        children.push({
+          name: 'Algorithm', value: CERT_COMPRESSION_NAMES[u16(b, q)] ?? `Unknown (${u16(b, q)})`,
+          abbrev: 'tls.compress_certificate.algorithm',
+        });
+      }
+      break;
+    }
+    // ALPS (Application-Layer Protocol Settings), Chrome's extension for
+    // settings that would otherwise wait for the first HTTP/2 frame.
+    //
+    // **Both codepoints, and the old one alone is what shipped.** Chrome moved
+    // ALPS from 17513 to 17613 when the wire format changed, and this case was
+    // written against the draft number - so it never once matched a frame in
+    // either fixture, where every ALPS extension is 17613. Nothing failed: the
+    // four names were registered, spelled correctly, and referenced by a row
+    // that could not run, which is the one thing none of the three gates here
+    // can see. The bodies are identical, so both are read.
+    case 17513:
+    case 17613: {
+      if (b.length < 2) break;
+      const listLen = u16(b, 0);
+      children.push({ name: 'ALPS Extension Length', value: listLen, abbrev: 'tls.handshake.extensions_alps_len' });
+      const entries: ProtocolField[] = [];
+      for (let q = 2; q < Math.min(2 + listLen, b.length);) {
+        const len = b[q];
+        if (q + 1 + len > b.length) break;
+        entries.push({ name: 'ALPS string length', value: len, abbrev: 'tls.handshake.extensions_alps_alpn_str_len' });
+        entries.push({
+          name: 'ALPS Next Protocol', value: asciiOf(b.subarray(q + 1, q + 1 + len)),
+          abbrev: 'tls.handshake.extensions_alps_alpn_str',
+        });
+        q += 1 + len;
+      }
+      children.push({
+        name: 'Supported ALPS List', value: '', abbrev: 'tls.handshake.extensions_alps_alpn_list', children: entries,
+      });
+      break;
+    }
+    case 57:
+      // QUIC transport parameters (RFC 9000 §18), carried in the TLS
+      // handshake because QUIC has no separate negotiation of its own. This
+      // is where a client states its flow-control limits, its idle timeout
+      // and its connection id - so on an h3 connection it is the only place
+      // the transport's settings appear in the clear at all.
+      children.push(...quicParameterRows(b));
+      break;
+    case 0xfe0d: {
+      // Encrypted ClientHello (draft-ietf-tls-esni). The outer form carries
+      // everything a reader can have without the server's private key: which
+      // HPKE suite encrypted the inner hello, which of the server's published
+      // configs it was encrypted to, the ephemeral public key, and the
+      // ciphertext. None of that decrypts anything here - what it buys is the
+      // ability to tell two ECH clients apart, and to see a config id change
+      // when a provider rotates its keys.
+      //
+      // `type` discriminates outer(0) from inner(1), and an inner hello is one
+      // byte with nothing after it: by the time anyone can read an inner
+      // ClientHello it has already been decrypted out of an outer one, so the
+      // fields below would be describing the wrong message.
+      if (b.length < 1) break;
+      const kind = b[0];
+      children.push({
+        name: 'Client Hello type', value: `${ECH_HELLO_TYPE_NAMES[kind] ?? 'Unknown'} (${kind})`,
+        abbrev: 'tls.ech.client_hello_type',
+      });
+      // 1 type + 2 kdf + 2 aead + 1 config_id + 2 enc length.
+      if (kind !== 0 || b.length < 8) break;
+      const kdf = u16(b, 1);
+      const aead = u16(b, 3);
+      const kdfName = HPKE_KDF_NAMES[kdf] ?? 'Unknown';
+      const aeadName = HPKE_AEAD_NAMES[aead] ?? 'Unknown';
+      children.push({
+        name: 'Cipher Suite', value: `${kdfName}/${aeadName}`,
+        abbrev: 'tls.ech.hpke.keyconfig.cipher_suite',
+        children: [
+          { name: 'KDF Id', value: `${kdfName} (${kdf})`, abbrev: 'tls.ech.hpke.keyconfig.cipher_suite.kdf_id' },
+          { name: 'AEAD Id', value: `${aeadName} (${aead})`, abbrev: 'tls.ech.hpke.keyconfig.cipher_suite.aead_id' },
+        ],
+      });
+      children.push({ name: 'Config Id', value: b[5], abbrev: 'tls.ech.config_id' });
+      const encLen = u16(b, 6);
+      children.push({ name: 'Enc length', value: encLen, abbrev: 'tls.ech.enc_length' });
+      if (8 + encLen > b.length) break;
+      children.push({ ...hexField('Enc', b.subarray(8, 8 + encLen)), abbrev: 'tls.ech.enc' });
+      const payloadAt = 8 + encLen;
+      if (payloadAt + 2 > b.length) break;
+      const payloadLen = u16(b, payloadAt);
+      children.push({ name: 'Payload length', value: payloadLen, abbrev: 'tls.ech.payload_length' });
+      if (payloadAt + 2 + payloadLen <= b.length) {
+        children.push({
+          ...hexField('Payload', b.subarray(payloadAt + 2, payloadAt + 2 + payloadLen)),
+          abbrev: 'tls.ech.payload',
+        });
+      }
+      break;
+    }
+  }
+  // **An extension nothing above decomposed still shows its bytes.** The
+  // reference calls them `tls.handshake.extension.data`, and drawing them is
+  // what makes an extension this build has never heard of readable at all -
+  // which matters more for the unknown ones than for the known.
+  if (children.length === 2 && b.length > 0) {
+    children.push({ ...hexField('Data', b), abbrev: 'tls.handshake.extension.data' });
   }
   return children;
+}
+
+/** RFC 8879 §7.3. */
+const CERT_COMPRESSION_NAMES: Record<number, string> = {
+  1: 'zlib (1)', 2: 'brotli (2)', 3: 'zstd (3)',
+};
+
+const ECH_HELLO_TYPE_NAMES: Record<number, string> = {
+  0: 'Outer Client Hello', 1: 'Inner Client Hello',
+};
+
+// RFC 9180's HPKE registries, spelled as the reference spells them - these are
+// matched against `tshark -G values` rather than written from the RFC, because
+// the RFC's own labels differ ("HKDF-SHA256" against the registry's
+// "HKDF-SHA256", but "ChaCha20Poly1305" against "ChaCha20-Poly1305") and the
+// measurement compares displayed strings.
+const HPKE_KDF_NAMES: Record<number, string> = {
+  0: 'Reserved', 1: 'HKDF-SHA256', 2: 'HKDF-SHA384', 3: 'HKDF-SHA512',
+};
+
+const HPKE_AEAD_NAMES: Record<number, string> = {
+  0: 'Reserved', 1: 'AES-128-GCM', 2: 'AES-256-GCM', 3: 'ChaCha20Poly1305',
+  0xffff: 'Export-only',
+};
+
+function asciiOf(bytes: Uint8Array): string {
+  let out = '';
+  for (const byte of bytes) out += byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.';
+  return out;
 }
 
 function helloFields(h: HelloFacts): ProtocolField[] {
@@ -1265,7 +1472,25 @@ function helloFields(h: HelloFacts): ProtocolField[] {
       ? { ...versionField('Version (legacy)', h.version, 'tls.handshake.legacy_version'),
           description: 'RFC 8446: ignored when supported_versions is present' }
       : versionField('Version', h.version, 'tls.handshake.version'),
-    { ...hexField('Random', h.random), abbrev: 'tls.handshake.random' },
+    {
+      ...hexField('Random', h.random), abbrev: 'tls.handshake.random',
+      // **Thirty-two bytes that are not all random.** The first four were
+      // `gmt_unix_time` in TLS 1.0-1.2 and are drawn as a clock because the
+      // reference draws them as one - and because a sender that still fills
+      // them in is leaking its wall clock to every observer, which is worth
+      // being able to see. RFC 8446 made all 32 random, so a modern hello
+      // shows a nonsense date here and that IS the correct reading.
+      children: h.random.length >= 32
+        ? [
+          {
+            name: 'GMT Unix Time',
+            value: new Date(u32(h.random, 0) * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC'),
+            abbrev: 'tls.handshake.random_time',
+          },
+          { ...hexField('Random Bytes', h.random.subarray(4, 32)), abbrev: 'tls.handshake.random_bytes' },
+        ]
+        : undefined,
+    },
     { name: 'Session ID Length', value: h.sessionId.length, abbrev: 'tls.handshake.session_id_length' },
     ...(h.sessionId.length > 0
       ? [{ ...hexField('Session ID', h.sessionId), abbrev: 'tls.handshake.session_id' }] : []),
@@ -1428,7 +1653,7 @@ function certificateFields(certs: CertificateSummary[], conv: TlsConversationSta
   });
 }
 
-function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: number, now: Date = new Date()): ProtocolLayer {
+function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: number, serverPort: number | undefined, now: Date = new Date()): ProtocolLayer {
   const fields: ProtocolField[] = [];
   for (const r of records) {
     if (r.ignored) {
@@ -1497,8 +1722,16 @@ function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: 
         name: `[Reassembled TCP segments (${r.length} bytes)]`, value: parts, generated: true, abbrev: 'tls.reassembled',
       });
     }
+    if (r.contentType === CT_APPLICATION_DATA) {
+      const appProto = appProtocolName(conv.alpn, serverPort);
+      if (appProto !== undefined) {
+        children.push({
+          name: '[Application Data Protocol]', value: appProto, generated: true, abbrev: 'tls.app_data_proto',
+        });
+      }
+    }
     fields.push({
-      name: `${versionName} Record Layer: ${recordTitle(r)}`,
+      name: `${versionName} Record Layer: ${recordTitle(r, appProtocolName(conv.alpn, serverPort))}`,
       value: '',
       abbrev: 'tls.record',
       ...(r.range ? { rawBytesRange: r.range } : {}),
@@ -1570,15 +1803,179 @@ function cursorEncrypted(r: TlsRecord): boolean {
   return r.description === 'Encrypted Handshake Message';
 }
 
-function recordTitle(r: TlsRecord): string {
+/**
+ * What the plaintext inside an Application Data record is, by name.
+ *
+ * **Known without decrypting anything**, which is the whole point: ALPN is
+ * negotiated in the clear, so a record nobody can read still has a protocol,
+ * and the reference says so on every one of them - 824 frames of the inwire
+ * fixture. This build computed the same fact, used it to pick a decoder, and
+ * never told the reader.
+ *
+ * The strings are the reference's own dissector names, which are also the
+ * keys in `PROTOCOL_NAME_MAP` (`pcapParser.ts`) - so the name drawn here and
+ * the name of the layer that appears once a key log opens the record are the
+ * same string, rather than two spellings of one thing.
+ *
+ * An ALPN this build does not decode gets no row: naming it would claim a
+ * handoff that is not going to happen.
+ */
+function appProtocolName(alpn: string | undefined, serverPort: number | undefined): string | undefined {
+  switch (alpn) {
+    case 'http/1.0': case 'http/1.1': return 'Hypertext Transfer Protocol';
+    case 'h2': case 'h2c': return 'HyperText Transfer Protocol 2';
+    case 'h3': return 'HyperText Transfer Protocol Version 3';
+    default: break;
+  }
+  // The port's registered protocol, which is the reference's own answer and
+  // the only one available on a 1.3 handshake nobody holds the keys to. More
+  // honest than it looks: it is also what this build hands the plaintext to
+  // if a key log ever opens the connection.
+  return serverPort === 443 || serverPort === 8443 ? 'Hypertext Transfer Protocol' : undefined;
+}
+
+function recordTitle(r: TlsRecord, appProto: string | undefined): string {
   switch (r.contentType) {
     case CT_HANDSHAKE: return `Handshake Protocol: ${r.description}`;
     case CT_APPLICATION_DATA:
       return r.decrypted
         ? `Application Data Protocol: ${r.description}`
-        : 'Application Data Protocol: Application Data';
+        // The reference names the protocol here even when it could not read
+        // the record, because ALPN told it. `info` is built from
+        // `r.description` and is untouched by this.
+        : `Application Data Protocol: ${appProto ?? 'Application Data'}`;
     case CT_ALERT: return r.alert ? `Alert (${ALERT_LEVEL_NAMES[r.alert.level] ?? 'Unknown'}): ${ALERT_DESCRIPTION_NAMES[r.alert.description] ?? 'Unknown'}` : 'Encrypted Alert';
     case CT_CHANGE_CIPHER_SPEC: return 'Change Cipher Spec Protocol: Change Cipher Spec';
     default: return r.description;
   }
+}
+
+/**
+ * A QUIC variable-length integer (RFC 9000 §16).
+ *
+ * The top two bits of the first byte say how many bytes the whole thing
+ * occupies - 1, 2, 4 or 8 - and the remaining 62 bits at most are the value.
+ * Returned as a `number` rather than a `bigint` because every parameter this
+ * reads is a byte count, a stream count or a millisecond timeout, none of
+ * which approach 2^53; the one place that would matter is a GREASE parameter
+ * type, which is drawn as hex instead for exactly that reason.
+ */
+function quicVarint(b: Uint8Array, at: number): { value: number; size: number } | null {
+  if (at >= b.length) return null;
+  const size = 1 << (b[at] >> 6);
+  if (at + size > b.length) return null;
+  let value = b[at] & 0x3f;
+  for (let i = 1; i < size; i++) value = value * 256 + b[at + i];
+  return { value, size };
+}
+
+/**
+ * RFC 9000 §18.2, RFC 9221, RFC 9368, and Google's private block.
+ *
+ * **Each abbrev is written out rather than composed from the name**, and
+ * that is not style. `scripts/dissect/registry.ts` finds field names by
+ * scanning for quoted `layer.field` literals, so a
+ * `` abbrev: `tls.quic.parameter.${named}` `` would be invisible to it AND
+ * to `wireshark-abbrevs.ts` - a name this build invented would ship with
+ * every check green. Spelled out, all twenty-two are held to
+ * `tshark -G fields` like everything else.
+ *
+ * `shape` says what the value is: a varint gets a typed row with a number,
+ * bytes get one with hex, and `none` means the reference has no field for
+ * the payload, so only `type`, `length` and `value` are drawn.
+ */
+const QUIC_PARAMETERS: Record<number, { name: string; abbrev?: string; shape: 'varint' | 'bytes' | 'none' }> = {
+  0x00: { name: 'original_destination_connection_id', abbrev: 'tls.quic.parameter.original_destination_connection_id', shape: 'bytes' },
+  0x01: { name: 'max_idle_timeout', abbrev: 'tls.quic.parameter.max_idle_timeout', shape: 'varint' },
+  0x02: { name: 'stateless_reset_token', abbrev: 'tls.quic.parameter.stateless_reset_token', shape: 'bytes' },
+  0x03: { name: 'max_udp_payload_size', abbrev: 'tls.quic.parameter.max_udp_payload_size', shape: 'varint' },
+  0x04: { name: 'initial_max_data', abbrev: 'tls.quic.parameter.initial_max_data', shape: 'varint' },
+  0x05: { name: 'initial_max_stream_data_bidi_local', abbrev: 'tls.quic.parameter.initial_max_stream_data_bidi_local', shape: 'varint' },
+  0x06: { name: 'initial_max_stream_data_bidi_remote', abbrev: 'tls.quic.parameter.initial_max_stream_data_bidi_remote', shape: 'varint' },
+  0x07: { name: 'initial_max_stream_data_uni', abbrev: 'tls.quic.parameter.initial_max_stream_data_uni', shape: 'varint' },
+  0x08: { name: 'initial_max_streams_bidi', abbrev: 'tls.quic.parameter.initial_max_streams_bidi', shape: 'varint' },
+  0x09: { name: 'initial_max_streams_uni', abbrev: 'tls.quic.parameter.initial_max_streams_uni', shape: 'varint' },
+  0x0a: { name: 'ack_delay_exponent', abbrev: 'tls.quic.parameter.ack_delay_exponent', shape: 'varint' },
+  0x0b: { name: 'max_ack_delay', abbrev: 'tls.quic.parameter.max_ack_delay', shape: 'varint' },
+  0x0c: { name: 'disable_active_migration', shape: 'none' },
+  0x0d: { name: 'preferred_address', shape: 'none' },
+  0x0e: { name: 'active_connection_id_limit', abbrev: 'tls.quic.parameter.active_connection_id_limit', shape: 'varint' },
+  0x0f: { name: 'initial_source_connection_id', abbrev: 'tls.quic.parameter.initial_source_connection_id', shape: 'bytes' },
+  0x10: { name: 'retry_source_connection_id', abbrev: 'tls.quic.parameter.retry_source_connection_id', shape: 'bytes' },
+  0x11: { name: 'version_information', shape: 'none' },
+  0x20: { name: 'max_datagram_frame_size', abbrev: 'tls.quic.parameter.max_datagram_frame_size', shape: 'varint' },
+  0x3127: { name: 'google.initial_rtt', abbrev: 'tls.quic.parameter.google.initial_rtt', shape: 'varint' },
+  0x3128: { name: 'google.connection_options', abbrev: 'tls.quic.parameter.google.connection_options', shape: 'bytes' },
+  0x3129: { name: 'google.user_agent', abbrev: 'tls.quic.parameter.google.user_agent', shape: 'bytes' },
+};
+
+function quicParameterRows(b: Uint8Array): ProtocolField[] {
+  const rows: ProtocolField[] = [];
+  let at = 0;
+  while (at < b.length) {
+    const type = quicVarint(b, at);
+    if (type === null) break;
+    const length = quicVarint(b, at + type.size);
+    if (length === null) break;
+    const valueAt = at + type.size + length.size;
+    if (valueAt + length.value > b.length) break;
+    const value = b.subarray(valueAt, valueAt + length.value);
+
+    // **GREASE is drawn as hex, not as a number.** Its types are chosen from
+    // `31 * N + 27` across the whole 62-bit space, so the value routinely
+    // exceeds what a JS number holds exactly - and a parameter whose only
+    // purpose is to be ignored is not worth losing precision over.
+    const isGreaseType = type.size === 8 || (type.value - 27) % 31 === 0;
+    const spec = QUIC_PARAMETERS[type.value];
+    const named = spec?.name;
+    const typeLabel = named ?? (isGreaseType ? 'GREASE' : 'Unknown');
+
+    const children: ProtocolField[] = [
+      {
+        name: 'Type',
+        value: isGreaseType && named === undefined
+          ? `GREASE (0x${hexOf(b.subarray(at, at + type.size))})`
+          : `${typeLabel} (0x${type.value.toString(16).padStart(2, '0')})`,
+        abbrev: 'tls.quic.parameter.type',
+      },
+      { name: 'Length', value: length.value, abbrev: 'tls.quic.parameter.length' },
+      { ...hexField('Value', value), abbrev: 'tls.quic.parameter.value' },
+    ];
+
+    if (spec?.shape === 'varint' && spec.abbrev !== undefined) {
+      const inner = quicVarint(value, 0);
+      if (inner !== null) children.push({ name: spec.name, value: inner.value, abbrev: spec.abbrev });
+    } else if (spec?.shape === 'bytes' && spec.abbrev !== undefined) {
+      children.push({ ...hexField(spec.name, value), abbrev: spec.abbrev });
+    } else if (type.value === 0x11 && value.length >= 4) {
+      // RFC 9368 version information: the version the sender chose, then
+      // every other one it would have accepted. Worth reading because a
+      // connection that negotiated down is otherwise indistinguishable from
+      // one that only ever offered the version it used.
+      children.push({
+        name: 'Chosen Version', value: `0x${hexOf(value.subarray(0, 4))}`,
+        abbrev: 'tls.quic.parameter.vi.chosen_version',
+      });
+      for (let q = 4; q + 4 <= value.length; q += 4) {
+        children.push({
+          name: 'Other Version', value: `0x${hexOf(value.subarray(q, q + 4))}`,
+          abbrev: 'tls.quic.parameter.vi.other_version',
+        });
+      }
+    }
+
+    rows.push({
+      name: `Parameter: ${typeLabel} (len=${length.value})`,
+      value: '',
+      children,
+    });
+    at = valueAt + length.value;
+  }
+  return rows;
+}
+
+function hexOf(bytes: Uint8Array): string {
+  let out = '';
+  for (const byte of bytes) out += byte.toString(16).padStart(2, '0');
+  return out;
 }

@@ -14,20 +14,17 @@
  * wider change than these three protocols justify.
  */
 import type { TransportResult } from '../dissect/types';
-import { dissectIgmp } from './igmp';
-import { dissectVrrp } from './vrrp';
-import { dissectOspf } from './ospf';
+import { findIpProto } from './dispatch';
 
-/** IP protocol numbers this module claims. */
-const IGMP_PROTOCOL = 2;
-const OSPF_PROTOCOL = 89;
-const VRRP_PROTOCOL = 112;
-
-/** True when `dissectPortless` is the right decoder for this protocol number. */
+/**
+ * True when `dissectPortless` is the right decoder for this protocol number.
+ *
+ * Asked of the `ip.proto` table rather than of three constants, so the answer
+ * cannot drift from the list of things `dissectPortless` can actually read -
+ * which is the failure the table exists to make unrepresentable.
+ */
 export function isPortlessProtocol(ipProtocolNum: number): boolean {
-  return ipProtocolNum === IGMP_PROTOCOL
-    || ipProtocolNum === VRRP_PROTOCOL
-    || ipProtocolNum === OSPF_PROTOCOL;
+  return findIpProto(ipProtocolNum) !== null;
 }
 
 /**
@@ -44,11 +41,9 @@ export function dissectPortless(
   l4SegmentLen?: number,
 ): TransportResult | null {
   const length = l4SegmentLen ?? rawBytes.length - transportOffset;
-  const read = ipProtocolNum === IGMP_PROTOCOL
-    ? dissectIgmp(rawBytes, transportOffset, length)
-    : ipProtocolNum === VRRP_PROTOCOL
-      ? dissectVrrp(rawBytes, transportOffset, transportOffset + length)
-      : dissectOspf(rawBytes, transportOffset, transportOffset + length);
+  const entry = findIpProto(ipProtocolNum);
+  if (entry === null) return null;
+  const read = entry.dissect(rawBytes, transportOffset, transportOffset + length);
   if (!read) return null;
   return {
     proto: 'ICMP',

@@ -108,11 +108,12 @@ export function dissectIgmp(
   const checksumCorrect = computeIgmpChecksum(rawBytes, offset, available) === checksum;
 
   const fields: ProtocolField[] = [
-    { name: '[IGMP Version]', value: version, generated: true },
+    { name: '[IGMP Version]', value: version, generated: true, abbrev: 'igmp.version' },
     {
       name: 'Type',
       value: `${typeName ?? 'Unknown'} (0x${type.toString(16).padStart(2, '0')})`,
       rawBytesRange: [offset, offset],
+      abbrev: 'igmp.type',
     },
   ];
 
@@ -126,12 +127,12 @@ export function dissectIgmp(
   if (type === TYPE_V3_MEMBERSHIP_REPORT) {
     // v3 report: [type][reserved][checksum][reserved:2][num records:2], then
     // one variable-length group record each.
-    fields.push({ name: 'Reserved', value: '00', rawBytesRange: [offset + 1, offset + 1] });
+    fields.push({ name: 'Reserved', value: '00', rawBytesRange: [offset + 1, offset + 1], abbrev: 'igmp.reserved' });
     pushChecksum(fields, offset, checksum, checksumCorrect);
-    fields.push({ name: 'Reserved', value: '0000', rawBytesRange: [offset + 4, offset + 5] });
+    fields.push({ name: 'Reserved', value: '0000', rawBytesRange: [offset + 4, offset + 5], abbrev: 'igmp.reserved' });
 
     const numRecords = (rawBytes[offset + 6] << 8) | rawBytes[offset + 7];
-    fields.push({ name: 'Num Group Records', value: numRecords, rawBytesRange: [offset + 6, offset + 7] });
+    fields.push({ name: 'Num Group Records', value: numRecords, rawBytesRange: [offset + 6, offset + 7], abbrev: 'igmp.num_grp_recs' });
     filterFields['igmp.num_grp_recs'] = numRecords;
 
     const descriptions: string[] = [];
@@ -150,10 +151,10 @@ export function dissectIgmp(
         value: `${group}  ${recordTypeName}`,
         rawBytesRange: [cursor, Math.min(cursor + recordLen - 1, rawBytes.length - 1)],
         children: [
-          { name: 'Record Type', value: `${recordTypeName} (${recordType})`, rawBytesRange: [cursor, cursor] },
-          { name: 'Aux Data Len', value: auxDataLen, rawBytesRange: [cursor + 1, cursor + 1] },
-          { name: 'Num Src', value: numSources, rawBytesRange: [cursor + 2, cursor + 3] },
-          { name: 'Multicast Address', value: group, rawBytesRange: [cursor + 4, cursor + 7] },
+          { name: 'Record Type', value: `${recordTypeName} (${recordType})`, rawBytesRange: [cursor, cursor], abbrev: 'igmp.record_type' },
+          { name: 'Aux Data Len', value: auxDataLen, rawBytesRange: [cursor + 1, cursor + 1], abbrev: 'igmp.aux_data_len' },
+          { name: 'Num Src', value: numSources, rawBytesRange: [cursor + 2, cursor + 3], abbrev: 'igmp.num_src' },
+          { name: 'Multicast Address', value: group, rawBytesRange: [cursor + 4, cursor + 7], abbrev: 'igmp.maddr' },
         ],
       });
 
@@ -170,11 +171,12 @@ export function dissectIgmp(
       name: 'Max Resp Time',
       value: `${maxResp.toFixed(1)} sec (0x${maxRespCode.toString(16).padStart(2, '0')})`,
       rawBytesRange: [offset + 1, offset + 1],
+      abbrev: 'igmp.max_resp',
     });
     pushChecksum(fields, offset, checksum, checksumCorrect);
 
     const group = formatIpv4Address(rawBytes, offset + 4);
-    fields.push({ name: 'Multicast Address', value: group, rawBytesRange: [offset + 4, offset + 7] });
+    fields.push({ name: 'Multicast Address', value: group, rawBytesRange: [offset + 4, offset + 7], abbrev: 'igmp.maddr' });
     filterFields['igmp.maddr'] = group;
 
     if (version === 3 && available >= 12) {
@@ -190,16 +192,18 @@ export function dissectIgmp(
           name: 'S',
           value: suppress ? 'Suppress router side processing' : 'Do not suppress router side processing',
           rawBytesRange: [offset + 8, offset + 8],
+          abbrev: 'igmp.s',
           bitfield: { bitOffset: 4, bitLength: 1, totalBits: 8 },
         },
         {
           name: 'QRV',
           value: qrv,
           rawBytesRange: [offset + 8, offset + 8],
+          abbrev: 'igmp.qrv',
           bitfield: { bitOffset: 5, bitLength: 3, totalBits: 8 },
         },
-        { name: 'QQIC', value: qqic, rawBytesRange: [offset + 9, offset + 9] },
-        { name: 'Num Src', value: numSources, rawBytesRange: [offset + 10, offset + 11] },
+        { name: 'QQIC', value: qqic, rawBytesRange: [offset + 9, offset + 9], abbrev: 'igmp.qqic' },
+        { name: 'Num Src', value: numSources, rawBytesRange: [offset + 10, offset + 11], abbrev: 'igmp.num_src' },
       );
     }
 
@@ -214,11 +218,12 @@ export function dissectIgmp(
       name: 'Max Resp Time',
       value: `${decodeMaxRespTime(maxRespCode).toFixed(1)} sec (0x${maxRespCode.toString(16).padStart(2, '0')})`,
       rawBytesRange: [offset + 1, offset + 1],
+      abbrev: 'igmp.max_resp',
     });
     pushChecksum(fields, offset, checksum, checksumCorrect);
 
     const group = formatIpv4Address(rawBytes, offset + 4);
-    fields.push({ name: 'Multicast Address', value: group, rawBytesRange: [offset + 4, offset + 7] });
+    fields.push({ name: 'Multicast Address', value: group, rawBytesRange: [offset + 4, offset + 7], abbrev: 'igmp.maddr' });
     filterFields['igmp.maddr'] = group;
 
     info = type === TYPE_LEAVE_GROUP
@@ -249,8 +254,9 @@ function pushChecksum(fields: ProtocolField[], offset: number, checksum: number,
       name: 'Checksum',
       value: `0x${checksum.toString(16).padStart(4, '0')} [${correct ? 'correct' : 'incorrect'}]`,
       rawBytesRange: [offset + 2, offset + 3],
+      abbrev: 'igmp.checksum',
     },
-    { name: '[Checksum Status]', value: correct ? 'Good' : 'Bad', generated: true },
+    { name: '[Checksum Status]', value: correct ? 'Good' : 'Bad', generated: true, abbrev: 'igmp.checksum.status' },
   );
 }
 

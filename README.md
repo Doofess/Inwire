@@ -52,10 +52,10 @@ may touch what, and the map from concept to file.
 
 - **Live capture** from any adapter, with throughput sparklines in the picker so
   you can see which one is carrying traffic before you commit.
-- **60 dissected layers** — Ethernet/VLAN/LLC, Linux cooked capture, IPv4/IPv6
+- **64 dissected layers** — Ethernet/VLAN/LLC, Linux cooked capture, IPv4/IPv6
   with fragment reassembly, TCP/UDP, DNS, TLS, QUIC, HTTP/1.1 through HTTP/3,
   DHCP, LDAP, SMB2, Kerberos, SIP, SNMP, RADIUS, BGP, OSPF and the rest, plus GRE
-  and VXLAN dissected *through*. The list is `LAYERS` in
+  and VXLAN dissected *through*, and an HTTP body read on into JSON or text. The list is `LAYERS` in
   `src/services/dissect/fieldRegistry.ts`, which also feeds the filter's names,
   the autocomplete and the column catalogue.
 - **Decryption from a key log.** `Settings → Decryption` takes the

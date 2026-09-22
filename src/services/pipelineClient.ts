@@ -12,6 +12,7 @@
 import type { AgentMessage, AgentCommand } from './agentProtocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
 import type { InfoPatch } from './pcapParser';
+import type { StreamSeeds } from './pipeline/replay';
 import type { HostIdentity } from './direction';
 import type { NetworkFacts } from './networkFacts';
 import type { AgentServiceFacts } from './agentLink';
@@ -33,6 +34,8 @@ export interface ReplayBundle {
   truncated: boolean;
   /** The stream index the capture gave this conversation, if it had one. */
   streamId?: number;
+  /** The same, for every other layer that has one. See `dissectReplay`. */
+  seeds?: StreamSeeds;
   /** A generated row a later frame wrote onto this one; see `dissectReplay`. */
   retroactive?: InfoPatch;
   /**
@@ -183,7 +186,7 @@ export class PipelineClient {
             this.send({
               type: 'replay', id: message.id,
               frames: bundle.frames, truncated: bundle.truncated,
-              streamId: bundle.streamId, retroactive: bundle.retroactive,
+              streamId: bundle.streamId, seeds: bundle.seeds, retroactive: bundle.retroactive,
               process: bundle.process,
             });
           },

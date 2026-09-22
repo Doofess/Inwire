@@ -296,6 +296,19 @@ export interface QuicPacketRecord {
   /** Only ever present when the packet could be decrypted. */
   packetNumber?: number;
   frames: QuicFrameRecord[];
+  /**
+   * The first byte's Fixed Bit, and - on a short header - its Spin Bit.
+   *
+   * Both are readable without keys, which is the whole reason they are here
+   * and the reserved bits are not: RFC 9001 protects the low four bits of a
+   * long header and the low five of a short one, so the reserved bits and the
+   * packet-number length cannot be read on a packet this build could not
+   * decrypt, and the spin bit at 0x20 can.
+   */
+  fixedBit: boolean;
+  spinBit?: boolean;
+  /** This packet's length within the datagram, coalesced packets counted apart. */
+  packetLength?: number;
 }
 
 export interface QuicDissectorResult {
@@ -403,6 +416,9 @@ function dissectQuic(
           ...(knownConnectionId ? { dcid: knownConnectionId, dcidLength: dcidLength } : {}),
           packetNumber: decrypted.packetNumber,
           frames: frames.records,
+          fixedBit: true,
+          spinBit: (firstByte & 0x20) !== 0,
+          packetLength: end - start,
         }],
         nextPacketOffset: end,
       };
@@ -425,6 +441,9 @@ function dissectQuic(
         typeName: 'Protected Payload (KP0)',
         ...(knownConnectionId ? { dcid: knownConnectionId, dcidLength: dcidLength } : {}),
         frames: [],
+        fixedBit: true,
+        spinBit: (firstByte & 0x20) !== 0,
+        packetLength: end - start,
       }],
       /** A short header runs to the end of the datagram; nothing follows it. */
       nextPacketOffset: end,
@@ -441,7 +460,7 @@ function dissectQuic(
     return {
       info: 'Version Negotiation',
       cryptoFragments: [], streamFragments: [], connectionIds: [], isLongHeader: true,
-      packets: [{ headerForm: 'long', typeName: 'Version Negotiation', version: 0, frames: [] }],
+      packets: [{ headerForm: 'long', typeName: 'Version Negotiation', version: 0, frames: [], fixedBit: true }],
       nextPacketOffset: end,
     };
   }
@@ -516,6 +535,11 @@ function dissectQuic(
     ...(tokenLength === null ? {} : { tokenLength }),
     ...(headerPayloadLength === null ? {} : { payloadLength: headerPayloadLength }),
     frames: [],
+    fixedBit: true,
+    // A long header may be one of several packets coalesced into one
+    // datagram, so its length is where the next one starts - not the end of
+    // the UDP payload.
+    packetLength: nextPacketOffset - start,
   };
   const kind: QuicPacketKind | null =
     packetType === 'Initial' ? 'initial'
@@ -648,7 +672,33 @@ export function buildQuicLayer(
         value: packet.headerForm === 'long' ? 'Long Header (1)' : 'Short Header (0)',
         abbrev: 'quic.header_form',
       },
+      // Set on every QUIC packet that is not deliberately disguised, which is
+      // what makes it the cheapest test for "is this UDP payload QUIC at all"
+      // - and the row that says so was the one thing this dissector checked
+      // and never showed.
+      {
+        name: 'Fixed Bit', value: packet.fixedBit ? 'True' : 'False',
+        abbrev: 'quic.fixed_bit',
+      },
     ];
+
+    // Readable without keys, unlike the reserved bits and the packet-number
+    // length beside it: RFC 9001 protects the low five bits of a short
+    // header, and the spin bit sits at 0x20. It is a latency signal - it
+    // flips once per round trip - so a passive observer can measure RTT on a
+    // connection it cannot read a byte of.
+    if (packet.spinBit !== undefined) {
+      children.push({
+        name: 'Spin Bit', value: packet.spinBit ? 'True' : 'False',
+        abbrev: 'quic.spin_bit',
+      });
+    }
+    if (packet.packetLength !== undefined) {
+      children.push({
+        name: 'Packet Length', value: packet.packetLength,
+        abbrev: 'quic.packet_length', generated: true,
+      });
+    }
 
     if (packet.longPacketType !== undefined) {
       children.push({
@@ -713,7 +763,7 @@ export function buildQuicLayer(
       if (frame.streamFin !== undefined) {
         frameRows.push({ name: 'Fin', value: frame.streamFin, abbrev: 'quic.stream.fin' });
       }
-      children.push({ name: frame.name, value: '', isExpanded: true, children: frameRows });
+      children.push({ name: frame.name, value: '', abbrev: 'quic.frame', isExpanded: true, children: frameRows });
       fields['quic.frame_type'] = frame.type;
     }
 

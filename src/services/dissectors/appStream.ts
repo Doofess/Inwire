@@ -9,8 +9,10 @@
  * - and by content when there is not, which is the ordinary case on port 80.
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
-import { httpMessageFields, httpMessageRows } from './httpFields';
-import { dissectHttp1, freshHttp1Direction, looksLikeHttp1, type Http1Direction } from './http1';
+import { httpBodyRows, httpMessageFields, httpMessageRows } from './httpFields';
+import { dissectHttp1, freshHttp1Direction, looksLikeHttp1, type Http1Body, type Http1Direction } from './http1';
+import { dissectMediaType } from './mediaType';
+import type { DecodedBody } from './httpBody';
 import {
   dissectHttp2, freshHttp2Direction, http2ErrorName, HTTP2_PREFACE,
   type Http2Direction, type Http2Frame,
@@ -132,20 +134,42 @@ function readHttp1(
     // Body bytes with no start line: the frame is part of a message whose head
     // was in an earlier one.
     if (result.bodyBytes === 0) return EMPTY;
+    const rows: ProtocolField[] = [
+      { name: 'Body', value: `${result.bodyBytes} bytes of a message that began in an earlier frame` },
+    ];
+    // **The frame that COMPLETES a body is where the body is drawn**, and it
+    // usually carries no start line at all - which is why this branch, the
+    // one that used to be a single "Continuation" row, is where a
+    // reassembled body most often appears.
+    const fields: Record<string, string | number> = {};
+    const extra: ProtocolLayer[] = [];
+    let summary = `Continuation (${result.bodyBytes} bytes)`;
+    for (const body of result.bodies) {
+      const { rows: bodyRows, decoded } = httpBodyRows(body);
+      rows.push(...bodyRows);
+      const media = mediaLayerFor(body, decoded);
+      if (media !== null) extra.push(media);
+      summary = `${body.message.summary} (reassembled body, ${body.bytes.length} bytes)`;
+    }
     return {
-      protocolLabel: 'HTTP', info: ['Continuation'],
-      layers: [{
-        name: 'Hypertext Transfer Protocol',
-        summary: `Continuation (${result.bodyBytes} bytes)`,
-        fields: [{ name: 'Body', value: `${result.bodyBytes} bytes of a message that began in an earlier frame` }],
-      }],
-      fields: {},
+      protocolLabel: 'HTTP', info: [result.bodies.length > 0 ? summary : 'Continuation'],
+      layers: [{ name: 'Hypertext Transfer Protocol', summary, fields: rows }, ...extra],
+      fields,
     };
   }
 
   const info: string[] = [];
   const rows: ProtocolField[] = [];
   const fields: Record<string, string | number> = {};
+  /**
+   * Layers BELOW the HTTP one - the body's own dissector.
+   *
+   * A separate top-level layer rather than rows nested under HTTP, because
+   * that is what makes `frameProtocols` read `...http:json` and the bareword
+   * `json` answer. Nesting would draw the same rows and leave the filter with
+   * nothing to test.
+   */
+  const extra: ProtocolLayer[] = [];
 
   for (const message of result.messages) {
     // The reference analyzer's HTTP dissector puts a trailing space after each
@@ -176,6 +200,26 @@ function readHttp1(
 
     rows.push(...httpMessageRows(message, { answers }));
     Object.assign(fields, httpMessageFields(message, { answers }));
+
+    // A body that began and ended inside this same segment belongs under the
+    // message it is the body of, not in a separate frame's tree.
+    const body = result.bodies.find((candidate) => candidate.message === message);
+    if (body !== undefined) {
+      const { rows: bodyRows, decoded } = httpBodyRows(body);
+      rows.push(...bodyRows);
+      const media = mediaLayerFor(body, decoded);
+      if (media !== null) extra.push(media);
+    }
+  }
+
+  // Anything left finished here but started earlier - the pipelined case,
+  // where one segment carries the tail of one message and the head of the next.
+  for (const body of result.bodies) {
+    if (result.messages.includes(body.message)) continue;
+    const { rows: bodyRows, decoded } = httpBodyRows(body);
+    rows.push(...bodyRows);
+    const media = mediaLayerFor(body, decoded);
+    if (media !== null) extra.push(media);
   }
 
   const line = info.join('');
@@ -184,9 +228,33 @@ function readHttp1(
     // One entry, already joined: pipelined messages are concatenated, not
     // comma-separated, so the caller must not put a separator between them.
     info: [line],
-    layers: [{ name: 'Hypertext Transfer Protocol', summary: line.trim(), fields: rows }],
+    layers: [{ name: 'Hypertext Transfer Protocol', summary: line.trim(), fields: rows }, ...extra],
     fields,
   };
+}
+
+/**
+ * The body's own layer, chosen by its Content-Type.
+ *
+ * Two bodies are deliberately NOT handed on, and the second was found by the
+ * gate rather than by reasoning:
+ *
+ * - **A truncated one.** A JSON tree built from half a document is a page of
+ *   rows ending in a syntax note, which reads as a malformed server rather
+ *   than as a capture this build chose to stop collecting. The
+ *   `[Body truncated]` row already says what happened.
+ * - **One whose Content-Encoding could not be undone.** The bytes are still
+ *   compressed, so `text/plain` would hand brotli to the line dissector and
+ *   draw the compressed stream as if it were the text it claims to be -
+ *   confidently wrong, which is worse than a row saying the encoding is not
+ *   implemented. The Content-Type describes what is UNDER the encoding, and
+ *   until the encoding comes off it describes nothing present.
+ */
+function mediaLayerFor(body: Http1Body, decoded: DecodedBody): ProtocolLayer | null {
+  if (body.truncated !== null) return null;
+  if (decoded.unsupported !== undefined || decoded.error !== undefined) return null;
+  const type = body.message.headers.find((h) => h.name.toLowerCase() === 'content-type')?.value;
+  return dissectMediaType(decoded.bytes, type);
 }
 
 // --- HTTP/2 --------------------------------------------------------------------

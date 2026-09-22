@@ -21,6 +21,7 @@
  */
 import { applyInfoPatch, decodeRawEthernetPacket, type InfoPatch } from '../pcapParser';
 import type { HostIdentity } from '../direction';
+import { fieldValue } from '../dissect/fieldAccess';
 import { TcpStreamTracker } from '../tcpStreamTracker';
 import { IcmpEchoTracker } from '../icmpEchoTracker';
 import { QuicFlowTracker } from '../quicFlowTracker';
@@ -57,6 +58,33 @@ export interface ReplayResult {
  * the last one. The caller supplies the frames; this decides nothing about
  * which they are.
  */
+/** The conversation indices a replay has to be told, one per layer that has one. */
+export interface StreamSeeds {
+  eth?: number;
+  ip?: number;
+  ipv6?: number;
+  udp?: number;
+  tls?: number;
+}
+
+/**
+ * Reads the seeds back off the frame whose tree is being rebuilt.
+ *
+ * The numbers were written into `Packet.fields` by the eager pass, so the
+ * replay is told what the conversation was called rather than made to
+ * recompute it from frames it cannot see.
+ */
+export function seedsFor(packet: Packet): StreamSeeds {
+  const read = (abbrev: string): number | undefined => {
+    const value = fieldValue(packet, abbrev);
+    return typeof value === 'number' ? value : undefined;
+  };
+  return {
+    eth: read('eth.stream'), ip: read('ip.stream'), ipv6: read('ipv6.stream'),
+    udp: read('udp.stream'), tls: read('tls.stream'),
+  };
+}
+
 export function dissectReplay(
   frames: ReplayFrame[],
   truncated: boolean,
@@ -91,15 +119,32 @@ export function dissectReplay(
    * script below holds the two to exact equality, and this was the difference.
    */
   host?: HostIdentity,
+  /**
+   * The other conversation indices the real capture gave this frame.
+   *
+   * `streamId` above is the same problem for `tcp.stream`, and was the whole
+   * of it until every layer gained an index of its own. A sixth trailing
+   * parameter rather than folding the five into one object, because
+   * `streamId` sits at position 3 and `scripts/pipeline/replay.ts` asserts
+   * both that an unseeded replay gets the number wrong and that a seeded one
+   * gets it right - moving it would rewrite the check that proves the
+   * mechanism works.
+   *
+   * Recovered by the caller from the target packet's own fields, which is why
+   * these five are the only new names in this wave written into the bag.
+   */
+  seeds?: StreamSeeds,
 ): ReplayResult {
   if (frames.length === 0) return { layers: [], truncated };
 
   const tcp = new TcpStreamTracker();
   if (streamId !== undefined) tcp.seedNextStreamId(streamId);
+  if (seeds?.tls !== undefined) tcp.seedNextTlsStreamId(seeds.tls);
   const icmp = new IcmpEchoTracker();
   const quic = new QuicFlowTracker();
   const dns = new DnsTracker();
   const l3 = new L3Tracker();
+  if (seeds !== undefined) l3.seedNextIndices(seeds);
 
   const start = Math.max(0, frames.length - MAX_REPLAY_FRAMES);
   const capped = truncated || start > 0;

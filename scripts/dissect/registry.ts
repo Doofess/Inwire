@@ -125,6 +125,33 @@ for (const file of DISSECTION_SOURCES) {
   }
 }
 
+/**
+ * Abbrevs a dissector claims whose layer token does not exist.
+ *
+ * **The gap this closes shipped once and was found by hand.** The scan above
+ * skips any dotted literal whose first segment is not in `LAYERS`, and it has
+ * to: `e.g.` and `index.html` are not field names, and the layer-token check
+ * is what excludes them. But it means the first field of a NEW layer is
+ * skipped for exactly the same reason - a `data.text` row sailed through
+ * unregistered while every check here reported green, because `data` was not
+ * yet a token.
+ *
+ * `abbrev: 'x.y'` is different from a bare literal: it is a dissector stating
+ * that `x.y` IS a field name. If its layer is unknown, that is a layer
+ * somebody forgot to declare, and there is no false positive to trade against.
+ */
+const claimedAbbrevs = new Map<string, string>();
+for (const file of DISSECTION_SOURCES) {
+  const text = readFileSync(file, 'utf8');
+  for (const m of text.matchAll(/\babbrev:\s*'([^']+)'/g)) {
+    const first = m[1].split('.')[0];
+    if (first === 'inwire' || (LAYERS as readonly string[]).includes(first)) continue;
+    claimedAbbrevs.set(m[1], relative(root, file).split(sep).join('/'));
+  }
+}
+check('every abbrev a tree row claims belongs to a declared layer',
+  [...claimedAbbrevs].map(([key, file]) => `${key} (${file})`), []);
+
 // --- both directions ----------------------------------------------------------
 
 check('every field a dissector writes is registered',
@@ -192,10 +219,22 @@ check('the filter engine resolves its field names through the registry',
 //
 // Everything else a dissector publishes must not be spelled out anywhere in
 // the engine - it should arrive through the registry or not at all.
+//
+// The five either-end names below are the first kind in the sentence above,
+// and they are spelled out in the engine BECAUSE they are aliases: `resolveField`
+// consults `ALIASES` before the registry, so the engine's copy is the one that
+// answers. They are registered anyway, as `treeOnly`, so the detail pane can
+// draw the row - which is what took `filterableNotInTree` to zero.
 const ENGINE_ALIASES = new Set([
   'ipv6.src', 'ipv6.dst', 'eth.src', 'eth.dst',
   'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport',
   'tcp.stream',
+  'eth.addr', 'ip.addr', 'ipv6.addr', 'tcp.port', 'udp.port',
+  // Answered from `Packet.analysisFlags` by the same prefix rule that answers
+  // the fifteen verdicts under it: a bare `tcp.analysis.flags` asks whether
+  // any of them fired. Second kind, like `tcp.stream` - the value was never
+  // in the bag, so routing it through one would write a second copy.
+  'tcp.analysis.flags',
 ]);
 check('...and no longer hand-lists a dissector field',
   [...FIELD_ABBREVS]
