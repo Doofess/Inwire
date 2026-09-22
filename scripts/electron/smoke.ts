@@ -214,13 +214,27 @@ try {
    */
   await page.waitForLoadState('domcontentloaded').catch(() => {});
   const domReadyMs = Date.now() - launchedAt;
-  // To the first thing a person can see, not just to a document. React mounting
-  // is downstream of the whole entry chunk parsing and executing, so this is
-  // the number that would move if the bundle were the cost.
-  await page.waitForFunction(
-    'document.getElementById("root") && document.getElementById("root").childElementCount > 0',
-    undefined, { timeout: 30_000 },
-  ).catch(() => {});
+  /*
+   * To the first thing a person can see, not just to a document. React mounting
+   * is downstream of the whole entry chunk parsing and executing, so this is
+   * the number that would move if the bundle were the cost.
+   *
+   * **A function predicate, never a string.** `waitForFunction` given a string
+   * builds its polling predicate with `eval` INSIDE the page, and this app's
+   * production CSP is `script-src 'self' 'unsafe-inline'` with no
+   * 'unsafe-eval' - so the string form throws `EvalError` on the first poll.
+   * The first version of this used a string behind a `.catch(() => {})`, which
+   * swallowed that and reported a number ~215 ms above the document time that
+   * was Playwright retrying a forbidden eval rather than React mounting. A
+   * measurement that silently measures something else is worse than none.
+   *
+   * The `catch` is gone with it: a predicate that cannot run should fail the
+   * run, not quietly publish a different number.
+   */
+  await page.waitForFunction(() => {
+    const root = document.getElementById('root');
+    return !!root && root.childElementCount > 0;
+  }, undefined, { timeout: 30_000 });
   console.log(`      document in ${domReadyMs} ms, first painted UI in `
     + `${Date.now() - launchedAt} ms `
     + '(measurements, not budgets: this machine, not this build)');

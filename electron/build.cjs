@@ -47,7 +47,16 @@ async function main() {
     // Provided by the runtime, and `electron` must never be inlined.
     external: ['electron'],
     sourcemap: false,
-    minify: false,
+    // Minified, and the reason is the store rather than the disk. `store.cjs`
+    // is parsed by a `utilityProcess` on its cold start, which is on the path
+    // between the window appearing and a capture being able to begin. The asar
+    // saving is a rounding error next to a 246 MB Electron binary.
+    //
+    // Safe without a sourcemap because nothing here is symbolicated after the
+    // fact: a main-process throw goes to `docs/verification.md`'s stderr and to
+    // the store's `log()` pipe with its own message, and the fuses forbid
+    // attaching an inspector to a packaged build anyway.
+    minify: true,
     logLevel: 'warning',
   });
 }

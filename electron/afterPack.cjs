@@ -74,7 +74,7 @@
  * close to nothing - but it is not zero, and the day this app grows a second
  * language, `KEEP` is the list to add to.
  */
-const { readdirSync, rmSync, statSync } = require('node:fs');
+const { existsSync, readdirSync, rmSync, statSync } = require('node:fs');
 const path = require('node:path');
 const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
 
@@ -134,4 +134,55 @@ exports.default = async function afterPack(context) {
   }
 
   console.log(`  • locales pruned  removed=${removed} freed=${(freed / 1e6).toFixed(1)}MB`);
+
+  /*
+   * Dawn's WebGPU shader compiler, which nothing here asks for.
+   *
+   * `dxcompiler.dll` (~25.7 MB) and `dxil.dll` (~1.5 MB) are DXC, the HLSL
+   * compiler Chromium ships for WebGPU. This app has no WebGPU at all - not a
+   * `navigator.gpu`, not a `requestAdapter`, nothing - and both of its 3D
+   * surfaces are WebGL: `three` is imported as `WebGLRenderer` and MapLibre is
+   * WebGL. ANGLE's own HLSL translator is `d3dcompiler_47.dll`, which is a
+   * different file and STAYS.
+   *
+   * The argument is the one the locales make a hundred lines up, and it applies
+   * unchanged: updates here are hand-rolled and ship the whole installer, so
+   * 27 MB is paid again by every user on every update.
+   *
+   * **This one is verified by launching, not by reasoning**, because the
+   * failure mode is silent: Chromium probes these lazily, so a build that
+   * needed them would fall back to a degraded renderer rather than fail. The
+   * check is in `docs/verification.md` - pack, run the packed exe, confirm the
+   * map draws and Capture Health still reports a GPU tier.
+   */
+  let gpuFreed = 0;
+  const gpuRemoved = [];
+  for (const dll of ['dxcompiler.dll', 'dxil.dll']) {
+    const file = path.join(context.appOutDir, dll);
+    let size;
+    try {
+      size = statSync(file).size;
+    } catch {
+      // Loud rather than silent, for the reason the locales guard gives: a
+      // pruning step that quietly prunes nothing is how the megabytes come
+      // back. If Electron stops shipping these, this list is what to delete -
+      // deliberately, rather than by a `catch` nobody reads.
+      throw new Error(`afterPack: expected ${dll} at ${file}. `
+        + 'If Electron no longer ships it, remove it from this list on purpose.');
+    }
+    rmSync(file);
+    gpuFreed += size;
+    gpuRemoved.push(dll);
+  }
+
+  // The one that must survive, and the reason this check exists: it is one
+  // character away from the files above and it is what ANGLE actually uses.
+  if (!existsSync(path.join(context.appOutDir, 'd3dcompiler_47.dll'))) {
+    throw new Error('afterPack: d3dcompiler_47.dll is gone. That file is '
+      + 'ANGLE\'s HLSL translator rather than WebGPU\'s, every GL surface in '
+      + 'the app needs it, and it is one character away from the two pruned above.');
+  }
+
+  console.log(`  • webgpu pruned   removed=${gpuRemoved.join(',')} `
+    + `freed=${(gpuFreed / 1e6).toFixed(1)}MB`);
 };

@@ -53,6 +53,41 @@ npx tsx scripts/electron/serveStub.ts --burst 40
 
 then launch the app beside it and pick **Ethernet (stub)**.
 
+### The packed app still gets a real GPU
+
+`electron/afterPack.cjs` deletes `dxcompiler.dll` and `dxil.dll` - 27.3 MB of
+Dawn's WebGPU shader compiler, which nothing in this app asks for. Chromium
+probes them **lazily**, so a build that needed them would fall back to a
+software rasterizer rather than fail: the symptom is a slower map and a screen
+that looks entirely normal.
+
+**Playwright cannot drive the packed exe**, and that is the fuses working:
+`enableNodeCliInspectArguments` is off, and Playwright's Electron support
+attaches through the Node inspector. A launch against `release/win-unpacked/`
+times out. So this one stays here.
+
+- [ ] `npm run pack`, then run `release\win-unpacked\Inwire.exe`. The pack log
+      should read `webgpu pruned removed=dxcompiler.dll,dxil.dll freed=27.3MB`.
+- [ ] Turn on location lookup and open the **Routing Map**. The globe draws, pins
+      appear, arcs draw between them.
+- [ ] **Settings -> Capture Health** reports a GPU rather than a software
+      renderer. `src/components/analytics/renderTier.ts` is what classifies it,
+      and `Microsoft Basic Render Driver`, `SwiftShader` or `llvmpipe` in that
+      string is the failure this check exists for.
+
+Measured once, automatically, against the same Chromium `dist/` runs on - both
+DLLs moved out of `node_modules/electron/dist` and the renderer string read back
+from a live WebGL context:
+
+```
+with the DLLs:    ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 (0x00002704) Direct3D11 vs_5_0 ps_5_0, D3D11)
+without them:     ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 (0x00002704) Direct3D11 vs_5_0 ps_5_0, D3D11)
+```
+
+Identical, so the prune costs nothing on a machine with a GPU. That is evidence
+rather than proof for the packed build: same Chromium, same files, different
+container. The boxes above are what closes the gap.
+
 ---
 
 ## 1. The window's own chrome
@@ -1299,7 +1334,9 @@ the app can read stops being one the agent can send.
 `switch-agent.ps1 -Rust` copies a built binary into Program Files rather than
 registering it where it was built, so a stale `target\` is a stale service -
 and on a machine with no MSVC linker the build lands in
-`target_64-pc-windows-gnuelease\` rather than `targetelease\`, which
+`target_64-pc-windows-gnu
+elease\` rather than `target
+elease\`, which
 is a second way to install yesterday's work and be told it succeeded. The script
 now prints the path it chose and how many minutes old it is; that line is the
 thing to read.
