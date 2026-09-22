@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { CircleAlert, Filter, X, Bookmark, Info, ChevronDown } from 'lucide-react';
 import { FilterEngine, FilterValidationResult } from '../../services/filterEngine';
 import { allPresets } from '../../services/filterPresets';
+import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
 
 /**
@@ -51,7 +52,29 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   filterPresetLibrary,
   onSaveCurrentFilter,
 }) => {
-  const [validation, setValidation] = useState<FilterValidationResult>({ isValid: true });
+  /*
+   * Validation is DERIVED, not stored, and it is derived from the settled text.
+   *
+   * It used to be a `useState` written from a `useEffect` keyed on `filterText`,
+   * which cost two things per character typed. One: a state write in an effect
+   * is a second render, and `filterText` lives in `App` with
+   * `LinkedHexViewer` as the application's only memo boundary, so that is two
+   * full-tree renders per keystroke rather than one. Two: `validateFilter`
+   * parses and compiles, so every prefix of `tcp.port == 443` was compiled and
+   * thrown away.
+   *
+   * 250 ms, matching `TrafficTimelineChart`'s overlay filter, which is the same
+   * shape of problem. The delay is safe because nothing here gates applying a
+   * filter - `validation` only decides a border colour, the save button and the
+   * error line. Enter reads `filterText` directly and always has. It also reads
+   * better: an expression is no longer briefly marked invalid while the word
+   * that will make it valid is still being typed.
+   */
+  const settledFilterText = useDebouncedValue(filterText, 250);
+  const validation: FilterValidationResult = useMemo(
+    () => FilterEngine.validateFilter(settledFilterText),
+    [settledFilterText],
+  );
   /**
    * Who asked for the presets list, or `null` for nobody.
    *
@@ -79,11 +102,6 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   const [highlighted, setHighlighted] = useState(-1);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  // Validate syntax as the user types.
-  useEffect(() => {
-    setValidation(FilterEngine.validateFilter(filterText));
-  }, [filterText]);
-
   /**
    * The word being typed, and where it starts.
    *

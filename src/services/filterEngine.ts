@@ -138,10 +138,19 @@ export class FilterEngine {
     const token = input.split(/[\s(){}&|!]+/).pop()?.toLowerCase() ?? '';
     if (!token) return STARTERS.slice(0, 8);
 
-    const names = [...protocolNames(), ...knownFieldNames()];
-    const starts = names.filter(n => n.startsWith(token));
-    const inside = names.filter(n => !n.startsWith(token) && n.includes(token));
-    return [...starts, ...inside].slice(0, 12);
+    // Built once. The two halves are already shared (see `fields.ts`); this is
+    // the concatenation of them, which was the third array allocated per
+    // keystroke. One pass rather than two, because the second `filter` was
+    // re-testing `startsWith` on every name it had just rejected.
+    const names = suggestionNames ??= [...protocolNames(), ...knownFieldNames()];
+    const starts: string[] = [];
+    const inside: string[] = [];
+    for (const name of names) {
+      if (name.startsWith(token)) starts.push(name);
+      else if (name.includes(token)) inside.push(name);
+      if (starts.length >= 12) break;
+    }
+    return starts.length >= 12 ? starts.slice(0, 12) : [...starts, ...inside].slice(0, 12);
   }
 
   /** The fields "Apply as column" offers, from the registry. */
@@ -149,6 +158,16 @@ export class FilterEngine {
     return columnFields();
   }
 }
+
+/**
+ * Every completable name, protocols first, built on the first keystroke.
+ *
+ * Module scope rather than a static field so it is shared across every caller,
+ * and lazy so importing this file for a check that never completes anything
+ * costs nothing. Safe to hold because both halves are immutable - see the note
+ * above `knownFieldNames` in `filter/fields.ts`.
+ */
+let suggestionNames: readonly string[] | undefined;
 
 /** Openers offered when there is nothing to complete yet. */
 const STARTERS = [

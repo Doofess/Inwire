@@ -344,6 +344,28 @@ export function resolveField(name: string): FieldResolution {
   };
 }
 
+/*
+ * The three name lists below are built once and shared.
+ *
+ * `FIELDS`, `ALIASES`, `LAYER_TOKENS` and `PROTOCOL_PREDICATES` are all
+ * module-level constants that nothing mutates at run time, so the answers
+ * cannot change - and these were being recomputed AND re-sorted on every
+ * keystroke in the filter bar, through `FilterEngine.getSuggestions`. The
+ * registry is 969 fields; that is two sorts of about a thousand strings and
+ * three array builds per character typed.
+ *
+ * `readonly` in the signatures rather than a convention in a comment: a shared
+ * array that one caller sorts in place is a bug in every other caller, and the
+ * type is what stops it. Every caller today only reads - `.filter`,
+ * `.includes`, `new Set(...)`, spread - and this keeps it that way.
+ *
+ * Lazily rather than at module load, because `scripts/` imports this file for
+ * checks that never ask for a name list, and the sort is real work.
+ */
+let knownFieldNamesCache: readonly string[] | undefined;
+let treeOnlyFieldNamesCache: readonly string[] | undefined;
+let protocolNamesCache: readonly string[] | undefined;
+
 /**
  * Every name a filter may use, for validation and autocomplete.
  *
@@ -351,21 +373,22 @@ export function resolveField(name: string): FieldResolution {
  * never match is worse than not offering it: it is the app telling the user the
  * filter is right.
  */
-export function knownFieldNames(): string[] {
-  return [
+export function knownFieldNames(): readonly string[] {
+  return knownFieldNamesCache ??= [
     ...Object.keys(ALIASES),
     ...FIELDS.filter((f) => f.treeOnly !== true).map((f) => f.abbrev),
   ].sort();
 }
 
 /** The registered names the tree shows and a filter cannot read. */
-export function treeOnlyFieldNames(): string[] {
-  return FIELDS.filter((f) => f.treeOnly === true).map((f) => f.abbrev).sort();
+export function treeOnlyFieldNames(): readonly string[] {
+  return treeOnlyFieldNamesCache ??=
+    FIELDS.filter((f) => f.treeOnly === true).map((f) => f.abbrev).sort();
 }
 
 /** Every bareword that tests for a protocol's presence. */
-export function protocolNames(): string[] {
-  return [...LAYER_TOKENS, ...Object.keys(PROTOCOL_PREDICATES)].sort();
+export function protocolNames(): readonly string[] {
+  return protocolNamesCache ??= [...LAYER_TOKENS, ...Object.keys(PROTOCOL_PREDICATES)].sort();
 }
 
 /** The fields "Apply as column" offers, from the registry. */
