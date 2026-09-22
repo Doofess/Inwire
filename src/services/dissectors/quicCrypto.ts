@@ -155,6 +155,19 @@ function decodePacketNumber(largestReceived: number, truncated: number, bitLengt
 export interface DecryptedPacket {
   packetNumber: number;
   payload: Uint8Array;
+  /**
+   * The first byte with header protection removed.
+   *
+   * Carried out because it is the only place the protected bits are readable
+   * and they were being computed and dropped: the long header's two reserved
+   * bits and the packet-number length live in its low nibble, and RFC 9001
+   * masks exactly those. A packet this build could not decrypt genuinely has
+   * no answer for them - which is why they are optional on the record rather
+   * than drawn as zero.
+   */
+  firstByte: number;
+  /** Bytes the packet number occupies, 1 to 4, from the unprotected bits. */
+  packetNumberLength: number;
 }
 
 /**
@@ -219,5 +232,5 @@ export function decryptQuicPacket(
     : chacha20Poly1305Decrypt(keys.key, nonce, aad, ciphertext, tag);
   if (!payload) return null;
 
-  return { packetNumber, payload };
+  return { packetNumber, payload, firstByte, packetNumberLength: pnLength };
 }

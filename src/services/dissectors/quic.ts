@@ -144,6 +144,7 @@ function summarizeFrames(payload: Uint8Array): {
         const record = records[records.length - 1];
         record.cryptoOffset = offsetVarint.value;
         record.cryptoLength = lengthVarint.value;
+        record.cryptoData = hexOfRange(payload, dataStart, dataEnd);
         cursor = dataEnd;
         break;
       }
@@ -227,7 +228,7 @@ export type PacketDecryptor = (
   version: number,
   destinationConnectionId: Uint8Array,
   kind: QuicPacketKind
-) => { packetNumber: number; payload: Uint8Array } | null;
+) => { packetNumber: number; payload: Uint8Array; firstByte: number; packetNumberLength: number } | null;
 
 /** One STREAM frame's contribution to a QUIC stream. */
 export interface StreamFragment {
@@ -257,6 +258,8 @@ export interface QuicFrameRecord {
   name: string;
   cryptoOffset?: number;
   cryptoLength?: number;
+  /** The frame's data bytes, hex. The reference names these and this did not. */
+  cryptoData?: string;
   streamId?: number;
   streamOffset?: number;
   streamLength?: number;
@@ -279,6 +282,26 @@ export interface QuicFrameRecord {
  * row is drawn only where the fact was actually read, which is the same rule
  * the status bar keeps - never show a zero that was never measured.
  */
+/**
+ * `toHex` over a slice, clamped, colon-separated.
+ *
+ * Colons because the reference's `show` carries them for every FT_BYTES, and
+ * `show` is what `tree-coverage.ts` compares - its `showname` runs the same
+ * bytes together, so reading the human-facing line produces a mismatch on
+ * every frame. The clamp is not decoration: these offsets are derived from
+ * length fields an adversary writes.
+ */
+function hexOfRange(bytes: Uint8Array, from: number, to: number): string {
+  const start = Math.max(0, Math.min(from, bytes.length));
+  const stop = Math.max(start, Math.min(to, bytes.length));
+  let out = '';
+  for (let i = start; i < stop; i++) {
+    if (out.length > 0) out += ':';
+    out += bytes[i].toString(16).padStart(2, '0');
+  }
+  return out;
+}
+
 export interface QuicPacketRecord {
   headerForm: 'long' | 'short';
   /** `Initial`, `Handshake`, `Protected Payload (KP0)`, ... */
@@ -309,6 +332,29 @@ export interface QuicPacketRecord {
   spinBit?: boolean;
   /** This packet's length within the datagram, coalesced packets counted apart. */
   packetLength?: number;
+  /**
+   * The long header's two reserved bits, present only once the header has been
+   * unprotected - which means only on a packet that decrypted.
+   */
+  reserved?: number;
+  /** The packet-number length field's raw 2-bit value; the byte count is it plus one. */
+  packetNumberLengthField?: number;
+  /**
+   * The protected payload, hex, on a packet that DID decrypt: everything after
+   * the packet number to the end of the packet.
+   *
+   * The reference draws these bytes and the frames it read out of them, which
+   * looks redundant and is not - the bytes are what a reader compares against
+   * another capture, and the frames are this build's interpretation of them.
+   */
+  payloadHex?: string;
+  /**
+   * The same region on a packet that did NOT decrypt, which the reference
+   * names differently and measures differently: from the end of the Length
+   * field rather than from the end of the packet number, because without
+   * header protection removed nobody knows how long the packet number is.
+   */
+  remainingPayloadHex?: string;
 }
 
 export interface QuicDissectorResult {
@@ -415,6 +461,8 @@ function dissectQuic(
           typeName: 'Protected Payload (KP0)',
           ...(knownConnectionId ? { dcid: knownConnectionId, dcidLength: dcidLength } : {}),
           packetNumber: decrypted.packetNumber,
+          packetNumberLengthField: decrypted.firstByte & 0x03,
+          payloadHex: hexOfRange(bytes, start + 1 + dcidLength + decrypted.packetNumberLength, end),
           frames: frames.records,
           fixedBit: true,
           spinBit: (firstByte & 0x20) !== 0,
@@ -444,6 +492,10 @@ function dissectQuic(
         fixedBit: true,
         spinBit: (firstByte & 0x20) !== 0,
         packetLength: end - start,
+        // Everything past the first byte and the connection id. The packet
+        // number is in there and is not separated out, because its length is
+        // under the protection this packet could not remove.
+        remainingPayloadHex: hexOfRange(bytes, start + 1 + dcidLength, end),
       }],
       /** A short header runs to the end of the datagram; nothing follows it. */
       nextPacketOffset: end,
@@ -556,7 +608,19 @@ function dissectQuic(
       streamFragments.push(...frames.streams);
       record.packetNumber = decrypted.packetNumber;
       record.frames = frames.records;
+      // Readable only now. `firstByte` arrives unprotected from the decryptor
+      // because these two fields live under exactly the mask it removes.
+      record.reserved = (decrypted.firstByte >> 2) & 0x03;
+      record.packetNumberLengthField = decrypted.firstByte & 0x03;
+      record.payloadHex = hexOfRange(
+        bytes, packetNumberOffset + decrypted.packetNumberLength, nextPacketOffset,
+      );
     }
+  }
+  // Undecrypted, so the payload is named `remaining` and measured from the end
+  // of the Length field - the packet number is inside it and unmeasurable.
+  if (record.packetNumber === undefined && packetNumberOffset > 0) {
+    record.remainingPayloadHex = hexOfRange(bytes, packetNumberOffset, nextPacketOffset);
   }
 
   return {
@@ -708,6 +772,18 @@ export function buildQuicLayer(
       });
       fields['quic.long.packet_type'] = packet.longPacketType;
     }
+    // Both sit under header protection, so both exist only on a packet that
+    // decrypted - drawn where they were read, never as a zero.
+    if (packet.reserved !== undefined) {
+      children.push({ name: 'Reserved', value: packet.reserved, abbrev: 'quic.long.reserved' });
+    }
+    if (packet.packetNumberLengthField !== undefined) {
+      children.push({
+        name: 'Packet Number Length',
+        value: `${packet.packetNumberLengthField + 1} bytes (${packet.packetNumberLengthField})`,
+        abbrev: 'quic.packet_number_length',
+      });
+    }
     if (packet.version !== undefined) {
       children.push({
         name: 'Version',
@@ -740,6 +816,18 @@ export function buildQuicLayer(
       children.push({ name: 'Packet Number', value: packet.packetNumber, abbrev: 'quic.packet_number' });
       fields['quic.packet_number'] = packet.packetNumber;
     }
+    // **The bytes AND the frames read out of them**, which is what the
+    // reference draws and only looks redundant: the frames below are this
+    // build's reading, and these are what a reader diffs against another
+    // capture when the reading is in doubt.
+    if (packet.payloadHex !== undefined && packet.payloadHex.length > 0) {
+      children.push({ name: 'Payload', value: packet.payloadHex, abbrev: 'quic.payload' });
+    }
+    if (packet.remainingPayloadHex !== undefined && packet.remainingPayloadHex.length > 0) {
+      children.push({
+        name: 'Remaining Payload', value: packet.remainingPayloadHex, abbrev: 'quic.remaining_payload',
+      });
+    }
 
     for (const frame of packet.frames) {
       const frameRows: ProtocolField[] = [
@@ -750,6 +838,9 @@ export function buildQuicLayer(
       }
       if (frame.cryptoLength !== undefined) {
         frameRows.push({ name: 'Length', value: frame.cryptoLength, abbrev: 'quic.crypto.length' });
+      }
+      if (frame.cryptoData !== undefined) {
+        frameRows.push({ name: 'Crypto Data', value: frame.cryptoData, abbrev: 'quic.crypto.crypto_data' });
       }
       if (frame.streamId !== undefined) {
         frameRows.push({ name: 'Stream ID', value: frame.streamId, abbrev: 'quic.stream.stream_id' });
@@ -767,7 +858,14 @@ export function buildQuicLayer(
       fields['quic.frame_type'] = frame.type;
     }
 
-    rows.push({ name: packet.typeName, value: '', isExpanded: true, children });
+    // **A short header's node carries a name of its own; a long header's does
+    // not.** The reference has `quic.short` for "QUIC Short Header" and no
+    // counterpart for the long form, which reads like an oversight and is
+    // consistent across every frame of both fixtures - so it is matched rather
+    // than tidied, the same call the IEEE 1905 media-type names got.
+    rows.push(packet.headerForm === 'short'
+      ? { name: 'QUIC Short Header', value: '', abbrev: 'quic.short', isExpanded: true, children }
+      : { name: packet.typeName, value: '', isExpanded: true, children });
   }
 
   return { layer: { name: 'QUIC IETF', summary, fields: rows }, fields };

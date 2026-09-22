@@ -377,6 +377,17 @@ export const FIELDS: readonly FieldDef[] = [
   // protection, which is why they are here and the reserved bits are not.
   treeOnly(bool('quic.fixed_bit', 'Fixed Bit', 'quic')),
   treeOnly(bool('quic.spin_bit', 'Spin Bit', 'quic')),
+  // Under header protection, so present only on a packet that decrypted.
+  treeOnly(uint('quic.long.reserved', 'Reserved', 'quic')),
+  treeOnly(str('quic.packet_number_length', 'Packet Number Length', 'quic')),
+  // The short header's own node. The long form has no counterpart in the
+  // reference, which is matched rather than tidied.
+  treeOnly(str('quic.short', 'QUIC Short Header', 'quic')),
+  // The protected payload under its two names: `payload` once the packet has
+  // been opened, `remaining_payload` when it never was.
+  treeOnly(str('quic.payload', 'Payload', 'quic')),
+  treeOnly(str('quic.remaining_payload', 'Remaining Payload', 'quic')),
+  treeOnly(str('quic.crypto.crypto_data', 'Crypto Data', 'quic')),
   treeOnly(uint('quic.packet_length', 'Packet Length', 'quic')),
   treeOnly(str('quic.frame', 'Frame', 'quic')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
