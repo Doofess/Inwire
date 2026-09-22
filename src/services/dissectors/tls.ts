@@ -873,6 +873,28 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     cursor.holed = false;
   };
 
+  /**
+   * Begins a record that this segment does not finish.
+   *
+   * **`tls.segment.data` is deliberately not drawn here, and that was measured
+   * rather than assumed.** The obvious reading - "the trailing bytes of a
+   * record completing later" - was implemented and produced the row on 72
+   * frames of `inwire` against the reference's 67, which looked like a near
+   * miss, and on **1,339** frames of `bulk` against its **2**. `bulk` is a long
+   * TLS transfer, so almost every frame has a trailing partial record, and the
+   * reference draws the row on almost none of them.
+   *
+   * The reason is that the reference has two reassemblers and the field belongs
+   * to only one. When its TCP desegmentation carries the trailing bytes into
+   * the next PDU, the frame is listed in that PDU's `tcp.segment` set and gets
+   * no `tls.segment.data`; the row appears only where TLS reassembles for
+   * itself. Frame 2410 of `inwire` is the case seen directly - its trailing
+   * bytes show up in frame 2421's `tcp.segment` list instead.
+   *
+   * Reproducing that means modelling the interaction between the two, not
+   * adding a row. Drawing it on the wrong 1,337 frames is worse than not
+   * drawing it: an abbrev is a filter somebody will write.
+   */
   const startSpanning = (h: RecordHeader, bodyStart: number): void => {
     const avail = end - bodyStart;
     cursor.contentType = h.contentType; cursor.version = h.version; cursor.recordLength = h.length;
