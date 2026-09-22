@@ -401,6 +401,33 @@ export class QuicFlowTracker {
    * byte up to that length has arrived. Anything else would parse a hole as
    * data and produce a fingerprint that matches nothing.
    */
+  /**
+   * **`tls.handshake.fragments` is deliberately not emitted, and the reason is
+   * a rule that could not be derived rather than one that was hard to write.**
+   *
+   * The reference draws a fragment list on the frame that completes a handshake
+   * message. Two things about it were established from `inwire` frames 43 and
+   * 44, which carry a ClientHello reassembled from 2,160 bytes:
+   *
+   * - It is not "bytes each frame carried". Frame 43 carried 1,078 of those
+   *   bytes and the reference credits it with 65. The 1,013 it delivered ahead
+   *   of the gap are inside frame 44's single entry, because filling the gap is
+   *   what made them readable.
+   * - So the unit is an advance of the contiguous-from-zero prefix, credited to
+   *   the frame that caused the advance. That much is clear.
+   *
+   * What does not follow is the split. Frame 43 is ONE QUIC packet carrying
+   * five CRYPTO frames, and the reference lists two entries for it - `0-63`
+   * and `64-64` - where a per-packet rule predicts one entry of 65 bytes and a
+   * per-CRYPTO-frame rule predicts five. Built on the obvious reading this
+   * emitted the rows on 45 frames against the reference's 22 and reported 13
+   * fragments where it reports 3.
+   *
+   * An abbrev is a filter somebody will write, so a count that is wrong on
+   * half the frames is worse than a count that is absent. If this is picked up
+   * again, start by explaining the `64-64` entry - everything else is already
+   * understood.
+   */
   public addCryptoFragments(
     srcIp: string, srcPort: number, dstIp: string, dstPort: number, fragments: CryptoFragment[],
   ): QuicHandshakeFacts | undefined {
