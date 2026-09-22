@@ -30,6 +30,7 @@ import { PcapService } from '../../src/services/pcapParser';
 import { dissectReplay, seedsFor } from '../../src/services/pipeline/replay';
 import { inferHostIdentity } from '../../src/services/hostIdentity';
 import { streamPackets, targetForPacket } from '../../src/services/followStream';
+import { fieldValue } from '../../src/services/dissect/fieldAccess';
 import type { ReplayFrame } from '../../src/services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../../src/types/packet';
 
@@ -163,6 +164,30 @@ async function main() {
     ).layers);
     checkTrue('an unseeded replay gets the stream index wrong', unseeded !== seeded);
     check('...and a seeded one gets it right', seeded, render(tcpFrame.layers));
+  }
+
+  // The same trap one layer down, and it needs its own case: `quic.connection
+  // .number` is seeded through `QuicFlowTracker` rather than `L3Tracker`, so a
+  // seed that stopped being passed would leave every check above passing while
+  // a replayed QUIC tree named the wrong connection. Picked past connection 3
+  // for the reason the TCP case is: connection 0 is what an unseeded tracker
+  // says anyway, so a frame on it proves nothing.
+  const quicFrame = truth.find((p) => {
+    const n = fieldValue(p, 'quic.connection.number');
+    return typeof n === 'number' && n > 3 && (p.frameProtocols ?? []).includes('quic');
+  });
+  if (quicFrame) {
+    const frames = bundleFor(quicFrame, buffer);
+    const seeds = seedsFor(quicFrame);
+    const seeded = render(dissectReplay(frames, false, quicFrame.streamId, undefined, host, seeds).layers);
+    const unseeded = render(dissectReplay(
+      frames, false, quicFrame.streamId, undefined, host, { ...seeds, quic: undefined },
+    ).layers);
+    const want = `Connection Number: ${fieldValue(quicFrame, 'quic.connection.number')}`;
+    checkTrue(`a seeded replay names connection ${fieldValue(quicFrame, 'quic.connection.number')}`
+      + ` (frame ${quicFrame.id})`, seeded.includes(want));
+    checkTrue('...and an unseeded one does not', !unseeded.includes(want));
+    check('...and the seeded tree is the eager one', seeded, render(quicFrame.layers));
   }
 
   // --- a truncated replay says so ---------------------------------------------

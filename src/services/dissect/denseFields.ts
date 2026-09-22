@@ -63,6 +63,13 @@ export const DENSE_FIELDS: readonly DenseKey[] = [
   { abbrev: 'ip.stream', width: 'u16' },
   { abbrev: 'ipv6.stream', width: 'u16' },
   { abbrev: 'udp.stream', width: 'u16' },
+  // 20.9% of `inwire`'s frames, which is over the rule's threshold. The gate
+  // does not fire on it because it measures both fixtures together and `bulk`
+  // is almost all TCP - so this is here on the rule rather than on the gate,
+  // and a capture of a browser that prefers QUIC is the one it is for.
+  // `widen()` moves the column up if a capture ever holds more than 65,535
+  // connections, so `u16` is a starting width rather than a ceiling.
+  { abbrev: 'quic.connection.number', width: 'u16' },
   // Sparse on a general browsing capture and dense on a long TLS transfer -
   // `bulk` is one, and that is what put this here. A TLS conversation index is
   // only as common as TLS, which on most captures of a browser is most frames.

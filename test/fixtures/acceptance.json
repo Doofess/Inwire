@@ -67,7 +67,7 @@
           "ipv6": 18,
           "llc": 8,
           "lldp": 56,
-          "quic": 23,
+          "quic": 24,
           "ssdp": 13,
           "stp": 18,
           "tcp": 90,
@@ -79,8 +79,8 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 119,
-          "valueMismatches": 284
+          "absentDistinct": 118,
+          "valueMismatches": 285
         },
         "unimplemented": {
           "prp": "Parallel Redundancy Protocol (IEC 62439-3), on 20 frames, and DELIBERATELY not implemented - these 20 are the reference's own false positives and reproducing them would be theatre. Every one is a TCP-over-IPv6 segmentation-offload frame whose IPv6 Payload Length is 0, so the reference has no length telling it where the payload ends and scans for PRP-0's 4-byte trailer instead. It finds one in the middle of an encrypted TLS record (frame 8200: bytes 4b 99 b1 00 at offset 266, LAN nibble B, 12-bit size 256 = 266+4-14) because PRP-0's only self-check is that its own size field agrees with its own position. Twenty hits over 180k frames is about what 1-in-32768 predicts. Industrial ring redundancy does not run on a home browsing capture. If a real PRP capture ever lands in test/fixtures, implement it then and floor it against that - not against this."
@@ -131,7 +131,7 @@
           "ip": 23,
           "ipv6": 17,
           "llc": 8,
-          "quic": 23,
+          "quic": 24,
           "ssdp": 7,
           "stp": 18,
           "tcp": 89,
@@ -143,7 +143,7 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 86,
+          "absentDistinct": 85,
           "valueMismatches": 198
         },
         "unimplemented": {}

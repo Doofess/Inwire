@@ -65,6 +65,13 @@ export interface StreamSeeds {
   ipv6?: number;
   udp?: number;
   tls?: number;
+  /**
+   * The QUIC connection index. Seeded like the rest and for the same reason -
+   * a bundle holds one connection, and a fresh tracker calls it 0 - but this
+   * one is the tracker's own counter rather than `L3Tracker`'s, so it is
+   * handed to `QuicFlowTracker` directly.
+   */
+  quic?: number;
 }
 
 /**
@@ -82,6 +89,7 @@ export function seedsFor(packet: Packet): StreamSeeds {
   return {
     eth: read('eth.stream'), ip: read('ip.stream'), ipv6: read('ipv6.stream'),
     udp: read('udp.stream'), tls: read('tls.stream'),
+    quic: read('quic.connection.number'),
   };
 }
 
@@ -142,6 +150,7 @@ export function dissectReplay(
   if (seeds?.tls !== undefined) tcp.seedNextTlsStreamId(seeds.tls);
   const icmp = new IcmpEchoTracker();
   const quic = new QuicFlowTracker();
+  if (seeds?.quic !== undefined) quic.seedNextConnectionNumber(seeds.quic);
   const dns = new DnsTracker();
   const l3 = new L3Tracker();
   if (seeds !== undefined) l3.seedNextIndices(seeds);

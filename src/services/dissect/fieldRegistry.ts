@@ -388,6 +388,10 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(str('quic.payload', 'Payload', 'quic')),
   treeOnly(str('quic.remaining_payload', 'Remaining Payload', 'quic')),
   treeOnly(str('quic.crypto.crypto_data', 'Crypto Data', 'quic')),
+  // Which connection a packet belongs to, indexed in order of first sight.
+  // A bag field rather than `treeOnly` because a replayed tree has to be told
+  // it - a bundle holds one connection and a fresh tracker would call it 0.
+  uint('quic.connection.number', 'Connection Number', 'quic'),
   treeOnly(uint('quic.packet_length', 'Packet Length', 'quic')),
   treeOnly(str('quic.frame', 'Frame', 'quic')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),

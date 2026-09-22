@@ -722,7 +722,8 @@ export function dissectQuicDatagram(
  */
 export function buildQuicLayer(
   packets: readonly QuicPacketRecord[],
-  summary: string
+  summary: string,
+  connectionNumber?: number
 ): { layer: ProtocolLayer; fields: Record<string, string | number> } | null {
   if (packets.length === 0) return null;
 
@@ -731,6 +732,12 @@ export function buildQuicLayer(
 
   for (const packet of packets) {
     const children: ProtocolField[] = [
+      // First, where the reference puts it: a generated row naming which
+      // connection this packet belongs to, before anything read off the wire.
+      ...(connectionNumber === undefined ? [] : [{
+        name: 'Connection Number', value: connectionNumber,
+        abbrev: 'quic.connection.number', generated: true,
+      }]),
       {
         name: 'Header Form',
         value: packet.headerForm === 'long' ? 'Long Header (1)' : 'Short Header (0)',

@@ -208,9 +208,15 @@ export function dissectUdpTransport(
         quicTracker?.createInitialDecryptor(srcIp, srcPort, dstIp, dstPort, rawBytes)
       );
       if (quic) {
-        if (quic.isLongHeader) {
-          quicTracker?.noteLongHeader(srcIp, srcPort, dstIp, dstPort, quic.connectionIds);
-        }
+        // A long header names its connection outright; a short one is
+        // recognised by the id the resolver matched while dissecting.
+        const connectionNumber = quic.isLongHeader
+          ? quicTracker?.noteLongHeader(
+            srcIp, srcPort, dstIp, dstPort, quic.connectionIds,
+            quic.packets.some((p) => p.headerForm === 'long' && (p.dcidLength ?? 0) === 0))
+          : quicTracker?.connectionNumberForFlow(
+            srcIp, srcPort, dstIp, dstPort, quic.packets[0]?.dcid);
+        if (connectionNumber !== undefined) quicFields['quic.connection.number'] = connectionNumber;
         proto = 'QUIC';
         protocolLabel = 'QUIC';
         protocolTokens.push('quic');
@@ -221,7 +227,7 @@ export function dissectUdpTransport(
         // TLS handshake below and the HTTP/3 pushed last. `frameProtocols` is
         // read off the layer names in order, so the stack has to read
         // `udp:quic:tls:http3` rather than putting QUIC after its own payload.
-        const quicLayer = buildQuicLayer(quic.packets, quic.info);
+        const quicLayer = buildQuicLayer(quic.packets, quic.info, connectionNumber);
         if (quicLayer) {
           extraLayers.push(quicLayer.layer);
           Object.assign(quicFields, quicLayer.fields);
