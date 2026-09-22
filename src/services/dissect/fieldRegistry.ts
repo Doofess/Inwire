@@ -955,6 +955,21 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(uint('tls.handshake.extensions.supported_versions_len', 'Supported Versions length', 'tls')),
   treeOnly(uint('tls.extension.psk_ke_modes_length', 'PSK Key Exchange Modes Length', 'tls')),
   treeOnly(str('tls.extension.psk_ke_mode', 'PSK Key Exchange Mode', 'tls')),
+  // pre_shared_key (RFC 8446 section 4.2.11), which is how a resumed TLS 1.3
+  // connection names the ticket it is resuming. A ClientHello carries the
+  // offered identities and their binders; a ServerHello carries only the index
+  // of the one it chose, which is why `identity.selected` sits beside a cluster
+  // it shares no bytes with.
+  treeOnly(uint('tls.handshake.extensions.psk.identities.length', 'Identities Length', 'tls')),
+  treeOnly(uint('tls.handshake.extensions.psk.identity.identity_length', 'Identity Length', 'tls')),
+  treeOnly(str('tls.handshake.extensions.psk.identity.identity', 'Identity', 'tls')),
+  treeOnly(uint('tls.handshake.extensions.psk.identity.obfuscated_ticket_age', 'Obfuscated Ticket Age', 'tls')),
+  treeOnly(uint('tls.handshake.extensions.psk.binders_len', 'PSK Binders length', 'tls')),
+  treeOnly(str('tls.handshake.extensions.psk.binders', 'PSK Binders', 'tls')),
+  treeOnly(str('tls.handshake.extensions.psk.binder', 'PSK Binder', 'tls')),
+  treeOnly(uint('tls.handshake.extensions.psk.binder.binder_length', 'Binder Length', 'tls')),
+  treeOnly(str('tls.handshake.extensions.psk.binder.binder', 'Binder', 'tls')),
+  treeOnly(uint('tls.handshake.extensions.psk.identity.selected', 'Selected Identity', 'tls')),
   treeOnly(uint('tls.handshake.extensions_key_share_client_length', 'Client Key Share Length', 'tls')),
   treeOnly(uint('tls.handshake.extensions_key_share_key_exchange_length', 'Key Exchange Length', 'tls')),
   // The share itself, which is what a reader compares across captures when

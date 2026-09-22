@@ -1171,8 +1171,26 @@ function ignoredUnknownRecord(conv: TlsConversationState, frame: number): TlsSeg
 
 // --- the tree ----------------------------------------------------------------------
 
+/**
+ * A byte string as a tree row.
+ *
+ * Colon-separated, which is what the reference's `show` carries for every
+ * FT_BYTES field and what `icmp.ts`, `linkLayer.ts` and `quic.ts` already
+ * write. This file was the one place still emitting an unseparated run, which
+ * made every byte row in the TLS tree read differently from every byte row
+ * beside it and counted as a value mismatch against the reference on each one.
+ */
 const hexField = (name: string, value: Uint8Array, range?: [number, number]): ProtocolField =>
-  ({ name, value: toHex(value), ...(range ? { rawBytesRange: range } : {}) });
+  ({ name, value: hexColons(value), ...(range ? { rawBytesRange: range } : {}) });
+
+function hexColons(bytes: Uint8Array): string {
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    if (i > 0) out += ':';
+    out += bytes[i].toString(16).padStart(2, '0');
+  }
+  return out;
+}
 
 function versionField(name: string, v: number, abbrev: string): ProtocolField {
   return { name, value: `${TLS_VERSION_NAMES[v]?.replace('TLSv', 'TLS ') ?? 'Unknown'} (0x${hex4(v)})`, abbrev };
@@ -1255,6 +1273,106 @@ function extensionFields(ext: Extension): ProtocolField[] {
         })),
       });
       break;
+    case 41: {
+      // pre_shared_key, and the two halves of it look nothing alike.
+      //
+      // A ServerHello sends one thing: the index of the identity it picked, in
+      // exactly two bytes. A ClientHello sends the offered identities and then
+      // a binder for each - an HMAC over the handshake so far, proving the
+      // client holds the secret the ticket stands for. The length is what tells
+      // them apart, the same way the supported_versions extension above is told
+      // apart, because the extension body carries no discriminator of its own.
+      if (b.length === 2) {
+        children.push({
+          name: 'Selected Identity', value: u16(b, 0),
+          abbrev: 'tls.handshake.extensions.psk.identity.selected',
+        });
+        break;
+      }
+      if (b.length < 2) break;
+
+      const identitiesLength = u16(b, 0);
+      children.push({
+        name: 'Identities Length', value: identitiesLength,
+        abbrev: 'tls.handshake.extensions.psk.identities.length',
+      });
+
+      const identitiesEnd = Math.min(b.length, 2 + identitiesLength);
+      let q = 2;
+      while (q + 2 <= identitiesEnd) {
+        const identityLength = u16(b, q);
+        // Each entry is a length, that many bytes, and a four-byte age. An
+        // entry that does not fit is a truncated capture, not a short one.
+        if (q + 2 + identityLength + 4 > identitiesEnd) break;
+        const identity = b.subarray(q + 2, q + 2 + identityLength);
+        children.push({
+          name: 'PSK Identity',
+          value: `length: ${identityLength}`,
+          isExpanded: true,
+          children: [
+            {
+              name: 'Identity Length', value: identityLength,
+              abbrev: 'tls.handshake.extensions.psk.identity.identity_length',
+            },
+            { ...hexField('Identity', identity), abbrev: 'tls.handshake.extensions.psk.identity.identity' },
+            {
+              name: 'Obfuscated Ticket Age',
+              // The client's age for the ticket plus the server's ticket_age_add,
+              // modulo 2^32 - obfuscated so a passive observer cannot correlate
+              // two resumptions of the same ticket by their age.
+              value: u32(b, q + 2 + identityLength),
+              abbrev: 'tls.handshake.extensions.psk.identity.obfuscated_ticket_age',
+            },
+          ],
+        });
+        q += 2 + identityLength + 4;
+      }
+
+      // The binders follow the identities, one per identity and in the same
+      // order, each its own length-prefixed HMAC.
+      let at = 2 + identitiesLength;
+      if (at + 2 > b.length) break;
+      const bindersLength = u16(b, at);
+      children.push({
+        name: 'PSK Binders length', value: bindersLength,
+        abbrev: 'tls.handshake.extensions.psk.binders_len',
+      });
+      at += 2;
+
+      const bindersEnd = Math.min(b.length, at + bindersLength);
+      const binders: ProtocolField[] = [];
+      while (at + 1 <= bindersEnd) {
+        const binderLength = b[at];
+        if (at + 1 + binderLength > bindersEnd) break;
+        binders.push({
+          // Empty, like `psk.binders` above: the reference puts the length in
+          // the row's label rather than its value, and the measurement compares
+          // the value.
+          name: 'PSK Binder',
+          value: '',
+          abbrev: 'tls.handshake.extensions.psk.binder',
+          isExpanded: true,
+          children: [
+            {
+              name: 'Binder Length', value: binderLength,
+              abbrev: 'tls.handshake.extensions.psk.binder.binder_length',
+            },
+            {
+              ...hexField('Binder', b.subarray(at + 1, at + 1 + binderLength)),
+              abbrev: 'tls.handshake.extensions.psk.binder.binder',
+            },
+          ],
+        });
+        at += 1 + binderLength;
+      }
+      children.push({
+        name: 'PSK Binders', value: '',
+        abbrev: 'tls.handshake.extensions.psk.binders',
+        isExpanded: true,
+        children: binders,
+      });
+      break;
+    }
     case 45:
       if (b.length >= 1) {
         children.push({ name: 'PSK Key Exchange Modes Length', value: b[0], abbrev: 'tls.extension.psk_ke_modes_length' });

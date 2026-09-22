@@ -44,6 +44,11 @@ const NOT_TESTS: Record<string, string> = {
   'electron/gpu-restore-drive.ts':
     'loses and restores a real WebGL context in the running app; needs dist/ and a GPU, run by hand',
   'electron/serveStub.ts': 'tool; serves the stub agent until Ctrl+C, for driving the app by hand',
+  'parity/cluster-diff.ts':
+    'tool; diffs ONE abbrev prefix against the reference by frame and by value, '
+    + 'which is what proves a new cluster is correct rather than merely present. '
+    + 'Takes a pcap and a prefix, has no pass mark of its own, and needs tshark '
+    + 'and a fixture - run by hand',
   'agent/pipe-interop.ts':
     "drives the Rust agent's named pipe with the app's own client; needs "
     + '`cargo run --example pipe_serve` running beside it, and Windows',
