@@ -164,25 +164,19 @@ function resolveColorBytes(color: string): [number, number, number, number] {
 const SLICE_MS = 6;
 const ROWS_PER_CHECK = 16;
 
-/**
- * This packet's colours if something has already matched it, else `undefined`.
+/*
+ * `knownStyle` stood here. It wrapped `matchedRuleIfKnown` and then called
+ * `getPacketStyle` for the colours, and the distinction it carried is the one
+ * the progressive fill is built on: `undefined` for a frame nothing has asked
+ * about yet is NOT the same answer as "matched no rule", and painting the two
+ * alike is how a strip would show a chain's answer for frames it never
+ * evaluated.
  *
- * The distinction the progressive fill is built on. `getPacketStyle` returns
- * `{}` for a frame that matched no rule, which is an answer; this returns
- * `undefined` for a frame nothing has asked about yet, which is not one - and
- * painting the two the same way is how a strip would show a chain's answer for
- * frames it has not evaluated.
+ * That distinction moved into `ColorRulesEngine.backgroundIfKnown`, which
+ * keeps the three-valued return and drops the two object allocations
+ * `getPacketStyle` made per call - a style object this file only ever read one
+ * string out of, built once per frame in the buffer per repaint.
  */
-function knownStyle(
-  engine: ColorRulesEngine,
-  packet: Packet,
-  theme: PacketTheme,
-): { background?: string } | undefined {
-  const rule = engine.matchedRuleIfKnown(packet);
-  if (rule === undefined) return undefined;
-  if (rule === null) return {};
-  return engine.getPacketStyle(packet, theme);
-}
 
 export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   packets,
@@ -321,13 +315,11 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
           // same as one matching no rule. It is not undecided - nobody is
           // going to decide it - so it must not count towards the slice pass
           // below or the strip would never stop working.
-          const style = packet === null
-            ? {}
-            : resolve
-              ? colorEngine.getPacketStyle(packet, packetTheme)
-              : knownStyle(colorEngine, packet, packetTheme);
-          if (style === undefined) undecided++;
-          ctx.fillStyle = style?.background || fallback;
+          const background = packet === null
+            ? null
+            : colorEngine.backgroundIfKnown(packet, packetTheme, resolve);
+          if (background === undefined) undecided++;
+          ctx.fillStyle = background || fallback;
           ctx.fillRect(0, i * bandHeight, size.width, Math.ceil(bandHeight));
         }
         return;
@@ -339,13 +331,11 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         let r = 0, g = 0, b = 0, a = 0, count = 0;
         for (let i = startIdx; i < endIdx && i < total; i++) {
           const packet = frameAt(i);
-          const style = packet === null
-            ? {}
-            : resolve
-              ? colorEngine.getPacketStyle(packet, packetTheme)
-              : knownStyle(colorEngine, packet, packetTheme);
-          if (style === undefined) undecided++;
-          const [pr, pg, pb, pa] = resolveColorBytes(style?.background || fallback);
+          const background = packet === null
+            ? null
+            : colorEngine.backgroundIfKnown(packet, packetTheme, resolve);
+          if (background === undefined) undecided++;
+          const [pr, pg, pb, pa] = resolveColorBytes(background || fallback);
           r += pr; g += pg; b += pb; a += pa;
           count++;
         }

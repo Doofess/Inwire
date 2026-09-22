@@ -586,6 +586,40 @@ export class ColorRulesEngine {
   }
 
   /**
+   * Just the background colour, for a caller that paints and does not style.
+   *
+   * `getPacketStyle` allocates: a spread of `resolveRuleColors`'s result plus a
+   * `borderColor`, two objects per call. That is nothing for a table row and it
+   * is not nothing for the minimap, which visits **every frame in the buffer**
+   * on every repaint - a 1px strip row averages the colour of every frame it
+   * covers, which is ~1,400 frames a row at a 700,000-frame buffer. Two
+   * allocations apiece, discarded immediately, for one string each caller
+   * actually reads.
+   *
+   * The three-valued return is `matchedRuleIfKnown`'s, kept deliberately rather
+   * than collapsed: `undefined` is "not decided yet" and is a real answer,
+   * distinct from `null`'s "decided, and nothing matched". Collapsing them
+   * would cost the minimap the thing that lets it paint what is known and come
+   * back for the rest.
+   *
+   * `resolveRuleColors` returns the theme's own object when the rule is themed,
+   * which is the ordinary case, so this allocates nothing at all on that path.
+   *
+   * @param resolve walk the chain for a frame nobody has decided yet. False is
+   *   the minimap's first pass, which must not block on an edited chain.
+   */
+  public backgroundIfKnown(
+    packet: Packet,
+    theme: PacketTheme,
+    resolve: boolean,
+  ): string | null | undefined {
+    const rule = resolve ? this.matchRule(packet) : this.matchedRuleIfKnown(packet);
+    if (rule === undefined) return undefined;
+    if (rule === null) return null;
+    return resolveRuleColors(rule, theme).background;
+  }
+
+  /**
    * The name of the first rule in the chain that matches, or undefined when
    * none does. The reference analyzer exposes the same thing as `frame.coloring_rule.name`,
    * which makes it the cleanest way to assert that this chain agrees with
