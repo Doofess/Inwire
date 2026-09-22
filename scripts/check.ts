@@ -74,6 +74,11 @@ const NOT_TESTS: Record<string, string> = {
   'perf/store-boundary.ts': 'measurement; there is no right answer to hold it to (the ADR 0028 number)',
   'perf/wire-size.ts': 'measurement; there is no right answer to hold it to (docs/decisions/0005)',
   'perf/summary-codec.ts': 'measurement; needs the fixtures, and sizes a format rather than asserting one (the disk-backed buffer plan)',
+  'perf/profile.ts':
+    'measurement; re-executes itself under `node --cpu-prof` and prints self time '
+    + 'by function. Needs the fixtures, takes ~30s, and a profile has no pass mark - '
+    + 'but nothing else can answer "where did the milliseconds go", which is the '
+    + 'question ADR 0011 got wrong by an order of magnitude before it measured',
 };
 
 function walk(dir: string): string[] {
