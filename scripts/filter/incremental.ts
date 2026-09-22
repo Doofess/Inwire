@@ -82,6 +82,70 @@ const buffer = Array.from({ length: 200 }, (_, i) => makePacket(i));
   check('...and literally the same array, so memos downstream do not rerun', second.result === first.result, true);
 }
 
+// --- A trim REUSES the decided prefix rather than re-deciding it -----------
+//
+// The trim case below already asserted the right answer, and it asserted it
+// just as happily when a trim threw the cache away and re-filtered the whole
+// buffer - which is what it did, and which at a 700,000-frame buffer is a
+// multi-hundred-millisecond freeze inside a render.
+//
+// So this measures the WORK, not the answer, by counting what reaches
+// `FilterEngine.filterPackets`. Put `prefixShift` back to returning null on a
+// trim and the first of these fails with 140 instead of 40: the whole buffer
+// re-decided rather than the forty frames that arrived after it.
+{
+  const realFilterPackets = FilterEngine.filterPackets;
+  const sizes: number[] = [];
+  FilterEngine.filterPackets = ((ps: Packet[], f: string) => {
+    sizes.push(ps.length);
+    return realFilterPackets.call(FilterEngine, ps, f);
+  }) as typeof FilterEngine.filterPackets;
+
+  try {
+    const grown = buffer.slice(0, 150);
+    const warm = filterIncrementally(grown, FILTER, null).cache;
+
+    // 50 dropped from the head, 40 appended on the end.
+    sizes.length = 0;
+    const trimmed = buffer.slice(50, 190);
+    const out = filterIncrementally(trimmed, FILTER, warm);
+
+    check('a trim decides only the frames that arrived after it', sizes, [40]);
+    check('...and still gives the full pass answer', ids(out.result), full(trimmed, FILTER));
+
+    // A trim with nothing appended decides nothing at all.
+    sizes.length = 0;
+    const shrunk = buffer.slice(50, 150);
+    const only = filterIncrementally(shrunk, FILTER, warm);
+    check('a trim with no new frames runs the matcher over nothing', sizes, []);
+    check('...and is still the full pass answer', ids(only.result), full(shrunk, FILTER));
+
+    // The cache the trim returns must itself be reusable, or the saving lasts
+    // exactly one flush and the next one pays for the whole buffer.
+    sizes.length = 0;
+    const after = buffer.slice(50, 200);
+    const grownAfterTrim = filterIncrementally(after, FILTER, out.cache);
+    // Snapshotted before `full()` below, which is itself a full pass and would
+    // otherwise land in the counter - it did, and read as a cache miss.
+    const growthWork = [...sizes];
+    check('growth after a trim matches a full pass',
+      ids(grownAfterTrim.result), full(after, FILTER));
+    check('...and decided only the ten frames past the trimmed buffer', growthWork, [10]);
+
+    // A wholesale replacement whose ids do not line up must still be refused,
+    // now that a moved head is no longer by itself a refusal.
+    sizes.length = 0;
+    const imported = Array.from({ length: 140 }, (_, i) => makePacket(i + 5000));
+    const afterImport = filterIncrementally(imported, FILTER, out.cache);
+    const importWork = [...sizes];
+    check('an import after a trim is not served a shifted result',
+      ids(afterImport.result), full(imported, FILTER));
+    check('...by re-deciding all of it', importWork, [140]);
+  } finally {
+    FilterEngine.filterPackets = realFilterPackets;
+  }
+}
+
 // --- The fast path must be refused when the prefix moved -------------------
 {
   const grown = buffer.slice(0, 150);

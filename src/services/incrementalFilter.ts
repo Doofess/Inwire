@@ -1,6 +1,6 @@
 import { Packet } from '../types/packet';
 import { FilterEngine } from './filterEngine';
-import { packetsExtend } from './packetPrefix';
+import { prefixShift } from './packetPrefix';
 
 /**
  * Applying a display filter to a growing packet buffer without re-deciding
@@ -27,12 +27,49 @@ export interface FilterCache {
 }
 
 /**
- * True when `cache` was built from a prefix of `packets` under the same
- * filter, so only the tail past it needs deciding. The prefix test itself is
- * shared - see `packetsExtend` for why two identity checks are enough.
+ * How many packets the buffer dropped from its head since `cache` was built,
+ * or `null` when the cache cannot be reused at all.
+ *
+ * `0` is the ordinary growth case. A positive number is a trim, and the answer
+ * is still recoverable - see `prefixShift`, and `dropLeading` below for the
+ * other half of it.
  */
-function prefixIntact(packets: Packet[], filter: string, cache: FilterCache | null): cache is FilterCache {
-  return cache !== null && cache.filter === filter && packetsExtend(packets, cache.source);
+function reusableShift(packets: Packet[], filter: string, cache: FilterCache | null): number | null {
+  if (cache === null || cache.filter !== filter) return null;
+  return prefixShift(packets, cache.source);
+}
+
+/**
+ * The cached result with the matches that fell off the front removed.
+ *
+ * The dropped source packets are a prefix, the result preserves source order,
+ * and the buffer is id-ordered - so the matches that went are exactly the ones
+ * with an id below the new first frame's, and they are a prefix of `result`.
+ * Binary search finds the boundary in O(log n) against the O(buffer) pass this
+ * exists to avoid.
+ *
+ * **Then it checks the answer by identity**, which is what makes relying on id
+ * ordering safe rather than assumed: the first surviving match must be the
+ * very object sitting at its own arithmetic position in `packets`. If it is
+ * not, this returns `null` and the caller does a full pass. The id order is
+ * therefore an optimisation this verifies, never a premise it trusts.
+ */
+function dropLeading(result: Packet[], packets: Packet[]): Packet[] | null {
+  const firstId = packets[0].id;
+  let lo = 0;
+  let hi = result.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (result[mid].id < firstId) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo === 0) return result;
+  const kept = result.slice(lo);
+  if (kept.length > 0) {
+    const at = kept[0].id - firstId;
+    if (!(at >= 0 && at < packets.length && packets[at] === kept[0])) return null;
+  }
+  return kept;
 }
 
 /**
@@ -54,8 +91,30 @@ export function filterIncrementally(
   // that consumers memoizing on its reference are not woken for nothing.
   if (!trimmed) return { result: packets, cache: null };
 
+  const shift = reusableShift(packets, trimmed, cache);
+
+  // A trim. Everything from `shift` on was already decided and is still in
+  // order, so the answer is the old result minus what fell off the front, plus
+  // whatever arrived on the end - rather than re-deciding the whole buffer.
+  //
+  // This is the path that used to be a freeze. `packetsExtend` refused the
+  // moment the head moved, so every trim cost a full pass, in a render, at
+  // whatever the buffer had grown to.
+  if (shift !== null && shift > 0 && cache !== null) {
+    const kept = dropLeading(cache.result, packets);
+    if (kept !== null) {
+      const decided = cache.source.length - shift;
+      const result = packets.length === decided
+        ? kept
+        : kept.concat(FilterEngine.filterPackets(packets.slice(decided), trimmed));
+      return { result, cache: { filter: trimmed, source: packets, result } };
+    }
+    // `dropLeading` could not confirm its own answer; fall through to the full
+    // pass, which is what this call would have cost before any of this existed.
+  }
+
   let result: Packet[];
-  if (prefixIntact(packets, trimmed, cache)) {
+  if (shift === 0 && cache !== null) {
     // The `concat` below copies every previously-matched packet on every
     // flush, which reads as the same O(n) waste this module exists to remove.
     // Measured, it is not: copying an array of references is memcpy, so at the

@@ -196,13 +196,21 @@ export function shouldStopForDisk(freeBytes: number | null): boolean {
 /**
  * How far over budget the buffer is allowed to go before anything is dropped.
  *
- * Carried over from `TRIM_SLACK` in `App.tsx`, and load-bearing for the same
- * reason its comment gives: moving the head of the buffer invalidates every
- * identity-based cache - `packetsExtend`, the display-filter cache, each
- * `useIncrementalAggregate` - so all of them fall back to a full pass. Without
- * slack that happened ten times a second forever. A budget that trimmed the
- * instant it was exceeded would do the same thing at a buffer size where the
- * full pass costs far more.
+ * Carried over from `TRIM_SLACK` in `App.tsx`, and load-bearing for the reason
+ * its comment gives: moving the head of the buffer invalidates the caches keyed
+ * on `packetsExtend`, so they fall back to a full pass. Without slack that
+ * happened ten times a second forever, and a budget that trimmed the instant it
+ * was exceeded would do it at a buffer size where the full pass costs far more.
+ *
+ * **One of the three no longer pays that price, and the other two still do.**
+ * The display filter recovers a trim through `prefixShift` - the retained
+ * frames were already decided and stay decided, so a trim costs a binary search
+ * and a slice rather than re-deciding the buffer. Every
+ * `useIncrementalAggregate` still rebuilds from scratch, because
+ * `foldIncrementally` has an `add` and no `remove`: a fold cannot un-see the
+ * frames that went. So the slack is still what stands between a trim and a
+ * full refold of the dashboard - it is doing less work than it was, and
+ * removing it would still be a mistake.
  */
 export const BUDGET_SLACK = 0.05;
 
