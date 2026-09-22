@@ -246,7 +246,22 @@ async function eachReferenceFrame(
   maxFrames: number,
   onFrame: (index: number, fields: FrameFields, protos: Set<string>) => void,
 ): Promise<number> {
-  const args = ['-T', 'pdml', '-r', capturePath];
+  // `-2`, for the reason `regen-ground-truth.sh` gives for the columns: the
+  // Wireshark GUI is two-pass, and it is the GUI this build is matched against.
+  // This gate was single-pass while the column gate was not, so the two halves
+  // of one measurement were comparing against two different references.
+  //
+  // It costs nothing and buys seven names. Measured on `inwire`: the
+  // single-pass vocabulary is a strict subset of the two-pass one - 802 abbrevs
+  // against 809 - and every one of the seven is a fact a first pass cannot
+  // know. `dns.response_in`, `dns.response_missing`, `icmp.resp_in`,
+  // `icmp.no_resp`, `icmp.resp_not_found`, `quic.reassembled_in` and
+  // `tls.handshake.reassembled_in`. This build already emits the first of them,
+  // so it was being counted as inwire-only against a reference that simply had
+  // not been asked the question.
+  //
+  // `-c` is a first-pass limit, so `--frames N` still means the first N.
+  const args = ['-2', '-T', 'pdml', '-r', capturePath];
   if (Number.isFinite(maxFrames)) args.push('-c', String(maxFrames));
   const child = spawn(tshark, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';

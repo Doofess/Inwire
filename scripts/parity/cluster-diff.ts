@@ -22,6 +22,11 @@
  * - **It compares (frame, value) as a set**, not a join on frame number. An
  *   abbrev that appears twice in one frame - `ip.host`, say - turns a join into
  *   a cross product and reports every row as both matching and differing.
+ * - **It runs tshark two-pass**, like `tree-coverage.ts` and
+ *   `regen-ground-truth.sh`. The GUI is two-pass and is what this build is
+ *   matched against; single-pass answers differ for anything that depends on a
+ *   later frame. `tls.segment.data` is on 102 frames single-pass and 67
+ *   two-pass, and a diff run in the wrong mode reports 35 phantom misses.
  *
  * Not a test: it measures one cluster the caller names, and has no pass mark of
  * its own. `scripts/check.ts` lists it as skipped.
@@ -44,7 +49,7 @@ if (pcapPath === undefined || prefix === undefined) {
 // with none of these fields contribute nothing on either side, so the
 // comparison is unaffected.
 const pdml = execFileSync(TSHARK,
-  ['-r', pcapPath, '-T', 'pdml', ...(filter ? ['-Y', filter] : [])], {
+  ['-2', '-r', pcapPath, '-T', 'pdml', ...(filter ? ['-Y', filter] : [])], {
   encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024,
 });
 
