@@ -9,7 +9,16 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   </head>
-  <body class="overflow-hidden bg-zinc-950">
+  <!-- No background class here, deliberately. `src/index.css` sets
+       `body { bg-background }` inside `@layer base`, and a utility class on the
+       element sits in a LATER layer, so `bg-zinc-950` won permanently - every
+       first paint was #09090b whatever the theme resolved to, over a window
+       ground of #161616 on Night and a light colour on Day. `electron/window.ts`
+       records deleting a #09090b literal for this exact reason: it "had drifted
+       from the palette by a shade nobody would notice until the window flashed
+       it". This was that flash, coming back in through the one file the theme
+       system does not own. -->
+  <body class="overflow-hidden">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -19,6 +19,28 @@ export class CaptureStoreHost {
   constructor(private readonly directory: string) {}
 
   /**
+   * Starts the store now, rather than on the renderer's first request.
+   *
+   * The fork is a process spawn plus a 239 kB CJS parse, and it used to happen
+   * on the first `give()` - which the renderer makes after the whole renderer
+   * bundle has parsed and `App` has mounted. So it sat between "the app is on
+   * screen" and "a capture can start", in series with both.
+   *
+   * Nothing is awaited and nothing changes for the renderer: `ensure()`
+   * memoises on `this.spawned`, so the first real request either finds the
+   * fork already done or waits on the very same promise it would have created.
+   * A warm-up that is not idempotent would be a second store.
+   */
+  public warm(): void {
+    void this.ensure().catch(() => {
+      // Deliberately swallowed. A failed fork is already reported through
+      // `exitListeners` to the renderer, and this call is speculative - it must
+      // not turn a store that will be retried into an unhandled rejection at
+      // startup.
+    });
+  }
+
+  /**
    * Forks the store and resolves once it is running.
    *
    * The wait matters: `child.postMessage(msg, [port])` before the `spawn`

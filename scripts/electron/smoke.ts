@@ -122,6 +122,21 @@ async function until(condition: () => Promise<boolean>, ms = 20_000): Promise<bo
   }
 }
 
+/**
+ * The URL the CSP probe asks for, which the policy must refuse.
+ *
+ * Declared here because two places need it and they must not drift: the probe
+ * itself, and the `requestfailed` filter - a request this run makes ON PURPOSE
+ * so that it will be blocked is not a failure, and without the exclusion the
+ * probe would fail the "no request failed" check it has nothing to do with.
+ *
+ * `example.com` because RFC 2606 reserves it for exactly this and it can never
+ * become somebody's real host. Nothing is sent: `default-src 'none'` refuses it
+ * before a connection is opened, which is also why this works on a machine with
+ * no outbound route at all.
+ */
+const CSP_PROBE_URL = 'https://example.com/inwire-csp-probe.png';
+
 let agent: StubAgent | null = null;
 let profile: string | null = null;
 let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
@@ -208,6 +223,8 @@ try {
     // A request this run deliberately aborted is not a failure. See
     // OUTBOUND_BLOCKED below for why they are aborted at all.
     if (OUTBOUND_BLOCKED.some((host) => request.url().includes(host))) return;
+    // The CSP probe's own request. Being refused IS the assertion.
+    if (request.url() === CSP_PROBE_URL) return;
     failedRequests.push(`${request.failure()?.errorText ?? '?'} ${request.url()}`);
   });
 
@@ -261,6 +278,73 @@ try {
   // assertion that has to exist BEFORE anything does.
   check('the renderer is cross-origin isolated',
     await page.evaluate(() => crossOriginIsolated), true);
+
+  /**
+   * The CSP is not merely correct, it is actually APPLIED.
+   *
+   * `scripts/electron/shell.ts` asserts what the policy SAYS. Nothing asserted
+   * that it reaches the document, and the failure mode is silent in the worst
+   * direction: a policy that stops being applied removes a restriction, so
+   * every other check in this file keeps passing and the app keeps working.
+   * This check exists because `onHeadersReceived` gained a URL filter, and if
+   * Electron had not matched `app://` against it the policy would have vanished
+   * with nothing to notice.
+   *
+   * **The probe has to be one the PAGE performs.** Two obvious tests do not
+   * work and both were tried:
+   *
+   * - `page.evaluate(() => eval('1+1'))` runs through CDP's `Runtime.evaluate`,
+   *   which is exempt from page CSP. It reported `eval` running with the policy
+   *   correctly applied, which reads exactly like a missing CSP.
+   * - `fetch()` to a blocked host fails with `TypeError: Failed to fetch`,
+   *   which is also what a machine with no outbound route says. Indistinguishable.
+   *
+   * An `<img>` the page appends is loaded by the browser under the page's own
+   * policy, and `securitypolicyviolation` fires only for a policy refusal - a
+   * network error raises `error` instead. So the event is decisive where the
+   * other two are not, and `default-src 'none'` with no `img-src` means any
+   * origin at all is a violation, with no request made and no network needed.
+   */
+  /*
+   * Passed as a STRING, and that is not a style choice.
+   *
+   * `tsx` transforms this file with esbuild's `keepNames` on, which wraps every
+   * named function - including a `const done = () => ...` inside a callback -
+   * in `__name(fn, "done")`. Playwright serialises the callback's source and
+   * evaluates it in the PAGE, where no `__name` exists, so the probe died with
+   * `ReferenceError: __name is not defined` before it could test anything. A
+   * string is never transformed. (The same helper charged 152 ms to `quic.ts`
+   * in `scripts/perf/profile.ts`; it is worth knowing it has two ways to bite.)
+   */
+  const CSP_PROBE = `new Promise((resolve) => {
+    let settled = false;
+    document.addEventListener('securitypolicyviolation', (event) => {
+      if (settled) return;
+      settled = true;
+      resolve('enforced:' + event.violatedDirective);
+    }, { once: true });
+    const probe = document.createElement('img');
+    probe.onerror = () => setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve('not enforced: the load failed with no violation');
+    }, 400);
+    probe.onload = () => {
+      if (settled) return;
+      settled = true;
+      resolve('not enforced: the image loaded');
+    };
+    probe.src = '${CSP_PROBE_URL}';
+    probe.style.display = 'none';
+    document.body.appendChild(probe);
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve('inconclusive: nothing fired');
+    }, 5000);
+  })`;
+  check('the content security policy is actually enforced on the document',
+    await page.evaluate(CSP_PROBE), 'enforced:img-src');
 
   console.log('\n--- a capture, end to end ---\n');
 

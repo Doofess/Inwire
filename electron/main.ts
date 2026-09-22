@@ -254,9 +254,6 @@ async function start(): Promise<void> {
     if (!isComponentId(id)) return undefined;
     return updates.apply(id);
   });
-  // So the rows carry installed versions before anybody presses Check. Not
-  // awaited: it spawns `reg`, and the window should not wait for that.
-  void updates.detect();
   // The store seals whatever is open when it goes; killing it here rather than
   // leaving it to be orphaned is what keeps a clean quit from looking like a
   // crash to the next launch's recovery pass.
@@ -277,7 +274,26 @@ async function start(): Promise<void> {
   // renderer has mounted, found the pipe shut, diagnosed it and offered a
   // button. A slow SCM must delay the agent, never the window.
   agent.ensureRunning();
-  await createWindow();
+  const firstWindow = await createWindow();
+
+  // **After the window, not before it.** `updates.detect()` spawns `reg` once
+  // or twice and sometimes `powershell.exe`, and it used to run at
+  // `whenReady()` - unawaited, but still competing with `loadURL` for a cold
+  // disk and whatever Defender does to a freshly installed binary. Nobody reads
+  // an Update Center row until Settings is opened, so the rows have until then.
+  //
+  // The agent's spawns stay where they are, above: they are on the critical
+  // path to a working capture and `agentPipe.ts` argues that case.
+  firstWindow.once('ready-to-show', () => {
+    void updates.detect();
+    // The store forks on the renderer's first port request, which it makes
+    // after 4 MB of bundle has parsed and `App` has mounted - so the fork, a
+    // process spawn plus a 239 kB CJS parse, sat between "the app is on screen"
+    // and "a capture can start". Asking here overlaps it with the parse.
+    // `ensure()` memoises on `this.spawned`, so this is idempotent and the
+    // renderer's own request still works exactly as it did.
+    store.warm();
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow();
@@ -341,7 +357,27 @@ function hardenSession(target: Electron.Session): void {
   target.setPermissionCheckHandler(() => false);
 
   const csp = DEV_SERVER_URL ? developmentCsp(DEV_SERVER_URL) : productionCsp();
-  target.webRequest.onHeadersReceived((details, callback) => {
+  /**
+   * Only the app's own responses, which are the only ones a CSP governs.
+   *
+   * Registered with no filter, this fired for **every response in the
+   * session** - so every openfreemap basemap tile, hundreds of them on a
+   * single pan of the globe, plus every DoH answer and every geo-IP lookup,
+   * was serialised into the main process's JavaScript and back out again to
+   * attach a header that means nothing on a tile. Main is the process holding
+   * the pipe to a privileged service; it has no business on the map's paint
+   * path.
+   *
+   * The dev server is in the list because `DEV_SERVER_URL` is where the
+   * document comes from under `npm run dev`, and a policy that stopped being
+   * applied there would only be noticed in production.
+   *
+   * `scripts/electron/shell.ts` asserts the policy's CONTENT rather than where
+   * it is applied, so it is unaffected - which is worth saying, because a gate
+   * that had pinned the registration shape would have made this look unsafe.
+   */
+  const governed = [`${APP_ORIGIN}/*`, ...(DEV_SERVER_URL ? [`${DEV_SERVER_URL}/*`] : [])];
+  target.webRequest.onHeadersReceived({ urls: governed }, (details, callback) => {
     // The isolation headers are NOT set here. `onHeadersReceived` does not
     // fire for `protocol.handle` responses, so setting them here reached the
     // document (which Chromium synthesises differently) and not the worker
