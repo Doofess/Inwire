@@ -114,8 +114,21 @@ export class CaptureStoreHost {
    * reporting on is the thing that is gone.
    */
   watch(contents: WebContents): void {
-    this.exitListeners.push((reason) => {
+    const listener = (reason: string): void => {
       if (!contents.isDestroyed()) contents.send(STORE_EXIT_CHANNEL, reason);
+    };
+    this.exitListeners.push(listener);
+    // **Removed when the renderer goes, because this is called per port
+    // request rather than per window.** `main.ts` calls `watch` on every
+    // `STORE_PORT_REQUEST`, so the array grew by one closure - each holding a
+    // `WebContents` - every time a renderer asked for a port. One per window in
+    // production, one per reload under `npm run dev`, and the array was never
+    // shortened. Small, and unbounded is unbounded: an `isDestroyed()` guard
+    // stops a dead renderer being written to, it does not stop it being
+    // retained.
+    contents.once('destroyed', () => {
+      const at = this.exitListeners.indexOf(listener);
+      if (at >= 0) this.exitListeners.splice(at, 1);
     });
   }
 

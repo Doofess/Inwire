@@ -42,9 +42,9 @@
  * A patch aimed at a frame that has already left the ring cannot be applied,
  * because a written chunk is deflated and sealed and rewriting it would undo
  * the append-only property the recovery rule depends on. Those are counted, not
- * ignored: `missedPatches` collects them for the overlay journal a reader
- * applies at decode time, and `stats.patchesMissed` is what says whether the
- * horizon is long enough. On the fixtures it is zero.
+ * ignored: `stats.patchesMissed` is what says whether the horizon is long
+ * enough, and `missedPatches` keeps a bounded sample of them. On the fixtures
+ * it is zero.
  */
 import { deflateSync } from 'fflate';
 import type { Packet } from '../../types/packet';
@@ -113,6 +113,17 @@ export interface WriterOptions {
 const DEFAULT_HORIZON_US = 2_000_000;
 const DEFAULT_HORIZON_FRAMES = 100_000;
 const DEFAULT_FLUSH_EVERY_CHUNKS = 8;
+
+/**
+ * How many missed patches are kept as a sample.
+ *
+ * Small on purpose. An `InfoPatch` is a frame id and a short string, so 256 of
+ * them is kilobytes - and the number exists to bound a container, not to
+ * capture a workload. If a capture misses more than 256 patches the count in
+ * `stats.patchesMissed` is the number that matters and the 257th frame id adds
+ * nothing to it.
+ */
+const MAX_MISSED_PATCH_SAMPLE = 256;
 
 /** Raw DEFLATE, the same format `node:zlib`'s `deflateRawSync` produces. */
 const defaultDeflate = (bytes: Uint8Array): Uint8Array => deflateSync(bytes, { level: 6 });
@@ -252,10 +263,24 @@ export class CaptureWriter {
   private chunksSinceFlush = 0;
 
   /**
-   * Patches that arrived after their target was sealed.
+   * A bounded sample of the patches that arrived after their target was sealed.
    *
-   * Kept rather than dropped: they are what a `patch.dat` overlay journals, and
-   * their count is the only honest signal that the horizon is too short.
+   * **The count is `stats.patchesMissed`; this is the sample.** It used to be
+   * every one of them, in an array cleared nowhere - not by `finish()`, not by
+   * `clearOrphans()` - kept for "the overlay journal a reader applies at decode
+   * time", which does not exist. The only reader in the tree is
+   * `scripts/capture/writer.ts`. So on a long capture with heavy TCP
+   * reassembly, slow DNS or ICMP round trips, every patch that landed past the
+   * horizon was retained in the store process for the life of the capture, for
+   * nobody. That is one of the few unbounded containers left on this path, and
+   * CLAUDE.md records the store's 4 GB death as "unexplained rather than
+   * diagnosed".
+   *
+   * It is capped rather than deleted because the SAMPLE is worth having: a
+   * count says the horizon is too short, and the frame ids say what is
+   * outrunning it. The first `MAX_MISSED_PATCH_SAMPLE` are kept rather than the
+   * last, so the sample shows when the trouble STARTED - which is the end of a
+   * capture that is still diagnosable.
    */
   readonly missedPatches: InfoPatch[] = [];
 
@@ -446,12 +471,17 @@ export class CaptureWriter {
    * identity-keyed cache is watching, but copying keeps this consistent with
    * the one other place that does the same job.
    */
+  /** Records a missed patch in the sample, up to the cap. */
+  private noteMissed(patch: InfoPatch): void {
+    if (this.missedPatches.length < MAX_MISSED_PATCH_SAMPLE) this.missedPatches.push(patch);
+  }
+
   applyPatches(patches: readonly InfoPatch[]): void {
     for (const patch of patches) {
       const index = this.stagedAt.get(patch.frameId);
       if (index === undefined || index < this.drained) {
         this.counters.patchesMissed += 1;
-        this.missedPatches.push(patch);
+        this.noteMissed(patch);
         continue;
       }
       const entry = this.staged[index];
@@ -461,7 +491,7 @@ export class CaptureWriter {
       // at all: the dissector applies its own patches before emitting.
       if (entry.packet === null) {
         this.counters.patchesMissed += 1;
-        this.missedPatches.push(patch);
+        this.noteMissed(patch);
         continue;
       }
       const copy = { ...entry.packet };

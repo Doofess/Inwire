@@ -460,6 +460,48 @@ function hello(kind: 1 | 2, cipher: number): Uint8Array {
   keyLog.clear();
 }
 
+// --- an evicted flow lets go of its connection ids ---------------------------
+//
+// `forgetFlow` deleted `flowConnectionIds` at its first statement and then read
+// that same map, two dozen lines later, to decide which entries of
+// `connectionNumbers` to drop. It iterated nothing, every time, while its own
+// comment said it was clearing the ids - so `connectionNumbers` grew for the
+// life of the buffer, bounded only by `reset()`, which fires when the capture
+// is gone and never on an eviction. On QUIC-heavy browsing that is the one map
+// in this tracker with no working cap.
+//
+// The observable is `connectionNumberFor`: an id belonging to a flow that has
+// been evicted must not still resolve. Put the bug back - read
+// `this.flowConnectionIds.get(flowKey)` at the sweep instead of before the
+// delete - and the second check here fails, because the stale entry answers.
+{
+  const tracker = new QuicFlowTracker();
+  // MAX_FLOWS is 4096, so 4097 distinct flows evicts the oldest.
+  const idOf = (n: number) => n.toString(16).padStart(16, '0');
+  const firstId = idOf(0);
+  tracker.noteLongHeader('10.0.0.1', 1024, '10.0.0.2', 443, [firstId]);
+  check('a fresh connection id resolves to its number',
+    tracker.connectionNumberFor(firstId), 0);
+
+  for (let i = 1; i <= 4096; i++) {
+    tracker.noteLongHeader('10.0.0.1', 1024 + i, '10.0.0.2', 443, [idOf(i)]);
+  }
+
+  check('the evicted flow no longer holds its connection id',
+    tracker.connectionNumberFor(firstId), undefined);
+  // The flow that pushed it out is still there, so this is an eviction rather
+  // than the tracker having simply forgotten everything.
+  check('...while the newest flow still does',
+    tracker.connectionNumberFor(idOf(4096)), 4096);
+  // An index is never handed out twice, evictions included (ADR 0014): a number
+  // that came back would point a saved filter at a different conversation.
+  tracker.noteLongHeader('10.0.0.1', 9999, '10.0.0.2', 443, [idOf(99999)]);
+  check('...and a connection after an eviction still gets an unused number',
+    tracker.connectionNumberFor(idOf(99999)), 4097);
+
+  tracker.reset();
+}
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);

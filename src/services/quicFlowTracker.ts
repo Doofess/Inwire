@@ -380,6 +380,15 @@ export class QuicFlowTracker {
 
   /** Drops everything held for one flow, across every map that keys by it. */
   private forgetFlow(flowKey: string): void {
+    // Read BEFORE the delete below, which is the whole of the bug this line
+    // fixes: the sweep of `connectionNumbers` at the end of this method used to
+    // read `flowConnectionIds.get(flowKey)` - a map the first statement had
+    // already emptied - so it iterated nothing, every time, while its own
+    // comment said it was clearing the ids. `connectionNumbers` is otherwise
+    // cleared only by `reset()`, which fires when the buffer is gone and never
+    // on an eviction, so it was the one map in this tracker with no working
+    // cap, on QUIC, which is most of a browsing capture.
+    const forgottenIds = this.flowConnectionIds.get(flowKey);
     this.flowConnectionIds.delete(flowKey);
     this.initialSessions.delete(flowKey);
     this.flowSni.delete(flowKey);
@@ -399,7 +408,7 @@ export class QuicFlowTracker {
     // The ids go, `nextConnectionNumber` does not: a forgotten connection's
     // index is spent, and handing it out again would point a filter written
     // against the old conversation at a new one.
-    for (const id of this.flowConnectionIds.get(flowKey) ?? []) this.connectionNumbers.delete(id);
+    for (const id of forgottenIds ?? []) this.connectionNumbers.delete(id);
     this.flowConnection.delete(flowKey);
     for (const [key, assembly] of this.streams) {
       if (!key.startsWith(prefix)) continue;
