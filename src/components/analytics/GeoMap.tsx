@@ -541,7 +541,16 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    * sync reads is the newest data, because it reads the newest inputs.
    */
   const arcInputRef = useRef<ArcInput | null>(null);
-  const connectionsRef = useRef<{ input: ArcInput | null; arcs: Arc[] }>({ input: null, arcs: [] });
+  /**
+   * The arcs last built, and the signature of the input they were built from.
+   *
+   * A signature rather than the input object: see `arcsForSync`. `null` means
+   * nothing has been built yet, which is also what tells the effect below that
+   * its first sync has no burst to coalesce and should not wait for one.
+   */
+  const connectionsRef = useRef<{ signature: string | null; arcs: Arc[] }>(
+    { signature: null, arcs: [] },
+  );
   /**
    * The arc layer instance, kept across style reloads.
    *
@@ -947,7 +956,31 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   const arcsForSync = (): Arc[] => {
     const input = arcInputRef.current;
     if (input === null) return connectionsRef.current.arcs;
-    if (connectionsRef.current.input === input) return connectionsRef.current.arcs;
+    // **By content, not by identity, and that is the whole of this fix.**
+    //
+    // `arcInputRef.current` is assigned a fresh object literal every time the
+    // effect below runs, and `routes` inside it is a fresh array every time -
+    // `useIncrementalAggregate`'s `finalize` returns a COPY, deliberately,
+    // because returning the accumulator froze every arc. So an identity check
+    // here could never hit on a data-driven sync, only on a camera-driven one.
+    //
+    // The consequence was invisible and constant: during a live capture with
+    // the map open, the arcs were rebuilt every CONNECTIONS_SYNC_THROTTLE_MS
+    // whether or not a single route had changed - ~2,880 great-circle samples,
+    // each a pair of trig calls, and a fresh ~829 kB Float32Array uploaded to
+    // the GPU, three times a second at the default refresh. `arcRebuilds` in
+    // `scripts/perf/map-bench.browser.js` is the counter for exactly this, and
+    // its header says driving it to zero is what that bench exists for.
+    //
+    // The signature is cheap because the input is small: MAX_ROUTES caps this
+    // at 60 entries, and `key` is already the canonical direction-independent
+    // identity of a pair of places. `total` is in it because the line weight is
+    // normalised against the busiest route, and `dominantProtocol` because it
+    // picks the colour - those are the only two fields of a route the geometry
+    // reads.
+    const signature = `${input.themeKey}\u0000${input.arcProtocolColors}\u0000${input.accent}\u0000`
+      + input.routes.map((r) => `${r.key}:${r.total}:${r.dominantProtocol}`).join('|');
+    if (connectionsRef.current.signature === signature) return connectionsRef.current.arcs;
 
     const { routes: forRoutes, themeKey: forTheme, arcProtocolColors: byProtocol, accent: forAccent } = input;
     // Weight is normalised against the busiest route rather than an absolute
@@ -979,7 +1012,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       ).map((points) => ({ points, color, weight }));
     });
 
-    connectionsRef.current = { input, arcs };
+    connectionsRef.current = { signature, arcs };
     return arcs;
   };
 
@@ -1076,7 +1109,22 @@ export const GeoMap: React.FC<GeoMapProps> = ({
 
   useEffect(() => {
     arcInputRef.current = { routes, themeKey, arcProtocolColors, accent };
-    scheduleConnectionsSync();
+    // **Leading edge on the first one.** The throttle exists to coalesce
+    // bursts, and on mount there is no burst to coalesce - it is the first
+    // call. Scheduling it at the full CONNECTIONS_SYNC_THROTTLE_MS meant the
+    // ArcLayer was not built or added to the style until 600ms after the map
+    // mounted, every single time the map was opened, waiting for a second call
+    // that had not been made.
+    //
+    // `style.load` also calls `syncConnectionsLayer` directly and rescued
+    // this - but only when it fired AFTER this effect, which on a warm HTTP
+    // cache it may not. So the 600ms was paid sometimes, which is worse than
+    // always: it is the shape of delay that gets blamed on the network.
+    //
+    // The argument is already written down one directory over, in
+    // `useThrottledValue.ts`: "a panel fills in the moment a capture starts
+    // rather than after a blank interval".
+    scheduleConnectionsSync(connectionsRef.current.signature === null ? 0 : undefined);
     // `accent` and the switch join the dependencies because the arc colours are
     // baked into a vertex buffer rather than read at draw time - the sync is
     // what rebuilds it, so anything that changes a colour has to wake this.
