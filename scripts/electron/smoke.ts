@@ -205,7 +205,29 @@ try {
     if (message.type() === 'error') consoleErrors.push(message.text());
   });
   page.on('requestfailed', (request) => {
+    // A request this run deliberately aborted is not a failure. See
+    // OUTBOUND_BLOCKED below for why they are aborted at all.
+    if (OUTBOUND_BLOCKED.some((host) => request.url().includes(host))) return;
     failedRequests.push(`${request.failure()?.errorText ?? '?'} ${request.url()}`);
+  });
+
+  // **Every host `electron/csp.ts` lets the renderer reach, refused here.**
+  //
+  // The geo section below turns location lookup on, which is consent this app
+  // asks a person for - and a suite that grants it on every `npm run check`
+  // would make the build machine dial four third parties to test a React
+  // render. Aborting them keeps `npm run check` offline, which is the product
+  // invariant, and costs the test nothing: the bug it exists for throws before
+  // a single request is made.
+  const OUTBOUND_BLOCKED = [
+    'get.geojs.io', 'ipapi.co', 'tiles.openfreemap.org', 'cloudflare-dns.com',
+  ];
+  await page.route('**/*', async (route) => {
+    if (OUTBOUND_BLOCKED.some((host) => route.request().url().includes(host))) {
+      await route.abort();
+      return;
+    }
+    await route.continue();
   });
 
   check('the window serves itself from app://',
@@ -287,6 +309,40 @@ try {
     () => document.body.innerText.match(/Standard query 0x[0-9a-f]{4} A example\.com/)?.[0] ?? null);
   checkTrue('...and are dissected, not just counted', info !== null);
   if (info) console.log(`      Info column reads: ${info}`);
+
+  // **Turning location lookup on, which once took the whole window with it.**
+  //
+  // `GeoMap` returns early when the setting is off, and two `useMemo` calls sat
+  // below that return - 45 hooks off, 47 hooks on. React throws error #310 when
+  // the count grows, and the throw unmounts the tree, so the window went black
+  // on the one click the off state exists to invite.
+  //
+  // Nothing here could see it. This script never turned the setting on, and
+  // `gpu-restore-drive.ts` - the only other script that reaches this component
+  // - skips outright when no map is on screen, which it is until geo-IP has
+  // been consented to. A test that does not enable the feature beside a test
+  // that requires it already enabled is a gap, and this closes it.
+  //
+  // The assertion is that the tree is still mounted. `pageErrors` below would
+  // catch the throw too, but "nothing threw" names the symptom of every bug in
+  // this file; an empty `#root` names this one.
+  console.log('\n--- the setting that unmounted the app ---\n');
+  checkTrue('the map pane opens',
+    await clicks('Routing Map', () => page.getByRole('button', { name: 'Routing Map' }).click()));
+  const geoButton = page.getByRole('button', { name: /Turn on location lookup/i });
+  if (await geoButton.isVisible().catch(() => false)) {
+    checkTrue('location lookup can be turned on',
+      await clicks('Turn on location lookup', () => geoButton.click()));
+    // Long enough for the render that used to throw. The lookups it would
+    // normally fire are aborted, so nothing here waits on a network.
+    await page.waitForTimeout(2_000);
+    check('...and the app is still mounted',
+      await page.evaluate(() => document.getElementById('root')?.childElementCount ?? -1) > 0, true);
+  } else {
+    // Not a pass. The button is the only way into the branch under test, and a
+    // run that never found it has tested nothing while looking like it did.
+    check('the "Turn on location lookup" button is on screen', false, true);
+  }
 
   // The map's worker. `setWorkerUrl` must run before `setRTLTextPlugin`, and
   // when it does not the worker dies before registering a handler and maplibre
