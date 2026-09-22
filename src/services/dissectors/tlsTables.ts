@@ -48,6 +48,12 @@ export const HANDSHAKE_TYPE_NAMES: Record<number, string> = {
   254: 'Message Hash',
 };
 
+/** RFC 6961. The reference writes "OCSP Multi" for 2, not "OCSP v2". */
+export const CERTIFICATE_STATUS_TYPE_NAMES: Record<number, string> = {
+  1: 'OCSP',
+  2: 'OCSP Multi',
+};
+
 export const ALERT_LEVEL_NAMES: Record<number, string> = { 1: 'Warning', 2: 'Fatal' };
 
 export const ALERT_DESCRIPTION_NAMES: Record<number, string> = {

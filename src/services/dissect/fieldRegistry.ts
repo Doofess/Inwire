@@ -955,6 +955,21 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(uint('tls.handshake.extensions.supported_versions_len', 'Supported Versions length', 'tls')),
   treeOnly(uint('tls.extension.psk_ke_modes_length', 'PSK Key Exchange Modes Length', 'tls')),
   treeOnly(str('tls.extension.psk_ke_mode', 'PSK Key Exchange Mode', 'tls')),
+  // The two record bodies that carry no fields of their own. Both are FT_NONE
+  // in the reference - a row that exists to say the record is that kind - so
+  // both are drawn with an empty value rather than an invented one.
+  treeOnly(str('tls.change_cipher_spec', 'Change Cipher Spec Message', 'tls')),
+  treeOnly(str('tls.alert_message', 'Alert Message', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_reneg_info_len', 'Renegotiation info extension length', 'tls')),
+  treeOnly(str('tls.handshake.extensions.session_ticket', 'Session Ticket', 'tls')),
+  // status_request (OCSP stapling) and its v2. The client asks the server to
+  // staple a revocation response to its certificate, which is why both lists
+  // are almost always empty: "ask whoever signed it, and add nothing".
+  treeOnly(str('tls.handshake.extensions_status_request_type', 'Certificate Status Type', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_status_request_responder_ids_len', 'Responder ID list Length', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_status_request_exts_len', 'Request Extensions Length', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_status_request_list_len', 'Certificate Status List Length', 'tls')),
+  treeOnly(uint('tls.handshake.extensions_status_request_len', 'Certificate Status Length', 'tls')),
   // pre_shared_key (RFC 8446 section 4.2.11), which is how a resumed TLS 1.3
   // connection names the ticket it is resuming. A ClientHello carries the
   // offered identities and their binders; a ServerHello carries only the index

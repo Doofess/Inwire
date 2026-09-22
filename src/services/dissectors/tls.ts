@@ -42,6 +42,7 @@ import { summarizeCertificate, type CertificateSummary } from './x509';
 import {
   ALERT_DESCRIPTION_NAMES, ALERT_LEVEL_NAMES, CONTENT_TYPE_NAMES, EC_POINT_FORMAT_NAMES,
   HANDSHAKE_TYPE_NAMES, PSK_KEY_EXCHANGE_MODE_NAMES, TLS_VERSION_NAMES,
+  CERTIFICATE_STATUS_TYPE_NAMES,
   isGrease, nameAlert, nameCipher, nameExtension, nameGroup, nameSignatureAlgorithm, nameVersion,
 } from './tlsTables';
 import { cipherSuiteSpec, undecryptableReason } from '../tls/cipherSuites';
@@ -1196,6 +1197,30 @@ function versionField(name: string, v: number, abbrev: string): ProtocolField {
   return { name, value: `${TLS_VERSION_NAMES[v]?.replace('TLSv', 'TLS ') ?? 'Unknown'} (0x${hex4(v)})`, abbrev };
 }
 
+/**
+ * The body both status_request forms share: a responder id list and a request
+ * extensions list, each with a two-byte length.
+ *
+ * Factored out because `status_request_v2` is the same structure wrapped in a
+ * list, and writing it twice is how the two drift apart.
+ */
+function statusRequestBody(b: Uint8Array, at: number): ProtocolField[] {
+  const rows: ProtocolField[] = [];
+  if (at + 2 > b.length) return rows;
+  const responderIdsLength = u16(b, at);
+  rows.push({
+    name: 'Responder ID list Length', value: responderIdsLength,
+    abbrev: 'tls.handshake.extensions_status_request_responder_ids_len',
+  });
+  const extsAt = at + 2 + responderIdsLength;
+  if (extsAt + 2 > b.length) return rows;
+  rows.push({
+    name: 'Request Extensions Length', value: u16(b, extsAt),
+    abbrev: 'tls.handshake.extensions_status_request_exts_len',
+  });
+  return rows;
+}
+
 function extensionFields(ext: Extension): ProtocolField[] {
   const b = ext.body;
   const children: ProtocolField[] = [
@@ -1272,6 +1297,69 @@ function extensionFields(ext: Extension): ProtocolField[] {
           ],
         })),
       });
+      break;
+    case 5: {
+      // status_request: the client asking for a stapled OCSP response. Both
+      // lists are empty in practice - naming a responder or adding extensions
+      // is what a client does when it does not trust the default.
+      if (b.length < 1) break;
+      children.push({
+        name: 'Certificate Status Type',
+        value: `${CERTIFICATE_STATUS_TYPE_NAMES[b[0]] ?? 'Unknown'} (${b[0]})`,
+        abbrev: 'tls.handshake.extensions_status_request_type',
+      });
+      children.push(...statusRequestBody(b, 1));
+      break;
+    }
+    case 17: {
+      // status_request_v2, which wraps the same body in a list so more than
+      // one status type can be asked for at once.
+      if (b.length < 2) break;
+      const listLength = u16(b, 0);
+      children.push({
+        name: 'Certificate Status List Length', value: listLength,
+        abbrev: 'tls.handshake.extensions_status_request_list_len',
+      });
+      const stop = Math.min(b.length, 2 + listLength);
+      let q = 2;
+      while (q + 3 <= stop) {
+        const statusType = b[q];
+        const itemLength = u16(b, q + 1);
+        if (q + 3 + itemLength > stop) break;
+        children.push({
+          name: 'Certificate Status Type',
+          value: `${CERTIFICATE_STATUS_TYPE_NAMES[statusType] ?? 'Unknown'} (${statusType})`,
+          abbrev: 'tls.handshake.extensions_status_request_type',
+        });
+        children.push({
+          name: 'Certificate Status Length', value: itemLength,
+          abbrev: 'tls.handshake.extensions_status_request_len',
+        });
+        children.push(...statusRequestBody(b, q + 3));
+        q += 3 + itemLength;
+      }
+      break;
+    }
+    case 35:
+      // session_ticket. An empty one is the client saying it has none yet and
+      // would like one - and the reference emits the field for it regardless,
+      // so an early return on a zero length would lose six of this fixture's
+      // seven.
+      children.push({
+        ...hexField('Session Ticket', b),
+        abbrev: 'tls.handshake.extensions.session_ticket',
+      });
+      break;
+    case 0xff01:
+      // renegotiation_info. TLS 1.3 cannot renegotiate at all, so on a modern
+      // ClientHello this is a zero-length field whose presence is the whole
+      // message: it signals RFC 5746 support to a server that might be 1.2.
+      if (b.length >= 1) {
+        children.push({
+          name: 'Renegotiation info extension length', value: b[0],
+          abbrev: 'tls.handshake.extensions_reneg_info_len',
+        });
+      }
       break;
     case 41: {
       // pre_shared_key, and the two halves of it look nothing alike.
@@ -1819,11 +1907,25 @@ function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: 
         children.push(hs);
         p += 4 + len;
       }
-    } else if (r.contentType === CT_ALERT && r.alert) {
-      children.push(
-        { name: 'Level', value: `${ALERT_LEVEL_NAMES[r.alert.level] ?? 'Unknown'} (${r.alert.level})`, abbrev: 'tls.alert_message.level' },
-        { name: 'Description', value: `${ALERT_DESCRIPTION_NAMES[r.alert.description] ?? 'Unknown'} (${r.alert.description})`, abbrev: 'tls.alert_message.desc' },
-      );
+    } else if (r.contentType === CT_ALERT) {
+      // The parent row exists even when the alert is encrypted and there is
+      // nothing under it - which is the commonest case on a TLS 1.3 capture,
+      // where a close_notify is inside the record like everything else.
+      children.push({
+        name: 'Alert Message', value: '', abbrev: 'tls.alert_message',
+        ...(r.alert ? {
+          isExpanded: true,
+          children: [
+            { name: 'Level', value: `${ALERT_LEVEL_NAMES[r.alert.level] ?? 'Unknown'} (${r.alert.level})`, abbrev: 'tls.alert_message.level' },
+            { name: 'Description', value: `${ALERT_DESCRIPTION_NAMES[r.alert.description] ?? 'Unknown'} (${r.alert.description})`, abbrev: 'tls.alert_message.desc' },
+          ],
+        } : {}),
+      });
+    } else if (r.contentType === CT_CHANGE_CIPHER_SPEC) {
+      // One byte on the wire and nothing to say about it. In TLS 1.3 it is not
+      // even a state change - it is sent only so a middlebox sees a handshake
+      // shaped the way it expects.
+      children.push({ name: 'Change Cipher Spec Message', value: '', abbrev: 'tls.change_cipher_spec' });
     } else if (r.contentType === CT_APPLICATION_DATA && r.range && r.decrypted === undefined) {
       children.push({
         name: 'Encrypted Application Data', value: `${r.length} bytes`,
