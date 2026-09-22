@@ -1692,6 +1692,48 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    * a coarse version of the thing the setting is there to control. Refusing to
    * build it closes that channel too, without needing a switch of its own.
    */
+  /**
+   * The protocols actually on screen, most-carried first.
+   *
+   * There has never been a legend anywhere in this app. That was survivable
+   * while every arc was one colour and stopped being survivable the moment they
+   * were coloured by protocol: the map became the only surface that encodes a
+   * variable without saying what the encoding is.
+   *
+   * Built from the routes rather than from the protocol table, so it lists what
+   * is drawn rather than the twelve protocols that could be.
+   */
+  const legend = React.useMemo(() => {
+    if (!arcProtocolColors) return [];
+    const totals = new Map<string, number>();
+    for (const route of routes) {
+      totals.set(route.dominantProtocol, (totals.get(route.dominantProtocol) ?? 0) + route.total);
+    }
+    return Array.from(totals, ([protocol, total]) => ({ protocol, total })).sort(
+      (a, b) => b.total - a.total,
+    );
+  }, [routes, arcProtocolColors]);
+
+  // `aggregateRoutes` already returns these sorted by total, descending
+  // (`geoRoutes.ts`), so the copy and the re-sort this used to do were both
+  // dead work on every dashboard tick.
+  const topRoutes = React.useMemo(() => routes.slice(0, 8), [routes]);
+
+  /**
+   * **Every hook in this component is above this line, and must stay there.**
+   *
+   * The early return below is the off state, and it used to sit above these two
+   * `useMemo` calls. React counts hooks per render: 45 with location lookup
+   * off, 47 with it on. Turning the setting on therefore rendered more hooks
+   * than the previous render and threw React error #310 - which is not a
+   * message anybody sees, because the error unmounts the tree. The whole
+   * window went black, on the one click the off state exists to invite.
+   *
+   * Nothing in the suite could catch it: `smoke.ts` never turns the setting on,
+   * and `gpu-restore-drive.ts` skips outright when the map is absent - which it
+   * is until geo-IP has been consented to. The bug lived in the gap between a
+   * test that does not enable the feature and a test that requires it enabled.
+   */
   if (!nameResolution.geoIp) {
     return (
       <div className="w-full h-full flex flex-col bg-card text-card-foreground">
@@ -1744,33 +1786,6 @@ export const GeoMap: React.FC<GeoMapProps> = ({
   const ispLabel = ispLocation
     ? `${ispLocation.city !== 'Unknown' ? ispLocation.city + ', ' : ''}${ispLocation.country}`
     : null;
-
-  /**
-   * The protocols actually on screen, most-carried first.
-   *
-   * There has never been a legend anywhere in this app. That was survivable
-   * while every arc was one colour and stopped being survivable the moment they
-   * were coloured by protocol: the map became the only surface that encodes a
-   * variable without saying what the encoding is.
-   *
-   * Built from the routes rather than from the protocol table, so it lists what
-   * is drawn rather than the twelve protocols that could be.
-   */
-  const legend = React.useMemo(() => {
-    if (!arcProtocolColors) return [];
-    const totals = new Map<string, number>();
-    for (const route of routes) {
-      totals.set(route.dominantProtocol, (totals.get(route.dominantProtocol) ?? 0) + route.total);
-    }
-    return Array.from(totals, ([protocol, total]) => ({ protocol, total })).sort(
-      (a, b) => b.total - a.total,
-    );
-  }, [routes, arcProtocolColors]);
-
-  // `aggregateRoutes` already returns these sorted by total, descending
-  // (`geoRoutes.ts`), so the copy and the re-sort this used to do were both
-  // dead work on every dashboard tick.
-  const topRoutes = React.useMemo(() => routes.slice(0, 8), [routes]);
 
   const map = (
     <div className="flex-1 min-h-0 relative overflow-hidden">
