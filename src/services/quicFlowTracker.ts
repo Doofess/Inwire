@@ -22,6 +22,8 @@ import type { CryptoFragment, PacketDecryptor, StreamFragment } from './dissecto
 import { parseQuicHandshake, type HelloFacts, type ServerHelloFacts } from './dissectors/tls';
 import { cipherSuiteSpec } from './tls/cipherSuites';
 import { keyLog } from './tls/keyLog';
+import { QpackTable } from './dissectors/qpack';
+import type { HeaderField } from './dissectors/hpack';
 import { dissectHttp3Stream, freshHttp3Stream, type Http3Frame, type Http3Stream } from './dissectors/http3';
 
 interface InitialSession {
@@ -184,6 +186,17 @@ export class QuicFlowTracker {
   private sessions = new Map<string, QuicSession>();
   /** HTTP/3 stream state, keyed by flow, sender and stream id. */
   private streams = new Map<string, StreamAssembly>();
+
+  /**
+   * One QPACK dynamic table per connection *per direction*.
+   *
+   * The direction is the point: a sender's encoder stream fills the table that
+   * decodes that same sender's header blocks. Sharing one table between the
+   * two directions would resolve a client's index against a server's insertion
+   * and produce a header with the wrong name - which reads as real, because
+   * both sides are inserting plausible headers.
+   */
+  private qpackTables = new Map<string, QpackTable>();
   /** Held bytes across every assembly above, against MAX_TOTAL_PENDING_BYTES. */
   private totalPendingBytes = 0;
 
@@ -265,6 +278,11 @@ export class QuicFlowTracker {
     }
     for (const key of this.cryptoStreams.keys()) {
       if (key.startsWith(prefix)) this.cryptoStreams.delete(key);
+    }
+    // Direction-keyed like the two above, so a forgotten flow leaves two of
+    // these behind unless they are swept with the same prefix.
+    for (const key of this.qpackTables.keys()) {
+      if (key.startsWith(prefix)) this.qpackTables.delete(key);
     }
     for (const [key, assembly] of this.streams) {
       if (!key.startsWith(prefix)) continue;
@@ -558,6 +576,9 @@ export class QuicFlowTracker {
   ): { streamId: number; frames: Http3Frame[]; streamTypeName?: string }[] {
     if (fragments.length === 0) return [];
     const flowKey = this.flowKey(srcIp, srcPort, dstIp, dstPort);
+    const qpackKey = `${flowKey}>${srcIp}:${srcPort}`;
+    let qpack = this.qpackTables.get(qpackKey);
+    if (qpack === undefined) { qpack = new QpackTable(); this.qpackTables.set(qpackKey, qpack); }
     const out: { streamId: number; frames: Http3Frame[]; streamTypeName?: string }[] = [];
 
     for (const fragment of fragments) {
@@ -611,10 +632,16 @@ export class QuicFlowTracker {
 
       const frames: Http3Frame[] = [];
       let streamTypeName: string | undefined;
+      const qpackInserted: HeaderField[] = [];
+      let qpackDecoderBytes: number | undefined;
       for (;;) {
-        const result = dissectHttp3Stream(data, assembly.http3, bidirectional);
+        const result = dissectHttp3Stream(data, assembly.http3, bidirectional, qpack);
         frames.push(...result.frames);
         streamTypeName ??= result.streamTypeName;
+        if (result.qpackInserted !== undefined) qpackInserted.push(...result.qpackInserted);
+        if (result.qpackDecoderBytes !== undefined) {
+          qpackDecoderBytes = (qpackDecoderBytes ?? 0) + result.qpackDecoderBytes;
+        }
         assembly.nextOffset += data.length;
 
         const next = takePendingAt(assembly);
@@ -623,8 +650,13 @@ export class QuicFlowTracker {
         data = next.data;
       }
 
-      if (frames.length > 0 || streamTypeName !== undefined) {
-        out.push({ streamId: fragment.streamId, frames, streamTypeName });
+      if (frames.length > 0 || streamTypeName !== undefined
+        || qpackInserted.length > 0 || qpackDecoderBytes !== undefined) {
+        out.push({
+          streamId: fragment.streamId, frames, streamTypeName,
+          ...(qpackInserted.length > 0 ? { qpackInserted } : {}),
+          ...(qpackDecoderBytes !== undefined ? { qpackDecoderBytes } : {}),
+        });
       }
     }
 
@@ -650,6 +682,7 @@ export class QuicFlowTracker {
     this.flowSni.clear();
     this.sessions.clear();
     this.streams.clear();
+    this.qpackTables.clear();
   }
 }
 

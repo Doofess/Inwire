@@ -14,11 +14,21 @@
  * from what the web actually sends, and it is indexed from zero where HPACK's
  * is indexed from one.
  *
- * What this does not do is track the encoder stream's dynamic table across
- * QUIC streams. A block that indexes into it is reported as unresolvable
- * rather than guessed at, the same way an HPACK block is when the capture
- * began mid-connection - and for the same reason, that a header name invented
- * by a decoder is worse than one it admits it does not have.
+ * The dynamic table IS tracked, per connection and per direction, by reading
+ * the encoder stream (`qpackReadEncoderStream`). What it cannot do is invent
+ * state it never saw: a capture that began mid-connection, or one missing the
+ * datagram that carried an insertion, leaves entries this decoder does not
+ * have. Those are still reported as unresolvable rather than guessed at, for
+ * the reason the HPACK decoder gives - a header name invented by a decoder is
+ * worse than one it admits it does not have.
+ *
+ * Two index spaces, and confusing them is the whole hazard here. Entries have
+ * an *absolute* index that never changes and never repeats. Everything on the
+ * wire is *relative*: to the insert count on the encoder stream, and to the
+ * section's own Base inside a field section - where an index may also run
+ * forwards from the Base ("post-base") because a section is allowed to
+ * reference entries inserted after it was encoded. Getting the arithmetic
+ * wrong does not throw; it returns a real header with the wrong name.
  */
 import { huffmanDecode, type HeaderField } from './hpack';
 
@@ -178,6 +188,163 @@ class Reader {
   }
 }
 
+/** RFC 9204 §3.2.1: an entry costs its two strings plus a flat 32. */
+const ENTRY_OVERHEAD = 32;
+
+/**
+ * One direction's QPACK dynamic table.
+ *
+ * Unlike HPACK's, this is filled by a *separate* unidirectional stream rather
+ * than by the header blocks themselves - so it is held per connection and per
+ * direction, and a field section can legitimately reference an entry whose
+ * insertion has not arrived yet.
+ *
+ * Entries are kept oldest-first with `dropped` counting those evicted, because
+ * the wire's absolute index is a count of every insertion ever made. Storing
+ * them newest-first the way `HpackTable` does would mean recomputing an offset
+ * on every lookup against a number that changes on every insert.
+ */
+export class QpackTable {
+  private entries: HeaderField[] = [];
+  /** Insertions evicted; `dropped + entries.length` is the insert count. */
+  private dropped = 0;
+  private size = 0;
+  private capacity = 0;
+  /**
+   * The largest capacity the encoder ever set, which is what `MaxEntries` in
+   * the Required Insert Count decoding is defined against - not the current
+   * capacity, which an encoder may lower at any time.
+   */
+  private maxCapacitySeen = 0;
+  /** True once a lookup failed, so the caller can say so rather than guess. */
+  public desynchronised = false;
+
+  /** Insertions made so far. The next entry's absolute index. */
+  public get insertCount(): number { return this.dropped + this.entries.length; }
+
+  public setCapacity(capacity: number): void {
+    this.capacity = capacity;
+    if (capacity > this.maxCapacitySeen) this.maxCapacitySeen = capacity;
+    this.evict();
+  }
+
+  public get maxEntries(): number { return Math.floor(this.maxCapacitySeen / ENTRY_OVERHEAD); }
+
+  public insert(field: HeaderField): void {
+    const cost = field.name.length + field.value.length + ENTRY_OVERHEAD;
+    // An entry too large for the table empties it and is not stored. RFC 9204
+    // §3.2.2 - the spec's rule, not an error.
+    if (cost > this.capacity) {
+      this.dropped += this.entries.length;
+      this.entries = [];
+      this.size = 0;
+      return;
+    }
+    this.entries.push(field);
+    this.size += cost;
+    this.evict();
+  }
+
+  private evict(): void {
+    while (this.size > this.capacity && this.entries.length > 0) {
+      const oldest = this.entries.shift()!;
+      this.size -= oldest.name.length + oldest.value.length + ENTRY_OVERHEAD;
+      this.dropped++;
+    }
+  }
+
+  /** By absolute index - the count of insertions before this one. */
+  public absolute(index: number): HeaderField | null {
+    const at = index - this.dropped;
+    if (at < 0 || at >= this.entries.length) { this.desynchronised = true; return null; }
+    return this.entries[at];
+  }
+
+  public get count(): number { return this.entries.length; }
+  public get bytes(): number { return this.size; }
+}
+
+export interface QpackEncoderStreamResult {
+  /** Insertions this call made, for the tree to show. */
+  inserted: HeaderField[];
+  /** Set when an instruction could not be read; the stream is then unusable. */
+  error?: string;
+}
+
+/**
+ * Applies one direction's encoder-stream bytes to its table (RFC 9204 §4.3).
+ *
+ * Four instructions, distinguished by a prefix of the first byte. The two that
+ * name an existing entry use an index *relative to the current insert count*,
+ * newest first - so absolute = insertCount - 1 - relative, computed before the
+ * insertion this instruction is about to make.
+ *
+ * Returns the number of bytes consumed in `used`: the caller keeps the rest,
+ * because an instruction may be split across QUIC datagrams and half of one is
+ * not an error.
+ */
+export function qpackReadEncoderStream(
+  bytes: Uint8Array, table: QpackTable
+): QpackEncoderStreamResult & { used: number } {
+  const reader = new Reader(bytes);
+  const inserted: HeaderField[] = [];
+
+  while (reader.remaining > 0) {
+    const start = reader.position;
+    const first = reader.bytes[reader.position];
+
+    if ((first & 0x80) !== 0) {
+      // Insert With Name Reference: 1 T index(6+) then the value.
+      const isStatic = (first & 0x40) !== 0;
+      const index = reader.integer(6);
+      if (index === null) return { inserted, used: start };
+      const entry = isStatic ? qpackStaticEntry(index) : table.absolute(table.insertCount - 1 - index);
+      const value = reader.string(7);
+      if (value === null) return { inserted, used: start };
+      if (entry === null) {
+        // The name is genuinely unknown, and inserting a placeholder would put
+        // every later absolute index one out. Insert it unnamed so the count
+        // stays right, and let the lookup report it.
+        table.insert({ name: '', value });
+        inserted.push({ name: '', value });
+        continue;
+      }
+      table.insert({ name: entry.name, value });
+      inserted.push({ name: entry.name, value });
+      continue;
+    }
+
+    if ((first & 0x40) !== 0) {
+      // Insert With Literal Name: 0 1 H namelen(5+) then the value.
+      const name = reader.string(5);
+      if (name === null) return { inserted, used: start };
+      const value = reader.string(7);
+      if (value === null) return { inserted, used: start };
+      table.insert({ name, value });
+      inserted.push({ name, value });
+      continue;
+    }
+
+    if ((first & 0x20) !== 0) {
+      // Set Dynamic Table Capacity: 0 0 1 capacity(5+).
+      const capacity = reader.integer(5);
+      if (capacity === null) return { inserted, used: start };
+      table.setCapacity(capacity);
+      continue;
+    }
+
+    // Duplicate: 0 0 0 index(5+), relative to the insert count as above.
+    const index = reader.integer(5);
+    if (index === null) return { inserted, used: start };
+    const entry = table.absolute(table.insertCount - 1 - index);
+    if (entry === null) return { inserted, used: reader.position, error: 'duplicate of an entry this capture does not have' };
+    table.insert(entry);
+    inserted.push(entry);
+  }
+
+  return { inserted, used: reader.position };
+}
+
 export interface QpackResult {
   headers: HeaderField[];
   /** Set when the section referenced dynamic-table state, or was malformed. */
@@ -185,24 +352,69 @@ export interface QpackResult {
 }
 
 /**
+ * Recovers the Required Insert Count from its encoded form (RFC 9204 §4.5.1.1).
+ *
+ * It is sent modulo a window so it stays small, and unwrapping it needs the
+ * table's own insert count - which is why this cannot be done without the
+ * encoder stream. The formulas are the RFC's, kept in its variable names on
+ * purpose: every one of them is off-by-one-shaped, and a version rewritten to
+ * read more naturally is a version nobody can check against the document.
+ */
+function decodeRequiredInsertCount(
+  encoded: number, totalInserts: number, maxEntries: number
+): number | null {
+  if (encoded === 0) return 0;
+  if (maxEntries === 0) return null;
+  const fullRange = 2 * maxEntries;
+  if (encoded > fullRange) return null;
+  const maxValue = totalInserts + maxEntries;
+  const maxWrapped = Math.floor(maxValue / fullRange) * fullRange;
+  let count = maxWrapped + encoded - 1;
+  if (count > maxValue) {
+    if (count <= fullRange) return null;
+    count -= fullRange;
+  }
+  return count === 0 ? null : count;
+}
+
+/**
  * Decodes one encoded field section.
  *
- * The prefix is read and discarded except for one thing: a non-zero Required
- * Insert Count means the section depends on the dynamic table, and this
- * decoder does not have it. Saying so once, up front, is more useful than
- * reporting each dynamic reference separately.
+ * With no table, or one that has not yet been filled far enough, a dynamic
+ * reference is reported rather than guessed - the headers decoded up to that
+ * point are still returned, because a partial answer with a note beats none.
  */
-export function qpackDecode(section: Uint8Array): QpackResult {
+export function qpackDecode(section: Uint8Array, table?: QpackTable): QpackResult {
   const reader = new Reader(section);
   const headers: HeaderField[] = [];
 
-  const requiredInsertCount = reader.integer(8);
-  if (requiredInsertCount === null) return { headers, error: 'truncated field section prefix' };
-  // Delta Base: a sign bit and a seven-bit prefix. Only meaningful with a
-  // dynamic table, so it is read to advance the cursor and then dropped.
-  if (reader.integer(7) === null) return { headers, error: 'truncated field section prefix' };
+  const encodedInsertCount = reader.integer(8);
+  if (encodedInsertCount === null) return { headers, error: 'truncated field section prefix' };
 
-  const needsDynamic = requiredInsertCount !== 0;
+  // Delta Base: a sign bit then a seven-bit prefix.
+  if (reader.remaining < 1) return { headers, error: 'truncated field section prefix' };
+  const negative = (reader.bytes[reader.position] & 0x80) !== 0;
+  const deltaBase = reader.integer(7);
+  if (deltaBase === null) return { headers, error: 'truncated field section prefix' };
+
+  const needsDynamic = encodedInsertCount !== 0;
+
+  // Base is where this section's relative indices are measured from. A section
+  // encoded before an insertion it does not use has a Base below the insert
+  // count, which is what the sign bit is for.
+  let base = 0;
+  let resolved = false;
+  if (table !== undefined) {
+    const required = decodeRequiredInsertCount(encodedInsertCount, table.insertCount, table.maxEntries);
+    if (required !== null) {
+      base = negative ? required - deltaBase - 1 : required + deltaBase;
+      resolved = true;
+    }
+  }
+
+  /** Absolute index, or null with the reason already decided. */
+  const dynamicAt = (absolute: number): HeaderField | null =>
+    table === undefined || !resolved ? null : table.absolute(absolute);
 
   while (reader.remaining > 0) {
     const first = reader.bytes[reader.position];
@@ -212,9 +424,10 @@ export function qpackDecode(section: Uint8Array): QpackResult {
       const isStatic = (first & 0x40) !== 0;
       const index = reader.integer(6);
       if (index === null) return { headers, error: 'malformed indexed field line' };
-      if (!isStatic) return { headers, error: qpackDynamicNote(needsDynamic) };
-      const entry = qpackStaticEntry(index);
-      if (entry === null) return { headers, error: `static index ${index} does not exist` };
+      const entry = isStatic ? qpackStaticEntry(index) : dynamicAt(base - index - 1);
+      if (entry === null) {
+        return { headers, error: isStatic ? `static index ${index} does not exist` : qpackDynamicNote(needsDynamic) };
+      }
       headers.push(entry);
       continue;
     }
@@ -224,9 +437,10 @@ export function qpackDecode(section: Uint8Array): QpackResult {
       const isStatic = (first & 0x10) !== 0;
       const index = reader.integer(4);
       if (index === null) return { headers, error: 'malformed literal field line' };
-      if (!isStatic) return { headers, error: qpackDynamicNote(needsDynamic) };
-      const entry = qpackStaticEntry(index);
-      if (entry === null) return { headers, error: `static index ${index} does not exist` };
+      const entry = isStatic ? qpackStaticEntry(index) : dynamicAt(base - index - 1);
+      if (entry === null) {
+        return { headers, error: isStatic ? `static index ${index} does not exist` : qpackDynamicNote(needsDynamic) };
+      }
       const value = reader.string(7);
       if (value === null) return { headers, error: 'undecodable header value' };
       headers.push({ name: entry.name, value });
@@ -243,9 +457,27 @@ export function qpackDecode(section: Uint8Array): QpackResult {
       continue;
     }
 
-    // The remaining two forms - indexed and literal with a post-base index -
-    // both name the dynamic table, so neither is resolvable here.
-    return { headers, error: qpackDynamicNote(needsDynamic) };
+    // The two post-base forms. Their indices run *forwards* from the Base
+    // rather than backwards, because a section may reference entries inserted
+    // after it was encoded.
+    if ((first & 0x10) !== 0) {
+      // Indexed Field Line With Post-Base Index: 0 0 0 1 index(4+).
+      const index = reader.integer(4);
+      if (index === null) return { headers, error: 'malformed post-base indexed field line' };
+      const entry = dynamicAt(base + index);
+      if (entry === null) return { headers, error: qpackDynamicNote(needsDynamic) };
+      headers.push(entry);
+      continue;
+    }
+
+    // Literal Field Line With Post-Base Name Reference: 0 0 0 0 N index(3+).
+    const index = reader.integer(3);
+    if (index === null) return { headers, error: 'malformed post-base literal field line' };
+    const entry = dynamicAt(base + index);
+    if (entry === null) return { headers, error: qpackDynamicNote(needsDynamic) };
+    const value = reader.string(7);
+    if (value === null) return { headers, error: 'undecodable header value' };
+    headers.push({ name: entry.name, value });
   }
 
   return { headers };

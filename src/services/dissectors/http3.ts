@@ -16,7 +16,7 @@
  * visible even when its contents are not, a QUIC packet is protected header
  * and all.
  */
-import { qpackDecode } from './qpack';
+import { qpackDecode, qpackReadEncoderStream, type QpackTable } from './qpack';
 // HTTP/3 frame types, lengths and settings are QUIC varints (RFC 9114 §7), so
 // the reader is QUIC's rather than a second copy of it. See `quic.ts`.
 import { readVarint } from './quic';
@@ -100,7 +100,13 @@ function describeHeaders(headers: HeaderField[]): string {
   const method = find(':method');
   if (method !== undefined) {
     const authority = find(':authority') ?? '';
-    return `${method} ${authority}${find(':path') ?? ''}`;
+    // The scheme is a pseudo-header like the other two, and including it is
+    // what makes the line a URL somebody can paste rather than a fragment.
+    // Only when there is an authority to attach it to: `GET https://` reads
+    // as a truncated address where `GET /path` reads as what it is.
+    const scheme = authority.length > 0 ? find(':scheme') : undefined;
+    const origin = scheme !== undefined ? `${scheme}://${authority}` : authority;
+    return `${method} ${origin}${find(':path') ?? ''}`;
   }
   return find(':status') ?? '';
 }
@@ -109,6 +115,16 @@ export interface Http3Result {
   frames: Http3Frame[];
   /** Set on the arrival that read a unidirectional stream's type byte. */
   streamTypeName?: string;
+  /**
+   * Entries this arrival inserted into the dynamic table, when it carried
+   * QPACK encoder instructions. Named rather than counted because an inserted
+   * header is the most informative thing on an encoder stream - it is usually
+   * the `:authority` or the cookie that the request referencing it will not
+   * spell out.
+   */
+  qpackInserted?: HeaderField[];
+  /** Bytes of decoder-stream instructions seen, which nothing here decodes. */
+  qpackDecoderBytes?: number;
 }
 
 /**
@@ -121,7 +137,8 @@ export interface Http3Result {
 export function dissectHttp3Stream(
   data: Uint8Array,
   stream: Http3Stream,
-  bidirectional: boolean
+  bidirectional: boolean,
+  table?: QpackTable
 ): Http3Result {
   const bytes = concat(stream.pending, data);
   const frames: Http3Frame[] = [];
@@ -135,17 +152,36 @@ export function dissectHttp3Stream(
     stream.typeKnown = true;
     streamTypeName = UNI_STREAM_TYPE_NAMES[type.value] ?? `Reserved Stream (0x${type.value.toString(16)})`;
     p = type.nextOffset;
-
-    // The QPACK streams carry table instructions, not frames, and the push
-    // stream carries a push id before its frames. Neither is read further:
-    // saying which stream it is is the useful part, and inventing a frame
-    // boundary in a stream that has none would be worse than stopping.
-    if (type.value !== 0x00) { stream.pending = bytes.subarray(p).slice(); return { frames, streamTypeName }; }
   }
 
+  // The QPACK streams carry table instructions rather than frames, and the
+  // push stream carries a push id before its frames.
   if (!bidirectional && stream.uniType !== 0x00) {
+    const rest = bytes.subarray(p);
+
+    // The encoder stream is the one that has to be read, because everything a
+    // decoded HEADERS cannot say without it - the `:authority`, the `:path`,
+    // the cookie - is in here. An instruction may be split across datagrams,
+    // so what was not consumed is kept rather than treated as malformed.
+    if (stream.uniType === 0x02) {
+      const applied = table === undefined
+        ? { inserted: [], used: rest.length }
+        : qpackReadEncoderStream(rest, table);
+      stream.pending = rest.subarray(applied.used).slice();
+      if (stream.pending.length > MAX_FRAME_PAYLOAD) stream.pending = new Uint8Array(0);
+      return { frames, streamTypeName, qpackInserted: applied.inserted };
+    }
+
+    // The decoder stream acknowledges sections and increments insert counts.
+    // None of it changes what this decoder can read, so it is reported by size
+    // and dropped - but it is still HTTP/3 arriving, which is why this returns
+    // a result rather than nothing.
     stream.pending = new Uint8Array(0);
-    return { frames, streamTypeName };
+    return {
+      frames,
+      streamTypeName,
+      ...(stream.uniType === 0x03 && rest.length > 0 ? { qpackDecoderBytes: rest.length } : {}),
+    };
   }
 
   for (;;) {
@@ -172,7 +208,7 @@ export function dissectHttp3Stream(
         frame.dataLength = payload.length;
         break;
       case 0x01: {
-        const decoded = qpackDecode(payload);
+        const decoded = qpackDecode(payload, table);
         frame.headers = decoded.headers;
         if (decoded.error !== undefined) frame.qpackError = decoded.error;
         break;
@@ -240,6 +276,8 @@ export interface Http3StreamResult {
   streamId: number;
   frames: Http3Frame[];
   streamTypeName?: string;
+  qpackInserted?: HeaderField[];
+  qpackDecoderBytes?: number;
 }
 
 /**
@@ -270,6 +308,31 @@ export function buildHttp3Layer(streams: Http3StreamResult[]): {
     info.push(...summaries);
 
     const children: ProtocolField[] = [{ name: 'Stream ID', value: stream.streamId, abbrev: 'http3.frame_streamid' }];
+
+    // An encoder stream carries no frames, so without this the arrival shows
+    // as an empty stream row - and these insertions are what every later
+    // HEADERS on this connection is made of.
+    const inserted = stream.qpackInserted ?? [];
+    if (inserted.length > 0) {
+      info.push(`QPACK ENC: ${inserted.length} insertion${inserted.length === 1 ? '' : 's'}`);
+      children.push({
+        name: 'QPACK Encoder Instructions',
+        value: `${inserted.length} insertion${inserted.length === 1 ? '' : 's'}`,
+        isExpanded: true,
+        children: inserted.map((entry) => ({
+          name: entry.name.length > 0 ? entry.name : '[name not in this capture]',
+          value: entry.value,
+        })),
+      });
+    }
+    if (stream.qpackDecoderBytes !== undefined) {
+      info.push('QPACK DEC');
+      children.push({
+        name: 'QPACK Decoder Instructions',
+        value: `${stream.qpackDecoderBytes} byte${stream.qpackDecoderBytes === 1 ? '' : 's'}`,
+        description: 'Section acknowledgments and insert-count increments. They tell the encoder what the decoder has seen and change nothing a reader of the capture can observe, so they are reported by size rather than decoded.',
+      });
+    }
     for (const frame of stream.frames) {
       const frameRows: ProtocolField[] = [
         { name: 'Type', value: `${frame.typeName} (0x${frame.type.toString(16)})`, abbrev: 'http3.frame_type' },
