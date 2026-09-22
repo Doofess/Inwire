@@ -60,6 +60,11 @@ const MAX_CRYPTO_BYTES = 65536;
 interface QuicSession {
   clientRandom?: Uint8Array;
   cipherSuite?: number;
+  /**
+   * The suites the ClientHello offered, kept for 0-RTT alone: its keys are
+   * needed before the ServerHello has named one. See `earlyKeys`.
+   */
+  offeredCiphers?: number[];
   /** undefined before the attempt, null when the key log had nothing for it. */
   keys?: QuicSessionKeys | null;
   keyGeneration?: number;
@@ -322,16 +327,20 @@ export class QuicFlowTracker {
         // secrets. Each packet-number space numbers its packets from zero
         // independently, which is why the largest-seen number is tracked per
         // space and not per direction.
-        const keys = this.trafficKeys(flowKey, srcIp, srcPort, kind);
-        if (!keys) return null;
+        // Usually exactly one key. More only for 0-RTT, where the suite is not
+        // yet known and the tag is what decides - see `earlyKeys`.
+        const candidates = this.trafficKeys(flowKey, srcIp, srcPort, kind);
         const spaceKey = `${senderKey}#${kind}`;
         const largestInSpace = this.largestPacketNumber.get(spaceKey) ?? -1;
-        const opened = decryptQuicPacket(
-          bytes, packetStart, packetNumberOffset, packetEnd, keys, largestInSpace, kind !== '1rtt',
-        );
-        if (!opened) return null;
-        if (opened.packetNumber > largestInSpace) this.largestPacketNumber.set(spaceKey, opened.packetNumber);
-        return opened;
+        for (const keys of candidates) {
+          const opened = decryptQuicPacket(
+            bytes, packetStart, packetNumberOffset, packetEnd, keys, largestInSpace, kind !== '1rtt',
+          );
+          if (!opened) continue;
+          if (opened.packetNumber > largestInSpace) this.largestPacketNumber.set(spaceKey, opened.packetNumber);
+          return opened;
+        }
+        return null;
       }
 
       const salt = saltForVersion(version);
@@ -409,6 +418,7 @@ export class QuicFlowTracker {
       const session = this.session(flowKey);
       if (facts.hello) {
         session.clientRandom = facts.hello.random;
+        session.offeredCiphers = facts.hello.ciphers;
         if (facts.hello.alpn.length > 0) session.alpn = facts.hello.alpn[0];
       }
       if (facts.serverHello) session.cipherSuite = facts.serverHello.cipher;
@@ -432,26 +442,79 @@ export class QuicFlowTracker {
    */
   private trafficKeys(
     flowKey: string, srcIp: string, srcPort: number, kind: 'handshake' | '0rtt' | '1rtt'
-  ): DirectionKeys | null {
+  ): DirectionKeys[] {
     const session = this.sessions.get(flowKey);
-    if (session === undefined) return null;
+    if (session === undefined) return [];
 
-    if (session.keys === undefined || session.keyGeneration !== keyLog.generation) {
+    const initial = this.initialSessions.get(flowKey);
+    if (initial === undefined) return [];
+    const fromClient = initial.clientEndpoint === `${srcIp}:${srcPort}`;
+
+    // 0-RTT is answered before the derivation below, not by it: the whole
+    // point of 0-RTT is that it arrives before the server has spoken, so the
+    // facts that block below are exactly the facts it will never have.
+    if (kind === '0rtt') return this.earlyKeys(session, fromClient);
+
+    // Derive only once the facts the derivation needs are actually known, and
+    // never cache a verdict reached without them.
+    //
+    // The client random comes from the ClientHello and the cipher suite from
+    // the ServerHello, so there is a window - every packet the client sends
+    // before the server has said anything - where a derivation attempt is
+    // guaranteed to fail for a reason that says nothing about the key log. A
+    // `null` cached there stood for the life of the connection, because the
+    // recompute guard only fires on `undefined` or a new key log.
+    //
+    // A single 0-RTT packet is enough to enter that window, and 0-RTT is
+    // exactly the case that sends one: it is client data sent before the
+    // handshake completes. Measured on a real Chrome capture, all three
+    // connections carrying a 0-RTT packet read as wholly undecryptable, 1-RTT
+    // included, while every connection without one decrypted normally.
+    const derivable = session.clientRandom !== undefined && session.cipherSuite !== undefined;
+    if (derivable && (session.keys === undefined || session.keyGeneration !== keyLog.generation)) {
       session.keyGeneration = keyLog.generation;
       session.keys = this.deriveSessionKeys(session);
     }
-    if (session.keys === null) return null;
+    if (session.keys === undefined || session.keys === null) return [];
 
-    const initial = this.initialSessions.get(flowKey);
-    if (initial === undefined) return null;
-    const fromClient = initial.clientEndpoint === `${srcIp}:${srcPort}`;
-
-    // 0-RTT rides on the client's early secret, which this build does not
-    // derive: it is a separate key log label and a rare packet.
-    if (kind === '0rtt') return null;
     const pair = kind === 'handshake' ? session.keys.handshake : session.keys.application;
-    if (pair === undefined) return null;
-    return fromClient ? pair.client : pair.server;
+    if (pair === undefined) return [];
+    return [fromClient ? pair.client : pair.server];
+  }
+
+  /**
+   * The keys for a 0-RTT packet, which are the one case that cannot wait for
+   * the ServerHello.
+   *
+   * 0-RTT carries the first request of a resumed connection - a GET, with its
+   * URL, sent before the handshake finishes - so it is the most interesting
+   * packet on the connection and the hardest one to key. Its secret is a key
+   * log label of its own, `CLIENT_EARLY_TRAFFIC_SECRET`, which the parser has
+   * always kept.
+   *
+   * The cipher suite is what makes it awkward: it is the *resumed* session's,
+   * and the ServerHello that would name it has not been sent yet. So the
+   * candidates are the suites the ClientHello offered, and the AEAD tag picks
+   * between them - a wrong suite fails to authenticate, which is the same
+   * outcome as having no key at all. Guessing is therefore free of the usual
+   * hazard: it cannot produce plausible wrong plaintext, only no plaintext.
+   * Chrome offers three, and GREASE entries fall out on `cipherSuiteSpec`.
+   */
+  private earlyKeys(session: QuicSession, fromClient: boolean): DirectionKeys[] {
+    // A server never sends 0-RTT; only the client can.
+    if (!fromClient || session.clientRandom === undefined) return [];
+    const early = keyLog.secretsFor(session.clientRandom)?.get('CLIENT_EARLY_TRAFFIC_SECRET');
+    if (early === undefined) return [];
+
+    const candidates = session.cipherSuite !== undefined
+      ? [session.cipherSuite]
+      : session.offeredCiphers ?? [];
+    const keys: DirectionKeys[] = [];
+    for (const id of candidates) {
+      const suite = cipherSuiteSpec(id);
+      if (suite !== null) keys.push(deriveTrafficKeys(early, suite));
+    }
+    return keys;
   }
 
   private deriveSessionKeys(session: QuicSession): QuicSessionKeys | null {

@@ -31,6 +31,13 @@ const FRAME_TYPE_NAMES: Record<number, string> = {
   0x05: 'PUSH_PROMISE',
   0x07: 'GOAWAY',
   0x0d: 'MAX_PUSH_ID',
+  0x41: 'WEBTRANSPORT_BISTREAM',
+  // RFC 9218. Chrome sends one before the HEADERS of most requests, so this
+  // was the commonest "Unknown" in a real capture rather than an exotic one.
+  // Two types, one name: 0xf0700 prioritises a request stream and 0xf0701 a
+  // push stream, and the reference names both PRIORITY_UPDATE.
+  0xf0700: 'PRIORITY_UPDATE',
+  0xf0701: 'PRIORITY_UPDATE',
 };
 
 const SETTING_NAMES: Record<number, string> = {

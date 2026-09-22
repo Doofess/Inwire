@@ -21,6 +21,7 @@ import { createCipheriv } from 'node:crypto';
 import { cipherSuiteSpec } from '../../src/services/tls/cipherSuites';
 import { deriveTrafficKeys, decryptQuicPacket } from '../../src/services/dissectors/quicCrypto';
 import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
+import { keyLog, toHex } from '../../src/services/tls/keyLog';
 import { dissectHttp3Stream, freshHttp3Stream, buildHttp3Layer } from '../../src/services/dissectors/http3';
 import { qpackDecode, qpackStaticEntry, QPACK_STATIC_ENTRIES } from '../../src/services/dissectors/qpack';
 
@@ -224,6 +225,96 @@ function sealShortHeader(
   // packet number field and the sample, and nothing opens.
   check('the wrong connection id length fails rather than producing noise',
     decryptQuicPacket(packet, 0, 1 + connectionId.length - 1, packet.length, keys, -1, false), null);
+}
+
+// --- a 0-RTT packet must not poison the connection it arrives on ----------------
+//
+// The keys for a QUIC connection need two facts from opposite directions: the
+// client random from the ClientHello and the cipher suite from the ServerHello.
+// Any packet the client sends in between asks for keys that cannot exist yet -
+// and the derivation's `null` used to be cached, so the verdict stood for the
+// life of the connection.
+//
+// 0-RTT is precisely the packet that arrives in that window; it is client data
+// sent before the handshake completes. One of them was enough to make every
+// later 1-RTT packet on the connection unreadable. Measured on a real Chrome
+// capture, all three connections carrying a 0-RTT packet read as wholly
+// undecryptable while every connection without one decrypted normally.
+//
+// The check drives the real order: hello, a too-early ask, server hello, then a
+// packet that must open.
+
+function hello(kind: 1 | 2, cipher: number): Uint8Array {
+  const b: number[] = [];
+  const u16 = (v: number) => b.push((v >> 8) & 0xff, v & 0xff);
+  b.push(0x03, 0x03);
+  for (let i = 0; i < 32; i++) b.push(kind === 1 ? i : 0x80 + i);
+  b.push(0);
+  if (kind === 1) { u16(2); u16(cipher); b.push(1, 0); } else { u16(cipher); b.push(0); }
+  u16(0);
+  const body = Uint8Array.from(b);
+  const out = new Uint8Array(4 + body.length);
+  out[0] = kind;
+  out[1] = (body.length >> 16) & 0xff;
+  out[2] = (body.length >> 8) & 0xff;
+  out[3] = body.length & 0xff;
+  out.set(body, 4);
+  return out;
+}
+
+{
+  const suite = cipherSuiteSpec(0x1301)!;
+  const CLIENT = { ip: '192.0.2.10', port: 50000 };
+  const SERVER = { ip: '198.51.100.5', port: 443 };
+  const connectionId = bytes(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02);
+
+  // The client random this synthetic ClientHello carries is 0..31.
+  const clientRandom = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) clientRandom[i] = i;
+  const clientSecret = new Uint8Array(32).fill(0x2a);
+  const serverSecret = new Uint8Array(32).fill(0x2b);
+
+  keyLog.clear();
+  keyLog.add([
+    `CLIENT_TRAFFIC_SECRET_0 ${toHex(clientRandom)} ${toHex(clientSecret)}`,
+    `SERVER_TRAFFIC_SECRET_0 ${toHex(clientRandom)} ${toHex(serverSecret)}`,
+  ].join('\n'));
+
+  const tracker = new QuicFlowTracker();
+  const appKeys = deriveTrafficKeys(clientSecret, suite);
+  const streamFrame = bytes(0x0e, 0x00, 0x00, HEADERS_FRAME.length, ...HEADERS_FRAME);
+  const packet = sealShortHeader(appKeys, connectionId, 7, streamFrame);
+  const pnOffset = 1 + connectionId.length;
+
+  // Registers which endpoint is the client. The Initial itself does not open -
+  // these are not its keys - but the registration is what the 1-RTT path reads.
+  tracker.createInitialDecryptor(CLIENT.ip, CLIENT.port, SERVER.ip, SERVER.port, packet)(
+    0, pnOffset, packet.length, 1, connectionId, 'initial');
+
+  tracker.addCryptoFragments(CLIENT.ip, CLIENT.port, SERVER.ip, SERVER.port,
+    [{ offset: 0, data: hello(1, 0x1301) }]);
+
+  // The too-early ask. `handshake` rather than `0rtt` on purpose: 0-RTT is now
+  // answered ahead of the derivation entirely, so it can no longer reach the
+  // cache - but a server that coalesces its Initial and its Handshake packet
+  // into one datagram still asks for handshake keys in the window before its
+  // own ServerHello has been reassembled. Asking with `0rtt` here passes
+  // whether the cache is guarded or not, which is a test that proves nothing;
+  // this was checked by putting the bug back.
+  const early = tracker.createInitialDecryptor(CLIENT.ip, CLIENT.port, SERVER.ip, SERVER.port, packet)(
+    0, pnOffset, packet.length, 1, connectionId, 'handshake');
+  check('a packet sent before the ServerHello does not open', early, null);
+
+  tracker.addCryptoFragments(SERVER.ip, SERVER.port, CLIENT.ip, CLIENT.port,
+    [{ offset: 0, data: hello(2, 0x1301) }]);
+
+  const opened = tracker.createInitialDecryptor(CLIENT.ip, CLIENT.port, SERVER.ip, SERVER.port, packet)(
+    0, pnOffset, packet.length, 1, connectionId, '1rtt');
+  check('...and the ServerHello arriving still opens the next 1-RTT packet', opened?.packetNumber, 7);
+  check('...with the payload that went in',
+    opened == null ? null : Array.from(opened.payload), Array.from(streamFrame));
+
+  keyLog.clear();
 }
 
 console.log();
