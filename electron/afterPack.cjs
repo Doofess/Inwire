@@ -1,5 +1,48 @@
 /**
- * Drops the Chromium locale packs the app cannot use.
+ * What happens to the packed output after electron-builder has written it:
+ * the Electron fuses are flipped, and the locale packs the app cannot use are
+ * dropped.
+ *
+ * ## The fuses, and why they are here rather than anywhere else
+ *
+ * A fuse is a byte in the Electron binary that turns a capability off for
+ * good. Until this hook flipped them, `Inwire.exe` shipped with Node's own
+ * entry points open - demonstrated rather than assumed, on the build this
+ * replaced:
+ *
+ *     ELECTRON_RUN_AS_NODE=1 Inwire.exe -e "console.log(process.version)"
+ *     v24.20.0
+ *
+ * That is arbitrary code, executing as the user, out of the application's own
+ * signed executable. Every signature check passes, because the file is
+ * unmodified - the capability is the file's.
+ *
+ * Four fuses, which is the set the root `CLAUDE.md` names:
+ *
+ *   - **RunAsNode** - the above.
+ *   - **EnableNodeCliInspectArguments** - `--inspect` on the same binary,
+ *     which opens a debugger port into the main process.
+ *   - **EnableNodeOptionsEnvironmentVariable** - `NODE_OPTIONS=--require ...`,
+ *     which injects a module into the app without touching the app.
+ *   - **OnlyLoadAppFromAsar** - refuses `app/` and `app.asar.unpacked` beside
+ *     the asar, so dropping a directory next to the executable cannot replace
+ *     the application. Safe here because `resources/app.asar` is what
+ *     electron-builder produces; on a build that stopped producing one this
+ *     fuse would refuse to start rather than fail quietly.
+ *
+ * **Flipping mutates the executable, so it must happen before signing** - the
+ * ordering `CLAUDE.md` calls out, and the reason this cannot be a step bolted
+ * on after a release is built.
+ *
+ * Deliberately NOT flipped: `EnableEmbeddedAsarIntegrityValidation`.
+ * electron-builder already stamps the integrity resource (it logs
+ * `updating asar integrity executable resource` during a pack), but turning
+ * the *validation* on is a separate decision with a failure mode this has no
+ * way to rehearse - a mismatch is an app that will not start, on machines
+ * where nobody can read the reason. It is the obvious next one, and it wants
+ * its own commit.
+ *
+ * ## Dropping the Chromium locale packs
  *
  * ## Why not `electronLanguages`
  *
@@ -33,11 +76,31 @@
  */
 const { readdirSync, rmSync, statSync } = require('node:fs');
 const path = require('node:path');
+const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
 
 /** Locales to keep. The app is English-only; see the header. */
 const KEEP = new Set(['en-US.pak']);
 
 exports.default = async function afterPack(context) {
+  // **Before the platform gate below.** The locale prune is Windows-shaped;
+  // a fuse is a property of the Electron binary on every platform, and
+  // gating it behind `win32` would mean a macOS build silently shipping with
+  // Node's entry points open the day one exists.
+  const exe = context.electronPlatformName === 'win32'
+    ? `${context.packager.appInfo.productFilename}.exe`
+    : context.packager.appInfo.productFilename;
+  const binary = path.join(context.appOutDir, exe);
+  await flipFuses(binary, {
+    version: FuseVersion.V1,
+    // `resetAdHocDarwinSignature` is deliberately absent: it is a macOS
+    // concern, and this app has no macOS build to have an opinion about.
+    [FuseV1Options.RunAsNode]: false,
+    [FuseV1Options.EnableNodeCliInspectArguments]: false,
+    [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+    [FuseV1Options.OnlyLoadAppFromAsar]: true,
+  });
+  console.log('  • fuses flipped   runAsNode=off inspect=off nodeOptions=off onlyLoadAppFromAsar=on');
+
   // macOS prunes through `electronLanguages`, and its layout is different
   // enough that doing it here would be a second implementation of one idea.
   if (context.electronPlatformName !== 'win32') return;

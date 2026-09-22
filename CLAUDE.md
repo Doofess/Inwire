@@ -440,11 +440,28 @@ took the whole bridge down with no message anywhere.
 
 **Electron fuses, and ASAR integrity.** `runAsNode`,
 `enableNodeCliInspectArguments` and `enableNodeOptionsEnvironmentVariable` off;
-`onlyLoadAppFromAsar` on. **NOT IMPLEMENTED.** electron-builder does stamp ASAR
-integrity (it logs `updating asar integrity executable resource` during
-`npm run pack`), but no fuse is flipped. Flipping mutates the exe, so this must
-land **before** signing — without `runAsNode: false` any local process can run
-the signed exe with `ELECTRON_RUN_AS_NODE=1` and pass every signature check.
+`onlyLoadAppFromAsar` on. Flipped in `electron/afterPack.cjs` — **before** the
+platform gate, because a fuse belongs to the binary on every platform — and
+enforced by `scripts/electron/fuses.ts`, which reads the wire out of the packed
+exe and skips cleanly when nothing is packed. Flipping mutates the exe, so it
+must stay **before** signing.
+
+What it was worth, quoted from the build this replaced rather than described:
+`ELECTRON_RUN_AS_NODE=1 Inwire.exe -e "console.log(process.version)"` printed
+`v24.20.0`. Signing would not have helped — the file is unmodified, so every
+signature check passes; the capability is the binary's.
+
+**The wire holds ASCII digits**, 49 for a set fuse and 48 for a cleared one, so
+`Boolean(value)` is true for both — which failed three correct rows the first
+time that check was written. `getCurrentFuseWire` reads it; running the exploit
+is better evidence and a worse test, because with the fuse on `-e` stops being
+Node's argument and **launches the app**, so a suite checking by execution opens
+a window on every run. That one belongs in `docs/verification.md`.
+
+`enableEmbeddedAsarIntegrityValidation` is deliberately still off. Integrity is
+stamped (`npm run pack` logs `updating asar integrity executable resource`);
+turning the *validation* on is a separate decision whose failure mode is an app
+that will not start, and it wants its own commit.
 
 **CSP is served as a header, not a meta tag.** `electron/csp.ts`, applied in
 `hardenSession`. `OUTBOUND_HOSTS` is the whole list of places the renderer can
@@ -844,12 +861,16 @@ measured — the store takes 31,000 frames a second and the app feeds it far les
 The Electron migration is done bar two items, and `docs/history.md` has the
 phase-by-phase record.
 
-**Signing and the fuses are deprioritised, not blocked.** They wait on a
-code-signing certificate (EV or Azure Trusted Signing) outside this repository —
-but signing, the fuses, the VM matrix and the Npcap OEM licence were all set
-aside deliberately, because this is a machine the author works on rather than a
-fleet they ship to. The installer compiles; the fuses are still to flip, and
-must land **before** signing.
+**Signing is deprioritised, not blocked.** It waits on a code-signing
+certificate (EV or Azure Trusted Signing) outside this repository — and
+signing, the VM matrix and the Npcap OEM licence were all set aside
+deliberately, because this is a machine the author works on rather than a fleet
+they ship to. The installer compiles.
+
+**The fuses are flipped**, which was the one item here that had to precede
+signing rather than follow it. `electron/afterPack.cjs` does it and
+`scripts/electron/fuses.ts` holds it; see the invariant above for what an open
+`runAsNode` was worth on the build before.
 
 **The offline basemap is the last of "rebuild what the browser forced".**
 `tiles.openfreemap.org` is still in `OUTBOUND_HOSTS` (`electron/csp.ts`) and
