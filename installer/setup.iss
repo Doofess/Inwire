@@ -132,6 +132,26 @@ CloseApplications=yes
 ; so the person decides.
 RestartApplications=no
 
+[InstallDelete]
+; **Inno adds files and never removes them.** An upgrade copies the new payload
+; over the old one and leaves behind anything the new build no longer ships, so
+; a directory only ever grows.
+;
+; That is not hypothetical here: dropping `tkinter` from the agent's spec took
+; the payload from 30 MB to 22 MB, and an upgrade over the previous build left
+; all 7.2 MB of `_tk_data` sitting in `{app}\agent\_internal` where nothing
+; would ever load it again. The install reported success, the version was
+; right, and the saving was entirely undone.
+;
+; Both directories are build output and nothing else - PyInstaller's `_internal`
+; and electron-builder's `resources` - so clearing them before the copy is
+; recreating them, not discarding anything a user owns. `{app}` itself is
+; deliberately NOT cleared: `{app}\agent` holds no config (that is
+; `{commonappdata}\Inwire`), but the app directory is where an uninstaller and
+; anything a future version writes would live.
+Type: filesandordirs; Name: "{app}\agent\_internal"
+Type: filesandordirs; Name: "{app}\resources"
+
 [Files]
 ; The Electron app. `electron-builder --dir` output, verbatim.
 Source: "{#AppSource}\*"; DestDir: "{app}"; \

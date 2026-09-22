@@ -156,7 +156,17 @@ a = Analysis(
     # collected: a signed installer should not carry a library the product
     # cannot reach, and PyInstaller would otherwise pull it in through the
     # tarball's requirements.
-    excludes=['websockets'],
+    #
+    # `tkinter` is the same argument and a larger number: **7.2 MB of a 30 MB
+    # agent**, a GUI toolkit inside a headless LocalSystem service that has no
+    # desktop to draw on. It arrives through scapy, whose `modules/ldaphero.py`
+    # and `modules/ticketer.py` import it - and both do so inside a `try`, so
+    # scapy already expects it to be missing. Neither module is reachable from
+    # anything here.
+    #
+    # The same reasoning that excludes it forbids guessing: this was rebuilt
+    # and the agent run against a real capture before the exclusion was kept.
+    excludes=['websockets', 'tkinter'],
     cipher=block_cipher,
     noarchive=False,
 )
