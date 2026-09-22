@@ -8,7 +8,6 @@ import { Section } from '../network/rows';
 import { Switch } from '../ui/switch';
 import { ImportPanel } from '../export/ImportPanel';
 import { ImportErrorDialog } from '../export/ImportErrorDialog';
-import { buildPdfReport } from '../export/pdfReport';
 import { useRovingFocus } from '../common/useRovingFocus';
 import { FilterEngine } from '../../services/filterEngine';
 import { PcapService } from '../../services/pcapParser';
@@ -300,8 +299,18 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
       note: 'Stats, alerts and the most recent 100 packets.',
       group: 'report',
       icon: <ImageIcon className="w-3.5 h-3.5" />,
+      // **Fetched when the button is pressed, not when the app starts.**
+      // `pdfReport` is the only eager path to `jspdf` and `jspdf-autotable`,
+      // about 344 kB minified, and it was inside the single entry chunk - so
+      // every launch parsed a PDF writer for a report nobody had asked for.
+      // `runExport`'s `produce` already accepts a promise, so this needed no
+      // new machinery; the pattern is `tabularReaders.ts:202`'s, which does the
+      // same for `pdfjs-dist` and `exceljs`.
       onClick: () => runExport('pdf', 'pdf',
-        ({ outgoing }) => buildPdfReport(outgoing, appliedFilter), 'inwire_report'),
+        async ({ outgoing }) => {
+          const { buildPdfReport } = await import('../export/pdfReport');
+          return buildPdfReport(outgoing, appliedFilter);
+        }, 'inwire_report'),
     },
   ];
 

@@ -189,6 +189,7 @@ try {
   // time `npm run check` runs. `main.ts` honours `INWIRE_USER_DATA` for
   // exactly this.
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-smoke-'));
+  const launchedAt = Date.now();
   app = await electron.launch({
     args: ['.'],
     // `INWIRE_AGENT_PIPE` points the app at this run's stub instead of the
@@ -198,6 +199,31 @@ try {
 
   const page = await app.firstWindow();
   mainWindow = page;
+  /**
+   * How long the app took to put something on screen.
+   *
+   * A MEASUREMENT, never a gate, and the distinction is ADR 0021's: a launch
+   * time is a property of this machine - its disk, its antivirus, whether the
+   * profile is warm - so a ceiling on it would fail for reasons that have
+   * nothing to do with the build. `scripts/perf/bundle-size.ts` is the gate,
+   * because a byte count is a property of the build and is the same everywhere.
+   *
+   * Printed because nothing else in this repository could see startup at all,
+   * and every argument about it was therefore an argument rather than a number.
+   * Read it against another run on the same machine, not against this comment.
+   */
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  const domReadyMs = Date.now() - launchedAt;
+  // To the first thing a person can see, not just to a document. React mounting
+  // is downstream of the whole entry chunk parsing and executing, so this is
+  // the number that would move if the bundle were the cost.
+  await page.waitForFunction(
+    'document.getElementById("root") && document.getElementById("root").childElementCount > 0',
+    undefined, { timeout: 30_000 },
+  ).catch(() => {});
+  console.log(`      document in ${domReadyMs} ms, first painted UI in `
+    + `${Date.now() - launchedAt} ms `
+    + '(measurements, not budgets: this machine, not this build)');
 
   // Playwright's default action timeout is **none**, and `_electron.launch`
   // has no config file to set one. So a locator that never matches - a button
