@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Packet } from '../../types/packet';
 import {
   MessageSquare,
@@ -6,37 +6,91 @@ import {
   Check,
   Download,
   TriangleAlert,
-  LoaderCircle,
 } from 'lucide-react';
-import { packetHexDump, packetAsciiDump } from '../../services/pcapParser';
 import { saveGeneratedBlob } from '../../lib/saveFile';
 import {
   clientEnd, isFromClient, streamPackets as framesOnStream,
   type StreamTarget,
 } from '../../services/followStream';
 import { portLabel } from '../../services/portServices';
-import { useHydratedBytes } from '../../lib/useHydratedBytes';
+import { virtualWindow } from '../../lib/virtualWindow';
 import { Segmented } from '../ui/segmented';
 import { LadderView } from '../ladder/LadderView';
 import { copyText } from '../ui/CopyButton';
 
 /**
- * One conversation's payload, both directions, in order.
+ * One conversation's frames, both directions, in order.
  *
  * Takes a five-tuple rather than the TCP stream index it used to: the tracker
  * numbers TCP conversations only, so a DNS exchange or a QUIC connection had
  * no id and this window could not be opened on one at all - which is most of
  * a modern capture. `services/followStream.ts` owns the selection and the
  * client/server decision so both are testable; this file renders them.
+ *
+ * ## This shows frame headers, not payload, and that is a decision
+ *
+ * It used to render every frame on the stream as ASCII, a hex dump or one
+ * unbroken hex string, chosen by three buttons. Three things made that
+ * unusable on a real stream, and they compounded:
+ *
+ * - `framesOnStream` is a `.filter()` over the WHOLE packet buffer - up to a
+ *   million frames - and it was called inline in the render body, so it ran on
+ *   every render and returned a new array each time.
+ * - The list was not virtualised. Every frame on the stream got a card.
+ * - `renderPayload` was called inside that map, so each frame's full dump was
+ *   rebuilt on every render. A 10,000-frame stream of 1,460-byte segments is
+ *   ~14.6M transient strings per render, which is a multi-second freeze and a
+ *   GC storm.
+ *
+ * **What was lost is real and is recorded rather than quietly dropped:** this
+ * was the only place in the app that showed a reassembled conversation's
+ * payload - the thing Follow Stream exists for in Wireshark, and the way you
+ * read an HTTP exchange or notice a credential in the clear. The trade was put
+ * explicitly and this is the answer that was chosen.
+ *
+ * **If it comes back, it comes back virtualised**: rendered for the ~30 rows
+ * on screen and memoised per packet id, never rebuilt inside a map over the
+ * whole stream. `virtualWindow` below is half of what that needs; the other
+ * half was `lib/useHydratedBytes.ts`, which this file was the only consumer
+ * of and which went with the payload rather than being left as a module
+ * nothing imports. It is in git, and `scripts/session/side-bar.ts` records
+ * the rule that outlived it - hydrate at press time, not on render.
+ *
+ * The Ladder tab is untouched. It answers the other half of the question -
+ * the shape of a conversation rather than its content - and it reads no bytes.
  */
 
 /**
  * A stable empty list for the closed window.
  *
- * `useHydratedBytes` keys its effect on which frames it was handed, and a
- * fresh `[]` on every render would be a new set each time.
+ * This pane is mounted with a null target and given one when it opens, so the
+ * memo below runs on every render of a closed window; a fresh `[]` each time
+ * would change identity for everything downstream of it.
  */
 const EMPTY_FRAMES: Packet[] = [];
+
+/**
+ * One dialogue row, in pixels.
+ *
+ * Applied as an inline `height` on the row rather than as a Tailwind class, so
+ * the number the spacers are computed from and the number the row is drawn at
+ * cannot drift apart - a row one pixel taller than the constant accumulates
+ * into a list that scrolls past its own end.
+ *
+ * A uniform height is what lets `virtualWindow` do arithmetic instead of
+ * measurement, and it is the structural reason the payload views this replaced
+ * could not be virtualised as they stood: a frame's hex dump is as tall as the
+ * frame is long, so every row would have had to be measured.
+ */
+const ROW_HEIGHT = 28;
+
+/**
+ * Rows drawn beyond each edge of the viewport.
+ *
+ * Twelve is `HexDumpView`'s number for a similar row height; it covers a fast
+ * flick without drawing much that nobody sees.
+ */
+const OVERSCAN = 12;
 
 interface StreamFollowerPaneProps {
   target: StreamTarget | null;
@@ -74,8 +128,11 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   // answered four seconds later, a side that went quiet, a retransmission
   // burst. Both are the same frames.
   const [tab, setTab] = useState<'dialogue' | 'ladder'>(initialTab);
-  const [viewFormat, setViewFormat] = useState<'ascii' | 'hex' | 'raw'>('ascii');
   const [copied, setCopied] = useState(false);
+  // Where the dialogue is scrolled to, for the virtual window below.
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const scrollFrame = useRef<number | null>(null);
 
   /*
    * Escape used to be handled here, in the capture phase with `stopPropagation`,
@@ -95,20 +152,70 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
    * every inner consumer in the app keeps, not a fact about the detail view.
    */
 
-  // Hydrated, because every view below reads the frames' bytes and a buffer
-  // large enough to have dropped them would otherwise render an empty stream
-  // (docs/decisions/0013). A pass-through while the buffer still holds them,
-  // which is every capture that fits in memory.
-  //
-  // Above the `target === null` early return, for the same reason the effect
-  // above it is: this window is mounted with a null target and given one when
-  // it opens, so a hook below the return would change the hook COUNT between
-  // two renders of the same component - which React refuses outright. It is
-  // the invariant the comment on that effect already names, and this hook was
-  // added underneath it.
-  const { packets: streamPackets, hydrating } = useHydratedBytes(
-    target === null ? EMPTY_FRAMES : framesOnStream(packets, target),
+  // No byte hydration here any more, and its absence is the point: this view
+  // reads `id`, `relativeTime`, the addresses and `length`, every one of which
+  // is on the summary record. It used to read `rawBytes` off every frame on the
+  // stream, so opening a stream whose frames the buffer had dropped meant a
+  // round trip to the store and a spinner (docs/decisions/0013). Now it opens
+  // on whatever is in the buffer, immediately, however long the stream is.
+
+  /**
+   * The frames on this stream.
+   *
+   * **Memoised, and that is the load-bearing part.** `framesOnStream` is a
+   * filter over the whole buffer; called in the render body it ran on every
+   * render - ten times a second during a capture - and handed back a new array
+   * that changed identity for every memo below it. Keyed on the buffer and the
+   * target, it runs when one of those actually changes.
+   *
+   * Above the `target === null` early return, because this pane is mounted with
+   * a null target and given one when it opens - a hook below the return would
+   * change the hook COUNT between two renders of the same component, which
+   * React refuses outright.
+   */
+  const streamPackets = useMemo(
+    () => (target === null ? EMPTY_FRAMES : framesOnStream(packets, target)),
+    [packets, target],
   );
+
+  /**
+   * Scroll position, coalesced to one update per animation frame.
+   *
+   * The scroll event fires far faster than React can commit, and each one here
+   * moves the virtual window. `{ passive: true }` is implicit on the React
+   * handler; the rAF is what stops a fast flick queueing dozens of renders.
+   */
+  const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    if (scrollFrame.current !== null) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = null;
+      setScrollTop(element.scrollTop);
+      setViewportHeight(element.clientHeight);
+    });
+  }, []);
+
+  /**
+   * The scroller, measured on mount and on every resize.
+   *
+   * A `ResizeObserver` rather than measuring in the scroll handler, and it is
+   * `PacketList.tsx:621`'s arrangement rather than a second answer to the same
+   * question: a window resize changes this box without producing a scroll
+   * event, so a height refreshed only on scroll goes stale exactly when the
+   * pane gets taller and leaves blank space below the last row.
+   */
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (element === null) return;
+    const update = () => setViewportHeight(element.clientHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+    // `tab` is the dep because the scroller only exists on the dialogue tab -
+    // switching to the ladder unmounts it, and coming back mounts a new one.
+  }, [tab]);
 
   if (target === null) return null;
 
@@ -130,53 +237,53 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   }
 
   /**
-   * The payload as the chosen view shows it.
+   * One frame as one line, and the same line the pane draws.
    *
-   * `raw` was rendering the ASCII view - the two buttons produced identical
-   * output, which is worse than not offering the choice. Wireshark's Raw is
-   * the payload bytes as one unbroken hex string, which is what gets pasted
-   * into a decoder; the hex dump with its offsets and ASCII column is a
-   * different thing and already has its own button.
+   * Copy and save share it so what lands on the clipboard cannot drift from
+   * what is on screen - they used to build their own dialogue strings, twice,
+   * with two different prefix formats between them.
+   *
+   * Built only when a button is pressed. That is the whole difference from
+   * what this replaced: the cost is O(stream) once, on an explicit action,
+   * rather than O(stream) on every render.
    */
-  const renderPayload = (p: Packet): string => {
-    if (viewFormat === 'hex') return packetHexDump(p);
-    if (viewFormat === 'raw') {
-      return Array.from(p.rawBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-    }
-    return p.streamPayload?.payloadText || packetAsciiDump(p);
+  const summaryLine = (p: Packet): string => {
+    const arrow = isFromClient(p, client) ? '-->' : '<--';
+    return [
+      `#${p.id}`,
+      `${p.relativeTime.toFixed(6)}s`,
+      arrow,
+      `${p.source}:${p.sourcePort}`,
+      `${p.destination}:${p.destPort}`,
+      `${p.length} B`,
+    ].join('\t');
+  };
+
+  const streamText = (): string => {
+    const header = `# Follow ${target.kind.toUpperCase()} stream`
+      + `${target.streamId !== undefined ? ` #${target.streamId}` : ''}`
+      + `  ${clientIp} <-> ${serverIp}:${serverPort}\n`
+      + `# frame\ttime\tdir\tsource\tdestination\tlength\n`;
+    return header + streamPackets.map(summaryLine).join('\n') + '\n';
   };
 
   const handleCopyStream = async () => {
-    const fullDialogue = streamPackets
-      .map(p => {
-        const prefix = isFromClient(p, client) ? `[CLIENT -> SERVER (${p.source})]` : `[SERVER -> CLIENT (${p.source})]`;
-        return `${prefix}\n${p.streamPayload?.payloadText || packetAsciiDump(p)}\n`;
-      })
-      .join('\n');
-
     // Through `copyText` rather than `navigator.clipboard` directly: it carries
     // the execCommand fallback for contexts that refuse the async API, and it
     // reports failure - so the tick is not shown for a copy that did not happen.
-    if (!(await copyText(fullDialogue))) return;
+    if (!(await copyText(streamText()))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
 
   const handleSaveStream = () => {
-    const fullDialogue = streamPackets
-      .map(p => {
-        const prefix = isFromClient(p, client) ? `>>> [CLIENT -> SERVER] ${p.source}:${p.sourcePort}` : `<<< [SERVER -> CLIENT] ${p.source}:${p.sourcePort}`;
-        return `${prefix}\n${p.streamPayload?.payloadText || packetAsciiDump(p)}\n`;
-      })
-      .join('\n');
-
-    const blob = new Blob([fullDialogue], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob([streamText()], { type: 'text/plain;charset=utf-8' });
     // Fire and forget: the dialog IS the feedback, and the only other outcomes
     // are a cancel (which needs no comment) and a write error (which the
     // dialog's own failure already put in front of the person).
     void saveGeneratedBlob(
       blob,
-      `${target.kind}_stream_${target.streamId ?? `${target.portA}-${target.portB}`}_conversation.txt`,
+      `${target.kind}_stream_${target.streamId ?? `${target.portA}-${target.portB}`}_frames.txt`,
     );
   };
 
@@ -220,43 +327,6 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
                 { value: 'ladder', label: 'Ladder' },
               ]}
             />
-            {/* View Format Switcher. Only for the dialogue - a ladder has no
-                payload to render as hex, and leaving a dead control on screen
-                is worse than removing it. */}
-            <div className={`flex rounded-md border border-border bg-secondary p-0.5 text-xs ${
-              tab === 'ladder' ? 'hidden' : ''}`}>
-              <button
-                onClick={() => setViewFormat('ascii')}
-                className={`px-2 py-1 rounded font-medium transition-all ${
-                  viewFormat === 'ascii'
-                    ? 'bg-sky-600 text-white shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                ASCII / UTF-8
-              </button>
-              <button
-                onClick={() => setViewFormat('hex')}
-                className={`px-2 py-1 rounded font-medium transition-all ${
-                  viewFormat === 'hex'
-                    ? 'bg-sky-600 text-white shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Hex Dump
-              </button>
-              <button
-                onClick={() => setViewFormat('raw')}
-                className={`px-2 py-1 rounded font-medium transition-all ${
-                  viewFormat === 'raw'
-                    ? 'bg-sky-600 text-white shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Raw Byte
-              </button>
-            </div>
-
             <button
               onClick={() => { void handleCopyStream(); }}
               className="p-1.5 rounded-md border text-xs transition-colors flex items-center gap-1 border-border hover:bg-accent text-foreground/80"
@@ -308,12 +378,10 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             </span>
           </div>
         )}
-        {hydrating && (
-          <div className="px-4 py-2 border-b border-border bg-muted/40 text-muted-foreground text-[11px] flex items-center gap-2">
-            <LoaderCircle className="w-4 h-4 shrink-0 animate-spin" />
-            <span>Reading this stream’s bytes back from the stored capture…</span>
-          </div>
-        )}
+        {/* The "reading this stream's bytes back from the stored capture"
+            banner stood here. Nothing replaced it because nothing waits any
+            more: this view reads only what a summary record already carries,
+            so a stream opens on whatever the buffer holds, immediately. */}
 
         {tab === 'ladder' ? (
           <LadderView
@@ -323,50 +391,85 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             onSelectFrame={onSelectFrame}
           />
         ) : (
-        /* Stream Dialogue Viewport */
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs custom-scrollbar">
-          {streamPackets.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">No frames on this stream are in the buffer.</div>
-          ) : (
-            streamPackets.map(p => {
-              const isClient = isFromClient(p, client);
-
-              return (
-                <div
-                  key={p.id}
-                  className={`p-3 rounded-lg border leading-relaxed ${
-                    p.id === selectedId ? 'ring-2 ring-primary/60 ' : ''}${
-                    isClient
-                      ? 'bg-rose-50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/40 text-rose-900 dark:text-rose-300'
-                      : 'bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-900/40 text-sky-900 dark:text-sky-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between pb-1 mb-1 border-b border-current/20 text-[10px] opacity-75 font-sans">
-                    {/* Clickable, at last. This printed as plain text, so the
-                        only way to find a frame you had just read about was to
-                        close the window and scroll for it. */}
-                    <span className="font-semibold">
-                      {onSelectFrame ? (
-                        <button onClick={() => onSelectFrame(p.id)}
-                          className="underline decoration-dotted underline-offset-2
-                            hover:decoration-solid cursor-pointer"
-                          title="Select this frame in the packet list">
-                          Frame #{p.id}
-                        </button>
-                      ) : <>Frame #{p.id}</>}
-                      {' • '}{isClient ? 'Client Request' : 'Server Response'} ({p.source}:{p.sourcePort} → {p.destination}:{p.destPort})
-                    </span>
-                    <span>{p.relativeTime.toFixed(4)}s ({p.length} bytes)</span>
-                  </div>
-
-                  <pre className="whitespace-pre-wrap font-mono text-xs break-all">
-                    {renderPayload(p)}
-                  </pre>
+        /*
+         * The dialogue, virtualised.
+         *
+         * `virtualWindow` rather than the arithmetic inline, because that
+         * arithmetic fails INVISIBLY: unclamped, a scroll offset the list can
+         * no longer reach gives a `startIndex` past `endIndex`, so the slice is
+         * empty and the only thing rendered is a top spacer the height of the
+         * old list - which keeps `scrollHeight` large enough that the browser
+         * never clamps the offset. A closed loop, and the reason that module
+         * exists and is asserted. `HexDumpView` hand-rolls the same arithmetic
+         * WITHOUT the clamp; it should be moved onto this too.
+         */
+        (() => {
+          const view = virtualWindow(
+            streamPackets.length, scrollTop, viewportHeight, ROW_HEIGHT, OVERSCAN,
+          );
+          return (
+            <div
+              ref={viewportRef}
+              onScroll={onScroll}
+              className="flex-1 overflow-y-auto font-mono text-xs custom-scrollbar"
+            >
+              {streamPackets.length === 0 ? (
+                <div className="text-center py-12 text-muted-foreground">
+                  No frames on this stream are in the buffer.
                 </div>
-              );
-            })
-          )}
-        </div>
+              ) : (
+                <>
+                  <div style={{ height: view.topSpacerHeight }} />
+                  {streamPackets.slice(view.startIndex, view.endIndex).map((p) => {
+                    const isClient = isFromClient(p, client);
+                    return (
+                      <div
+                        key={p.id}
+                        style={{ height: ROW_HEIGHT }}
+                        className={`flex items-center gap-2 px-4 border-l-2 ${
+                          p.id === selectedId ? 'bg-primary/10 ' : ''}${
+                          isClient
+                            ? 'border-rose-500 text-rose-700 dark:text-rose-300'
+                            : 'border-sky-500 text-sky-700 dark:text-sky-300'
+                        }`}
+                      >
+                        {/* Clickable, and it stays clickable. This printed as
+                            plain text once, so the only way to find a frame you
+                            had just read about was to close the window and
+                            scroll for it. */}
+                        <span className="w-20 shrink-0 font-semibold tabular-nums">
+                          {onSelectFrame ? (
+                            <button onClick={() => onSelectFrame(p.id)}
+                              className="underline decoration-dotted underline-offset-2
+                                hover:decoration-solid cursor-pointer"
+                              title="Select this frame in the packet list">
+                              #{p.id}
+                            </button>
+                          ) : <>#{p.id}</>}
+                        </span>
+                        <span className="w-24 shrink-0 tabular-nums text-muted-foreground">
+                          {p.relativeTime.toFixed(4)}s
+                        </span>
+                        <span className="w-6 shrink-0 text-center" aria-hidden="true">
+                          {isClient ? '→' : '←'}
+                        </span>
+                        <span className="flex-1 min-w-0 truncate">
+                          {p.source}:{p.sourcePort}
+                          <span className="text-muted-foreground"> to </span>
+                          {p.destination}:{p.destPort}
+                        </span>
+                        <span className="w-20 shrink-0 text-right tabular-nums text-muted-foreground">
+                          {p.length} B
+                        </span>
+                      </div>
+                    );
+                  })}
+                  <div style={{ height: view.bottomSpacerHeight }} />
+                </>
+              )}
+            </div>
+          );
+        })()
         )}
 
         {/* **The "Back to frame N" button was here and is in the chrome.**
