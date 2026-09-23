@@ -122,13 +122,25 @@ way a browser does: **901-963 ms** into the panel on the old build, **11-39 ms**
 on the new, three and five runs, printed rather than asserted (ADR 0041).
 `keylog-follow.ts` holds the poll to at most half of `ORDERING_HOLD_MS`.
 
-**The browser's own flush latency is still not measured**, deliberately: no stub
-can say it, and `agent-live-drive.ts` records why drivers here do not start a
-capture on a person's real adapter. The offline replay above is the instrument
-for it instead, kept as `scripts/tls/replay-stored-capture.ts` - it reads a
-stored capture and a key log, needs no live adapter, and prints each
-connection's opaque/decrypted pattern. If early packets on a connection still stay opaque while later ones
-decrypt, that is the first thing to run.
+**And then measured end to end, live, once, with the owner's say-so.** A
+one-off driver (not committed: it captures a real adapter, which
+`agent-live-drive.ts` records drivers here do not do unasked) launched the app
+following a throwaway key log, captured the real Ethernet adapter, and ran a
+headless Chrome writing that key log across seven HTTP/3 pages; the stored
+capture was then put through `scripts/tls/replay-stored-capture.ts`. Same
+script, same pages, the poll the only difference:
+
+| poll | protected QUIC | opaque live | opaque on replay | **lost to timing** |
+|---|---|---|---|---|
+| 1,000 ms | 9,977 | 7,754 | 51 | **7,703 (77%)** |
+| 25 ms | 10,576 | 182 | 182 | **0** |
+
+The residual opaque packets are whole connections from other software on the
+machine, whose secrets were never in the throwaway log - opaque on replay too,
+so not the race. That also answers what this section left open: **the
+browser's own flush latency is inside the window** - with the follower fixed,
+nothing was lost. The replay script is the instrument to run if early packets
+on a connection ever stay opaque while later ones decrypt.
 
 **What success looks like, because it is easy to misread**: a decrypted QUIC
 packet's Info still *begins* `Protected Payload (KP0)` - that is the packet type,
