@@ -1093,6 +1093,10 @@ and remembers the path, so key material now enters memory at launch. **The
 renderer never names the file** - it can ask for one picked in main's own dialog
 or main's own `SSLKEYLOGFILE`, and `scripts/electron/keylog-follow.ts` holds
 every handler and preload method to taking no path. Only the path is written.
+**The 25 ms poll is what sees a browser, not `fs.watch`**: Chrome appends through
+a handle it holds open, which on Windows raises no change notification, so at
+the original one-second poll every connection's first burst stayed opaque
+(`scripts/tls/replay-stored-capture.ts` is how that was found).
 
 ---
 

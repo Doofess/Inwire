@@ -18,7 +18,7 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  LineAssembler, MAX_READ_BYTES, parseKeyLogSettings, planRead, readSpans,
+  LineAssembler, MAX_READ_BYTES, parseKeyLogSettings, planRead, POLL_MS, readSpans, REARM_TICKS,
 } from '../../electron/keyLogTail';
 
 let failures = 0;
@@ -78,6 +78,22 @@ check('a large one is several, of at most MAX_READ_BYTES each',
 check('...and they tile the range exactly',
   readSpans(100, 100 + MAX_READ_BYTES + 1), [[100, 100 + MAX_READ_BYTES], [100 + MAX_READ_BYTES, 101 + MAX_READ_BYTES]]);
 check('nothing to read is no reads', readSpans(40, 40), []);
+
+console.log('\n--- a secret arrives inside the ordering window ---\n');
+
+// The poll is the only thing that sees a browser's writes - Chrome appends
+// through a handle it holds open, which raises no `fs.watch` event on Windows -
+// so its interval IS the follower's latency. At one second, every
+// connection's first ~100 ms of 1-RTT packets was dissected before its secret
+// arrived and stayed `Protected Payload` for good. The Worker holds frames for
+// `ORDERING_HOLD_MS`; the poll must fit twice inside it.
+{
+  const worker = readFileSync('src/workers/pipeline.worker.ts', 'utf8');
+  const hold = Number(/const ORDERING_HOLD_MS = (\d+);/.exec(worker)?.[1]);
+  checkTrue('the Worker\'s ordering window is readable from source', Number.isFinite(hold) && hold > 0);
+  checkTrue(`the poll (${POLL_MS} ms) is at most half the ordering window (${hold} ms)`, POLL_MS * 2 <= hold);
+  check('the watcher is re-armed about once a second, not every tick', REARM_TICKS * POLL_MS, 1000);
+}
 
 console.log('\n--- the remembered path ---\n');
 

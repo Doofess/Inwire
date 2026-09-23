@@ -36,7 +36,9 @@
  * one dissected string it can predict exactly. Everything visual stays with a
  * person looking at it.
  */
-import { appendFileSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync, existsSync, mkdtempSync, openSync, rmSync, statSync, writeFileSync, writeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
@@ -656,13 +658,21 @@ try {
   // the number, and a string predicate is an `eval` this app's CSP refuses
   // (ADR 0041's broken measurement). Printed, never asserted - it is this
   // machine's disk and scheduler, not the build's.
+  //
+  // Written the way a browser writes: through a handle held open, not
+  // `appendFileSync`. On Windows a write through an open handle raises no
+  // `fs.watch` event, so an open-append-close here was timing the watcher -
+  // 3-11 ms - while every real browser was being seen by the one-second poll,
+  // and live QUIC lost each connection's first burst to it.
+  const writer = openSync(keyLogFile!, 'a');
   const appendedAt = Date.now();
-  appendFileSync(keyLogFile!, `${keyLogLine('b2')}\n${keyLogLine('c3')}\n`);
+  writeSync(writer, `${keyLogLine('b2')}\n${keyLogLine('c3')}\n`);
   const grew = await page.waitForFunction(
     () => document.querySelector('[data-keylog-secrets]')?.getAttribute('data-keylog-secrets') === '3',
     undefined, { polling: 'raf', timeout: 10_000 },
   ).then(() => true, () => false);
   const followMs = Date.now() - appendedAt;
+  closeSync(writer);
   checkTrue('lines appended while it runs are picked up as they are written', grew);
   if (grew) {
     console.log(`      appended to the file -> counted in the panel: ${followMs} ms`

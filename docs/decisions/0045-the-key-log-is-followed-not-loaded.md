@@ -25,9 +25,9 @@ launch, because nothing remembered it.
 ## Decision
 
 **Main follows the file.** `electron/keyLogFollower.ts` reads it from the top
-when a renderer attaches, then reads what is appended - `fs.watch` for latency,
-a one-second poll for the file being replaced or not existing yet, both of
-which end a watch without an error anyone sees. Complete lines go to the
+when a renderer attaches, then reads what is appended - a 25 ms poll, which is
+the only thing that sees a browser's writes (see **The race**), and `fs.watch`
+for a writer that opens and closes the file per line. Complete lines go to the
 renderer as text, which feeds both key stores exactly as the file picker did
 (the Worker's, which live capture decrypts with, and the main thread's, which
 imports use). The arithmetic - where to read from, what a shrunken file means,
@@ -97,16 +97,38 @@ A secret has to reach the Worker before the packets it opens are dissected. The
 slack is the Worker's 100 ms ordering window, plus however long the agent holds
 a batch.
 
-**The follower's side is measured**: `smoke.ts` appends to a followed file and
-times it into the Decryption panel - **3-11 ms** across five runs on this
-machine, printed rather than asserted (ADR 0041).
+**The first measurement of the follower's side was wrong, and it shipped.**
+`smoke.ts` appended with `appendFileSync` and timed **3-11 ms** into the
+Decryption panel. That was timing `fs.watch`, which a browser never triggers:
+Chrome appends through a handle it holds open, and on Windows such a write
+raises no change notification - **0 events for 10 appends held open, against 10
+at 0.4 ms opened and closed each time.** Every real browser was seen by the
+one-second poll alone.
 
-**The other side is not**, deliberately. It is the browser's: how soon after
-deriving a secret it flushes the line, which no stub can say and which only a
-capture of real traffic would show. `agent-live-drive.ts` records why drivers
-here do not start a capture on a person's real adapter, and that rule is not
-set aside for this. It is the first thing to check if early packets on a
-connection stay opaque while later ones decrypt.
+**Found on a real capture, not by a driver.** A 3-minute live capture taken
+while following Chrome's key log had **180 of 326** protected QUIC packets
+opaque, and the pattern per connection was always the same: the first ~65-150
+ms of 1-RTT packets opaque, everything after decrypted. Re-dissected offline
+from the stored bytes with the same key log, **all 180 decrypt** - so the
+handshakes were captured, the keys were right, and they arrived late. That is
+this section's race, lost by ~900 ms to the poll interval rather than to the
+browser.
+
+**Fixed by polling at 25 ms** (`POLL_MS` in `keyLogTail.ts`). An idle check is an
+open, an `fstat` and a close - **21 µs** measured - so forty a second is under a
+thousandth of a core. The status push that ran on every check now runs only
+when something changed. `smoke.ts` now writes through a held-open handle, the
+way a browser does: **901-963 ms** into the panel on the old build, **11-39 ms**
+on the new, three and five runs, printed rather than asserted (ADR 0041).
+`keylog-follow.ts` holds the poll to at most half of `ORDERING_HOLD_MS`.
+
+**The browser's own flush latency is still not measured**, deliberately: no stub
+can say it, and `agent-live-drive.ts` records why drivers here do not start a
+capture on a person's real adapter. The offline replay above is the instrument
+for it instead, kept as `scripts/tls/replay-stored-capture.ts` - it reads a
+stored capture and a key log, needs no live adapter, and prints each
+connection's opaque/decrypted pattern. If early packets on a connection still stay opaque while later ones
+decrypt, that is the first thing to run.
 
 **What success looks like, because it is easy to misread**: a decrypted QUIC
 packet's Info still *begins* `Protected Payload (KP0)` - that is the packet type,

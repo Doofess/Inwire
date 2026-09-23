@@ -100,6 +100,31 @@ export function readSpans(from: number, to: number, max = MAX_READ_BYTES): [numb
   return spans;
 }
 
+/**
+ * How often the file is checked for growth, and it is the latency that matters.
+ *
+ * **`fs.watch` does not see a browser's writes.** Chrome holds its key log open
+ * and appends to it, and on Windows a write through a handle kept open raises
+ * no change notification - measured: 0 events for 10 appends held open, against
+ * 10 events at 0.4 ms for the same appends opened and closed each time. So the
+ * poll is not a fallback, it is the only thing that sees Chrome at all, and at
+ * the one second it started at, every connection's first burst was dissected
+ * before its secret arrived: a real 3-minute capture had 180 of 326 protected
+ * QUIC packets opaque, the first ~100 ms of every connection, and all 180
+ * decrypted when the same bytes were re-dissected with the same file.
+ *
+ * The bound is the Worker's ordering window, `ORDERING_HOLD_MS` (100 ms): a
+ * secret that reaches the Worker inside it opens the packets it holds. Half of
+ * it is the ceiling `scripts/electron/keylog-follow.ts` enforces; a quarter
+ * leaves room for the browser's own flush and the two IPC hops. An idle check
+ * is an open, an `fstat` and a close - 21 µs measured, so 40 a second is under
+ * a thousandth of a core.
+ */
+export const POLL_MS = 25;
+
+/** Ticks between attempts to re-arm a dead watcher - about once a second. */
+export const REARM_TICKS = Math.round(1000 / POLL_MS);
+
 /** What the renderer is told about the follower. Plain data: it crosses IPC. */
 export interface KeyLogFollowStatus {
   /** The file being followed, or null when none has been chosen. */

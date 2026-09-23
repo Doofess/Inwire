@@ -31,11 +31,16 @@
  *
  * ## Watching
  *
- * `fs.watch` for latency and a one-second poll for correctness. The latency
- * matters and is not a nicety: a secret has to reach the Worker before the
- * packets it opens are dissected, and the only slack is the Worker's 100 ms
- * ordering window. The poll is what survives the file being replaced or not
- * existing yet, both of which end an `fs.watch` without an error anyone sees.
+ * A fast poll, `POLL_MS`, and `fs.watch` beside it. The latency matters and is
+ * not a nicety: a secret has to reach the Worker before the packets it opens
+ * are dissected, and the only slack is the Worker's 100 ms ordering window.
+ *
+ * **The poll is what sees a browser**, not the watcher: Chrome appends through
+ * a handle it keeps open, and on Windows that raises no change notification at
+ * all. `keyLogTail.ts` has the measurement. The watcher is kept for a writer
+ * that opens and closes the file per line, which it sees in under a
+ * millisecond, and the poll re-arms it when the file is replaced or created
+ * late - both of which end an `fs.watch` without an error anyone sees.
  */
 import { dialog, type BrowserWindow, type WebContents } from 'electron';
 import {
@@ -45,11 +50,9 @@ import {
 import path from 'node:path';
 import { KEYLOG_STATUS_CHANNEL, KEYLOG_TEXT_CHANNEL } from './channels';
 import {
-  LineAssembler, parseKeyLogSettings, planRead, readSpans,
+  LineAssembler, parseKeyLogSettings, planRead, POLL_MS, readSpans, REARM_TICKS,
   type KeyLogFollowStatus,
 } from './keyLogTail';
-
-const POLL_MS = 1000;
 
 export class KeyLogFollower {
   private file: string | null;
@@ -168,10 +171,12 @@ export class KeyLogFollower {
     }
     this.readNew();
     this.watchFile();
+    let tick = 0;
     this.poll = setInterval(() => {
       // The poll also re-arms the watcher, which a replaced or late-created
-      // file leaves dead without saying so.
-      if (this.watcher === null) this.watchFile();
+      // file leaves dead without saying so. About once a second rather than
+      // every tick: on a missing file every attempt throws.
+      if (this.watcher === null && ++tick % REARM_TICKS === 0) this.watchFile();
       this.readNew();
     }, POLL_MS);
   }
@@ -201,6 +206,8 @@ export class KeyLogFollower {
   private readNew(): void {
     if (this.file === null) return;
     const before = this.state;
+    const beforeOffset = this.offset;
+    const beforeError = this.error;
     let fd: number | null = null;
     try {
       if (!existsSync(this.file)) {
@@ -240,8 +247,12 @@ export class KeyLogFollower {
       if (fd !== null) closeSync(fd);
     }
     // Every read that moved the offset is worth telling the panel about, and
-    // so is every change of state.
-    this.pushStatus();
+    // so is every change of state - and nothing else is. This runs forty times
+    // a second, and an unconditional push would be forty IPC messages and
+    // forty panel renders a second to say nothing changed.
+    if (this.offset !== beforeOffset || this.state !== before || this.error !== beforeError) {
+      this.pushStatus();
+    }
   }
 
   private send(text: string): void {

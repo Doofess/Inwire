@@ -44,6 +44,8 @@ const NOT_TESTS: Record<string, string> = {
   'electron/gpu-restore-drive.ts':
     'loses and restores a real WebGL context in the running app; needs dist/ and a GPU, run by hand',
   'electron/serveStub.ts': 'tool; serves the stub agent until Ctrl+C, for driving the app by hand',
+  'tls/replay-stored-capture.ts':
+    'tool; replays a person\'s own stored capture against their key log (ADR 0045), run by hand',
   'parity/cluster-diff.ts':
     'tool; diffs ONE abbrev prefix against the reference by frame and by value, '
     + 'which is what proves a new cluster is correct rather than merely present. '
