@@ -434,6 +434,52 @@ try {
   checkTrue('...and are dissected, not just counted', info !== null);
   if (info) console.log(`      Info column reads: ${info}`);
 
+  /*
+   * **The Frame layer names the adapter, on the EAGER path.**
+   *
+   * The interface rows were wrong for every live capture -
+   * `Interface description: Imported capture` - and this is deliberately only
+   * half the check for it. Which half is worth stating, because the obvious
+   * reading of these three assertions is wrong:
+   *
+   * The Worker keeps the tree it built during ingest for the newest
+   * `DETAIL_CACHE_FRAMES` (4,000) frames. This run has a few thousand, and the
+   * row clicked below is a recent one, so the tree drawn is that cached eager
+   * tree and **nothing is replayed**. These assertions therefore prove the
+   * live ingest path labels a frame correctly - which is worth proving and is
+   * not where the bug was. Verified by reintroducing it: all three still pass.
+   *
+   * The replay half - a tree rebuilt by `dissectReplay`, which is what a
+   * person sees for any frame older than that cache - is in
+   * `scripts/electron/disk-drive.ts`, where a 77,000-frame capture puts the
+   * selected row tens of thousands of frames past the cache. That one fails
+   * with the bug in.
+   *
+   * The stub's adapter is the device name `\Device\NPF_{STUB-0}` under the
+   * label `Ethernet (stub)`, so both rows are predictable exactly.
+   */
+  checkTrue('a frame can be selected', await clicks('the first packet row',
+    () => page.locator('[role="row"]').nth(1).click()));
+  const frameLayer = await until(async () => (await page.evaluate(
+    () => document.body.innerText)).includes('Interface description:'), 10_000);
+  checkTrue('...and its tree is drawn', frameLayer);
+  const tree = await page.evaluate(() => document.body.innerText);
+  // Named as the thing it must NOT say, because that is the defect: an
+  // assertion that only checked for the label would pass on a tree that
+  // happened to contain it somewhere else.
+  check('the live frame is not described as an imported capture',
+    tree.includes('Imported capture'), false);
+  // Whitespace-collapsed, because the tree draws a row's name and its value as
+  // two elements: `innerText` puts them on separate lines, so a match on
+  // "Interface description: Ethernet (stub)" finds nothing while the row reads
+  // exactly that on screen. The negative check above does not need this - a
+  // substring of one element is still a substring of the page.
+  const flat = tree.replace(/\s+/g, ' ');
+  checkTrue('...it names the adapter the capture is running on',
+    flat.includes('Interface description: Ethernet (stub)'));
+  checkTrue('...and the device name beside it',
+    flat.includes(String.raw`Interface name: \Device\NPF_{STUB-0}`));
+
   // **Turning location lookup on, which once took the whole window with it.**
   //
   // `GeoMap` returns early when the setting is off, and two `useMemo` calls sat

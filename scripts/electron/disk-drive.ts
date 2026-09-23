@@ -249,6 +249,37 @@ try {
   checkTrue('...and they are one filter period apart, read off disk in order',
     top.length === 3 && top[1] - top[0] === FILTER_PERIOD && top[2] - top[1] === FILTER_PERIOD);
 
+  /*
+   * **The rebuilt tree still knows which adapter the frame came off.**
+   *
+   * This is the one place in the suite that reaches the replay path with a
+   * LIVE frame. The Worker keeps the eager tree for the newest
+   * `DETAIL_CACHE_FRAMES` (4,000) frames, so a click during an ordinary
+   * capture - `smoke.ts`'s click, for instance - is answered from that cache
+   * and never replays anything. The row selected here is around frame 4,096
+   * of 77,000+, which is tens of thousands of frames past the cache, so the
+   * tree drawn below is genuinely rebuilt by `dissectReplay`.
+   *
+   * That distinction is not academic: `dissectReplay` passed a hard-coded
+   * `undefined` as its capture interface, so every replayed tree read
+   * `Interface description: Imported capture` on a live capture. It was
+   * reported from a real session and no script here could see it - `smoke.ts`
+   * asserts the same rows and passes them with the bug in, because its frame
+   * is cached, and `scripts/pipeline/replay.ts` calls `dissectReplay` directly
+   * so it cannot prove the adapter list reaches the Worker at all.
+   */
+  await page.locator('tbody tr').first().click().catch(() => { /* asserted below */ });
+  const drew = await until(async () => (await page.evaluate(
+    () => document.body.innerText)).includes('Interface description:'), 15_000);
+  checkTrue('an old frame\'s tree is rebuilt and drawn', drew);
+  const tree = (await page.evaluate(() => document.body.innerText)).replace(/\s+/g, ' ');
+  const described = tree.match(/Interface description: ([^\n]{0,40})/)?.[1]?.trim();
+  console.log(`      the rebuilt tree calls it: ${JSON.stringify(described ?? null)}`);
+  check('a replayed live frame is not described as an imported capture',
+    tree.includes('Imported capture'), false);
+  checkTrue('...it names the adapter the capture ran on',
+    described !== undefined && described.length > 0 && described !== 'unknown');
+
   check('nothing threw in the renderer', rendererErrors, []);
   output.flush();
   check('...and the store stayed quiet throughout', complaints, []);

@@ -39,7 +39,7 @@ import { L3Tracker } from '../services/l3Tracker';
 import { NO_HOST, type HostIdentity } from '../services/direction';
 import { NetworkFactsCollector } from '../services/networkFacts';
 import { DuplicateFinder, duplicateSuffix } from '../services/duplicateFrames';
-import { dissectReplay } from '../services/pipeline/replay';
+import { dissectReplay, interfacesByLabel } from '../services/pipeline/replay';
 import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
@@ -221,6 +221,12 @@ let interfaceById = new Map<number, { name: string; label: string }>();
  */
 let linkTypeById = new Map<number, number>();
 
+/**
+ * The same records, keyed by the label a frame carries - see
+ * `interfacesByLabel`, which holds the `eth0` trap this must not walk into.
+ */
+let interfaceByLabel = new Map<string, { name: string; label: string }>();
+
 function rebuildInterfaceIndex(): void {
   interfaceById = new Map(
     // `entry.id ?? index` is the agent's own indexing rule, kept exactly: the
@@ -235,6 +241,21 @@ function rebuildInterfaceIndex(): void {
       .map((entry, index) => [entry.id ?? index, entry.linkType] as const)
       .filter((pair): pair is readonly [number, number] => pair[1] !== undefined),
   );
+  // Built from the same objects as `interfaceById`, so a replayed frame and a
+  // live one are handed the identical record rather than two equal ones.
+  interfaceByLabel = interfacesByLabel([...interfaceById.values()]);
+}
+
+/**
+ * The adapter a replayed frame says it came off, if this list still has it.
+ *
+ * `undefined` for an imported file, for the `eth0` fallback, and for an
+ * adapter that has gone away since the frame was captured - all three of which
+ * are honestly "no adapter" rather than a guess, which is the rule the drop
+ * counters and process attribution follow.
+ */
+function interfaceByFrameLabel(label: string): { name: string; label: string } | undefined {
+  return interfaceByLabel.get(label);
 }
 
 function interfaceFor(iface: number): { name: string; label: string } | undefined {
@@ -653,6 +674,11 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       const { layers } = dissectReplay(
         command.frames, command.truncated, command.streamId, command.retroactive, host,
         command.seeds,
+        // The adapter, resolved here because here is where the list is. Without
+        // it every rebuilt tree read `Interface description: Imported capture`
+        // on a live capture - and a displayed tree is always a rebuilt one
+        // (ADR 0007), so that was every tree a person ever saw.
+        interfaceByFrameLabel,
       );
       // The process came down with the request rather than being looked up
       // here: this store is a moving picture of open sockets, and a frame

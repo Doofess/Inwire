@@ -1,4 +1,38 @@
-@import "tailwindcss";
+/* Tailwind scans what the renderer is, and nothing else.
+ *
+ * `@import "tailwindcss"` on its own turns on **automatic source detection**,
+ * which walks up to the project root and scans the whole repository minus
+ * `.gitignore`. That is every assertion script, every ADR, every comment in
+ * `electron/`, `local-agent/` and `agent-rs/` - and Tailwind extracts
+ * candidates from plain prose, so any word shaped like a utility becomes a
+ * rule in the stylesheet users download.
+ *
+ * Measured, because it did not look like it was happening: restricting to the
+ * two places the renderer's classes actually live took `index-*.css` from
+ * **77,415 to 75,383 bytes**. What went was `h-130`, `h-614`, `h-720`,
+ * `h-1120` and thirty more of that shape - numbers scraped out of sentences -
+ * plus a bare `bg-primary/30` from a script quoting a `dark:`-prefixed class
+ * without its prefix. Every rule `src/` genuinely uses survives, including
+ * that `dark:` variant and `bg-primary/15` beside it; the diff of generated
+ * selectors between the two builds is exactly the 39 above and nothing else.
+ *
+ * It was found by `scripts/perf/bundle-size.ts` failing on a commit that
+ * touched no CSS and no component - two new assertion scripts had grown the
+ * production stylesheet by 129 bytes. That is the gate doing the one job ADR
+ * 0041 built it for.
+ *
+ * `source(none)` disables the automatic detection; the two `@source` rules are
+ * then the whole list. `./` is `src/`. `../index.html` is the document itself,
+ * which carries `class="overflow-hidden"` on `<body>` and is the only markup
+ * outside this tree that the app loads - `docs/how-inwire-works.html` styles
+ * itself in a `<style>` block and depends on nothing here.
+ *
+ * Adding a renderer source outside `src/` means adding it here, and the
+ * symptom of forgetting is a class that silently does nothing.
+ */
+@import "tailwindcss" source(none);
+@source "./";
+@source "../index.html";
 
 /* No webfont is imported. The app is set in the faces the host OS ships -
    on Windows, Segoe UI Variable for the chrome and Cascadia Mono for the

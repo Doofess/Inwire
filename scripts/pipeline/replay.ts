@@ -27,7 +27,9 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
-import { dissectReplay, seedsFor } from '../../src/services/pipeline/replay';
+import {
+  dissectReplay, interfacesByLabel, seedsFor, NOT_AN_ADAPTER,
+} from '../../src/services/pipeline/replay';
 import { inferHostIdentity } from '../../src/services/hostIdentity';
 import { streamPackets, targetForPacket } from '../../src/services/followStream';
 import { fieldValue } from '../../src/services/dissect/fieldAccess';
@@ -210,6 +212,75 @@ async function main() {
   // --- degenerate inputs --------------------------------------------------------
   check('a replay of nothing is an empty tree, not a crash',
     dissectReplay([], false).layers.length, 0);
+
+  // --- the adapter the frame came off ---------------------------------------
+  //
+  // **This suite could not see the Frame layer's interface rows, and they were
+  // wrong the whole time.** `dissectReplay` passed a hard-coded `undefined` as
+  // its capture interface, so every rebuilt tree read `Interface name:
+  // unknown` / `Interface description: Imported capture`. On a live capture
+  // that is simply false - and since a displayed tree is always a rebuilt one
+  // (ADR 0007), it was every tree anybody ever saw.
+  //
+  // The equality check above ran green through all of it, and the reason is
+  // the one `CLAUDE.md` states about the fixtures: **a measurement that cannot
+  // see a feature cannot defend it.** This script imports a file, where
+  // `undefined` is the correct answer, so both sides said `Imported capture`
+  // and matched. Supplying an adapter is what makes the rows observable, and
+  // the `not Imported capture` assertion is what stops this passing by both
+  // sides agreeing on nothing again.
+  {
+    const ADAPTER = { name: '\\Device\\NPF_{0BADF00D}', label: 'Wi-Fi 6E' };
+    const resolve = (label: string) => interfacesByLabel([ADAPTER]).get(label);
+    const sample = truth.find((p) => p.rawBytes.length > 0);
+    if (!sample) {
+      console.log('SKIP  no frame with bytes - the fixture is unusable');
+    } else {
+      const bare: ReplayFrame[] = [{
+        id: sample.id, tsUs: sample.tsUs, relativeTime: sample.relativeTime,
+        timeDelta: sample.timeDelta, origLen: sample.length, bytes: sample.rawBytes,
+      }];
+      const onAdapter: ReplayFrame[] = [{ ...bare[0], interfaceName: ADAPTER.label }];
+
+      const imported = render(dissectReplay(bare, false).layers);
+      const live = render(dissectReplay(onAdapter, false, undefined, undefined,
+        undefined, undefined, resolve).layers);
+
+      // The import case, which is what this always did and is right for a file.
+      checkTrue('a frame off no adapter still reads as an imported capture',
+        imported.includes('Interface description: Imported capture'));
+
+      // The bug, named as the thing it must not say.
+      checkTrue('a frame off an adapter does NOT read as an imported capture',
+        !live.includes('Imported capture'));
+      checkTrue('...it names the adapter', live.includes(`Interface description: ${ADAPTER.label}`));
+      checkTrue('...and its device name', live.includes(`Interface name: ${ADAPTER.name}`));
+      checkTrue('...including in the row that summarises the two',
+        live.includes(`Interface id: 0 (${ADAPTER.name})`));
+
+      // Nothing else moved. Without this the rows could be right and some
+      // other part of the tree quietly different, which is the failure this
+      // whole file exists for.
+      const strip = (tree: string) => tree.split('\n')
+        .filter((line) => !line.includes('Interface ')).join('\n');
+      check('and no other row in the tree changed', strip(live), strip(imported));
+
+      // The trap `sessionRestore.ts` records, now held where a script can
+      // reach it: `eth0` is `pcapParser.ts`'s fallback for a frame with no
+      // interface, and trusting it invents an adapter for every imported file.
+      check('the eth0 fallback is not treated as an adapter',
+        interfacesByLabel([{ name: 'x', label: NOT_AN_ADAPTER }]).size, 0);
+      check('...while a real adapter beside it survives',
+        [...interfacesByLabel([{ name: 'x', label: NOT_AN_ADAPTER }, ADAPTER]).keys()],
+        [ADAPTER.label]);
+      // Two adapters sharing a label is not resolved by preferring the later
+      // one; an unknown is not a guess.
+      check('a duplicate label keeps the first record',
+        interfacesByLabel([ADAPTER, { name: 'other', label: ADAPTER.label }])
+          .get(ADAPTER.label)?.name,
+        ADAPTER.name);
+    }
+  }
 }
 
 main().then(() => {

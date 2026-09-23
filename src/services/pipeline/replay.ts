@@ -93,6 +93,42 @@ export function seedsFor(packet: Packet): StreamSeeds {
   };
 }
 
+/**
+ * The literal `pcapParser.ts` gives a frame that had no capture interface.
+ *
+ * It is a real-looking adapter label and it is not one, which is the whole
+ * reason this constant is named rather than inlined: `sessionRestore.ts`
+ * records the same trap - trusting `Packet.interfaceName` whenever it is set
+ * "turned every interface-less frame into one captured on an adapter named
+ * eth0 and broke the round-trip equality this module exists to guarantee".
+ */
+export const NOT_AN_ADAPTER = 'eth0';
+
+/**
+ * The adapter list, keyed by the label a frame carries.
+ *
+ * `Packet.interfaceName` is the adapter's *label*, and it is the only thing a
+ * frame remembers about where it came from - so a replay, which is handed
+ * frames rather than a capture, has nothing else to look up with.
+ *
+ * Here rather than in `pipeline.worker.ts`, where it is used, because a Worker
+ * is unreachable from the assertion suite and this is arithmetic worth
+ * testing - the rule the root `CLAUDE.md` states after a `queue.shift()` in a
+ * `find` predicate took the renderer down.
+ */
+export function interfacesByLabel<T extends { name: string; label: string }>(
+  list: readonly T[],
+): Map<string, T> {
+  const byLabel = new Map<string, T>();
+  for (const entry of list) {
+    if (entry.label === NOT_AN_ADAPTER) continue;
+    // First wins: two adapters sharing a label is not something to resolve by
+    // picking the later one, and an unknown is not a guess.
+    if (!byLabel.has(entry.label)) byLabel.set(entry.label, entry);
+  }
+  return byLabel;
+}
+
 export function dissectReplay(
   frames: ReplayFrame[],
   truncated: boolean,
@@ -142,6 +178,20 @@ export function dissectReplay(
    * these five are the only new names in this wave written into the bag.
    */
   seeds?: StreamSeeds,
+  /**
+   * Turns a frame's adapter label back into the record the dissector wants.
+   *
+   * A seventh trailing parameter for the reason `seeds` above gives about the
+   * sixth: `streamId` sits at position 3 and `scripts/pipeline/replay.ts`
+   * asserts both halves of the seeding mechanism by its position, so the five
+   * before it do not move.
+   *
+   * A function rather than the list itself, because only the Worker holds the
+   * list and this module is imported by scripts that have no Worker. Absent -
+   * or answering `undefined` - is the imported-file case, where there is
+   * genuinely no adapter and `unknown` / `Imported capture` is the truth.
+   */
+  resolveInterface?: (label: string) => { name: string; label: string } | undefined,
 ): ReplayResult {
   if (frames.length === 0) return { layers: [], truncated };
 
@@ -163,7 +213,9 @@ export function dissectReplay(
     const frame = frames[i];
     const { packet } = decodeRawEthernetPacket(
       frame.bytes, frame.id, frame.tsUs, frame.relativeTime, frame.timeDelta,
-      frame.origLen, tcp, icmp, quic, dns, undefined, frame.linkType, l3, host,
+      frame.origLen, tcp, icmp, quic, dns,
+      frame.interfaceName !== undefined ? resolveInterface?.(frame.interfaceName) : undefined,
+      frame.linkType, l3, host,
     );
     // Only the last frame's tree is kept. The rest are dissected for their
     // effect on the trackers and thrown away, which is the whole mechanism.

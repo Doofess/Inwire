@@ -154,6 +154,24 @@ export interface ReplayFrame {
    * adapter sends nothing extra.
    */
   linkType?: number;
+  /**
+   * The adapter this frame came off, as the frame itself recorded it.
+   *
+   * Carried for the same reason `linkType` above is, and it was missed for
+   * the same reason `host` and `process` were before it: a replay dissects
+   * bytes, and no amount of dissecting says which adapter they arrived on.
+   * Without it every rebuilt tree passed `undefined` as its capture interface
+   * and the Frame layer read **`Interface name: unknown` /
+   * `Interface description: Imported capture`** - on live captures, which is
+   * every tree a person ever sees, because a displayed tree is always a
+   * replay (ADR 0007).
+   *
+   * This is `Packet.interfaceName`, which is the adapter's *label*. The
+   * Worker turns it back into the full record, because the Worker is the one
+   * that holds the adapter list - see `interfaceByLabel` in
+   * `pipeline.worker.ts`.
+   */
+  interfaceName?: string;
 }
 
 // --- worker -> main thread ---------------------------------------------------

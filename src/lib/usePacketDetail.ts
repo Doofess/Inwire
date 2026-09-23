@@ -53,6 +53,11 @@ export async function replayBundleFor(
     // adapter. Carried per frame rather than per bundle because a conversation
     // is one adapter's in practice but nothing in the five-tuple says so.
     linkType: p.linkType,
+    // Which adapter it arrived on. Read back off the frame rather than looked
+    // up again, the same rule `processName` below follows: the adapter list
+    // lives in the Worker and a frame scrolled back to may predate the list
+    // the Worker holds now.
+    interfaceName: p.interfaceName,
   }));
 
   // A TCP conversation starts with a SYN. If the earliest frame we still hold
