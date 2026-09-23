@@ -130,10 +130,13 @@ console.log(`  ${'TOTAL'.padEnd(34)} ${kb(total).padStart(10)}\n`);
 
 if (process.argv.includes('--write-ceilings')) {
   const next: Ceilings = {
-    note: 'Ceilings for the built renderer, in bytes. They may only FALL - '
-      + 'scripts/perf/bundle-size.ts fails a raised one, read against git HEAD. '
-      + 'eagerJs is the entry chunk that must parse before React\'s first commit; '
-      + 'total is every emitted asset including lazily-fetched ones.',
+    note: 'Ceilings for the built renderer, in bytes. They may only FALL, with '
+      + 'one exception whose shape scripts/perf/bundle-size.ts enforces: a raise '
+      + 'is allowed only when the build actually outgrew the previous ceiling, and '
+      + 'only to exactly that build - never in advance, never past it. Read '
+      + 'against git HEAD. eagerJs is the entry chunk that must parse before '
+      + 'React\'s first commit; total is every emitted asset including '
+      + 'lazily-fetched ones.',
     measured: new Date().toISOString().slice(0, 10),
     bundle: measured,
   };
@@ -199,11 +202,51 @@ if (previous) {
     // `?? Infinity` rather than an `in` guard, for the same reason acceptance.ts
     // uses `?? 0`: deleting a ceiling is the cheapest way to raise one.
     const before = previous.bundle?.[key] ?? Infinity;
-    check(`ceiling for ${key} did not rise`, measured[key] <= before || ceilings.bundle[key] <= before, true);
-    if (ceilings.bundle[key] > before) {
+    const raised = ceilings.bundle[key] > before;
+    /*
+     * **This condition used to be the wrong way round**, and it was wrong in
+     * the direction that matters: `measured <= before || next <= before`
+     * passes whenever the build still fits the OLD ceiling - so a ceiling
+     * could be inflated freely in advance, and the one case it refused was
+     * recording growth that had actually happened. Exactly backwards, and it
+     * contradicted this script's own failure text two screens up, which tells
+     * you to "raise this ceiling deliberately in its own commit with the
+     * reason".
+     *
+     * A raise is legitimate on two conditions, and both are checked:
+     *
+     *   - **The build really outgrew the old ceiling.** No pre-emptive
+     *     headroom: a ceiling above the build is a budget nobody is spending,
+     *     and it is how 4.38 MB arrived without a gate noticing.
+     *   - **And it rises to exactly this build, not past it.** That is what
+     *     `--write-ceilings` produces, and it makes the next byte somebody
+     *     adds argue for itself rather than land in slack.
+     *
+     * Which leaves "ceilings only fall" true of everything except the commit
+     * that says, in its message, what it added.
+     */
+    check(`ceiling for ${key} did not rise`,
+      !raised || (measured[key] > before && ceilings.bundle[key] === measured[key]), true);
+    if (raised) {
       console.log(`        ${key}: ${kb(before)} -> ${kb(ceilings.bundle[key])}.`);
-      console.log('        Ceilings only fall. If this is deliberate, it belongs in its');
-      console.log('        own commit saying what was added and why it was worth it.');
+      if (measured[key] <= before) {
+        console.log('        ...and this build still fits the old ceiling, so nothing');
+        console.log('        needed the room. Ceilings do not rise in advance.');
+      } else if (ceilings.bundle[key] !== measured[key]) {
+        console.log(`        ...past this build, which is ${kb(measured[key])}. A raise`);
+        console.log('        records growth; it does not buy slack for the next one.');
+        console.log('        `--write-ceilings` writes the right number.');
+      } else {
+        console.log('        Ceilings only fall. If this is deliberate, it belongs in its');
+        console.log('        own commit saying what was added and why it was worth it.');
+      }
+    }
+    // Printed, never asserted (ADR 0021): a ceiling sitting above the build is
+    // a drop somebody forgot to bank, and there is no right number of bytes for
+    // it to be. `--write-ceilings` is the answer whenever this is not zero.
+    if (!raised && ceilings.bundle[key] > measured[key]) {
+      console.log(`      ${key}: ${kb(ceilings.bundle[key] - measured[key])} of unbanked headroom`
+        + ` - \`--write-ceilings\` when the drop is real.`);
     }
   }
 } else {

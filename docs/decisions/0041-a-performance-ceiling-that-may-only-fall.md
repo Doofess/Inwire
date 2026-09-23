@@ -86,6 +86,33 @@ Two rules come out of it:
   *same* build agreeing to 2 ms is what made 32 ms believable; without that
   baseline it is indistinguishable from the ±4% `throughput.ts` already records.
 
+## Amendment: "may only fall" had no way to record growth, and the check was inverted
+
+Found the first time an ordinary feature added bytes - 619 of them, a
+reverse-DNS queue and a selection anchor, against a chunk that had just fallen
+by 1.51 MB.
+
+The script's failure text already said what to do: "if the growth is intended,
+lower nothing and raise this ceiling deliberately in its own commit with the
+reason." **Its ratchet refused to allow that**, and worse, the condition was
+inverted. `measured <= before || next <= before` passes whenever the build still
+fits the *old* ceiling - so a ceiling could be inflated freely in advance, and
+the one case it refused was recording growth that had already happened.
+
+A raise is now allowed on exactly two conditions, both checked: the build really
+outgrew the old ceiling, **and** the new ceiling equals this build's size. No
+pre-emptive headroom, because a ceiling above the build is a budget nobody is
+spending, which is how 4.38 MB arrived without a gate noticing. No raise past
+the build, because a raise records growth rather than buying slack for the next
+one.
+
+Unbanked headroom - a ceiling sitting above the build after a drop nobody
+recorded - is **printed, not asserted**, for this ADR's own reason: there is no
+right number of bytes for it to be.
+
+Verified in all four directions: a raise to exactly this build passes, a raise
+past it fails, a raise while the build still fits fails, and a lowering passes.
+
 ## Consequences
 
 - `test/perf/ceilings.json` joins `test/fixtures/acceptance.json` as a tracked
