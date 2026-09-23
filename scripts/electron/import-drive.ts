@@ -28,6 +28,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { dnsQuery } from './stubAgent';
+import { watchMainOutput } from './mainOutput';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -108,22 +109,12 @@ try {
   mainWindow = page;
   page.setDefaultTimeout(30_000);
 
-  // What the STORE said, which is not everything main printed. Same split and
-  // same reason as `disk-drive.ts`: this asserted main's whole stdout was
-  // empty under the name "the store stayed quiet", so on any machine with the
-  // agent service installed it failed on `[agent-pipe] auto start: started` -
-  // the supervisor reporting normal operation. `[capture-store:` is the prefix
-  // `electron/store/host.ts` puts on both of the child's streams.
-  const complaints: string[] = [];
-  const otherOutput: string[] = [];
-  app.process().stdout?.on('data', (data) => {
-    for (const line of String(data).split(/\r?\n/)) {
-      const text = line.trim();
-      if (!text) continue;
-      if (text.includes('[capture-store:')) complaints.push(text);
-      else otherOutput.push(text);
-    }
-  });
+  // What the STORE said, which is not everything main printed - and which is
+  // harder to separate than one `includes` per line. `mainOutput.ts` has the
+  // two reasons: `data` events are chunks that can split a marker in half, and
+  // `host.ts` prefixes a whole multi-line message once.
+  const output = watchMainOutput(app.process().stdout);
+  const complaints = output.store;
   const rendererErrors: string[] = [];
   page.on('pageerror', (error) => rendererErrors.push(error.message));
 
@@ -225,11 +216,9 @@ try {
   check('the list scrolls back to the first frame in the file', top, [1, 2, 3, 4]);
 
   check('nothing threw in the renderer', rendererErrors, []);
+  output.flush();
   check('the store stayed quiet', complaints, []);
-  if (otherOutput.length > 0) {
-    console.log(`      ${otherOutput.length} other line(s) from main, reported not asserted:`);
-    for (const line of otherOutput.slice(0, 5)) console.log(`        ${line.slice(0, 120)}`);
-  }
+  output.report();
 } finally {
   await mainWindow?.evaluate(() => window.inwire?.setUnsavedCapture?.(false))
     .catch(() => { /* already gone */ });

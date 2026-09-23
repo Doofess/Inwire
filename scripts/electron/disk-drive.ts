@@ -45,6 +45,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
+import { watchMainOutput } from './mainOutput';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -136,32 +137,12 @@ try {
   // Anything the store says goes to main's stdout. A silent run is part of
   // what is being asserted: the bug this exists for reported itself here, over
   // and over, and nothing was listening.
-  /**
-   * What the STORE said, which is not everything main printed.
-   *
-   * This collected every line on main's stdout and asserted the list was
-   * empty, under the name "the store never complained" - so on any machine
-   * with the agent service installed it failed twice per run on
-   * `[agent-pipe] auto start: started`, which is the supervisor reporting
-   * normal operation. A by-hand driver that fails every run on something
-   * unrelated is a by-hand driver nobody runs.
-   *
-   * `[capture-store:` is the prefix `electron/store/host.ts` puts on both of
-   * the child's streams, and it is the reason `stdio: 'pipe'` exists at all -
-   * a packaged GUI app has no console to inherit, so every `fail()` the store
-   * protocol calls "never silent" arrives here or nowhere. Everything else is
-   * printed rather than asserted: still visible, never the reason this fails.
-   */
-  const complaints: string[] = [];
-  const otherOutput: string[] = [];
-  app.process().stdout?.on('data', (data) => {
-    for (const line of String(data).split(/\r?\n/)) {
-      const text = line.trim();
-      if (!text) continue;
-      if (text.includes('[capture-store:')) complaints.push(text);
-      else otherOutput.push(text);
-    }
-  });
+  // What the STORE said, which is not everything main printed - and which is
+  // harder to separate than one `includes` per line. `mainOutput.ts` has the
+  // two reasons: `data` events are chunks that can split a marker in half, and
+  // `host.ts` prefixes a whole multi-line message once.
+  const output = watchMainOutput(app.process().stdout);
+  const complaints = output.store;
   const rendererErrors: string[] = [];
   page.on('pageerror', (error) => rendererErrors.push(error.message));
 
@@ -170,6 +151,20 @@ try {
   // than ~450,000. Set through the same preference the settings panel writes.
   await page.evaluate(() => localStorage.setItem('inwire.performance',
     JSON.stringify({ dashboardRefreshMs: 2000, packetBufferBytes: 128 * 1024 * 1024 })));
+  /*
+   * **And the first-run tour, which this file was passing in spite of.**
+   *
+   * A temporary profile is a first run, so `TourOverlay` opens over everything
+   * - the same thing that made `import-drive.ts` unrunnable until it set this.
+   * This file survived on a coincidence: `TOUR_STEPS[0]` anchors `interfaces`,
+   * which happens to be the exact control the first click below reaches for,
+   * and the spotlight ring carries `pointer-events: none`. Reorder the steps,
+   * delete the first one, or change its `side`, and this lands in the
+   * identical `TimeoutError` - and being in `check.ts`'s `NOT_TESTS`, nothing
+   * would say so until somebody ran it by hand.
+   */
+  await page.evaluate(() => localStorage.setItem('inwire.tour',
+    JSON.stringify({ completed: true })));
   await page.reload();
   await page.waitForLoadState('domcontentloaded');
   await sleep(1500);
@@ -208,11 +203,9 @@ try {
   // window's oldest frame in them. When the field block was crossing unflattened
   // this stayed equal for ever, however long the capture ran.
   checkTrue('the capture outgrows the RAM window', outgrew);
+  output.flush();
   check('the store never complained', complaints, []);
-  if (otherOutput.length > 0) {
-    console.log(`      ${otherOutput.length} other line(s) from main, reported not asserted:`);
-    for (const line of otherOutput.slice(0, 5)) console.log(`        ${line.slice(0, 120)}`);
-  }
+  output.report();
 
   await page.getByLabel('Stop capture').click().catch(() => { /* already stopped */ });
   await sleep(3000);
@@ -257,7 +250,12 @@ try {
     top.length === 3 && top[1] - top[0] === FILTER_PERIOD && top[2] - top[1] === FILTER_PERIOD);
 
   check('nothing threw in the renderer', rendererErrors, []);
+  output.flush();
   check('...and the store stayed quiet throughout', complaints, []);
+  // Reported here as well, not only after the capture. Everything main printed
+  // during the filter, the scan and the disk reads - the most store-intensive
+  // half of this run - was collected and then silently dropped.
+  output.report();
 } finally {
   // See `smoke.ts`: closing with frames in the buffer opens a native modal no
   // test can answer.
