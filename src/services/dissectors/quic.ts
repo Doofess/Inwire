@@ -16,6 +16,7 @@
  * tail here - and none in the reference analyzer either.
  */
 import { toHex } from '../addressFormat';
+import { hexColons } from '../dissect/hexBytes';
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 
 /** Long-header packet types for QUIC v1 (RFC 9000). */
@@ -283,24 +284,14 @@ export interface QuicFrameRecord {
  * the status bar keeps - never show a zero that was never measured.
  */
 /**
- * `toHex` over a slice, clamped, colon-separated.
+ * `hexColons` under this file's own name, because the clamp is load-bearing
+ * here and the shared module is where it now lives.
  *
- * Colons because the reference's `show` carries them for every FT_BYTES, and
- * `show` is what `tree-coverage.ts` compares - its `showname` runs the same
- * bytes together, so reading the human-facing line produces a mismatch on
- * every frame. The clamp is not decoration: these offsets are derived from
- * length fields an adversary writes.
+ * It was the largest pure-leaf cost in this repository's own code - ADR 0042
+ * profiled it at 57-75 ms of a ~1,260 ms dissection - and `hexBytes.ts` is
+ * where that got fixed, without changing a byte of what it returns.
  */
-function hexOfRange(bytes: Uint8Array, from: number, to: number): string {
-  const start = Math.max(0, Math.min(from, bytes.length));
-  const stop = Math.max(start, Math.min(to, bytes.length));
-  let out = '';
-  for (let i = start; i < stop; i++) {
-    if (out.length > 0) out += ':';
-    out += bytes[i].toString(16).padStart(2, '0');
-  }
-  return out;
-}
+const hexOfRange = hexColons;
 
 export interface QuicPacketRecord {
   headerForm: 'long' | 'short';

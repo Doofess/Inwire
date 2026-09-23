@@ -62,6 +62,7 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0041](0041-a-performance-ceiling-that-may-only-fall.md) | One performance ceiling that may only fall, and why every number that moves with the machine is printed instead — plus the measurement that silently measured something else | Accepted 2026-09-23 |
 | [0042](0042-where-the-dissectors-time-actually-goes.md) | Where the dissector's time actually goes, measured a second time — four of five candidates refuted, and `__name` charged 10% of a profile to the wrong file | Accepted 2026-09-23 |
 | [0043](0043-the-map-is-lazy-and-warmed.md) | The map's code is lazy and warmed rather than statically imported — 1.51 MB off the eager chunk for ~35 ms of launch, and a per-kilobyte figure that does not extrapolate | Accepted 2026-09-23 |
+| [0044](0044-the-cost-was-the-loop-not-the-string.md) | The cost was the formatting loop, not the string's existence — one hex helper for four dissectors, 8.2% off dissection, and 0042's lazy-range refactor withdrawn rather than deferred | Accepted 2026-09-23 |
 
 ## Review outcome: amendments to the spec's execution order
 

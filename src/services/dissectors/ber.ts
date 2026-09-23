@@ -34,6 +34,8 @@
  * of the protocols here emit them. A reader that guessed at them would be
  * guessing on the one input where being wrong is silent.
  */
+import { hexRun } from '../dissect/hexBytes';
+
 
 /** Universal tag numbers worth naming. The rest are reported as their number. */
 export const BER_TAG = {
@@ -174,11 +176,13 @@ export function berOid(bytes: Uint8Array, value: BerValue): string {
   return [x, first - x * 40, ...groups.slice(1)].join('.');
 }
 
-/** Hex, for the values that must not be rendered as text. */
+/**
+ * Hex, for the values that must not be rendered as text.
+ *
+ * Run together rather than colon-separated: a modulus is compared as one
+ * string. The loop moved to `dissect/hexBytes.ts`, which also gained the clamp
+ * this never had.
+ */
 export function berHex(bytes: Uint8Array, value: BerValue): string {
-  let out = '';
-  for (let p = value.contentStart; p < value.contentEnd; p++) {
-    out += bytes[p].toString(16).padStart(2, '0');
-  }
-  return out;
+  return hexRun(bytes, value.contentStart, value.contentEnd);
 }

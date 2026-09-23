@@ -34,6 +34,11 @@ import type { IcmpEchoTracker } from '../icmpEchoTracker';
 import { formatIpv6Address, formatMac } from '../addressFormat';
 import { checksumVerdict } from '../dissect/transportShared';
 import { dataLayer } from './mediaType';
+// The reference's FT_BYTES rendering. It was a copy of the loop three other
+// dissectors also carried, and it clamped only the top end - `bytes[-1]` is
+// `undefined` and a thrown `TypeError`, not a short read. The shared one
+// clamps both ends, and is 4.7x faster for the same string (`hexBytes.ts`).
+import { hexColons } from '../dissect/hexBytes';
 
 /** Everything the decode needs that is neither the bytes nor the offset. */
 export interface IcmpContext {
@@ -87,16 +92,6 @@ const SHARED_ABBREV = {
     checksum: 'icmpv6.checksum', checksumStatus: 'icmpv6.checksum.status',
   },
 } as const;
-
-/** The reference's FT_BYTES rendering: lowercase hex, colon-separated. */
-function hexColons(bytes: Uint8Array, start: number, end: number): string {
-  let out = '';
-  for (let i = start; i < end && i < bytes.length; i++) {
-    if (out.length > 0) out += ':';
-    out += bytes[i].toString(16).padStart(2, '0');
-  }
-  return out;
-}
 
 /** `2 (0x0002)` - the reference's own showname for a 16-bit identifier. */
 function decimalAndHex(value: number): string {

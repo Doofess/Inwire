@@ -2,6 +2,15 @@
 
 **Status:** accepted. Refines 0011's method rather than its conclusion.
 
+> **Its one surviving candidate is closed, and the fix it proposed is
+> withdrawn.** `hexOfRange` was the right function; the reason given for its
+> cost was wrong. It was not "a string nobody reads" - it was
+> `toString(16).padStart(2, '0')` twice per byte for one of 256 answers, in a
+> loop four dissectors each carried a copy of. A lookup table took the whole
+> dissection down **8.2%** with no change to `ProtocolField` at all, so the
+> lazy-range refactor sized below is withdrawn rather than deferred. **ADR
+> 0044.** Self time says *where*, never *why*.
+
 ## Context
 
 ADR 0011 is this repository's founding performance lesson: a plan assumed the
@@ -82,7 +91,10 @@ One artefact, two unrelated failures, both of which looked like something else.
   range instead of a string, every reader routed through one accessor, and
   `replay.ts`'s exact-string tree equality to prove none was missed. That is a
   reasonable trade to make deliberately, and a poor one to make because a plan
-  said so before it was measured.
+  said so before it was measured. **Superseded by 0044**, which found the cost
+  was the loop rather than the string and removed 8.2% of dissection without
+  touching `ProtocolField` - the refactor above was sized against a cost that no
+  longer exists.
 - **The four refuted candidates are recorded as refuted.** Without this they
   stay plausible forever and get re-proposed by the next audit, because each one
   is genuinely O(payload) and genuinely discarded — the reasoning was sound and

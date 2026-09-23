@@ -749,6 +749,15 @@ wrong function; the second time, it refuted four of five candidates. Beware
 from production, and which charged 10% of the first profile to the one file the
 plan was about to optimise. It is folded into the tooling row by name.
 
+**And self time says *where*, never *why*.** The profiler's one surviving
+dissector candidate, `hexOfRange`, was read as the cost of building a string
+nobody reads, and an ADR sized a change to `ProtocolField`'s contract against
+it. The actual cost was `toString(16).padStart(2, '0')` twice per byte for one
+of 256 answers, in a loop four dissectors each carried a copy of; a lookup table
+took **8.2% off the whole dissection** with no contract change, and the refactor
+was withdrawn rather than deferred (ADRs 0042 and 0044). Eliminate "this hot
+leaf is written badly" before anything that changes a type.
+
 **Three rules keep the suite runnable under plain `tsx`**, and all three are
 invariants with enforcers in §5: no Electron or `node:*` under `src/services/`
 and `src/lib/`, `nodeBlockFile.ts` unreachable from `src/main.tsx`, and matching

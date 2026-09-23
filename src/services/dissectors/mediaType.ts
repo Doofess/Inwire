@@ -26,6 +26,7 @@
  * XML tree would be worse than a line count.
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
+import { hexColons } from '../dissect/hexBytes';
 import { dissectJson } from './json';
 
 export interface MediaEntry {
@@ -122,11 +123,7 @@ export const MEDIA_DISSECTORS: readonly MediaEntry[] = [
  * frame. `icmp.data` two files over already draws it this way.
  */
 export function dataLayer(bytes: Uint8Array): ProtocolLayer {
-  let hex = '';
-  for (let i = 0; i < bytes.length; i++) {
-    if (i > 0) hex += ':';
-    hex += bytes[i].toString(16).padStart(2, '0');
-  }
+  const hex = hexColons(bytes, 0, bytes.length);
   return {
     name: 'Data',
     summary: `Data (${bytes.length} byte${bytes.length === 1 ? '' : 's'})`,
