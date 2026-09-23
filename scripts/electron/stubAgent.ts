@@ -114,6 +114,17 @@ export interface StubAgent {
   readonly received: string[];
   /** Frames handed over so far. */
   readonly sent: () => number;
+  /**
+   * Changes the frames per 100 ms tick from the next tick on.
+   *
+   * For a test that needs a capture LARGE rather than realistic, after the
+   * part that wants it realistic has run. `smoke.ts` asserts the ordering
+   * window and the flush at the gentle default, then raises this so its frame
+   * count passes the Worker's 4,000-frame tree cache in about two seconds
+   * instead of ten - which is the only way to put a replayed tree on screen
+   * in a run that otherwise takes five.
+   */
+  setPerTick: (frames: number) => void;
   close: () => Promise<void>;
 }
 
@@ -139,6 +150,7 @@ export async function startStubAgent(
 ): Promise<StubAgent> {
   const received: string[] = [];
   let seq = 0;
+  let rate = perTick;
   let pump: ReturnType<typeof setInterval> | null = null;
   const clients = new Set<Socket>();
 
@@ -183,7 +195,7 @@ export async function startStubAgent(
           stop();
           pump = setInterval(() => {
             const batch = [];
-            for (let i = 0; i < perTick; i++) {
+            for (let i = 0; i < rate; i++) {
               seq++;
               batch.push({ seq, tsUs: Date.now() * 1000, bytes: dnsQuery(seq & 0xffff) });
             }
@@ -220,6 +232,7 @@ export async function startStubAgent(
   return {
     received,
     sent: () => seq,
+    setPerTick: (frames: number) => { rate = frames; },
     close: () => new Promise<void>((resolve) => {
       stop();
       for (const socket of clients) socket.destroy();

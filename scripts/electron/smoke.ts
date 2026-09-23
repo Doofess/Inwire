@@ -449,11 +449,8 @@ try {
    * live ingest path labels a frame correctly - which is worth proving and is
    * not where the bug was. Verified by reintroducing it: all three still pass.
    *
-   * The replay half - a tree rebuilt by `dissectReplay`, which is what a
-   * person sees for any frame older than that cache - is in
-   * `scripts/electron/disk-drive.ts`, where a 77,000-frame capture puts the
-   * selected row tens of thousands of frames past the cache. That one fails
-   * with the bug in.
+   * The replay half is the block after these, which pushes the capture past
+   * the cache and opens the oldest row.
    *
    * The stub's adapter is the device name `\Device\NPF_{STUB-0}` under the
    * label `Ethernet (stub)`, so both rows are predictable exactly.
@@ -479,6 +476,82 @@ try {
     flat.includes('Interface description: Ethernet (stub)'));
   checkTrue('...and the device name beside it',
     flat.includes(String.raw`Interface name: \Device\NPF_{STUB-0}`));
+
+  /*
+   * **And on the REPLAY path, which is where the bug actually was.**
+   *
+   * The three assertions above read a cached eager tree and pass with the bug
+   * in. What a person sees for any frame older than the Worker's
+   * `DETAIL_CACHE_FRAMES` (4,000) is a tree rebuilt by `dissectReplay`, and
+   * that is the path which passed `undefined` as the capture interface.
+   *
+   * So the capture is pushed past the cache and the OLDEST row is opened. The
+   * stub runs at its gentle default for everything above, because that is
+   * what exercises the ordering window and the flush; only now is it raised,
+   * so this costs about two seconds on a five-second run rather than ten.
+   *
+   * The wait is on `Frame <n>:` for the row actually clicked, not on
+   * `Interface description:` - the tree above is still on screen until the
+   * new one lands, and waiting on a string both trees contain would read the
+   * old one and pass.
+   */
+  const PAST_THE_CACHE = 5_000;
+  agent!.setPerTick(400);
+  checkTrue(`the capture passes the ${PAST_THE_CACHE.toLocaleString()}-frame mark`,
+    await until(async () => Number((await rows()).replace(/,/g, '')) > PAST_THE_CACHE));
+  agent!.setPerTick(40);
+  // **Stopped before scrolling, and that is what makes the next four lines
+  // deterministic.** With the capture still running, the list's follow-the-tail
+  // autoscroll can land between setting `scrollTop` and the scroll event that
+  // would have disarmed it - so the list snaps back to the bottom, the row
+  // under the click is a recent frame, and the wait for `Frame 2:` times out.
+  // Seen once in five runs before this line existed. It is also the order a
+  // person does it in: stop, scroll back, open something old.
+  checkTrue('the capture can be stopped', await clicks('Stop capture',
+    () => page.getByLabel('Stop capture').click()));
+  await sleep(300);
+  // Scrolled to the top the way `disk-drive.ts` does it.
+  await page.evaluate(() => {
+    const scroller = [...document.querySelectorAll('div')].find(
+      (d) => d.scrollHeight > d.clientHeight + 200 && d.querySelector('[role="row"]'));
+    if (scroller) scroller.scrollTop = 0;
+  });
+  await sleep(500);
+  const oldest = page.locator('[role="row"]').nth(1);
+  // The first CELL, not the row's text: a row's `textContent` runs its cells
+  // together with no separator, so frame 2 followed by a Time of `0.000000`
+  // reads as "20.000000" and a leading-digits match answers 20. That sent the
+  // wait below looking for a `Frame 20:` that was never going to be drawn.
+  const oldestId = Number(await oldest.evaluate(
+    (row) => row.firstElementChild?.textContent?.trim() ?? '').catch(() => '-1'));
+  checkTrue(`the oldest row is a frame the tree cache has dropped (frame ${oldestId})`,
+    oldestId > 0 && oldestId < 100);
+  checkTrue('...and it can be selected', await clicks('the oldest row', () => oldest.click()));
+  const rebuilt = await until(async () => (await page.evaluate(
+    () => document.body.innerText)).includes(`Frame ${oldestId}:`), 15_000);
+  checkTrue('...and its tree is rebuilt and drawn', rebuilt);
+  const replayed = (await page.evaluate(() => document.body.innerText)).replace(/\s+/g, ' ');
+  if (!rebuilt) {
+    // Said, not guessed at: which frame the pane is actually showing, and
+    // which row the list thinks is selected. A wait that times out with no
+    // account of what it found instead is how the first version of this block
+    // spent an hour looking for a `Frame 20:` that the parsing had invented.
+    const header = replayed.match(/Frame \d+: \d+ bytes on wire/)?.[0] ?? 'no Frame header at all';
+    const selected = await page.evaluate(() =>
+      document.querySelector('[role="row"][aria-selected="true"]')?.firstElementChild?.textContent ?? 'none');
+    console.log(`        the pane shows "${header}"; the selected row is frame ${selected}`);
+  }
+  // **Gated on `rebuilt`, because without it these pass on the wrong tree.**
+  // If the replayed tree never lands, the pane is still showing the RECENT
+  // frame selected above - a cached eager tree whose interface rows are
+  // right - so all three would pass having tested nothing. Seen: a timeout on
+  // the line above, followed by three PASSes.
+  check('a REPLAYED live frame is not described as an imported capture',
+    rebuilt && !replayed.includes('Imported capture'), true);
+  checkTrue('...it names the adapter',
+    rebuilt && replayed.includes('Interface description: Ethernet (stub)'));
+  checkTrue('...and the device name',
+    rebuilt && replayed.includes(String.raw`Interface name: \Device\NPF_{STUB-0}`));
 
   // **Turning location lookup on, which once took the whole window with it.**
   //
