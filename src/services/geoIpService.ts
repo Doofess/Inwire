@@ -423,6 +423,11 @@ export function resetGeoCacheForTests(): void {
     clearTimeout(queueTimer);
     queueTimer = null;
   }
+  hostnameCache.clear();
+  hostnameInflight.clear();
+  hostnameSettle.clear();
+  hostnameQueue = [];
+  dohActive = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +485,18 @@ export function setNameResolutionOptions(next: NameResolutionOptions): void {
     cache.clear();
     selfLocationPromise = null;
   }
-  if (disablingDns) hostnameCache.clear();
+  if (disablingDns) {
+    hostnameCache.clear();
+    // The queue too, or addresses enqueued a moment before the switch went off
+    // are still asked about after it. Anything already in flight is answered
+    // `null` rather than left to hang its caller for ever.
+    hostnameQueue = [];
+    for (const [ip, resolve] of hostnameSettle) {
+      resolve(null);
+      hostnameInflight.delete(ip);
+    }
+    hostnameSettle.clear();
+  }
 
   // Turning one on has to invalidate the callers' own "already asked" records,
   // or nothing already in the buffer is ever looked up and the feature appears
@@ -552,23 +568,71 @@ export function resolveSelfLocation(): Promise<GeoLocation | null> {
 // Reverse DNS
 // ---------------------------------------------------------------------------
 
-const hostnameCache = new Map<string, string | null>();
-const hostnamePending = new Set<string>();
+/**
+ * ## The queue, and why this file has two different ones
+ *
+ * `flushQueue` above batches geo lookups because `get.geojs.io` takes a
+ * comma-separated list in one request. DoH does not: RFC 8484 carries one
+ * question per query, so there is nothing to batch and the bound has to be on
+ * **concurrency** instead.
+ *
+ * It needed one. This fired a `fetch` per address from inside a loop over
+ * newly-arrived packets, so a capture that saw 300 distinct remote hosts opened
+ * 300 simultaneous DoH streams - which is the exact shape the comment on
+ * `BATCH_WINDOW_MS` records fixing for the geo endpoint, "a burst of
+ * simultaneous requests - which is what earned the 429s that then poisoned the
+ * cache permanently", left unfixed one screen below it.
+ *
+ * It is a trust problem before it is a rate-limit problem. This app's stated
+ * invariant is that it makes no outbound connection the user did not ask for,
+ * and its audience can *see* these in their own capture: 300 connections to
+ * Cloudflare, at once, out of a packet analyzer, is not what consenting to
+ * reverse DNS looks like.
+ */
+const MAX_DOH_CONCURRENT = 4;
 
 /**
- * Reverse-DNS (PTR) lookup via Cloudflare's public DNS-over-HTTPS resolver -
- * free, no API key, CORS-enabled. Only IPv4 is supported (IPv6 PTR requires
- * nibble-expanding the address into ip6.arpa, and most captured IPv6 traffic
- * has no PTR record anyway). Many IPs simply have no reverse DNS configured,
- * so a null result is the expected common case, not an error.
+ * Bounded for the same reason and at the same size as `MAX_CACHE` above.
+ *
+ * This was an unbounded `Map` that only grew, one screen below one carrying a
+ * comment about having been exactly that. A long capture on a busy link sees a
+ * lot of hosts.
  */
-export const resolveHostname = async (ip: string): Promise<string | null> => {
-  if (hostnameCache.has(ip)) return hostnameCache.get(ip)!;
-  // Nothing cached on the way out, for the same reason as above.
-  if (!nameResolution.reverseDns) return null;
-  if (hostnamePending.has(ip) || !isLocatable(ip) || parseIPv4(ip) === null) return null;
+const MAX_HOSTNAME_CACHE = 5000;
 
-  hostnamePending.add(ip);
+const hostnameCache = new Map<string, string | null>();
+/** One promise per address, shared by every caller that asks for it. */
+const hostnameInflight = new Map<string, Promise<string | null>>();
+const hostnameSettle = new Map<string, (name: string | null) => void>();
+let hostnameQueue: string[] = [];
+let dohActive = 0;
+
+function rememberHostname(ip: string, name: string | null): void {
+  if (hostnameCache.size >= MAX_HOSTNAME_CACHE) {
+    const oldest = hostnameCache.keys().next().value;
+    if (oldest !== undefined) hostnameCache.delete(oldest);
+  }
+  hostnameCache.set(ip, name);
+}
+
+/**
+ * Hands an address its answer, and decides whether the answer is kept.
+ *
+ * `keep` is the distinction `remember` makes for geo results and this path did
+ * not: an address with no PTR record is a permanent `null` worth caching, and a
+ * request that failed at the network is a `null` that must **not** be - the
+ * previous version cached both, so one blip left a host unnamed for the life of
+ * the session. `remember`'s own comment calls that "the whole difference from
+ * the version where one network blip was final".
+ */
+function finishHostname(ip: string, name: string | null, keep: boolean): void {
+  if (keep) rememberHostname(ip, name);
+  hostnameSettle.get(ip)?.(name);
+  hostnameSettle.delete(ip);
+  hostnameInflight.delete(ip);
+}
+
+async function askDoh(ip: string): Promise<void> {
   try {
     const reversed = ip.split('.').reverse().join('.');
     const res = await fetch(
@@ -578,13 +642,53 @@ export const resolveHostname = async (ip: string): Promise<string | null> => {
     if (!res.ok) throw new Error('DoH request failed');
     const data = await res.json();
     const hostname: string | undefined = data?.Answer?.[0]?.data;
-    const clean = hostname ? hostname.replace(/\.$/, '') : null;
-    hostnameCache.set(ip, clean);
-    hostnamePending.delete(ip);
-    return clean;
+    // No answer is a real answer: most addresses have no PTR record, and
+    // asking again would be one request per address per session for ever.
+    finishHostname(ip, hostname ? hostname.replace(/\.$/, '') : null, true);
   } catch {
-    hostnameCache.set(ip, null);
-    hostnamePending.delete(ip);
-    return null;
+    // The address is fine, the request was not. Left uncached so a later
+    // attempt can succeed - see `finishHostname`.
+    finishHostname(ip, null, false);
   }
+}
+
+/** Starts as many queued lookups as the concurrency bound allows. */
+function pumpDoh(): void {
+  while (dohActive < MAX_DOH_CONCURRENT && hostnameQueue.length > 0) {
+    const ip = hostnameQueue.shift()!;
+    dohActive++;
+    void askDoh(ip).finally(() => {
+      dohActive--;
+      pumpDoh();
+    });
+  }
+}
+
+/**
+ * Reverse-DNS (PTR) lookup via Cloudflare's public DNS-over-HTTPS resolver -
+ * free, no API key, CORS-enabled. Only IPv4 is supported (IPv6 PTR requires
+ * nibble-expanding the address into ip6.arpa, and most captured IPv6 traffic
+ * has no PTR record anyway). Many IPs simply have no reverse DNS configured,
+ * so a null result is the expected common case, not an error.
+ *
+ * **A second caller for an address already being looked up gets the same
+ * promise**, rather than `null`. It used to get `null` immediately - so on a
+ * map that asks once per address per tick, every caller but the first was told
+ * "no hostname", and the real answer landed only if the one winning caller was
+ * still interested when it arrived.
+ */
+export const resolveHostname = async (ip: string): Promise<string | null> => {
+  if (hostnameCache.has(ip)) return hostnameCache.get(ip)!;
+  // Nothing cached on the way out, for the same reason as above.
+  if (!nameResolution.reverseDns) return null;
+  if (!isLocatable(ip) || parseIPv4(ip) === null) return null;
+
+  const existing = hostnameInflight.get(ip);
+  if (existing) return existing;
+
+  const promise = new Promise<string | null>((resolve) => hostnameSettle.set(ip, resolve));
+  hostnameInflight.set(ip, promise);
+  hostnameQueue.push(ip);
+  pumpDoh();
+  return promise;
 };

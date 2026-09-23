@@ -1024,7 +1024,14 @@ backs up the Worker's own queue and everything lags together. That is what the
 pool is for, and its trigger is unchanged.
 
 **Offline by default, as a product invariant.** No outbound connection the user
-did not ask for. A packet analyzer that makes requests visible in the user's own
+did not ask for - **and consent is not only about whether, it is about how
+many**. `resolveHostname` fired one DoH request per address from inside a loop
+over newly-arrived packets, so consenting to reverse DNS meant 300 simultaneous
+streams to Cloudflare, visible to this audience in their own capture. It is
+bounded to four in flight now, with the same shared-promise and
+retryable-failure discipline the geo batcher beside it already carried;
+`scripts/geoip/reverse-dns-queue.ts` counts the overlap, which a count of total
+requests cannot see. A packet analyzer that makes requests visible in the user's own
 capture is a trust problem specific to this audience. First steps: an offline
 `d3-geo` map to replace openfreemap's tiles, then the geolocation lookups behind
 an explicit opt-in or a bundled database. The near-term step is an assertion
