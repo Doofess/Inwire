@@ -29,6 +29,7 @@ import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { publishPacketCounts } from "./services/packetCounts";
 import { GeoMap, warmGeoMap } from "./components/analytics/geoMapLoader";
+import { anchorSelection } from "./services/selectionAnchor";
 import { shortInterfaceLabel } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
@@ -1746,7 +1747,9 @@ export default function App() {
   // holds; what changed is that the window's range is not the capture's.
   useEffect(() => {
     if (!selectedPacket) return;
-    let visible: boolean;
+
+    // The unfiltered list is answered by arithmetic, because this runs on
+    // every flush and must not touch the buffer at all in the common case.
     if (filteredPackets === packets) {
       // Below the window, and readable from disk. `bytesAreRecoverable` is the
       // capture store's own id range, which only grows - so this says "the
@@ -1759,18 +1762,27 @@ export default function App() {
       // front, which holds for live trimming and not for a buffer replaced
       // wholesale - an import, a restore - where a stale selection numbered
       // above the new head would be reported present.
-      visible = packets.length > 0
+      const inRange = packets.length > 0
         && selectedPacket.id >= packets[0].id
         && selectedPacket.id <= packets[packets.length - 1].id;
-    } else {
-      visible = false;
-      for (let i = filteredPackets.length - 1; i >= 0; i--) {
-        if (filteredPackets[i].id === selectedPacket.id) { visible = true; break; }
-      }
+      if (inRange) return;
     }
-    if (!visible && filteredPackets.length > 0) {
-      setSelectedPacket(filteredPackets[filteredPackets.length - 1]);
-    }
+
+    // **And where it goes instead is the nearest surviving frame, not the
+    // newest one.** Reassigning to `filteredPackets[length - 1]` is invisible
+    // while you follow a live capture and is the whole interaction going wrong
+    // while you read history: type a filter at frame 12,000 of 700,000 and the
+    // app answers by selecting the last frame in the capture. That is the same
+    // argument the paragraph above makes about the window, applied to the
+    // filter.
+    //
+    // It also stops being a reverse linear walk of the filtered array.
+    // "Almost always near the tail" holds while you follow the tail, and is
+    // false in exactly this case - a selection near the head walked the whole
+    // array on every flush for as long as it stayed unmatched.
+    const anchor = anchorSelection(filteredPackets, selectedPacket.id);
+    if (anchor.kept || anchor.packet === null) return;
+    setSelectedPacket(anchor.packet);
   }, [filteredPackets, packets, selectedPacket]);
 
   // The keyboard handler below reads the live list and selection through refs
