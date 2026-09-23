@@ -475,6 +475,18 @@ behind `nameResolution.geoIp`, the DoH resolver behind
 `nameResolution.reverseDns` (two separate Settings rows), and the basemap tiles
 behind neither, loading whenever the map is shown. See **Direction**.
 
+**And it is actually applied, which is a separate check.** `shell.ts` asserts
+what the policy *says*; nothing asserted that it reaches the document, and the
+failure is silent in the worst direction — a policy that stops being applied
+removes a restriction, so every other check keeps passing and the app keeps
+working. `smoke.ts` appends an `<img>` from a blocked origin and requires a
+`securitypolicyviolation`. That probe has to be one the **page** performs: a
+`page.evaluate` of `eval` goes through CDP, which is exempt from page CSP, and a
+blocked `fetch` is indistinguishable from a machine with no outbound route.
+`onHeadersReceived` carries a URL filter so the map's tiles no longer round-trip
+through main's JavaScript to be handed a header that means nothing on a tile —
+that filter is what made the check necessary.
+
 **Main reaches two more hosts, and they are deliberately not in the policy.**
 The update feed and `npcap.com` are dialled by `net.fetch` in the main process,
 which is not a page and which no CSP governs — so a `connect-src` entry for
@@ -519,6 +531,17 @@ rule with teeth is the third one there: that module must not be **reachable**
 from `src/main.tsx`, which is a walk of the import graph rather than a grep,
 because the hazard is transitive. `captureClient.ts` sits one import away from
 it and is reached from `App.tsx`.
+
+**The renderer's weight only falls.** `scripts/perf/bundle-size.ts` holds
+`dist/assets` to `test/perf/ceilings.json`, which is the other direction of
+`test/fixtures/acceptance.json`'s "floors only rise" and is enforced the same
+way, against `git show HEAD:`. It is the **only** performance number in this
+repository that is a gate, and the line is not importance but whose property the
+number is: a
+byte count belongs to the build and is the same everywhere, where a launch time
+belongs to the machine. So launch and map-load timings are *printed* by
+`smoke.ts` and asserted by nothing (ADR 0041). It skips cleanly with no `dist/`,
+because CI runs `check` before `build` on purpose.
 
 **Dissection matches tshark.** `test/fixtures/` holds two real captures
 (untracked; ADR 0004) and tshark ground truth.
@@ -698,7 +721,21 @@ by itself — the window's own chrome against both themes and three scaling
 factors, Snap Layouts, the drag regions, the two bottom panes and their divider,
 the pipe's security descriptor taking effect (which needs a second Windows
 account), and the UAC prompt. Each item says what a failure *looks like*,
-because everything in it fails silently.
+because everything in it fails silently. It also carries the **packed** app's
+GPU check, because `enableNodeCliInspectArguments` is fused off and Playwright
+attaches through the Node inspector — so the packaged exe cannot be driven, and
+that is the fuse working rather than a gap to close.
+
+**`scripts/perf/profile.ts` is the instrument ADR 0011's finding came from**,
+and which was never committed until ADR 0042. It re-executes itself under
+`node --cpu-prof` and prints self time by function, and the rule it enforces by
+existing is: **no dissector change on performance grounds until it has named the
+function that change is meant to make cheaper.** The last time somebody reasoned
+their way to a hot spot here they were wrong by an order of magnitude and in the
+wrong function; the second time, it refuted four of five candidates. Beware
+`__name` — esbuild's `keepNames` helper, which is a property of `tsx` and absent
+from production, and which charged 10% of the first profile to the one file the
+plan was about to optimise. It is folded into the tooling row by name.
 
 **Three rules keep the suite runnable under plain `tsx`**, and all three are
 invariants with enforcers in §5: no Electron or `node:*` under `src/services/`

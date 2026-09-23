@@ -59,6 +59,8 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0038](0038-bytes-and-rows-are-two-arrivals.md) | Bytes and rows are two arrivals, so a frame reaches disk before anything dissects it — and a dissection that throws no longer loses the frame | Accepted 2026-09-19 |
 | [0039](0039-what-the-tree-is-held-to.md) | What the protocol tree is held to: counts and not ratios, because the denominator is the reference's vocabulary rather than ours | Accepted 2026-09-20 |
 | [0040](0040-follow-stream-shows-frames-not-payload.md) | Follow Stream shows a conversation's frames, not its payload — the alternative was to virtualise the payload, and what that would have cost is recorded | Accepted 2026-09-23 |
+| [0041](0041-a-performance-ceiling-that-may-only-fall.md) | One performance ceiling that may only fall, and why every number that moves with the machine is printed instead — plus the measurement that silently measured something else | Accepted 2026-09-23 |
+| [0042](0042-where-the-dissectors-time-actually-goes.md) | Where the dissector's time actually goes, measured a second time — four of five candidates refuted, and `__name` charged 10% of a profile to the wrong file | Accepted 2026-09-23 |
 
 ## Review outcome: amendments to the spec's execution order
 
