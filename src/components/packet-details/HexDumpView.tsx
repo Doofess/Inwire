@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Packet } from '../../types/packet';
+import { virtualWindow } from '../../lib/virtualWindow';
 
 /**
  * The hex/ASCII dump itself, with no surrounding chrome.
@@ -177,10 +178,33 @@ export const HexDumpView: React.FC<HexDumpViewProps> = ({
     });
   };
 
-  const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS);
-  const endRow = Math.min(numRows, Math.ceil((scrollTop + viewportHeight) / rowHeight) + OVERSCAN_ROWS);
-  const topSpacer = startRow * rowHeight;
-  const bottomSpacer = Math.max(0, (numRows - endRow) * rowHeight);
+  /**
+   * The tested window, rather than this file's own copy of it.
+   *
+   * These four lines used to be hand-rolled here, and they were the version
+   * WITHOUT the one line `virtualWindow.ts` calls "the whole fix": the clamp
+   * of `scrollTop` to what the content can actually reach. The failure is a
+   * closed loop rather than a flicker - an offset past the end gives
+   * `startRow` beyond `endRow`, so the slice is empty, so the only thing drawn
+   * is a top spacer the height of the whole dump, which keeps `scrollHeight`
+   * large enough that the browser never clamps `scrollTop`, which keeps
+   * `startRow` past the end. Scrolling does not help because there is nothing
+   * to scroll to. Measured in the packet list, where it was found: 157,117
+   * pixels of nothing.
+   *
+   * It is reachable here through the **embedded** path. When `scrollRef` is
+   * given, `scrollTop` is not a scroller's own offset - which the browser
+   * bounds for you - but `offsetIntoDump`, how far an outer document has
+   * scrolled past the top of this dump, and nothing bounds that above. The
+   * clamp at zero in that effect is the other half of the same guard, written
+   * once and not twice.
+   *
+   * Latent rather than observed, and fixed by **reuse** rather than by a
+   * second patch: two implementations of one window is how the first one came
+   * to be missing a line the second has.
+   */
+  const { startIndex: startRow, endIndex: endRow, topSpacerHeight: topSpacer, bottomSpacerHeight: bottomSpacer }
+    = virtualWindow(numRows, scrollTop, viewportHeight, rowHeight, OVERSCAN_ROWS);
 
   const isByteInRange = (idx: number) =>
     !!activeByteRange && idx >= activeByteRange[0] && idx <= activeByteRange[1];

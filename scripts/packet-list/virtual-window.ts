@@ -22,6 +22,8 @@
  * **"the window is never empty when there are rows to show"** - which is the
  * only statement that would have caught it.
  */
+import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { virtualWindow } from '../../src/lib/virtualWindow';
 
 let failures = 0;
@@ -117,6 +119,39 @@ const OVERSCAN = 15;
     [short.startIndex, short.endIndex], [0, 3]);
   check('...with no spacers at all',
     [short.topSpacerHeight, short.bottomSpacerHeight], [0, 0]);
+}
+
+/**
+ * ...and every surface that virtualises rows uses THIS window.
+ *
+ * The clamp above is only worth having where it is reached, and it was not.
+ * `HexDumpView.tsx` carried its own four-line copy of this arithmetic - the
+ * version from before the clamp existed - so the one component whose scroll
+ * offset is supplied by an *outer* document, and is therefore not bounded by a
+ * scroller at all, was the one running the unguarded code.
+ *
+ * It was found by reading rather than by failing, which is exactly why it gets
+ * a check: a second implementation of one window is how the first came to be
+ * missing a line the second has, and nothing here could see it. Source text
+ * rather than behaviour, because a React component is not reachable from plain
+ * `tsx` - the same reason `scripts/session/side-bar.ts` reads its files.
+ */
+{
+  console.log();
+  const virtualised = [
+    'src/components/packet-list/PacketList.tsx',
+    'src/components/stream-follower/StreamFollowerPane.tsx',
+    'src/components/packet-details/HexDumpView.tsx',
+  ];
+  for (const file of virtualised) {
+    const source = readFileSync(file, 'utf8');
+    checkTrue(`${basename(file)} takes its window from virtualWindow.ts`,
+      /import \{[^}]*\bvirtualWindow\b[^}]*\} from/.test(source));
+    // The shape of the copy that was here: an index derived straight from an
+    // unclamped offset. `virtualWindow` is the only place that division belongs.
+    checkTrue(`...rather than deriving a row index from a raw offset`,
+      !/Math\.floor\(\s*scrollTop\s*\//.test(source));
+  }
 }
 
 console.log();
