@@ -417,7 +417,7 @@ function applyLandLift(
   }
 }
 
-interface GeoMapProps {
+export interface GeoMapProps {
   packets: Packet[];
   isDark: boolean;
   /** See TrafficTimelineChart: forces a redraw when the theme changes, which

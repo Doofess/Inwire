@@ -543,6 +543,18 @@ belongs to the machine. So launch and map-load timings are *printed* by
 `smoke.ts` and asserted by nothing (ADR 0041). It skips cleanly with no `dist/`,
 because CI runs `check` before `build` on purpose.
 
+**The map is the one lazy route, and it is warmed rather than merely lazy.**
+`GeoMap.tsx` reaches maplibre-gl and `three` - 1.51 MB of the eager chunk, behind
+a rail button most launches never press - so `geoMapLoader.tsx` puts it behind
+`React.lazy` and calls `warmGeoMap()` from an idle callback after mount. Both
+halves are the decision: a bare `React.lazy` would move MapLibre's worker-pool
+spawn (three Workers, 487 kB each, acquired by `setRTLTextPlugin` at that
+module's scope) onto the click that opens the map, in front of the 2-4 serial
+round trips to openfreemap the first basemap pixel already waits on. ADR 0043,
+which also **amends 0041's 32 ms per 413 kB to a measurement of one split**: it
+predicts ~117 ms here and the real figure is ~35 ms. Take your own before sizing
+a split with it.
+
 **Dissection matches tshark.** `test/fixtures/` holds two real captures
 (untracked; ADR 0004) and tshark ground truth.
 `npx tsx scripts/parity/parity-check.ts` diffs Protocol, Source, Destination,

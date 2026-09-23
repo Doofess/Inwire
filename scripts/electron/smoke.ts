@@ -454,7 +454,21 @@ try {
   checkTrue('the map pane opens',
     await clicks('Routing Map', () => page.getByRole('button', { name: 'Routing Map' }).click()));
   const geoButton = page.getByRole('button', { name: /Turn on location lookup/i });
-  if (await geoButton.isVisible().catch(() => false)) {
+  // **The pane is lazy now, so this locator has to retry.** `GeoMap` sits
+  // behind `React.lazy` with a launch-time warm (`geoMapLoader.tsx`), so the
+  // click above commits a Suspense fallback and the pane's own first render is
+  // at least one tick later. `isVisible()` does **not** retry - it is a
+  // snapshot - so it answered `false` against a chunk that was already in the
+  // module registry, and the branch below then reported a race as "the button
+  // is not on screen". Every other locator in this file gets Playwright's
+  // 30-second retry; this one was the exception and had no reason to be.
+  const paneAt = Date.now();
+  const paneShown = await geoButton.waitFor({ state: 'visible' }).then(() => true).catch(() => false);
+  if (paneShown) {
+    // A measurement, not a budget (ADR 0021), and it is the number that says
+    // whether the warm is doing its job: a warmed chunk makes this React's
+    // commit, an unwarmed one adds an `app://` fetch and a 1.5 MB parse.
+    console.log(`      map pane on screen ${Date.now() - paneAt} ms after the click`);
     checkTrue('location lookup can be turned on',
       await clicks('Turn on location lookup', () => geoButton.click()));
     // Long enough for the render that used to throw. The lookups it would

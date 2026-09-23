@@ -28,7 +28,7 @@ import { usePreferenceStore, usePreferenceValue } from "./services/preferenceSto
 import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { publishPacketCounts } from "./services/packetCounts";
-import { GeoMap } from "./components/analytics/GeoMap";
+import { GeoMap, warmGeoMap } from "./components/analytics/geoMapLoader";
 import { shortInterfaceLabel } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
@@ -292,6 +292,20 @@ export default function App() {
   useEffect(() => {
     if (!shouldCheckOnLaunch(updateStore.get())) return;
     void window.inwire?.checkForUpdates?.().catch(() => {});
+  }, []);
+
+  /**
+   * Pull the map's chunk in once the app is idle.
+   *
+   * `GeoMap` is lazy now - maplibre-gl and `three` are the largest thing that
+   * used to sit in the eager chunk, behind a rail button most launches never
+   * press. Warming rather than waiting for the click is the whole design;
+   * `geoMapLoader.tsx` has the argument, which is that MapLibre's worker pool
+   * is acquired at that module's scope and must not spawn in front of the
+   * map's own network path.
+   */
+  useEffect(() => {
+    warmGeoMap();
   }, []);
 
   // Live-capture relative-time clock (reference-analyzer style): resets whenever the
@@ -3092,11 +3106,20 @@ export default function App() {
                 change and the live buffer changes ten times a second. */}
             {view === 'geo' && (
               <div className="flex-1 min-w-0 overflow-hidden">
-                <GeoMap
-                  packets={dashboardPackets}
-                  isDark={isDark}
-                  themeKey={resolvedTheme}
-                />
+                {/* The fallback is one commit's worth of the window's own
+                    ground, not a loading state. `warmGeoMap()` above has had
+                    the chunk since shortly after launch, so this renders while
+                    `React.lazy` resolves from its own cache. It is the ground
+                    colour rather than a spinner for the reason
+                    `electron/window.ts` fixes `backgroundColor`: the one frame
+                    it does occupy must not be a flash of a different shade. */}
+                <React.Suspense fallback={<div className="h-full w-full bg-background" />}>
+                  <GeoMap
+                    packets={dashboardPackets}
+                    isDark={isDark}
+                    themeKey={resolvedTheme}
+                  />
+                </React.Suspense>
               </div>
             )}
 
