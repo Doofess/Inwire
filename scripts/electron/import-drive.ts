@@ -108,10 +108,21 @@ try {
   mainWindow = page;
   page.setDefaultTimeout(30_000);
 
+  // What the STORE said, which is not everything main printed. Same split and
+  // same reason as `disk-drive.ts`: this asserted main's whole stdout was
+  // empty under the name "the store stayed quiet", so on any machine with the
+  // agent service installed it failed on `[agent-pipe] auto start: started` -
+  // the supervisor reporting normal operation. `[capture-store:` is the prefix
+  // `electron/store/host.ts` puts on both of the child's streams.
   const complaints: string[] = [];
+  const otherOutput: string[] = [];
   app.process().stdout?.on('data', (data) => {
-    const text = String(data).trim();
-    if (text) complaints.push(text);
+    for (const line of String(data).split(/\r?\n/)) {
+      const text = line.trim();
+      if (!text) continue;
+      if (text.includes('[capture-store:')) complaints.push(text);
+      else otherOutput.push(text);
+    }
   });
   const rendererErrors: string[] = [];
   page.on('pageerror', (error) => rendererErrors.push(error.message));
@@ -119,6 +130,25 @@ try {
   await page.waitForLoadState('domcontentloaded');
   await page.evaluate(() => localStorage.setItem('inwire.performance',
     JSON.stringify({ dashboardRefreshMs: 2000, packetBufferBytes: 128 * 1024 * 1024 })));
+  /*
+   * **And the first-run tour, which made this script unrunnable.**
+   *
+   * A temporary profile is a first run, so `TourOverlay` opens over everything
+   * and its popover intercepts pointer events. The first click this script
+   * makes is the rail's Export/Import button, so every run ended in a
+   * `TimeoutError` naming `Choose what to listen on` - a tour step - rather
+   * than anything to do with importing. Reproduced at the commit before this
+   * one, so it is not new; it is just that a driver in `check.ts`'s
+   * `NOT_TESTS` only fails when somebody runs it, which is the second time
+   * that has bitten this exact file.
+   *
+   * `update-center-drive.ts` clicks Skip. This sets the preference instead,
+   * one line above a `reload()` that was already here: a click depends on a
+   * button's label and on the overlay having finished animating in, and both
+   * of those have already moved once in this file's history.
+   */
+  await page.evaluate(() => localStorage.setItem('inwire.tour',
+    JSON.stringify({ completed: true })));
   await page.reload();
   await page.waitForLoadState('domcontentloaded');
   await sleep(1500);
@@ -196,6 +226,10 @@ try {
 
   check('nothing threw in the renderer', rendererErrors, []);
   check('the store stayed quiet', complaints, []);
+  if (otherOutput.length > 0) {
+    console.log(`      ${otherOutput.length} other line(s) from main, reported not asserted:`);
+    for (const line of otherOutput.slice(0, 5)) console.log(`        ${line.slice(0, 120)}`);
+  }
 } finally {
   await mainWindow?.evaluate(() => window.inwire?.setUnsavedCapture?.(false))
     .catch(() => { /* already gone */ });

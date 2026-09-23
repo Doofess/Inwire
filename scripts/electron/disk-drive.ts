@@ -136,10 +136,31 @@ try {
   // Anything the store says goes to main's stdout. A silent run is part of
   // what is being asserted: the bug this exists for reported itself here, over
   // and over, and nothing was listening.
+  /**
+   * What the STORE said, which is not everything main printed.
+   *
+   * This collected every line on main's stdout and asserted the list was
+   * empty, under the name "the store never complained" - so on any machine
+   * with the agent service installed it failed twice per run on
+   * `[agent-pipe] auto start: started`, which is the supervisor reporting
+   * normal operation. A by-hand driver that fails every run on something
+   * unrelated is a by-hand driver nobody runs.
+   *
+   * `[capture-store:` is the prefix `electron/store/host.ts` puts on both of
+   * the child's streams, and it is the reason `stdio: 'pipe'` exists at all -
+   * a packaged GUI app has no console to inherit, so every `fail()` the store
+   * protocol calls "never silent" arrives here or nowhere. Everything else is
+   * printed rather than asserted: still visible, never the reason this fails.
+   */
   const complaints: string[] = [];
+  const otherOutput: string[] = [];
   app.process().stdout?.on('data', (data) => {
-    const text = String(data).trim();
-    if (text) complaints.push(text);
+    for (const line of String(data).split(/\r?\n/)) {
+      const text = line.trim();
+      if (!text) continue;
+      if (text.includes('[capture-store:')) complaints.push(text);
+      else otherOutput.push(text);
+    }
   });
   const rendererErrors: string[] = [];
   page.on('pageerror', (error) => rendererErrors.push(error.message));
@@ -188,6 +209,10 @@ try {
   // this stayed equal for ever, however long the capture ran.
   checkTrue('the capture outgrows the RAM window', outgrew);
   check('the store never complained', complaints, []);
+  if (otherOutput.length > 0) {
+    console.log(`      ${otherOutput.length} other line(s) from main, reported not asserted:`);
+    for (const line of otherOutput.slice(0, 5)) console.log(`        ${line.slice(0, 120)}`);
+  }
 
   await page.getByLabel('Stop capture').click().catch(() => { /* already stopped */ });
   await sleep(3000);
