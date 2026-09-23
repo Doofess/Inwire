@@ -36,7 +36,7 @@
  * one dissected string it can predict exactly. Everything visual stays with a
  * person looking at it.
  */
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
@@ -139,6 +139,19 @@ const CSP_PROBE_URL = 'https://example.com/inwire-csp-probe.png';
 
 let agent: StubAgent | null = null;
 let profile: string | null = null;
+/** The key log this run seeds into its profile and then appends to. */
+let keyLogFile: string | null = null;
+
+/**
+ * One well-formed key log line for a made-up connection.
+ *
+ * Nothing here decrypts anything - the stub sends DNS - so the values mean
+ * nothing. What is under test is that lines reach the app, counted by the
+ * Decryption panel, and a line has to be well-formed for `keyLog.add` to count
+ * it: 64 hex characters of client random, a known label.
+ */
+const keyLogLine = (random: string) =>
+  `CLIENT_TRAFFIC_SECRET_0 ${random.repeat(32)} ${'ee'.repeat(32)}`;
 let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
 /**
  * Hoisted out of the try, because the cleanup below has to talk to it.
@@ -189,6 +202,14 @@ try {
   // time `npm run check` runs. `main.ts` honours `INWIRE_USER_DATA` for
   // exactly this.
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-smoke-'));
+  // A key log the app was told to follow in an earlier session - written the
+  // way `electron/keyLogFollower.ts` writes it, before the app starts, so the
+  // launch has to pick it up from disk with nobody clicking anything. That is
+  // the "remember the path" half; the section near the end appends to the file
+  // and is the "follow it" half.
+  keyLogFile = path.join(profile, 'sslkeylog.txt');
+  writeFileSync(keyLogFile, `${keyLogLine('a1')}\n`);
+  writeFileSync(path.join(profile, 'keylog.json'), JSON.stringify({ path: keyLogFile }));
   const launchedAt = Date.now();
   app = await electron.launch({
     args: ['.'],
@@ -600,6 +621,57 @@ try {
     // run that never found it has tested nothing while looking like it did.
     check('the "Turn on location lookup" button is on screen', false, true);
   }
+
+  /*
+   * **A followed key log: remembered across launches, and read as it grows.**
+   *
+   * Live decryption did not work, and the reason was not the decryptor: the key
+   * log was taken through a file picker, which reads a snapshot, and a browser
+   * appends each connection's secrets the moment it starts that connection. A
+   * snapshot taken before a capture holds nothing for any connection in it. The
+   * fix is main following the file - and remembering which one, so it resumes
+   * at launch - which is two claims, and this checks both through the real app:
+   *
+   * - the path seeded into the profile BEFORE launch is being followed, with
+   *   its one line loaded, and nobody clicked anything;
+   * - two lines appended while the app runs arrive without a click either.
+   */
+  console.log('\n--- the key log it was told to follow last time ---\n');
+  checkTrue('Settings opens', await clicks('Settings',
+    () => page.getByRole('button', { name: 'Settings', exact: true }).click()));
+  checkTrue('...on its Decryption section', await clicks('Decryption',
+    () => page.getByRole('button', { name: 'Decryption' }).first().click()));
+  const followState = () => page.evaluate(
+    () => document.querySelector('[data-keylog-follow]')?.getAttribute('data-keylog-follow') ?? 'absent');
+  const secretsShown = () => page.evaluate(
+    () => Number(document.querySelector('[data-keylog-secrets]')?.getAttribute('data-keylog-secrets') ?? -1));
+  checkTrue('the remembered key log is being followed at launch',
+    await until(async () => (await followState()) === 'following', 10_000));
+  checkTrue('...and its line was loaded without a click',
+    await until(async () => (await secretsShown()) === 1, 10_000));
+  // Timed, because the latency is the whole question for live traffic. A
+  // secret has to reach the Worker before the packets it opens are dissected,
+  // and the Worker's 100 ms ordering window is the only slack there is.
+  // A function predicate polled per frame: `until`'s 200 ms step would hide
+  // the number, and a string predicate is an `eval` this app's CSP refuses
+  // (ADR 0041's broken measurement). Printed, never asserted - it is this
+  // machine's disk and scheduler, not the build's.
+  const appendedAt = Date.now();
+  appendFileSync(keyLogFile!, `${keyLogLine('b2')}\n${keyLogLine('c3')}\n`);
+  const grew = await page.waitForFunction(
+    () => document.querySelector('[data-keylog-secrets]')?.getAttribute('data-keylog-secrets') === '3',
+    undefined, { polling: 'raf', timeout: 10_000 },
+  ).then(() => true, () => false);
+  const followMs = Date.now() - appendedAt;
+  checkTrue('lines appended while it runs are picked up as they are written', grew);
+  if (grew) {
+    console.log(`      appended to the file -> counted in the panel: ${followMs} ms`
+      + ' (a measurement: the Worker gets it one postMessage after this)');
+  } else {
+    console.log(`        the panel shows ${await secretsShown()} secret(s), expected 3`);
+  }
+  // Back out, so the remaining checks see the workspace rather than the sheet.
+  await page.getByRole('button', { name: 'Settings', exact: true }).click().catch(() => {});
 
   // The map's worker. `setWorkerUrl` must run before `setRTLTextPlugin`, and
   // when it does not the worker dies before registering a handler and maplibre

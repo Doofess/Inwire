@@ -137,6 +137,18 @@ declare global {
        * a Settings panel that mounts and unmounts on every visit.
        */
       onUpdateState?(listener: (state: unknown) => void): () => void;
+
+      /**
+       * The followed TLS key log. None takes a path - see
+       * `electron/keyLogFollower.ts`. Statuses are `unknown` here and narrowed
+       * by `src/lib/keyLogFollow.ts`, like every other value from main.
+       */
+      attachKeyLog?(): Promise<unknown>;
+      chooseKeyLog?(): Promise<unknown>;
+      followSuggestedKeyLog?(): Promise<unknown>;
+      forgetKeyLog?(): Promise<unknown>;
+      onKeyLogText?(listener: (text: string) => void): () => void;
+      onKeyLogStatus?(listener: (status: unknown) => void): () => void;
       /**
        * Reports the resolved theme, so main can cache the ground the NEXT
        * window opens on.

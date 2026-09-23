@@ -133,3 +133,27 @@ export const WINDOW_CONTROL_CHANNEL = 'inwire:window-control';
 /** The verbs `WINDOW_CONTROL_CHANNEL` accepts. Anything else is ignored. */
 export const WINDOW_CONTROLS = ['minimize', 'toggle-maximize', 'close'] as const;
 export type WindowControl = (typeof WINDOW_CONTROLS)[number];
+
+/**
+ * Renderer -> main: I am ready for key log text; send it from the top.
+ *
+ * `electron/keyLogFollower.ts`. Answers with the follower's status. None of
+ * the five key log channels carries a path from the renderer - see that
+ * file's header for why that is the security half of the feature.
+ */
+export const KEYLOG_ATTACH_CHANNEL = 'inwire:keylog-attach';
+
+/** Renderer -> main: show the open dialog and follow what is picked. */
+export const KEYLOG_CHOOSE_CHANNEL = 'inwire:keylog-choose';
+
+/** Renderer -> main: follow the file main's own `SSLKEYLOGFILE` names. */
+export const KEYLOG_FOLLOW_SUGGESTED_CHANNEL = 'inwire:keylog-follow-suggested';
+
+/** Renderer -> main: stop following and forget the path. */
+export const KEYLOG_FORGET_CHANNEL = 'inwire:keylog-forget';
+
+/** Main -> renderer: complete key log lines, as text, as they are appended. */
+export const KEYLOG_TEXT_CHANNEL = 'inwire:keylog-text';
+
+/** Main -> renderer: the follower's status whenever it changes. */
+export const KEYLOG_STATUS_CHANNEL = 'inwire:keylog-status';

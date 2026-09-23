@@ -663,6 +663,15 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       keyLog.add(command.text);
       break;
 
+    case 'keylog-clear':
+      // `clear` also flushes the derived AES schedules; see its comment.
+      keyLog.clear();
+      // And the cached trees, which are the other place a decrypted payload
+      // lives: without this a recent frame would keep showing plaintext after
+      // the panel said the secrets were gone.
+      treeCache.clear();
+      break;
+
     case 'detail': {
       const layers = treeCache.get(command.id);
       if (layers) post({ type: 'detail', id: command.id, layers });

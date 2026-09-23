@@ -23,6 +23,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
+  KEYLOG_ATTACH_CHANNEL, KEYLOG_CHOOSE_CHANNEL, KEYLOG_FOLLOW_SUGGESTED_CHANNEL,
+  KEYLOG_FORGET_CHANNEL, KEYLOG_STATUS_CHANNEL, KEYLOG_TEXT_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_INGEST_PORT_REQUEST,
   STORE_PORT_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
@@ -212,6 +214,39 @@ const api = {
   /** Downloads, verifies and installs one component. Raises a UAC prompt. */
   applyUpdate(id: string): Promise<unknown> {
     return ipcRenderer.invoke(UPDATE_APPLY_CHANNEL, id);
+  },
+
+  /**
+   * The followed TLS key log (`electron/keyLogFollower.ts`).
+   *
+   * **No method here takes a path**, and that is deliberate rather than an
+   * omission: the page can pick from what main already knows and nothing
+   * else. Text arrives through `onKeyLogText`, from the top on every attach.
+   */
+  attachKeyLog(): Promise<unknown> {
+    return ipcRenderer.invoke(KEYLOG_ATTACH_CHANNEL);
+  },
+  chooseKeyLog(): Promise<unknown> {
+    return ipcRenderer.invoke(KEYLOG_CHOOSE_CHANNEL);
+  },
+  followSuggestedKeyLog(): Promise<unknown> {
+    return ipcRenderer.invoke(KEYLOG_FOLLOW_SUGGESTED_CHANNEL);
+  },
+  forgetKeyLog(): Promise<unknown> {
+    return ipcRenderer.invoke(KEYLOG_FORGET_CHANNEL);
+  },
+  /** Returns the unsubscribe, for `onUpdateState`'s reason. */
+  onKeyLogText(listener: (text: string) => void): () => void {
+    const handler = (_event: unknown, text: unknown): void => {
+      if (typeof text === 'string') listener(text);
+    };
+    ipcRenderer.on(KEYLOG_TEXT_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(KEYLOG_TEXT_CHANNEL, handler); };
+  },
+  onKeyLogStatus(listener: (status: unknown) => void): () => void {
+    const handler = (_event: unknown, status: unknown): void => listener(status);
+    ipcRenderer.on(KEYLOG_STATUS_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(KEYLOG_STATUS_CHANNEL, handler); };
   },
 
   /**

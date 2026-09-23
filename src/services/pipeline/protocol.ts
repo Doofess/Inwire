@@ -110,6 +110,17 @@ export type ToPipeline =
    */
   | { type: 'keylog'; text: string }
   /**
+   * Forget every secret the Worker holds.
+   *
+   * **It did not exist.** Settings -> Decryption -> Clear cleared the main
+   * thread's store and said "new ones will not be decrypted" - while the
+   * Worker, which does every live decryption, kept every secret and kept
+   * decrypting. ADR 0008's whole position is that key material is transient,
+   * and a clear that leaves the copy that is actually used is the one place
+   * that was not true.
+   */
+  | { type: 'keylog-clear' }
+  /**
    * Who this machine is, for deciding which way each frame went.
    *
    * Sent as plain arrays rather than as a `HostIdentity` because a `Set` does

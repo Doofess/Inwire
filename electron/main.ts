@@ -29,12 +29,15 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
 import {
-  AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL, STORE_INGEST_PORT_REQUEST, STORE_PORT_REQUEST,
+  AGENT_PORT_REQUEST, KEYLOG_ATTACH_CHANNEL, KEYLOG_CHOOSE_CHANNEL,
+  KEYLOG_FOLLOW_SUGGESTED_CHANNEL, KEYLOG_FORGET_CHANNEL,
+  SAVE_FILE_CHANNEL, STORE_INGEST_PORT_REQUEST, STORE_PORT_REQUEST,
   WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
 } from './channels';
 import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
+import { KeyLogFollower } from './keyLogFollower';
 import { AgentPipeLink } from './agentPipe';
 import { isComponentId } from './updateCenter/components';
 import { UpdateCenter } from './updateCenter/host';
@@ -191,6 +194,20 @@ const updates = new UpdateCenter({
 });
 
 async function start(): Promise<void> {
+  // Built here rather than at module scope because `userData` can be moved by
+  // `INWIRE_USER_DATA` before this runs, and the settings file lives there.
+  const keyLogs = new KeyLogFollower(path.join(app.getPath('userData'), 'keylog.json'));
+  // **None of these four reads an argument.** The renderer names no path; it
+  // can only ask main to follow a file main already knows - one picked in
+  // main's own dialog, or main's own `SSLKEYLOGFILE`. See `keyLogFollower.ts`.
+  // `scripts/electron/keylog-follow.ts` holds these handlers to that.
+  ipcMain.handle(KEYLOG_ATTACH_CHANNEL, (event) => keyLogs.attach(event.sender));
+  ipcMain.handle(KEYLOG_CHOOSE_CHANNEL, (event) =>
+    keyLogs.choose(BrowserWindow.fromWebContents(event.sender)));
+  ipcMain.handle(KEYLOG_FOLLOW_SUGGESTED_CHANNEL, () => keyLogs.followSuggested());
+  ipcMain.handle(KEYLOG_FORGET_CHANNEL, () => keyLogs.forget());
+  app.on('will-quit', () => keyLogs.stop());
+
   ipcMain.on(UNSAVED_CAPTURE_CHANNEL, (_event, hasFrames: unknown) => {
     unsavedCapture = hasFrames === true;
   });

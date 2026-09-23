@@ -1084,6 +1084,16 @@ reason — a renderer minidump is a copy of `KeyLogStore`, so the usual advice t
 enable it with `uploadToServer: false` for local dumps conflicts with 0008 and
 is declined until the key-lifetime question is reopened.
 
+**And ADR 0045 amends 0008 on one point: the key log is FOLLOWED.** A browser
+appends each connection's secrets as the connection starts, so a key log read
+once before a capture holds nothing for any connection in it - which is how
+live QUIC kept reading `Protected Payload (KP0)` with a key log loaded. Main
+follows the file (`electron/keyLogFollower.ts`, arithmetic in `keyLogTail.ts`)
+and remembers the path, so key material now enters memory at launch. **The
+renderer never names the file** - it can ask for one picked in main's own dialog
+or main's own `SSLKEYLOGFILE`, and `scripts/electron/keylog-follow.ts` holds
+every handler and preload method to taking no path. Only the path is written.
+
 ---
 
 ## Architecture reference

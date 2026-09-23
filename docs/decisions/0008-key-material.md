@@ -16,6 +16,9 @@
 > what a successor ADR would do; this banner only records that the premise moved.
 
 **Status:** accepted, Phase 13. **Weakened by 0027** — see the banner above.
+**Amended by [0045](0045-the-key-log-is-followed-not-loaded.md):** key material now enters memory at
+launch when the person has chosen to follow a key log file, rather than only by an action in that
+session. Only the file's path is persisted; the rest of this decision stands.
 **Supersedes nothing. Related: 0004 (fixtures and privacy), 0001 (two-phase dissection).**
 
 ## The decision

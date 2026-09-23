@@ -30,6 +30,7 @@ import { resetGeoSession } from "./components/analytics/geoSession";
 import { publishPacketCounts } from "./services/packetCounts";
 import { GeoMap, warmGeoMap } from "./components/analytics/geoMapLoader";
 import { anchorSelection } from "./services/selectionAnchor";
+import { startKeyLogFollow } from "./lib/keyLogFollow";
 import { shortInterfaceLabel } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
@@ -307,6 +308,17 @@ export default function App() {
    */
   useEffect(() => {
     warmGeoMap();
+  }, []);
+
+  /**
+   * Start receiving the followed TLS key log, if one was chosen.
+   *
+   * Here and not in the Decryption panel, because the panel only exists while
+   * Settings is open and a follow that only ran while somebody was looking at
+   * it would decrypt nothing. `lib/keyLogFollow.ts` has the rest.
+   */
+  useEffect(() => {
+    startKeyLogFollow();
   }, []);
 
   // Live-capture relative-time clock (reference-analyzer style): resets whenever the

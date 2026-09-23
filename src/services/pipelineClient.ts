@@ -308,6 +308,11 @@ export class PipelineClient {
     this.send({ type: 'keylog', text });
   }
 
+  /** Forget every secret the Worker holds. See `keylog-clear` in the protocol. */
+  clearKeyLog() {
+    this.send({ type: 'keylog-clear' });
+  }
+
   /**
    * Who this machine is, so the Worker can say which way each frame went.
    *

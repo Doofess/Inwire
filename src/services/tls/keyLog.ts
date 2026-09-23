@@ -76,6 +76,12 @@ export { toHex };
  * Worker and imports run on the main thread, so a key log the user loads is
  * pushed to both rather than shared.
  */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export class KeyLogStore {
   private byRandom = new Map<string, Map<string, Uint8Array>>();
   private ignoredLines = 0;
@@ -83,10 +89,16 @@ export class KeyLogStore {
   /** Every line accepted, in order, so an export can write back what was read. */
   private lines: string[] = [];
   /**
-   * Bumped by every `add`. A dissector that concluded "no secret for this
-   * connection" records the generation it concluded it at, so loading a log
-   * during a live capture reopens the connections that were opaque instead of
-   * leaving them opaque until the app is restarted.
+   * Bumped by every `add` that learned something. A dissector that concluded
+   * "no secret for this connection" records the generation it concluded it
+   * at, so loading a log during a live capture reopens the connections that
+   * were opaque instead of leaving them opaque until the app is restarted.
+   *
+   * **Only when something changed**, which did not matter while a key log
+   * arrived once per session and matters a great deal now that it is
+   * followed: `keyLogFollow` feeds every append Chrome makes, and a bump is
+   * an instruction to every live TLS and QUIC conversation to re-derive its
+   * keys on its next packet. A chunk that taught nothing must not cost that.
    */
   public generation = 0;
 
@@ -97,6 +109,7 @@ export class KeyLogStore {
    * append-only and a repeated label means the connection was resumed.
    */
   public add(text: string): KeyLogStats {
+    let changed = false;
     for (const rawLine of text.split(/\r?\n/)) {
       const line = rawLine.trim();
       if (line.length === 0 || line.startsWith('#')) continue;
@@ -115,12 +128,20 @@ export class KeyLogStore {
       const key = randomHex.toLowerCase();
       let entry = this.byRandom.get(key);
       if (entry === undefined) { entry = new Map(); this.byRandom.set(key, entry); }
+      // **A line already held is not a new secret.** This counted and stored
+      // every line every time, so loading the same file twice doubled
+      // `secrets` and `lines`, and the panel's own "added no new secrets -
+      // every line was already loaded" could never be shown. It matters more
+      // now: a followed file is re-sent whole whenever a renderer attaches.
+      const held = entry.get(label);
+      if (held !== undefined && sameBytes(held, secret)) continue;
       entry.set(label, secret);
       this.acceptedLines++;
       this.lines.push(`${label} ${key} ${secretHex.toLowerCase()}`);
+      changed = true;
     }
 
-    this.generation++;
+    if (changed) this.generation++;
     return this.stats();
   }
 
