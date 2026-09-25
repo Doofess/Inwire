@@ -193,7 +193,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
    * special-cased here.
    */
   const filterActionClass =
-    'flex items-center justify-center h-5 w-5 rounded bg-primary text-primary-foreground '
+    'flex items-center justify-center h-4 w-4 rounded-sm bg-primary text-primary-foreground '
     + 'hover:bg-primary/90 transition-colors cursor-pointer shrink-0';
 
   const presetCount = allPresets(filterPresetLibrary).length;
@@ -229,11 +229,10 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   }, []);
 
   return (
-    // Renders inline inside the header rather than as its own row: it has no
-    // background, border or vertical padding of its own, and takes the width
-    // the header gives it. flex-nowrap because the header is a fixed 4rem
-    // tall - wrapping here would push controls out of the bar entirely
-    // instead of onto a second line.
+    // Renders inline in the title row rather than as its own row, and takes
+    // the width the row gives it. flex-nowrap because the row is a fixed 32px
+    // - wrapping here would push controls out of the bar entirely instead of
+    // onto a second line.
     <div
       ref={containerRef}
       className="relative z-30 min-w-0 flex-1"
@@ -249,7 +248,13 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             text input that also has a list of choices puts one. */}
         <div className="relative flex-1 min-w-[140px]">
           <div
-            className={`flex items-center rounded-md border w-full px-3 py-1.5 transition-all shadow-inner bg-background border-border ${
+            // **22px in a 32px row, VS Code's command-center metric.** It was
+            // py-1.5 around a 20px chevron - 34px, taller than the row holding
+            // it, so it read as a box laid over the bar rather than a field set
+            // into it. A fixed height rather than padding, because padding
+            // sizes the box from whichever child is tallest; the controls
+            // inside are 16px so they fit it rather than setting it.
+            className={`flex items-center rounded-md border w-full h-[22px] pl-2 pr-[3px] transition-colors bg-background border-border ${
               isNotEmpty && !validation.isValid
                 ? '!border-rose-500 bg-rose-100 dark:bg-rose-950/20'
                 : isNotEmpty && validation.isValid
@@ -263,7 +268,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 obviously a search field. The colour stays `--primary`, which
                 is what makes the box read as the app's own control rather
                 than as a text input somebody dropped in. */}
-            <Filter className="w-3.5 h-3.5 mr-2 shrink-0 text-primary" aria-hidden />
+            <Filter className="w-3 h-3 mr-1.5 shrink-0 text-primary" aria-hidden />
 
             <input
               ref={inputRef}
@@ -292,7 +297,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               // clause rather than three, because the box is narrower now and
               // a truncated example is worse than a short one.
               placeholder='e.g. tcp.port == 443'
-              className="bg-transparent outline-none text-xs font-mono w-full text-foreground placeholder:text-muted-foreground"
+              className="bg-transparent outline-none text-xs leading-4 font-mono w-full text-foreground placeholder:text-muted-foreground"
             />
 
             {/* Clear and Save, inside the input.
@@ -314,12 +319,12 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 duplicate of the field's.
 
                 The survivors either side of it are filled rather than bare
-                glyphs, and it is deliberately not. At 12px on
+                glyphs, and it is deliberately not. This small on
                 the inside edge of a field they read as part of the text
                 otherwise - the X in particular looked like a character someone
                 had typed - and only appear once there is a filter to act on, so
                 the field is empty chrome until they have something to do. */}
-            <div className="flex items-center gap-1.5 ml-2 shrink-0">
+            <div className="flex items-center gap-1 ml-2 shrink-0">
               {isNotEmpty && (
                 <button
                   onClick={() => {
@@ -329,7 +334,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   className={filterActionClass}
                   title="Clear filter"
                 >
-                  <X className="w-3 h-3" />
+                  <X className="w-2.5 h-2.5" />
                 </button>
               )}
 
@@ -339,7 +344,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   className={filterActionClass}
                   title="Save current filter expression"
                 >
-                  <Bookmark className="w-3 h-3" />
+                  <Bookmark className="w-2.5 h-2.5" />
                 </button>
               )}
 
@@ -372,13 +377,13 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 aria-expanded={presetsVisible}
                 aria-label="Show display filter presets"
                 title={presetsVisible ? 'Hide presets' : 'Show presets'}
-                className="flex items-center justify-center h-5 w-5 rounded shrink-0
+                className="flex items-center justify-center h-4 w-4 rounded-sm shrink-0
                   cursor-pointer text-muted-foreground transition-colors
                   hover:bg-accent hover:text-foreground focus-visible:outline-none
                   focus-visible:ring-1 focus-visible:ring-ring"
               >
                 <ChevronDown
-                  className={`w-3.5 h-3.5 transition-transform duration-150
+                  className={`w-3 h-3 transition-transform duration-150
                     ${presetsVisible ? 'rotate-180' : ''}`}
                 />
               </button>
