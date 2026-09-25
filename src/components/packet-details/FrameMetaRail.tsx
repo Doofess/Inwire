@@ -11,6 +11,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-react';
 import { FrameSummary, RelatedFrame } from './packetDetailModel';
+import { CATEGORY_HINTS, CATEGORY_LABELS, CATEGORY_TEXT, type ExpertItem } from '../../services/expertInfo';
 
 /**
  * Everything about the frame that is READ rather than WORKED IN.
@@ -44,6 +45,8 @@ interface FrameMetaRailProps {
   related: RelatedFrame[];
   streamTarget: StreamTarget | null;
   hiddenByFilter: boolean;
+  /** What the dissectors found in this frame, each with its category. */
+  expert: readonly ExpertItem[];
   /** The go-to-frame control, passed in so the rail owns no lookup logic. */
   frameBox: React.ReactNode;
   collapsed: boolean;
@@ -120,6 +123,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
   related,
   streamTarget,
   hiddenByFilter,
+  expert,
   frameBox,
   collapsed,
   onToggleCollapse,
@@ -127,7 +131,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
   onShowFrame,
   className = '',
 }) => {
-  const hasAnalysis = summary.analysisFlags.length > 0 || hiddenByFilter;
+  const hasAnalysis = expert.length > 0 || summary.analysisFlags.length > 0 || hiddenByFilter;
 
   if (collapsed) {
     return (
@@ -205,6 +209,26 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
             not carry a heading announcing that nothing is wrong with it. */}
         {hasAnalysis && (
           <MetaGroup label="Analysis" icon={TriangleAlert}>
+            {/* Category above summary rather than beside it: at 17rem a
+                finding like "[TCP Previous segment not captured]" beside its
+                label would wrap anyway, and wrap mid-phrase. */}
+            {expert.map((item, i) => (
+              <div
+                // Index in the key: a frame can carry the same finding twice -
+                // two fragments of one datagram both overlapping, say.
+                key={`${item.category}|${item.summary}|${i}`}
+                className="min-w-0"
+                title={CATEGORY_HINTS[item.category]}
+              >
+                <div className={`text-[9px] uppercase tracking-wider font-semibold ${CATEGORY_TEXT[item.category]}`}>
+                  {CATEGORY_LABELS[item.category]}
+                </div>
+                <div className="font-mono text-[11px] leading-snug text-foreground break-words">
+                  {item.summary}
+                </div>
+              </div>
+            ))}
+
             {summary.analysisFlags.length > 0 && (
               <div className="flex flex-wrap gap-1">
                 {summary.analysisFlags.map(flag => (

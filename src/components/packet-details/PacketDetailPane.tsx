@@ -14,7 +14,7 @@ import { LayerRail } from './LayerRail';
 import { HexDumpView } from './HexDumpView';
 import { hasBytes } from '../../services/packetBytes';
 import { HexCopyMenu } from './HexViewer';
-import { ExpertFindings } from './ExpertFindings';
+import { expertItemsFor } from '../../services/expertInfo';
 import {
   buildFrameSummary,
   collectRelatedFrames,
@@ -525,6 +525,11 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
     // index and could not be followed at all before this.
     streamTarget: packet ? targetForPacket(packet) : null,
     hiddenByFilter,
+    // The findings live in the rail's Analysis group. They had a bar of their
+    // own across the canvas, a full-width strip for what is usually one line
+    // - and the rail's Analysis group already answered "what is wrong with
+    // this frame", with the TCP flags that raise most of them.
+    expert: packet ? expertItemsFor(packet) : [],
     frameBox,
     onFollowStream,
     onShowFrame: showFrame,
@@ -750,14 +755,6 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
               )}
 
               <div className="flex-1 min-w-0 flex flex-col">
-                {/* Alerts get the full canvas width - in a window showing one
-                    packet, the thing saying something is wrong should not be in
-                    a column. Capped, though: they used to be unbounded, and
-                    three of them squeezed the fields and the dump to nothing. */}
-                <div className="shrink-0 max-h-[9rem] overflow-y-auto custom-scrollbar empty:hidden">
-                  <ExpertFindings packet={packet} className="px-5 py-3 border-b border-border" />
-                </div>
-
                 {/* The protocol stack as a band across the canvas: a scale
                     drawing of the frame, and the way any layer is isolated. */}
                 <div className="border-b border-border bg-secondary/20 shrink-0">
