@@ -19,7 +19,11 @@
  */
 import { createCipheriv } from 'node:crypto';
 import { cipherSuiteSpec } from '../../src/services/tls/cipherSuites';
-import { deriveTrafficKeys, decryptQuicPacket } from '../../src/services/dissectors/quicCrypto';
+import {
+  deriveInitialKeys, deriveTrafficKeys, decryptQuicPacket, QUIC_V1_INITIAL_SALT,
+} from '../../src/services/dissectors/quicCrypto';
+import { PcapService } from '../../src/services/pcapParser';
+import { pcapOf, udpFrameTo } from '../parity/synthetic';
 import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
 import { keyLog, toHex } from '../../src/services/tls/keyLog';
 import { dissectHttp3Stream, freshHttp3Stream, buildHttp3Layer } from '../../src/services/dissectors/http3';
@@ -500,6 +504,110 @@ function hello(kind: 1 | 2, cipher: number): Uint8Array {
     tracker.connectionNumberFor(idOf(99999)), 4097);
 
   tracker.reset();
+}
+
+// --- the ServerHello and the packets it unlocks, in ONE datagram -------------
+//
+// A server's first flight is routinely a single datagram: an Initial carrying
+// the ServerHello (or its last piece), a Handshake packet, and - on a resumed
+// connection, where it has 0.5-RTT data to send at once - a 1-RTT packet. The
+// cipher suite the Handshake and 1-RTT keys need is IN the Initial ahead of
+// them. The tracker used to be handed the datagram's CRYPTO fragments only
+// after the whole datagram had been dissected, so every packet behind the
+// Initial asked for keys a moment before the suite was known, and stayed
+// opaque for good.
+//
+// Found on a real Chrome capture: 18,705 of 18,708 protected packets opened
+// and the other 3 were exactly this - the server's first datagram on each of
+// the three resumed (0-RTT) connections - while tshark opened all three. The
+// test goes through the real UDP path, because the defect was in the ORDER the
+// datagram's packets met the tracker, which no tracker-level call can see. Put
+// the bug back - feed `addCryptoFragments` after `dissectQuicDatagram` returns
+// - and the first two checks here fail.
+{
+  const suite = cipherSuiteSpec(0x1301)!;
+  const CLIENT = { ip: '192.0.2.10', port: 50001 };
+  const SERVER = { ip: '198.51.100.5', port: 443 };
+  const originalDcid = bytes(0x0d, 0xc1, 0xd0, 0x00, 0x11, 0x22, 0x33, 0x44);
+  const clientCid = bytes(0xc1, 0x1e, 0x47, 0x00, 0x00, 0x00, 0x00, 0x01);
+  const serverCid = bytes(0x5e, 0x4e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x02);
+
+  const clientRandom = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) clientRandom[i] = i;
+  const secret = (fill: number) => new Uint8Array(32).fill(fill);
+  keyLog.clear();
+  keyLog.add([
+    `CLIENT_HANDSHAKE_TRAFFIC_SECRET ${toHex(clientRandom)} ${toHex(secret(0x31))}`,
+    `SERVER_HANDSHAKE_TRAFFIC_SECRET ${toHex(clientRandom)} ${toHex(secret(0x32))}`,
+    `CLIENT_TRAFFIC_SECRET_0 ${toHex(clientRandom)} ${toHex(secret(0x33))}`,
+    `SERVER_TRAFFIC_SECRET_0 ${toHex(clientRandom)} ${toHex(secret(0x34))}`,
+  ].join('\n'));
+  const initial = deriveInitialKeys(originalDcid, QUIC_V1_INITIAL_SALT, false);
+  const serverHandshake = deriveTrafficKeys(secret(0x32), suite);
+  const serverApp = deriveTrafficKeys(secret(0x34), suite);
+
+  /** A protected long-header packet: Initial (type 0) or Handshake (type 2). */
+  function sealLongHeader(
+    keys: { key: Uint8Array; iv: Uint8Array; headerProtection: Uint8Array },
+    typeBits: 0 | 2, dcid: Uint8Array, scid: Uint8Array, packetNumber: number, payload: Uint8Array,
+  ): Uint8Array {
+    const pnLength = 2;
+    const length = pnLength + payload.length + 16;
+    const header = Buffer.from([
+      0xc0 | (typeBits << 4) | (pnLength - 1),
+      0x00, 0x00, 0x00, 0x01,
+      dcid.length, ...dcid, scid.length, ...scid,
+      ...(typeBits === 0 ? [0x00] : []),                  // Initial: empty token
+      0x40 | ((length >> 8) & 0x3f), length & 0xff,       // two-byte varint Length
+      (packetNumber >> 8) & 0xff, packetNumber & 0xff,
+    ]);
+    const nonce = Buffer.from(keys.iv);
+    for (let i = 0; i < 8; i++) nonce[nonce.length - 1 - i] ^= Math.floor(packetNumber / 2 ** (8 * i)) & 0xff;
+    const cipher = createCipheriv('aes-128-gcm', Buffer.from(keys.key), nonce, { authTagLength: 16 });
+    cipher.setAAD(header);
+    const packet = Buffer.concat([header, cipher.update(Buffer.from(payload)), cipher.final(), cipher.getAuthTag()]);
+    const pnOffset = header.length - pnLength;
+    const mask = createCipheriv('aes-128-ecb', Buffer.from(keys.headerProtection), null)
+      .update(packet.subarray(pnOffset + 4, pnOffset + 20));
+    packet[0] ^= mask[0] & 0x0f;
+    for (let i = 0; i < pnLength; i++) packet[pnOffset + i] ^= mask[1 + i];
+    return new Uint8Array(packet);
+  }
+  const cryptoFrame = (data: Uint8Array) => bytes(0x06, 0x00, 0x40 | (data.length >> 8), data.length & 0xff, ...data);
+  const padded = (frames: Uint8Array, size = 64) =>
+    Uint8Array.from([...frames, ...new Uint8Array(Math.max(0, size - frames.length))]);
+
+  const clientInitial = sealLongHeader(initial.client, 0, originalDcid, clientCid, 0,
+    padded(cryptoFrame(hello(1, 0x1301)), 1100));
+  const serverFlight = Uint8Array.from([
+    ...sealLongHeader(initial.server, 0, clientCid, serverCid, 0, padded(cryptoFrame(hello(2, 0x1301)))),
+    // EncryptedExtensions with no extensions: its content does not matter,
+    // only that the packet carrying it opens.
+    ...sealLongHeader(serverHandshake, 2, clientCid, serverCid, 0, padded(cryptoFrame(bytes(0x08, 0, 0, 2, 0, 0)))),
+    ...sealShortHeader(serverApp, clientCid, 7,
+      bytes(0x0e, 0x00, 0x00, HEADERS_FRAME.length, ...HEADERS_FRAME)),
+  ]);
+
+  const { packets } = await PcapService.parseCaptureFile(new File([pcapOf([
+    udpFrameTo(CLIENT.ip, SERVER.ip, CLIENT.port, SERVER.port, clientInitial),
+    udpFrameTo(SERVER.ip, CLIENT.ip, SERVER.port, CLIENT.port, serverFlight),
+  ])], 'coalesced.pcap'), Number.POSITIVE_INFINITY, true);
+  const flight = packets[1];
+  const numbers: unknown[] = [];
+  const walk = (fields: readonly { abbrev?: string; value: unknown; children?: unknown }[]) => {
+    for (const f of fields) {
+      if (f.abbrev === 'quic.packet_number') numbers.push(f.value);
+      if (Array.isArray(f.children)) walk(f.children as typeof fields);
+    }
+  };
+  for (const layer of flight?.layers ?? []) walk(layer.fields);
+
+  check('the 1-RTT packet behind the ServerHello opens, in the same datagram',
+    /PKN: 7/.test(flight?.info ?? ''), true);
+  check('...and so does the Handshake packet between them',
+    numbers.map(Number).sort((a, b) => a - b), [0, 0, 7]);
+  check('...and what opened is the HTTP/3 that went in', flight?.protocolLabel, 'HTTP3');
+  keyLog.clear();
 }
 
 console.log();

@@ -14,7 +14,7 @@
  */
 import type { Packet, ProtocolLayer } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
-import type { QuicFlowTracker } from '../quicFlowTracker';
+import type { QuicFlowTracker, QuicHandshakeFacts } from '../quicFlowTracker';
 import type { DnsTracker } from '../dnsTracker';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
@@ -200,12 +200,24 @@ export function dissectUdpTransport(
         ? (bytes: Uint8Array, at: number) =>
           quicTracker.matchConnectionId(srcIp, srcPort, dstIp, dstPort, bytes, at)
         : undefined;
+      // The handshake facts are gathered packet by packet, as the datagram is
+      // walked, rather than from the whole datagram afterwards: the ServerHello
+      // that names the cipher suite is usually in the Initial AHEAD of the
+      // Handshake and 1-RTT packets that need it, in the same datagram.
+      // `dissectQuicDatagram` has the measurement.
+      const facts: QuicHandshakeFacts = {};
       const quic = dissectQuicDatagram(
         rawBytes,
         udpPayloadStart,
         Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen),
         resolveConnectionId,
-        quicTracker?.createInitialDecryptor(srcIp, srcPort, dstIp, dstPort, rawBytes)
+        quicTracker?.createInitialDecryptor(srcIp, srcPort, dstIp, dstPort, rawBytes),
+        quicTracker
+          ? (fragments) => {
+            const learned = quicTracker.addCryptoFragments(srcIp, srcPort, dstIp, dstPort, fragments);
+            if (learned) Object.assign(facts, learned);
+          }
+          : undefined,
       );
       if (quic) {
         // A long header names its connection outright; a short one is
@@ -251,8 +263,7 @@ export function dissectUdpTransport(
           Object.assign(appFields, http3.fields);
         }
 
-        const facts = quicTracker?.addCryptoFragments(srcIp, srcPort, dstIp, dstPort, quic.cryptoFragments);
-        if (facts?.hello) {
+        if (facts.hello) {
           const h = facts.hello;
           if (h.sni !== null) quicFields['tls.handshake.extensions_server_name'] = h.sni;
           if (h.alpn.length > 0) quicFields['tls.handshake.extensions_alpn_str'] = h.alpn.join(',');
@@ -263,7 +274,7 @@ export function dissectUdpTransport(
           quicFields['tls.handshake.extensions_ech'] = h.echPresent ? 1 : 0;
           extraLayers.push(buildQuicTlsLayer(h, undefined));
         }
-        if (facts?.serverHello) {
+        if (facts.serverHello) {
           const sh = facts.serverHello;
           quicFields['tls.handshake.ciphersuite'] = sh.cipher;
           quicFields['tls.handshake.ja3s'] = sh.ja3s;

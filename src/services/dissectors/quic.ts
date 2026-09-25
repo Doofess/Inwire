@@ -642,13 +642,23 @@ export type ConnectionIdResolver = (bytes: Uint8Array, offset: number) => string
  * *last* one, so that is what `info` reports. Connection IDs are collected
  * across all of them, since any long header in the datagram teaches us an ID
  * that later short headers will use.
+ *
+ * `onPacketCrypto` hears each packet's CRYPTO fragments **before the next
+ * packet is dissected**, and that ordering is the point of it. A server's first
+ * datagram is typically an Initial carrying the ServerHello followed by a
+ * Handshake packet and, on a resumed connection, a 1-RTT one - and the cipher
+ * suite those two need is in the Initial ahead of them. Handed over only once
+ * the whole datagram was done, the suite arrived one packet too late and both
+ * stayed opaque: on a real Chrome capture, the only 3 of 18,708 protected
+ * packets that did not open were exactly these, and tshark opened all three.
  */
 export function dissectQuicDatagram(
   bytes: Uint8Array,
   start: number,
   end: number,
   resolveConnectionId?: ConnectionIdResolver,
-  decryptPacket?: PacketDecryptor
+  decryptPacket?: PacketDecryptor,
+  onPacketCrypto?: (fragments: CryptoFragment[]) => void,
 ): QuicDissectorResult | null {
   let offset = start;
   let last: QuicDissectorResult | null = null;
@@ -680,6 +690,7 @@ export function dissectQuicDatagram(
     streamFragments.push(...result.streamFragments);
     packets.push(...result.packets);
     sawLongHeader = sawLongHeader || result.isLongHeader;
+    if (onPacketCrypto && result.cryptoFragments.length > 0) onPacketCrypto(result.cryptoFragments);
 
     if (result.nextPacketOffset <= offset) break;
     offset = result.nextPacketOffset;
