@@ -48,7 +48,7 @@ export function useRovingFocus(
     // **A field keeps its own arrows, and its own Home and End.**
     //
     // The rail had no inputs, so the first version of this did not have to ask.
-    // A panel does: the schedule's preset name, and `DateTimeCalendar`'s Hour
+    // A panel does: the schedule's custom duration, and its start/stop Hour
     // and Minute. Home in a text field is "start of line" and Up in a number
     // field is "increment" - both of which this would have taken, moving FOCUS
     // out of the field somebody was typing in.

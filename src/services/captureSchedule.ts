@@ -122,7 +122,11 @@ export function applyPreset(schedule: CaptureSchedule, preset: SchedulePreset): 
  * stored as a duration rather than resolved when the preset was clicked.
  */
 export function resolveStopTime(schedule: CaptureSchedule, startedAt: number): number | null {
-  if (schedule.stopAt !== null) return schedule.stopAt;
+  // An absolute stop at or before the capture began is not a stop for THIS
+  // capture. Firing it meant a capture started by hand after the stop time had
+  // passed was stopped by the very next tick - one second of capture, from a
+  // schedule the panel had already flagged as wrong.
+  if (schedule.stopAt !== null) return schedule.stopAt > startedAt ? schedule.stopAt : null;
   if (schedule.stopAfterMinutes !== null) return startedAt + schedule.stopAfterMinutes * 60_000;
   return null;
 }
@@ -149,6 +153,9 @@ export function scheduleDecision(
     return stopAt !== null && now >= stopAt ? 'stop' : 'idle';
   }
   if (schedule.startAt === null) return 'idle';
+  // A start whose stop comes first is not armed. The panel said so in red, and
+  // the capture started anyway - to be stopped by the next tick.
+  if (isStopBeforeStart(schedule)) return 'idle';
   // Due, and not so long ago that it must have been set in the past.
   return now >= schedule.startAt && now <= schedule.startAt + START_GRACE_MS
     ? 'start'
@@ -164,6 +171,85 @@ export function scheduleDecision(
  */
 export function isStartMissed(schedule: CaptureSchedule, now: number): boolean {
   return schedule.startAt !== null && now > schedule.startAt + START_GRACE_MS;
+}
+
+/**
+ * True when both ends are absolute times and the stop is not after the start.
+ *
+ * Accepted silently until now: a capture armed to start at 14:00 and stop at
+ * 13:30 started, and was then stopped by the very next tick.
+ */
+export function isStopBeforeStart(schedule: CaptureSchedule): boolean {
+  return schedule.startAt !== null && schedule.stopAt !== null && schedule.stopAt <= schedule.startAt;
+}
+
+/**
+ * True when an absolute stop is already in the past - so a capture started now
+ * would be stopped by the first tick. Only meaningful for a manual start; a
+ * scheduled start that is later than the stop is `isStopBeforeStart`.
+ */
+export function isStopPassed(schedule: CaptureSchedule, now: number): boolean {
+  return schedule.stopAt !== null && schedule.stopAt <= now;
+}
+
+/** Why a schedule that is not empty will not do what it says, if it will not. */
+export type ScheduleProblem = 'start-missed' | 'stop-before-start' | 'stop-passed';
+
+/**
+ * The one answer to "is this schedule armed?", for every surface that shows it.
+ *
+ * Three surfaces showed the schedule and each asked its own question: the panel
+ * flagged a stop before the start in red while the plan sentence, the trigger
+ * button and the rail's dot all read it as armed. Only asked while idle - a
+ * running capture's stop is `resolveStopTime`'s question.
+ */
+export function scheduleProblem(schedule: CaptureSchedule, now: number): ScheduleProblem | null {
+  if (isStartMissed(schedule, now)) return 'start-missed';
+  if (isStopBeforeStart(schedule)) return 'stop-before-start';
+  if (schedule.startAt === null && isStopPassed(schedule, now)) return 'stop-passed';
+  return null;
+}
+
+/**
+ * The schedule once a scheduled stop has fired: both absolute times spent, the
+ * duration kept.
+ *
+ * Nothing cleared them before, and that was two bugs. Two minutes after a
+ * scheduled run the panel said "That time has already passed", in red, about
+ * a start that had happened exactly as asked. And the spent `stopAt` stayed
+ * armed, so the NEXT capture - started by hand, hours later - was stopped by
+ * the first tick. The duration is kept because it is a habit rather than a
+ * moment: "each capture runs 30 minutes" is still true after one has.
+ */
+export function afterScheduledStop(schedule: CaptureSchedule): CaptureSchedule {
+  return { ...schedule, startAt: null, stopAt: null };
+}
+
+/**
+ * Where "At a time" lands when a section is switched to it: the next whole
+ * five minutes that is at least a minute away. A time already past - "now",
+ * rounded down - would switch the section straight into its error.
+ */
+export function defaultStartAt(now: number): number {
+  const step = 5 * 60_000;
+  return Math.ceil((now + 60_000) / step) * step;
+}
+
+/** A stop half an hour after whatever the start is - or after now, if manual. */
+export function defaultStopAt(schedule: CaptureSchedule, now: number): number {
+  return (schedule.startAt ?? defaultStartAt(now)) + 30 * 60_000;
+}
+
+/** `epochMs` moved to another calendar day, keeping its time of day. */
+export function onDay(epochMs: number, day: Date): number {
+  const t = new Date(epochMs);
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), t.getHours(), t.getMinutes()).getTime();
+}
+
+/** `epochMs` at another time of day, keeping its date. */
+export function atTime(epochMs: number, hours: number, minutes: number): number {
+  const d = new Date(epochMs);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), hours, minutes).getTime();
 }
 
 /** Milliseconds until the running capture stops, or null when nothing will. */
@@ -212,10 +298,88 @@ export function describeDuration(minutes: number): string {
  * the same order. One format defined twice is one format that drifts; the two
  * halves of the feature simply lived in two files.
  */
-export function formatStamp(epochMs: number): string {
-  return new Date(epochMs).toLocaleString(undefined, {
-    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-  });
+export function formatWhen(epochMs: number, now: number): string {
+  // "today 16:20" - the panel's own words. This used to be "Sep 25, 16:20"
+  // over a plan sentence reading "today at 16:20" and a date field reading
+  // "Today": one moment spelt three ways in one column.
+  return `${describeDay(epochMs, now)} ${formatClock(epochMs)}`;
+}
+
+/**
+ * "14:05" - the time of day, always on the 24-hour clock.
+ *
+ * Fixed rather than the machine's own cycle because the panel's time FIELDS are
+ * two 24-hour numbers, and on a 12-hour machine the sentence above them read
+ * "04:15 PM" over fields reading 16 : 15 - two spellings of one time a
+ * centimetre apart.
+ */
+export function formatClock(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+}
+
+/** "today", "tomorrow", or "Sat 27 Sep" - a day relative to `now`. */
+export function describeDay(epochMs: number, now: number): string {
+  const day = new Date(epochMs);
+  const today = new Date(now);
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  // Rounded rather than divided exactly: a daylight-saving night is 23 or 25
+  // hours, and "tomorrow" must not become "Sun 26 Oct" on the one day a year
+  // the clocks move.
+  const days = Math.round((midnight(day) - midnight(today)) / 86_400_000);
+  if (days === 0) return 'today';
+  if (days === 1) return 'tomorrow';
+  if (days === -1) return 'yesterday';
+  return day.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+/**
+ * The one sentence at the top of the panel: what will happen, and when.
+ *
+ * The panel used to have no such line. It had two values - "Manually" and
+ * "Not Set" - and a reader had to assemble the plan from them, where "Manually"
+ * meant "the Start button" and "Not Set" meant "the Stop button" and neither
+ * said so. This says the plan in words, in every state, including the one
+ * where nothing is scheduled.
+ */
+export function describePlan(
+  schedule: CaptureSchedule,
+  now: number,
+  isCapturing: boolean,
+  startedAt: number | null,
+): string {
+  const at = (t: number) => `${describeDay(t, now)} at ${formatClock(t)}`;
+  if (isCapturing) {
+    // No countdown here: this sentence is read to a screen reader when it
+    // changes, and a ticking one changes every second. The trigger button
+    // carries the countdown.
+    const stop = startedAt === null ? null : resolveStopTime(schedule, startedAt);
+    if (stop === null) return 'Capturing. No stop set - it runs until you stop it.';
+    return `Capturing. Stops ${at(stop)}.`;
+  }
+  const { startAt, stopAt, stopAfterMinutes } = schedule;
+  if (startAt === null && stopAt === null && stopAfterMinutes === null) {
+    return 'Nothing scheduled. Capture starts and stops when you press the button.';
+  }
+  switch (scheduleProblem(schedule, now)) {
+    case 'start-missed': return 'Not armed: the start time has passed.';
+    case 'stop-before-start': return 'Not armed: the stop is before the start.';
+    case 'stop-passed': return 'Not armed: the stop time has passed.';
+    case null: break;
+  }
+  if (startAt !== null) {
+    if (stopAfterMinutes !== null) {
+      const end = startAt + stopAfterMinutes * 60_000;
+      return `Starts ${at(startAt)} · stops ${formatClock(end)} (after ${describeDuration(stopAfterMinutes)}).`;
+    }
+    if (stopAt !== null) {
+      // The day is said once when both ends share it.
+      const sameDay = describeDay(stopAt, now) === describeDay(startAt, now);
+      return `Starts ${at(startAt)} · stops ${sameDay ? formatClock(stopAt) : at(stopAt)}.`;
+    }
+    return `Starts ${at(startAt)} · runs until you stop it.`;
+  }
+  if (stopAfterMinutes !== null) return `Stops ${describeDuration(stopAfterMinutes)} after you press Start.`;
+  return `Stops ${at(stopAt!)}, however it was started.`;
 }
 
 export function describeSchedule(
@@ -223,8 +387,8 @@ export function describeSchedule(
   now: number,
   isCapturing: boolean,
   startedAt: number | null,
-  formatTime: (epochMs: number) => string,
 ): string {
+  const formatTime = (t: number) => formatWhen(t, now);
   if (isScheduleEmpty(schedule)) return 'Schedule capture';
   if (isCapturing) {
     const left = millisUntilStop(schedule, now, startedAt);
@@ -233,7 +397,9 @@ export function describeSchedule(
   // A start that can no longer fire must not read as one that will. The panel
   // already says so; a trigger still promising "Starts 14:00" would be the app
   // disagreeing with itself in two places a centimetre apart.
-  if (isStartMissed(schedule, now)) return 'Start time passed';
+  const problem = scheduleProblem(schedule, now);
+  if (problem === 'start-missed') return 'Start time passed';
+  if (problem !== null) return 'Schedule not armed';
   if (schedule.startAt !== null) return `Starts ${formatTime(schedule.startAt)}`;
   if (schedule.stopAt !== null) return `Stops ${formatTime(schedule.stopAt)}`;
   if (schedule.stopAfterMinutes !== null) return `Runs ${describeDuration(schedule.stopAfterMinutes)}`;

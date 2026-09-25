@@ -1,67 +1,47 @@
 import React, { useState } from 'react';
-import { ChevronDown, Trash, TriangleAlert } from 'lucide-react';
+import { CalendarDays, TriangleAlert, X } from 'lucide-react';
 
-import { DateTimeCalendar } from '../common/DateTimeCalendar';
+import { MonthGrid } from '../common/MonthGrid';
 import { Section } from '../network/rows';
+import { Segmented } from '../ui/segmented';
 import { useRovingFocus } from '../common/useRovingFocus';
 import {
-  DEFAULT_SCHEDULE_PRESETS, describeDuration, formatStamp, isStartMissed,
-  withStartAt, withStopAfter, withStopAt, applyPreset, START_GRACE_MS,
+  DEFAULT_SCHEDULE_PRESETS, EMPTY_SCHEDULE, applyPreset, atTime, defaultStartAt, defaultStopAt,
+  describeDay, describeDuration, describePlan, formatClock, isScheduleEmpty,
+  onDay, scheduleProblem, withStartAt, withStopAfter, withStopAt,
   type CaptureSchedule, type SchedulePreset,
 } from '../../services/captureSchedule';
 
 /**
- * A start time, a stop time, and the presets that fill them.
+ * When a capture starts, when it stops, and one calendar for both.
  *
- * This was a Radix dropdown off the rail, and almost everything that was odd
- * about it was the dropdown rather than the schedule.
+ * ## What the redesign changed, and why
  *
- * ## The cap is gone, so the calendars simply stay open
+ * Asked for by the owner - start and stop apart, the calendar kept open
+ * because the column has the room - and designed with a UX pass that found
+ * more than the layout wrong:
  *
- * `CaptureSchedulePicker` held ONE calendar between the two rows and a single
- * `editing: 'start' | 'stop' | null` slot deciding which field it was editing,
- * and the comment said why outright: *"two month grids stacked would make the
- * panel taller than the header it hangs from."* That is a sentence about a menu
- * hanging off a 36px button. A column is as tall as the window, so the slot
- * becomes two independent disclosures and both can be open at once - which is
- * the state somebody setting a window of time is actually in.
+ * - **Nothing said what would happen.** Two values, "Manually" and "Not Set",
+ *   and a reader had to assemble the plan. A sentence at the top says it now,
+ *   in every state (`describePlan`).
+ * - **Start and stop were two rows of one card** with a calendar behind each
+ *   chevron. They are two sections with a mode each - Start: Manual / At a
+ *   time; Stop: Manual / After / At a time - so the three stop forms that
+ *   `withStopAt` and `withStopAfter` already made exclusive are finally shown as
+ *   exclusive.
+ * - **One calendar, always open, showing both ends.** Two grids would spend
+ *   400px to show two separate dots; one shows the start filled, the stop ringed
+ *   and the days between tinted. Which end a pick sets is `target`, marked on
+ *   the section's date row and in the calendar's title.
+ * - **The duration chips and the presets were the same five values twice**,
+ *   and saving a preset could only re-save one that existed, since nothing let
+ *   you type a duration. The presets ARE the chips now, beside a minutes field
+ *   that can save a new one.
+ * - **Two checks were missing**: a stop before the start, and a stop already
+ *   past - which stopped a capture on its first tick without a word.
  *
- * ## The summary comes out of the tooltip
- *
- * `describeSchedule(...)` was computed in `ActivityRail` for one purpose: to
- * fill the rail button's `title`. "Stops in 14:58" was a fact the app knew,
- * updated every second, and showed only to somebody who happened to hover a
- * 36px icon. It is the header's `detail` now, which is the single most useful
- * thing this conversion buys and cost nothing to move.
- *
- * ## Every Radix workaround is deleted rather than ported
- *
- * Three `DropdownMenuItem`s - Clear schedule, each preset row, Restore
- * defaults - existed because *"a bare button inside the panel is skipped by
- * Radix's roving focus, which would leave the one destructive control here as
- * the only one the arrow keys cannot reach."* Outside a menu a button is an
- * ordinary tab stop and `useRovingFocus` reaches it, so they are buttons. The
- * three `onSelect={(e) => { e.preventDefault(); ... }}` handlers went with
- * them: each existed only to stop the menu closing.
- *
- * With the items went the `<div className="flex items-center gap-1 pr-1">`
- * that held each preset's trash button OUTSIDE the tinted row - a
- * `DropdownMenuItem` is a full-width row that cannot contain a second
- * focusable, which is why deleting a preset meant aiming at a target sitting
- * beyond the highlight that named it. The trash is inside the row now.
- *
- * And `w-80 max-h-[32rem] ... border-0 shadow-lg`, whose comment blamed the
- * mono theme's near-white `--border` for drawing "a hard rectangle around the
- * panel". There is no floating panel to outline: this one shares the rail's
- * border, which is the seam.
- *
- * ## Clear schedule keeps its focus ring, and loses its `!`
- *
- * The two `!` prefixes beat the primitive's own `focus:bg-accent`; there is no
- * primitive. The RING stays, and its comment's argument survives intact because
- * it was never about Radix: a 10% opacity shift on a saturated fill is not a
- * focus indicator, so a keyboard user reaching the one destructive control here
- * could not see that they had.
+ * `DateTimeCalendar` and its Today / In 15 min / Clear buttons are gone: the
+ * modes and the quick offsets replace them, and `MonthGrid` is only a grid.
  */
 export interface CaptureSchedulePanelProps {
   schedule: CaptureSchedule;
@@ -75,316 +55,503 @@ export interface CaptureSchedulePanelProps {
   bufferedPackets: number;
   /** The schedule hook's clock, so "already passed" updates without a timer here. */
   now: number;
+  /** Whether a capture is running - the start is history then, not a setting. */
+  isCapturing: boolean;
+  /** When the running capture began, epoch ms. */
+  startedAt: number | null;
 }
 
-const fieldClass =
-  'w-full rounded-sm border border-border bg-background px-2 py-1 font-mono text-xs '
-  + 'text-foreground outline-none focus:border-primary disabled:opacity-50';
+type StartMode = 'manual' | 'time';
+type StopMode = 'manual' | 'after' | 'time';
 
-const rowLabelClass =
-  'text-[10px] font-bold uppercase tracking-wider font-mono text-muted-foreground';
+const START_MODES = [
+  { value: 'manual', label: 'Manual' },
+  { value: 'time', label: 'At a time' },
+] as const;
+const STOP_MODES = [
+  { value: 'manual', label: 'Manual' },
+  { value: 'after', label: 'After' },
+  { value: 'time', label: 'At a time' },
+] as const;
+
+// 24px targets throughout (`h-6`): the first pass drew fields, chips and modes
+// at 18-20px, under the smallest size a pointer reliably hits.
+const fieldClass =
+  'h-6 rounded-sm border border-border bg-background px-1 font-mono text-xs text-center '
+  + 'text-foreground outline-none focus:border-primary placeholder:text-muted-foreground/60';
+const helpClass = 'text-[11px] leading-snug text-muted-foreground';
+const linkClass =
+  'text-[11px] text-primary hover:underline cursor-pointer focus-visible:outline-none '
+  + 'focus-visible:ring-1 focus-visible:ring-ring rounded-sm';
+/**
+ * One chip for both sections, in a three-column grid with the text centred.
+ * The Stop chips used to carry `pr-4` for an × that was hidden most of the
+ * time, so they sat lopsided beside the Start chips and wrapped 3 then 2.
+ */
+const chipClass = (on: boolean) =>
+  `w-full h-6 rounded-sm border px-1 font-mono text-[11px] text-center cursor-pointer transition-colors ${on
+    ? 'border-primary bg-primary/15 text-primary font-semibold'
+    : 'border-border hover:border-primary'}`;
+const buttonClass =
+  'h-6 rounded-sm border border-border px-2 text-[11px] cursor-pointer hover:border-primary '
+  + 'disabled:opacity-50 disabled:cursor-not-allowed';
+
+const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** A field's keys are its own: the panel's arrows and the window's Space must not fire. */
+const keepKeys = (e: React.KeyboardEvent) => {
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', ' '].includes(e.key)) {
+    e.stopPropagation();
+  }
+};
 
 /**
- * The interface panel's selection language, stated once here.
- *
- * A tinted accent ground, accent text, and a bar that scales out of the left
- * edge - so a selection reads as MOVING between rows rather than appearing on
- * one. Copied deliberately: the two panels open from adjacent buttons in the
- * rail's capture group, and "this is the one you picked" must not be said two
- * different ways a centimetre apart.
- *
- * **It is on the presets and not on the two value rows.** Those rows are not a
- * choice among alternatives - they are two fields, each holding one value -
- * and marking the one whose calendar happens to be open as "selected" said
- * something the chevron already says, in the vocabulary reserved for a picked
- * item.
+ * Hour and minute for one end. Up/Down step by one, Shift+Up/Down step minutes
+ * by fifteen, typing keeps the last two digits - so "1" then "4" is 14, not 1
+ * then an invalid 14-and-something.
  */
-const selectedRowClass = 'bg-primary/15 text-primary font-semibold';
-const accentBarClass =
-  'absolute left-0 top-1 bottom-1 w-0.5 origin-center rounded-full bg-primary '
-  + 'transition-transform duration-150 ease-out';
+const TimeFields: React.FC<{
+  value: number;
+  onChange: (next: number) => void;
+  label: string;
+}> = ({ value, onChange, label }) => {
+  const d = new Date(value);
+  const h = d.getHours();
+  const m = d.getMinutes();
+  const set = (nh: number, nm: number) => onChange(atTime(value, (nh + 24) % 24, (nm + 60) % 60));
+  const field = (which: 'hour' | 'minute', current: number, max: number) => (
+    <input
+      aria-label={`${label} ${which}`}
+      role="spinbutton"
+      aria-valuenow={current}
+      aria-valuemin={0}
+      aria-valuemax={max}
+      inputMode="numeric"
+      className={`${fieldClass} w-9`}
+      value={String(current).padStart(2, '0')}
+      onChange={(e) => {
+        const digits = e.target.value.replace(/\D/g, '').slice(-2);
+        const n = Math.min(max, Number(digits) || 0);
+        if (which === 'hour') set(n, m);
+        else set(h, n);
+      }}
+      onKeyDown={(e) => {
+        keepKeys(e);
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+        e.preventDefault();
+        const step = (e.key === 'ArrowUp' ? 1 : -1) * (which === 'minute' && e.shiftKey ? 15 : 1);
+        if (which === 'hour') set(h + step, m);
+        else set(h, m + step);
+      }}
+    />
+  );
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      {field('hour', h, 23)}
+      <span className="text-xs text-muted-foreground">:</span>
+      {field('minute', m, 59)}
+    </span>
+  );
+};
+
+/**
+ * One end's date and time. The date is a button that points the calendar at
+ * this end.
+ *
+ * **Picking is a fill and an icon, not a coloured border.** A primary border
+ * and primary text is what a FOCUSED field looks like here, so the first pass
+ * showed the date button and the hour field beside it both apparently focused,
+ * and invited typing into a button.
+ */
+const WhenRow: React.FC<{
+  value: number;
+  now: number;
+  picking: boolean;
+  onPick: () => void;
+  onChange: (next: number) => void;
+  label: string;
+}> = ({ value, now, picking, onPick, onChange, label }) => (
+  <div className="flex items-center gap-2">
+    <button
+      type="button"
+      aria-pressed={picking}
+      aria-label={`${label} date, ${describeDay(value, now)}${picking ? ', set on the calendar below' : ''}`}
+      title={picking ? 'The calendar below sets this date' : 'Set this date on the calendar below'}
+      onClick={onPick}
+      className={`flex-1 min-w-0 h-6 flex items-center gap-1.5 rounded-sm px-1.5 font-mono text-xs cursor-pointer
+        border transition-colors ${picking
+          ? 'border-transparent bg-primary/15 text-foreground'
+          : 'border-border hover:border-primary'}`}
+    >
+      <CalendarDays className={`w-3 h-3 shrink-0 ${picking ? 'text-primary' : 'text-muted-foreground'}`} />
+      {/* "Today", "Tomorrow", or "Sat, Sep 27": the day relative to now, which
+          is the question - and short enough for the narrowest column, where
+          the full date and "(today)" after it ran out of the box. */}
+      <span className="truncate">{capitalise(describeDay(value, now))}</span>
+    </button>
+    <TimeFields value={value} onChange={onChange} label={label} />
+  </div>
+);
+
+const Notice: React.FC<{ tone: 'error' | 'warning'; children: React.ReactNode }> = ({ tone, children }) => (
+  <p className={`flex items-start gap-1 text-[11px] leading-snug ${
+    tone === 'error' ? 'text-destructive' : 'text-warning'}`}>
+    <TriangleAlert className="w-3 h-3 shrink-0 mt-0.5" />
+    <span>{children}</span>
+  </p>
+);
 
 export const CaptureSchedulePanel: React.FC<CaptureSchedulePanelProps> = ({
   schedule, onScheduleChange, presets, onPresetsChange, bufferedPackets, now,
+  isCapturing, startedAt,
 }) => {
-  const [newPresetName, setNewPresetName] = useState('');
-  /**
-   * Two disclosures, not one slot.
-   *
-   * The single `editing` slot was the height cap wearing a state variable.
-   * Setting a window of time means holding both ends in view, and the column
-   * has the room, so neither field closes the other.
-   */
-  const [startOpen, setStartOpen] = useState(false);
-  const [stopOpen, setStopOpen] = useState(false);
+  /** Which end a calendar pick sets. Follows whichever date row was last pressed. */
+  const [target, setTarget] = useState<'start' | 'stop'>('start');
+  const [customMinutes, setCustomMinutes] = useState('');
+  /** The last preset deleted, and where it was - so a delete can be undone. */
+  const [removed, setRemoved] = useState<{ preset: SchedulePreset; index: number } | null>(null);
   const onKeyDown = useRovingFocus('vertical');
 
-  const willDiscard = schedule.startAt !== null && bufferedPackets > 0;
-  // A start too far in the past can no longer fire, and has to say so. Silently
-  // keeping a time that will never happen is how somebody sets a schedule,
-  // watches nothing occur, and concludes the feature is broken.
-  const startMissed = isStartMissed(schedule, now);
-  // Only a duration is worth saving: an absolute stop is a moment, and a moment
-  // saved as a preset is wrong by tomorrow.
-  const canSavePreset = schedule.stopAfterMinutes !== null;
+  const startMode: StartMode = schedule.startAt === null ? 'manual' : 'time';
+  const stopMode: StopMode = schedule.stopAt !== null
+    ? 'time'
+    : schedule.stopAfterMinutes !== null ? 'after' : 'manual';
 
-  const removePreset = (id: string) => onPresetsChange(presets.filter((p) => p.id !== id));
-
-  const savePreset = () => {
-    const minutes = schedule.stopAfterMinutes;
-    if (minutes === null) return;
-    const name = newPresetName.trim() || `Capture for ${describeDuration(minutes)}`;
-    onPresetsChange([
-      ...presets,
-      { id: `preset-${Date.now().toString(36)}`, name, stopAfterMinutes: minutes },
-    ]);
-    setNewPresetName('');
+  const setStartMode = (mode: StartMode) => {
+    if (mode === 'manual') {
+      onScheduleChange(withStartAt(schedule, null));
+      if (target === 'start' && stopMode === 'time') setTarget('stop');
+    } else {
+      onScheduleChange(withStartAt(schedule, defaultStartAt(now)));
+      setTarget('start');
+    }
+  };
+  const setStopMode = (mode: StopMode) => {
+    if (mode === 'manual') onScheduleChange(withStopAfter(schedule, null));
+    else if (mode === 'after') onScheduleChange(withStopAfter(schedule, schedule.stopAfterMinutes ?? 30));
+    else {
+      onScheduleChange(withStopAt(schedule, defaultStopAt(schedule, now)));
+      setTarget('stop');
+    }
   };
 
-  const fields = [
-    {
-      key: 'start' as const,
-      label: 'Starting Time',
-      value: schedule.startAt,
-      open: startOpen,
-      toggle: () => setStartOpen((v) => !v),
-      // A duration is a stop, so the row may not answer "Not Set" while a
-      // preset below it is highlighted as applied and the line beneath says
-      // when the capture ends - three statements about one field, one of them
-      // wrong. `withStopAfter` clears `stopAt`, so this field is empty in
-      // exactly the case where the OTHER form of the same answer is set.
-      empty: 'Manually',
-      onChange: (next: number | null) => onScheduleChange(withStartAt(schedule, next)),
-    },
-    {
-      key: 'stop' as const,
-      label: 'Stopping Time',
-      value: schedule.stopAt,
-      open: stopOpen,
-      toggle: () => setStopOpen((v) => !v),
-      empty: schedule.stopAfterMinutes !== null
-        ? `${describeDuration(schedule.stopAfterMinutes)} after start`
-        : 'Not Set',
-      onChange: (next: number | null) => onScheduleChange(withStopAt(schedule, next)),
-    },
-  ];
+  /**
+   * Which end the calendar sets, and whether it can set one at all.
+   *
+   * **A pick only ever sets an end that is already "At a time".** The first
+   * pass let a pick switch a Manual start, or an After stop, to "At a time" -
+   * at a time of day the user had never seen, and in the After case throwing
+   * the duration away. Nothing announced either. So the calendar follows the
+   * end that has a date, and with neither it is shown and not pickable.
+   */
+  const isTimed = (end: 'start' | 'stop') =>
+    end === 'start' ? !isCapturing && startMode === 'time' : stopMode === 'time';
+  const preferred = isCapturing ? 'stop' : target;
+  const other = preferred === 'start' ? 'stop' : 'start';
+  const calendarTarget: 'start' | 'stop' = isTimed(preferred) ? preferred : isTimed(other) ? other : preferred;
+  const calendarLive = isTimed(calendarTarget);
+
+  const pickDay = (day: Date) => {
+    if (!calendarLive) return;
+    if (calendarTarget === 'start') onScheduleChange(withStartAt(schedule, onDay(schedule.startAt!, day)));
+    else onScheduleChange(withStopAt(schedule, onDay(schedule.stopAt!, day)));
+  };
+
+  const problem = isCapturing ? null : scheduleProblem(schedule, now);
+  const startMissed = problem === 'start-missed';
+  const stopBeforeStart = problem === 'stop-before-start';
+  const stopPassed = problem === 'stop-passed';
+  const willDiscard = !isCapturing && schedule.startAt !== null && problem === null && bufferedPackets > 0;
+
+  const custom = Number(customMinutes);
+  const customValid = customMinutes !== '' && Number.isInteger(custom) && custom > 0 && custom <= 7 * 24 * 60;
+  const alreadyPreset = (minutes: number) => presets.some((p) => p.stopAfterMinutes === minutes);
+  /**
+   * Two buttons, two actions. "Use and save" was one button doing both, whose
+   * label turned into "Use" depending on what had been typed.
+   */
+  const applyCustom = () => {
+    if (!customValid) return;
+    onScheduleChange(withStopAfter(schedule, custom));
+    setCustomMinutes('');
+  };
+  const saveCustom = () => {
+    if (!customValid || alreadyPreset(custom)) return;
+    onPresetsChange([
+      ...presets,
+      { id: `preset-${Date.now().toString(36)}`, name: `Capture for ${describeDuration(custom)}`, stopAfterMinutes: custom },
+    ]);
+    applyCustom();
+  };
+  const removePreset = (preset: SchedulePreset) => {
+    setRemoved({ preset, index: presets.findIndex((p) => p.id === preset.id) });
+    onPresetsChange(presets.filter((p) => p.id !== preset.id));
+  };
+  const undoRemove = () => {
+    if (removed === null) return;
+    const next = [...presets];
+    next.splice(Math.min(removed.index, next.length), 0, removed.preset);
+    onPresetsChange(next);
+    setRemoved(null);
+  };
 
   return (
     <div className="p-2 space-y-2" onKeyDown={onKeyDown}>
-      <Section title="When">
-        {fields.map((field) => (
-          /* **One cell per field, and its notices live inside it.**
-
-             `Section` lays its children out `divide-y`, so a notice rendered as
-             a SIBLING would read as another fact in the list rather than as
-             something attached to the field above it. Inside the cell it is
-             unambiguously about that field, which is what the collapsed layout
-             had nowhere to put. */
-          <div key={field.key}>
-            <button
-              type="button"
-              aria-expanded={field.open}
-              onClick={field.toggle}
-              className="group relative w-full flex items-center gap-2 px-3 py-2
-                font-mono text-xs cursor-pointer transition-colors hover:bg-accent/60
-                focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring
-                focus-visible:ring-inset"
-            >
-              <span className={rowLabelClass}>{field.label}</span>
-              <span className="ml-auto truncate">
-                {field.value !== null ? formatStamp(field.value) : field.empty}
-              </span>
-              <ChevronDown
-                aria-hidden
-                className={`w-3.5 h-3.5 shrink-0 text-muted-foreground transition-transform
-                  duration-150 ${field.open ? 'rotate-180' : ''}`}
-              />
-            </button>
-
-            {field.open && (
-              <div className="px-3 pb-2">
-                <DateTimeCalendar
-                  value={field.value}
-                  now={now}
-                  label={field.key === 'start' ? 'Starts at' : 'Stops at'}
-                  onChange={field.onChange}
-                />
-              </div>
-            )}
-
-            {field.key === 'start' && startMissed && (
-              <p className="flex items-start gap-1 px-3 pb-2 text-[10px] leading-tight
-                text-destructive">
-                <TriangleAlert className="w-3 h-3 shrink-0 mt-px" />
-                <span>
-                  That time has already passed, so nothing will start. Pick one more than{' '}
-                  {Math.round(START_GRACE_MS / 60_000)} minutes ahead.
-                </span>
-              </p>
-            )}
-            {field.key === 'start' && willDiscard && !startMissed && (
-              /* **The warning is the confirm.** Starting with frames in the
-                 buffer normally asks first - the Start button puts up "Discard
-                 N captured packets?" and waits. A timer cannot answer that, so
-                 the cost is stated here, live, while the schedule is being set.
-                 The consent is given at the moment of the decision rather than
-                 removed. */
-              <p className="flex items-start gap-1 px-3 pb-2 text-[10px] leading-tight
-                text-warning">
-                <TriangleAlert className="w-3 h-3 shrink-0 mt-px" />
-                <span>
-                  {bufferedPackets.toLocaleString()} captured packet
-                  {bufferedPackets === 1 ? '' : 's'} will be discarded when this starts.
-                </span>
-              </p>
-            )}
-          </div>
-        ))}
-      </Section>
-
-      {/* The five durations, which are the fastest way to set a stop and the
-          only control here that needs no calendar at all. */}
-      <div className="flex flex-wrap gap-1 px-1">
-        {[5, 15, 30, 60, 120].map((minutes) => {
-          const applied = schedule.stopAfterMinutes === minutes;
-          return (
-            <button
-              key={minutes}
-              type="button"
-              // Too small to carry the accent bar, so a chip takes the other
-              // half of the same language - the tinted ground and the accent
-              // text - rather than inventing a third way to say "this one".
-              className={`rounded-sm border px-1.5 py-0.5 font-mono text-[10px] cursor-pointer
-                transition-colors ${applied
-                  ? 'border-primary bg-primary/15 text-primary font-semibold'
-                  : 'border-border hover:border-primary'}`}
-              onClick={() => onScheduleChange(withStopAfter(schedule, minutes))}
-            >
-              {describeDuration(minutes)}
-            </button>
-          );
-        })}
+      {/* **The plan, in words**, always. It is the one line that answers "what
+          happens if I walk away now", which the panel never said - so it is
+          marked as the panel's headline, and turns red when the schedule will
+          not do what it says. It is a live region, which is why `describePlan`
+          carries no ticking countdown: that was read aloud every second. */}
+      <div
+        className={`flex items-start gap-2 rounded-lg border border-l-2 px-3 py-2 ${problem !== null
+          ? 'border-destructive/40 border-l-destructive bg-destructive/5'
+          : 'border-border border-l-primary bg-primary/5'}`}
+      >
+        <p
+          role="status"
+          className={`flex-1 min-w-0 text-xs leading-snug ${problem !== null ? 'text-destructive' : 'text-foreground'}`}
+        >
+          {describePlan(schedule, now, isCapturing, startedAt)}
+        </p>
+        {/* Clear sits beside the plan it clears. It was a link under the
+            calendar, a screen away from anything it described. */}
+        {!isScheduleEmpty(schedule) && (
+          <button type="button" className={`${linkClass} shrink-0`} onClick={() => onScheduleChange(EMPTY_SCHEDULE)}>
+            Clear
+          </button>
+        )}
       </div>
 
-      <Section
-        title="Presets"
-        // The explanation was the ELSE branch of a fork that swapped it for the
-        // save row. Promoted to permanent, it explains the disabled row instead
-        // of replacing it - so the reason is on screen at the moment somebody
-        // wonders why they cannot type in the box.
-        note="A preset is a duration. An absolute stop time would be stale tomorrow."
-      >
-        {presets.length === 0 && (
-          <p className="px-3 py-2 text-[10px] leading-tight text-muted-foreground">
-            No presets. Set a duration above to save one, or restore the defaults.
-          </p>
-        )}
-
-        {presets.map((preset) => {
-          // The schedule holds a DURATION, not a preset id, so "applied" is a
-          // question about minutes - and two presets naming the same duration
-          // both light up, because both of them are applied. Remembering which
-          // one was clicked would make this a memory of an action rather than a
-          // statement about the schedule, and the two disagree the moment the
-          // duration is changed by the chips above.
-          const applied = schedule.stopAfterMinutes === preset.stopAfterMinutes;
-          return (
-            <div
-              key={preset.id}
-              className={`group relative flex items-center ${applied ? selectedRowClass : ''}`}
-            >
-              <span
-                aria-hidden
-                className={`${accentBarClass} ${applied ? 'scale-y-100' : 'scale-y-0'}`}
+      <Section title="Start">
+        <div className="px-3 py-2 space-y-2">
+          {isCapturing ? (
+            <p className={helpClass}>
+              Started {startedAt !== null ? `${describeDay(startedAt, now)} at ${formatClock(startedAt)}` : 'by hand'}.
+              The start is set again once this capture stops.
+            </p>
+          ) : (
+            <>
+              <Segmented
+                value={startMode}
+                onValueChange={setStartMode}
+                options={START_MODES}
+                ariaLabel="How the capture starts"
+                size="md"
               />
-              <button
-                type="button"
-                onClick={() => onScheduleChange(applyPreset(schedule, preset))}
-                className="flex-1 min-w-0 text-left px-3 py-2 font-mono text-xs cursor-pointer
-                  transition-colors hover:bg-accent/60 focus-visible:outline-none
-                  focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
-              >
-                <span className="block truncate">{preset.name}</span>
-              </button>
-              {/* **Inside the row, not beside it.** It sat outside the tinted
-                  item because a `DropdownMenuItem` is a full-width row that
-                  cannot hold a second focusable - so deleting a preset meant
-                  aiming at a target that sat beyond the highlight naming what
-                  would be deleted. */}
-              <button
-                type="button"
-                aria-label={`Delete preset ${preset.name}`}
-                title="Delete preset"
-                className="mr-1 p-1 rounded-sm text-muted-foreground hover:text-destructive
-                  cursor-pointer opacity-0 group-hover:opacity-100 group-focus-within:opacity-100
-                  focus-visible:opacity-100 transition-opacity"
-                onClick={() => removePreset(preset.id)}
-              >
-                <Trash className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          );
-        })}
-
-        {/* **Always mounted, disabled when there is nothing to save.** It was a
-            fork: the input appeared only once a duration existed, and the
-            sentence explaining why took its place otherwise. Swapping a control
-            for its own explanation means the explanation is gone at the moment
-            the control works, and the control is gone at the moment somebody
-            wants to know why. The note on this Section carries the reason
-            permanently, and this row simply greys out. */}
-        <div className="flex items-center gap-1 px-3 py-2">
-          <input
-            className={fieldClass}
-            disabled={!canSavePreset}
-            aria-label="Name for the saved preset"
-            placeholder={canSavePreset
-              ? `Capture for ${describeDuration(schedule.stopAfterMinutes!)}`
-              : 'Set a duration first'}
-            value={newPresetName}
-            onChange={(e) => setNewPresetName(e.target.value)}
-            // **Two reasons now, and the second is new.** It stopped Radix's
-            // typeahead swallowing keystrokes; it also stops the roving-focus
-            // handler on this panel's container, whose Home and End would
-            // otherwise jump the FOCUS out of this field rather than moving the
-            // caret in it - and stops `useKeyboardNavigation`'s window-level
-            // Space from toggling the capture mid-word.
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === 'Enter') savePreset();
-            }}
-          />
-          <button
-            type="button"
-            disabled={!canSavePreset}
-            className="rounded-sm border border-border px-2 py-1 font-mono text-xs
-              cursor-pointer hover:border-primary disabled:opacity-50
-              disabled:cursor-not-allowed"
-            onClick={savePreset}
-          >
-            Save
-          </button>
+              {startMode === 'manual' ? (
+                <p className={helpClass}>Starts when you press Start.</p>
+              ) : (
+                <WhenRow
+                  value={schedule.startAt!}
+                  now={now}
+                  picking={calendarLive && calendarTarget === 'start'}
+                  onPick={() => setTarget('start')}
+                  onChange={(next) => onScheduleChange(withStartAt(schedule, next))}
+                  label="Start"
+                />
+              )}
+              <div className="grid grid-cols-[auto_1fr_1fr_1fr] items-center gap-1">
+                <span className={`${helpClass} mr-0.5`}>Start in</span>
+                {[5, 15, 60].map((minutes) => (
+                  <button
+                    key={minutes}
+                    type="button"
+                    className={chipClass(false)}
+                    onClick={() => {
+                      // To the minute, so the fields read cleanly and the start
+                      // lands on a real minute boundary.
+                      const at = Math.ceil((now + minutes * 60_000) / 60_000) * 60_000;
+                      onScheduleChange(withStartAt(schedule, at));
+                      setTarget('start');
+                    }}
+                  >
+                    {describeDuration(minutes)}
+                  </button>
+                ))}
+              </div>
+              {startMissed && (
+                <Notice tone="error">
+                  {formatClock(schedule.startAt!)} has passed, so nothing will start. Pick a later time.
+                </Notice>
+              )}
+              {willDiscard && (
+                /* **The warning is the confirm.** The Start button asks before
+                   discarding a buffer; a timer cannot, so the cost is stated
+                   here, live, while the schedule is being set. */
+                <Notice tone="warning">
+                  {bufferedPackets.toLocaleString()} packet{bufferedPackets === 1 ? '' : 's'} in the
+                  buffer will be discarded when this starts.
+                </Notice>
+              )}
+            </>
+          )}
         </div>
+      </Section>
 
-        {presets.length < DEFAULT_SCHEDULE_PRESETS.length && (
-          <button
-            type="button"
-            className="w-full text-left px-3 py-2 font-mono text-xs text-muted-foreground
-              cursor-pointer hover:bg-accent/60 focus-visible:outline-none
-              focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
-            onClick={() => {
-              // Merged, not replaced: restoring the defaults should not throw
-              // away presets the user made.
-              const have = new Set(presets.map((p) => p.id));
-              onPresetsChange([
-                ...presets,
-                ...DEFAULT_SCHEDULE_PRESETS.filter((p) => !have.has(p.id)),
-              ]);
-            }}
-          >
-            Restore default presets
-          </button>
-        )}
+      <Section title="Stop">
+        {/* A floor on the height, sized to the tallest mode (After, measured at 145px), so the
+            calendar below does not jump ~100px under the pointer when the mode
+            changes - the hazard `MonthGrid`'s fixed six rows exist to avoid. */}
+        <div className="px-3 py-2 space-y-2 min-h-[145px]">
+          <Segmented
+            value={stopMode}
+            onValueChange={setStopMode}
+            options={STOP_MODES}
+            ariaLabel="How the capture stops"
+            size="md"
+          />
+
+          {stopMode === 'manual' && <p className={helpClass}>Runs until you press Stop.</p>}
+
+          {stopMode === 'after' && (
+            <>
+              {/* **The presets are the chips.** They were five chips AND five
+                  preset rows holding the same five durations - two controls for
+                  one value. A preset's name is its tooltip; the chip says the
+                  duration, which is what is being chosen.
+
+                  The × is a hover affordance on chips that are NOT applied. On
+                  the applied chip an × reads as "unselect" and it deleted the
+                  preset, which is why it is never drawn there. Every delete -
+                  the × or Delete on a focused chip - can be undone. */}
+              <div className="grid grid-cols-3 gap-1">
+                {presets.map((preset) => {
+                  const applied = schedule.stopAfterMinutes === preset.stopAfterMinutes;
+                  return (
+                    <span key={preset.id} className="group relative">
+                      <button
+                        type="button"
+                        title={`${preset.name} - Delete removes it`}
+                        aria-pressed={applied}
+                        aria-keyshortcuts="Delete"
+                        className={chipClass(applied)}
+                        onClick={() => onScheduleChange(applyPreset(schedule, preset))}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Delete' || e.key === 'Backspace') {
+                            e.preventDefault();
+                            removePreset(preset);
+                          }
+                        }}
+                      >
+                        {describeDuration(preset.stopAfterMinutes)}
+                      </button>
+                      {!applied && (
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          aria-label={`Delete preset ${preset.name}`}
+                          title="Delete this duration"
+                          className="absolute right-0.5 top-1/2 -translate-y-1/2 p-0.5 rounded-sm
+                            text-muted-foreground hover:text-destructive cursor-pointer opacity-0
+                            group-hover:opacity-100 transition-opacity"
+                          onClick={() => removePreset(preset)}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+
+              {removed !== null && (
+                <p className={`${helpClass} flex items-center gap-1.5`}>
+                  <span>Removed {describeDuration(removed.preset.stopAfterMinutes)}.</span>
+                  <button type="button" className={linkClass} onClick={undoRemove}>Undo</button>
+                </p>
+              )}
+
+              <div className="flex flex-wrap items-center gap-1">
+                <input
+                  aria-label="Custom duration in minutes"
+                  inputMode="numeric"
+                  placeholder="e.g. 90"
+                  className={`${fieldClass} w-16`}
+                  value={customMinutes}
+                  onChange={(e) => setCustomMinutes(e.target.value.replace(/\D/g, '').slice(0, 5))}
+                  onKeyDown={(e) => {
+                    keepKeys(e);
+                    if (e.key === 'Enter') applyCustom();
+                  }}
+                />
+                <span className={`${helpClass} mr-auto`}>min</span>
+                <button type="button" disabled={!customValid} className={buttonClass} onClick={applyCustom}>
+                  Set
+                </button>
+                <button
+                  type="button"
+                  disabled={!customValid || alreadyPreset(custom)}
+                  title={customValid && alreadyPreset(custom) ? 'Already a preset' : 'Set it, and keep it as a preset'}
+                  className={buttonClass}
+                  onClick={saveCustom}
+                >
+                  Save
+                </button>
+              </div>
+
+              {presets.length < DEFAULT_SCHEDULE_PRESETS.length && (
+                <button
+                  type="button"
+                  className={linkClass}
+                  onClick={() => {
+                    // Merged, not replaced: restoring the defaults must not
+                    // throw away durations somebody saved.
+                    const have = new Set(presets.map((p) => p.id));
+                    onPresetsChange([...presets, ...DEFAULT_SCHEDULE_PRESETS.filter((p) => !have.has(p.id))]);
+                    setRemoved(null);
+                  }}
+                >
+                  Restore default durations
+                </button>
+              )}
+            </>
+          )}
+
+          {stopMode === 'time' && (
+            <WhenRow
+              value={schedule.stopAt!}
+              now={now}
+              picking={calendarLive && calendarTarget === 'stop'}
+              onPick={() => setTarget('stop')}
+              onChange={(next) => onScheduleChange(withStopAt(schedule, next))}
+              label="Stop"
+            />
+          )}
+
+          {stopBeforeStart && (
+            <Notice tone="error">
+              Stops before it starts, so nothing will run. Pick a stop after {formatClock(schedule.startAt!)}.
+            </Notice>
+          )}
+          {stopPassed && (
+            <Notice tone="error">
+              {formatClock(schedule.stopAt!)} has passed. Pick a later stop.
+            </Notice>
+          )}
+        </div>
+      </Section>
+
+      {/* **Always open**, which is the owner's call and the column's room. The
+          heading stays "Calendar" whichever end it sets - a heading that
+          changed with the target moved text out from under the reader's eye -
+          and the note names the end. */}
+      <Section
+        title="Calendar"
+        note={calendarLive
+          ? <>Sets the <span className="font-semibold text-primary">{calendarTarget}</span> date</>
+          : 'Set Start or Stop to "At a time" to pick a day'}
+      >
+        <div className="px-3 py-2">
+          <MonthGrid
+            start={schedule.startAt}
+            stop={schedule.stopAt}
+            target={calendarTarget}
+            onPickDay={pickDay}
+            now={now}
+            label={calendarTarget === 'start' ? 'Start date' : 'Stop date'}
+            disabled={!calendarLive}
+          />
+        </div>
       </Section>
     </div>
   );

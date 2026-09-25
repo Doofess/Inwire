@@ -57,7 +57,8 @@ import { usePacketBuffer } from './hooks/usePacketBuffer';
 import { useCaptureSchedule } from './hooks/useCaptureSchedule';
 import { capturePresetStore } from './services/captureSchedulePrefs';
 import {
-  describeSchedule, EMPTY_SCHEDULE, formatStamp, isScheduleEmpty, type CaptureSchedule,
+  afterScheduledStop, describeSchedule, EMPTY_SCHEDULE, isScheduleEmpty, scheduleProblem,
+  type CaptureSchedule,
 } from './services/captureSchedule';
 import { useAgentConnection } from './hooks/useAgentConnection';
 import { inferHostIdentity } from './services/hostIdentity';
@@ -863,6 +864,11 @@ export default function App() {
     onScheduledStart: scheduledStart,
     onScheduledStop: () => {
       handlePauseCapture();
+      // Spent: the absolute times are cleared and the duration kept. Left
+      // armed, the old start read as "already passed" two minutes later and
+      // the old stop killed the next capture started by hand on its first
+      // tick. See `afterScheduledStop`.
+      setSchedule(afterScheduledStop);
       setNavNotice('Scheduled capture stopped.');
     },
   });
@@ -1898,8 +1904,10 @@ export default function App() {
    * moving precisely because the one it had was a tooltip.
    */
   const scheduleSummary = describeSchedule(
-    schedule, scheduleNow, isCapturing, captureStartedAtRef.current, formatStamp,
+    schedule, scheduleNow, isCapturing, captureStartedAtRef.current,
   );
+  const scheduleArmed = !isScheduleEmpty(schedule)
+    && (isCapturing || scheduleProblem(schedule, scheduleNow) === null);
 
   const handleViewChange = useCallback((next: AppView) => {
     /**
@@ -2553,6 +2561,7 @@ export default function App() {
           onOpenSideBar={toggleSideBar}
           schedule={schedule}
           scheduleSummary={scheduleSummary}
+          scheduleArmed={scheduleArmed}
         />
 
         {/* The content pane, tucked into the corner the title row and the rail
@@ -2645,8 +2654,9 @@ export default function App() {
               ? agentInterfaces.length
               : sideBar === 'schedule' && !isScheduleEmpty(schedule)
                 // The promotion this conversion is for: a live countdown that
-                // was computed only to fill a 36px button's tooltip.
-                ? scheduleSummary
+                // was computed only to fill a 36px button's tooltip. Red when
+                // the schedule will not act, as the plan box below it is.
+                ? scheduleArmed ? scheduleSummary : <span className="text-destructive">{scheduleSummary}</span>
                 : undefined}
           >
             {sideBar === 'interfaces' && (
@@ -2673,6 +2683,8 @@ export default function App() {
                 onPresetsChange={setSchedulePresets}
                 bufferedPackets={packets.length}
                 now={scheduleNow}
+                isCapturing={isCapturing}
+                startedAt={captureStartedAtRef.current}
               />
             )}
             {sideBar === 'network' && (

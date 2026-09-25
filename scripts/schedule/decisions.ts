@@ -19,6 +19,8 @@ import {
   describeSchedule, millisUntilStop, normalizePresets,
   resolveStopTime, scheduleDecision, withStartAt, withStopAfter,
   withStopAt, isStartMissed, START_GRACE_MS, type CaptureSchedule,
+  afterScheduledStop, atTime, defaultStartAt, defaultStopAt, describeDay, describePlan,
+  isStopBeforeStart, isStopPassed, onDay, scheduleProblem,
 } from '../../src/services/captureSchedule';
 
 let failures = 0;
@@ -134,25 +136,24 @@ const T0 = 1_800_000_000_000;
 
 // --- 7. what the button says ------------------------------------------------------
 {
-  const at = (epoch: number) => new Date(epoch).toISOString().slice(11, 16);
   check('an empty schedule names itself',
-    describeSchedule(EMPTY_SCHEDULE, T0, false, null, at), 'Schedule capture');
+    describeSchedule(EMPTY_SCHEDULE, T0, false, null), 'Schedule capture');
   check('a running capture counts down',
-    describeSchedule(withStopAfter(EMPTY_SCHEDULE, 5), T0 + 2 * MIN, true, T0, at), 'Stops in 03:00');
+    describeSchedule(withStopAfter(EMPTY_SCHEDULE, 5), T0 + 2 * MIN, true, T0), 'Stops in 03:00');
   // Past an hour the countdown grows a field rather than showing 90 minutes.
   check('...with an hours field once there is one',
-    describeSchedule(withStopAfter(EMPTY_SCHEDULE, 90), T0, true, T0, at), 'Stops in 1:30:00');
+    describeSchedule(withStopAfter(EMPTY_SCHEDULE, 90), T0, true, T0), 'Stops in 1:30:00');
   check('an armed duration names the duration',
-    describeSchedule(withStopAfter(EMPTY_SCHEDULE, 120), T0, false, null, at), 'Runs 2 hours');
+    describeSchedule(withStopAfter(EMPTY_SCHEDULE, 120), T0, false, null), 'Runs 2 hours');
   check('...and a mixed one reads naturally', describeDuration(90), '1h 30m');
   check('...and one minute is singular', describeDuration(1), '1 min');
   // The trigger and the panel have to agree: the panel says it will never
   // start, so the button must not still promise that it will.
   check('a missed start says so rather than promising a time',
-    describeSchedule(withStartAt(EMPTY_SCHEDULE, T0), T0 + 10 * MIN, false, null, at),
+    describeSchedule(withStartAt(EMPTY_SCHEDULE, T0), T0 + 10 * MIN, false, null),
     'Start time passed');
   check('an armed start names the start',
-    describeSchedule(withStartAt(EMPTY_SCHEDULE, T0), T0, false, null, at).startsWith('Starts'), true);
+    describeSchedule(withStartAt(EMPTY_SCHEDULE, T0), T0, false, null).startsWith('Starts'), true);
 }
 
 // --- 8. presets survive the round trip, including having none ----------------------
@@ -168,6 +169,103 @@ const T0 = 1_800_000_000_000;
   check('a non-array falls back', normalizePresets({}), null);
   check('the five defaults are the ones asked for',
     DEFAULT_SCHEDULE_PRESETS.map((p) => p.stopAfterMinutes), [5, 15, 30, 60, 120]);
+}
+
+// --- the redesign's rules --------------------------------------------------------
+//
+// Two checks the panel never made, a reset nothing performed, and the plan line
+// that replaced "Manually" / "Not Set".
+{
+  const NOW = new Date(2026, 8, 25, 13, 58).getTime();   // Fri 25 Sep 2026, 13:58
+  const at = (h: number, m: number, dayOffset = 0) => new Date(2026, 8, 25 + dayOffset, h, m).getTime();
+
+  check('a stop before the start is caught',
+    isStopBeforeStart({ startAt: at(14, 0), stopAt: at(13, 30), stopAfterMinutes: null }), true);
+  check('...and a stop equal to it too - a capture of zero length',
+    isStopBeforeStart({ startAt: at(14, 0), stopAt: at(14, 0), stopAfterMinutes: null }), true);
+  check('...but not a stop after it', isStopBeforeStart({ startAt: at(14, 0), stopAt: at(14, 30), stopAfterMinutes: null }), false);
+  check('...nor a duration, which cannot be before anything',
+    isStopBeforeStart({ startAt: at(14, 0), stopAt: null, stopAfterMinutes: 30 }), false);
+  check('a stop already past is caught', isStopPassed({ startAt: null, stopAt: at(13, 0), stopAfterMinutes: null }, NOW), true);
+  check('...and one ahead is not', isStopPassed({ startAt: null, stopAt: at(15, 0), stopAfterMinutes: null }, NOW), false);
+
+  // The two bugs, as the schedule the timer leaves behind. Put the old
+  // behaviour back (a stop that clears nothing) and the second and third fail.
+  const ran: CaptureSchedule = { startAt: at(14, 0), stopAt: at(14, 30), stopAfterMinutes: null };
+  const after = afterScheduledStop(ran);
+  check('a scheduled stop spends both absolute times', [after.startAt, after.stopAt], [null, null]);
+  check('...so two minutes later nothing says the start "has passed"', isStartMissed(after, at(14, 33)), false);
+  check('...and a capture started by hand later is not stopped by the old stop',
+    scheduleDecision(after, at(16, 0), true, at(15, 59)), 'idle');
+  check('...while a duration survives it - it is a habit, not a moment',
+    afterScheduledStop({ startAt: at(14, 0), stopAt: null, stopAfterMinutes: 30 }).stopAfterMinutes, 30);
+
+  // "At a time" must never land in its own error.
+  const start = defaultStartAt(NOW);
+  check('a new start is on a five-minute boundary', new Date(start).getMinutes() % 5, 0);
+  check('...at least a minute ahead, so it is not already missed', start - NOW >= 60_000, true);
+  check('a new stop is half an hour after the start',
+    defaultStopAt({ startAt: at(14, 0), stopAt: null, stopAfterMinutes: null }, NOW), at(14, 30));
+
+  check('moving to another day keeps the time of day', onDay(at(14, 5), new Date(2026, 8, 27)), at(14, 5, 2));
+  check('setting a time keeps the day', atTime(at(14, 5, 2), 9, 30), at(9, 30, 2));
+
+  check('today is "today"', describeDay(at(18, 0), NOW), 'today');
+  check('tomorrow is "tomorrow"', describeDay(at(0, 30, 1), NOW), 'tomorrow');
+
+  // The plan line, in every shape a schedule takes. Clock text is the
+  // machine's locale, so the checks read around it rather than pinning "14:00".
+  const plan = (s: CaptureSchedule) => describePlan(s, NOW, false, null);
+  check('nothing scheduled says so',
+    plan(EMPTY_SCHEDULE), 'Nothing scheduled. Capture starts and stops when you press the button.');
+  check('a start and a duration name both ends',
+    /^Starts today at .+ · stops .+ \(after 30 mins\)\.$/.test(plan({ startAt: at(14, 0), stopAt: null, stopAfterMinutes: 30 })), true);
+  check('a start and no stop says it runs until stopped',
+    /^Starts today at .+ · runs until you stop it\.$/.test(plan({ startAt: at(14, 0), stopAt: null, stopAfterMinutes: null })), true);
+  check('two ends on one day say the day once',
+    /^Starts today at [^·]+ · stops [^a-z]+\.$/.test(plan({ startAt: at(14, 0), stopAt: at(15, 0), stopAfterMinutes: null })), true);
+  check('...and on two days say both',
+    /· stops tomorrow at /.test(plan({ startAt: at(23, 0), stopAt: at(1, 0, 1), stopAfterMinutes: null })), true);
+  check('a duration alone is measured from pressing Start',
+    plan({ startAt: null, stopAt: null, stopAfterMinutes: 90 }), 'Stops 1h 30m after you press Start.');
+  check('a stop alone applies however the capture began',
+    /^Stops tomorrow at .+, however it was started\.$/.test(plan({ startAt: null, stopAt: at(9, 0, 1), stopAfterMinutes: null })), true);
+  // No countdown: the plan line is a live region, and a ticking one was read
+  // aloud every second. Two ticks a second apart must read the same.
+  const running: CaptureSchedule = { startAt: null, stopAt: null, stopAfterMinutes: 30 };
+  check('a running capture names its stop time',
+    /^Capturing\. Stops today at .+\.$/.test(describePlan(running, at(14, 1), true, at(14, 0))), true);
+  check('...and does not change from one second to the next',
+    describePlan(running, at(14, 1), true, at(14, 0)), describePlan(running, at(14, 1) + 1000, true, at(14, 0)));
+  check('...or says it has no stop',
+    describePlan(EMPTY_SCHEDULE, NOW, true, at(13, 0)), 'Capturing. No stop set - it runs until you stop it.');
+}
+
+// --- the critic's blocker: a schedule the panel flags must not run --------------
+//
+// A stop before its start was shown in red in the panel, and armed everywhere
+// else: the plan sentence, the trigger's summary and the rail's dot all read
+// it as fine, and `scheduleDecision` started the capture - for the next tick to
+// stop it. Put the `isStopBeforeStart` guard back out of `scheduleDecision` and
+// the first check fails.
+{
+  const at = (h: number, m: number) => new Date(2026, 8, 25, h, m).getTime();
+  const backwards: CaptureSchedule = { startAt: at(16, 20), stopAt: at(15, 50), stopAfterMinutes: null };
+  check('a stop before its start does not start', scheduleDecision(backwards, at(16, 20), false, null), 'idle');
+  check('...is reported as the problem it is', scheduleProblem(backwards, at(16, 0)), 'stop-before-start');
+  check('...the plan says it is not armed', describePlan(backwards, at(16, 0), false, null),
+    'Not armed: the stop is before the start.');
+  check('...and so does the trigger', describeSchedule(backwards, at(16, 0), false, null), 'Schedule not armed');
+
+  // The manual-start form of the same bug: a stop already past when Start is
+  // pressed stopped the capture on its first tick.
+  const stale: CaptureSchedule = { startAt: null, stopAt: at(15, 0), stopAfterMinutes: null };
+  check('a stop that predates the capture does not stop it',
+    scheduleDecision(stale, at(16, 0) + 1000, true, at(16, 0)), 'idle');
+  check('...and reports no countdown', millisUntilStop(stale, at(16, 0) + 1000, at(16, 0)), null);
+  check('...while idle, it is flagged', scheduleProblem(stale, at(16, 0)), 'stop-passed');
+  check('a good schedule has no problem',
+    scheduleProblem({ startAt: at(16, 20), stopAt: at(16, 50), stopAfterMinutes: null }, at(16, 0)), null);
 }
 
 console.log();

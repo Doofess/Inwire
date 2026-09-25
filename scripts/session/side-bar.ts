@@ -347,16 +347,19 @@ console.log('\n--- what may not come back ---\n');
   checkTrue('...and anonymises there too, not in a memo',
     /const prepare = async[\s\S]{0,900}anonymiseCapture\(/.test(transfer));
 
-  // **The schedule's height cap, which was a state variable.** One `editing`
-  // slot decided which of two fields the single shared calendar was showing,
-  // and its comment gave the reason outright - "two month grids stacked would
-  // make the panel taller than the header it hangs from". That is a sentence
-  // about a menu on a 36px button. Two independent disclosures is the shape
-  // that says the cap is gone.
+  // **The schedule's calendar stays open, and there is one of it.** It was a
+  // single calendar behind an `editing` slot while this was a dropdown, then
+  // two behind two disclosures in the column; the owner asked for it to stay
+  // open because the column has the room. One grid that marks BOTH ends is the
+  // shape - so the check is that it renders unconditionally, once, and that no
+  // open/closed state for it has come back.
   const sched = code('src/components/sidebar/CaptureSchedulePanel.tsx');
-  checkTrue('both calendars can be open at once',
-    sched.includes('const [startOpen, setStartOpen]')
-    && sched.includes('const [stopOpen, setStopOpen]'));
+  check('the schedule has one calendar', (sched.match(/<MonthGrid\b/g) ?? []).length, 1);
+  checkTrue('...not behind a disclosure',
+    !/\{\s*\w*[Oo]pen\s*&&\s*\(\s*[\s\S]{0,120}<MonthGrid/.test(sched)
+    && !/const \[\w*[Oo]pen, set\w*[Oo]pen\]/.test(sched));
+  checkTrue('...and it is told which end a pick sets',
+    /<MonthGrid[\s\S]{0,200}target=\{calendarTarget\}/.test(sched));
 
   // The summary was computed only to fill a tooltip. Two readers now, and the
   // check is that one expression feeds both rather than being written twice.
@@ -368,13 +371,15 @@ console.log('\n--- what may not come back ---\n');
   // order. One format defined twice is one format that drifts, and the two
   // copies existed only because the halves of one feature lived in two files.
   //
-  // Asserted as "the call site names the function" rather than as "these
-  // options appear once in the tree": `pcapParser.ts` formats a timestamp with
-  // the same options for a different reason, and a check that cannot tell
-  // those apart is a check that fails on unrelated work.
+  // The formatter now lives inside `describeSchedule` (`formatWhen`), so the
+  // call site passes none - which is the strongest form of "not an inline copy".
+  // Asserted at the call site rather than as "these options appear once in the
+  // tree": `pcapParser.ts` formats a timestamp for a different reason, and a
+  // check that cannot tell those apart fails on unrelated work.
   checkTrue('...and formatted by a named function, not an inline copy',
-    /describeSchedule\([^)]*formatStamp[^)]*\)/.test(app)
-    && !/describeSchedule\([\s\S]{0,200}toLocaleString/.test(app));
+    /describeSchedule\(\s*schedule, scheduleNow, isCapturing, captureStartedAtRef\.current,\s*\)/.test(app)
+    && !/describeSchedule\([\s\S]{0,200}toLocale/.test(app)
+    && /const formatTime = \(t: number\) => formatWhen\(t, now\)/.test(code('src/services/captureSchedule.ts')));
 
   const panels = readdirSync('src/components/sidebar')
     .filter((f) => f.endsWith('.tsx'))

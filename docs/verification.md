@@ -370,10 +370,12 @@ cannot see what two cards look like where they meet.
       the top, and the status bar's packet counter must not move. Without the
       `stopPropagation` in `useRovingFocus`, one key does two things and only
       one of them is visible.
-- [ ] **A field inside a panel keeps its own keys.** In the schedule's preset
-      name field, Home goes to the start of the line rather than moving focus;
-      in `DateTimeCalendar`'s Hour and Minute, Up increments rather than
-      jumping out of the field.
+- [ ] **A field inside a panel keeps its own keys.** In the schedule's
+      custom-minutes field, Home goes to the start of the line rather than
+      moving focus; in a start or stop time's hour and minute, Up increments
+      (Shift+Up by 15 on minutes) rather than jumping out of the field; and in
+      the calendar, the arrows move a day or a week, PageUp/PageDown a month,
+      and Space picks a day **without toggling the capture**.
 - [ ] **Adapter sampling starts and stops with the PANEL.** Open Interfaces:
       the sparklines move. Switch to another panel and confirm
       `unsubscribe_interface_stats` in the agent's log. Switch back: they

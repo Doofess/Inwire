@@ -397,8 +397,8 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
               aria-pressed={active}
               onClick={() => setScope(option.id)}
               className={`${ROW} ${active
-                ? 'bg-primary/20 text-foreground font-semibold'
-                : 'hover:bg-accent/60'}`}
+                ? 'bg-primary/15 text-foreground font-semibold'
+                : 'hover:bg-accent/60 dark:hover:bg-foreground/5'}`}
             >
               <span className="block text-xs">{option.label}</span>
               <span className="mt-0.5 block text-[10px] font-mono truncate

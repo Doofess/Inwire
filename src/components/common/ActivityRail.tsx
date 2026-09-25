@@ -367,6 +367,12 @@ export interface ActivityRailProps {
   schedule: CaptureSchedule;
   /** "Stops in 14:58" - the panel header's detail, and this button's tooltip. */
   scheduleSummary: string;
+  /**
+   * Whether the schedule will actually act. The dot follows this, not "is
+   * anything set": a stop before its start is set and is not armed, and a dot
+   * on it said the opposite of the panel it opens.
+   */
+  scheduleArmed: boolean;
 
   /* --- views ------------------------------------------------------------ */
   view: AppView;
@@ -445,7 +451,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   view, onViewChange, streamAvailable,
   settingsOpen, onOpenSettings, sideBarOpen,
   sideBarPanel, onOpenSideBar,
-  schedule, scheduleSummary,
+  schedule, scheduleSummary, scheduleArmed,
 }) => {
   // The whole selection, named: one adapter or several (`selectionLabel`).
   const selected = selectionLabel(agentInterfaces, selectedInterfaces);
@@ -743,7 +749,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           title={scheduleSet ? scheduleSummary : 'Schedule when this capture starts and stops'}
           className={railButton(sideBarPanel === 'schedule')}
         >
-          {scheduleSet && (
+          {scheduleArmed && (
             <span
               aria-hidden
               className="absolute right-1 top-1 w-1.5 h-1.5 rounded-full bg-primary"

@@ -124,16 +124,31 @@ export const Row: React.FC<RowProps> = ({
  * nothing. The radius moves onto the heading instead. What is lost is the clip
  * on the last row's ground when that row carries a warning wash; what is
  * gained is knowing where you are.
+ *
+ * **The body is the lighter surface and the heading the darker one, in both
+ * themes.** Day always had it that way (`--card` #fff under `--secondary`
+ * #eef1f5); Night had it reversed - the body showed the column's `--card`
+ * #1a1a1a through it, under a `--secondary` #232323 heading - and the owner
+ * asked for it the other way round. So Night alone swaps, with `dark:`
+ * variants: the body takes `--muted` (#232323; `--muted` rather than the
+ * identical `--secondary`, because `--secondary` is the chrome's colour and
+ * a section body is content) and the heading `--card` (#1a1a1a) - the
+ * column's own ground, so the heading reads as the column showing through
+ * above a raised body. `--background` (#161616) was tried first and sat
+ * DARKER than the column around it, which read as a slot cut into the card
+ * rather than as its title. Day is untouched on purpose: swapping it too would
+ * darken the body again and drop `--warning` on it to 4.06:1. The note lost its
+ * `/70` in the same pass - it measured 3.71:1 on the new body.
  */
-export const Section: React.FC<{ title: string; note?: string; children: React.ReactNode }> = ({
+export const Section: React.FC<{ title: string; note?: React.ReactNode; children: React.ReactNode }> = ({
   title, note, children,
 }) => (
-  <div className="rounded-lg border border-border">
-    <div className="sticky top-0 z-10 rounded-t-lg px-3 py-2 bg-secondary border-b border-border">
+  <div className="rounded-lg border border-border dark:bg-muted">
+    <div className="sticky top-0 z-10 rounded-t-lg px-3 py-2 bg-secondary dark:bg-card border-b border-border">
       <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         {title}
       </div>
-      {note && <div className="text-[11px] text-muted-foreground/70 mt-0.5">{note}</div>}
+      {note && <div className="text-[11px] text-muted-foreground mt-0.5">{note}</div>}
     </div>
     <div className="divide-y divide-border">{children}</div>
   </div>
