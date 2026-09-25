@@ -6,6 +6,7 @@ import {
   useDebouncedPreference,
   usePreferenceSync,
 } from '../../services/preferences';
+import { minimapIndicator } from '../../lib/minimapIndicator';
 import { useThemeToken } from '../../lib/themeColor';
 import { useThrottledValue } from '../../lib/useThrottledValue';
 import type { PacketTheme } from '../../services/packetThemes';
@@ -244,17 +245,9 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   const updateViewport = useCallback(() => {
     const el = containerRef.current;
     if (!el || size.height === 0) return;
-    const { scrollTop, scrollHeight, clientHeight } = el;
-    if (scrollHeight <= 0) {
-      setViewport({ top: 0, height: size.height });
-      return;
-    }
-    setViewport({
-      top: (scrollTop / scrollHeight) * size.height,
-      // Minimum height keeps the indicator grabbable even when thousands of
-      // packets squeeze the proportional viewport down to a sliver.
-      height: Math.max((clientHeight / scrollHeight) * size.height, 8),
-    });
+    // Placed as a scrollbar places its thumb, so a box held at its minimum
+    // height cannot hang past the end of the map - see `minimapIndicator`.
+    setViewport(minimapIndicator(el.scrollTop, el.scrollHeight, el.clientHeight, size.height));
   }, [containerRef, size.height]);
 
   useEffect(() => {

@@ -155,6 +155,21 @@ export const COLUMN_ALIGN_CLASS: Record<ColumnAlign, string> = {
 };
 
 /**
+ * The same positions for a cell whose content is a FLEX row, which ignores
+ * `text-align` entirely.
+ *
+ * Source is one: the address and the program that sent it sit in a flex row,
+ * so the address can ellipsise while the program never does. With only the
+ * `text-*` class on its cell, Source's Left / Centred / Right was stored,
+ * shown as chosen in the menu, and moved nothing on screen.
+ */
+export const COLUMN_JUSTIFY_CLASS: Record<ColumnAlign, string> = {
+  left: 'justify-start',
+  center: 'justify-center',
+  right: 'justify-end',
+};
+
+/**
  * Where the text sits, per column.
  *
  * It used to be one setting for the whole list, and the restriction that came

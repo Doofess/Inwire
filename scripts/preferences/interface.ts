@@ -146,6 +146,12 @@ for (const [name, fn] of [
     list.includes('setAlignColumn(isAlignableColumn(column) ? column : null)'), true);
   check('...and the Direction cell is centred with no setting behind it',
     /cellAlign\('direction'\)/.test(list), false);
+  // **Source's position moved nothing.** Its content is a flex row (the address
+  // and the program that sent it), and a flex row ignores `text-align` - so
+  // the cell's `text-*` class was stored, shown as chosen, and inert. The row
+  // has to take the matching `justify-*` itself.
+  check('the Source cell\'s flex row follows the chosen position',
+    list.includes('min-w-0 ${COLUMN_JUSTIFY_CLASS[listPrefs.align.source]}'), true);
 }
 
 {

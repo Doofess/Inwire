@@ -34,6 +34,7 @@ import {
   COLUMN_ALIGNS,
   COLUMN_ALIGN_CLASS,
   COLUMN_ALIGN_LABELS,
+  COLUMN_JUSTIFY_CLASS,
   COLUMN_LABELS,
   HIDEABLE_COLUMNS,
   isAlignableColumn,
@@ -1446,7 +1447,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                               thing that had just been added. The address
                               shrinks; the program never does - it is the short
                               half, and the half that is new. */}
-                          <span className="flex items-baseline min-w-0">
+                          <span className={`flex items-baseline min-w-0 ${COLUMN_JUSTIFY_CLASS[listPrefs.align.source]}`}>
                             <span className="truncate">{resolved(packet.source)}</span>
                             {sender && (
                               // Dimmed, because the address is the identity and
