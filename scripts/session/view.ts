@@ -307,14 +307,19 @@ console.log('\n--- Settings is a pane and not a view ---\n');
     !code('src/components/common/SettingsPane.tsx').includes("id: 'network'"));
 
   // **Three ways out and no fourth.** Every other pane is left by the back step,
-  // Escape, or the rail. The X and the Close button were the modal's, and a
-  // surface with four doors is one nobody knows how to leave.
+  // Escape, or choosing another view. The X and the Close button were the
+  // modal's, and a surface with four doors is one nobody knows how to leave.
   checkTrue('the pane has no close control of its own',
     !pane.includes('onClose') && !pane.includes('>Close<'));
   checkTrue('...the back step closes it rather than leaving the view',
     app.includes('if (sheetOpen) { setSheet(null); return; }'));
-  checkTrue('...and the rail toggles it',
-    app.includes("(open) => (open === which ? null : which)"));
+  // **The rail's button OPENS it and does not toggle.** It used to toggle,
+  // which made Settings the one rail button that, pressed while showing, sent
+  // you back to the last view - where pressing a view that is showing keeps
+  // it. Reported as a bug, alongside the next check's.
+  checkTrue('...and the rail opens it rather than toggling it',
+    app.includes("onOpenSettings={() => setSheet('settings')}")
+      && !app.includes('open === which ? null : which'));
 
   // **Choosing a view closes it**, and this shipped broken. The pane renders
   // INSTEAD of the view stack, so `setView` underneath it moved the rail's
@@ -337,6 +342,11 @@ console.log('\n--- Settings is a pane and not a view ---\n');
   const railSrc = code('src/components/common/ActivityRail.tsx');
   checkTrue('the rail marks Settings the way it marks a view',
     railSrc.includes('railButton(settingsOpen)'));
+  // And it is the only thing marked while it is up. The view underneath is
+  // kept, so `view` still names it, and marking it too showed two surfaces
+  // selected in a card that holds one.
+  checkTrue('...and no view is marked while Settings is up',
+    railSrc.includes('const active = view === id && !settingsOpen;'));
   // Every button in this strip that puts a surface on screen takes the fill,
   // and the four that open a side bar panel compare against the PANEL rather
   // than each holding a boolean of its own - one column shows one of them, so

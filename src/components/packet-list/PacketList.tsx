@@ -36,6 +36,7 @@ import {
   COLUMN_ALIGN_LABELS,
   COLUMN_LABELS,
   HIDEABLE_COLUMNS,
+  isAlignableColumn,
   visibleSortField,
   type AlignableColumn,
   type ColumnAlign,
@@ -1062,7 +1063,11 @@ export const PacketList: React.FC<PacketListProps> = ({
               aria-rowindex={1}
               onContextMenu={(e) => {
                 const cell = (e.target as HTMLElement).closest('th[data-column]');
-                setAlignColumn((cell?.getAttribute('data-column') as AlignableColumn) ?? null);
+                // Only a column that HAS a position to choose. Direction is
+                // always centred, and an added field's column has no slot in
+                // the alignment map - so neither opens the menu.
+                const column = cell?.getAttribute('data-column');
+                setAlignColumn(isAlignableColumn(column) ? column : null);
               }}
               // **No `divide-x` here, and that is the fix rather than a
               // simplification.** A collapsed border on a sticky header is
@@ -1380,7 +1385,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                         marker on an inferred one is what keeps a guess from
                         reading like a measurement. */}
                     {columns.direction && (
-                    <td className={`px-2 ${density.cell} whitespace-nowrap ${cellAlign('direction')}`}
+                    <td className={`px-2 ${density.cell} whitespace-nowrap text-center`}
                       title={directionTitle(packet.direction)}>
                       <span className={`inline-flex items-center ${
                         directionOf(packet.direction) === Direction.Unknown ? 'opacity-40' : ''}`}>

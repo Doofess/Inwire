@@ -23,7 +23,8 @@ import {
   normalizePacketList,
   normalizePerformance,
 } from '../../src/services/interfacePrefs';
-import { DEFAULT_COLUMN_ALIGN } from '../../src/lib/packetColumns';
+import { readFileSync } from 'node:fs';
+import { ALIGNABLE_COLUMNS, DEFAULT_COLUMN_ALIGN } from '../../src/lib/packetColumns';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -122,9 +123,6 @@ for (const [name, fn] of [
   // rearranges every existing user's packet list on upgrade.
   check('the defaults are what the list already showed', PACKET_LIST_DEFAULTS.align, {
     id: 'right',
-    // The one centred column: a single glyph has neither a digit column to
-    // line up on the right nor a first letter to line up on the left.
-    direction: 'center',
     relativeTime: 'right',
     length: 'right',
     source: 'left',
@@ -132,6 +130,22 @@ for (const [name, fn] of [
     protocol: 'left',
     info: 'left',
   });
+
+  // **Direction has no position to choose.** It is one glyph, centred always,
+  // so it is not in the map at all - and a position stored for it by an older
+  // build is dropped on load rather than carried, or it would sit in storage
+  // governing nothing.
+  check('Direction is not alignable', ALIGNABLE_COLUMNS.includes('direction' as never), false);
+  check('...and a stored position for it is dropped on load',
+    'direction' in (normalizePacketList({ align: { direction: 'left', source: 'right' } })?.align ?? {}), false);
+  check('...while the rest of that stored map survives',
+    normalizePacketList({ align: { direction: 'left', source: 'right' } })?.align.source, 'right');
+  // The right-click menu opens only for a column with a position to choose.
+  const list = readFileSync('src/components/packet-list/PacketList.tsx', 'utf8');
+  check('the header menu is gated on an alignable column',
+    list.includes('setAlignColumn(isAlignableColumn(column) ? column : null)'), true);
+  check('...and the Direction cell is centred with no setting behind it',
+    /cellAlign\('direction'\)/.test(list), false);
 }
 
 {

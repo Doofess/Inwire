@@ -139,8 +139,13 @@ carries — a boolean invites a second boolean beside it, and then "both open" i
 representable in a card that shows one.
 
 **Three ways out and no fourth**: the title row's back step, reading
-"Back to &lt;the view underneath&gt;"; Escape, outermost surface first; and the
-rail's Settings icon, a toggle carrying the same active marker a view does.
+"Back to &lt;the view underneath&gt;"; Escape, outermost surface first; and
+choosing any view on the rail. **The rail's Settings icon opens and never
+toggles**, and while the sheet is up it is the only rail button marked - the
+view underneath keeps its place in `view` but loses its marker. Both were
+reported as bugs: a toggle made Settings the one button that, pressed again,
+sent you back to the last view, and the kept marker showed two surfaces
+selected in a card that holds one.
 
 **Landing on a view closes it, and the close belongs to the TRANSITION rather
 than to the pane** — the view underneath is untouched while the sheet is up, so

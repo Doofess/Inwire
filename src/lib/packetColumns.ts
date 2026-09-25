@@ -166,10 +166,23 @@ export const COLUMN_ALIGN_CLASS: Record<ColumnAlign, string> = {
  * it. Nobody sets Time to centred by accident now - they have to open that
  * column's own menu and choose it - so every column is offered, and the three
  * numeric ones simply DEFAULT to right.
+ *
+ * **Every column but Direction.** It holds one glyph rather than a value, so
+ * it has no first letter to line up on the left and no digits to line up on
+ * the right - centred is the only position that means anything, and the menu
+ * offering Left and Right for it was a choice with no right answer but one.
+ * It is centred, always, and its header opens no alignment menu.
  */
-export type AlignableColumn = SortField;
+export type AlignableColumn = Exclude<SortField, 'direction'>;
 
-export const ALIGNABLE_COLUMNS: readonly AlignableColumn[] = [...HIDEABLE_COLUMNS, 'info'];
+export const ALIGNABLE_COLUMNS: readonly AlignableColumn[] = [
+  ...HIDEABLE_COLUMNS.filter((c): c is Exclude<HideableColumn, 'direction'> => c !== 'direction'),
+  'info',
+];
+
+export function isAlignableColumn(column: string | null | undefined): column is AlignableColumn {
+  return ALIGNABLE_COLUMNS.includes(column as AlignableColumn);
+}
 
 export type ColumnAlignMap = Record<AlignableColumn, ColumnAlign>;
 
@@ -183,10 +196,6 @@ export type ColumnAlignMap = Record<AlignableColumn, ColumnAlign>;
  */
 export const DEFAULT_COLUMN_ALIGN: ColumnAlignMap = {
   id: 'right',
-  // Centred, and the only column that is: it holds a single glyph rather than
-  // a value, so there is neither a digit column to line up on the right nor a
-  // first letter to line up on the left.
-  direction: 'center',
   relativeTime: 'right',
   length: 'right',
   source: 'left',

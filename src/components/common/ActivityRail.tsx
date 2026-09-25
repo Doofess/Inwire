@@ -848,7 +848,10 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
       <div className={GROUP} role="group" aria-label="Views" data-tour="rail">
         {APP_VIEWS.map(({ id, label, shortcut }) => {
           const Icon = VIEW_ICONS[id];
-          const active = view === id;
+          // Not while Settings is up. The view underneath is kept, so `view`
+          // still names it - but it is not on screen, and marking it beside
+          // Settings showed two surfaces selected in a card that holds one.
+          const active = view === id && !settingsOpen;
           // Follow Stream needs something to follow. Disabled rather than
           // hidden: a group that changes length moves the divider and the
           // group below it every time a stream is opened or cleared.
@@ -908,12 +911,14 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           above can grow without overlapping it. */}
       <div className={`${GROUP} mt-auto pb-2`} role="group" aria-label="Application">
         <RailDivider />
-        {/* **A toggle now, and marked like a view.** Settings was a modal
-            with an X and a Close button; it is a pane taking the workspace
-            card, so the rail has to say it is on screen and pressing this again
-            has to put it away. It takes the fill, which is now the rail's only
-            active mark - the choice this comment used to argue, between the
-            fill and an outline, no longer exists to get wrong. */}
+        {/* **Marked like a view, and it behaves like one.** Settings was a
+            modal with an X and a Close button; it is a pane taking the
+            workspace card, so the rail has to say it is on screen - and while
+            it is, it is the ONLY button marked, because the view underneath is
+            not on screen. Pressing it again keeps it, as pressing a view that
+            is already showing does; it used to toggle, which made it the one
+            button that navigated you back somewhere. It takes the fill, which
+            is the rail's only active mark. */}
         <button
           onClick={onOpenSettings}
           aria-label="Settings"

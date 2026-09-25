@@ -494,10 +494,6 @@ export default function App() {
    */
   const [sheet, setSheet] = useState<'settings' | null>(null);
   const sheetOpen = sheet !== null;
-  const toggleSheet = useCallback(
-    (which: 'settings') => setSheet((open) => (open === which ? null : which)),
-    [],
-  );
 
   /**
    * Which of the five surfaces the rail says we are on.
@@ -2550,7 +2546,12 @@ export default function App() {
           onViewChange={handleViewChange}
           streamAvailable={streamForSelection !== null || streamToFollow !== null}
           settingsOpen={settingsOpen}
-          onOpenSettings={() => toggleSheet('settings')}
+          // Opens, and does not toggle. The rail's Settings button behaves as
+          // a view's does: pressing the one already on screen keeps it there,
+          // and leaving is choosing somewhere else - any view, Escape, or the
+          // title row's back step. A toggle made it the one button that sent
+          // you back to wherever you had been.
+          onOpenSettings={() => setSheet('settings')}
           sideBarOpen={sideBarOpen}
           sideBarPanel={sideBar}
           onOpenSideBar={toggleSideBar}
