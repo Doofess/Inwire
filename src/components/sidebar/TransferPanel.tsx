@@ -296,7 +296,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
     {
       id: 'pdf',
       title: 'PDF Report',
-      note: 'Stats, alerts and the most recent 100 packets.',
+      note: 'Statistics and findings for the capture.',
       group: 'report',
       icon: <ImageIcon className="w-3.5 h-3.5" />,
       // **Fetched when the button is pressed, not when the app starts.**
@@ -304,8 +304,8 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
       // about 344 kB minified, and it was inside the single entry chunk - so
       // every launch parsed a PDF writer for a report nobody had asked for.
       // `runExport`'s `produce` already accepts a promise, so this needed no
-      // new machinery; the pattern is `tabularReaders.ts:202`'s, which does the
-      // same for `pdfjs-dist` and `exceljs`.
+      // new machinery; the pattern is `tabularReaders.ts`'s, which does the same
+      // for `exceljs`.
       onClick: () => runExport('pdf', 'pdf',
         async ({ outgoing }) => {
           const { buildPdfReport } = await import('../export/pdfReport');

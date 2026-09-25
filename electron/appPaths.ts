@@ -23,8 +23,7 @@
  * strict MIME checking, and the only trace is a console message nobody reads in
  * a packaged build. Two of the files that matter most are `.mjs` - maplibre's
  * worker and its shared chunk, which `vite.config.ts` emits **unhashed on
- * purpose** because maplibre resolves them by literal name at runtime - and so
- * is the pdfjs worker.
+ * purpose** because maplibre resolves them by literal name at runtime.
  *
  * Pure, so `scripts/electron/protocol-paths.ts` can drive every case without a
  * browser. The Electron adapter around it does nothing but read a file.

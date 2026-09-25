@@ -87,6 +87,11 @@ export default defineConfig(() => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
+        // jsPDF's optional dependencies, reached only from `doc.html()` and
+        // `addSvgAsImage()`, which the report never calls. Aliased away so
+        // their chunks are not emitted; see `src/lib/unbundledOptional.ts`.
+        ...Object.fromEntries(['html2canvas', 'dompurify', 'canvg'].map(name =>
+          [name, path.resolve(__dirname, 'src/lib/unbundledOptional.ts')])),
       },
     },
     optimizeDeps: {

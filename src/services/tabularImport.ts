@@ -1,7 +1,6 @@
 import { Packet } from '../types/packet';
 import { DnsTracker } from './dnsTracker';
 import { ImportFailure, rowsToFrames } from './exportSchema';
-import { PDF_PACKET_LIMIT } from './pdfReportFormat';
 import { PcapService } from './pcapParser';
 import { applyIcmpReplies, restoreBatch } from './sessionRestore';
 import { extensionOf, readTabularFile, TABULAR_EXTENSIONS } from './tabularReaders';
@@ -71,16 +70,6 @@ function framesToPackets(
 export function importRows(
   rows: string[][],
   sourceLabel: string,
-  /**
-   * What kind of file the rows came out of.
-   *
-   * Only 'pdf' behaves differently, and it has to: a report is a document, not
-   * a data format, and carries the newest 100 frames with Info cut short. That
-   * caveat belongs here with the other notes rather than being bolted on by the
-   * caller - a note the dispatcher adds is a note no test of this function can
-   * see.
-   */
-  sourceKind: 'table' | 'pdf' = 'table',
 ): ImportOutcome {
   const parsed = rowsToFrames(rows, sourceLabel);
   // Explicit === false, not !parsed.ok: this project compiles non-strict, and
@@ -89,11 +78,6 @@ export function importRows(
   if (parsed.ok === false) return parsed;
 
   const notes: string[] = [];
-  if (sourceKind === 'pdf') {
-    notes.push(
-      `A PDF report holds only the most recent ${PDF_PACKET_LIMIT} packets, with shortened Info text.`,
-    );
-  }
   if (!parsed.hadRawBytes) {
     notes.push(
       'No raw packet bytes in this file, so these frames have no hex dump and no protocol '
@@ -130,8 +114,8 @@ export function importRows(
  * JSON, routed through the same evaluator as every other table.
  *
  * The array of objects is flattened to a header row plus value rows, which
- * means one validator covers CSV, Excel, PDF and JSON rather than a fourth
- * bespoke check that can disagree with the other three.
+ * means one validator covers CSV, Excel and JSON rather than a third bespoke
+ * check that can disagree with the other two.
  */
 async function importJson(file: File): Promise<ImportOutcome> {
   let parsed: unknown;
@@ -374,7 +358,7 @@ export async function importAnyFile(file: File, options: ImportOptions = {}): Pr
   if (TABULAR_EXTENSIONS.includes(extension)) {
     const table = await readTabularFile(file);
     if (table.ok === false) return table;
-    return importRows(table.rows, file.name, extension === '.pdf' ? 'pdf' : 'table');
+    return importRows(table.rows, file.name);
   }
 
   return {

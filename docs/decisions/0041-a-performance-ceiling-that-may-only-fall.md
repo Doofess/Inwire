@@ -54,7 +54,7 @@ nothing at all.
 SKIP rather than failing. A gate that fails because nothing was built teaches
 people to ignore its output.
 
-**`eager` and `total` are two numbers, not one.** `pdf.worker`, `exceljs` and
+**`eager` and `total` are two numbers, not one.** `jspdf`, `exceljs` and
 the maplibre worker are lazily fetched and land in `dist/assets` beside the
 entry chunk. Ceilinged together, a lazy chunk growing looks identical to the
 startup path growing — which is the one thing this exists to see.

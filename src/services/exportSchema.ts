@@ -8,8 +8,7 @@ import { expertItemsFor } from './expertInfo';
  * CSV, Excel and the importer all read this file, which is the point: a column
  * added to a writer but missed by the reader is the failure mode a shared
  * schema exists to make impossible. The PDF report is deliberately NOT built
- * from it - a report is a document with its own narrower columns, and pretending
- * otherwise would drag `RawBytes` into a printed table.
+ * from it - a report is a document of statistics, not a table of frames.
  *
  * What a row cannot carry is the dissection. `Packet.layers`, `fields` and
  * `anomalies` all come back out of the wire bytes, so a row either carries

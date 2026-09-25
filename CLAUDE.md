@@ -1039,11 +1039,13 @@ that every host in `OUTBOUND_HOSTS` has a recorded purpose and a consent gate.
 
 **The dependency rule.** A shipped dependency must beat the platform API that
 replaces it, and no native module lands without a measurement. The platform
-answers already chosen or available: `printToPDF` for reports, `net.fetch` for
-the updater, `dialog` for file I/O, `powerMonitor` for sleep gaps. The current
-`dependencies` list still carries `jspdf`, `jspdf-autotable`, `pdfjs-dist`,
-`exceljs` and `three` — the pass that weighs each has **not** happened. All five
-are genuinely imported and reachable from `src/main.tsx`, which is the
+answers already chosen or available: `net.fetch` for the updater, `dialog` for
+file I/O, `powerMonitor` for sleep gaps. Reports are the exception that won:
+`jspdf` generates the PDF rather than `printToPDF`, because it runs under plain
+`tsx` and so the report is testable by an assertion script, which a page
+printed by Chromium is not. The current `dependencies` list still carries
+`jspdf-autotable`, `exceljs` and `three` beside it — the pass that weighs each
+has **not** happened. All four are genuinely imported and reachable from `src/main.tsx`, which is the
 distinction that matters: **unweighed, not unused**.
 
 **The failure mode the rule does not catch is a dependency nothing imports** —

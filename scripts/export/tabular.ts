@@ -296,10 +296,10 @@ check('fixture carries wire bytes', capture[0].rawBytes.length > 0, true);
     '10.0.0.9',
   );
 
-  // The PDF report's Length cell reads "1514 bytes", not "1514".
+  // A hand-made table may write its Length cell as "1514 bytes", not "1514".
   const suffixed = rowsToFrames(
     [['ID', 'Source', 'Destination', 'Proto', 'Length'], ['7', '1.1.1.1', '2.2.2.2', 'TCP', '1514 bytes']],
-    'report.pdf',
+    'suffixed.csv',
   );
   check('length tolerates a unit suffix', suffixed.ok === true ? suffixed.frames[0].length : 0, 1514);
 }

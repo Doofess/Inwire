@@ -133,7 +133,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
             {dragging ? 'Drop to import' : 'Click to upload, or drag & drop'}
           </span>
           <span className="text-[11px] text-muted-foreground mt-1 font-mono text-center">
-            .pcap .pcapng .cap · .csv .tsv · .xlsx · .pdf · .json · .zip
+            .pcap .pcapng .cap · .csv .tsv · .xlsx · .json · .zip
           </span>
           <input
             ref={inputRef}
@@ -148,7 +148,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
 
       <div className="rounded-lg border border-border bg-muted/30 p-3 text-[11px] text-muted-foreground leading-relaxed space-y-1.5">
         <p>
-          Spreadsheets and PDFs are checked before anything is imported: a file whose columns are not
+          Spreadsheets and tables are checked before anything is imported: a file whose columns are not
           packet data is refused rather than turned into frames that were never captured.
         </p>
         <p>

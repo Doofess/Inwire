@@ -83,12 +83,12 @@ export interface XlsxOptions {
 }
 
 /**
- * Three sheets, mirroring the PDF report: the packets themselves, the protocol
- * hierarchy, and the alerts.
+ * Three sheets: the packets themselves, and the protocol hierarchy and alerts
+ * the PDF report also carries.
  *
- * Unlike the PDF - which truncates to the latest 100 frames because it is a
- * document - the Packets sheet carries every packet it was given. A spreadsheet
- * is the format people reach for when they want all of it.
+ * Unlike the PDF - which carries no frames at all because it is a document -
+ * the Packets sheet carries every packet it was given. A spreadsheet is the
+ * format people reach for when they want all of it.
  */
 export async function buildXlsx(packets: Packet[], options: XlsxOptions): Promise<Blob> {
   // exceljs resolves to a UMD bundle in the browser and to CommonJS under

@@ -7,8 +7,7 @@ import { matchHeaders, REQUIRED_COLUMNS } from './exportSchema';
  * Everything here stops at `string[][]`; deciding whether those strings are
  * packets is `exportSchema.rowsToFrames`'s job. The split matters because the
  * evaluator then behaves identically no matter which format a table arrived in
- * - a CSV, a spreadsheet and a PDF report all fail for the same reasons, with
- * the same wording.
+ * - a CSV and a spreadsheet fail for the same reasons, with the same wording.
  */
 
 export type TableResult =
@@ -16,7 +15,7 @@ export type TableResult =
   | { ok: false; failure: ImportFailure };
 
 /** Extensions this module can turn into a table. */
-export const TABULAR_EXTENSIONS = ['.csv', '.tsv', '.xlsx', '.xlsm', '.xls', '.pdf'];
+export const TABULAR_EXTENSIONS = ['.csv', '.tsv', '.xlsx', '.xlsm', '.xls'];
 
 export function extensionOf(filename: string): string {
   const dot = filename.lastIndexOf('.');
@@ -196,12 +195,6 @@ export async function readTabularFile(file: File): Promise<TableResult> {
     case '.xlsm':
     case '.xls':
       return readXlsx(file);
-    case '.pdf': {
-      // Isolated behind a dynamic import: pdfjs is a megabyte, and its module
-      // uses Vite-only syntax that Node cannot parse. See pdfTable.ts.
-      const { readInwirePdf } = await import('./pdfTable');
-      return readInwirePdf(file);
-    }
     default:
       return {
         ok: false,

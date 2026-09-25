@@ -88,8 +88,9 @@ function join(parts: readonly string[]): string {
  * `'unsafe-inline'` survives in two places and neither is negotiable today:
  * `next-themes` renders a pre-hydration inline script (which is the mechanism
  * that stops a flash of the wrong theme), and Tailwind v4 injects styles at
- * runtime. `'unsafe-eval'` is **not** here, which is the line worth asserting -
- * pdfjs will ask for it and is told no (`isEvalSupported: false`).
+ * runtime. `'unsafe-eval'` is **not** here, which is the line worth asserting:
+ * the renderer parses hostile bytes, and a policy that allows `eval` turns any
+ * string a dissector mishandles into code.
  */
 export function productionCsp(): string {
   const hosts = Object.values(OUTBOUND_HOSTS);

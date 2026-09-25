@@ -159,8 +159,8 @@ export const ImportErrorDialog: React.FC<ImportErrorDialogProps> = ({
             <div className="rounded-lg border border-border bg-muted/40 p-3 text-[11px] text-muted-foreground leading-relaxed flex gap-2">
               <FileX className="w-4 h-4 shrink-0 mt-0.5" />
               <span>
-                PDF import reads only the reports Inwire itself generates. Any other PDF has no reliable
-                table structure to read, and guessing at one would produce packets that were never on a wire.
+                Inwire imports a file only when it can tell exactly which packets it holds. Guessing would
+                produce packets that were never on a wire, so it refuses instead.
               </span>
             </div>
           )}

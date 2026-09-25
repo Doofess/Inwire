@@ -28,7 +28,7 @@
  * put on the wire.
  */
 import { readFileSync } from 'node:fs';
-import { decideServe, MAPLIBRE_RUNTIME_ASSETS, MIME_TYPES } from '../../electron/appPaths';
+import { decideServe, MAPLIBRE_RUNTIME_ASSETS } from '../../electron/appPaths';
 import {
   developmentCsp, MAIN_OUTBOUND_HOSTS, OUTBOUND_HOSTS, productionCsp,
 } from '../../electron/csp';
@@ -210,8 +210,6 @@ console.log('\n--- what the handler serves, and what it refuses ---\n');
       [decision.kind, decision.kind === 'file' && decision.mime],
       ['file', 'text/javascript; charset=utf-8']);
   }
-  check('the pdfjs worker is JavaScript too',
-    MIME_TYPES['.mjs'], 'text/javascript; charset=utf-8');
 
   // The rule that replaced the SPA fallback. A missing asset must 404 rather
   // than come back as HTML: that fallback has already cost this project a map
@@ -231,8 +229,8 @@ console.log('\n--- the policy, and the list it has to keep up with ---\n');
 
 {
   const production = productionCsp();
-  // pdfjs will ask for eval and is told no. This is the line worth pinning:
-  // it is one convenience away from being added back.
+  // No eval in the process that parses hostile bytes. This is the line worth
+  // pinning: it is one convenience away from being added back.
   checkTrue('production allows no eval', !production.includes('unsafe-eval'));
   checkTrue('production locks the default down', production.includes("default-src 'none'"));
   checkTrue('...and forbids framing and form posts',

@@ -36,7 +36,7 @@
  *   every content change, so a ceiling keyed on the exact filename would be
  *   unfindable after the first edit. Entries are matched by a glob on the
  *   stable part of the name.
- * - **The eager chunk is not the total.** `pdf.worker`, `exceljs` and the
+ * - **The eager chunk is not the total.** `jspdf`, `exceljs` and the
  *   maplibre worker are all lazily fetched and land in `dist/assets` beside
  *   the entry chunk. Ceiling them together and a lazy chunk growing looks
  *   identical to the startup path growing, which is the thing this exists to
