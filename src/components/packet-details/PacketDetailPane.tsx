@@ -833,33 +833,11 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
               </div>
             </div>
 
-            {/* This pane's own footer, and all it carries now is the frame's
-                position in the buffer.
-
-                **The byte inspector was the other half and it is in the
-                application status bar.** That bar is back - it existed for one
-                revision, carrying the readout with its text indented to line up
-                under a dump, which is what got it deleted. What changed is the
-                alignment rather than the verdict: a status bar groups its items
-                by priority and never by correspondence with the pane above
-                them, so nothing in it is inset and nothing in it reads a pane's
-                size. See `components/status/StatusBar.tsx`.
-
-                This readout stays here because it is genuinely about this pane:
-                it is where the frame being read sits in the buffer, and there
-                is a second dump - the Packets view's - whose position would be
-                a different number. */}
-            <div className="px-5 py-1.5 border-t border-border bg-secondary/50 text-[10px] font-mono text-muted-foreground flex items-center justify-end shrink-0">
-              <span className="uppercase tracking-wider whitespace-nowrap">
-                {/* A frame the buffer has since dropped is still readable - the
-                    store gives its bytes back - but it has no position in the
-                    buffer any more, and `index + 1` would print "Frame 0 of
-                    178,200" rather than saying so. */}
-                {index === -1
-                  ? 'No longer in the buffer'
-                  : `Frame ${(index + 1).toLocaleString()} of ${packets.length.toLocaleString()}`}
-              </span>
-            </div>
+            {/* **No footer.** This pane had one, and by the end all it carried
+                was "Frame N of M" - a full-width strip for a position the
+                header already implies and nobody read. Removed at the owner's
+                request. The byte inspector that used to share it lives in the
+                application status bar (`components/status/StatusBar.tsx`). */}
           </>
         )}
     </section>
