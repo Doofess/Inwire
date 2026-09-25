@@ -27,7 +27,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import {
-  encodeChunk, decodeChunk, applyPrefixes, PrefixBlock, ChunkDirectory,
+  encodeChunk, decodeChunk, applyPrefixes, PrefixBlock, ChunkDirectory, chunkStoresLinkType, CHUNK_VERSION,
   DIRECTORY_BYTES, prefixBlockBytes,
   CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND,
 } from '../../src/services/capture/chunkCodec';
@@ -91,7 +91,7 @@ const CARRIED = [
   'id', 'source', 'destination', 'protocol', 'protocolLabel', 'info', 'status',
   'length', 'tsUs', 'relativeTime', 'timeDelta', 'interfaceName',
   'sourcePort', 'destPort', 'streamId', 'direction', 'tsPrecision', 'tsNanos',
-  'frameProtocols', 'analysisFlags', 'expert', 'resolved',
+  'frameProtocols', 'analysisFlags', 'expert', 'resolved', 'linkType',
 ] as const;
 
 /** The shape a round trip is compared on, fields and all. */
@@ -411,6 +411,21 @@ async function realFrames(): Promise<void> {
     const backFromDisk = decodeChunk(inflateRawSync(summaryDeflated));
     check(`${name}: the summary block survives a deflate round trip`,
       backFromDisk.length, sample.length);
+    // **A chunk written before link types were stored still decodes** - a
+    // capture on disk outlives the build that wrote it. Real frames, the old
+    // layout written for real, and every other field still exact.
+    const v1 = encodeChunk(sample, capLengths(sample), 1);
+    const v1Back = decodeChunk(v1.summary);
+    applyPrefixes(v1Back, v1.prefix);
+    check(`${name}: a version-1 chunk decodes, every carried field but linkType exact`,
+      v1Back.filter((p, i) => {
+        const { linkType: _a, ...want } = shapeOf(sample[i]);
+        const { linkType: _b, ...got } = shapeOf(p);
+        return show(want) !== show(got);
+      }).length, 0);
+    check(`${name}: ...and says its rows do not record a link type`,
+      [chunkStoresLinkType(v1.summary), chunkStoresLinkType(encoded.summary), CHUNK_VERSION], [false, true, 2]);
+
     console.log(`      (${name}: prefix ${(prefixDeflated.length / sample.length).toFixed(1)}`
       + ` + summary ${(summaryDeflated.length / sample.length).toFixed(1)}`
       + ` = ${((prefixDeflated.length + summaryDeflated.length) / sample.length).toFixed(1)} B/frame on disk)`);

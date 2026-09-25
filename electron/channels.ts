@@ -60,6 +60,18 @@ export const AGENT_PORT_REQUEST = 'inwire:agent-port-request';
 export const SAVE_FILE_CHANNEL = 'inwire:save-file';
 
 /**
+ * Renderer -> main: the same save, in pieces - open shows the dialog and
+ * answers with a token, write appends, close commits or aborts.
+ *
+ * For a file larger than the renderer should hold at once. The bytes go to
+ * `<path>.partial` and only take the chosen name on commit; see
+ * `electron/saveSession.ts`.
+ */
+export const SAVE_STREAM_OPEN_CHANNEL = 'inwire:save-stream-open';
+export const SAVE_STREAM_WRITE_CHANNEL = 'inwire:save-stream-write';
+export const SAVE_STREAM_CLOSE_CHANNEL = 'inwire:save-stream-close';
+
+/**
  * Main -> renderer: the Update Center's whole state, whenever it changes.
  *
  * A snapshot rather than a delta, for the same reason the agent's

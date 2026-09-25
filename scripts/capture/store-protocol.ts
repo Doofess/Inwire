@@ -34,8 +34,8 @@
  * matters most is that a **read is answered while a scan is still running** -
  * which is the entire reason `step()` is sliced rather than a loop.
  */
-import { CaptureHost, type CaptureVolume, type OpenVolume } from '../../src/services/capture/captureHost';
-import { MemoryBlockFile } from '../../src/services/capture/blockFile';
+import { CaptureHost } from '../../src/services/capture/captureHost';
+import { MemoryVolume } from '../../src/services/capture/memoryVolume';
 import { MatchSet } from '../../src/services/capture/matchSet';
 import { CHUNK_FRAMES } from '../../src/services/capture/chunkCodec';
 import { compile } from '../../src/services/filter/compile';
@@ -43,7 +43,6 @@ import { plainForStore } from '../../src/services/capture/storePacket';
 import { FieldBlock } from '../../src/services/dissect/fieldBlock';
 import { DENSE_FIELDS } from '../../src/services/dissect/denseFields';
 import { serialize, deserialize } from 'node:v8';
-import type { CaptureFiles } from '../../src/services/capture/captureWriter';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { Packet } from '../../src/types/packet';
 
@@ -58,52 +57,6 @@ function check(name: string, actual: unknown, expected: unknown): void {
   }
 }
 const checkTrue = (name: string, condition: boolean) => check(name, condition, true);
-
-/**
- * The four files, in memory, surviving a close.
- *
- * Reopening has to find what was written - recovery, the resume and the torn
- * tail are the whole point of `open` being one message rather than two - so
- * the files outlive the `OpenVolume` that wrapped them.
- */
-class MemoryVolume implements CaptureVolume {
-  readonly directory = 'C:\\memory\\captures';
-  private readonly stored = new Map<string, CaptureFiles>();
-  /** Opens minus closes. A leaked handle is a Windows EBUSY on the next prune. */
-  outstanding = 0;
-
-  open(captureId: string): OpenVolume {
-    let files = this.stored.get(captureId);
-    if (files === undefined) {
-      files = {
-        index: new MemoryBlockFile(), pfx: new MemoryBlockFile(),
-        sum: new MemoryBlockFile(), byt: new MemoryBlockFile(),
-      };
-      this.stored.set(captureId, files);
-    }
-    this.outstanding++;
-    let closed = false;
-    return {
-      ...files,
-      close: () => {
-        if (closed) return;
-        closed = true;
-        this.outstanding--;
-      },
-    };
-  }
-
-  list(): string[] { return [...this.stored.keys()]; }
-  remove(captureId: string): void { this.stored.delete(captureId); }
-  freeBytes(): number { return 1_000_000_000_000; }
-  /** Entries that are not captures, for the prune guard. */
-  plant(name: string): void {
-    this.stored.set(name, {
-      index: new MemoryBlockFile(), pfx: new MemoryBlockFile(),
-      sum: new MemoryBlockFile(), byt: new MemoryBlockFile(),
-    });
-  }
-}
 
 /** A host with everything it said recorded, in order. */
 function host(options: { scanSliceMs?: number } = {}) {

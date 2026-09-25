@@ -320,6 +320,9 @@ try {
   const bridge = await page.evaluate(() => ({
     present: typeof window.inwire,
     save: typeof window.inwire?.saveFile,
+    saveStreamOpen: typeof window.inwire?.openSaveStream,
+    saveStreamWrite: typeof window.inwire?.writeSaveStream,
+    saveStreamClose: typeof window.inwire?.closeSaveStream,
     agentPort: typeof window.inwire?.requestAgentPort,
     storePort: typeof window.inwire?.requestCaptureStorePort,
     // The window's own four. It is frameless, so without `windowControl` there
@@ -332,7 +335,9 @@ try {
     windowState: typeof window.inwire?.onWindowState,
   }));
   check('the preload bridge is exposed', bridge, {
-    present: 'object', save: 'function', agentPort: 'function', storePort: 'function',
+    present: 'object', save: 'function',
+    saveStreamOpen: 'function', saveStreamWrite: 'function', saveStreamClose: 'function',
+    agentPort: 'function', storePort: 'function',
     windowTheme: 'function', windowControl: 'function', windowTitle: 'function',
     windowState: 'function',
   });

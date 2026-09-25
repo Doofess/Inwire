@@ -32,6 +32,17 @@
  */
 import type { Packet, ProtocolLayer } from '../../types/packet';
 
+/**
+ * A pcapng Decryption Secrets Block's type for an NSS key log: "TLSK" as four
+ * ASCII bytes. The registry has others (WireGuard, ZigBee), none of which this
+ * build produces or consumes.
+ *
+ * Here rather than beside the writer because the READER needs it too, and the
+ * reader is `pcapParser.ts`, in the entry chunk: importing the constant from
+ * the writer pulled the whole pcapng writer into every launch.
+ */
+export const DSB_SECRETS_TYPE_TLS_KEY_LOG = 0x544c534b;
+
 /** pcap/pcapng link types this dissector distinguishes (LINKTYPE_* values). */
 export const LINKTYPE = {
   NULL: 0,        // BSD loopback: 4-byte AF header

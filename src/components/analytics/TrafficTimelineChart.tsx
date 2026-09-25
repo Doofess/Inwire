@@ -10,6 +10,7 @@ import { useThemeToken } from '../../lib/themeColor';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
 import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { FilterEngine } from '../../services/filterEngine';
+import { timelineIndex } from '../../services/report/timeline';
 
 export type TimelineMetric = 'packets' | 'bytes';
 export type TimelineChart = 'area' | 'bars';
@@ -212,9 +213,8 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       acc.last = p.relativeTime;
 
       // Bucket INDEX, not seconds: the axis multiplies back by the interval.
-      // Keying on the index is what keeps the map small at a 1-minute
-      // interval and exact at 100 ms, where a float second would collide.
-      const sec = Math.floor(p.relativeTime / bucketSeconds);
+      // Shared with the report's timeline, so both put a frame in one bucket.
+      const sec = timelineIndex(p.relativeTime, bucketSeconds);
       let bucket = acc.seconds.get(sec);
       if (!bucket) {
         bucket = { count: 0, bytes: 0, match: 0, matchBytes: 0, hasAnomaly: false };
@@ -243,7 +243,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
 
       // Everything below counts in bucket INDEXES and converts to seconds on
       // the way out, so the axis is in seconds whatever the interval is.
-      const minIndex = Math.floor(acc.first / bucketSeconds);
+      const minIndex = timelineIndex(acc.first, bucketSeconds);
       let maxIndex = Math.ceil(acc.last / bucketSeconds);
       const minSpan = Math.ceil(MIN_AXIS_SECONDS / bucketSeconds);
       if (maxIndex - minIndex < minSpan) maxIndex = minIndex + minSpan;

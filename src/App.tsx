@@ -120,6 +120,8 @@ import { startRendererHeapGuard } from './services/rendererHeapGuard';
 import { captureStore, newCaptureId } from './services/capture/captureClient';
 import { freshCaptureStorageState, type CaptureStorageState } from './services/capture/captureProtocol';
 import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
+import type { CaptureSource } from './services/export/captureMeta';
+import { cancelExportForChange, cancelExportJob } from './services/export/exportJob';
 
 /**
  * How far back a socket-table DELTA is allowed to re-annotate.
@@ -249,6 +251,14 @@ export default function App() {
 
   // Stream & Capturing State
   const [isCapturing, setIsCapturing] = useState(false);
+  /**
+   * Where the frames in the buffer came from, for what an export says about
+   * itself. Set where the buffer changes owner - Start, an import, a restore -
+   * and read only by the Export panel. State rather than a ref because that
+   * panel renders it, and it changes a handful of times a session, never per
+   * flush.
+   */
+  const [captureSource, setCaptureSource] = useState<CaptureSource>({ kind: 'session' });
 
   // --- the packet buffer ----------------------------------------------------
   //
@@ -815,6 +825,21 @@ export default function App() {
     setIsCapturing(false);
     sendAgentCommand({ type: 'stop_capture' });
   };
+  /**
+   * An import replaces the capture, so a live one has to actually stop - not
+   * only read as stopped. Setting `isCapturing` alone left the agent sniffing,
+   * its drop counters refilled a second later, and every export of the
+   * imported file then printed the live capture's losses as its own. The same
+   * stop the Stop button sends. Assigned every render, like the one above,
+   * because the import's batch callback is memoized with no deps.
+   */
+  const stopCaptureForImportRef = useRef<() => void>(() => {});
+  stopCaptureForImportRef.current = () => {
+    if (!isCapturingRef.current) return;
+    sendAgentCommand({ type: 'stop_capture' });
+    setIsCapturing(false);
+    captureStartedAtRef.current = null;
+  };
 
   // --- the capture schedule ---------------------------------------------------
   /**
@@ -1053,7 +1078,11 @@ export default function App() {
           fieldWriter.current.absorb(rows);
           for (const packet of rows) {
             accountingRef.current.residentBytes += estimateSummaryBytes(packet);
-            if (restoredLinkTypes.size > 0) {
+            // Only where the row has none: a chunk written since link types
+            // were stored with each row already carries the frame's own, and
+            // the table - keyed by label, not by adapter - is the fallback for
+            // older chunks, never an override.
+            if (restoredLinkTypes.size > 0 && packet.linkType === undefined) {
               const linkType = restoredLinkTypes.get(packet.interfaceName);
               if (linkType !== undefined) packet.linkType = linkType;
             }
@@ -1105,6 +1134,13 @@ export default function App() {
       }
 
       setRestoreProgress(null);
+      // An imported file keeps its name across a reload; anything else
+      // restored is a session whose adapters may no longer exist.
+      if (stored !== null && stored.frameCount > 0) {
+        setCaptureSource(meta?.importedFrom
+          ? { kind: 'import', fileName: meta.importedFrom }
+          : { kind: 'session' });
+      }
       restoringRef.current = false;
 
       if (meta?.selectedInterfaces.length) {
@@ -1164,6 +1200,8 @@ export default function App() {
       // a capture the store failed to open would send the next startup looking
       // for frames that were never on disk.
       captureId: storedCaptureId,
+      // What a restored session tells an export about where it came from.
+      ...(captureSource.kind === 'import' ? { importedFrom: captureSource.fileName } : {}),
       // Written from the ref rather than the state beside it: the identity
       // settles when the adapter list arrives or a buffer is scored, neither
       // of which is in this effect's dependency list, and the throttled
@@ -1177,7 +1215,7 @@ export default function App() {
         ...(hostIdentityRef.current.basis ? { basis: hostIdentityRef.current.basis } : {}),
       },
     });
-  }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick, storedCaptureId]);
+  }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick, storedCaptureId, captureSource]);
 
 
   // Resizable Bottom Pane
@@ -2036,6 +2074,11 @@ export default function App() {
    * the clear and resurrect part of the previous capture.
    */
   const handleStartCapture = async () => {
+    // Before anything touches the store: an export reading the previous
+    // capture ends - its file removed - and says why, rather than reading on
+    // into the new one (`cancelExportForChange`). Every Start goes through
+    // here: the rail's button, the shortcut and the schedule.
+    await cancelExportForChange('a new capture started');
     setBufferAutoPaused(false);
     clearCaptureStats();
     await clearSession();
@@ -2057,6 +2100,14 @@ export default function App() {
     // always had, which used to be spelled `clearSession` wiping the frames
     // out of IndexedDB.
     captureStore.prune([captureIdRef.current]);
+    // By label, which is what an export prints. Through the ref, because a
+    // scheduled start calls this from a closure that may be renders old.
+    setCaptureSource({
+      kind: 'live',
+      adapters: selectedInterfacesRef.current.map(
+        (name) => agentInterfaces.find((i) => i.name === name)?.label ?? name,
+      ),
+    });
     sendAgentCommand({ type: 'start_capture' });
     setIsCapturing(true);
   };
@@ -2127,6 +2178,7 @@ export default function App() {
    * (docs/decisions/0012-stored-captures-persist.md).
    */
   const handleDiscardCapture = useCallback(async () => {
+    await cancelExportForChange('the capture was discarded');
     await clearSession();
     setSelectedPacket(null);
     resetByteRange();
@@ -2290,14 +2342,25 @@ export default function App() {
    */
   const handleImportBatch = useCallback((batch: Packet[]) => {
     if (importCaptureIdRef.current === null) {
+      // Before the store is re-opened. The panel shuts the import while an
+      // export runs; this is the other door, and the export's reader refuses
+      // to read on across the re-open either way (`guardedReader`).
+      cancelExportJob('an import started');
+      stopCaptureForImportRef.current();
       importCaptureIdRef.current = newCaptureId();
       captureStore.begin(importCaptureIdRef.current);
     }
     captureStore.append(batch);
   }, []);
 
-  const handleImportPackets = (imported: Packet[]) => {
+  const handleImportPackets = (imported: Packet[], info?: { filename: string }) => {
+    stopCaptureForImportRef.current();
     setIsCapturing(false);
+    setCaptureSource(info ? { kind: 'import', fileName: info.filename } : { kind: 'session' });
+    // The live capture's drop counters describe frames that are no longer in
+    // the buffer. Left in place, every export of the imported file reported it
+    // as a live capture that lost the previous capture's frames.
+    clearCaptureStats();
     // The same reset Clear does, and for the same reasons. Imported frames are
     // numbered 1..N by buildPacketsFromFrames; without this the Worker's
     // counter is untouched, so pressing Start after an import issues live
@@ -2705,6 +2768,20 @@ export default function App() {
                 appliedFilter={appliedFilter}
                 permissions={permissions}
                 captureStats={captureStats}
+                // The whole capture, not the window: where the window sits on
+                // disk, the scan that answers the filter below it, and the two
+                // counts the title row already shows. Every one is a number or
+                // a value that changes only when its subject does - `rescan`
+                // is stable - so none of them adds a render or a computation
+                // this component was not already doing.
+                belowWindow={belowWindow}
+                captureRowCount={captureRowCount}
+                filteredRowCount={shownRowCount}
+                filterScan={captureFilter.state}
+                filterUncovered={filterUncovered}
+                onRescan={captureFilter.rescan}
+                agentInterfaces={agentInterfaces}
+                captureSource={captureSource}
                 onImportPackets={handleImportPackets}
                 onImportBatch={handleImportBatch}
               />

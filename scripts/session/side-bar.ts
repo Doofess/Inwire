@@ -341,11 +341,36 @@ console.log('\n--- what may not come back ---\n');
   // The heavy work moved off the render path, which is the same class of defect
   // as the lease countdown: `useHydratedBytes` over the whole buffer was a
   // one-off in a modal and is ten times a second in a panel.
+  //
+  // It then moved out of the panel altogether: an export is the whole capture,
+  // read a page at a time by `services/export/runExport.ts`, and the panel only
+  // starts it. The weight moved with it - the writers, the anonymiser, exceljs
+  // and jsPDF were in the entry chunk while the panel imported them directly.
   const transfer = code('src/components/sidebar/TransferPanel.tsx');
-  checkTrue('the transfer panel hydrates at press time, not on render',
-    !transfer.includes('useHydratedBytes') && transfer.includes('await packetsBytes('));
-  checkTrue('...and anonymises there too, not in a memo',
-    /const prepare = async[\s\S]{0,900}anonymiseCapture\(/.test(transfer));
+  const staticImports = [...transfer.matchAll(/^import\s+(?!type\b)[\s\S]*?\sfrom\s+'([^']+)';/gm)]
+    .map((m) => m[1]);
+  check('the transfer panel imports no writer, anonymiser or report statically',
+    staticImports.filter((from) =>
+      /pcapngWriter|anonymise|tabularWriters|export\/writers|pdfReport|runExport|report\/analysis/.test(from)),
+    []);
+  checkTrue('...and fetches the export when a format is pressed',
+    /await import\('\.\.\/\.\.\/services\/export\/runExport'\)/.test(transfer));
+  checkTrue('...and nothing is hydrated or anonymised on render, or in the panel at all',
+    !transfer.includes('useHydratedBytes') && !transfer.includes('packetsBytes(')
+    && !transfer.includes('anonymiseCapture(') && !transfer.includes('new Anonymiser('));
+
+  // **One anonymiser per export job.** It is keyed, so two map one address to
+  // two pseudonyms: one per page would write a file in which a host is a
+  // different host on every page, and nothing reading it would say so.
+  const run = code('src/services/export/runExport.ts');
+  check('runExport constructs exactly one Anonymiser',
+    (run.match(/new Anonymiser\(/g) ?? []).length, 1);
+  checkTrue('...before the first page loop, not inside it',
+    run.indexOf('new Anonymiser(') >= 0 && run.indexOf('for await (') > run.indexOf('new Anonymiser('));
+  // Bytes come back where the frames are read - per page, in one place - and
+  // not a second time in the orchestrator.
+  checkTrue('byte hydration happens in exportFrames.ts, not in runExport',
+    code('src/services/export/exportFrames.ts').includes('packetsBytes(') && !run.includes('packetsBytes('));
 
   // **The schedule's calendar stays open, and there is one of it.** It was a
   // single calendar behind an `editing` slot while this was a dropdown, then

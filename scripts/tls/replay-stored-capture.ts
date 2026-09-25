@@ -34,6 +34,7 @@ import { CaptureReader } from '../../src/services/capture/captureReader';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
 import { recoverIndex } from '../../src/services/capture/captureIndex';
 import { PcapService } from '../../src/services/pcapParser';
+import { generatePcapBinary } from '../../src/services/export/oneShot';
 import { keyLog } from '../../src/services/tls/keyLog';
 import type { Packet } from '../../src/types/packet';
 
@@ -70,7 +71,7 @@ async function main(): Promise<void> {
     for (const file of Object.values(files)) file.close();
 
     keyLog.add(readFileSync(keyLogFile, 'latin1'));
-    const pcap = PcapService.generatePcapBinary(withBytes);
+    const pcap = generatePcapBinary(withBytes);
     const replayed = (await PcapService.parseCaptureFile(
       new File([await pcap.arrayBuffer()], 'replay.pcap'),
     )).packets;

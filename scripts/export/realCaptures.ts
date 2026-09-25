@@ -9,6 +9,7 @@
  * `parity/tree-coverage.ts` does, so `npm run check` stays runnable on CI.
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PcapService } from '../../src/services/pcapParser';
@@ -38,4 +39,36 @@ export async function loadRealCaptures(): Promise<RealCapture[]> {
     found.push({ name, path, packets });
   }
   return found;
+}
+
+/**
+ * A Wireshark command-line tool - `tshark`, `capinfos`, `editcap` - or null.
+ *
+ * The same search `parity/tree-coverage.ts` makes for tshark: `TSHARK`'s
+ * directory when set, the bare name on PATH, then the install paths. A caller
+ * that gets null prints SKIP for the cross-check and runs the rest.
+ */
+export function findWiresharkTool(tool: 'tshark' | 'capinfos' | 'editcap' | 'mergecap'): string | null {
+  const exe = process.platform === 'win32' ? `${tool}.exe` : tool;
+  const candidates = [
+    process.env.TSHARK ? join(dirname(process.env.TSHARK), exe) : undefined,
+    tool,
+    `C:\\Program Files\\Wireshark\\${exe}`,
+    `C:\\Program Files (x86)\\Wireshark\\${exe}`,
+    `/usr/bin/${tool}`,
+    `/usr/local/bin/${tool}`,
+    `/opt/homebrew/bin/${tool}`,
+  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ['-v'], { encoding: 'utf8', shell: false });
+    if (probe.status === 0) return candidate;
+  }
+  return null;
+}
+
+/** Runs a Wireshark tool and returns its stdout; throws with its stderr on failure. */
+export function runTool(tool: string, args: string[]): string {
+  const result = spawnSync(tool, args, { encoding: 'utf8', shell: false, maxBuffer: 512 * 1024 * 1024 });
+  if (result.status !== 0) throw new Error(`${tool} ${args.join(' ')} exited ${result.status}: ${result.stderr}`);
+  return result.stdout;
 }

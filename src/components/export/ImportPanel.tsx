@@ -22,7 +22,7 @@ interface ImportPanelProps {
    * The frames to put in the buffer: everything for a small file, the newest
    * `maxFrames` when the import streamed to disk.
    */
-  onImportPackets: (packets: Packet[]) => void;
+  onImportPackets: (packets: Packet[], info: { filename: string }) => void;
   /**
    * Where every frame goes as it is dissected, if anywhere.
    *
@@ -35,6 +35,13 @@ interface ImportPanelProps {
   onFailure: (filename: string, failure: ImportFailure) => void;
   /** Set when the error dialog's "Choose another file" reopens the picker. */
   retryToken: number;
+  /**
+   * Why an import cannot start right now, or null. An import re-opens the
+   * capture store on a new capture, which is the one thing a running export
+   * cannot survive - so while one runs, the picker and the drop zone are shut
+   * and say so.
+   */
+  blockedBy?: string | null;
 }
 
 export const ImportPanel: React.FC<ImportPanelProps> = ({
@@ -42,6 +49,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
   onImportBatch,
   onFailure,
   retryToken,
+  blockedBy = null,
 }) => {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -54,11 +62,11 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
   // Reopened by the error dialog. A ref-driven click rather than lifting the
   // whole picker into the parent, so the dialog stays a presentation concern.
   React.useEffect(() => {
-    if (retryToken > 0) inputRef.current?.click();
+    if (retryToken > 0 && blockedBy === null) inputRef.current?.click();
   }, [retryToken]);
 
   const handleFile = async (file: File | undefined) => {
-    if (!file || busy) return;
+    if (!file || busy || blockedBy !== null) return;
 
     setBusy(true);
     setStatus(`Reading ${file.name}...`);
@@ -78,7 +86,9 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
         onFailure(file.name, outcome.failure);
         return;
       }
-      onImportPackets(outcome.packets);
+      // The name travels with the frames: it is the capture's source in
+      // everything exported from them.
+      onImportPackets(outcome.packets, { filename: file.name });
       setStatus(`Imported ${outcome.packets.length.toLocaleString()} packets from ${file.name}`);
       setNotes(outcome.notes);
     } catch (err) {
@@ -120,8 +130,9 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
             setDragging(false);
             void handleFile(e.dataTransfer.files?.[0]);
           }}
+          aria-disabled={blockedBy !== null}
           className={`border-2 border-dashed rounded-lg p-6 flex flex-col items-center justify-center transition-colors ${
-            busy ? 'cursor-wait opacity-70' : 'cursor-pointer'
+            busy ? 'cursor-wait opacity-70' : blockedBy !== null ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'
           } ${dragging ? 'border-primary bg-primary/10' : 'border-border hover:border-sky-500 bg-muted/30'}`}
         >
           {busy ? (
@@ -135,12 +146,15 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
           <span className="text-[11px] text-muted-foreground mt-1 font-mono text-center">
             .pcap .pcapng .cap · .csv .tsv · .xlsx · .json · .zip
           </span>
+          {blockedBy !== null && (
+            <span className="text-[11px] text-warning mt-1 text-center">{blockedBy}</span>
+          )}
           <input
             ref={inputRef}
             type="file"
             accept={IMPORT_ACCEPT}
             onChange={onInputChange}
-            disabled={busy}
+            disabled={busy || blockedBy !== null}
             className="hidden"
           />
         </label>

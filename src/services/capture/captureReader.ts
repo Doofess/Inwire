@@ -36,7 +36,7 @@
  * and lives in the storage Worker, outside the main thread's byte budget
  * entirely.
  */
-import { ChunkDirectory, applyPrefixes, decodeChunk, prefixBlockBytes } from './chunkCodec';
+import { ChunkDirectory, applyPrefixes, chunkStoresLinkType, decodeChunk, prefixBlockBytes } from './chunkCodec';
 import type { CaptureIndex } from './captureIndex';
 import { readExact, type BlockFile } from './blockFile';
 import type { CaptureFiles } from './captureWriter';
@@ -108,14 +108,24 @@ export class CaptureReader {
    * error - the caller has the rest of the capture and should show it.
    */
   readRows(chunk: number): Packet[] {
-    if (chunk < 0 || chunk >= this.index.chunkCount) return [];
+    return this.readChunkRows(chunk).packets;
+  }
+
+  /**
+   * `readRows`, and whether the chunk recorded each row's link type
+   * (`chunkStoresLinkType`) - false for a chunk written before it did, whose
+   * rows' absent `linkType` means "not recorded" rather than Ethernet.
+   */
+  private readChunkRows(chunk: number): { packets: Packet[]; linkTypesStored: boolean } {
+    if (chunk < 0 || chunk >= this.index.chunkCount) return { packets: [], linkTypesStored: false };
     const record = this.index.record(chunk);
     const summaryRaw = this.readClamped(this.files.sum, record.sumOffset, record.sumLength);
     const prefixRaw = this.readClamped(this.files.pfx, record.pfxOffset, record.pfxLength);
-    if (summaryRaw === null || prefixRaw === null) return [];
-    const packets = decodeChunk(this.inflate(summaryRaw));
+    if (summaryRaw === null || prefixRaw === null) return { packets: [], linkTypesStored: false };
+    const summary = this.inflate(summaryRaw);
+    const packets = decodeChunk(summary);
     applyPrefixes(packets, this.inflate(prefixRaw));
-    return packets;
+    return { packets, linkTypesStored: chunkStoresLinkType(summary) };
   }
 
   /**
@@ -147,14 +157,14 @@ export class CaptureReader {
    * so trimming it to the viewport would throw away the rows it is about to
    * scroll into.
    */
-  readRowsAt(from: number, to: number): { firstOrdinal: number; packets: Packet[] }[] {
-    const out: { firstOrdinal: number; packets: Packet[] }[] = [];
+  readRowsAt(from: number, to: number): { firstOrdinal: number; packets: Packet[]; linkTypesStored: boolean }[] {
+    const out: { firstOrdinal: number; packets: Packet[]; linkTypesStored: boolean }[] = [];
     let at = Math.max(0, from);
     while (at < to && out.length < MAX_ROW_CHUNKS) {
       const chunk = this.index.chunkForOrdinal(at);
       if (chunk < 0) break;
       const record = this.index.record(chunk);
-      out.push({ firstOrdinal: record.firstOrdinal, packets: this.readRows(chunk) });
+      out.push({ firstOrdinal: record.firstOrdinal, ...this.readChunkRows(chunk) });
       at = record.firstOrdinal + record.frameCount;
     }
     return out;

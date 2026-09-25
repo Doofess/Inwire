@@ -40,6 +40,13 @@ import { plainForStore } from './storePacket';
 export interface RowBlock {
   firstOrdinal: number;
   packets: Packet[];
+  /**
+   * True when the chunk recorded each row's `linkType`, so an absent one
+   * means Ethernet. False or absent for a chunk written before it did, where
+   * absent means "not recorded" and only the session's adapter table can say
+   * (`export/exportFrames.ts`).
+   */
+  linkTypesStored?: boolean;
 }
 
 /** How far a scan has got, for the progress the filter bar shows. */
@@ -334,8 +341,21 @@ class CaptureClient {
     }
   }
 
+  /**
+   * Bumped every time the store is pointed at a different capture - `begin`,
+   * `reopen`, `discard`. Something that reads the store across many requests
+   * (an export) remembers it and stops if it moves, because every answer after
+   * that is about another capture (`export/exportFrames.guardedReader`).
+   */
+  private openGeneration = 0;
+
+  get generation(): number {
+    return this.openGeneration;
+  }
+
   /** Starts a capture. One Start->Stop cycle is one capture directory. */
   begin(captureId: string): void {
+    this.openGeneration++;
     if (!captureStoreAvailable()) return;
     this.settleAll();
     this.state = freshCaptureStorageState();
@@ -433,6 +453,7 @@ class CaptureClient {
    * reads as "there is nothing to restore".
    */
   reopen(captureId: string): Promise<StoredCapture | null> {
+    this.openGeneration++;
     this.state = freshCaptureStorageState();
     return this.request(
       this.pendingOpen as never,
@@ -562,6 +583,7 @@ class CaptureClient {
   askForStats(): void { this.send({ type: 'stats' }); }
 
   discard(captureId: string): void {
+    this.openGeneration++;
     this.send({ type: 'discard', captureId });
     this.settleAll();
     this.state = freshCaptureStorageState();

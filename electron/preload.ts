@@ -23,6 +23,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
+  SAVE_STREAM_CLOSE_CHANNEL, SAVE_STREAM_OPEN_CHANNEL, SAVE_STREAM_WRITE_CHANNEL,
   KEYLOG_ATTACH_CHANNEL, KEYLOG_CHOOSE_CHANNEL, KEYLOG_FOLLOW_SUGGESTED_CHANNEL,
   KEYLOG_FORGET_CHANNEL, KEYLOG_STATUS_CHANNEL, KEYLOG_TEXT_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_INGEST_PORT_REQUEST,
@@ -193,6 +194,27 @@ const api = {
     bytes: Uint8Array;
   }): Promise<unknown> {
     return ipcRenderer.invoke(SAVE_FILE_CHANNEL, request);
+  },
+
+  /**
+   * The same save in pieces, for a file too large to hand over whole.
+   *
+   * Open shows the dialog and answers with a token; the bytes then go to a
+   * `.partial` beside the chosen path and take its name only on a committed
+   * close. `src/lib/saveSink.ts` is the only caller and narrows the answers.
+   */
+  openSaveStream(request: {
+    suggestedName: string;
+    extensions?: string[];
+    description?: string;
+  }): Promise<unknown> {
+    return ipcRenderer.invoke(SAVE_STREAM_OPEN_CHANNEL, request);
+  },
+  writeSaveStream(token: string, bytes: Uint8Array): Promise<unknown> {
+    return ipcRenderer.invoke(SAVE_STREAM_WRITE_CHANNEL, token, bytes);
+  },
+  closeSaveStream(token: string, commit: boolean): Promise<unknown> {
+    return ipcRenderer.invoke(SAVE_STREAM_CLOSE_CHANNEL, token, commit === true);
   },
 
   /** The Update Center's state right now, for a panel that has just mounted. */

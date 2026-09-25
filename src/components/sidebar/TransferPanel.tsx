@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   Check, CircleAlert, Download, FileCode, FileSpreadsheet, FileText,
-  Image as ImageIcon, LoaderCircle,
+  Image as ImageIcon, LoaderCircle, RefreshCw, X,
 } from 'lucide-react';
 
 import { Section } from '../network/rows';
@@ -10,17 +10,17 @@ import { ImportPanel } from '../export/ImportPanel';
 import { ImportErrorDialog } from '../export/ImportErrorDialog';
 import { useRovingFocus } from '../common/useRovingFocus';
 import { FilterEngine } from '../../services/filterEngine';
-import { PcapService } from '../../services/pcapParser';
-import { generatePcapNg, type PcapngInterface } from '../../services/pcapngWriter';
-import { anonymiseCapture } from '../../services/anonymise';
 import { keyLog } from '../../services/tls/keyLog';
-import { buildNameMap } from '../../services/nameResolution';
-import { buildCsv, buildXlsx, zipSingleFile } from '../../services/tabularWriters';
-import { saveGeneratedBlob, exportStem } from '../../lib/saveFile';
-import { packetsBytes } from '../../services/packetBytes';
-import type { CaptureDropStats } from '../../services/agentProtocol';
+import { captureStore } from '../../services/capture/captureClient';
+import {
+  beginExportJob, cancelExportJob, dismissExportJob, type ExportFormat, type ExportJobState, type ExportPhase,
+} from '../../services/export/exportJob';
+import { useExportJob } from '../../lib/useExportJob';
+import type { CaptureFilterState } from '../../lib/useCaptureFilter';
+import type { AgentInterface, CaptureDropStats } from '../../services/agentProtocol';
 import type { Capabilities, Packet } from '../../types/packet';
 import type { ImportFailure } from '../../services/exportSchema';
+import type { CaptureSource } from '../../services/export/captureMeta';
 
 /**
  * Export and Import, as one column read top to bottom.
@@ -32,78 +32,132 @@ import type { ImportFailure } from '../../services/exportSchema';
  * sequence, where a three-column grid scrambled the last step into a reading
  * path nobody follows.
  *
- * ## The heavy work moved off the render path, and that is not a tidy-up
+ * ## An export is the whole capture, and none of the work happens here
  *
- * `ExportPanel` computed `useHydratedBytes(exportPackets)` on RENDER, then
- * anonymised the result, then built a name map from it, then estimated its
- * size - all as memos over the whole buffer, to drive live previews. Inside a
- * modal opened for a few seconds that is a one-off cost nobody notices.
+ * Every format writes the capture - the frames on disk below the RAM window as
+ * well as the window - or what the display filter selects from all of it. The
+ * work is `services/export/runExport.ts`, fetched with `await import` when a
+ * format is pressed: the writers, the anonymiser, exceljs and jsPDF are none
+ * of them needed to show a packet, and this panel is reached from the entry
+ * chunk. Nothing expensive runs on render either - this panel sits beside a
+ * live capture and re-renders on every flush, so hydrating or anonymising
+ * anything here would do it ten times a second, for a preview.
  *
- * This panel is persistent and sits beside a live capture, where `packets`
- * changes ten times a second. Those memos would re-hydrate and re-anonymise
- * the entire buffer at that rate, for a preview. So every one of them happens
- * once, inside `runExport`, at the moment something is actually being written.
+ * **The job outlives the panel.** Switching the side bar to Interfaces
+ * unmounts this component, and an export that took its progress and its
+ * Cancel button with it would carry on writing with nothing able to stop it.
+ * So the job is a module store (`services/export/exportJob.ts`) and this is a
+ * view of it: come back and the bar is where the export has got to.
  *
- * **What that costs is the live previews**, and it is worth naming rather than
- * glossing: the "would rewrite N addresses" figure beside Anonymise and the
- * raw-bytes size estimate are gone. The prose they sat beside is not - the
- * consequence is what the reader cannot discover, and the number was only ever
- * its illustration.
+ * ## Both counts are the list's own
  *
- * ## The filtered scope names an expression and not a count
- *
- * For the same reason. `FilterEngine.filterPackets` over the buffer is held to
- * a 50ms budget at 50,000 frames by `scripts/filter/engine.ts`; run on every
- * flush it is half a core, continuously, to print a number. The buffer count
- * is free (`packets.length`) and is shown; the filtered count is what the
- * saved line reports once the file exists.
- *
- * The app's own packet counter was the tempting shortcut and is the wrong
- * source: it counts over the WHOLE capture, disk included, and this writes
- * from the buffer. A panel that promised 4,231 and wrote 2,800 would be worse
- * than one that promised nothing.
+ * "The whole capture" is the title row's total and "what the filter selects"
+ * is its match count, from the same scan (`useCaptureFilter`). The export runs
+ * no scan of its own - the store runs one at a time, and a second would cancel
+ * the list's - so until that scan has covered every frame on disk the filtered
+ * choice is unavailable and says why, rather than writing the window's matches
+ * and calling them the filter's answer.
  *
  * ## There is no filter field here any more
  *
  * The modal embedded a whole `FilterBar`, because a 70% scrim covered the one
  * in the title row. There is no scrim: that field is 32px above this column and
  * always reachable. What is left is the CHOICE the embedded copy really
- * offered - write the buffer, or write what the filter selects - which is two
- * buttons and no second expression anywhere in the window.
+ * offered - the capture, or what the filter selects - which is two buttons and
+ * no second expression anywhere in the window.
  */
 export interface TransferPanelProps {
-  /** The full live buffer. This panel derives its own filtered view from it. */
+  /** The RAM window: the capture's newest frames. The rest is read off disk. */
   packets: Packet[];
   /** The expression applied in the title row, which this panel only reads. */
   appliedFilter: string;
   permissions: Capabilities;
   /**
-   * What the driver and the agent dropped, for the pcapng Interface Statistics
-   * Block. A file that does not say it is incomplete reads as complete.
+   * What the driver, the agent and the pipe dropped. A file that does not say
+   * it is incomplete reads as complete - and a count nobody reported is null
+   * here and null in the file, never a zero.
    */
   captureStats?: CaptureDropStats | null;
-  onImportPackets: (packets: Packet[]) => void;
+  /** Capture ordinals below the window (`useWindowOrdinal`). */
+  belowWindow: number;
+  /** Frames in the whole capture: `belowWindow + packets.length`. */
+  captureRowCount: number;
+  /** Frames the display filter selects over the whole capture, once the scan is in. */
+  filteredRowCount: number;
+  /** The scan that answers the filter below the window. */
+  filterScan: CaptureFilterState;
+  /** Rows below the window the scan did not reach (`uncoveredRows`). */
+  filterUncovered: number;
+  onRescan: () => void;
+  /** The agent's adapters, which carry each one's link type. */
+  agentInterfaces: AgentInterface[];
+  /** Where these frames came from, for the metadata every format prints. */
+  captureSource: CaptureSource;
+  onImportPackets: (packets: Packet[], info: { filename: string }) => void;
   onImportBatch?: (batch: Packet[]) => void;
 }
 
-type FormatId = 'pcap' | 'pcapng' | 'json' | 'csv' | 'xlsx' | 'pdf';
-type Scope = 'buffer' | 'filter';
+type Scope = 'capture' | 'filter';
 
 const ROW = 'w-full text-left px-3 py-2 cursor-pointer transition-colors '
   + 'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring '
   + 'focus-visible:ring-inset disabled:opacity-40 disabled:cursor-not-allowed';
 
+const COUNT = new Intl.NumberFormat();
+
+/**
+ * Whether the filtered choice can be written, and what its row says.
+ *
+ * With nothing on disk below the window the in-memory filter is the whole
+ * answer and there is no scan to wait for. With something there, only a scan
+ * that finished AND reached the end of the disk half will do: a scan still
+ * running has no answer yet, and one that started before the capture grew
+ * does not cover the frames that arrived since - exporting then would quietly
+ * leave them out.
+ */
+function filterAvailability(
+  hasFilter: boolean, below: number, scan: CaptureFilterState, uncovered: number, matches: number,
+): { ready: boolean; detail: string; rescan: boolean } {
+  if (!hasFilter) return { ready: false, detail: 'no filter applied', rescan: false };
+  const frames = `${COUNT.format(matches)} frames`;
+  if (below === 0) return { ready: true, detail: frames, rescan: false };
+  switch (scan.status) {
+    case 'ready':
+      return uncovered > 0
+        ? {
+          ready: false,
+          detail: `${COUNT.format(uncovered)} frames arrived after the scan; rescan to include them`,
+          rescan: true,
+        }
+        : { ready: true, detail: frames, rescan: false };
+    case 'scanning': {
+      const percent = scan.frameCount > 0 ? Math.floor((scan.framesDone / scan.frameCount) * 100) : 0;
+      return { ready: false, detail: `scanning ${percent}%`, rescan: false };
+    }
+    case 'failed':
+      return { ready: false, detail: `the scan failed: ${scan.message}`, rescan: true };
+    case 'off':
+      return { ready: false, detail: 'waiting for the scan', rescan: false };
+  }
+}
+
+const PHASE_LABEL: Record<ExportPhase, string> = {
+  choosing: 'Choosing where to save',
+  surveying: 'Counting frames and columns',
+  writing: 'Writing',
+  finishing: 'Finishing the file',
+};
+
 export const TransferPanel: React.FC<TransferPanelProps> = ({
-  packets, appliedFilter, permissions, captureStats, onImportPackets, onImportBatch,
+  packets, appliedFilter, permissions, captureStats, belowWindow, captureRowCount, filteredRowCount,
+  filterScan, filterUncovered, onRescan, agentInterfaces, captureSource, onImportPackets, onImportBatch,
 }) => {
-  const [scope, setScope] = useState<Scope>('buffer');
+  const [scope, setScope] = useState<Scope>('capture');
   const [includeRawBytes, setIncludeRawBytes] = useState(true);
   const [compress, setCompress] = useState(false);
   const [anonymise, setAnonymise] = useState(false);
   const [attachSecrets, setAttachSecrets] = useState(false);
-  const [busy, setBusy] = useState<FormatId | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [savedTo, setSavedTo] = useState<{ path: string; frames: number } | null>(null);
+  const job = useExportJob();
   /**
    * A refused file, and the token that reopens the picker for it.
    *
@@ -128,104 +182,72 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
    * wrote and carry no sign of it.
    */
   const filterValid = !hasFilter || FilterEngine.validateFilter(appliedFilter).isValid;
-  const canExport = packets.length > 0 && filterValid && busy === null;
+  const filtered = filterAvailability(hasFilter, belowWindow, filterScan, filterUncovered, filteredRowCount);
+  // A filter cleared after choosing it leaves nothing to narrow by: the scope
+  // falls back to the capture rather than disabling every format.
+  const effectiveScope: Scope = scope === 'filter' && hasFilter ? 'filter' : 'capture';
+  const busy = job.status === 'running';
+  const canExport = captureRowCount > 0 && filterValid && !busy
+    && (effectiveScope === 'capture' || filtered.ready);
 
   /**
-   * Everything expensive, once, at the moment something is written.
+   * Hands the job to `runExport`, fetched now rather than at startup.
    *
-   * Hydrated FIRST, because a buffer large enough to have stopped holding raw
-   * frames would otherwise write a capture of empty ones - and anonymisation
-   * rewrites those bytes, so it has to happen after they are back (ADR 0013).
-   *
-   * This does mean the whole capture's bytes are resident for the length of an
-   * export. At the present cap that is ~117 MB and unremarkable; if the cap
-   * ever rises to a million frames it is 1.17 GB, and the writers will have to
-   * produce a Blob from parts as they go rather than one contiguous buffer.
-   * Noted here because that is the moment this stops being adequate.
+   * Everything it needs is read here, at the press, and handed over as values:
+   * the window as it is now, the scan's bitmap, the counters. A live capture
+   * keeps growing while the file is written; the file is the capture as of
+   * this moment, which is the only moment anybody chose.
    */
-  const prepare = async (): Promise<{ outgoing: Packet[]; interfaces: PcapngInterface[] }> => {
-    const chosen = scope === 'filter' && hasFilter
-      ? FilterEngine.filterPackets(packets, appliedFilter)
-      : packets;
-    const bytesById = await packetsBytes(chosen);
-    const hydrated = chosen.map((p) => {
-      const bytes = bytesById.get(p.id);
-      return bytes === undefined ? p : { ...p, rawBytes: bytes };
-    });
-    const outgoing = anonymise ? anonymiseCapture(hydrated).packets : hydrated;
-
-    // One IDB per adapter the export actually contains. Classic pcap has one
-    // link type and no interface field, so a multi-adapter capture came out as
-    // one undifferentiated stream; pcapng can say it, so it does.
-    const names = [...new Set(outgoing.map((p) => p.interfaceName).filter(Boolean))] as string[];
-    const interfaces: PcapngInterface[] = names.length === 0
-      ? [{ name: 'unknown', description: 'Inwire capture' }]
-      : names.map((name) => ({
-        name,
-        description: 'Inwire capture',
-        // A nanosecond capture stays nanosecond: pcapng records the
-        // resolution per interface, which is the thing classic pcap could
-        // only express through the whole file's magic number.
-        tsPrecision: outgoing.find((p) => p.interfaceName === name)?.tsPrecision ?? 6,
-        // Per IDB, which is the one thing classic pcap cannot say: a capture
-        // on an Ethernet adapter and Npcap's loopback at once is two link
-        // types in one file, and pcapng describes it. The field existed on
-        // `PcapngInterface` with no caller anywhere setting it, so every
-        // exported file declared Ethernet whatever it held.
-        linkType: outgoing.find((p) => p.interfaceName === name)?.linkType,
-        // The counters describe the whole capture rather than this adapter's
-        // share, so they are only written when there is exactly one adapter
-        // to attribute them to.
-        ...(names.length === 1 && captureStats
-          ? {
-            received: captureStats.received,
-            dropped: (captureStats.droppedKernel ?? 0) + captureStats.droppedAgent,
-          }
-          : {}),
-      }));
-    return { outgoing, interfaces };
-  };
-
-  /**
-   * One path for every format: build a blob, optionally zip it, save it.
-   *
-   * The zip toggle is why this is centralised - wrapping happens after the file
-   * exists and before it is handed over, so a format only has to know how to
-   * produce its own bytes.
-   */
-  const runExport = async (
-    id: FormatId,
-    extension: string,
-    produce: (ready: { outgoing: Packet[]; interfaces: PcapngInterface[] }) => Blob | Promise<Blob>,
-    stemPrefix = 'inwire_capture',
-  ) => {
+  const start = async (format: ExportFormat) => {
     if (!canExport) return;
-    setBusy(id);
-    setError(null);
-    setSavedTo(null);
+    const handle = beginExportJob(format);
+    if (handle === null) return;
     try {
-      const ready = await prepare();
-      const stem = exportStem(stemPrefix);
-      const filename = `${stem}.${extension}`;
-      const blob = await produce(ready);
-      const outcome = compress
-        ? await saveGeneratedBlob(await zipSingleFile(blob, filename), `${stem}.zip`)
-        : await saveGeneratedBlob(blob, filename);
-      // Three outcomes, and cancelled is not one of the other two. Somebody who
-      // pressed Cancel meant to, and showing them an error for it would be the
-      // app arguing with a decision it just asked them to make.
-      if (outcome.saved) setSavedTo({ path: outcome.path, frames: ready.outgoing.length });
-      else if (!outcome.canceled) setError(outcome.error);
+      const { runExport } = await import('../../services/export/runExport');
+      const result = await runExport({
+        format,
+        scope: {
+          window: packets,
+          filter: effectiveScope === 'filter'
+            ? { expression: appliedFilter, matches: filterScan.status === 'ready' ? filterScan.matches : null }
+            : null,
+        },
+        reader: captureStore,
+        // Every read fails if the store is re-opened under the export. The
+        // app cancels first (`cancelExportForChange`); this catches a path
+        // that forgot to.
+        captureIdentity: () => captureStore.generation,
+        interfaces: agentInterfaces,
+        includeRawBytes,
+        compress,
+        anonymise,
+        secrets: attachSecrets && !anonymise ? keyLog.serialise() : undefined,
+        source: captureSource,
+        // Each count as the agent reported it. `droppedKernel` is null when
+        // the driver's counters could not be read, and `droppedPipe` when the
+        // agent did not say; folding either to 0 would print a complete
+        // capture that nobody measured.
+        drops: {
+          kernel: captureStats ? captureStats.droppedKernel : null,
+          agent: captureStats ? captureStats.droppedAgent : null,
+          pipe: captureStats ? captureStats.droppedPipe : null,
+        },
+        received: captureStats ? captureStats.received : null,
+        // The capturing machine's OS, from the preload - read here rather than
+        // inside a writer, which is a service and never sees `window`.
+        os: window.inwire?.osDescription ?? null,
+      }, { signal: handle.signal, onProgress: handle.progress });
+      handle.settle(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'The export failed.');
-    } finally {
-      setBusy(null);
+      // The chunk itself failed to load, or something outside `runExport`'s
+      // own net threw. Its sink, if it opened one, has already been aborted.
+      handle.settle({ outcome: 'failed', error: err instanceof Error ? err.message : 'The export failed.' });
     }
   };
 
   const formats: {
-    id: FormatId; title: string; note?: string; icon: React.ReactNode;
-    disabled?: boolean; group: 'capture' | 'report'; onClick: () => void;
+    id: ExportFormat; title: string; note?: string; icon: React.ReactNode;
+    disabled?: boolean; group: 'capture' | 'report';
   }[] = [
     {
       id: 'pcapng',
@@ -233,65 +255,37 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
       group: 'capture',
       icon: <Download className="w-3.5 h-3.5" />,
       disabled: !permissions.canExportPcap,
-      onClick: () => runExport('pcapng', 'pcapng', ({ outgoing, interfaces }) => generatePcapNg(
-        outgoing,
-        {
-          interfaces,
-          // Only when the addresses are real. An anonymised file must not carry
-          // a table mapping the addresses it just rewrote back to host names.
-          names: anonymise ? undefined : buildNameMap(outgoing).entries()
-            .filter((e) => e.address.includes('.') || e.address.includes(':'))
-            .map((e) => ({ address: e.address, names: [e.name] })),
-          // Never alongside anonymisation: the secrets would open the payload
-          // that was just removed, and the two together are a contradiction
-          // rather than a choice.
-          secrets: attachSecrets && !anonymise ? keyLog.serialise() : undefined,
-          comment: hasFilter && scope === 'filter'
-            ? `Exported from Inwire with the display filter: ${appliedFilter}`
-            : 'Exported from Inwire',
-        },
-      )),
     },
     {
       id: 'pcap',
       title: 'Libpcap (.pcap)',
-      // The only format row carrying a line, and it carries a LOSS - the four
+      // The only capture row carrying a line, and it carries a LOSS - the
       // things pcapng keeps that this cannot. Stating them here rather than as
-      // pcapng's four keeps is the same fact said once instead of twice, and
-      // said where it changes a decision.
-      note: 'Loses the adapter name, nanosecond timestamps, the resolved names '
-        + 'and what the capture dropped.',
+      // pcapng's keeps is the same fact said once instead of twice, and said
+      // where it changes a decision.
+      note: 'Loses the adapter name, nanosecond timestamps, the resolved names, '
+        + 'what the capture dropped and the capture\'s metadata.',
       group: 'capture',
       icon: <Download className="w-3.5 h-3.5" />,
       disabled: !permissions.canExportPcap,
-      onClick: () => runExport('pcap', 'pcap',
-        ({ outgoing }) => PcapService.generatePcapBinary(outgoing)),
     },
     {
       id: 'xlsx',
       title: 'Excel Workbook',
       group: 'report',
       icon: <FileSpreadsheet className="w-3.5 h-3.5" />,
-      onClick: () => runExport('xlsx', 'xlsx',
-        ({ outgoing }) => buildXlsx(outgoing, { includeRawBytes, filter: appliedFilter })),
     },
     {
       id: 'csv',
       title: 'Spreadsheet CSV',
       group: 'report',
       icon: <FileText className="w-3.5 h-3.5" />,
-      onClick: () => runExport('csv', 'csv',
-        ({ outgoing }) => buildCsv(outgoing, includeRawBytes)),
     },
     {
       id: 'json',
       title: 'JSON Telemetry',
       group: 'report',
       icon: <FileCode className="w-3.5 h-3.5" />,
-      onClick: () => runExport('json', 'json', ({ outgoing }) => new Blob(
-        [PcapService.exportToJson(outgoing, includeRawBytes)],
-        { type: 'application/json;charset=utf-8' },
-      )),
     },
     {
       id: 'pdf',
@@ -299,18 +293,6 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
       note: 'Statistics and findings for the capture.',
       group: 'report',
       icon: <ImageIcon className="w-3.5 h-3.5" />,
-      // **Fetched when the button is pressed, not when the app starts.**
-      // `pdfReport` is the only eager path to `jspdf` and `jspdf-autotable`,
-      // about 344 kB minified, and it was inside the single entry chunk - so
-      // every launch parsed a PDF writer for a report nobody had asked for.
-      // `runExport`'s `produce` already accepts a promise, so this needed no
-      // new machinery; the pattern is `tabularReaders.ts`'s, which does the same
-      // for `exceljs`.
-      onClick: () => runExport('pdf', 'pdf',
-        async ({ outgoing }) => {
-          const { buildPdfReport } = await import('../export/pdfReport');
-          return buildPdfReport(outgoing, appliedFilter);
-        }, 'inwire_report'),
     },
   ];
 
@@ -352,14 +334,14 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
     <button
       key={f.id}
       type="button"
-      onClick={f.onClick}
+      onClick={() => { void start(f.id); }}
       disabled={!canExport || f.disabled}
       title={f.disabled ? 'Exporting raw captures is restricted for this role' : undefined}
       className={`${ROW} hover:bg-accent`}
     >
       <span className="flex items-center gap-2">
         <span className="shrink-0 text-muted-foreground">
-          {busy === f.id ? <LoaderCircle className="w-3.5 h-3.5 animate-spin" /> : f.icon}
+          {busy && job.format === f.id ? <LoaderCircle className="w-3.5 h-3.5 animate-spin" /> : f.icon}
         </span>
         <span className="text-xs font-semibold">{f.title}</span>
       </span>
@@ -378,22 +360,25 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
             stood here existed because a scrim covered the title row's; without
             one, this is the CHOICE that field really offered. */}
         {([
-          { id: 'buffer' as const, label: 'Everything in the buffer', detail: `${packets.length.toLocaleString()} frames` },
+          {
+            id: 'capture' as const,
+            label: 'The whole capture',
+            detail: `${COUNT.format(captureRowCount)} frames`,
+            unavailable: false,
+          },
           {
             id: 'filter' as const,
             label: 'What the display filter selects',
-            // No count, and deliberately: see the header. The expression is the
-            // identity of the set; the number arrives with the file.
-            detail: hasFilter ? appliedFilter : 'no filter applied',
+            detail: filtered.detail,
+            unavailable: !filtered.ready,
           },
         ]).map((option) => {
-          const active = scope === option.id;
-          const unavailable = option.id === 'filter' && !hasFilter;
+          const active = effectiveScope === option.id;
           return (
             <button
               key={option.id}
               type="button"
-              disabled={unavailable}
+              disabled={option.unavailable}
               aria-pressed={active}
               onClick={() => setScope(option.id)}
               className={`${ROW} ${active
@@ -408,6 +393,19 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
             </button>
           );
         })}
+        {/* The one way to settle a scan that is behind or failed, offered
+            where the choice it blocks is - the same act as the counter's
+            "+N UNSEARCHED" in the status bar. */}
+        {filtered.rescan && (
+          <button
+            type="button"
+            onClick={onRescan}
+            className={`${ROW} hover:bg-accent flex items-center gap-2 text-xs`}
+          >
+            <RefreshCw className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+            Rescan the capture
+          </button>
+        )}
         {!filterValid && (
           <p className="px-3 py-2 text-[10px] leading-tight text-destructive">
             The applied filter does not compile, so nothing can be exported. An
@@ -417,7 +415,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
         )}
       </Section>
 
-      {packets.length > 0 && (
+      {captureRowCount > 0 && (
         <Section title="What travels with it">
           {switches.map((row) => (
             /* **The row is inverted, and that is the redesign.** The modal put
@@ -458,26 +456,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
         {formats.filter((f) => f.group === 'report').map(formatRow)}
       </Section>
 
-      {error !== null && (
-        <p className="flex items-start gap-1.5 px-1 text-[11px] text-destructive">
-          <CircleAlert className="w-3.5 h-3.5 shrink-0 mt-px" />
-          <span>{error}</span>
-        </p>
-      )}
-      {savedTo !== null && (
-        <p className="px-1 text-[11px] text-success-muted">
-          <span className="flex items-center gap-1.5">
-            <Check className="w-3.5 h-3.5 shrink-0" />
-            {savedTo.frames.toLocaleString()} frames written
-          </span>
-          {/* Ellipsised at the FRONT, which is the half nobody needs - the
-              filename is what identifies the file. More right at 256px than it
-              was at 768. */}
-          <span dir="rtl" className="mt-0.5 block font-mono truncate text-muted-foreground">
-            {savedTo.path}
-          </span>
-        </p>
-      )}
+      <JobStatus job={job} />
 
       <Section title="Import">
         {/* **The consequence is stated ABOVE the target, not after it**, and it
@@ -496,6 +475,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
             onImportBatch={onImportBatch}
             onFailure={(filename, failure) => setRejected({ filename, failure })}
             retryToken={retryToken}
+            blockedBy={busy ? 'Not while an export is running - an import would replace the frames it is reading.' : null}
           />
         </div>
       </Section>
@@ -511,3 +491,117 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
     </div>
   );
 };
+
+/**
+ * The running export's bar and Cancel, or how the last one ended.
+ *
+ * A cancelled one shows nothing: somebody who pressed Cancel - in the dialog
+ * or here - meant to, and a line about it would be the app arguing with a
+ * decision it just asked them to make.
+ */
+const JobStatus: React.FC<{ job: ExportJobState }> = ({ job }) => {
+  switch (job.status) {
+    case 'idle':
+      return null;
+    case 'canceled':
+      // A person's own Cancel says nothing; one the app made has to say why
+      // the file they asked for does not exist.
+      return job.reason === null ? null : (
+        <Finished tone="text-warning">
+          <span className="flex items-start gap-1.5">
+            <CircleAlert className="w-3.5 h-3.5 shrink-0 mt-px" />
+            <span>Export cancelled: {job.reason}. Nothing was saved.</span>
+          </span>
+        </Finished>
+      );
+    case 'running': {
+      const known = job.total > 0 && (job.phase === 'surveying' || job.phase === 'writing');
+      const share = known ? Math.min(1, job.done / job.total) : 0;
+      return (
+        <div className="px-1 space-y-1" role="status" aria-live="polite">
+          <div className="flex items-center gap-2 text-[11px]">
+            <LoaderCircle className="w-3.5 h-3.5 shrink-0 animate-spin text-muted-foreground" />
+            <span className="flex-1 min-w-0 truncate">
+              {PHASE_LABEL[job.phase]}
+              {known && ` - ${COUNT.format(job.done)} of ${COUNT.format(job.total)} frames`}
+            </span>
+            <button
+              type="button"
+              onClick={() => cancelExportJob()}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent
+                focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <X className="w-3 h-3" />
+              Cancel
+            </button>
+          </div>
+          {/* Indeterminate while the dialog is up or the file is closing,
+              which have no frame count to show. */}
+          <div className="h-1 rounded bg-secondary overflow-hidden">
+            <div
+              className={`h-full bg-primary ${known ? '' : 'w-full opacity-40 animate-pulse'}`}
+              style={known ? { width: `${(share * 100).toFixed(1)}%` } : undefined}
+            />
+          </div>
+        </div>
+      );
+    }
+    case 'failed':
+      return (
+        <Finished tone="text-destructive">
+          <span className="flex items-start gap-1.5">
+            <CircleAlert className="w-3.5 h-3.5 shrink-0 mt-px" />
+            <span>{job.error}</span>
+          </span>
+        </Finished>
+      );
+    case 'saved': {
+      // Frames written without their bytes are a file that is not what it
+      // looks like - a capture whose records are empty - so the line stops
+      // being a plain success.
+      const partial = job.withoutBytes > 0 || job.unreadable > 0;
+      return (
+        <Finished tone={partial ? 'text-warning' : 'text-success-muted'}>
+          <span className="flex items-center gap-1.5">
+            {partial
+              ? <CircleAlert className="w-3.5 h-3.5 shrink-0" />
+              : <Check className="w-3.5 h-3.5 shrink-0" />}
+            Saved {COUNT.format(job.frames)} frames
+            {job.withoutBytes > 0 && ` - ${COUNT.format(job.withoutBytes)} without their bytes`}
+            {' '}to
+          </span>
+          {/* Ellipsised at the FRONT, which is the half nobody needs - the
+              filename is what identifies the file. */}
+          <span dir="rtl" className="mt-0.5 block font-mono truncate text-muted-foreground" title={job.path}>
+            {job.path}
+          </span>
+          {job.unreadable > 0 && (
+            <span className="mt-0.5 block text-warning">
+              {COUNT.format(job.unreadable)} frames could not be read back from disk and are not in the file.
+            </span>
+          )}
+        </Finished>
+      );
+    }
+  }
+};
+
+/**
+ * How a finished export's line is framed: its text, and a dismiss. A new
+ * export replaces the line on its own; this is for putting it away sooner.
+ */
+const Finished: React.FC<{ tone: string; children: React.ReactNode }> = ({ tone, children }) => (
+  <div className={`flex items-start gap-1 px-1 text-[11px] ${tone}`}>
+    <div className="flex-1 min-w-0">{children}</div>
+    <button
+      type="button"
+      onClick={dismissExportJob}
+      aria-label="Dismiss"
+      title="Dismiss"
+      className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent
+        focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+    >
+      <X className="w-3 h-3" />
+    </button>
+  </div>
+);

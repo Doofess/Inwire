@@ -1,5 +1,5 @@
 import type { ImportFailure } from './exportSchema';
-import { matchHeaders, REQUIRED_COLUMNS } from './exportSchema';
+import { matchHeaders, REQUIRED_COLUMNS, stripPreamble } from './exportSchema';
 
 /**
  * Turning a file into a table of strings.
@@ -177,7 +177,7 @@ async function readXlsx(file: File): Promise<TableResult> {
   // like packet data, and fall back to the first sheet so the failure message
   // names real headers the user can see rather than an arbitrary sheet's.
   const match = sheets.find(rows => {
-    const columns = matchHeaders(rows[0] ?? []);
+    const columns = matchHeaders(stripPreamble(rows)[0] ?? []);
     return REQUIRED_COLUMNS.every(key => columns[key] !== undefined);
   });
   return { ok: true, rows: match ?? sheets[0] };

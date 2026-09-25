@@ -162,7 +162,7 @@ if (measured.eagerJs > ceilings.bundle.eagerJs) {
   console.log(`        ${kb(measured.eagerJs)} against a ceiling of ${kb(ceilings.bundle.eagerJs)}`
     + ` (+${kb(measured.eagerJs - ceilings.bundle.eagerJs)})`);
   console.log('        A static import reached src/main.tsx\'s graph. Make it an');
-  console.log('        `await import()` - tabularWriters.ts:97 is the pattern - or,');
+  console.log('        `await import()` - tabularWriters.ts:51 is the pattern - or,');
   console.log('        if the growth is intended, lower nothing and raise this');
   console.log('        ceiling deliberately in its own commit with the reason.');
 }

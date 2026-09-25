@@ -321,7 +321,7 @@ export class CaptureHost {
   }
 
   private onRowsAt(message: Extract<ToCapture, { type: 'rowsAt' }>): void {
-    let blocks: { firstOrdinal: number; packets: Packet[] }[] = [];
+    let blocks: { firstOrdinal: number; packets: Packet[]; linkTypesStored: boolean }[] = [];
     try {
       if (this.open !== null) blocks = this.open.reader.readRowsAt(message.from, message.to);
     } catch (error) {

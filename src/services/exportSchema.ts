@@ -1,6 +1,9 @@
-import { Packet, ProtocolType, PacketStatus } from '../types/packet';
+import type { ColorRule, Packet, ProtocolType, PacketStatus } from '../types/packet';
 import type { StoredFrame } from './sessionRestore';
 import { expertItemsFor } from './expertInfo';
+import { DIRECTION_LABEL, Direction, directionOf } from './direction';
+import { isoMicros } from './export/captureMeta';
+import { LAYERS, fieldDef } from './dissect/fieldRegistry';
 
 /**
  * The one description of Inwire's tabular packet format.
@@ -10,12 +13,20 @@ import { expertItemsFor } from './expertInfo';
  * schema exists to make impossible. The PDF report is deliberately NOT built
  * from it - a report is a document of statistics, not a table of frames.
  *
- * What a row cannot carry is the dissection. `Packet.layers`, `fields` and
- * `anomalies` all come back out of the wire bytes, so a row either carries
- * those bytes - the opt-in `RawBytes` column - or it imports as a summary with
- * an honestly empty hex pane. See `rowsToFrames`.
+ * What a row cannot give back is the dissection. An export now writes every
+ * dissected field as a column of its own (`export/fieldColumns.ts`), for the
+ * reader - but the importer does not read them back, because a field bag
+ * rebuilt from cells would be a second dissector that disagrees with the
+ * first. `Packet.layers`, `fields` and the findings come out of the wire
+ * bytes, so a row either carries those bytes - the opt-in `RawBytes` column -
+ * or it imports as a summary with an honestly empty hex pane. See
+ * `rowsToFrames`.
  */
 
+/**
+ * The columns the importer recognises. Every other column in a file - ours or
+ * anyone's - is carried past without being read.
+ */
 export type ColumnKey =
   | 'no'
   | 'time'
@@ -29,41 +40,93 @@ export type ColumnKey =
   | 'expert'
   | 'rawBytes';
 
+/** Every standard column an export writes: the importable ones and seven more. */
+export type ExportColumnKey =
+  | ColumnKey
+  | 'arrival'
+  | 'interface'
+  | 'direction'
+  | 'stream'
+  | 'stack'
+  | 'colourRule'
+  | 'analysisFlags';
+
+/**
+ * What a column holds, which decides how each format writes it.
+ *
+ * CSV and JSON are text, and every kind has one text form. Excel is not: a
+ * time written as the string `"0.250000"` sorts as text, sums to nothing and
+ * cannot be charted, which is what the old workbook did. So a kind carries the
+ * number format Excel shows it in, and the cell holds the number.
+ */
+export type ColumnKind =
+  /** A whole number: frame number, length, stream. */
+  | 'integer'
+  /** Seconds since the capture began. */
+  | 'seconds'
+  /** Epoch milliseconds, fractional to the microsecond. */
+  | 'epochMs'
+  /** Epoch microseconds, shown as a UTC date and time. */
+  | 'datetime'
+  | 'text'
+  /** Frame bytes, base64. */
+  | 'base64';
+
 export interface ColumnSpec {
-  key: ColumnKey;
+  key: ExportColumnKey;
   header: string;
   /** Character width, used for Excel column sizing. */
   width: number;
+  kind: ColumnKind;
 }
 
 /**
  * Column order, shared by CSV and Excel.
  *
+ * The first ten are the order this format has always had, so a reader who
+ * knows the file finds the same thing in the same place. The rest are what the
+ * packet list knows about a frame beyond its summary.
+ *
  * `Epoch (ms)` is here because `Time(s)` alone is not enough: a relative time
  * says when a frame arrived within its capture, not when the capture happened.
  * A file carrying only relative times re-imports onto a timeline anchored at
  * the moment of import, which is a different capture wearing the same shape.
+ * `Arrival (UTC)` is the same instant for a person rather than a program: a
+ * date Excel can read, and ISO-8601 to the microsecond in CSV.
  */
 export const EXPORT_COLUMNS: ColumnSpec[] = [
-  { key: 'no', header: 'No.', width: 8 },
-  { key: 'time', header: 'Time(s)', width: 14 },
-  { key: 'epoch', header: 'Epoch (ms)', width: 16 },
-  { key: 'source', header: 'Source', width: 24 },
-  { key: 'destination', header: 'Destination', width: 24 },
-  { key: 'protocol', header: 'Protocol', width: 12 },
-  { key: 'length', header: 'Length', width: 9 },
-  { key: 'info', header: 'Info', width: 60 },
-  { key: 'status', header: 'Status', width: 11 },
-  { key: 'expert', header: 'Expert', width: 30 },
+  { key: 'no', header: 'No.', width: 10, kind: 'integer' },
+  { key: 'time', header: 'Time(s)', width: 12, kind: 'seconds' },
+  { key: 'epoch', header: 'Epoch (ms)', width: 18, kind: 'epochMs' },
+  { key: 'arrival', header: 'Arrival (UTC)', width: 24, kind: 'datetime' },
+  { key: 'source', header: 'Source', width: 40, kind: 'text' },
+  { key: 'destination', header: 'Destination', width: 40, kind: 'text' },
+  { key: 'protocol', header: 'Protocol', width: 11, kind: 'text' },
+  { key: 'length', header: 'Length', width: 9, kind: 'integer' },
+  { key: 'info', header: 'Info', width: 64, kind: 'text' },
+  { key: 'status', header: 'Status', width: 10, kind: 'text' },
+  { key: 'expert', header: 'Expert', width: 32, kind: 'text' },
+  { key: 'interface', header: 'Interface', width: 16, kind: 'text' },
+  { key: 'direction', header: 'Direction', width: 12, kind: 'text' },
+  { key: 'stream', header: 'Stream', width: 9, kind: 'integer' },
+  { key: 'stack', header: 'Protocol stack', width: 30, kind: 'text' },
+  { key: 'colourRule', header: 'Colour rule', width: 20, kind: 'text' },
+  { key: 'analysisFlags', header: 'Analysis flags', width: 24, kind: 'text' },
 ];
 
-/** Appended only when the user opts in; see `packetToRow`. */
+/**
+ * Appended only when the user opts in, after the field columns - it is the
+ * widest column by far, and a reader scrolling right to the fields should not
+ * have to cross it.
+ */
 export const RAW_BYTES_COLUMN: ColumnSpec = {
   key: 'rawBytes',
   header: 'RawBytes (Base64)',
   width: 48,
+  kind: 'base64',
 };
 
+/** The standard columns, without the field columns that sit between. */
 export function exportColumns(includeRawBytes: boolean): ColumnSpec[] {
   return includeRawBytes ? [...EXPORT_COLUMNS, RAW_BYTES_COLUMN] : EXPORT_COLUMNS;
 }
@@ -162,23 +225,71 @@ export function unguardFormula(value: string): string {
   return value.startsWith("'") && FORMULA_LEAD.test(value.slice(1)) ? value.slice(1) : value;
 }
 
-export function packetToRow(p: Packet, includeRawBytes: boolean): (string | number)[] {
-  const row: (string | number)[] = [
+/** One standard cell before a format decides how to write it. `null` is an empty cell. */
+export type StandardValue = string | number | null;
+
+/**
+ * A frame's standard columns, in `exportColumns` order, as typed values.
+ *
+ * Numbers stay numbers - each format decides how to spell them - and text is
+ * the frame's own, unguarded: JSON writes it verbatim, and the two formats a
+ * spreadsheet opens guard it as they write (`standardText`, the workbook).
+ * A fact the frame does not have is `null`: an empty cell, never a zero or a
+ * word standing in for "none". An unattributed frame has no stream rather than
+ * stream 0, and a frame nobody could place has no direction rather than
+ * "Unknown".
+ *
+ * `rule` is the colour rule the frame matched (`export/ruleMatcher.ts`), asked
+ * by the caller because an anonymised frame can no longer be matched.
+ */
+export function standardValues(
+  p: Packet,
+  rule: ColorRule | null,
+  includeRawBytes: boolean,
+): StandardValue[] {
+  const text = (value: string | undefined): StandardValue => (value ? value : null);
+  const direction = directionOf(p.direction);
+  const row: StandardValue[] = [
     p.id,
-    p.relativeTime.toFixed(6),
+    p.relativeTime,
     p.tsUs / 1000,
-    guardFormula(p.source),
-    guardFormula(p.destination),
-    guardFormula(displayProtocol(p)),
+    p.tsUs,
+    p.source,
+    p.destination,
+    displayProtocol(p),
     p.length,
-    guardFormula(p.info),
+    p.info,
     p.status,
     // Every finding on the frame, not the two hard-coded anomalies this used
     // to carry - the column is wider than it was, not narrower.
-    guardFormula(expertItemsFor(p).map((i) => i.summary).join('; ')),
+    text(expertItemsFor(p).map((i) => i.summary).join('; ')),
+    text(p.interfaceName),
+    direction === Direction.Unknown ? null : DIRECTION_LABEL[direction],
+    p.streamId ?? null,
+    text(p.frameProtocols?.join(':')),
+    text(rule?.name),
+    text(p.analysisFlags?.join(', ')),
   ];
-  if (includeRawBytes) row.push(p.rawBytes.length > 0 ? toBase64(p.rawBytes) : '');
+  if (includeRawBytes) row.push(p.rawBytes.length > 0 ? toBase64(p.rawBytes) : null);
   return row;
+}
+
+/**
+ * A standard value as text, the one spelling CSV writes and the importer reads.
+ *
+ * Time keeps its six places, as it always has; epoch milliseconds are the
+ * shortest string that reads back as the same double, which is exact to the
+ * microsecond; a date is ISO-8601 in UTC with all six digits. Text is
+ * formula-guarded - base64 included, which can begin with `+`.
+ */
+export function standardText(kind: ColumnKind, value: StandardValue): string {
+  if (value === null) return '';
+  if (typeof value === 'string') return guardFormula(value);
+  switch (kind) {
+    case 'seconds': return value.toFixed(6);
+    case 'datetime': return isoMicros(value);
+    default: return String(value);
+  }
 }
 
 /** Bytes the RawBytes column will add, for the size estimate in the UI. */
@@ -232,6 +343,30 @@ function normalizeHeader(cellText: string): string {
 }
 
 /**
+ * A Wireshark field name - `frame.len`, `ip.src`, `tcp.flags.syn`.
+ *
+ * An export writes one column per dissected field under exactly that name, and
+ * the normalisation below strips the dot: `frame.len` becomes `framelen`, which
+ * is a spelling of Length, and `frame.number` becomes `framenumber`, a spelling
+ * of No. First match wins, and our own standard columns come first, so our own
+ * files were safe by order alone - a foreign file with the field columns first,
+ * or an export by a tool that writes only fields, was not.
+ *
+ * A header is a field when the registry knows it, or when it is dotted and
+ * its first part is a protocol layer token, lowercase as Wireshark spells
+ * them - which is what catches `frame.len` and `frame.number`, neither of
+ * which this build registers. A foreign `Src.IP` or `Dst.Port` is neither,
+ * and is still read as the column it names.
+ */
+function isFieldName(header: string): boolean {
+  if (fieldDef(header) !== undefined) return true;
+  const dot = header.indexOf('.');
+  return dot > 0 && dot < header.length - 1 && LAYER_TOKENS.has(header.slice(0, dot));
+}
+
+const LAYER_TOKENS: ReadonlySet<string> = new Set<string>(LAYERS);
+
+/**
  * Maps a file's header cells onto column keys, first match winning.
  *
  * Returns column *indices*, not values, so a file may carry unrelated columns
@@ -245,6 +380,7 @@ export function matchHeaders(header: string[]): Partial<Record<ColumnKey, number
 
   const found: Partial<Record<ColumnKey, number>> = {};
   header.forEach((headerCell, index) => {
+    if (isFieldName(headerCell.trim())) return;
     const key = lookup.get(normalizeHeader(headerCell));
     if (key !== undefined && found[key] === undefined) found[key] = index;
   });
@@ -294,7 +430,10 @@ function coerceProtocol(raw: string): { protocol: ProtocolType; protocolLabel?: 
 /** Pulls the first number out of a cell, so `1514`, `1514 bytes` and ` 1514 ` all read. */
 function parseNumber(text: string | undefined): number | null {
   if (text === undefined) return null;
-  const match = /-?\d+(?:\.\d+)?/.exec(text);
+  // Exponents included: a JSON number below 1e-6 is written `5e-7`, and a
+  // CSV Excel has re-saved writes a large epoch as `1.7588E+12` - reading the
+  // mantissa alone would make those 5 and 1.7588.
+  const match = /-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?/.exec(text);
   if (!match) return null;
   const value = Number(match[0]);
   return Number.isFinite(value) ? value : null;
@@ -313,6 +452,32 @@ export interface RowsToFramesOk {
   synthesizedEpoch: boolean;
   /** Non-empty Expert cells, which a row cannot restore. See below. */
   droppedExpert: number;
+}
+
+/**
+ * A line of the metadata preamble an export writes above its header:
+ * `# Frames exported: 12,858`. One cell, `#`, a key, a colon.
+ *
+ * A bare `#` does not match - it is a common spelling of the No. header - and
+ * nor does a row with anything in its other cells, which is a header or data.
+ */
+const PREAMBLE_LINE = /^#\s*[^:]+:/;
+
+function isPreambleRow(row: string[]): boolean {
+  if (row.length === 0) return true;
+  for (let i = 1; i < row.length; i++) if (row[i].trim() !== '') return false;
+  const first = row[0].trim();
+  return first === '' || PREAMBLE_LINE.test(first);
+}
+
+/**
+ * The table under the preamble: leading `# key: value` lines, and any blank
+ * rows among them, dropped. A file with no preamble comes back unchanged.
+ */
+export function stripPreamble(rows: string[][]): string[][] {
+  let start = 0;
+  while (start < rows.length && isPreambleRow(rows[start])) start++;
+  return start === 0 ? rows : rows.slice(start);
 }
 
 /**
@@ -344,7 +509,14 @@ export function rowsToFrames(
     };
   }
 
-  const header = rows[0];
+  const table = stripPreamble(rows);
+  if (table.length === 0) {
+    return {
+      ok: false,
+      failure: { kind: 'no-table', message: 'The file contains no table of any kind.' },
+    };
+  }
+  const header = table[0];
   const columns = matchHeaders(header);
   const missing = REQUIRED_COLUMNS.filter(key => columns[key] === undefined);
   if (missing.length > 0) {
@@ -362,7 +534,7 @@ export function rowsToFrames(
     };
   }
 
-  const body = rows.slice(1).filter(row => row.some(c => c.trim().length > 0));
+  const body = table.slice(1).filter(row => row.some(c => c.trim().length > 0));
   if (body.length === 0) {
     return {
       ok: false,

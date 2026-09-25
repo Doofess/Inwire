@@ -301,7 +301,7 @@ export function askTshark(tshark: string, frames: Uint8Array[]): TsharkRow[] {
 
 /**
  * A classic libpcap file, written here rather than through
- * `PcapService.generatePcapBinary`.
+ * `export/oneShot.generatePcapBinary`.
  *
  * The writer under test must not be the writer that builds the oracle's input:
  * a shared bug would cancel out and the comparison would pass on both sides

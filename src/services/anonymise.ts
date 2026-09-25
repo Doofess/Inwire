@@ -176,6 +176,30 @@ export class Anonymiser {
   }
 
   /**
+   * Free text with every address in it mapped the way the frames are.
+   *
+   * For the prose a dissector writes about a frame - an expert message names
+   * the address it is about ("Duplicate IP address configured (10.0.0.7)") -
+   * and for anything a report prints from it. Mapped rather than blanked, so a
+   * sentence about a host still names the same host the anonymised tables do.
+   *
+   * A token is rewritten only when it parses as an address: a clock reading
+   * such as `12:30:45` has colons and is not one, and a version string such as
+   * `1.2.3` has dots and is not one either.
+   */
+  text(s: string): string {
+    return s.replace(ADDRESS_TOKEN, (token) => {
+      if (MAC_TOKEN.test(token)) return this.mac(token.toLowerCase());
+      // Windows writes a MAC with dashes (`ipconfig`, adapter names). Mapped
+      // through the same table, so one device is one pseudonym in both
+      // spellings, and handed back in the spelling it arrived in.
+      if (DASHED_MAC_TOKEN.test(token)) return this.mac(token.toLowerCase().replace(/-/g, ':')).replace(/:/g, '-');
+      if (token.includes(':')) return parseIpv6(token) ? this.ipv6Address(token) : token;
+      return parseIpv4(token) ? this.ipv4Address(token) : token;
+    });
+  }
+
+  /**
    * One frame, rewritten.
    *
    * The bytes are what an exported capture actually carries, so they are what
@@ -210,6 +234,10 @@ export class Anonymiser {
       hexDump: undefined,
       asciiDump: undefined,
       info: '(anonymised)',
+      // Findings survive, because they are what the frame is being shared to
+      // show - but their messages are prose written about THIS frame, and some
+      // of them name its addresses.
+      expert: packet.expert?.map((e) => ({ ...e, message: this.text(e.message) })),
     };
   }
 
@@ -329,6 +357,20 @@ export function anonymiseCapture(packets: Packet[]): { packets: Packet[]; summar
 }
 
 // --- helpers ---------------------------------------------------------------------
+
+/**
+ * Anything in prose that might be an address: a MAC, a run of hex and colons
+ * with at least two colons (IPv6, compressed or not), or a dotted quad. The
+ * candidates are then parsed, so the pattern only has to be generous.
+ */
+const ADDRESS_TOKEN = new RegExp([
+  /(?<![0-9a-f:])[0-9a-f]{2}(?::[0-9a-f]{2}){5}(?![0-9a-f:])/.source,
+  /(?<![0-9a-f-])[0-9a-f]{2}(?:-[0-9a-f]{2}){5}(?![0-9a-f-])/.source,
+  /(?<![0-9a-z:])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-z:]|\.\d)/.source,
+  /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?!\.?\d)/.source,
+].join('|'), 'gi');
+const MAC_TOKEN = /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i;
+const DASHED_MAC_TOKEN = /^[0-9a-f]{2}(?:-[0-9a-f]{2}){5}$/i;
 
 function randomKey(): Uint8Array {
   const key = new Uint8Array(32);

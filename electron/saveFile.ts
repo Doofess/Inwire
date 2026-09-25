@@ -24,15 +24,12 @@
  *
  * ## Bytes, not a Blob, and one copy
  *
- * The payload crosses IPC as a `Uint8Array`, which is a structured-clone copy.
- * For today's exports that is fine and for a capture larger than memory it
- * will not be - but that is a rewrite of the export path rather than of this
- * file, because `useHydratedBytes` gates the button on hydrating every frame
- * first and the NRB, the ISB drop counts and Anonymise are all whole-capture
- * passes. Said here so the limit is written down where somebody would
- * otherwise assume a save dialog had removed it.
+ * The payload crosses IPC as a `Uint8Array`, which is a structured-clone copy
+ * of the whole file. That is fine for a report and not for a capture larger
+ * than the renderer's heap, which is what `saveStream.ts` is for: the same
+ * dialog, then the bytes in pieces.
  */
-import { BrowserWindow, dialog, type IpcMainInvokeEvent } from 'electron';
+import { BrowserWindow, dialog, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { writeFile } from 'node:fs/promises';
 import { filtersFor, safeName, type SaveTargetRequest } from './saveTarget';
 
@@ -46,13 +43,19 @@ export type SaveFileResult =
   | { saved: false; canceled: true }
   | { saved: false; canceled: false; error: string };
 
-export async function saveGeneratedFile(
-  event: IpcMainInvokeEvent,
-  request: SaveFileRequest,
-): Promise<SaveFileResult> {
+/**
+ * Shows the save dialog and answers with the chosen path, or null on Cancel.
+ *
+ * Shared with `saveStream.ts`, so the two ways of saving cannot drift into two
+ * dialogs with different rules about overwriting.
+ */
+export async function chooseSavePath(
+  sender: WebContents,
+  request: SaveTargetRequest,
+): Promise<string | null> {
   // Parented to the window that asked, so the dialog is modal to it rather
   // than a floating window the person can lose behind the app.
-  const owner = BrowserWindow.fromWebContents(event.sender);
+  const owner = BrowserWindow.fromWebContents(sender);
 
   const options: Electron.SaveDialogOptions = {
     defaultPath: safeName(request.suggestedName),
@@ -66,12 +69,19 @@ export async function saveGeneratedFile(
   const chosen = owner
     ? await dialog.showSaveDialog(owner, options)
     : await dialog.showSaveDialog(options);
+  return chosen.canceled || !chosen.filePath ? null : chosen.filePath;
+}
 
-  if (chosen.canceled || !chosen.filePath) return { saved: false, canceled: true };
+export async function saveGeneratedFile(
+  event: IpcMainInvokeEvent,
+  request: SaveFileRequest,
+): Promise<SaveFileResult> {
+  const chosen = await chooseSavePath(event.sender, request);
+  if (chosen === null) return { saved: false, canceled: true };
 
   try {
-    await writeFile(chosen.filePath, request.bytes);
-    return { saved: true, path: chosen.filePath };
+    await writeFile(chosen, request.bytes);
+    return { saved: true, path: chosen };
   } catch (error) {
     // A full disk, a read-only volume, a path a policy forbids. The message is
     // shown to a person, so it is the OS's own rather than a paraphrase.

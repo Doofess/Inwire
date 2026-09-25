@@ -5,6 +5,15 @@ import path from 'path';
 import {defineConfig, type Plugin} from 'vite';
 
 /**
+ * The product version, read from `package.json` at build time for
+ * `src/lib/appVersion.ts`. Read rather than written down, because Inwire has
+ * one version number and `package.json` is the only place it is authored.
+ */
+const INWIRE_VERSION: string = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf8'),
+).version;
+
+/**
  * Emits maplibre-gl's tile worker into the build.
  *
  * maplibre-gl 6 ships three files - the library, a shared chunk, and the worker
@@ -84,6 +93,9 @@ function bundledMapAssets(): Plugin {
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss(), bundledMapAssets()],
+    define: {
+      __INWIRE_VERSION__: JSON.stringify(INWIRE_VERSION),
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

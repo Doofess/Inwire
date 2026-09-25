@@ -105,6 +105,19 @@ declare global {
         bytes: Uint8Array;
       }): Promise<unknown>;
       /**
+       * The same save in pieces: open shows the dialog and answers with a
+       * `{token}`, `{canceled: true}` or `{error}`; write appends; close
+       * commits (renames `<path>.partial` over the target) or aborts
+       * (deletes it). `src/lib/saveSink.ts` is the caller and narrows these.
+       */
+      openSaveStream?(request: {
+        suggestedName: string;
+        extensions?: string[];
+        description?: string;
+      }): Promise<unknown>;
+      writeSaveStream?(token: string, bytes: Uint8Array): Promise<unknown>;
+      closeSaveStream?(token: string, commit: boolean): Promise<unknown>;
+      /**
        * The Update Center's state, for a panel that has just mounted.
        *
        * `unknown` like `saveFile`, and narrowed by

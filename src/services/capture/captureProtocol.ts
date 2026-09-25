@@ -169,8 +169,15 @@ export type FromCapture =
     }
   /** Frames asked for by a `read`. Absent ids are frames the capture lacks. */
   | { type: 'bytes'; requestId: number; frames: [number, Uint8Array][] }
-  /** Decoded chunks answering a `rowsAt`, each with where it starts. */
-  | { type: 'blocks'; requestId: number; blocks: { firstOrdinal: number; packets: Packet[] }[] }
+  /**
+   * Decoded chunks answering a `rowsAt`, each with where it starts and
+   * whether its rows carry their own link type (`RowBlock.linkTypesStored`).
+   */
+  | {
+      type: 'blocks';
+      requestId: number;
+      blocks: { firstOrdinal: number; packets: Packet[]; linkTypesStored?: boolean }[];
+    }
   /**
    * The rows a `rowsForOrdinals` asked for, each paired with its position.
    *

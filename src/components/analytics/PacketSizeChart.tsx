@@ -1,6 +1,7 @@
 import React from 'react';
 import { Packet } from '../../types/packet';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
+import { SIZE_BUCKETS as BUCKETS, sizeBucketIndex } from '../../services/report/sizeBuckets';
 
 /**
  * How frame lengths are distributed across the capture.
@@ -13,10 +14,9 @@ import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
  * the same pane as the tables that aggregate the same buffer. `GraphsTab` is
  * the only thing that renders it, and carries the argument for the placement.
  *
- * The buckets are the ones that modal used, and they are not arbitrary: 64 is
- * the Ethernet minimum, 1518 the classic MTU-plus-header maximum, and the last
- * bucket is everything above that, which on a live link means either jumbo
- * frames or segmentation offload handing you a 64KB pseudo-frame.
+ * The buckets are the ones that modal used, and live in
+ * `services/report/sizeBuckets.ts` so the exported report counts the same
+ * distribution this draws.
  *
  * Counted incrementally rather than with the modal's `useMemo` over the whole
  * buffer: bucket counts are running sums, so nothing here ever needed
@@ -24,25 +24,6 @@ import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
  */
 
 export type SizeChart = 'bars' | 'table';
-
-interface SizeBucket {
-  /** For the table, which has room for the range. */
-  label: string;
-  /** For the histogram axis, which does not. */
-  short: string;
-  min: number;
-  max: number;
-}
-
-const BUCKETS: readonly SizeBucket[] = [
-  { label: 'up to 64 B', short: '64', min: 0, max: 64 },
-  { label: '65 - 128 B', short: '128', min: 65, max: 128 },
-  { label: '129 - 256 B', short: '256', min: 129, max: 256 },
-  { label: '257 - 512 B', short: '512', min: 257, max: 512 },
-  { label: '513 - 1024 B', short: '1K', min: 513, max: 1024 },
-  { label: '1025 - 1518 B', short: '1.5K', min: 1025, max: 1518 },
-  { label: 'over 1518 B (jumbo)', short: 'JUMBO', min: 1519, max: Infinity },
-];
 
 interface PacketSizeChartProps {
   packets: Packet[];
@@ -54,12 +35,8 @@ export const PacketSizeChart: React.FC<PacketSizeChartProps> = ({ packets, chart
     packets,
     () => ({ counts: new Array<number>(BUCKETS.length).fill(0), total: 0 }),
     (acc, p) => {
-      for (let i = 0; i < BUCKETS.length; i++) {
-        if (p.length >= BUCKETS[i].min && p.length <= BUCKETS[i].max) {
-          acc.counts[i] += 1;
-          break;
-        }
-      }
+      const i = sizeBucketIndex(p.length);
+      if (i >= 0) acc.counts[i] += 1;
       acc.total += 1;
     },
     (acc) => ({ counts: acc.counts, total: acc.total }),

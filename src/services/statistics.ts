@@ -70,7 +70,7 @@ export interface Conversation {
   lastBtoA: number | null;
   packets: number;
   bytes: number;
-  /** Seconds since the capture started, from the first frame of this pair. */
+  /** Seconds since the capture started, from this pair's earliest frame. */
   startRel: number;
   duration: number;
   /** The TCP/UDP stream this pair is, when the tracker assigned one. */
@@ -130,22 +130,32 @@ function frameHasLayer(packet: Packet, kind: ConversationKind): boolean {
   return layers.includes(kind === 'ipv4' ? 'ip' : kind);
 }
 
-export function conversations(packets: readonly Packet[], kind: ConversationKind): Conversation[] {
-  const byKey = new Map<string, Conversation>();
+/**
+ * The conversation table, one frame at a time.
+ *
+ * A fold rather than only a function over an array, because an export reads a
+ * capture off disk in pages and never holds it whole. `result()` may be called
+ * mid-fold and returns copies, so a caller holding one answer does not see it
+ * change under it as more frames arrive.
+ */
+export class ConversationTable {
+  private readonly byKey = new Map<string, Conversation>();
 
-  for (const packet of packets) {
-    if (!frameHasLayer(packet, kind)) continue;
-    const ends = addressesFor(packet, kind);
-    if (!ends) continue;
+  constructor(readonly kind: ConversationKind) {}
+
+  add(packet: Packet): void {
+    if (!frameHasLayer(packet, this.kind)) return;
+    const ends = addressesFor(packet, this.kind);
+    if (!ends) return;
 
     // Both orderings map to the same row; the first frame seen fixes which
     // end is A, so a TCP conversation's A is the side that sent the SYN.
     const forwardKey = `${ends.a}|${ends.pa ?? ''}|${ends.b}|${ends.pb ?? ''}`;
     const reverseKey = `${ends.b}|${ends.pb ?? ''}|${ends.a}|${ends.pa ?? ''}`;
-    const existing = byKey.get(forwardKey) ?? byKey.get(reverseKey);
+    const existing = this.byKey.get(forwardKey) ?? this.byKey.get(reverseKey);
 
     if (!existing) {
-      byKey.set(forwardKey, {
+      this.byKey.set(forwardKey, {
         key: forwardKey,
         addressA: ends.a, addressB: ends.b, portA: ends.pa, portB: ends.pb,
         packetsAtoB: 1, bytesAtoB: packet.length,
@@ -159,30 +169,33 @@ export function conversations(packets: readonly Packet[], kind: ConversationKind
         protocol: packet.protocolLabel ?? packet.protocol,
         firstFrame: packet.id,
       });
-      continue;
+      return;
     }
 
     const isAtoB = existing.addressA === ends.a && existing.portA === ends.pa;
     if (isAtoB) {
       existing.packetsAtoB++;
       existing.bytesAtoB += packet.length;
-      // `??` rather than a plain assignment on the first: a relative time of
-      // exactly 0 is the capture's very first frame, and `||` would treat it
-      // as absent and keep overwriting it.
-      existing.firstAtoB = existing.firstAtoB ?? packet.relativeTime;
+      // `??` rather than `||`: a relative time of exactly 0 is the capture's
+      // very first frame, and `||` would treat it as absent.
+      existing.firstAtoB = Math.min(existing.firstAtoB ?? packet.relativeTime, packet.relativeTime);
       existing.lastAtoB = Math.max(existing.lastAtoB ?? packet.relativeTime, packet.relativeTime);
     } else {
       existing.packetsBtoA++;
       existing.bytesBtoA += packet.length;
-      existing.firstBtoA = existing.firstBtoA ?? packet.relativeTime;
+      existing.firstBtoA = Math.min(existing.firstBtoA ?? packet.relativeTime, packet.relativeTime);
       existing.lastBtoA = Math.max(existing.lastBtoA ?? packet.relativeTime, packet.relativeTime);
     }
     existing.packets++;
     existing.bytes += packet.length;
-    // Frames arrive in capture order on every path that feeds this, so the
-    // last one seen is the latest; `Math.max` rather than assignment anyway,
-    // because a sorted view could hand them over in any order.
-    existing.duration = Math.max(existing.duration, packet.relativeTime - existing.startRel);
+    // Earliest and latest by TIME, not by arrival. Capture order is not time
+    // order: two adapters, or a driver that timestamps on a different core,
+    // hand over a frame earlier than the one before it - the inwire fixture has
+    // a QUIC frame 14.5 ms older than one that arrived ahead of it - and tshark,
+    // which this table is checked against, takes the earliest.
+    const end = Math.max(existing.startRel + existing.duration, packet.relativeTime);
+    existing.startRel = Math.min(existing.startRel, packet.relativeTime);
+    existing.duration = end - existing.startRel;
     if (existing.streamId === undefined) existing.streamId = packet.streamId;
     // A pair's protocol is the most specific label it ever carried: a TCP
     // conversation that turns into TLS reads better as TLS, and the plain
@@ -191,34 +204,59 @@ export function conversations(packets: readonly Packet[], kind: ConversationKind
     if (label !== 'TCP' && label !== 'UDP') existing.protocol = label;
   }
 
-  return [...byKey.values()];
+  result(): Conversation[] {
+    return [...this.byKey.values()].map((c) => ({ ...c }));
+  }
 }
 
-export function endpoints(packets: readonly Packet[], kind: ConversationKind): Endpoint[] {
-  const byKey = new Map<string, Endpoint>();
+export function conversations(packets: readonly Packet[], kind: ConversationKind): Conversation[] {
+  const table = new ConversationTable(kind);
+  for (const packet of packets) table.add(packet);
+  return table.result();
+}
 
-  const bump = (address: string, port: number | undefined, bytes: number, sending: boolean) => {
+/** The endpoint table, one frame at a time; see `ConversationTable`. */
+export class EndpointTable {
+  private readonly byKey = new Map<string, Endpoint>();
+
+  constructor(readonly kind: ConversationKind) {}
+
+  private bump(address: string, port: number | undefined, bytes: number, sending: boolean): void {
     const key = port === undefined ? address : `${address}|${port}`;
-    let e = byKey.get(key);
+    let e = this.byKey.get(key);
     if (!e) {
       e = { address, port, packets: 0, bytes: 0, packetsTx: 0, bytesTx: 0, packetsRx: 0, bytesRx: 0 };
-      byKey.set(key, e);
+      this.byKey.set(key, e);
     }
     e.packets++;
     e.bytes += bytes;
     if (sending) { e.packetsTx++; e.bytesTx += bytes; }
     else { e.packetsRx++; e.bytesRx += bytes; }
-  };
-
-  for (const packet of packets) {
-    if (!frameHasLayer(packet, kind)) continue;
-    const ends = addressesFor(packet, kind);
-    if (!ends) continue;
-    bump(ends.a, ends.pa, packet.length, true);
-    bump(ends.b, ends.pb, packet.length, false);
   }
 
-  return [...byKey.values()];
+  add(packet: Packet): void {
+    if (!frameHasLayer(packet, this.kind)) return;
+    const ends = addressesFor(packet, this.kind);
+    if (!ends) return;
+    this.bump(ends.a, ends.pa, packet.length, true);
+    this.bump(ends.b, ends.pb, packet.length, false);
+  }
+
+  result(): Endpoint[] {
+    return [...this.byKey.values()].map((e) => ({ ...e }));
+  }
+}
+
+export function endpoints(packets: readonly Packet[], kind: ConversationKind): Endpoint[] {
+  const table = new EndpointTable(kind);
+  for (const packet of packets) table.add(packet);
+  return table.result();
+}
+
+export interface ProtocolHierarchy {
+  roots: HierarchyNode[];
+  packets: number;
+  bytes: number;
 }
 
 /**
@@ -230,19 +268,23 @@ export function endpoints(packets: readonly Packet[], kind: ConversationKind): E
  * is why the dissector inserts a QUIC or SSDP token beside its transport layer
  * rather than appending it - appended, `quic` landed under `tls` on the 68
  * frames that carry both, which is the inverse of what contains what.
+ *
+ * The fold keeps nodes in first-seen order and `result()` sorts a copy. The
+ * sort is stable, so that is the order the array function always produced by
+ * sorting in place once at the end.
  */
-export function protocolHierarchy(packets: readonly Packet[]): { roots: HierarchyNode[]; packets: number; bytes: number } {
-  const roots: HierarchyNode[] = [];
-  let totalPackets = 0;
-  let totalBytes = 0;
+export class HierarchyFold {
+  private readonly roots: HierarchyNode[] = [];
+  private packets = 0;
+  private bytes = 0;
 
-  for (const packet of packets) {
+  add(packet: Packet): void {
     const chain = packet.frameProtocols;
-    if (!chain || chain.length === 0) continue;
-    totalPackets++;
-    totalBytes += packet.length;
+    if (!chain || chain.length === 0) return;
+    this.packets++;
+    this.bytes += packet.length;
 
-    let level = roots;
+    let level = this.roots;
     for (const token of chain) {
       let node = level.find((n) => n.token === token);
       if (!node) {
@@ -255,13 +297,19 @@ export function protocolHierarchy(packets: readonly Packet[]): { roots: Hierarch
     }
   }
 
-  const sortTree = (nodes: HierarchyNode[]) => {
-    nodes.sort((a, b) => b.packets - a.packets);
-    for (const n of nodes) sortTree(n.children);
-  };
-  sortTree(roots);
+  result(): ProtocolHierarchy {
+    const sorted = (nodes: readonly HierarchyNode[]): HierarchyNode[] =>
+      nodes
+        .map((n) => ({ token: n.token, packets: n.packets, bytes: n.bytes, children: sorted(n.children) }))
+        .sort((a, b) => b.packets - a.packets);
+    return { roots: sorted(this.roots), packets: this.packets, bytes: this.bytes };
+  }
+}
 
-  return { roots, packets: totalPackets, bytes: totalBytes };
+export function protocolHierarchy(packets: readonly Packet[]): ProtocolHierarchy {
+  const fold = new HierarchyFold();
+  for (const packet of packets) fold.add(packet);
+  return fold.result();
 }
 
 /**
@@ -365,15 +413,17 @@ export interface ProcessGroup {
  * "unknown" row. There is no single thing they belong to, and inventing one
  * would put a number next to a name that does not exist.
  */
-export function processes(packets: readonly Packet[], isLocal?: (address: string) => boolean): ProcessGroup[] {
-  const byPid = new Map<number, ProcessGroup>();
+export class ProcessTable {
+  private readonly byPid = new Map<number, ProcessGroup>();
 
-  for (const packet of packets) {
+  constructor(private readonly isLocal?: (address: string) => boolean) {}
+
+  add(packet: Packet): void {
     const name = fieldValue(packet, 'inwire.process.name');
     const pid = fieldValue(packet, 'inwire.process.pid');
-    if (typeof name !== 'string' || typeof pid !== 'number') continue;
+    if (typeof name !== 'string' || typeof pid !== 'number') return;
 
-    let group = byPid.get(pid);
+    let group = this.byPid.get(pid);
     if (!group) {
       group = {
         name, pid,
@@ -381,7 +431,7 @@ export function processes(packets: readonly Packet[], isLocal?: (address: string
         peers: [], packets: 0, bytes: 0,
         firstFrame: packet.id, firstSeen: packet.relativeTime, lastSeen: packet.relativeTime,
       };
-      byPid.set(pid, group);
+      this.byPid.set(pid, group);
     }
     group.packets++;
     group.bytes += packet.length;
@@ -390,9 +440,9 @@ export function processes(packets: readonly Packet[], isLocal?: (address: string
     // The far end, which is whichever of the two is not this machine. Without
     // the local set to compare against there is no way to tell, so the column
     // stays empty rather than listing this machine as its own peer.
-    if (isLocal) {
-      const peer = isLocal(packet.source) ? packet.destination
-        : isLocal(packet.destination) ? packet.source
+    if (this.isLocal) {
+      const peer = this.isLocal(packet.source) ? packet.destination
+        : this.isLocal(packet.destination) ? packet.source
           : null;
       if (peer && !group.peers.includes(peer) && group.peers.length < 16) {
         group.peers.push(peer);
@@ -400,7 +450,15 @@ export function processes(packets: readonly Packet[], isLocal?: (address: string
     }
   }
 
-  return [...byPid.values()];
+  result(): ProcessGroup[] {
+    return [...this.byPid.values()].map((g) => ({ ...g, peers: [...g.peers] }));
+  }
+}
+
+export function processes(packets: readonly Packet[], isLocal?: (address: string) => boolean): ProcessGroup[] {
+  const table = new ProcessTable(isLocal);
+  for (const packet of packets) table.add(packet);
+  return table.result();
 }
 
 /**

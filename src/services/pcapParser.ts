@@ -1,6 +1,6 @@
 import { Packet, ProtocolLayer, ProtocolField, ExpertCategory, ExpertInfo } from '../types/packet';
 import { applyInfoPatch } from './dissect/infoPatch';
-import { CATEGORY_RANK, expertItemsFor } from './expertInfo';
+import { CATEGORY_RANK } from './expertInfo';
 import { TcpStreamTracker } from './tcpStreamTracker';
 import { resolveMacName } from './macVendors';
 import { dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l2';
@@ -16,16 +16,13 @@ import {
 import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { decodeNetworkLayer } from './dissectors/networkLayer';
 import { keyLog } from './tls/keyLog';
-import { DSB_SECRETS_TYPE_TLS_KEY_LOG } from './pcapngWriter';
-import { LINKTYPE, type InfoPatch } from './dissect/types';
+import { DSB_SECRETS_TYPE_TLS_KEY_LOG, LINKTYPE, type InfoPatch } from './dissect/types';
 // Re-exported because it was declared here for a long time and four modules
 // import it from this path; it now lives with the rest of the contract.
 export type { InfoPatch } from './dissect/types';
 import { dissectCdp, CDP_SNAP_PID, CISCO_OUI } from './dissectors/cdp';
 import { DnsTracker } from './dnsTracker';
 import { QuicFlowTracker } from './quicFlowTracker';
-import { displayProtocol, toBase64 } from './exportSchema';
-import { buildCsvText } from './tabularWriters';
 import { IcmpEchoTracker } from './icmpEchoTracker';
 import { poolExpert, poolTokens } from './dissect/tokenPool';
 import { FieldBlockWriter } from './dissect/fieldSplit';
@@ -63,30 +60,6 @@ export const IMPORT_PATCH_WINDOW = 100_000;
  * frame. Stateless without `{stream: true}`, which nothing here uses.
  */
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
-
-/**
- * Standard Libpcap file header structure (24 bytes)
- * magic_number (4 bytes) = 0xa1b2c3d4
- * version_major (2 bytes) = 2
- * version_minor (2 bytes) = 4
- * thiszone (4 bytes) = 0 (GMT)
- * sigfigs (4 bytes) = 0
- * snaplen (4 bytes) = 65535
- * network (4 bytes) = 1 (LINKTYPE_ETHERNET)
- */
-
-/**
- * Flattens a ProtocolField for JSON export, recursing into nested children so
- * sub-fields (TCP's raw seq/ack numbers, IP's DSCP/ECN and flag bits, ICMP's
- * identifier) survive the export instead of being silently dropped.
- */
-function mapField(f: ProtocolField): { name: string; value: string | number | boolean; children?: ReturnType<typeof mapField>[] } {
-  return {
-    name: f.name,
-    value: f.value,
-    ...(f.children && f.children.length > 0 ? { children: f.children.map(mapField) } : {}),
-  };
-}
 
 interface ExtractedFrame {
   rawBytes: Uint8Array;
@@ -128,80 +101,6 @@ function precisionFor(secondsPerTick: number): number {
 }
 
 export class PcapService {
-  /**
-   * Generates a compliant binary Libpcap 2.4 file from packet stream
-   *
-   * **The header's link type is read from the frames, not assumed.** Classic
-   * pcap has exactly one for the whole file, which is the format's own limit
-   * and the reason the pcapng row says it keeps things this one cannot - but
-   * writing `1` unconditionally meant a loopback capture exported a file that
-   * declared Ethernet, so Wireshark reproduced this app's own misparse from
-   * the file rather than from the wire. A capture that mixes link types cannot
-   * be described by this format at all; the first frame's is written and the
-   * rest are as wrong as they have always been, which is one honest header
-   * instead of a fixed wrong one.
-   */
-  public static generatePcapBinary(packets: Packet[]): Blob {
-    // **The FIRST frame's, not the first non-Ethernet one.** `linkType` is
-    // absent on an Ethernet frame, so searching for a defined one would let a
-    // single loopback frame at the end of an Ethernet capture relabel the
-    // whole file - which is the wrong answer in the common case to be less
-    // wrong in a case this format cannot express at all.
-    const linkType = packets[0]?.linkType ?? LINKTYPE.ETHERNET;
-    let totalSize = 24; // Global header
-    for (const p of packets) {
-      totalSize += 16 + p.rawBytes.length; // 16 bytes pcap_pkthdr + raw bytes
-    }
-
-    const buffer = new ArrayBuffer(totalSize);
-    const view = new DataView(buffer);
-    let offset = 0;
-
-    // 1. Write Global Header (Little Endian standard)
-    view.setUint32(offset, 0xa1b2c3d4, true); // Magic
-    offset += 4;
-    view.setUint16(offset, 2, true); // Major version
-    offset += 2;
-    view.setUint16(offset, 4, true); // Minor version
-    offset += 2;
-    view.setInt32(offset, 0, true); // Timezone GMT
-    offset += 4;
-    view.setUint32(offset, 0, true); // Sigfigs
-    offset += 4;
-    view.setUint32(offset, 65535, true); // Snaplen
-    offset += 4;
-    view.setUint32(offset, linkType, true); // LinkType, from the frames
-    offset += 4;
-
-    // 2. Write Packet Records, in capture order. The buffer can hold frames
-    //    from several adapters that arrived out of order (the ordering window
-    //    only covers thread skew); a file is forever, so it is sorted here.
-    //    Stable, so equal stamps keep frame-number order.
-    const ordered = [...packets].sort((a, b) => a.tsUs - b.tsUs);
-    for (const packet of ordered) {
-      const tsSec = Math.floor(packet.tsUs / 1_000_000);
-      const tsUsec = packet.tsUs - tsSec * 1_000_000;
-      const capLen = packet.rawBytes.length;
-      const origLen = packet.length;
-
-      // Packet Header (16 bytes)
-      view.setUint32(offset, tsSec, true);
-      offset += 4;
-      view.setUint32(offset, tsUsec, true);
-      offset += 4;
-      view.setUint32(offset, capLen, true);
-      offset += 4;
-      view.setUint32(offset, origLen, true);
-      offset += 4;
-
-      // Packet Raw Bytes
-      const destUint8 = new Uint8Array(buffer, offset, capLen);
-      destUint8.set(packet.rawBytes);
-      offset += capLen;
-    }
-
-    return new Blob([buffer], { type: 'application/vnd.tcpdump.pcap' });
-  }
 
   /**
    * Parses a capture file into packets, up to `maxFrames` of them.
@@ -709,57 +608,6 @@ export class PcapService {
     // Whatever is left has nothing else coming for it.
     drain(0);
     return { missedPatches };
-  }
-
-  /**
-   * Export to JSON string.
-   *
-   * The field names are the ones `exportSchema` recognises, and `epoch` is
-   * present, so a JSON export re-imports through the same evaluator as a CSV.
-   * It did not before: the old shape renamed `id` to `no` and `relativeTime`
-   * to `time`, dropped `rawBytes` entirely, and was then handed straight back
-   * to the app as if it were a `Packet[]`.
-   *
-   * `layers` stays in - it is what makes this export readable by other tools -
-   * but it is decoration on the way back, because the layers are re-derived
-   * from `rawBytes` when those are present and cannot be trusted when they
-   * are not.
-   */
-  public static exportToJson(packets: Packet[], includeRawBytes = false): string {
-    const sanitized = packets.map(p => ({
-      no: p.id,
-      time: p.relativeTime.toFixed(6),
-      epoch: p.tsUs / 1000,
-      source: p.source,
-      destination: p.destination,
-      protocol: displayProtocol(p),
-      length: p.length,
-      info: p.info,
-      status: p.status,
-      expert: expertItemsFor(p).map((i) => i.summary).join('; '),
-      ...(includeRawBytes
-        ? { rawBytes: p.rawBytes.length > 0 ? toBase64(p.rawBytes) : '' }
-        : {}),
-      layers: p.layers.map(l => ({
-        layer: l.name,
-        summary: l.summary,
-        fields: l.fields.map(mapField),
-      })),
-    }));
-
-    return JSON.stringify(sanitized, null, 2);
-  }
-
-  /**
-   * Export to CSV.
-   *
-   * Delegates to `tabularWriters` so CSV, Excel and the importer cannot drift
-   * apart on columns, quoting or encoding. The hand-rolled version this
-   * replaced quoted three columns of nine, emitted no BOM, and joined with
-   * bare LF.
-   */
-  public static exportToCsv(packets: Packet[], includeRawBytes = false): string {
-    return buildCsvText(packets, includeRawBytes);
   }
 }
 

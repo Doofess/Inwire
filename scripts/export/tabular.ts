@@ -1,37 +1,61 @@
 /**
- * Assertion tests for the tabular export/import round-trip.
+ * Assertion tests for the tabular exports - CSV, Excel, JSON - and their
+ * import, driven by the two real captures.
  *
  *   npx tsx scripts/export/tabular.ts
  *
- * Two things are being defended here.
+ * Three things are being defended here.
  *
  * The first is the round-trip: a capture exported with raw bytes and imported
  * again must come back byte-identical, because that is the entire promise of
- * the "Include raw packet bytes" toggle. Without it a spreadsheet is a summary
- * and everyone should know it; with it, anything less than exact is a lie.
+ * the "Include raw packet bytes" toggle. Real traffic, both fixtures, every
+ * frame - not a dozen frames a test author built to pass.
  *
- * The second is the evaluator - the thing that decides a file is NOT packet
+ * The second is "every field": each dissected field is a column under its
+ * Wireshark name, and its cells say what the dissector said - checked against
+ * `fieldValue` for sampled frames, and against tshark's own `-T fields` for a
+ * handful of abbreviations, so a column that is present but wrong fails too.
+ *
+ * The third is the evaluator - the thing that decides a file is NOT packet
  * data. That half has no visible success case, so it is the half that rots
  * quietly: a loosened header match or a swallowed parse error turns "this
- * spreadsheet isn't a capture" into a buffer full of invented frames. Every
- * failure kind therefore has a test that names it.
+ * spreadsheet isn't a capture" into a buffer full of invented frames. Those
+ * checks, and the few edge cases no capture can express (an empty file, a
+ * bare `#` header, a hostile formula), are literals.
+ *
+ * The real-capture half SKIPs cleanly without the fixtures (ADR 0004), and the
+ * tshark cross-check without tshark.
  */
 import {
+  EXPORT_COLUMNS,
+  RAW_BYTES_COLUMN,
   fromBase64,
+  guardFormula,
   matchHeaders,
   rowsToFrames,
+  stripPreamble,
   toBase64,
   unguardFormula,
   MAX_IMPORT_ROWS,
 } from '../../src/services/exportSchema';
-import { importRows } from '../../src/services/tabularImport';
-import { parseDelimited } from '../../src/services/tabularReaders';
-import { buildCsvText } from '../../src/services/tabularWriters';
-import { decodeRawEthernetPacket } from '../../src/services/pcapParser';
-import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
-import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
-import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
+import { importAnyFile, importRows } from '../../src/services/tabularImport';
+import { parseDelimited, readTabularFile } from '../../src/services/tabularReaders';
+import { buildCsvText, buildXlsx, zipSingleFile } from '../../src/services/tabularWriters';
+import { EXCEL_CELL_CHARS } from '../../src/services/export/writers/xlsx';
+import { PcapService } from '../../src/services/pcapParser';
+import { exportToJson } from '../../src/services/export/oneShot';
+import { CsvWriter } from '../../src/services/export/writers/csv';
+import { concatChunks } from '../../src/services/export/writers/writer';
+import { FieldSurvey, orderedFieldEntries } from '../../src/services/export/fieldColumns';
+import { metaEntries, type CaptureMeta } from '../../src/services/export/captureMeta';
+import { fieldEntries, fieldValue } from '../../src/services/dissect/fieldAccess';
+import { Anonymiser } from '../../src/services/anonymise';
+import { adapterLabel } from '../../src/services/report/redact';
+import { findWiresharkTool, loadRealCaptures, runTool, type RealCapture } from './realCaptures';
 import type { Packet } from '../../src/types/packet';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -39,83 +63,39 @@ function check(name: string, actual: unknown, expected: unknown) {
   if (!pass) failures++;
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}`);
   if (!pass) {
-    console.log(`        expected ${JSON.stringify(expected)}`);
-    console.log(`        actual   ${JSON.stringify(actual)}`);
+    console.log(`        expected ${JSON.stringify(expected)?.slice(0, 400)}`);
+    console.log(`        actual   ${JSON.stringify(actual)?.slice(0, 400)}`);
   }
 }
+const checkTrue = (name: string, condition: boolean) => check(name, condition, true);
 
-// --- A capture to round-trip -------------------------------------------------
-
-/**
- * A real Ethernet/IPv4/TCP frame, built byte by byte.
- *
- * Synthetic rather than a committed .pcap so this runs on any machine, and
- * decoded through `decodeRawEthernetPacket` - the same function live capture,
- * pcap import and session restore use - so the packets under test are the ones
- * the app actually handles rather than hand-written literals that can drift
- * from the real shape.
- */
-function buildTcpFrame(seq: number, payload: string): Uint8Array {
-  const body = new TextEncoder().encode(payload);
-  const frame = new Uint8Array(54 + body.length);
-  const view = new DataView(frame.buffer);
-
-  frame.set([0x00, 0x11, 0x22, 0x33, 0x44, 0x55], 0); // dst MAC
-  frame.set([0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb], 6); // src MAC
-  view.setUint16(12, 0x0800); // IPv4
-
-  frame[14] = 0x45; // version 4, IHL 5
-  view.setUint16(16, 40 + body.length); // total length
-  view.setUint16(18, 0x1234); // id
-  frame[22] = 64; // TTL
-  frame[23] = 6; // TCP
-  frame.set([192, 168, 1, 10], 26);
-  frame.set([93, 184, 216, 34], 30);
-
-  view.setUint16(34, 51000 + seq); // src port
-  view.setUint16(36, 443); // dst port
-  view.setUint32(38, 1000 + seq * 100); // seq
-  view.setUint32(42, 2000); // ack
-  frame[46] = 0x50; // data offset 5
-  frame[47] = 0x18; // PSH|ACK
-  view.setUint16(48, 8192); // window
-  frame.set(body, 54);
-  return frame;
-}
-
-function buildCapture(count: number): Packet[] {
-  const trackers = {
-    tcp: new TcpStreamTracker(),
-    icmp: new IcmpEchoTracker(),
-    quic: new QuicFlowTracker(),
+/** The metadata an export of this capture would carry. */
+function metaFor(capture: RealCapture, overrides: Partial<CaptureMeta['flags']> = {}): CaptureMeta {
+  const p = capture.packets;
+  return {
+    app: 'Inwire', version: 'dev', os: 'Windows 11 Pro 10.0.26200', generatedAt: Date.UTC(2026, 8, 25, 12),
+    source: { kind: 'import', fileName: capture.path.split(/[\\/]/).pop()! },
+    firstUs: p[0].tsUs, lastUs: p[p.length - 1].tsUs,
+    frames: { exported: p.length, inCapture: p.length, unreadable: 0 },
+    drops: { kernel: null, agent: null, pipe: null },
+    scope: 'capture', filter: '',
+    flags: { anonymised: false, rawBytes: true, fields: true, secrets: false, ...overrides },
   };
-  const packets: Packet[] = [];
-  for (let i = 0; i < count; i++) {
-    const raw = buildTcpFrame(i, `payload ${i}`);
-    const { packet } = decodeRawEthernetPacket(
-      raw,
-      i + 1,
-      1_700_000_000_000 + i * 250,
-      i * 0.25,
-      i === 0 ? 0 : 0.25,
-      raw.length,
-      trackers.tcp,
-      trackers.icmp,
-      trackers.quic,
-    );
-    packets.push(packet);
-  }
-  return packets;
 }
 
-const capture = buildCapture(12);
-check('fixture decoded as TCP', capture[0].protocol, 'TCP');
-check('fixture carries wire bytes', capture[0].rawBytes.length > 0, true);
+const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
 
-// --- Base64 ------------------------------------------------------------------
-{
-  // Every remainder class, since the padding branches are where a hand-rolled
-  // encoder goes wrong.
+/** Every n-th frame, and the last - a sample that covers the whole capture. */
+function sample<T>(items: readonly T[], every = 97): T[] {
+  const out = items.filter((_, i) => i % every === 0);
+  if (items.length > 0) out.push(items[items.length - 1]);
+  return out;
+}
+
+// --- literals: the evaluator and the pure edge cases ------------------------------
+
+function literalChecks(): void {
+  // Base64 over every remainder class and every byte value - bytes, not packets.
   let roundTripped = true;
   for (let length = 0; length <= 16; length++) {
     const bytes = new Uint8Array(length);
@@ -125,241 +105,87 @@ check('fixture carries wire bytes', capture[0].rawBytes.length > 0, true);
       if (back !== null) roundTripped = false;
       continue;
     }
-    if (!back || back.length !== length || back.some((b, i) => b !== bytes[i])) roundTripped = false;
+    if (!back || !sameBytes(back, bytes)) roundTripped = false;
   }
   check('base64 round-trips every length', roundTripped, true);
-
-  // All 256 byte values, so a sign-extension bug cannot hide in the high half.
-  const all = new Uint8Array(256);
-  for (let i = 0; i < 256; i++) all[i] = i;
-  const back = fromBase64(toBase64(all));
-  check('base64 covers all byte values', back && back.every((b, i) => b === i), true);
-
+  const all = Uint8Array.from({ length: 256 }, (_, i) => i);
+  check('base64 covers all byte values', fromBase64(toBase64(all))?.every((b, i) => b === i), true);
   check('base64 rejects wrong length', fromBase64('abc'), null);
   check('base64 rejects illegal characters', fromBase64('ab*d'), null);
-}
 
-// --- 1. Round-trip WITH raw bytes -------------------------------------------
-{
-  const csv = buildCsvText(capture, true);
-  const rows = parseDelimited(csv, ',');
-  const outcome = importRows(rows, 'capture.csv');
-
-  if (outcome.ok === false) {
-    check('csv+bytes imports', outcome.failure.message, '(an import)');
-  } else {
-    check('csv+bytes frame count', outcome.packets.length, capture.length);
-
-    const same = (field: keyof Packet) =>
-      outcome.packets.every((p, i) => JSON.stringify(p[field]) === JSON.stringify(capture[i][field]));
-
-    check('csv+bytes preserves rawBytes exactly', same('rawBytes'), true);
-    check('csv+bytes preserves id', same('id'), true);
-    check('csv+bytes preserves source', same('source'), true);
-    check('csv+bytes preserves destination', same('destination'), true);
-    check('csv+bytes preserves protocol', same('protocol'), true);
-    check('csv+bytes preserves length', same('length'), true);
-    check('csv+bytes preserves info', same('info'), true);
-    check('csv+bytes preserves timestamp', same('tsUs'), true);
-    // The whole point of carrying the bytes: dissection comes back too. The
-    // protocol tree itself is rebuilt on demand rather than carried
-    // (docs/decisions/0007), so what proves the re-dissection happened is the
-    // layer list and the filterable fields the dissectors published - which is
-    // also what every view except the detail pane actually reads.
-    check('csv+bytes re-dissects the frame', same('frameProtocols'), true);
-    check('...down to the fields the filters use', same('fields'), true);
-    check('...and the frame carries its bytes, not a tree',
-      outcome.packets[0].rawBytes.length > 0 && outcome.packets[0].layers.length === 0, true);
-    check('csv+bytes reports no losses', outcome.notes.length, 0);
+  {
+    const result = rowsToFrames([['Name', 'Email', 'Signed up'], ['Ada', 'ada@example.com', '2026-01-01']], 'contacts.csv');
+    check('unrelated table kind', result.ok === false ? result.failure.kind : 'imported', 'missing-columns');
+    check('unrelated table names what it found',
+      result.ok === false && result.failure.kind === 'missing-columns' ? result.failure.found : null,
+      ['Name', 'Email', 'Signed up']);
+    check('unrelated table names what it needs',
+      result.ok === false && result.failure.kind === 'missing-columns' ? result.failure.missing : null,
+      ['source', 'destination', 'protocol', 'length']);
   }
-}
-
-// --- 2. Round-trip WITHOUT raw bytes ----------------------------------------
-{
-  const rows = parseDelimited(buildCsvText(capture, false), ',');
-  const outcome = importRows(rows, 'summary.csv');
-
-  if (outcome.ok === false) {
-    check('csv summary imports', outcome.failure.message, '(an import)');
-  } else {
-    check('csv summary frame count', outcome.packets.length, capture.length);
-    check('csv summary keeps addresses', outcome.packets[3].source, capture[3].source);
-    check('csv summary keeps info', outcome.packets[3].info, capture[3].info);
-    check('csv summary keeps absolute time', outcome.packets[3].tsUs, capture[3].tsUs);
-    // Genuinely empty, not fabricated - the rule sessionRestore.ts states.
-    check('csv summary has no wire bytes', outcome.packets[3].rawBytes.length, 0);
-    check('csv summary says why there is no hex', outcome.notes[0].includes('no hex dump'), true);
-    check('csv summary names its own origin', outcome.packets[0].interfaceName, 'summary.csv');
+  check('empty file kind', (() => { const r = rowsToFrames([], 'empty.csv'); return r.ok === false ? r.failure.kind : 'imported'; })(), 'no-table');
+  check('a preamble with no table under it is no table',
+    (() => { const r = rowsToFrames([['# Application: Inwire 4.0.0'], ['# Scope: the whole capture']], 'p.csv'); return r.ok === false ? r.failure.kind : 'imported'; })(),
+    'no-table');
+  check('header with no rows kind',
+    (() => { const r = rowsToFrames([['No.', 'Source', 'Destination', 'Protocol', 'Length']], 'h.csv'); return r.ok === false ? r.failure.kind : 'imported'; })(),
+    'no-rows');
+  {
+    const garbage = [
+      ['No.', 'Source', 'Destination', 'Protocol', 'Length'],
+      ['1', '', '', '', ''], ['2', 'x', '', 'TCP', 'abc'], ['3', '', 'y', 'TCP', '60'],
+    ];
+    const result = rowsToFrames(garbage, 'garbage.csv');
+    check('garbage rows kind', result.ok === false ? result.failure.kind : 'imported', 'no-rows');
+    check('garbage rows counts what it rejected',
+      result.ok === false && result.failure.kind === 'no-rows' ? result.failure.rejected : 0, 3);
   }
-}
-
-// --- 3. Evaluator negatives --------------------------------------------------
-{
-  const unrelated = [
-    ['Name', 'Email', 'Signed up'],
-    ['Ada', 'ada@example.com', '2026-01-01'],
-  ];
-  const result = rowsToFrames(unrelated, 'contacts.csv');
-  if (result.ok === true) {
-    check('unrelated table is refused', 'imported', 'refused');
-  } else {
-    check('unrelated table kind', result.failure.kind, 'missing-columns');
-    // The message has to name the headers the user can see, or it is useless.
-    check(
-      'unrelated table names what it found',
-      result.failure.kind === 'missing-columns' ? result.failure.found : null,
-      ['Name', 'Email', 'Signed up'],
-    );
-    check(
-      'unrelated table names what it needs',
-      result.failure.kind === 'missing-columns' ? result.failure.missing : null,
-      ['source', 'destination', 'protocol', 'length'],
-    );
+  {
+    const body = Array.from({ length: MAX_IMPORT_ROWS + 1 }, (_, i) => [String(i + 1), '10.0.0.1', '10.0.0.2', 'TCP', '60']);
+    const result = rowsToFrames([['No.', 'Source', 'Destination', 'Protocol', 'Length'], ...body], 'huge.csv');
+    check('oversized file kind', result.ok === false ? result.failure.kind : 'imported', 'too-large');
   }
-}
-{
-  const result = rowsToFrames([], 'empty.csv');
-  check('empty file kind', result.ok === false ? result.failure.kind : 'imported', 'no-table');
-}
-{
-  const headerOnly = [['No.', 'Source', 'Destination', 'Protocol', 'Length']];
-  const result = rowsToFrames(headerOnly, 'header.csv');
-  check('header with no rows kind', result.ok === false ? result.failure.kind : 'imported', 'no-rows');
-}
-{
-  // Right headers, unusable rows: blank addresses and a non-numeric length.
-  const garbage = [
-    ['No.', 'Source', 'Destination', 'Protocol', 'Length'],
-    ['1', '', '', '', ''],
-    ['2', 'x', '', 'TCP', 'abc'],
-    ['3', '', 'y', 'TCP', '60'],
-  ];
-  const result = rowsToFrames(garbage, 'garbage.csv');
-  check('garbage rows kind', result.ok === false ? result.failure.kind : 'imported', 'no-rows');
-  check(
-    'garbage rows counts what it rejected',
-    result.ok === false && result.failure.kind === 'no-rows' ? result.failure.rejected : 0,
-    3,
-  );
-}
-{
-  const header = [['No.', 'Source', 'Destination', 'Protocol', 'Length']];
-  const body = Array.from({ length: MAX_IMPORT_ROWS + 1 }, (_, i) => [
-    String(i + 1), '10.0.0.1', '10.0.0.2', 'TCP', '60',
-  ]);
-  const result = rowsToFrames([...header, ...body], 'huge.csv');
-  check('oversized file kind', result.ok === false ? result.failure.kind : 'imported', 'too-large');
-}
-{
-  // A partial rejection must import the survivors rather than failing whole.
-  const mixed = [
-    ['No.', 'Source', 'Destination', 'Protocol', 'Length'],
-    ['1', '10.0.0.1', '10.0.0.2', 'TCP', '60'],
-    ['2', '', '', '', ''],
-    ['3', '10.0.0.3', '10.0.0.4', 'UDP', '74'],
-  ];
-  const result = rowsToFrames(mixed, 'mixed.csv');
-  check('partial rejection still imports', result.ok === true ? result.frames.length : 0, 2);
-  check('partial rejection is counted', result.ok === true ? result.rejected : -1, 1);
-}
 
-// --- 4. Header synonyms ------------------------------------------------------
-{
-  const columns = matchHeaders(['#', 'Src', 'Dst', 'Proto', 'Len', 'Summary', 'Raw Bytes']);
-  check('synonym #', columns.no, 0);
-  check('synonym Src', columns.source, 1);
-  check('synonym Dst', columns.destination, 2);
-  check('synonym Proto', columns.protocol, 3);
-  check('synonym Len', columns.length, 4);
-  check('synonym Summary', columns.info, 5);
-  check('synonym Raw Bytes', columns.rawBytes, 6);
+  // Header synonyms, and our own headers mapping to themselves.
+  {
+    const columns = matchHeaders(['#', 'Src', 'Dst', 'Proto', 'Len', 'Summary', 'Raw Bytes']);
+    check('synonyms map', [columns.no, columns.source, columns.destination, columns.protocol, columns.length, columns.info, columns.rawBytes],
+      [0, 1, 2, 3, 4, 5, 6]);
+    const own = matchHeaders([...EXPORT_COLUMNS.map((c) => c.header), RAW_BYTES_COLUMN.header]);
+    check('our own importable headers all map', Object.keys(own).sort(),
+      ['destination', 'epoch', 'expert', 'info', 'length', 'no', 'protocol', 'rawBytes', 'source', 'status', 'time']);
+    // The seven new columns are carried past, not mistaken for anything.
+    const extra = matchHeaders(EXPORT_COLUMNS.filter((c) => !['no', 'time', 'epoch', 'source', 'destination', 'protocol', 'length', 'info', 'status', 'expert'].includes(c.key)).map((c) => c.header));
+    check('the new standard columns match nothing the importer reads', extra, {});
+  }
 
-  // Our own headers must map to themselves, or an export cannot be re-imported.
-  const own = matchHeaders([
-    'No.', 'Time(s)', 'Epoch (ms)', 'Source', 'Destination',
-    'Protocol', 'Length', 'Info', 'Status', 'Expert', 'RawBytes (Base64)',
-  ]);
-  check('our own headers all map', Object.keys(own).length, 11);
+  // A Wireshark field name normalises to a spelling of a standard column -
+  // frame.len to "framelen" (Length), frame.number to "framenumber" (No.) - and
+  // must never be taken for it, even when it comes first.
+  {
+    const hijack = matchHeaders(['frame.number', 'frame.len', 'Source', 'Destination', 'Protocol', 'Length', 'No.']);
+    check('frame.len does not take Length', hijack.length, 5);
+    check('frame.number does not take No.', hijack.no, 6);
+    const onlyFields = matchHeaders(['frame.len', 'frame.number', 'ip.src', 'ip.dst']);
+    check('a table of nothing but fields matches no standard column', onlyFields, {});
+  }
 
-  // A foreign spreadsheet with columns in a different order and extras between.
-  const shuffled = rowsToFrames(
-    [
-      ['Length', 'Notes', 'Protocol', 'Destination', 'Source'],
-      ['1514', 'ignored', 'UDP', '8.8.8.8', '10.0.0.9'],
-    ],
-    'shuffled.csv',
-  );
-  check('column order does not matter', shuffled.ok === true ? shuffled.frames[0].length : 0, 1514);
-  check(
-    'unknown columns are ignored',
-    shuffled.ok === true ? shuffled.frames[0].fallback?.source : null,
-    '10.0.0.9',
-  );
+  // A dotted header that is not a Wireshark field is somebody's column name.
+  {
+    const foreign = matchHeaders(['Src.IP', 'Dst.IP', 'Proto', 'Len']);
+    check('a foreign Src.IP / Dst.IP header is still read as the address columns',
+      [foreign.source, foreign.destination], [0, 1]);
+  }
 
-  // A hand-made table may write its Length cell as "1514 bytes", not "1514".
-  const suffixed = rowsToFrames(
-    [['ID', 'Source', 'Destination', 'Proto', 'Length'], ['7', '1.1.1.1', '2.2.2.2', 'TCP', '1514 bytes']],
-    'suffixed.csv',
-  );
-  check('length tolerates a unit suffix', suffixed.ok === true ? suffixed.frames[0].length : 0, 1514);
-}
+  // A header row is never mistaken for a preamble line.
+  check('a header row whose first cell has a colon is not preamble', stripPreamble([['#: odd', 'Source'], ['x', 'y']]).length, 2);
 
-// --- 5. CSV quoting and formula guarding ------------------------------------
-{
-  const nasty = buildCapture(1);
-  nasty[0].info = 'Standard query 0x1234 A, "quoted", comma\nand a newline';
-  nasty[0].rawBytes = new Uint8Array(0);
-
-  const rows = parseDelimited(buildCsvText(nasty, false), ',');
-  check('quoted field survives commas, quotes and newlines', rows[1][7], nasty[0].info);
-
-  // Spreadsheet formula injection: `info` carries names straight off the wire.
-  const hostile = buildCapture(1);
-  hostile[0].info = '=cmd|\'/c calc\'!A1';
-  hostile[0].rawBytes = new Uint8Array(0);
-  const hostileCsv = buildCsvText(hostile, false);
-  check('formula lead is neutralised in the file', hostileCsv.includes("'=cmd|"), true);
-
-  const back = importRows(parseDelimited(hostileCsv, ','), 'hostile.csv');
-  check(
-    'formula guard is removed again on import',
-    back.ok === true ? back.packets[0].info : null,
-    '=cmd|\'/c calc\'!A1',
-  );
+  // Formula guarding is symmetric, and leaves ordinary text alone.
+  check('guard neutralises a formula lead', guardFormula('=cmd|\'/c calc\'!A1'), '\'=cmd|\'/c calc\'!A1');
+  check('unguard restores it', unguardFormula(guardFormula('=cmd|\'/c calc\'!A1')), '=cmd|\'/c calc\'!A1');
   check('unguard leaves ordinary text alone', unguardFormula("it's fine"), "it's fine");
-}
-{
-  // The BOM must not end up inside the first header cell.
-  const csv = buildCsvText(capture, false);
-  check('csv starts with a UTF-8 BOM', csv.charCodeAt(0), 0xfeff);
-  const rows = parseDelimited(csv, ',');
-  check('parser strips the BOM', rows[0][0], 'No.');
-}
 
-// --- 6. Protocol coercion ----------------------------------------------------
-{
-  const labelled = rowsToFrames(
-    [['Source', 'Destination', 'Protocol', 'Length'], ['1.1.1.1', '2.2.2.2', 'TLSv1.2', '517']],
-    'labelled.csv',
-  );
-  // Not cast blindly into ProtocolType, which every color rule and display
-  // filter believes is one of twelve values.
-  check('unknown protocol becomes CUSTOM', labelled.ok === true ? labelled.frames[0].fallback?.protocol : null, 'CUSTOM');
-  check(
-    'unknown protocol keeps its label',
-    labelled.ok === true ? labelled.frames[0].fallback?.protocolLabel : null,
-    'TLSv1.2',
-  );
-
-  const known = rowsToFrames(
-    [['Source', 'Destination', 'Protocol', 'Length'], ['1.1.1.1', '2.2.2.2', 'udp', '60']],
-    'known.csv',
-  );
-  check('known protocol is normalised', known.ok === true ? known.frames[0].fallback?.protocol : null, 'UDP');
-}
-
-// --- 7. Delimited parsing edge cases ----------------------------------------
-{
+  // Delimited parsing.
   check('bare row', parseDelimited('a,b,c', ','), [['a', 'b', 'c']]);
   check('crlf rows', parseDelimited('a,b\r\nc,d\r\n', ','), [['a', 'b'], ['c', 'd']]);
   check('doubled quotes', parseDelimited('"say ""hi""",b', ','), [['say "hi"', 'b']]);
@@ -368,57 +194,351 @@ check('fixture carries wire bytes', capture[0].rawBytes.length > 0, true);
   check('tab delimited', parseDelimited('a\tb', '\t'), [['a', 'b']]);
 }
 
-// --- 8. Excel and zip, through the real libraries ---------------------------
-//
-// Async, so it runs last and owns the exit. These two exercise exceljs and
-// fflate for real rather than mocking them: the interop shape of exceljs's
-// browser bundle versus its CommonJS entry is exactly the kind of thing that
-// works in Node and breaks in the browser, so at minimum one of the two
-// environments is covered here.
-async function binaryFormats() {
-  const { buildXlsx, zipSingleFile } = await import('../../src/services/tabularWriters');
-  const { readTabularFile } = await import('../../src/services/tabularReaders');
+// --- the real captures --------------------------------------------------------------
 
-  const xlsx = await buildXlsx(capture, { includeRawBytes: true, filter: 'tcp' });
-  const table = await readTabularFile(new File([xlsx], 'capture.xlsx'));
+/** tshark's answer for a few abbreviations, by frame number. */
+function tsharkFields(tshark: string, path: string, abbrevs: string[]): Map<number, string[]> {
+  const out = new Map<number, string[]>();
+  const text = runTool(tshark, ['-r', path, '-2', '-T', 'fields', '-E', 'separator=\t', '-E', 'occurrence=a',
+    '-e', 'frame.number', ...abbrevs.flatMap((a) => ['-e', a])]);
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    const [n, ...values] = line.split('\t');
+    out.set(Number(n), values);
+  }
+  return out;
+}
 
-  if (table.ok === false) {
-    check('xlsx reads back', table.failure.message, '(a table)');
+/** A field value as the CSV spells it. */
+const csvText = (v: string | number) => (typeof v === 'string' ? guardFormula(v) : String(v));
+
+async function captureChecks(capture: RealCapture, tshark: string | null): Promise<void> {
+  const name = capture.name;
+  const packets = capture.packets;
+  const meta = metaFor(capture);
+  const survey = new FieldSurvey();
+  survey.addPage(packets);
+  const columns = survey.columns();
+
+  // --- CSV, paged, equals the one-shot ---------------------------------------
+  const oneShot = buildCsvText(packets, true, meta);
+  const paged = (() => {
+    const writer = new CsvWriter({ includeRawBytes: true, fields: columns, meta });
+    const chunks: Uint8Array[] = [];
+    for (let at = 0; at < packets.length; at += 1000) chunks.push(...writer.write(packets.slice(at, at + 1000)));
+    chunks.push(...writer.finish());
+    return new TextDecoder('utf-8', { ignoreBOM: true }).decode(concatChunks(chunks));
+  })();
+  checkTrue(`${name}: CSV written in pages is identical to the one-shot`, paged === oneShot);
+  check(`${name}: CSV starts with a UTF-8 BOM`, oneShot.charCodeAt(0), 0xfeff);
+
+  const rows = parseDelimited(oneShot, ',');
+  const entries = metaEntries(meta);
+  check(`${name}: the preamble is one quoted line per metadata entry`,
+    rows.slice(0, entries.length).map((r) => r), entries.map(([k, v]) => [`# ${k}: ${v}`]));
+  const header = rows[entries.length];
+  check(`${name}: the header is the standard columns, the fields, then RawBytes`,
+    header, [...EXPORT_COLUMNS.map((c) => c.header), ...columns.map((c) => c.abbrev), RAW_BYTES_COLUMN.header]);
+  check(`${name}: one row per frame`, rows.length - entries.length - 1, packets.length);
+  checkTrue(`${name}: every dissected field has a column (${columns.length})`,
+    columns.length > 100 && new Set(header).size === header.length);
+
+  // --- field columns say what the dissector said --------------------------------
+  {
+    const at = new Map(header.map((h, i) => [h, i]));
+    let compared = 0;
+    let wrong: string[] = [];
+    let missingBag = 0;
+    for (const p of sample(packets)) {
+      const row = rows[entries.length + packets.indexOf(p) + 1];
+      const bag = new Map(fieldEntries(p));
+      for (const c of columns) {
+        const cell = row[at.get(c.abbrev)!];
+        const value = fieldValue(p, c.abbrev);
+        const expected = value === undefined ? '' : csvText(value);
+        if (cell !== expected) wrong.push(`frame ${p.id} ${c.abbrev}: ${JSON.stringify(cell)} != ${JSON.stringify(expected)}`);
+        if (value !== undefined) compared++;
+        if (value !== undefined && !bag.has(c.abbrev)) missingBag++;
+      }
+    }
+    check(`${name}: sampled field cells equal fieldValue (${compared} values)`, wrong.slice(0, 5), []);
+    check(`${name}: ...and fieldValue agrees with fieldEntries, dense columns included`, missingBag, 0);
+    wrong = [];
+  }
+
+  // --- and what tshark says ---------------------------------------------------------
+  if (tshark === null) {
+    console.log(`SKIP  ${name}: tshark not found - field values not cross-checked against the reference`);
   } else {
-    const outcome = importRows(table.rows, 'capture.xlsx');
-    if (outcome.ok === false) {
-      check('xlsx imports', outcome.failure.message, '(an import)');
-    } else {
-      check('xlsx frame count', outcome.packets.length, capture.length);
-      check(
-        'xlsx preserves rawBytes exactly',
-        outcome.packets.every((p, i) => JSON.stringify(p.rawBytes) === JSON.stringify(capture[i].rawBytes)),
-        true,
-      );
-      check('xlsx preserves info', outcome.packets[5].info, capture[5].info);
-      check('xlsx preserves absolute time', outcome.packets[5].tsUs, capture[5].tsUs);
-      // The reader has to find the packet table among four sheets, not just
-      // take the first one it is handed.
-      check('xlsx picks the packet sheet', outcome.packets[0].source, capture[0].source);
+    const abbrevs = ['eth.src', 'ip.src', 'ip.ttl', 'ipv6.dst', 'tcp.srcport', 'tcp.len', 'udp.dstport', 'dns.qry.name'];
+    const theirs = tsharkFields(tshark, capture.path, abbrevs);
+    const at = new Map(header.map((h, i) => [h, i]));
+    for (const abbrev of abbrevs) {
+      const index = at.get(abbrev);
+      if (index === undefined) {
+        console.log(`SKIP  ${name}: no ${abbrev} column - the capture has none`);
+        continue;
+      }
+      let compared = 0;
+      const wrong: string[] = [];
+      packets.forEach((p, i) => {
+        const ours = unguardFormula(rows[entries.length + i + 1][index]);
+        const reference = theirs.get(p.id)?.[abbrevs.indexOf(abbrev)] ?? '';
+        // Only single-valued frames: a tunnel or a multi-question query is one
+        // value in our bag and several in tshark's, which is a different
+        // question from whether the column is right.
+        if (ours === '' || reference === '' || reference.includes(',')) return;
+        compared++;
+        if (ours !== reference) wrong.push(`frame ${p.id}: ours ${ours}, tshark ${reference}`);
+      });
+      check(`${name}: ${abbrev} column equals tshark -T fields (${compared} frames)`,
+        compared > 0 ? wrong.slice(0, 3) : ['nothing compared'], []);
     }
   }
 
-  const csvBlob = new Blob([buildCsvText(capture, true)]);
-  const original = new Uint8Array(await csvBlob.arrayBuffer());
-  const zipped = await zipSingleFile(csvBlob, 'capture.csv');
-  const { unzipSync } = await import('fflate');
-  const entries = unzipSync(new Uint8Array(await zipped.arrayBuffer()));
-  check('zip holds the file under its name', Object.keys(entries), ['capture.csv']);
-  // Compared as bytes, not as decoded text: TextDecoder swallows the leading
-  // BOM, which would make a lost BOM look like a pass.
-  const restored = entries['capture.csv'];
-  check(
-    'zip content is byte-identical',
-    restored.length === original.length && restored.every((b, i) => b === original[i]),
-    true,
-  );
-  check('zip preserved the BOM', [restored[0], restored[1], restored[2]], [0xef, 0xbb, 0xbf]);
-  check('zip actually compressed', zipped.size < csvBlob.size, true);
+  // --- CSV round-trip, with bytes ------------------------------------------------------
+  {
+    const outcome = importRows(rows, `${name}.csv`);
+    if (outcome.ok === false) {
+      check(`${name}: CSV imports`, outcome.failure.message, '(an import)');
+    } else {
+      const back = outcome.packets;
+      check(`${name}: CSV+bytes frame count`, back.length, packets.length);
+      checkTrue(`${name}: CSV+bytes preserves every frame's bytes exactly`,
+        back.every((p, i) => sameBytes(p.rawBytes, packets[i].rawBytes)));
+      const same = (f: (p: Packet) => unknown) => back.every((p, i) => JSON.stringify(f(p)) === JSON.stringify(f(packets[i])));
+      checkTrue(`${name}: ...and every id`, same((p) => p.id));
+      checkTrue(`${name}: ...and every timestamp, to the microsecond`, same((p) => p.tsUs));
+      checkTrue(`${name}: ...and every length`, same((p) => p.length));
+      checkTrue(`${name}: ...and re-dissects every frame to the same protocol stack`, same((p) => p.frameProtocols));
+      // Every field but three the two import ROUTES answer differently -
+      // properties of the importer, not of the file, and measured rather than
+      // guessed (539 of 12,858 and 58 of 14,782 frames differ, all in these):
+      //   *.stream           conversation indexes, which the capture-file
+      //                      importer assigns and the row importer's restore
+      //                      path does not
+      //   dns.response_in    a forward reference the capture importer patches
+      //                      back onto the query once the answer is seen
+      //   *.checksum.status  "Unverified" on frames this machine sent, which
+      //                      needs the host identity the capture importer
+      //                      infers from the whole file and a row import has not
+      const routeDependent = (k: string) => k.endsWith('.stream') || k === 'dns.response_in' || k.endsWith('.checksum.status');
+      const fieldsOf = (p: Packet) => orderedFieldEntries(p).filter(([k]) => !routeDependent(k));
+      const differing = back.filter((p, i) => JSON.stringify(fieldsOf(p)) !== JSON.stringify(fieldsOf(packets[i])));
+      check(`${name}: ...and to the same fields on every frame`, differing.slice(0, 5).map((p) => p.id), []);
+      // The preamble is read past, not rejected: no row was skipped. (The one
+      // note is the expert findings a row cannot rebuild, which is true.)
+      check(`${name}: the preamble costs the import no rows`,
+        outcome.notes.filter((n) => !n.includes('named an expert finding')), []);
+    }
+  }
+
+  // --- without bytes, a summary ------------------------------------------------------------
+  {
+    const outcome = importRows(parseDelimited(buildCsvText(packets, false, meta), ','), 'summary.csv');
+    if (outcome.ok === false) {
+      check(`${name}: summary CSV imports`, outcome.failure.message, '(an import)');
+    } else {
+      const i = Math.floor(packets.length / 2);
+      check(`${name}: summary keeps count, addresses, info and absolute time`,
+        [outcome.packets.length, outcome.packets[i].source, outcome.packets[i].info, outcome.packets[i].tsUs],
+        [packets.length, packets[i].source, packets[i].info, packets[i].tsUs]);
+      check(`${name}: summary has no wire bytes, and says so`,
+        [outcome.packets[i].rawBytes.length, outcome.notes[0]?.includes('no hex dump')], [0, true]);
+    }
+  }
+
+  // --- anonymised ------------------------------------------------------------------------------
+  //
+  // The survey is of the REAL frames - which is what a caller has before it
+  // anonymises - and the writer is handed the anonymised ones. The field
+  // columns must not appear, whatever the survey found.
+  {
+    const anonymiser = new Anonymiser();
+    const real = packets.slice(0, 500);
+    const anonymised = real.map((p) => anonymiser.packet(p));
+    const realSurvey = new FieldSurvey();
+    realSurvey.addPage(real);
+    checkTrue(`${name}: the real frames' survey has field columns to leave out`, realSurvey.columns().length > 0);
+    const meta = metaFor(capture, { anonymised: true, fields: false });
+    const write = (opts: { anonymiser?: Anonymiser }) => {
+      const writer = new CsvWriter({ includeRawBytes: false, fields: realSurvey.columns(), meta, ...opts });
+      return parseDelimited(new TextDecoder().decode(concatChunks([...writer.write(anonymised), ...writer.finish()])), ',');
+    };
+    const rowsA = write({ anonymiser });
+    const at = rowsA.findIndex((r) => r[0] === 'No.');
+    check(`${name}: an anonymised CSV carries no field columns`, rowsA[at], EXPORT_COLUMNS.map((c) => c.header));
+    const iface = rowsA[at].indexOf('Interface');
+    check(`${name}: ...and its Interface is the adapter label redactMeta would print`,
+      rowsA[at + 1][iface], adapterLabel(anonymiser, real[0].interfaceName, 0));
+    const withheld = write({});
+    check(`${name}: with no anonymiser to map through, the adapter is withheld as "adapter 1"`,
+      withheld[withheld.findIndex((r) => r[0] === 'No.') + 1][iface], 'adapter 1');
+    const json = JSON.parse(exportToJson(anonymised, false, meta)) as { packets: Record<string, unknown>[] };
+    check(`${name}: ...and in JSON`, [json.packets[0].interface, 'fields' in json.packets[0]], ['adapter 1', false]);
+  }
+
+  // --- the preamble and a bare # header, on the real file ---------------------------------------
+  {
+    const table = stripPreamble(rows);
+    check(`${name}: the preamble is stripped down to the header`, table[0], header);
+    const bareHash = [['#', ...header.slice(1)], ...table.slice(1)];
+    const back = rowsToFrames(bareHash, 'bare.csv');
+    checkTrue(`${name}: a bare # is still the No. header`,
+      back.ok === true && back.frames.length === packets.length && back.frames.every((f, i) => f.id === packets[i].id));
+  }
+
+  // --- Protocol coercion, on the capture's own labelled frames -----------------------------------
+  {
+    const labelled = packets.find((p) => p.protocolLabel !== undefined && p.protocolLabel !== p.protocol);
+    if (labelled) {
+      const back = rowsToFrames(parseDelimited(buildCsvText([labelled], false), ','), 'l.csv');
+      check(`${name}: a label that is not a coarse protocol (${labelled.protocolLabel}) imports as CUSTOM with its label`,
+        back.ok === true ? [back.frames[0].fallback?.protocol, back.frames[0].fallback?.protocolLabel] : null,
+        ['CUSTOM', labelled.protocolLabel]);
+    }
+  }
+
+  // --- a CSV Excel has re-saved: the epoch in scientific notation --------------------------------
+  {
+    const epochAt = header.indexOf('Epoch (ms)');
+    const resaved = rows.map((r, i) => (i > entries.length ? r.map((c, j) => (j === epochAt ? Number(c).toExponential(14).toUpperCase() : c)) : r));
+    const back = rowsToFrames(resaved, 'resaved.csv');
+    const worst = back.ok === true
+      ? Math.max(...back.frames.map((f, i) => Math.abs(f.timestamp - packets[i].tsUs / 1000))) : Infinity;
+    check(`${name}: an epoch Excel re-saved as ${resaved[entries.length + 1][epochAt]} reads as the epoch, not its mantissa`,
+      worst < 1, true);
+  }
+
+  // --- a hostile Info string, on a real frame ------------------------------------------------
+  {
+    const hostile = { ...packets[0], info: '=cmd|\'/c calc\'!A1', rawBytes: new Uint8Array(0) };
+    const text = buildCsvText([hostile], false);
+    checkTrue(`${name}: a formula lead is neutralised in the file`, text.includes('\'=cmd|'));
+    const back = importRows(parseDelimited(text, ','), 'hostile.csv');
+    check(`${name}: ...and the guard is removed again on import`, back.ok === true ? back.packets[0].info : null, '=cmd|\'/c calc\'!A1');
+  }
+
+  // --- Excel round-trip ------------------------------------------------------------------------
+  {
+    const xlsx = await buildXlsx(packets, { includeRawBytes: true, meta });
+    const table = await readTabularFile(new File([xlsx], `${name}.xlsx`));
+    if (table.ok === false) {
+      check(`${name}: xlsx reads back`, table.failure.message, '(a table)');
+    } else {
+      const outcome = importRows(table.rows, `${name}.xlsx`);
+      if (outcome.ok === false) {
+        check(`${name}: xlsx imports`, outcome.failure.message, '(an import)');
+      } else {
+        check(`${name}: xlsx frame count`, outcome.packets.length, packets.length);
+        // A cell holds 32,767 characters, so a frame whose base64 is longer
+        // travels without its bytes (the Capture sheet says so) and imports
+        // as a summary; every other frame's bytes are exact.
+        const tooLong = (p: Packet) => Math.ceil(p.rawBytes.length / 3) * 4 > EXCEL_CELL_CHARS;
+        const long = packets.filter(tooLong).length;
+        checkTrue(`${name}: xlsx preserves the bytes of every frame that fits a cell, exactly`,
+          outcome.packets.every((p, i) => (tooLong(packets[i]) ? p.rawBytes.length === 0 : sameBytes(p.rawBytes, packets[i].rawBytes))));
+        console.log(`        (${long} frame(s) of ${packets.length} are past the cell limit)`);
+        // Epoch milliseconds are a text cell: a number keeps 15 significant
+        // digits in Excel and an epoch to the microsecond has 16.
+        checkTrue(`${name}: xlsx epoch values stay exact to the microsecond`,
+          outcome.packets.every((p, i) => p.tsUs === packets[i].tsUs));
+        check(`${name}: xlsx picks the packet sheet and keeps info`,
+          [outcome.packets[7].source, outcome.packets[7].info], [packets[7].source, packets[7].info]);
+      }
+    }
+  }
+
+  // --- JSON ---------------------------------------------------------------------------------------
+  {
+    const text = exportToJson(packets, true, meta);
+    const doc = JSON.parse(text) as { format: string; formatVersion: number; meta: CaptureMeta; packets: Record<string, unknown>[] };
+    check(`${name}: JSON names its format and version`, [doc.format, doc.formatVersion], ['inwire-export', 2]);
+    check(`${name}: JSON carries the metadata as it is`, doc.meta, meta);
+    check(`${name}: JSON holds every frame`, doc.packets.length, packets.length);
+    checkTrue(`${name}: JSON drops layers`, doc.packets.every((f) => !('layers' in f)));
+    const wrong = sample(packets).filter((p) => {
+      const f = doc.packets[packets.indexOf(p)];
+      return JSON.stringify(f.fields) !== JSON.stringify(Object.fromEntries(orderedFieldEntries(p)))
+        || JSON.stringify(f.protocols) !== JSON.stringify(p.frameProtocols ?? [])
+        || JSON.stringify(f.analysisFlags) !== JSON.stringify(p.analysisFlags ?? []);
+    });
+    check(`${name}: JSON fields, protocols and analysis flags equal the frame's`, wrong.map((p) => p.id), []);
+
+    const outcome = await importAnyFile(new File([text], `${name}.json`));
+    if (outcome.ok === false) {
+      check(`${name}: {meta, packets} JSON imports`, outcome.failure.message, '(an import)');
+    } else {
+      check(`${name}: {meta, packets} JSON imports every frame`, outcome.packets.length, packets.length);
+      checkTrue(`${name}: ...with its bytes exact`, outcome.packets.every((p, i) => sameBytes(p.rawBytes, packets[i].rawBytes)));
+      checkTrue(`${name}: ...and its timestamps`, outcome.packets.every((p, i) => p.tsUs === packets[i].tsUs));
+    }
+  }
+
+  // --- zip ----------------------------------------------------------------------------------------
+  {
+    const csvBlob = new Blob([oneShot]);
+    const original = new Uint8Array(await csvBlob.arrayBuffer());
+    const zipped = await zipSingleFile(csvBlob, 'capture.csv');
+    const { unzipSync } = await import('fflate');
+    const entriesZ = unzipSync(new Uint8Array(await zipped.arrayBuffer()));
+    check(`${name}: zip holds the file under its name`, Object.keys(entriesZ), ['capture.csv']);
+    checkTrue(`${name}: zip content is byte-identical, BOM included`, sameBytes(entriesZ['capture.csv'], original));
+    checkTrue(`${name}: zip actually compressed`, zipped.size < csvBlob.size);
+  }
+}
+
+/**
+ * A frame less than a microsecond after the first, from real traffic.
+ *
+ * Wireshark's own tools make it: a nanosecond copy of the first 300 frames of
+ * a fixture, a second copy shifted by 123 ns (`editcap -t`), and the two
+ * merged in time order (`mergecap`). Frame 2 then sits 1.23e-7 s into the
+ * capture - a relative time JSON writes as `1.23e-7` and a workbook stores as
+ * a number in the same notation, which a reader that ignores exponents takes
+ * for 1.23.
+ */
+async function subMicrosecondChecks(capture: RealCapture): Promise<void> {
+  const editcap = findWiresharkTool('editcap');
+  const mergecap = findWiresharkTool('mergecap');
+  if (editcap === null || mergecap === null) {
+    console.log('SKIP  sub-microsecond round-trip: editcap or mergecap not found');
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'inwire-tabular-'));
+  try {
+    const a = join(dir, 'a.pcap');
+    const b = join(dir, 'b.pcap');
+    const merged = join(dir, 'sub.pcap');
+    runTool(editcap, ['-F', 'nsecpcap', '-r', capture.path, a, '1-300']);
+    runTool(editcap, ['-F', 'nsecpcap', '-t', '0.000000123', a, b]);
+    runTool(mergecap, ['-F', 'nsecpcap', '-w', merged, a, b]);
+    const { packets } = await PcapService.parseCaptureFile(
+      new File([new Uint8Array(readFileSync(merged))], 'sub.pcap'), Number.POSITIVE_INFINITY);
+    check('the merged capture has a frame 1.23e-7 s after the first', packets[1].relativeTime, 1.23e-7);
+
+    const json = exportToJson(packets, true);
+    checkTrue('...which JSON writes in exponent notation', json.includes('"time":1.23e-7'));
+    const fromJson = await importAnyFile(new File([json], 'sub.json'));
+    check('...and reads back from JSON as 1.23e-7, not 1.23',
+      fromJson.ok === true ? fromJson.packets.map((p) => p.relativeTime).filter((t, i) => t !== packets[i].relativeTime).length : 'import failed', 0);
+
+    const xlsx = await buildXlsx(packets, { includeRawBytes: false });
+    const table = await readTabularFile(new File([xlsx], 'sub.xlsx'));
+    const fromXlsx = table.ok === true ? importRows(table.rows, 'sub.xlsx') : null;
+    check('...and from the workbook\'s numeric Time cells',
+      fromXlsx?.ok === true ? fromXlsx.packets.map((p) => p.relativeTime).filter((t, i) => t !== packets[i].relativeTime).length : 'import failed', 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  literalChecks();
+  const captures = await loadRealCaptures();
+  const tshark = captures.length > 0 ? findWiresharkTool('tshark') : null;
+  for (const capture of captures) await captureChecks(capture, tshark);
+  if (captures.length > 0) await subMicrosecondChecks(captures[0]);
 
   console.log();
   if (failures > 0) {
@@ -429,7 +549,7 @@ async function binaryFormats() {
   process.exit(0);
 }
 
-binaryFormats().catch(err => {
-  console.log(`FAIL  binary formats threw: ${err instanceof Error ? err.stack : String(err)}`);
+main().catch((err) => {
+  console.log(`FAIL  threw: ${err instanceof Error ? err.stack : String(err)}`);
   process.exit(1);
 });

@@ -77,6 +77,27 @@ export const CATEGORY_HINTS: Record<ExpertCategory, string> = {
 };
 
 /**
+ * The colour rule each category paints its rows with, by rule id.
+ *
+ * For anything that wants a category's ROW colours outside the packet list -
+ * the report's expert section - so it can take them from
+ * `getPacketThemeForApp(...).rules` and agree with the list rather than keep a
+ * third palette. `scripts/report/analysis.ts` holds every id to one that
+ * exists in `DEFAULT_COLOR_RULES`, so a renamed band fails there rather than
+ * printing an uncoloured chip.
+ */
+export const EXPERT_RULE_ID: Record<ExpertCategory, string> = {
+  Broken: 'color-expert-broken',
+  Reset: 'color-expert-reset',
+  Security: 'color-expert-security',
+  Loss: 'color-expert-loss',
+  CaptureGap: 'color-expert-capture-gap',
+  FlowControl: 'color-expert-flow-control',
+  Unverifiable: 'color-expert-unverifiable',
+  Note: 'color-expert-note',
+};
+
+/**
  * Text colour per category, for the detail tree and the Expert tab.
  *
  * Here rather than in a component because four separate copies of the severity
@@ -143,6 +164,11 @@ export interface ExpertGroupRow {
 
 /** How many frames a group row remembers. Enough to jump around, not a copy of the capture. */
 const MAX_REMEMBERED_FRAMES = 200;
+
+/** Code-unit order, never the locale's: a report must sort the same everywhere. */
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 
 function rank(c: ExpertCategory): number {
   return CATEGORY_RANK[c];
@@ -239,6 +265,15 @@ export class ExpertLog {
   private strongest = new Map<number, ExpertCategory>();
   private total = 0;
 
+  /**
+   * @param perFrame keep `categoryOf`'s answer for every frame. The app's log
+   * needs it and holds a window of frames; a report folding a whole capture
+   * off disk does not, and one Map entry per flagged frame is what runs out -
+   * a Map throws `RangeError` at about 16.7 million entries, which a long
+   * capture full of keep-alives reaches.
+   */
+  constructor(private readonly perFrame = true) {}
+
   add(packet: Packet): void {
     for (const item of expertItemsFor(packet)) {
       this.total++;
@@ -254,6 +289,7 @@ export class ExpertLog {
         });
       }
 
+      if (!this.perFrame) continue;
       const current = this.strongest.get(item.frame);
       if (current === undefined || rank(item.category) < rank(current)) {
         this.strongest.set(item.frame, item.category);
@@ -264,7 +300,11 @@ export class ExpertLog {
   /** Group rows, most consequential first, then commonest. */
   groups(): ExpertGroupRow[] {
     return [...this.rows.values()].sort(
-      (a, b) => rank(a.category) - rank(b.category) || b.count - a.count,
+      // Then a total order, so two rows with one count do not swap places
+      // between runs that saw them first in a different order - a report
+      // folded in pages and one folded whole must list them identically.
+      (a, b) => rank(a.category) - rank(b.category) || b.count - a.count
+        || compareText(a.summary, b.summary) || compareText(a.protocol, b.protocol),
     );
   }
 

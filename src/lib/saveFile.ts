@@ -37,6 +37,8 @@ const DESCRIPTIONS: Record<string, string> = {
   txt: 'Text file',
   md: 'Markdown',
   html: 'HTML',
+  xlsx: 'Excel workbook',
+  pdf: 'PDF document',
 };
 
 /**
@@ -59,16 +61,26 @@ export async function saveGeneratedFile(
     return { saved: false, canceled: false, error: 'no desktop bridge to save through' };
   }
 
+  const result = await save({ ...dialogRequestFor(suggestedName), bytes });
+  return narrowSaveResult(result);
+}
+
+/**
+ * What the dialog is asked for, derived from the name alone. Shared with the
+ * streaming save in `saveSink.ts` so both offer the same dropdown.
+ */
+export function dialogRequestFor(suggestedName: string): {
+  suggestedName: string;
+  extensions?: string[];
+  description?: string;
+} {
   const dot = suggestedName.lastIndexOf('.');
   const extension = dot > 0 ? suggestedName.slice(dot + 1).toLowerCase() : '';
-
-  const result = await save({
+  return {
     suggestedName,
     extensions: extension ? [extension] : undefined,
     description: DESCRIPTIONS[extension],
-    bytes,
-  });
-  return narrowSaveResult(result);
+  };
 }
 
 /** Convenience for the callers that still hold a `Blob`. */

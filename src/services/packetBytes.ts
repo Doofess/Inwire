@@ -46,6 +46,11 @@
 import { captureStore } from './capture/captureClient';
 import type { Packet } from '../types/packet';
 
+/** Whatever can hand back stored bytes by frame id - the store, or a test's stand-in. */
+export interface ByteSource {
+  readBytes(ids: readonly number[]): Promise<Map<number, Uint8Array>>;
+}
+
 /** Bytes a frame no longer has and the store cannot supply. */
 export const NO_BYTES = new Uint8Array(0);
 
@@ -89,8 +94,16 @@ export async function packetBytes(packet: Packet): Promise<Uint8Array> {
  * Stream, export, the replay bundle. One read for the lot rather than one per
  * frame, and packets that still carry their own bytes never reach the store at
  * all, so a capture small enough to hold in memory does no IO.
+ *
+ * `source` is the store unless a caller says otherwise. The whole-capture
+ * export (`export/exportFrames.ts`) takes its reader as a parameter so a test
+ * can drive it against a real `CaptureHost`, and it hydrates through here so
+ * the rule above - carried bytes win, the rest in one read - has one copy.
  */
-export async function packetsBytes(packets: readonly Packet[]): Promise<Map<number, Uint8Array>> {
+export async function packetsBytes(
+  packets: readonly Packet[],
+  source: ByteSource = captureStore,
+): Promise<Map<number, Uint8Array>> {
   const out = new Map<number, Uint8Array>();
   const missing: number[] = [];
   for (const packet of packets) {
@@ -98,7 +111,7 @@ export async function packetsBytes(packets: readonly Packet[]): Promise<Map<numb
     else missing.push(packet.id);
   }
   if (missing.length === 0) return out;
-  for (const [id, bytes] of await captureStore.readBytes(missing)) out.set(id, bytes);
+  for (const [id, bytes] of await source.readBytes(missing)) out.set(id, bytes);
   return out;
 }
 

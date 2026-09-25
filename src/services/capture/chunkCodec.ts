@@ -60,7 +60,27 @@ import { LAYERS } from '../dissect/fieldRegistry';
 import { fieldEntries } from '../dissect/fieldAccess';
 
 export const CHUNK_MAGIC = 0x314b4349;            // 'ICK1'
-export const CHUNK_VERSION = 1;
+/**
+ * 2 carries each frame's `linkType`; 1 did not.
+ *
+ * **A version-1 chunk still decodes**, and that is a promise rather than a
+ * courtesy: a capture on disk outlives the build that wrote it, and a restore
+ * or an export of one written last week must not fail because this field was
+ * added since. Its rows come back with no `linkType`, exactly as they always
+ * did, and `chunkStoresLinkType` says so - so a reader knows the absence means
+ * "not recorded" there and "Ethernet" in a version-2 chunk, which is the same
+ * convention the dissector follows.
+ *
+ * Why it had to be stored: the only other source is a table from adapter
+ * label to link type, and a label is not an adapter. Every frame of an
+ * imported file is labelled alike, so an import of a multi-interface pcapng -
+ * an Ethernet adapter and a Raw IP tunnel, say - read back off disk with every
+ * row given whichever type the table held last, and an export of it wrote
+ * the tunnel's frames under an Ethernet interface or the reverse.
+ */
+export const CHUNK_VERSION = 2;
+/** The oldest summary layout this build reads. */
+const OLDEST_CHUNK_VERSION = 1;
 
 /**
  * Frames per chunk, pinned to `BLOCK_ROWS` in `dissect/fieldSplit.ts`.
@@ -298,7 +318,16 @@ export interface EncodedChunk {
  * frame that failed to dissect burns one - so the decoder never assumes
  * `firstId + n`.
  */
-export function encodeChunk(packets: readonly Packet[], capLengths: readonly number[]): EncodedChunk {
+export function encodeChunk(
+  packets: readonly Packet[],
+  capLengths: readonly number[],
+  /**
+   * The layout to write. Always `CHUNK_VERSION` in the app; 1 exists so the
+   * compatibility promise above can be asserted against a real old chunk
+   * rather than one described in a comment.
+   */
+  version: 1 | 2 = CHUNK_VERSION,
+): EncodedChunk {
   if (packets.length === 0) throw new Error('encodeChunk: empty chunk');
   if (packets.length > CHUNK_FRAMES) {
     throw new Error(`encodeChunk: ${packets.length} frames exceeds CHUNK_FRAMES (${CHUNK_FRAMES})`);
@@ -388,6 +417,8 @@ export function encodeChunk(packets: readonly Packet[], capLengths: readonly num
     body.u32(p.direction === undefined ? 0xffffffff : p.direction >>> 0);
     body.u16(p.tsPrecision === undefined ? 0xffff : p.tsPrecision);
     writeNanos(body, p.tsNanos);
+    // Absent stays absent, meaning Ethernet, as it does on the frame.
+    if (version >= 2) body.u16(p.linkType === undefined ? 0xffff : p.linkType & 0xffff);
 
     // ABSENT rather than 0 for a list the frame does not have, because an
     // EMPTY list is a different fact and the dissector emits both: a TCP frame
@@ -434,7 +465,7 @@ export function encodeChunk(packets: readonly Packet[], capLengths: readonly num
   // that only wants string ids resolved does not have to walk the bodies.
   const out = new Sink(body.bytes().length + 8192);
   out.u32(CHUNK_MAGIC);
-  out.u16(CHUNK_VERSION);
+  out.u16(version);
   out.u16(0);                                  // flags, reserved
   out.u32(packets.length);
   out.u32(table.length);
@@ -497,7 +528,9 @@ export function decodeChunk(summary: Uint8Array): Packet[] {
   const magic = src.u32();
   if (magic !== CHUNK_MAGIC) throw new Error(`decodeChunk: bad magic 0x${magic.toString(16)}`);
   const version = src.u16();
-  if (version !== CHUNK_VERSION) throw new Error(`decodeChunk: version ${version} is not one this build reads`);
+  if (version < OLDEST_CHUNK_VERSION || version > CHUNK_VERSION) {
+    throw new Error(`decodeChunk: version ${version} is not one this build reads`);
+  }
   src.u16();                                    // flags
   const frameCount = src.u32();
   const tableLength = src.u32();
@@ -526,6 +559,7 @@ export function decodeChunk(summary: Uint8Array): Packet[] {
     const direction = src.u32();
     const tsPrecision = src.u16();
     const tsNanos = readNanos(src);
+    const linkType = version >= 2 ? src.u16() : 0xffff;
 
     const protocolCount = src.u16();
     const protocols: string[] = new Array(protocolCount === ABSENT ? 0 : protocolCount);
@@ -584,6 +618,7 @@ export function decodeChunk(summary: Uint8Array): Packet[] {
       ...(direction === 0xffffffff ? {} : { direction }),
       ...(tsPrecision === 0xffff ? {} : { tsPrecision }),
       ...(tsNanos === undefined ? {} : { tsNanos }),
+      ...(linkType === 0xffff ? {} : { linkType }),
       ...(protocolCount === ABSENT ? {} : { frameProtocols: protocols }),
       ...(flagCount === ABSENT ? {} : { analysisFlags: flags }),
       ...(expertCount === ABSENT ? {} : { expert }),
@@ -599,6 +634,18 @@ export function decodeChunk(summary: Uint8Array): Packet[] {
 }
 
 const EMPTY_BYTES = new Uint8Array(0);
+
+/**
+ * Whether a summary's rows carry their own `linkType` - version 2 onward.
+ *
+ * Asked by the reader so a consumer can tell "Ethernet" from "not recorded":
+ * on a version-1 row an absent link type is the second, and the only way to
+ * recover it is the session's adapter table.
+ */
+export function chunkStoresLinkType(summary: Uint8Array): boolean {
+  if (summary.byteLength < 6) return false;
+  return new DataView(summary.buffer, summary.byteOffset, summary.byteLength).getUint16(4, true) >= 2;
+}
 
 /**
  * The u16 count that means "this frame has no such list at all".

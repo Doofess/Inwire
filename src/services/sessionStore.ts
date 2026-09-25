@@ -122,6 +122,15 @@ export interface SessionMeta {
    * way to the Worker.
    */
   host?: StoredHost;
+  /**
+   * The file name these frames were imported from, when they were.
+   *
+   * What an export prints as the capture's source. Without it a reload turns
+   * an imported file into "restored session", and the pcapng or report
+   * written afterwards no longer says which file it came from. Absent for a
+   * live capture, and for a session written before this was saved.
+   */
+  importedFrom?: string;
 }
 
 /** `HostIdentity` in a shape IndexedDB can hold. See `SessionMeta.host`. */
@@ -262,6 +271,9 @@ export async function loadSessionMeta(): Promise<SessionMeta | null> {
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
     captureId: typeof raw.captureId === 'string' ? raw.captureId : null,
     host: readStoredHost((raw as { host?: unknown }).host),
+    ...(typeof raw.importedFrom === 'string' && raw.importedFrom !== ''
+      ? { importedFrom: raw.importedFrom }
+      : {}),
   };
 }
 
