@@ -1409,7 +1409,131 @@ is a panel that stays empty with nothing erroring.
   write, while `agent.log` itself belongs to SYSTEM and Administrators. Lines
   still reach subscribers and stderr; nothing is kept.
 
-## 6. What is still owed
+## 6. Exports
+
+Every format is written by `runExport` and read back by something other than
+its writer in `scripts/export/run-export.ts`, and the partial-file rules are
+driven against a real directory in `scripts/export/save-stream.ts`. What those
+scripts cannot do is open the file in the program it is for, and they never run
+against a capture larger than the RAM budget in the real app. That is this
+section. ADR 0046 is the design.
+
+**Before you start, you need a capture that has outgrown the buffer.** Capture
+on a real adapter, or beside `serveStub.ts --burst 400`, until the window trims.
+`scripts/electron/disk-drive.ts` produces the same state automatically. Until the
+title row's total is larger than the frames held in memory, everything below
+tests only the window, and the window is what exports always covered.
+
+- [ ] **A whole-capture export has every frame.** Export **The whole capture**
+      as pcapng and count the frames: `tshark -r file.pcapng | find /c /v ""`.
+      The count must equal the title row's total, and the first frame's time
+      must be the capture's first. Then export **What the display filter
+      selects** with a filter that matches frames on both sides of the window,
+      such as `dns`. The count must equal the list's match count.
+
+      What a failure looks like:
+      - a count equal to the window's size means the disk half was never read,
+        and that was the old behaviour;
+      - a count a few thousand short means the seam at `below` lost frames;
+      - a count a few thousand over means the seam wrote them twice;
+      - a non-zero *Frames unreadable* in the file's metadata, on a capture that
+        never crashed, means the reader stepped over chunks it should have read.
+- [ ] **Do the same with CSV and JSON**, and compare their row counts with the
+      title row's total. Excel counts are covered by the budget item below.
+- [ ] **pcapng in Wireshark shows what wrote it.** Open the whole-capture pcapng
+      and go to **Statistics → Capture File Properties**.
+      - Under *Capture*, **OS** reads the Windows version and **Application**
+        reads `Inwire <version>`.
+      - *Capture file comments* holds the metadata lines: Application, Source
+        (the adapter names), First/Last frame, Frames exported and in capture,
+        and the three drop lines.
+      - A drop counter that Capture Health showed as unavailable reads **not
+        available** in the comment, and the interface table's dropped count
+        reads *Unknown*. **A `0` there is the bug this export was rewritten to
+        end**: it tells the reader the capture is complete, and nobody measured
+        that.
+      - With one adapter, the interface row shows the adapter's name and its
+        drops. With two, it shows both names and no drop counts, because the
+        counters describe the whole capture and there is no single interface to
+        attribute them to.
+
+      What a failure looks like:
+      - an empty comments box means the SHB comment was not written;
+      - a blank Application means `shb_userappl` is missing;
+      - an OS reading like a browser user agent means `shb_os` came from the
+        wrong source.
+- [ ] **Anonymise the same export and open it again.** There is no name table:
+      **Statistics → Resolved Addresses** shows no host name the file taught.
+      The comment says *Anonymised: yes*, and the adapter names are replaced by
+      labels. A real hostname anywhere in that window is a leak.
+- [ ] **The .xlsx opens in Excel without repair.** The failure is Excel's own
+      dialog: *"We found a problem with some content… Do you want us to try to
+      recover as much as we can?"* That means the workbook is malformed even
+      though exceljs read it back in the script. Then check each of these:
+      - **The rows keep their colours.** Find a TCP RST, a DNS and an ARP frame.
+        Each row has the packet list's **Day** colours even when the app is in
+        Night. The fill stops at the last column of the table. **A fill that
+        runs across the whole sheet to column XFD is `row.fill`**, and it is the
+        wrong API.
+      - **The panes are frozen.** Scroll down and right: the header row and the
+        No. column stay where they are, and the header has an autofilter.
+      - **Epoch (ms) is text, with every digit.** Epoch values are left-aligned,
+        possibly with Excel's "number stored as text" triangle, and each keeps
+        its microsecond digits. **`1.7588E+12`, or a value whose last digit is
+        always 0**, means it was stored as a number and Excel's 15 significant
+        digits truncated it. Time(s) and Length are right-aligned numbers that
+        `SUM` accepts. Arrival (UTC) is a date.
+      - **The four sheets are Packets, Protocols, Findings and Capture.**
+        Capture holds the metadata and a legend of the colour rules with a swatch
+        and a count each.
+- [ ] **A large Excel export is refused rather than attempted.** On a capture of
+      a few hundred thousand frames, Excel must either write the file without
+      the field columns, saying so on the Capture sheet, or refuse with a
+      message that names CSV. **The failure is the renderer dying**: a white
+      window or a crashed-renderer reload in the middle of the export. That
+      means the budget in `writers/xlsx.ts` is above what the heap holds on
+      this machine.
+- [ ] **The PDF, on screen.** Open it in Edge.
+      - The title reads **Inwire capture analysis**, and **"Net View" appears
+        nowhere**. Use Ctrl+F.
+      - There is **no packet table**.
+      - The brand mark on the cover is in colour.
+      - Every page ends *Page n of m · …*.
+      - At 400% zoom the charts and the mark stay sharp, because they are
+        vectors. A blurred chart means something was rasterised.
+      - A table that continues onto a new page repeats its header row.
+      - A `?` in a hostname is expected only when the name has characters
+        outside WinAnsi, and the Methods section says so when that happens.
+- [ ] **The PDF, printed.** Print it on A4, or with *Microsoft Print to PDF*.
+      Nothing is clipped at the margins, and no chart is split across a page
+      break. **A band cut off at the page edge** means a layout that only ever
+      fit the screen.
+- [ ] **Cancel leaves nothing behind.** Start a whole-capture pcapng export of
+      the large capture and press **Cancel** while the bar is in *Writing*. In
+      the folder you chose there is **no file with the chosen name and no
+      `*.partial`**. Do it again, but this time close the window mid-export
+      (confirm the quit if asked). There is still no partial.
+
+      What a failure looks like:
+      - a file with the chosen name that is shorter than the capture is the
+        truncated file the partial exists to prevent;
+      - a leftover `<name>.<random>.partial` is a partial that nothing deleted.
+- [ ] **A target that is in use costs nothing.** Open a previous export in
+      Wireshark and export over it with the same name. There are two correct
+      outcomes:
+      - the save is refused at once, before anything is read, because the
+        `r+` probe found the file locked;
+      - the export ends with an error naming the target and saying the finished
+        export *was kept as* a `.partial` beside it, and that file opens.
+
+      **Losing the whole export** over a lock that Wireshark releases on close
+      is the failure.
+- [ ] **Switch side-bar panels during a long export**, then come back. The
+      progress bar is where the export has got to, and Cancel still works. An
+      empty Export panel while the file keeps growing means the job lost its
+      view.
+
+## 7. What is still owed
 
 Not checkable yet, recorded so it is not mistaken for done.
 

@@ -99,9 +99,17 @@ may touch what, and the map from concept to file.
 - **Passive name resolution.** Every name comes out of the capture — DNS and mDNS
   answers, TLS and QUIC server names, DHCP, LLDP — and is a rendering choice
   only, so filters and exports still see addresses.
-- **Export to pcap and pcapng**, plus PDF and CSV reports. pcapng carries what
-  pcap cannot: per-adapter provenance, nanosecond timestamps, the names the
-  capture taught us, and what the capture missed.
+- **Export the whole capture**, not just what is in memory — every frame on
+  disk, or every frame the display filter selects — to pcapng, pcap, CSV, JSON
+  or Excel, streamed to disk so the file can be larger than the app's memory.
+  pcapng carries what pcap cannot: per-adapter provenance, nanosecond
+  timestamps, the names the capture taught us, and what the capture missed.
+  Every format except classic pcap records where the capture came from and what
+  it dropped; CSV, JSON and Excel carry every dissected field under its
+  Wireshark name, and Excel rows keep the packet list's colours.
+- **A PDF analysis report**: traffic over time, the protocol hierarchy, top
+  endpoints and conversations, expert findings and a written summary of what
+  stands out — statistics, not a packet list.
 - **Anonymise** on export: addresses prefix-preserving so the file is still a
   network, MACs keeping their OUI, everything above the transport header zeroed.
 - **Two themes**, Day and Night, plus System — which is a rule for choosing

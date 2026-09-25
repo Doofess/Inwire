@@ -191,10 +191,19 @@ absent because a pipe answers over SMB unless the descriptor says otherwise.
 
 A thin adapter over things only a privileged process can hold: the `app://`
 handler, the window, the menu, the quit guard, the pipe client, the agent's
-service diagnosis, native save dialogs, and the capture store's lifetime. Every
-decision worth testing is in a module beside it: `appPaths.ts`, `window.ts`,
-`csp.ts`, `menu.ts`, `windowState.ts`, `saveTarget.ts`, `pipeTransport.ts`,
-`agentService.ts`, `windowColors.ts`.
+service diagnosis, native save dialogs and the streaming save behind them, and
+the capture store's lifetime. Every decision worth testing is in a module beside
+it: `appPaths.ts`, `window.ts`, `csp.ts`, `menu.ts`, `windowState.ts`,
+`saveTarget.ts`, `saveSession.ts`, `pipeTransport.ts`, `agentService.ts`,
+`windowColors.ts`.
+
+**An export is saved in pieces** (ADR 0046): `inwire:save-stream-open` shows the
+dialog and opens `<target>.<random>.partial`, `-write` appends, and `-close`
+renames it onto the target or deletes it. The chosen name appears only on
+commit, so a cancelled or failed export leaves nothing that looks finished. A
+token belongs to the webContents that opened it, and a window that goes away or
+a quit deletes its partials. `saveSession.ts` holds every rule; `saveStream.ts`
+is the Electron adapter.
 
 **The window is frameless and draws its own controls.** `frame: false`, and a
 32px title row carrying the app's own minimize / maximize / close. What is lost
@@ -336,6 +345,12 @@ and `append` overtook an async `open`, losing 500 frames silently.
 
 Recovery: a capture whose trailing chunk is incomplete loses that chunk and
 nothing else. `scripts/capture/recovery-on-disk.ts`.
+
+**A chunk is version 2 and records each frame's `linkType`**; version 1 still
+decodes, and `RowBlock.linkTypesStored` says which meaning an absent one has —
+Ethernet in v2, *not recorded* in v1. It had to be stored because the only other
+source is a table keyed by adapter label, and every frame of an import carries
+one label whatever its link type (ADR 0046).
 
 ### On the wire — `src/services/agentFraming.ts` / `local-agent/pipe_frame.py`
 
@@ -1197,11 +1212,43 @@ not. Process attribution comes from the agent's socket table
 (`services/flowAnnotations.ts`, ADR 0009), under the rule *enrich only from the
 captured machine, never from a third party*.
 
-Export: `PcapService.generatePcapBinary` writes classic libpcap;
-`services/pcapngWriter.ts` writes pcapng, which is the only one that can name
-the adapter, keep nanosecond timestamps, carry the names the capture taught us,
-and record what the capture missed. `services/anonymise.ts` is
-prefix-preserving over Crypto-PAn; MACs keep their OUI.
+**Export is the whole capture, streamed** (ADR 0046). `services/export/runExport.ts`
+is fetched by `await import` when a format is pressed and does the whole job:
+the save dialog first, then — for CSV, Excel, JSON and pcapng — a **survey** pass
+over the rows without bytes that fixes the field columns, the metadata and the
+name table, then the frames a page at a time into a `ByteSink`
+(`lib/saveSink.ts`) that writes `<target>.<random>.partial` and renames it on
+commit. `exportFrames.ts` reads ordinals `[0, below)` off the store and then the
+window from memory, with `below` asked of the store and never taken from the
+list. A filtered export is the **list's own scan** — `MatchSet` below the window,
+`FilterEngine` over it — and never a scan of its own, because the store runs one
+at a time. Progress and Cancel live in `exportJob.ts`, so they survive the side
+bar switching panels.
+
+The writers are one file per format under `services/export/writers/`, each
+`write(page)` / `finish()`; the capture formats go through `orderByTime.ts`.
+pcapng is still the only one that names the adapter, keeps nanosecond
+timestamps, and carries the names the capture taught us and what it missed.
+**Every format but one carries the metadata** from `captureMeta.ts` — pcapng's
+section comment, CSV's `# key: value` preamble, JSON's `meta`, Excel's Capture
+sheet, the PDF's cover — and a count nobody reported prints as *not available*,
+never 0. **Classic pcap has nowhere to put it and carries none.** CSV and Excel
+carry every dissected field as a column headed by its Wireshark abbreviation.
+Excel is the one buffered format, so it is refused past a cell budget measured
+by `scripts/perf/xlsx-cost.ts`, and the refusal names CSV.
+
+**The PDF is an analysis, not a packet list**: `services/report/analysis.ts`
+folds the pages, `findings.ts` writes the sentences, and
+`components/export/pdfReport.ts` draws it with jsPDF. PDF import is gone with
+`pdfjs-dist`.
+
+`services/anonymise.ts` is prefix-preserving over Crypto-PAn; MACs keep their
+OUI. **One `Anonymiser` per job**, built before the first page — two would map
+one host to two pseudonyms across a page boundary — and colour rules, fields,
+names and the analysis are all taken from the real frame first and redacted
+after. `scripts/session/side-bar.ts` holds that. The export tests
+(`scripts/export/`, `scripts/report/`) run on the real fixtures and skip cleanly
+without them.
 
 ### Typography, theming and the brand mark
 
