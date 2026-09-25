@@ -54,3 +54,41 @@ export function shortInterfaceLabel(label: string): string {
   // menu row with nothing to click on.
   return short.trim() || label.trim();
 }
+
+/**
+ * What a SELECTION of adapters is called, in the few characters the rail and
+ * the window title have: `Ethernet`, `Ethernet + Wi-Fi`, `3 adapters`.
+ *
+ * Capture takes several adapters again (it was narrowed to one on 2026-08-26,
+ * and the reason was never the several - it was that every adapter came
+ * pre-selected, so Start could begin a capture nobody had pointed anywhere;
+ * nothing is pre-selected now either). Both callers used to read
+ * `selectedInterfaces[0]`, which would name one adapter of a two-adapter
+ * capture as if it were the whole of it.
+ *
+ * In the agent's list order rather than click order, so the name does not
+ * change with the order somebody happened to tick the boxes. Names the agent
+ * does not list are skipped: a selection restored from a session can outlive
+ * an unplugged adapter. Null when nothing listed is selected.
+ */
+export function selectionLabel(
+  interfaces: readonly { name: string; label: string }[],
+  selected: readonly string[],
+): string | null {
+  const chosen = interfaces.filter((i) => selected.includes(i.name));
+  if (chosen.length === 0) return null;
+  if (chosen.length === 1) return shortInterfaceLabel(chosen[0].label);
+  if (chosen.length === 2) return chosen.map((i) => shortInterfaceLabel(i.label)).join(' + ');
+  return `${chosen.length} adapters`;
+}
+
+/** Adds an adapter to a selection, or takes it out - keeping the agent's order. */
+export function toggleInterface(
+  interfaces: readonly { name: string }[],
+  selected: readonly string[],
+  name: string,
+): string[] {
+  const next = selected.includes(name) ? selected.filter((n) => n !== name) : [...selected, name];
+  const order = new Map(interfaces.map((i, index) => [i.name, index]));
+  return [...next].sort((a, b) => (order.get(a) ?? Infinity) - (order.get(b) ?? Infinity));
+}

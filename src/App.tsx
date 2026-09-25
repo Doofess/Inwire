@@ -31,7 +31,7 @@ import { publishPacketCounts } from "./services/packetCounts";
 import { GeoMap, warmGeoMap } from "./components/analytics/geoMapLoader";
 import { anchorSelection } from "./services/selectionAnchor";
 import { startKeyLogFollow } from "./lib/keyLogFollow";
-import { shortInterfaceLabel } from "./services/captureInterfaces";
+import { selectionLabel, toggleInterface } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
 import { StatusBar } from "./components/status/StatusBar";
@@ -1986,17 +1986,16 @@ export default function App() {
 
   // Actions
   //
-  // Capture is single-interface: starting always names exactly one adapter,
-  // so there is no way to begin capturing without having said where from.
-  // set_interfaces is sent before start_capture because the agent restarts
-  // its sniffer threads on a selection change - sending it after would spend
-  // the first moments of the capture on the previous adapter.
-  // Choosing an adapter without starting. A running capture follows the
-  // change: the agent restarts its sniffer threads on set_interfaces, so
-  // switching adapters mid-capture keeps capturing, just from the new one.
-  const handleSelectInterface = (interfaceName: string) => {
-    setSelectedInterfaces([interfaceName]);
-    sendAgentCommand({ type: 'set_interfaces', interfaces: [interfaceName] });
+  // Capture takes one adapter or several. What stays from the single-adapter
+  // rule of 2026-08-26 is the part that was its point: nothing is pre-selected,
+  // so a capture cannot begin without somebody having said where from.
+  // A running capture follows the change: the agent restarts its sniffer
+  // threads on set_interfaces, so adding or removing an adapter mid-capture
+  // keeps capturing, on the new set.
+  const handleToggleInterface = (interfaceName: string) => {
+    const next = toggleInterface(agentInterfaces, selectedInterfacesRef.current, interfaceName);
+    setSelectedInterfaces(next);
+    sendAgentCommand({ type: 'set_interfaces', interfaces: next });
   };
 
 
@@ -2416,10 +2415,7 @@ export default function App() {
    * looking for the one on the interface they care about, and "Inwire" four
    * times in the taskbar says nothing.
    */
-  const captureAdapter = (() => {
-    const label = agentInterfaces.find((i) => i.name === selectedInterfaces[0])?.label;
-    return label === undefined ? null : shortInterfaceLabel(label);
-  })();
+  const captureAdapter = selectionLabel(agentInterfaces, selectedInterfaces);
   // The window's name, for the OS alone now: the taskbar, Alt-Tab and the
   // window list. The title row's centre shows the packet counter instead - see
   // `components/common/PacketCountsReadout.tsx` - so this string has exactly one
@@ -2657,8 +2653,8 @@ export default function App() {
               <CaptureInterfacePanel
                 interfaces={agentInterfaces}
                 adapters={adapters}
-                selectedInterface={selectedInterfaces[0] ?? null}
-                onSelect={handleSelectInterface}
+                selectedInterfaces={selectedInterfaces}
+                onToggle={handleToggleInterface}
                 interfaceRates={interfaceRates}
                 agentHealth={agentHealth}
                 isCapturing={isCapturing}

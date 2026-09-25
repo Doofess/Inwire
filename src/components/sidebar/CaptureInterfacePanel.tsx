@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { Check } from 'lucide-react';
 import { Sparkline } from '../common/Sparkline';
 import { CopyButton } from '../ui/CopyButton';
 import { Empty } from '../network/rows';
@@ -68,8 +69,12 @@ export interface CaptureInterfacePanelProps {
    * its name and its chart rather than dashing facts nobody established.
    */
   adapters: AgentAdapter[];
-  selectedInterface: string | null;
-  onSelect: (name: string) => void;
+  /**
+   * Every adapter being captured from - one or several. A row is a checkbox:
+   * a click adds that adapter to the capture or takes it out.
+   */
+  selectedInterfaces: string[];
+  onToggle: (name: string) => void;
   /** Packets per second, newest last, trimmed to the agent's sample window. */
   interfaceRates?: Record<string, number[]>;
   agentHealth: AgentHealth;
@@ -95,7 +100,7 @@ export interface CaptureInterfacePanelProps {
 const CHART = 'w-full h-4 text-muted-foreground group-data-[state=checked]:text-primary';
 
 export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
-  interfaces, adapters, selectedInterface, onSelect, interfaceRates,
+  interfaces, adapters, selectedInterfaces, onToggle, interfaceRates,
   agentHealth, isCapturing, captureOwnedElsewhere, onOpenSettings, onSamplingChange,
 }) => {
   /**
@@ -205,25 +210,33 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
            `--secondary` it measures 4.06 and the status bar had to move the
            hue onto a glyph. This panel's ground is `--card`. */
         <p className="px-3 py-2 text-[11px] leading-tight text-warning bg-warning/10">
-          Capturing. Choosing another adapter restarts the capture on it.
+          Capturing. Adding or removing an adapter restarts the capture on the new set.
         </p>
-      ) : selectedInterface === null ? (
+      ) : selectedInterfaces.length === 0 ? (
         <p className="px-3 py-2 text-[11px] leading-tight text-muted-foreground">
-          No adapter chosen. Start stays blocked until you pick one.
+          No adapter chosen. Start stays blocked until you pick one or more.
         </p>
       ) : null}
 
       {/* No border and no card around the list: it IS the panel's body, and a
-          box around it inside the side bar's own card is a card in a card. */}
+          box around it inside the side bar's own card is a card in a card.
+
+          **Checkboxes, not radios.** Capture takes several adapters at once -
+          the agent opens one sniffer per selected device, and the list merges
+          them in timestamp order - so a row adds its adapter to the capture or
+          takes it out. It was a radio group from 2026-08-26, when capture was
+          narrowed to one adapter so that Start could never begin on a
+          selection nobody made; that rule survives as "nothing is
+          pre-selected", which checkboxes do not change. */}
       <div
-        role="radiogroup"
+        role="group"
         aria-label="Capture from"
         onKeyDown={onKeyDown}
         className="divide-y divide-border"
       >
         {interfaces.map((iface) => {
           const adapter = byId.get(iface.name) ?? null;
-          const selected = iface.name === selectedInterface;
+          const selected = selectedInterfaces.includes(iface.name);
           const series = interfaceRates?.[iface.name] ?? [];
           const latest = series.length > 0 ? series[series.length - 1] : null;
           const address = adapter?.ipv4[0]?.address ?? null;
@@ -231,7 +244,7 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
             <button
               key={iface.name}
               type="button"
-              role="radio"
+              role="checkbox"
               aria-checked={selected}
               // Set by hand, spelled out rather than helpered, so the string
               // reads as the same string the shared `ui/` primitives emit -
@@ -241,7 +254,7 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
               // only two surfaces in the app that mark a chosen row.
               data-state={selected ? 'checked' : 'unchecked'}
               title={iface.label}
-              onClick={() => onSelect(iface.name)}
+              onClick={() => onToggle(iface.name)}
               className="group relative w-full text-left px-3 py-2 cursor-pointer
                 transition-colors hover:bg-accent/60
                 data-[state=checked]:bg-primary/15 data-[state=checked]:text-primary
@@ -249,8 +262,7 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
                 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring
                 focus-visible:ring-inset"
             >
-              {/* Scales out of the left edge rather than appearing, so the
-                  selection reads as MOVING between rows. */}
+              {/* Scales out of the left edge rather than appearing. */}
               <span
                 aria-hidden
                 className="absolute left-0 top-1 bottom-1 w-0.5 origin-center scale-y-0
@@ -258,7 +270,18 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
                   group-data-[state=checked]:scale-y-100"
               />
 
-              <div className="flex items-baseline gap-2">
+              <div className="flex items-center gap-2">
+                {/* A drawn checkbox, because the fill alone does not say "you
+                    can tick more than one" - and saying so is the whole change
+                    from the radio this list used to be. */}
+                <span
+                  aria-hidden
+                  className="shrink-0 grid place-items-center w-3 h-3 rounded-[3px] border
+                    border-muted-foreground/60 group-data-[state=checked]:border-primary
+                    group-data-[state=checked]:bg-primary text-primary-foreground"
+                >
+                  {selected && <Check className="w-2.5 h-2.5" strokeWidth={3} />}
+                </span>
                 <span className="flex-1 truncate text-xs">
                   {shortInterfaceLabel(iface.label)}
                 </span>
@@ -315,15 +338,17 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
           `Row` from `network/rows.tsx` is deliberately not reused: its label
           column is being restacked for this same column width, and a path that
           has to wrap is a path nobody can read. */}
-      {selectedInterface !== null && (
+      {selectedInterfaces.length > 0 && (
         <div className="px-3 py-2 border-t border-border">
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-            Capture device
+            {selectedInterfaces.length === 1 ? 'Capture device' : 'Capture devices'}
           </div>
-          <div className="flex items-center gap-1 min-w-0">
-            <code className="flex-1 text-[10px] font-mono truncate">{selectedInterface}</code>
-            <CopyButton value={selectedInterface} label="capture device path" />
-          </div>
+          {selectedInterfaces.map((device) => (
+            <div key={device} className="flex items-center gap-1 min-w-0">
+              <code className="flex-1 text-[10px] font-mono truncate">{device}</code>
+              <CopyButton value={device} label="capture device path" />
+            </div>
+          ))}
         </div>
       )}
 

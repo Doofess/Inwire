@@ -7,7 +7,9 @@
 import {
   LOOPBACK_DEVICE,
   filterCapturableInterfaces,
+  selectionLabel,
   shortInterfaceLabel,
+  toggleInterface,
 } from '../../src/services/captureInterfaces';
 
 let failures = 0;
@@ -74,6 +76,33 @@ check(
   filterCapturableInterfaces([{ name: '\\Device\\NPF_{XYZ}', label: 'Loopback Pseudo-Interface 1' }]).length,
   1,
 );
+
+// --- several adapters at once -------------------------------------------------
+//
+// Capture takes several adapters again. The rail and the window title both read
+// `selectedInterfaces[0]`, which would name one adapter of a two-adapter
+// capture as if it were all of it; `selectionLabel` names the whole selection.
+{
+  const LIST = [
+    { name: 'A', label: 'Ethernet (Intel(R) I225-V)' },
+    { name: 'B', label: 'Wi-Fi (Intel(R) Wi-Fi 6E AX211)' },
+    { name: 'C', label: 'Local Area Connection* 3 (WAN Miniport)' },
+  ];
+  check('no selection has no name', selectionLabel(LIST, []), null);
+  check('one adapter is named as before', selectionLabel(LIST, ['B']), 'Wi-Fi');
+  check('two are both named', selectionLabel(LIST, ['A', 'B']), 'Ethernet + Wi-Fi');
+  check('...in the agent\'s order, not the order they were ticked', selectionLabel(LIST, ['B', 'A']), 'Ethernet + Wi-Fi');
+  check('three or more are counted', selectionLabel(LIST, ['A', 'B', 'C']), '3 adapters');
+  check('a remembered adapter the agent no longer lists is not named',
+    selectionLabel(LIST, ['A', 'unplugged']), 'Ethernet');
+
+  check('ticking an adapter adds it', toggleInterface(LIST, ['A'], 'C'), ['A', 'C']);
+  check('...kept in the agent\'s order', toggleInterface(LIST, ['C'], 'A'), ['A', 'C']);
+  check('ticking a chosen one takes it out', toggleInterface(LIST, ['A', 'C'], 'A'), ['C']);
+  // Nothing forces one to stay: an empty selection is the "nothing chosen"
+  // state, and Start stays blocked in it - which is the 2026-08-26 rule.
+  check('the last one can be taken out', toggleInterface(LIST, ['A'], 'A'), []);
+}
 
 console.log();
 if (failures) {

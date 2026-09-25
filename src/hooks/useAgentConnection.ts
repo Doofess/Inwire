@@ -299,12 +299,12 @@ export function useAgentConnection(host: AgentConnectionHost) {
 
         setAgentInterfaces(filterCapturableInterfaces(message.interfaces));
 
-        // Deliberately does NOT default to every interface. Capture is
-        // single-interface and the user has to name the adapter before a
-        // capture can start; pre-selecting all nine would hand Start a
-        // ready-made selection and quietly defeat that. An existing
-        // selection survives a reconnect untouched.
-        setSelectedInterfaces((prev) => (prev.length > 1 ? [prev[0]] : prev));
+        // Deliberately does NOT default to every interface: the user has to
+        // name where a capture reads from before it can start, and
+        // pre-selecting all nine would hand Start a ready-made selection and
+        // quietly defeat that. An existing selection - one adapter or several
+        // - survives a reconnect untouched. (This used to trim it to its first
+        // entry, from when capture was single-adapter.)
 
         // Reconnect resync. A fresh connection always finds the agent idle
         // with every interface selected - it stops capturing when the last

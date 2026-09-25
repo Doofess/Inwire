@@ -17,7 +17,7 @@ import {
 import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentStatusLabel } from '../../services/agentHealth';
 import { isScheduleEmpty, type CaptureSchedule } from '../../services/captureSchedule';
-import { shortInterfaceLabel } from '../../services/captureInterfaces';
+import { selectionLabel } from '../../services/captureInterfaces';
 import type { Capabilities } from '../../types/packet';
 import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
 import type { SideBarPanel } from '../../services/sideBarPrefs';
@@ -447,7 +447,12 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   sideBarPanel, onOpenSideBar,
   schedule, scheduleSummary,
 }) => {
-  const selected = agentInterfaces.find((i) => i.name === selectedInterfaces[0]) ?? null;
+  // The whole selection, named: one adapter or several (`selectionLabel`).
+  const selected = selectionLabel(agentInterfaces, selectedInterfaces);
+  const selectedFull = agentInterfaces
+    .filter((i) => selectedInterfaces.includes(i.name))
+    .map((i) => i.label)
+    .join('\n');
   const attention = agentNeedsAttention(agentHealth);
 
   /**
@@ -464,7 +469,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
     ? agentStatusLabel(agentHealth)
     : selected === null
       ? 'none selected'
-      : shortInterfaceLabel(selected.label);
+      : selected;
   const adapterName = `Interfaces - ${adapterDetail}`;
 
   // A clock glyph looks the same whether or not anything is scheduled, which is
@@ -475,8 +480,8 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   const adapterTitle = attention && 'summary' in agentHealth
     ? `${agentHealth.summary}. Settings > Capture Health has the detail.`
     : selected === null
-      ? 'Choose which adapter to capture from'
-      : selected.label;
+      ? 'Choose which adapters to capture from'
+      : selectedFull;
 
   /**
    * A stopped capture cannot be resumed, so starting again means discarding.
