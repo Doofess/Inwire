@@ -21,10 +21,10 @@
  * file a spreadsheet opens and evaluates.
  */
 import type { ColorRule, Packet } from '../../../types/packet';
-import { guardFormula, standardText, EXPORT_COLUMNS, RAW_BYTES_COLUMN } from '../../exportSchema';
+import { guardFormula, EXPORT_COLUMNS, RAW_BYTES_COLUMN } from '../../exportSchema';
 import { metaEntries } from '../captureMeta';
 import { fieldRow, type FieldColumn } from '../fieldColumns';
-import { AdapterLabels, fieldColumnsFor, RuleSource, splitValues, type TabularOptions } from './tabular';
+import { AdapterLabels, fieldColumnsFor, RuleSource, splitValues, standardText, type TabularOptions } from './tabular';
 import { utf8, type ExportWriter } from './writer';
 
 export const CSV_MIME = 'text/csv;charset=utf-8';

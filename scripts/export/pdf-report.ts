@@ -21,6 +21,7 @@
 import { buildPdfReport, SECTION_TITLES } from '../../src/components/export/pdfReport';
 import { analyseCapture, type CaptureAnalysis } from '../../src/services/report/analysis';
 import { Anonymiser } from '../../src/services/anonymise';
+import { redactAnalysis } from '../../src/services/report/redact';
 import { brandMarkPaths } from '../../src/lib/brandMark';
 import type { CaptureMeta } from '../../src/services/export/captureMeta';
 import { loadRealCaptures } from './realCaptures';
@@ -164,6 +165,22 @@ async function main() {
     check(`${name}: anonymised live capture, no real address in the adapter labels`, leaks(anonLive), { addresses: [], names: [] });
     check(`${name}: ...a device path becomes its position`,
       drawnText(anonLive).includes('adapter 2') && !anonLive.includes('NPF_'), true);
+    // A friendly name is the machine's hardware, and it used to be kept - with
+    // the address in it mapped, so "Ethernet <pseudonym>". The word alone is
+    // the protocol hierarchy's and an expert summary's, and stays.
+    check(`${name}: ...and so does a friendly name`,
+      [drawnText(anonLive).includes('adapter 1'), /Ethernet [0-9a-f]*[.:]/i.test(drawnText(anonLive))], [true, false]);
+
+    // Processes come from the capturing machine's socket table: who was using
+    // it, not what the network did. The fixtures are imports, which carry
+    // none, so the report's own section is the check when a capture has them.
+    const redacted = redactAnalysis(analysis, new Anonymiser());
+    check(`${name}: an anonymised analysis has no processes`, redacted.processes, []);
+    if (analysis.processes.length === 0) {
+      console.log(`SKIP  ${name}: no process attribution in this capture - the anonymised report's Processes section is not exercised`);
+    } else {
+      check(`${name}: ...and the anonymised report has no Processes section`, anonLive.includes(drawn('Processes')), false);
+    }
 
     let refused = false;
     try {

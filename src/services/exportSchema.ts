@@ -2,7 +2,6 @@ import type { ColorRule, Packet, ProtocolType, PacketStatus } from '../types/pac
 import type { StoredFrame } from './sessionRestore';
 import { expertItemsFor } from './expertInfo';
 import { DIRECTION_LABEL, Direction, directionOf } from './direction';
-import { isoMicros } from './export/captureMeta';
 import { LAYERS, fieldDef } from './dissect/fieldRegistry';
 
 /**
@@ -233,7 +232,8 @@ export type StandardValue = string | number | null;
  *
  * Numbers stay numbers - each format decides how to spell them - and text is
  * the frame's own, unguarded: JSON writes it verbatim, and the two formats a
- * spreadsheet opens guard it as they write (`standardText`, the workbook).
+ * spreadsheet opens guard it as they write (`standardText` in
+ * `export/writers/tabular.ts`, the workbook).
  * A fact the frame does not have is `null`: an empty cell, never a zero or a
  * word standing in for "none". An unattributed frame has no stream rather than
  * stream 0, and a frame nobody could place has no direction rather than
@@ -272,24 +272,6 @@ export function standardValues(
   ];
   if (includeRawBytes) row.push(p.rawBytes.length > 0 ? toBase64(p.rawBytes) : null);
   return row;
-}
-
-/**
- * A standard value as text, the one spelling CSV writes and the importer reads.
- *
- * Time keeps its six places, as it always has; epoch milliseconds are the
- * shortest string that reads back as the same double, which is exact to the
- * microsecond; a date is ISO-8601 in UTC with all six digits. Text is
- * formula-guarded - base64 included, which can begin with `+`.
- */
-export function standardText(kind: ColumnKind, value: StandardValue): string {
-  if (value === null) return '';
-  if (typeof value === 'string') return guardFormula(value);
-  switch (kind) {
-    case 'seconds': return value.toFixed(6);
-    case 'datetime': return isoMicros(value);
-    default: return String(value);
-  }
 }
 
 /** Bytes the RawBytes column will add, for the size estimate in the UI. */

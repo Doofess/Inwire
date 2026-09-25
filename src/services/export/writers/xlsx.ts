@@ -58,7 +58,7 @@ import { MARK_ACCENT, brandMarkPaths } from '../../../lib/brandMark';
 import { APP_NAME } from '../../../lib/appVersion';
 import { metaEntries, type MetaEntry } from '../captureMeta';
 import { fieldRow, type FieldColumn } from '../fieldColumns';
-import { AdapterLabels, fieldColumnsFor, RuleSource, splitValues, type TabularOptions } from './tabular';
+import { AdapterLabels, epochMsText, fieldColumnsFor, RuleSource, splitValues, type TabularOptions } from './tabular';
 import type { ExportWriter } from './writer';
 
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -150,6 +150,27 @@ export function planWorkbook(
       + `${COUNT.format(standardCells + fieldCells)} cells, past the ${COUNT.format(budget.cells)} `
       + 'a workbook built in memory can hold. Export as CSV or JSON for every field.',
   };
+}
+
+/**
+ * The refusal a workbook of `frames` rows would get on its standard columns
+ * alone, or null when those fit.
+ *
+ * Asked before the save dialog opens: the frame count is known at the press,
+ * and a person who picks a folder and a name only to be told the file cannot
+ * be written was asked for a decision that never mattered. The field columns
+ * cannot be judged here - how many cells they take is what the survey counts -
+ * so their fallback still happens after it, in `planWorkbook`.
+ */
+export function xlsxRefusal(frames: number, includeRawBytes: boolean, budget: XlsxBudget = XLSX_BUDGET): string | null {
+  const standardColumns = EXPORT_COLUMNS.length + (includeRawBytes ? 1 : 0);
+  try {
+    planWorkbook(frames, standardColumns, 0, false, budget);
+    return null;
+  } catch (error) {
+    if (error instanceof XlsxTooLargeError) return error.message;
+    throw error;
+  }
 }
 
 export interface XlsxOptions extends TabularOptions {
@@ -479,7 +500,7 @@ export class XlsxWriter implements ExportWriter {
   private cellValue(kind: ColumnKind, value: StandardValue): string | number | Date | null {
     if (value === null) return null;
     if (kind === 'datetime' && typeof value === 'number') return arrivalDate(value);
-    if (kind === 'epochMs') return String(value);
+    if (kind === 'epochMs') return typeof value === 'number' ? epochMsText(value) : value;
     return typeof value === 'string' ? this.text(value) : value;
   }
 

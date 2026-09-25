@@ -1464,8 +1464,33 @@ tests only the window, and the window is what exports always covered.
         wrong source.
 - [ ] **Anonymise the same export and open it again.** There is no name table:
       **Statistics → Resolved Addresses** shows no host name the file taught.
-      The comment says *Anonymised: yes*, and the adapter names are replaced by
-      labels. A real hostname anywhere in that window is a leak.
+      The comment says *Anonymised: yes*. Every adapter is **`adapter 1`,
+      `adapter 2`…**, never its name: in the comment's *Source* line, in the
+      interface table's *Interface* column, and as the frames' *Interface
+      name* (`frame.interface_name`). The interface description reads
+      *Inwire capture*. A real hostname anywhere in that window is a leak, and
+      so is **the adapter's name** ("Ethernet", "Intel(R) Ethernet
+      Controller…", a `\Device\NPF_{…}` path): it names the machine.
+
+      Then look at the frames themselves, because they are what a recipient
+      reads. Filter `icmpv6 || icmp || igmp || stp || lldp || ieee1905` and
+      open a Neighbor Advertisement: its *Target Address* is the same pseudonym
+      as its IPv6 source, and its *Target link-layer address* is the frame's
+      own (anonymised) Ethernet source, not the real MAC. A Router
+      Advertisement's *Prefix* is a prefix the hosts' pseudonyms are in; an
+      ICMP *Time-to-live exceeded* quotes a packet whose source is the host it
+      was sent to; an LLDP frame's *Chassis Id* and the system name read as
+      zeros; a 1905 frame's SSIDs are zeros of the same length. **No row says
+      "Bad checksum"**, including under Edit → Preferences → Protocols → IPv4 /
+      TCP / UDP with *Validate the checksum* turned on.
+      `scripts/export/anonymise-wire.ts` checks all of this against the real
+      captures; this is where a person sees it.
+- [ ] **Anonymise the PDF.** The cover and every page's header read *Live
+      capture on adapter 1* (or the file-name-withheld line for an import),
+      never the adapter's name. There is **no Processes section**, even on a
+      live capture whose socket table attributed traffic to programs, and no
+      finding names a process. Methods says the processes were removed and
+      the adapters numbered.
 - [ ] **The .xlsx opens in Excel without repair.** The failure is Excel's own
       dialog: *"We found a problem with some content… Do you want us to try to
       recover as much as we can?"* That means the workbook is malformed even
@@ -1479,9 +1504,12 @@ tests only the window, and the window is what exports always covered.
         No. column stay where they are, and the header has an autofilter.
       - **Epoch (ms) is text, with every digit.** Epoch values are left-aligned,
         possibly with Excel's "number stored as text" triangle, and each keeps
-        its microsecond digits. **`1.7588E+12`, or a value whose last digit is
-        always 0**, means it was stored as a number and Excel's 15 significant
-        digits truncated it. Time(s) and Length are right-aligned numbers that
+        its microsecond digits - **always three decimals**, `…989.120` and
+        `…989.000`, never `…989.12` or a bare `…989`. **`1.7588E+12`, or a value
+        whose last digit is always 0**, means it was stored as a number and
+        Excel's 15 significant digits truncated it; a ragged number of decimals
+        means the shortest-double spelling came back. The CSV's column reads
+        the same way. Time(s) and Length are right-aligned numbers that
         `SUM` accepts. Arrival (UTC) is a date.
       - **The four sheets are Packets, Protocols, Findings and Capture.**
         Capture holds the metadata and a legend of the colour rules with a swatch
@@ -1489,7 +1517,12 @@ tests only the window, and the window is what exports always covered.
 - [ ] **A large Excel export is refused rather than attempted.** On a capture of
       a few hundred thousand frames, Excel must either write the file without
       the field columns, saying so on the Capture sheet, or refuse with a
-      message that names CSV. **The failure is the renderer dying**: a white
+      message that names CSV. **A refusal on the frame count comes before the
+      save dialog**: press Excel on a capture past ~110,000 frames and the
+      message appears with no dialog at all. A dialog that opens, takes a name
+      and a folder, and is then refused is the order this was changed from. The
+      field-column fallback still comes after the dialog, because only the
+      survey knows how many field cells there are. **The failure is the renderer dying**: a white
       window or a crashed-renderer reload in the middle of the export. That
       means the budget in `writers/xlsx.ts` is above what the heap holds on
       this machine.
@@ -1528,6 +1561,12 @@ tests only the window, and the window is what exports always covered.
 
       **Losing the whole export** over a lock that Wireshark releases on close
       is the failure.
+- [ ] **The progress row is whole at the side bar's narrowest.** Drag the side
+      bar to its 170px floor during a long export. The phase ("Writing") sits
+      beside the spinner and Cancel, and the count - `268,114 / 439,858 frames`
+      - is on its own line beneath, wrapping at a space if it must. **An
+      ellipsis anywhere in the row** ("…of 439,858 fr…") is the single
+      truncating line this replaced.
 - [ ] **Switch side-bar panels during a long export**, then come back. The
       progress bar is where the export has got to, and Cancel still works. An
       empty Export panel while the file keeps growing means the job lost its

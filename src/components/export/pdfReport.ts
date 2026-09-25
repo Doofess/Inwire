@@ -872,8 +872,8 @@ function methodsSection(r: Report, a: CaptureAnalysis, meta: CaptureMeta): void 
     'Names. Host names are passive: they come only from the capture itself. Nothing in this report was looked up.',
     meta.flags.anonymised
       ? 'Anonymisation. Addresses were mapped with a prefix-preserving scheme (Crypto-PAn) under a key generated for '
-        + 'this export alone, so subnets survive and MAC addresses keep their vendor half. Host names, process '
-        + 'paths and the names of DNS resolvers were removed.'
+        + 'this export alone, so subnets survive and MAC addresses keep their vendor half. Host names, the '
+        + 'processes and the names of DNS resolvers were removed, and adapters are numbered rather than named.'
       : 'Anonymisation. None: addresses are shown as captured.',
   ];
   for (const p of paras) {
@@ -954,7 +954,9 @@ export function buildPdfReport(real: CaptureAnalysis, realMeta: CaptureMeta, opt
     // while printing every address.
     throw new Error('An anonymised report needs the export\'s Anonymiser.');
   }
-  const analysis = opts.anonymiser ? redactAnalysis(real, opts.anonymiser) : real;
+  // The real adapter list, so the report's interfaces are numbered as its metadata numbers them.
+  const adapters = realMeta.source.kind === 'live' ? realMeta.source.adapters : [];
+  const analysis = opts.anonymiser ? redactAnalysis(real, opts.anonymiser, adapters) : real;
   const meta = opts.anonymiser ? redactMeta(realMeta, opts.anonymiser) : realMeta;
   const r = new Report(opts.compress ?? false);
   r.doc.setProperties({

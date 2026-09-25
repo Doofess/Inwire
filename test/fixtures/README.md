@@ -14,6 +14,22 @@ somewhere other than `Downloads/`; they are the only copies.
 
 Both are Ethernet, snaplen 65535, microsecond timestamps, exported by the app itself.
 
+One more is **optional**: scripts that need it name it, and everything else ignores it
+(`OPTIONAL_CAPTURES` in `scripts/export/realCaptures.ts`).
+
+| name | file | frames | SHA-256 |
+|---|---|---|---|
+| `icmpErrors` | `icmp_errors_capture_1790359378632.pcapng` | 66 | `a8f445db710493c9911e4dfe700b78e5aeaeda515957e9e24c0c5d217268919a` |
+
+Neither general capture holds a single ICMP error, so the anonymiser's rewrite of the
+packet an error quotes had nothing real to run against. This is 50 seconds of
+Wireshark's `dumpcap -i <Ethernet> -f "icmp or icmp6 or igmp"` while `tracert -d -h 4`
+ran to 1.1.1.1 and `tracert -6 -d -h 4` to 2606:4700:4700::1111: 12 ICMPv4 and 9 ICMPv6
+Time Exceeded, each quoting the echo that expired, plus Neighbor Solicitations and
+Advertisements and one Router Advertisement. pcapng, one interface.
+It carries this machine's addresses and MAC like the others, and is untracked for the
+same reason.
+
 They are named for what they hold, because a measurement is only comparable if you
 know which capture produced it. `inwire` is general browsing - 3,088 QUIC rows, 43
 TLS hellos, and most of the TCP analysis this build is held to. `bulk` is long TLS

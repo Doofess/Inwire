@@ -22,12 +22,35 @@ export const REAL_CAPTURES: Record<string, string> = {
   bulk: 'bulk_capture_1788426090876.pcap',
 };
 
+/**
+ * Real captures a caller asks for by name, for what the two general ones do
+ * not contain. Not in `REAL_CAPTURES`, because every script that loads those
+ * asserts things only a general capture has (a DNS query on both sides of the
+ * disk seam, say), and a 66-frame capture of traceroutes has none of them.
+ *
+ *   - `icmpErrors`: taken on this machine's Ethernet adapter with dumpcap
+ *     (`-f "icmp or icmp6 or igmp"`) during `tracert` to 1.1.1.1 and
+ *     2606:4700:4700::1111 - ICMPv4 and ICMPv6 Time Exceeded, each quoting
+ *     the echo that expired, plus Neighbor Discovery and a Router
+ *     Advertisement. Neither general capture holds a single ICMP error.
+ */
+export const OPTIONAL_CAPTURES: Record<string, string> = {
+  icmpErrors: 'icmp_errors_capture_1790359378632.pcapng',
+};
+
 export interface RealCapture { name: string; path: string; packets: Packet[] }
 
-/** Every fixture that is present, dissected in full. Prints a SKIP line for each one that is not. */
-export async function loadRealCaptures(): Promise<RealCapture[]> {
+/**
+ * Every fixture that is present, dissected in full. Prints a SKIP line for each
+ * one that is not. `optional` names entries of `OPTIONAL_CAPTURES` to load too.
+ */
+export async function loadRealCaptures(optional: readonly string[] = []): Promise<RealCapture[]> {
   const found: RealCapture[] = [];
-  for (const [name, file] of Object.entries(REAL_CAPTURES)) {
+  const wanted: [string, string][] = [
+    ...Object.entries(REAL_CAPTURES),
+    ...optional.map((name): [string, string] => [name, OPTIONAL_CAPTURES[name]]),
+  ];
+  for (const [name, file] of wanted) {
     const path = join(FIXTURES, file);
     if (!existsSync(path)) {
       console.log(`SKIP  ${name}: ${file} not present (test/fixtures/README.md)`);

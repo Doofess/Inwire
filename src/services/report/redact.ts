@@ -8,15 +8,15 @@
  * Names are dropped rather than mapped. There is no pseudonym for
  * `payroll.example.com` that is not either the name or a lie, and a resolved
  * name is precisely what anonymising is meant to remove. The same goes for the
- * DNS-over-HTTPS resolvers the capture asked for by name, a process's path and
- * its peers; the process NAME stays, because `chrome.exe` identifies a program
- * rather than a person or a network.
+ * DNS-over-HTTPS resolvers the capture asked for by name, every process the
+ * capturing machine's socket table attributed traffic to, and the adapters'
+ * names, which become `adapter N`.
  *
  * Expert summaries are prose that can name an address, so they go through
  * `Anonymiser.text`, which maps every address token it finds the same way.
  */
 import { parseIpv4, parseIpv6, type Anonymiser } from '../anonymise';
-import type { Conversation, Endpoint, ProcessGroup } from '../statistics';
+import type { Conversation, Endpoint } from '../statistics';
 import type { CaptureMeta } from '../export/captureMeta';
 import type { CaptureAnalysis, Ranked } from './analysis';
 
@@ -24,17 +24,38 @@ import type { CaptureAnalysis, Ranked } from './analysis';
 export const WITHHELD_FILE_NAME = 'a file (name withheld)';
 
 /**
- * An adapter's label, fit to leave the machine.
+ * An adapter's label, fit to leave the machine: its position, and nothing else.
  *
- * A friendly name ("Ethernet", "Wi-Fi", "Intel(R) Ethernet Connection I219-V")
- * names hardware rather than a person, and is what makes a multi-adapter
- * report readable, so it stays - with any address inside it mapped. A device
- * path (`\Device\NPF_{GUID}`) or anything else carrying a GUID is an
- * identifier of this one machine's install, and is replaced by its position.
+ * This used to keep a friendly name, on the argument that "Ethernet (Intel(R)
+ * Ethernet Controller (3) I225-V)" names hardware rather than a person. It
+ * names the one machine that has that controller, as the name in the capture
+ * that shipped it did - in the pcapng's comment, in every IDB and on the PDF's
+ * cover, while `docs/verification.md` said labels replaced it. A device path
+ * (`\Device\NPF_{GUID}`) identifies the install even more precisely. So every
+ * adapter is `adapter N`, numbered by its place in the capture's own list of
+ * adapters, and a multi-adapter file still tells its adapters apart.
  */
-export function adapterLabel(anonymiser: Anonymiser, name: string, index: number): string {
-  if (/[{}\\]|[0-9a-f]{8}-[0-9a-f]{4}-/i.test(name)) return `adapter ${index + 1}`;
-  return anonymiser.text(name);
+export function adapterLabel(index: number): string {
+  return `adapter ${index + 1}`;
+}
+
+/**
+ * Labels for adapters by their real names: numbered by `known` (the order the
+ * metadata lists them in), and after those in the order they are first asked
+ * for - so a table, an IDB and the metadata give one adapter one number.
+ */
+export class AdapterNumbering {
+  private readonly order: string[];
+
+  constructor(known: readonly string[] = []) {
+    this.order = [...known];
+  }
+
+  label(name: string): string {
+    let index = this.order.indexOf(name);
+    if (index < 0) index = this.order.push(name) - 1;
+    return adapterLabel(index);
+  }
 }
 
 /**
@@ -73,7 +94,7 @@ export function redactMeta(meta: CaptureMeta, anonymiser: Anonymiser): CaptureMe
   const source: CaptureMeta['source'] = meta.source.kind === 'import'
     ? { kind: 'import', fileName: WITHHELD_FILE_NAME }
     : meta.source.kind === 'live'
-      ? { kind: 'live', adapters: meta.source.adapters.map((a, i) => adapterLabel(anonymiser, a, i)) }
+      ? { kind: 'live', adapters: meta.source.adapters.map((_, i) => adapterLabel(i)) }
       : meta.source;
   return {
     ...meta,
@@ -118,11 +139,22 @@ function conversations(anonymiser: Anonymiser, ranked: Ranked<Conversation>): Ra
   };
 }
 
-function process(p: ProcessGroup): ProcessGroup {
-  return { ...p, exe: '', peers: [] };
-}
-
-export function redactAnalysis(analysis: CaptureAnalysis, anonymiser: Anonymiser): CaptureAnalysis {
+/**
+ * The analysis of an anonymised report.
+ *
+ * `adapters` is the capture's adapter list as the metadata gives it, before
+ * redaction, so an interface here is numbered the way `redactMeta` numbers it.
+ *
+ * **Processes are dropped, not trimmed.** A process name and its PID come from
+ * the socket table of the machine the capture was taken on - `chrome.exe, pid
+ * 8412` is a fact about one person's session, not about the network - and the
+ * report is anonymised so that it says nothing about who. The earlier rule
+ * kept the name and cleared the path, and the report printed a table of them.
+ */
+export function redactAnalysis(
+  analysis: CaptureAnalysis, anonymiser: Anonymiser, adapters: readonly string[] = [],
+): CaptureAnalysis {
+  const numbering = new AdapterNumbering(adapters);
   return {
     ...analysis,
     endpoints: {
@@ -137,7 +169,7 @@ export function redactAnalysis(analysis: CaptureAnalysis, anonymiser: Anonymiser
     },
     localAddresses: analysis.localAddresses.map((a) => address(anonymiser, a)),
     topRemote: analysis.topRemote && { ...analysis.topRemote, address: address(anonymiser, analysis.topRemote.address) },
-    interfaces: analysis.interfaces.map((i, n) => ({ ...i, name: adapterLabel(anonymiser, i.name, n) })),
+    interfaces: analysis.interfaces.map((i) => ({ ...i, name: numbering.label(i.name) })),
     expert: {
       ...analysis.expert,
       groups: analysis.expert.groups.map((g) => {
@@ -146,7 +178,7 @@ export function redactAnalysis(analysis: CaptureAnalysis, anonymiser: Anonymiser
       }),
     },
     names: [],
-    processes: analysis.processes.map(process),
+    processes: [],
     signals: {
       ...analysis.signals,
       encrypted: { ...analysis.signals.encrypted, dohResolvers: [] },

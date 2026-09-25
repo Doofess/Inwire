@@ -236,6 +236,9 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
         // The capturing machine's OS, from the preload - read here rather than
         // inside a writer, which is a service and never sees `window`.
         os: window.inwire?.osDescription ?? null,
+        // The count this panel shows, so an Excel export too large for a
+        // workbook is refused before the save dialog rather than after it.
+        expectedFrames: effectiveScope === 'filter' ? filteredRowCount : captureRowCount,
       }, { signal: handle.signal, onProgress: handle.progress });
       handle.settle(result);
     } catch (err) {
@@ -319,7 +322,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
       on: anonymise,
       set: setAnonymise,
       note: 'Prefix-preserving, so subnets survive and a MAC keeps its vendor '
-        + 'half. Payload is dropped.',
+        + 'half. Payload, adapter names and processes are dropped.',
     },
     ...(keyLog.isEmpty ? [] : [{
       label: 'Attach decryption secrets',
@@ -519,22 +522,34 @@ const JobStatus: React.FC<{ job: ExportJobState }> = ({ job }) => {
       const share = known ? Math.min(1, job.done / job.total) : 0;
       return (
         <div className="px-1 space-y-1" role="status" aria-live="polite">
-          <div className="flex items-center gap-2 text-[11px]">
-            <LoaderCircle className="w-3.5 h-3.5 shrink-0 animate-spin text-muted-foreground" />
-            <span className="flex-1 min-w-0 truncate">
+          {/* **Two lines, and neither truncates.** The phase and the count
+              shared one `truncate` line beside Cancel, which at the side
+              bar's 170px floor - and well above it - read "Writing - 268,114
+              of 439,858 fr…": the one number the row exists for, cut. The
+              phase keeps the line with the spinner and Cancel and may wrap;
+              the count gets the full width of the line below, in the compact
+              "done / total" form, and wraps at its spaces if even that is
+              too narrow. */}
+          <div className="flex items-start gap-2 text-[11px]">
+            <LoaderCircle className="w-3.5 h-3.5 shrink-0 mt-px animate-spin text-muted-foreground" />
+            <span className="flex-1 min-w-0 leading-tight">
               {PHASE_LABEL[job.phase]}
-              {known && ` - ${COUNT.format(job.done)} of ${COUNT.format(job.total)} frames`}
             </span>
             <button
               type="button"
               onClick={() => cancelExportJob()}
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent
+              className="shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent
                 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <X className="w-3 h-3" />
               Cancel
             </button>
           </div>
+          {known && (
+            <div className="text-[10px] leading-tight font-mono text-muted-foreground">
+              {COUNT.format(job.done)} / {COUNT.format(job.total)} frames
+            </div>
+          )}
           {/* Indeterminate while the dialog is up or the file is closing,
               which have no frame count to show. */}
           <div className="h-1 rounded bg-secondary overflow-hidden">

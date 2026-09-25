@@ -39,7 +39,7 @@ import { NO_BYTES } from '../../src/services/packetBytes';
 import { PcapService } from '../../src/services/pcapParser';
 import { Anonymiser, parseIpv4 } from '../../src/services/anonymise';
 import { parseDelimited } from '../../src/services/tabularReaders';
-import { stripPreamble } from '../../src/services/exportSchema';
+import { EXPORT_COLUMNS, stripPreamble } from '../../src/services/exportSchema';
 import { MemorySink, type OpenSinkResult } from '../../src/lib/saveSink';
 import { runExport, type ExportRequest, type ExportRuntime } from '../../src/services/export/runExport';
 import type { CaptureRowReader, FrameScope } from '../../src/services/export/exportFrames';
@@ -421,6 +421,31 @@ async function main() {
       };
       check(`${name}: an anonymised export labels the adapter in its rows as its metadata does`,
         [...new Set(liveDoc.packets.map((p) => p.interface))], liveDoc.meta.source.adapters);
+      check(`${name}: ...and that label is its number, not its name`, liveDoc.meta.source.adapters, ['adapter 1']);
+
+      // The adapter's name is the machine's hardware. An anonymised pcapng
+      // printed it in the section comment's Source line and in every IDB's
+      // if_name, and the PDF on its cover and every page's header.
+      const liveNg = await exportTo({
+        format: 'pcapng', scope: whole, reader: store.reader, anonymise: true,
+        source: { kind: 'live', adapters: [adapterName] },
+      });
+      const liveNgText = Buffer.from(liveNg.sink.bytes()).toString('utf8');
+      check(`${name}: an anonymised pcapng names no adapter, in its comment or its IDBs`,
+        [liveNgText.includes(adapterName), liveNgText.includes('adapter 1')], [false, true]);
+      if (tshark !== null) {
+        const liveFile = join(scratch, `${name}.live-anon.pcapng`);
+        writeFileSync(liveFile, liveNg.sink.bytes());
+        const idbNames = runTool(tshark, ['-r', liveFile, '-T', 'fields', '-e', 'frame.interface_name'])
+          .split(/\r?\n/).filter((l) => l.trim() !== '');
+        check(`${name}: ...tshark reads every frame's interface as "adapter 1"`, [...new Set(idbNames)], ['adapter 1']);
+      }
+      const livePdf = pdfStrings((await exportTo({
+        format: 'pdf', scope: whole, reader: store.reader, anonymise: true,
+        source: { kind: 'live', adapters: [adapterName] },
+      })).sink.bytes()).join('\n');
+      check(`${name}: ...nor does the anonymised pdf, which says "adapter 1"`,
+        [livePdf.includes(adapterName), livePdf.includes('adapter 1')], [false, true]);
 
       const aCsv = await exportTo({ format: 'csv', scope: whole, reader: store.reader, anonymise: true });
       check(`${name}: ...nor in the anonymised csv`, leaks(new TextDecoder().decode(aCsv.sink.bytes()), real), []);
@@ -466,6 +491,45 @@ async function main() {
       );
       check(`${name}: a dismissed save dialog is a cancel`, dismissed.outcome, 'canceled');
       check(`${name}: ...and reads nothing`, store.rowReads, readsBefore);
+
+      // ---- Excel past its budget: refused before the dialog --------------------
+      // A budget one cell short of this capture's standard columns - the
+      // real budget holds ~110,000 frames, more than either fixture.
+      {
+        const standardCells = total * EXPORT_COLUMNS.length;
+        let dialogs = 0;
+        const readsAtPress = store.rowReads;
+        const refused = await exportTo(
+          { format: 'xlsx', scope: whole, reader: store.reader, expectedFrames: total },
+          {
+            xlsxBudget: { rows: 1_048_575, cells: standardCells - 1 },
+            openSink: async () => { dialogs++; return new MemorySink(); },
+          },
+        );
+        check(`${name}: an Excel export over budget on its frame count is refused, naming CSV`,
+          [refused.result.outcome, refused.result.outcome === 'failed' && refused.result.error.includes('CSV')], ['failed', true]);
+        check(`${name}: ...before the save dialog opens, having read nothing`,
+          [dialogs, store.rowReads - readsAtPress, refused.progress.length], [0, 0, 0]);
+
+        const fallbackSink = new MemorySink();
+        // Room for the standard columns and not for the fields: that is the
+        // survey's to find out, so the dialog opens and the file is written
+        // without them.
+        const fallback = await exportTo(
+          { format: 'xlsx', scope: whole, reader: store.reader, expectedFrames: total },
+          {
+            xlsxBudget: { rows: 1_048_575, cells: standardCells + 1 },
+            openSink: async () => { dialogs++; return fallbackSink; },
+          },
+        );
+        check(`${name}: with room for the standard columns only, it asks where to save and writes them`,
+          [fallback.result.outcome, dialogs], ['saved', 1]);
+        const fbBytes = fallbackSink.bytes();
+        const fbBook = new ExcelJS.Workbook();
+        await fbBook.xlsx.load(fbBytes.buffer.slice(fbBytes.byteOffset, fbBytes.byteOffset + fbBytes.byteLength) as ArrayBuffer);
+        check(`${name}: ...without the field columns, after the survey found they would not fit`,
+          fbBook.getWorksheet('Packets')?.getRow(1).cellCount, EXPORT_COLUMNS.length);
+      }
 
       // ---- compressed ---------------------------------------------------------
       const zipped = await exportTo({ format: 'pcap', scope: whole, reader: store.reader, compress: true });

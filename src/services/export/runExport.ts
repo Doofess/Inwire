@@ -15,6 +15,12 @@
  *
  * ## The order is the design
  *
+ *   0. **An Excel export that cannot fit, refused before the dialog.** Its
+ *      frame count is known at the press (`expectedFrames`), and the standard
+ *      columns alone decide whether a workbook can hold that many rows - so a
+ *      person is not asked for a folder and a name for a file that will be
+ *      refused. Whether the field columns fit is the survey's question, and
+ *      stays after it.
  *   1. **The save dialog, first.** A person who presses Cancel there has asked
  *      for nothing, so nothing is read: a survey of a five-million-frame
  *      capture is seconds of store IO to throw away.
@@ -70,7 +76,7 @@ import { PcapWriter } from './writers/pcap';
 import { PcapngWriter, type PcapngInterface } from './writers/pcapng';
 import { CsvWriter } from './writers/csv';
 import { JsonWriter } from './writers/json';
-import { createXlsxWriter } from './writers/xlsx';
+import { createXlsxWriter, xlsxRefusal, type XlsxBudget } from './writers/xlsx';
 import { redactMeta } from '../report/redact';
 
 export interface ExportRequest {
@@ -100,6 +106,13 @@ export interface ExportRequest {
   received: number | null;
   /** The OS this export is made on, as the caller describes it. */
   os: string | null;
+  /**
+   * Frames the export will write, as the panel shows them - the title row's
+   * total, or the filter's match count. Read for one thing: an Excel export
+   * that is over its budget on this count alone is refused before the save
+   * dialog opens (`xlsxRefusal`). Absent, that refusal waits for the survey.
+   */
+  expectedFrames?: number;
 }
 
 export interface ExportRuntime {
@@ -112,6 +125,8 @@ export interface ExportRuntime {
   locate?: LocateRetry;
   /** Epoch ms; `Date.now` when absent. */
   now?: () => number;
+  /** For tests: Excel's budget, `XLSX_BUDGET` when absent. */
+  xlsxBudget?: XlsxBudget;
 }
 
 const EXTENSION: Record<ExportFormat, string> = {
@@ -154,6 +169,12 @@ export async function runExport(request: ExportRequest, runtime: ExportRuntime =
   const { signal } = runtime;
   const now = runtime.now ?? Date.now;
   const report = runtime.onProgress ?? (() => {});
+
+  // ---- 0. a workbook that cannot be built, refused before anything is asked
+  if (format === 'xlsx' && request.expectedFrames !== undefined) {
+    const refusal = xlsxRefusal(request.expectedFrames, request.includeRawBytes, runtime.xlsxBudget);
+    if (refusal !== null) return { outcome: 'failed', error: refusal };
+  }
 
   // ---- 1. the dialog -------------------------------------------------------
   report({ phase: 'choosing', done: 0, total: 0 });
@@ -243,7 +264,7 @@ export async function runExport(request: ExportRequest, runtime: ExportRuntime =
     // job's anonymiser too, numbering adapters in the order the REAL metadata
     // listed them - which is how `redactMeta` numbered them above.
     const adapters = request.source.kind === 'live' ? request.source.adapters : [];
-    const writer = await writerFor(request, survey, meta, anonymiser, adapters, now);
+    const writer = await writerFor(request, survey, meta, anonymiser, adapters, now, runtime.xlsxBudget);
 
     // ---- 3. the frames -------------------------------------------------------
     const tabular = TABULAR.has(format);
@@ -356,6 +377,7 @@ async function writerFor(
   anonymiser: Anonymiser | null,
   adapters: readonly string[],
   now: () => number,
+  xlsxBudget: XlsxBudget | undefined,
 ): Promise<ExportWriter> {
   const anonymised = anonymiser !== null;
   const tabular = {
@@ -402,6 +424,7 @@ async function writerFor(
         expectedFrames: survey?.frames ?? 0,
         expectedFieldCells: survey?.fields?.cells ?? 0,
         now: new Date(now()),
+        budget: xlsxBudget,
       });
     case 'pdf':
       throw new Error('the PDF has no frame writer');

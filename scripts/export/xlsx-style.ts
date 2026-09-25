@@ -164,8 +164,19 @@ async function captureChecks(capture: RealCapture): Promise<void> {
       [row.getCell(col('no')).value, row.getCell(col('time')).value, row.getCell(col('length')).value],
       [p.id, p.relativeTime, p.length]);
     // Excel keeps 15 significant digits; an epoch to the microsecond has 16.
+    // Built from the integer microseconds, not from `p.tsUs / 1000`, so this
+    // does not share the writer's arithmetic.
+    const epochOf = (tsUs: number) => `${Math.floor(tsUs / 1000)}.${String(tsUs % 1000).padStart(3, '0')}`;
     check(`${name}: Epoch (ms) is a text cell, exact to the microsecond`,
-      [row.getCell(col('epoch')).value, row.getCell(col('epoch')).numFmt], [String(p.tsUs / 1000), '@']);
+      [row.getCell(col('epoch')).value, row.getCell(col('epoch')).numFmt], [epochOf(p.tsUs), '@']);
+    // `String(ms)` dropped trailing zeros: .120 printed as .12 and .000 as
+    // nothing. Every row, not a sample, and the capture has to hold such a
+    // frame for the check to mean anything.
+    const zeros = packets.map((q, k) => ({ q, k })).filter(({ q }) => q.tsUs % 10 === 0);
+    checkTrue(`${name}: the capture has frames whose epoch ends in a zero (${zeros.length})`, zeros.length > 0);
+    check(`${name}: ...and every Epoch (ms) cell keeps all three decimals`,
+      packets.map((q, k) => ({ q, k })).filter(({ q, k }) => rowOf(k).getCell(col('epoch')).value !== epochOf(q.tsUs))
+        .slice(0, 3).map(({ q, k }) => [q.tsUs, rowOf(k).getCell(col('epoch')).value]), []);
     // A string cell is never evaluated, so no apostrophe is written into it.
     const leads = packets.map((q, k) => ({ q, k })).filter(({ q }) => /^[=+\-@]/.test(q.info));
     if (leads.length > 0) {

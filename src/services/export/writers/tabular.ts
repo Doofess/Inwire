@@ -3,12 +3,13 @@
  * the per-frame work of turning a frame into its standard values.
  */
 import type { ColorRule, Packet } from '../../../types/packet';
-import { standardValues, type StandardValue } from '../../exportSchema';
+import { guardFormula, standardValues, type ColumnKind, type StandardValue } from '../../exportSchema';
+import { isoMicros } from '../captureMeta';
 import type { CaptureMeta } from '../captureMeta';
 import type { FieldColumn } from '../fieldColumns';
 import { RuleMatcher } from '../ruleMatcher';
 import type { Anonymiser } from '../../anonymise';
-import { adapterLabel, redactFilter } from '../../report/redact';
+import { AdapterNumbering, redactFilter } from '../../report/redact';
 
 export interface TabularOptions {
   /** Append each frame's bytes, base64. */
@@ -41,24 +42,18 @@ export interface TabularOptions {
  * anonymised.
  *
  * The anonymiser rewrites a frame's addresses and leaves `interfaceName`
- * alone, and a device path - `\Device\NPF_{GUID}` - identifies this machine's
- * install as surely as a MAC does. So an anonymised export labels adapters the
- * way `report/redact.ts`'s `redactMeta` does, through the same `adapterLabel`:
- * a friendly name stays with any address in it mapped, a GUID or device path
- * becomes `adapter N`. N is the adapter's place in `adapters` - the list
- * `redactMeta` numbered - and, for one not in it (an import names its own),
- * the order adapters first appear after those.
- *
- * With no anonymiser to map through, every adapter becomes `adapter N`:
- * withholding a friendly name costs a reader little, and publishing a device
- * path is the one mistake this exists to prevent.
+ * alone, and an adapter's name - "Ethernet (Intel(R) Ethernet Controller (3)
+ * I225-V)", or a device path `\Device\NPF_{GUID}` - identifies this machine.
+ * So an anonymised export labels every adapter the way `report/redact.ts`'s
+ * `redactMeta` does: `adapter N`, where N is the adapter's place in `adapters`
+ * - the list `redactMeta` numbered - and, for one not in it (an import names
+ * its own), the order adapters first appear after those.
  */
 export class AdapterLabels {
-  private readonly order: string[];
-  private readonly labels = new Map<string, string>();
+  private readonly numbering: AdapterNumbering;
 
   constructor(private readonly options: Pick<TabularOptions, 'meta' | 'anonymiser' | 'adapters'>) {
-    this.order = [...(options.adapters ?? [])];
+    this.numbering = new AdapterNumbering(options.adapters ?? []);
   }
 
   get anonymised(): boolean {
@@ -67,14 +62,7 @@ export class AdapterLabels {
 
   label(name: string): string {
     if (!this.anonymised || name === '') return name;
-    let label = this.labels.get(name);
-    if (label === undefined) {
-      let index = this.order.indexOf(name);
-      if (index < 0) index = this.order.push(name) - 1;
-      label = this.options.anonymiser ? adapterLabel(this.options.anonymiser, name, index) : `adapter ${index + 1}`;
-      this.labels.set(name, label);
-    }
-    return label;
+    return this.numbering.label(name);
   }
 
   /** A colour rule's filter, as the Capture sheet may print it. */
@@ -136,4 +124,46 @@ export function splitValues(
   return includeRawBytes
     ? { standard: values.slice(0, standardCount), raw: values[standardCount] }
     : { standard: values, raw: undefined };
+}
+
+// --- one standard value as text ----------------------------------------------------
+//
+// Here rather than beside the schema: only the writers spell values, and
+// `exportSchema.ts` is in the entry chunk (the importer reads it), so
+// everything in it is paid for at launch.
+
+/**
+ * Epoch milliseconds to the microsecond, always with three decimals.
+ *
+ * `String(ms)` is the shortest string that reads back as the same double, and
+ * so it drops trailing zeros: a frame at .120 ms printed `…989.12` and one at
+ * .000 printed `…989`, and a column of them read as three precisions. Built
+ * from the integer microseconds rather than with `toFixed(3)`, which formats
+ * the double and can print one digit off: `ms * 1000` is within a fraction of
+ * a microsecond of the integer the capture stored (an epoch is ~2^40 ms, and a
+ * double's spacing there is 2^-12 ms), so rounding recovers it exactly.
+ */
+export function epochMsText(ms: number): string {
+  const us = Math.round(ms * 1000);
+  const abs = Math.abs(us);
+  const whole = Math.floor(abs / 1000);
+  return `${us < 0 ? '-' : ''}${whole}.${String(abs - whole * 1000).padStart(3, '0')}`;
+}
+
+/**
+ * A standard value as text, the one spelling CSV writes and the importer reads.
+ *
+ * Time keeps its six places, as it always has; epoch milliseconds keep their
+ * three (`epochMsText`); a date is ISO-8601 in UTC with all six digits. Text
+ * is formula-guarded - base64 included, which can begin with `+`.
+ */
+export function standardText(kind: ColumnKind, value: StandardValue): string {
+  if (value === null) return '';
+  if (typeof value === 'string') return guardFormula(value);
+  switch (kind) {
+    case 'seconds': return value.toFixed(6);
+    case 'epochMs': return epochMsText(value);
+    case 'datetime': return isoMicros(value);
+    default: return String(value);
+  }
 }

@@ -309,6 +309,8 @@ interface OpenInterface {
   name: string;
   /** What `if_name` says - `name`, or its anonymised label. */
   label: string;
+  /** What `if_description` says: the caller's, or the generic one when anonymised. */
+  description: string;
   linkType: number;
   precision: number;
   unitsPerSecond: bigint;
@@ -323,7 +325,7 @@ function interfaceDescription(iface: OpenInterface): Uint8Array {
   w.u16(0);            // reserved
   w.u32(0);            // snaplen: 0 = no limit, which is what this app captures
   stringOption(w, IF_NAME, iface.label);
-  stringOption(w, IF_DESCRIPTION, iface.given?.description ?? 'Inwire capture');
+  stringOption(w, IF_DESCRIPTION, iface.description);
   // if_tsresol is one byte: a power of ten unless the high bit says power of
   // two. Writing it is what makes a nanosecond capture survive the round trip.
   option(w, IF_TSRESOL, Uint8Array.of(iface.precision));
@@ -341,7 +343,7 @@ function ticksOf(packet: Packet, unitsPerSecond: bigint): bigint {
     : BigInt(Math.round(packet.tsUs)) * unitsPerSecond / 1_000_000n;
 }
 
-function enhancedPacket(packet: Packet, iface: OpenInterface): Uint8Array {
+function enhancedPacket(packet: Packet, iface: OpenInterface, anonymised: boolean): Uint8Array {
   const w = new Bytes();
   const ticks = ticksOf(packet, iface.unitsPerSecond);
   w.u32(iface.id);
@@ -363,7 +365,9 @@ function enhancedPacket(packet: Packet, iface: OpenInterface): Uint8Array {
   // attributed - an empty comment would say "known to be nothing".
   const processName = fieldValue(packet, 'inwire.process.name');
   const processPid = fieldValue(packet, 'inwire.process.pid');
-  if (typeof processName === 'string' && typeof processPid === 'number') {
+  // Never in an anonymised file, whatever the frame still carries: a process
+  // and its PID are the capturing machine's, and say who was using it.
+  if (!anonymised && typeof processName === 'string' && typeof processPid === 'number') {
     const path = fieldValue(packet, 'inwire.process.path');
     stringOption(w, OPT_COMMENT, `Process: ${processName} (pid ${processPid})`
       + (typeof path === 'string' && path ? ` - ${path}` : ''));
@@ -521,7 +525,7 @@ export class PcapngWriter implements ExportWriter {
       const iface = this.interfaceFor(packet, out);
       if (packet.tsUs < iface.firstUs) iface.firstUs = packet.tsUs;
       if (packet.tsUs > iface.lastUs) iface.lastUs = packet.tsUs;
-      out.push(enhancedPacket(packet, iface));
+      out.push(enhancedPacket(packet, iface, this.labels.anonymised));
     }
     return out;
   }
@@ -591,6 +595,9 @@ export class PcapngWriter implements ExportWriter {
       id: this.open.size,
       name,
       label: this.labels.label(name),
+      // A description a caller supplied can name the hardware as surely as
+      // the adapter's name does, so an anonymised file carries neither.
+      description: this.labels.anonymised ? 'Inwire capture' : given?.description ?? 'Inwire capture',
       linkType,
       precision,
       unitsPerSecond: 10n ** BigInt(precision),

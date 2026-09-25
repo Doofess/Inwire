@@ -370,9 +370,10 @@ async function captureChecks(capture: RealCapture, tshark: string | null): Promi
     check(`${name}: an anonymised CSV carries no field columns`, rowsA[at], EXPORT_COLUMNS.map((c) => c.header));
     const iface = rowsA[at].indexOf('Interface');
     check(`${name}: ...and its Interface is the adapter label redactMeta would print`,
-      rowsA[at + 1][iface], adapterLabel(anonymiser, real[0].interfaceName, 0));
+      rowsA[at + 1][iface], adapterLabel(0));
+    checkTrue(`${name}: ...which is not the adapter's name`, rowsA[at + 1][iface] !== real[0].interfaceName);
     const withheld = write({});
-    check(`${name}: with no anonymiser to map through, the adapter is withheld as "adapter 1"`,
+    check(`${name}: with no anonymiser to map through, the adapter is withheld as "adapter 1" too`,
       withheld[withheld.findIndex((r) => r[0] === 'No.') + 1][iface], 'adapter 1');
     const json = JSON.parse(exportToJson(anonymised, false, meta)) as { packets: Record<string, unknown>[] };
     check(`${name}: ...and in JSON`, [json.packets[0].interface, 'fields' in json.packets[0]], ['adapter 1', false]);
@@ -397,6 +398,24 @@ async function captureChecks(capture: RealCapture, tshark: string | null): Promi
         back.ok === true ? [back.frames[0].fallback?.protocol, back.frames[0].fallback?.protocolLabel] : null,
         ['CUSTOM', labelled.protocolLabel]);
     }
+  }
+
+  // --- Epoch (ms) keeps three decimals ----------------------------------------------------------
+  //
+  // It was `String(ms)`, the shortest spelling of the double, which drops
+  // trailing zeros: .120 printed as .12, .000 as nothing. Compared against the
+  // integer microseconds, not against `tsUs / 1000`, so the check does not
+  // share the writer's arithmetic.
+  {
+    const epochAt = header.indexOf('Epoch (ms)');
+    const data = rows.slice(entries.length + 1);
+    const epochOf = (tsUs: number) => `${Math.floor(tsUs / 1000)}.${String(tsUs % 1000).padStart(3, '0')}`;
+    checkTrue(`${name}: the capture has frames whose epoch ends in a zero`, packets.some((p) => p.tsUs % 10 === 0));
+    check(`${name}: every CSV Epoch (ms) cell has all three decimals, exact`,
+      data.map((r, i) => [r[epochAt], epochOf(packets[i].tsUs)]).filter(([a, b]) => a !== b).slice(0, 3), []);
+    const back = rowsToFrames(rows, 'epoch.csv');
+    checkTrue(`${name}: ...and reads back to the microsecond`,
+      back.ok === true && back.frames.every((f, i) => Math.round(f.timestamp * 1000) === packets[i].tsUs));
   }
 
   // --- a CSV Excel has re-saved: the epoch in scientific notation --------------------------------
