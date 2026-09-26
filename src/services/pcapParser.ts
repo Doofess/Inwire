@@ -64,7 +64,7 @@ export const IMPORT_PATCH_WINDOW = 100_000;
  */
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
 
-interface ExtractedFrame {
+export interface ExtractedFrame {
   rawBytes: Uint8Array;
   /**
    * Epoch time in nanoseconds. Deliberately a bigint: epoch-nanoseconds is
@@ -174,7 +174,7 @@ export class PcapService {
    * implementations of one decision agree until they do not, and this repo has
    * already paid that price once over the agent's wire format.
    */
-  private static inferHostFromFrames(frames: ExtractedFrame[]): HostIdentity | undefined {
+  public static inferHostFromFrames(frames: ExtractedFrame[]): HostIdentity | undefined {
     if (frames.length === 0) return undefined;
     const prefix = frames.length > SCORING_FRAMES ? frames.slice(0, SCORING_FRAMES) : frames;
     return inferHostIdentity(PcapService.buildPacketsFromFrames(prefix)) ?? undefined;
@@ -242,7 +242,7 @@ export class PcapService {
     return (await PcapService.parseCaptureFile(file, Number.POSITIVE_INFINITY, true)).packets;
   }
 
-  private static async extractFrames(
+  public static async extractFrames(
     file: File,
     maxFrames: number,
   ): Promise<{ frames: ExtractedFrame[]; totalFrames: number }> {
