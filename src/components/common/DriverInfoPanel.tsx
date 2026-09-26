@@ -1,22 +1,16 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AgentHealth } from '../../services/agentHealth';
-import { Trash, Plug, Unplug, RefreshCw } from 'lucide-react';
-import type { AgentLogEntry, CaptureDropStats } from '../../services/agentProtocol';
+import { Trash } from 'lucide-react';
+import type { AgentLogEntry } from '../../services/agentProtocol';
 import { describeLink, type LinkChange } from '../../services/linkContext';
 
 interface DriverInfoPanelProps {
-  /** Only for the Connect / Disconnect / Restart controls - no row names it. */
+  /** Only for the no-adapters notice and the log's empty state - no row names it. */
   agentStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
-  /** This capture's frame counts from the agent, or null before its first report. */
-  captureStats?: CaptureDropStats | null;
   /**
-   * Frames pushed out of the app's own buffer because it filled.
-   *
-   * The third of the three places a frame goes missing, and the only one the
-   * app itself is responsible for. Counted and worded apart from the other two
-   * because it is a different loss: these frames were captured, dissected and
-   * shown, and are still in the stored session - they are just no longer in
-   * the list.
+   * Frames pushed out of the app's own buffer because it filled. Not a loss:
+   * these frames were captured, dissected and shown, and are still in the
+   * stored session - they are just no longer in the list.
    */
   droppedBuffer?: number;
   /** Network transitions observed this session, oldest first. */
@@ -24,10 +18,6 @@ interface DriverInfoPanelProps {
   /** Only to detect the no-adapters state; the adapter in use is in the bar. */
   agentInterfaces: { name: string; label: string }[];
   agentLog: AgentLogEntry[];
-  /** Whether the app is meant to be holding a link at all - see App.tsx.
-   *  Distinguishes "you disconnected" from "the agent is not running", which
-   *  agentStatus alone reports as the same 'disconnected'. */
-  agentLinkEnabled: boolean;
   /**
    * Why the link is down, when anything outside the pipe can say.
    *
@@ -54,9 +44,6 @@ interface DriverInfoPanelProps {
    * `services/rendererHeapGuard.ts`.
    */
   heapNotice?: string | null;
-  onConnect: () => void;
-  onDisconnect: () => void;
-  onRestartAgent: () => void;
   onSubscribe: () => void;
   onUnsubscribe: () => void;
   onClearLog: () => void;
@@ -89,21 +76,6 @@ interface DriverInfoPanelProps {
  * reached by opening Settings, which is strictly more work than glancing down.
  */
 
-// The agent resolves this itself from %ProgramData% (config.config_dir()),
-// so a machine with a relocated ProgramData would differ. Showing the
-// standard path is enough to find the file; the agent is not asked for its
-// real one, which would mean another protocol field for a rare case.
-//
-// The OS comes from the preload rather than from `navigator`. `platformDetect`
-// inferred it from the user agent in order to pick an installer to download,
-// and both the inference and the download are gone: the main process simply
-// knows which OS it is running on.
-function logFilePath(): string {
-  return window.inwire?.platform === 'win32'
-    ? '%ProgramData%\\Inwire\\agent.log'
-    : '~/.inwire/agent.log';
-}
-
 function levelColor(level: string | null): string {
   switch (level) {
     case 'ERROR':
@@ -119,18 +91,16 @@ function levelColor(level: string | null): string {
 }
 
 /**
- * The four actions in this tab: Connect, Disconnect, Restart Driver, Clear
- * Buffer.
+ * The action in this tab: Clear Buffer, in the capture section's slot.
  *
- * Pill shaped, and in the theme's accent rather than a bordered neutral. They
- * were three near-identical class strings here plus a fourth in SettingsModal
- * that had already drifted - a different background, a different radius - even
- * though all four are the same kind of control. One constant, exported so the
- * buffer button in the slot above can use the same one instead of a copy.
+ * Pill shaped, and in the theme's accent rather than a bordered neutral. It sat
+ * beside Connect, Disconnect and Restart Driver, which are gone (2026-09-26,
+ * at the owner's request, with the "Frames lost" counts above them). Kept as
+ * an exported constant so the next action here matches it rather than drifting.
  *
- * Fully rounded because these are actions on a status readout rather than form
- * submits; the pill is what separates them from the panel's rows of facts
- * without needing a border to do it.
+ * Fully rounded because it is an action on a status readout rather than a form
+ * submit; the pill is what separates it from the panel's rows of facts without
+ * needing a border to do it.
  */
 export const DRIVER_ACTION_BUTTON_CLASS =
   'flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-medium transition-colors '
@@ -139,20 +109,15 @@ export const DRIVER_ACTION_BUTTON_CLASS =
 
 export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   agentStatus,
-  captureStats,
   droppedBuffer = 0,
   linkChanges = [],
   agentInterfaces,
   agentLog,
-  agentLinkEnabled,
   agentHealth,
   onStartAgentService,
   onShowUpdates,
   agentError,
   heapNotice,
-  onConnect,
-  onDisconnect,
-  onRestartAgent,
   onSubscribe,
   onUnsubscribe,
   onClearLog,
@@ -220,13 +185,11 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   // Until now the entire signal for it was a hover tooltip on a header
   // button. It is the state a new install lands in, so it is the one that
   // least deserves to be a tooltip.
-  const noInterfaces = agentLinkEnabled
-    && agentStatus === 'connected'
-    && agentInterfaces.length === 0;
+  const noInterfaces = agentStatus === 'connected' && agentInterfaces.length === 0;
 
   return (
     <div className="flex flex-col gap-4 min-h-0">
-      {agentLinkEnabled && diagnosis && (
+      {diagnosis && (
         <div className={`rounded-md border px-3 py-2.5 text-xs ${
           diagnosis.kind === 'crashing' || diagnosis.kind === 'missing'
             ? 'border-rose-500/30 bg-rose-500/5'
@@ -265,152 +228,50 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
         </div>
       )}
       <div>
-        {/* **Where the frames went, and nothing the status bar already says.**
-            This block was a Status row, a Version pill, a Capture row and a
-            Listening-on list, all four of which the status bar reports
-            permanently - and reaching this one means opening Settings and
-            picking a tab, which is strictly more work than glancing down. What
-            is left is the app's only full account of frames it lost, which has
-            no other home at all: the bar shows a single total, deliberately,
-            because four figures do not fit a 24px strip. */}
-        <div className="text-xs font-semibold text-foreground mb-2">Frames lost</div>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
-          {/* Loss is reported here, in full and in one place. "Unknown" for
-              the driver's count means the agent could not read pcap's
-              statistics on this adapter - it is not a zero, and is never shown
-              as one. */}
-          {captureStats ? (
-            <>
-              <dt className="text-muted-foreground">Received</dt>
-              <dd className="font-mono">{captureStats.received.toLocaleString()}</dd>
-              <dt className="text-muted-foreground">Dropped by driver</dt>
-              <dd className={`font-mono ${captureStats.droppedKernel ? 'text-amber-600 dark:text-amber-400' : ''}`}>
-                {captureStats.droppedKernel === null ? 'Unknown' : captureStats.droppedKernel.toLocaleString()}
-              </dd>
-              <dt className="text-muted-foreground">Dropped by agent</dt>
-              <dd className={`font-mono ${captureStats.droppedAgent ? 'text-amber-600 dark:text-amber-400' : ''}`}>
-                {captureStats.droppedAgent.toLocaleString()}
-              </dd>
-              {/* The fourth stage, and the newest. The agent's outbound queue
-                  sheds whole batches when the app cannot keep up; it counts
-                  PACKETS rather than items, because this figure is summed
-                  beside the two above it and a batch counted as one understated
-                  the loss by the batch size. Absent rather than zero on an
-                  agent too old to report it - `null` is not 0, and a stage
-                  nobody measured must not read as a stage that lost nothing. */}
-              <dt className="text-muted-foreground">Dropped in transit</dt>
-              <dd className={`font-mono ${captureStats.droppedPipe ? 'text-amber-600 dark:text-amber-400' : ''}`}>
-                {captureStats.droppedPipe === null
-                  ? <span className="text-muted-foreground">Not reported</span>
-                  : captureStats.droppedPipe.toLocaleString()}
-              </dd>
-            </>
-          ) : (
-            <>
-              {/* An empty grid reads as a panel that failed to load. Saying
-                  there is nothing to report is a different statement from
-                  reporting zeros, which is the distinction the counters
-                  themselves keep. */}
-              <dt className="text-muted-foreground">Capture</dt>
-              <dd className="text-muted-foreground">No capture has reported yet</dd>
-            </>
-          )}
+        {/* **Two facts that appear only when there is something to say.**
 
-          {/* Gated on its own count rather than on captureStats: the buffer
-              fills during an import too, when there is no agent to have
-              reported anything.
+            They were the tail of a "Frames lost" block - Received, the three
+            drop counts, the log file's path - removed with Connect, Disconnect
+            and Restart Driver on 2026-09-26 at the owner's request. The status
+            bar still carries the drop total.
 
-              **And it is worded apart from the four above on purpose.** These
-              frames were captured, dissected, written to disk and are still
-              readable off it - they are only out of the RAM window. Folding
-              them into a loss total says the capture missed them, which it did
-              not. `SessionStatus.tsx` does fold them in, and that is a known
-              overstatement rather than a decision. */}
-          {droppedBuffer > 0 && (
-            <>
-              <dt className="text-muted-foreground">Trimmed from the buffer</dt>
-              <dd className="font-mono">
-                {droppedBuffer.toLocaleString()}
-                <span className="text-muted-foreground"> (still on disk)</span>
-              </dd>
-            </>
-          )}
+            The trimmed count is worded apart from a loss on purpose: these
+            frames were captured, dissected, written to disk and are still
+            readable off it - they are only out of the RAM window. Gated on its
+            own count because the buffer fills during an import too, when there
+            is no agent to have reported anything.
 
-          {/* The half that actually explains a capture. A machine changing
-              network is what a gap with no frames, a burst of ARP and DHCP, or
-              a stream that stops dead all look like from the inside.
+            A network change is what a gap with no frames, a burst of ARP and
+            DHCP, or a stream that stops dead all look like from the inside. */}
+        {(droppedBuffer > 0 || linkChanges.length > 0) && (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
+            {droppedBuffer > 0 && (
+              <>
+                <dt className="text-muted-foreground">Trimmed from the buffer</dt>
+                <dd className="font-mono">
+                  {droppedBuffer.toLocaleString()}
+                  <span className="text-muted-foreground"> (still on disk)</span>
+                </dd>
+              </>
+            )}
+            {linkChanges.length > 0 && (
+              <>
+                <dt className="text-muted-foreground">Network changed</dt>
+                <dd className="font-mono text-amber-600 dark:text-amber-400">
+                  {linkChanges.length}&times;
+                  <span className="text-muted-foreground">
+                    {' '}(last: {describeLink(linkChanges[linkChanges.length - 1].before) || 'unknown'}
+                    {' → '}
+                    {describeLink(linkChanges[linkChanges.length - 1].after) || 'unknown'})
+                  </span>
+                </dd>
+              </>
+            )}
+          </dl>
+        )}
 
-              Its companion row, "Link (estimated)", is deleted. That was
-              Chromium's own guess at downlink and RTT, derived from its recent
-              requests and ROUNDED to resist fingerprinting - the code's own
-              comment admitted it was not a measurement. In a panel whose
-              remaining rows are all exact counts off the wire, one rounded
-              estimate is the row that teaches you to distrust the others. A
-              real one would come from the adapter's negotiated speed, which
-              the agent could report and does not. */}
-          {linkChanges.length > 0 && (
-            <>
-              <dt className="text-muted-foreground">Network changed</dt>
-              <dd className="font-mono text-amber-600 dark:text-amber-400">
-                {linkChanges.length}&times;
-                <span className="text-muted-foreground">
-                  {' '}(last: {describeLink(linkChanges[linkChanges.length - 1].before) || 'unknown'}
-                  {' → '}
-                  {describeLink(linkChanges[linkChanges.length - 1].after) || 'unknown'})
-                </span>
-              </dd>
-            </>
-          )}
-
-          <dt className="text-muted-foreground">Log file</dt>
-          <dd className="font-mono text-muted-foreground break-all">{logFilePath()}</dd>
-        </dl>
-
-        {/* Disabled states here are correctness, not polish. Restart is a
-            command sent down the socket, so it is unreachable without one -
-            offering it while disconnected would look like it did nothing. */}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button
-            onClick={onConnect}
-            disabled={agentLinkEnabled}
-            title={agentLinkEnabled ? 'Already connected' : 'Reconnect to the driver'}
-            className={DRIVER_ACTION_BUTTON_CLASS}
-          >
-            <Plug className="w-3.5 h-3.5" />
-            <span>Connect</span>
-          </button>
-
-          <button
-            onClick={onDisconnect}
-            disabled={!agentLinkEnabled}
-            title={
-              agentLinkEnabled
-                ? 'Close the link. The driver stops capturing when its last client leaves.'
-                : 'Already disconnected'
-            }
-            className={DRIVER_ACTION_BUTTON_CLASS}
-          >
-            <Unplug className="w-3.5 h-3.5" />
-            <span>Disconnect</span>
-          </button>
-
-          <button
-            onClick={onRestartAgent}
-            disabled={agentStatus !== 'connected'}
-            title={
-              agentStatus === 'connected'
-                ? 'Restart the driver service. It comes back on its own in a few seconds.'
-                : 'Needs a live connection to the driver'
-            }
-            className={DRIVER_ACTION_BUTTON_CLASS}
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>Restart Driver</span>
-          </button>
-        </div>
-
-        {/* A refused restart has no other visible outcome - without this the
-            button reads as broken rather than as declined for a reason. */}
+        {/* The agent's most recent refusal. Most commands have no other visible
+            outcome, so without this a declined one reads as nothing happening. */}
         {agentError && (
           <div className="mt-2 px-2.5 py-2 rounded-md text-[11px] bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400">
             {agentError}

@@ -588,17 +588,10 @@ export type AgentCommand =
    * result is identical, because "nothing changed" is itself the answer the
    * user asked for.
    */
-  | { type: 'refresh_adapters' }
-  /**
-   * Asks the agent to restart its own process.
-   *
-   * The agent refuses unless it can confirm it is the process the Windows
-   * service manager runs AND that a restart-on-failure policy exists to bring
-   * it back - so an agent run from source, or one on a machine whose policy
-   * was cleared, answers with `error` and stays up rather than exiting into a
-   * state nothing can recover from. See agent.py's restart_agent handling.
-   */
-  | { type: 'restart_agent' };
+  | { type: 'refresh_adapters' };
+  // `restart_agent` is not here. Both agents still understand it, and the app
+  // stopped sending it on 2026-09-26, when Restart Driver was removed from
+  // Capture Health at the owner's request.
 
 export function encodeAgentCommand(command: AgentCommand): string {
   return JSON.stringify(command);

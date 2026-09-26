@@ -48,9 +48,8 @@ export type AgentHealth =
  * How many short-lived connections in the window before it is a loop.
  *
  * Three, because two is a service legitimately restarting once - an upgrade,
- * or `restart_agent`, which the app itself can cause - and calling that a
- * crash loop would accuse the agent of failing at the exact moment it did what
- * it was told.
+ * or the SCM bringing it back after one failure - and calling that a crash
+ * loop would accuse the agent of the one restart its policy exists to make.
  */
 export const CRASH_LOOP_CONNECTIONS = 3;
 

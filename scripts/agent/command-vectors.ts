@@ -75,7 +75,6 @@ const SAMPLES: Record<AgentCommand['type'], AgentCommand> = {
   subscribe_adapters: { type: 'subscribe_adapters' },
   unsubscribe_adapters: { type: 'unsubscribe_adapters' },
   refresh_adapters: { type: 'refresh_adapters' },
-  restart_agent: { type: 'restart_agent' },
 };
 
 const VECTORS = path.join('scripts', 'agent', 'command-vectors.json');

@@ -302,11 +302,10 @@ newer version. Skipping.").
   - Smart App Control in enforcement mode ignores the signature
 
   The build is ready for it. It needs only a new thumbprint.
-- **`restart_agent`, round-tripped through the installed Rust agent.** The gate
-  and the failure policy it depends on are both confirmed live (see the table
-  above). What has not been watched is the exit itself on this build: pressing
-  Restart Driver, seeing `restarting now`, and seeing the SCM start a new
-  process about five seconds later.
+- ~~**`restart_agent`, round-tripped through the installed Rust agent.**~~
+  **Withdrawn 2026-09-26:** Restart Driver was removed from Capture Health at
+  the owner's request, and the app no longer sends `restart_agent`. Both agents
+  still answer it.
 - **The by-hand items that 0037 left:**
   - a capture through the UI against the installed agent
   - two clients over Fast User Switching

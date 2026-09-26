@@ -12,7 +12,6 @@
     "{\"type\":\"unsubscribe_sockets\"}",
     "{\"type\":\"subscribe_adapters\"}",
     "{\"type\":\"unsubscribe_adapters\"}",
-    "{\"type\":\"refresh_adapters\"}",
-    "{\"type\":\"restart_agent\"}"
+    "{\"type\":\"refresh_adapters\"}"
   ]
 }

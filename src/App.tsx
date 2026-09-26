@@ -811,7 +811,6 @@ export default function App() {
   const {
     agentStatus, agentClientId, captureOwner,
     agentHealth, startAgentService,
-    agentLinkEnabled, setAgentLinkEnabled,
     agentVersion, agentNpcapAccess, agentIncompatible, agentInterfaces, captureStats, adapters,
     agentLog, agentError, interfaceRates, selectedInterfaces,
     setSelectedInterfaces, selectedInterfacesRef,
@@ -1576,35 +1575,6 @@ export default function App() {
   }, [isCapturing]);
 
 
-
-  /**
-   * Driver Info's Connect / Disconnect.
-   *
-   * Both only set intent - the agent-link effect in `useAgentConnection` owns
-   * the connection, and flipping this flag is what makes it run its cleanup or
-   * reconnect. Nothing is sent to the agent on disconnect and nothing needs to
-   * be: the agent stops its sniffer when the last client goes away
-   * (handle_disconnect in agent.py), so dropping the link genuinely stops the
-   * capture rather than just hiding it from this window.
-   *
-   * Memoized like the log handlers above, because DriverInfoPanel keys effects
-   * on these identities.
-   */
-  const handleDisconnectAgent = useCallback(() => setAgentLinkEnabled(false), []);
-  const handleConnectAgent = useCallback(() => setAgentLinkEnabled(true), []);
-
-  /**
-   * Driver Info's Restart Agent.
-   *
-   * Fire and forget by design. The agent acks by dying, so there is no reply
-   * to wait for - the pipe drops, the existing 3s reconnect loop starts
-   * retrying, and the agent comes back under it. If the agent refuses (it is
-   * not running as the service, or no restart policy is in place) it answers
-   * with an `error` message instead and the log pane shows why.
-   */
-  const handleRestartAgent = useCallback(() => {
-    sendAgentCommand({ type: 'restart_agent' });
-  }, []);
 
   // Driven by the picker opening and closing. Sampling adapter counters is
   // cheap but not free, and nothing should be measured on the user's machine
@@ -2908,20 +2878,15 @@ export default function App() {
               surface would join this list rather than sit beside it. */}
           {sheet === 'settings' ? (
             <SettingsPane
-              agentLinkEnabled={agentLinkEnabled}
               agentHealth={agentHealth}
               onStartAgentService={startAgentService}
               agentError={agentError}
               heapNotice={heapNotice}
-              onConnectAgent={handleConnectAgent}
-              onDisconnectAgent={handleDisconnectAgent}
-              onRestartAgent={handleRestartAgent}
               agentStatus={agentStatus}
               agentVersion={agentVersion}
               agentOutdated={agentOutdated}
               agentNpcapAccess={agentNpcapAccess}
               agentInterfaces={agentInterfaces}
-              captureStats={captureStats}
               droppedBuffer={droppedBuffer}
               linkChanges={linkChanges}
               agentLog={agentLog}

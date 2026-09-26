@@ -55,10 +55,6 @@ check('REQUIRED_AGENT_VERSION is the product version', REQUIRED_AGENT_VERSION, p
 // transport is a named pipe whose security descriptor names who may open it,
 // so there is nothing to present and nothing to paste.
 
-// The command exists so Driver Info can ask the agent to restart itself. The
-// agent refuses it unless it can prove something would start it again - see
-// decide_restart_allowed in agent.py.
-check('restart_agent encodes', encodeAgentCommand({ type: 'restart_agent' }), '{"type":"restart_agent"}');
 check('a 1.1.0 agent is outdated against 2.4.0', isAgentOutdated('1.1.0', '2.4.0'), true);
 check('a 2.3.0 agent is outdated against 2.4.0', isAgentOutdated('2.3.0', '2.4.0'), true);
 check('a 2.4.0 agent is current', isAgentOutdated('2.4.0', '2.4.0'), false);

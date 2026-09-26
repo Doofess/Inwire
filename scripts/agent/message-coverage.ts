@@ -176,7 +176,7 @@ const appSends = [...protocol.matchAll(/^\s{2}\|\s*\{\s*type: '([a-z_]+)'/gm)]
   .sort();
 
 check('the app declares the commands this build expects', appSends, [
-  'refresh_adapters', 'restart_agent', 'set_interfaces', 'start_capture',
+  'refresh_adapters', 'set_interfaces', 'start_capture',
   'stop_capture', 'subscribe_adapters', 'subscribe_interface_stats',
   'subscribe_logs', 'subscribe_sockets', 'unsubscribe_adapters',
   'unsubscribe_interface_stats', 'unsubscribe_logs', 'unsubscribe_sockets',

@@ -18,7 +18,7 @@
  *   - `onNetworkFacts`- what the Worker derived from the capture
  *
  * They are held in a **ref**, deliberately. The connection effect's deps are
- * `[canCapture, agentLinkEnabled]` and must stay that way: a callback whose
+ * `[canCapture]` and must stay that way: a callback whose
  * identity changed between renders would otherwise tear the socket down and
  * reconnect it, which is a reconnect per render on the hottest path in the app.
  */
@@ -95,7 +95,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
    */
   const [agentService, setAgentService] = useState<AgentServiceFacts | null>(null);
   const [agentShortConnections, setAgentShortConnections] = useState(0);
-  const [agentLinkEnabled, setAgentLinkEnabled] = useState(true);
   const [agentVersion, setAgentVersion] = useState<string | null>(null);
   /**
    * The Npcap device object's DACL, as the agent read it - the SYSTEM half of
@@ -192,13 +191,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
   // parses a packet.
   useEffect(() => {
     if (!canCapture) return;
-    // Driver Info's Disconnect. Bailing out here rather than tearing the
-    // connection down somewhere else is the point: React runs this effect's
-    // existing cleanup on the way in, and that cleanup already does exactly
-    // what disconnecting means - it stops the Worker retrying, closes the
-    // socket, and reports "disconnected". A second teardown path would be a
-    // second thing to keep correct.
-    if (!agentLinkEnabled) return;
 
     // A pre-Task-4 agent never sends `hello` at all, so its absence within
     // this window (started on every fresh socket open, cleared the moment
@@ -482,7 +474,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
       pipeline.disconnect();
       setAgentStatus("disconnected");
     };
-  }, [canCapture, agentLinkEnabled]);
+  }, [canCapture]);
 
   // Which adapter each frame's `iface` index names, and how to read its
   // frames. The Worker builds the Frame layer's interface rows from the first
@@ -578,7 +570,6 @@ export function useAgentConnection(host: AgentConnectionHost) {
   return {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
     agentHealth, startAgentService,
-    agentLinkEnabled, setAgentLinkEnabled,
     agentVersion, agentNpcapAccess, agentIncompatible, agentInterfaces,
     captureStats, adapters, agentLog, agentError, interfaceRates,
     selectedInterfaces, setSelectedInterfaces, selectedInterfacesRef,

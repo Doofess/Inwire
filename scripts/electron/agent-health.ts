@@ -159,9 +159,9 @@ check('an unreadable start type still allows a start',
 console.log('\n--- the crash loop ---\n');
 
 {
-  // Two is a service restarting once - an upgrade, or `restart_agent`, which
-  // the app itself causes. Calling that a crash loop would accuse the agent of
-  // failing at the moment it did exactly what it was told.
+  // Two is a service restarting once - an upgrade, or the SCM bringing it back
+  // after one failure. Calling that a crash loop would accuse the agent of the
+  // one restart its policy exists to make.
   check('one short connection is not a loop',
     diagnose({ shortConnections: 1 }).kind, 'stopped');
   check('two is still not a loop',

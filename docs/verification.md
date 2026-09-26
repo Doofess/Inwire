@@ -1084,24 +1084,22 @@ be run here now. None has been run against that install yet.
 - [ ] **Two Windows users, via Fast User Switching.** Both run Inwire and both
       capture. One quitting does **not** stop the other's capture: the agent
       counts clients, and this is why the app was never granted `WP`.
-- [ ] **Settings → Capture Health → Restart Driver** still works, and Npcap
-      install still cycles the link and re-enumerates adapters. Both go through
-      paths the lifetime change touched. The Rust agent's restart has **not been
-      watched on the installed service**; see "Restart Driver, against the
-      installed agent" below for what `agent.log` should show.
+- [ ] An Npcap install still cycles the link and re-enumerates adapters. It
+      goes through paths the lifetime change touched.
 
 ### Capture Health says what nothing else does
 
 - [ ] The tab is named **Capture Health**, and it carries no Status row, no
       Version pill, no Capture row and no "Listening on" list. All four are in
-      the status bar permanently; the panel exists for the loss account.
-- [ ] During a capture it shows **Received** and four drop stages — driver,
-      agent, in transit, and the buffer trim. "Dropped in transit" reads
-      `Not reported` against an agent too old to send `droppedPipe`, and **never
-      `0`**: a stage nobody measured must not read as a stage that lost nothing.
-- [ ] The buffer trim is worded apart from the four and says **"still on disk"**.
-      Those frames were captured and are readable; the status bar's single total
-      does fold them in, which is a known overstatement.
+      the status bar permanently.
+- [ ] It carries **no "Frames lost" block** — no Received, no drop stages, no
+      log file path — and **no Connect, Disconnect or Restart Driver**. All were
+      removed on 2026-09-26 at the owner's request. The status bar's single drop
+      total is what is left of the loss account.
+- [ ] With the buffer trimmed, a **"Trimmed from the buffer"** row appears and
+      says **"still on disk"**. Those frames were captured and are readable; the
+      status bar's single total does fold them in, which is a known
+      overstatement.
 - [ ] There is **no "Link (estimated)" row**. It was Chromium's rounded guess at
       downlink and RTT among rows of exact counts off the wire.
 
@@ -1365,16 +1363,6 @@ service.
       through the pipe, not the UI. `smoke.ts` drives the UI against the stub.
       `filterCapturableInterfaces` removes loopback from the picker, so this
       needs a real adapter.
-- [ ] **Restart Driver, against the installed agent.** Open Settings → Capture
-      Health → Restart Driver. `%ProgramData%\Inwire\agent.log` should show:
-      1. `restart_agent requested by a client`
-      2. `restarting now - exiting so the service manager starts a new process`
-      3. about five seconds later, `Inwire agent 4.0.0 starting` with the policy
-         lines above
-
-      The app should then reconnect on its own. If the installed service logs
-      `restart is unavailable`, the process-id match or the policy read failed,
-      and the button will get `restart_unavailable` back.
 - [ ] **Two clients**, over Fast User Switching. One captures. The other is told
       `capture_busy` rather than taking the capture over, and closing the second
       does not stop the first's capture.
@@ -1680,8 +1668,8 @@ Not checkable yet, recorded so it is not mistaken for done.
   ones the feed named. It says nothing about the publisher. A check pinned to
   this PC's certificate would pass here and nowhere else, so it waits on the
   item above.
-- **Restart Driver against the installed Rust agent**, and a UI capture against
-  it. See "The Rust agent: installed, signed, and at parity".
+- **A UI capture against the installed Rust agent.** See "The Rust agent:
+  installed, signed, and at parity".
 - **The update feed.** `updates.inwire.app` does not resolve, so the Inwire row
   reads "Not checked" and every check is a quiet no-op.
 - **`crossOriginIsolated` in the packaged app.** Set via `ISOLATION_HEADERS` and

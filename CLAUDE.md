@@ -1042,8 +1042,6 @@ this is a machine the author works on rather than a fleet they ship to.
 
 **Still owed on the agent:**
 
-- a `restart_agent` round trip through the installed service (the
-  failure-policy write it depends on is confirmed under the SCM)
 - a capture through the UI against it
 - the two-client and second-account items in `docs/verification.md`
 

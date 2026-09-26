@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import type { AgentHealth } from '../../services/agentHealth';
-import type { CaptureDropStats } from '../../services/agentProtocol';
 import type { LinkChange } from '../../services/linkContext';
 import {
   Settings,
@@ -108,23 +107,18 @@ interface SettingsPaneProps {
   agentOutdated: boolean;
   /** The Npcap device object's DACL from `hello`, for the Update Center's row. */
   agentNpcapAccess?: string | null;
-  captureStats?: CaptureDropStats | null;
   /** Frames pushed out of the browser's buffer because it filled. */
   droppedBuffer?: number;
   /** Network transitions observed this session. */
   linkChanges?: LinkChange[];
   agentInterfaces: { name: string; label: string }[];
   agentLog: AgentLogEntry[];
-  agentLinkEnabled: boolean;
   /** Why the agent link is down, and whether the app can offer to fix it. */
   agentHealth: AgentHealth;
   onStartAgentService: () => void;
   agentError: string | null;
   /** What the renderer's heap guard has said, or null. */
   heapNotice?: string | null;
-  onConnectAgent: () => void;
-  onDisconnectAgent: () => void;
-  onRestartAgent: () => void;
   onSubscribeAgentLog: () => void;
   onUnsubscribeAgentLog: () => void;
   onClearAgentLog: () => void;
@@ -147,19 +141,14 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   agentVersion,
   agentOutdated,
   agentNpcapAccess,
-  captureStats,
   droppedBuffer,
   linkChanges,
   agentInterfaces,
   agentLog,
-  agentLinkEnabled,
   agentHealth,
   onStartAgentService,
   agentError,
   heapNotice,
-  onConnectAgent,
-  onDisconnectAgent,
-  onRestartAgent,
   onSubscribeAgentLog,
   onUnsubscribeAgentLog,
   onClearAgentLog,
@@ -258,17 +247,12 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
             {section === 'driver' && (
               <DriverInfoPanel
                 agentStatus={agentStatus}
-                captureStats={captureStats}
                 droppedBuffer={droppedBuffer}
                 linkChanges={linkChanges}
                 agentInterfaces={agentInterfaces}
                 agentLog={agentLog}
-                agentLinkEnabled={agentLinkEnabled}
                 agentError={agentError}
                 heapNotice={heapNotice}
-                onConnect={onConnectAgent}
-                onDisconnect={onDisconnectAgent}
-                onRestartAgent={onRestartAgent}
                 agentHealth={agentHealth}
                 onStartAgentService={onStartAgentService}
                 onShowUpdates={() => setSection('updates')}

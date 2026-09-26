@@ -128,8 +128,9 @@ adapter *configuration* and never touches `AVAILABLE_INTERFACES`, the
 capture-interface list the picker is built from, **and is itself filtered by
 that stale list**, so a brand-new adapter is excluded from its own snapshot. The
 agent re-reads the list in `register()`, once per client connection, so a
-reconnect is what re-enumerates. Preferred over `restart_agent`, which also
-works but kills a service the app deliberately has no rights to stop.
+reconnect is what re-enumerates. The app no longer sends `restart_agent` at
+all; it would also have worked, by killing a service the app deliberately has
+no rights to stop.
 
 ### The feed
 
