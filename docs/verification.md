@@ -1064,9 +1064,9 @@ can take. The claim that granting `WP` would let a second interactive user stop
 the first's capture is now a **measurement** rather than a reading of the
 installer.
 
-The rest still needs a person, because it needs the demand-start install this
-machine does not yet have - it still carries the pre-0035 `AUTO_START` service,
-which the drive script says so about rather than failing on.
+The rest still needs a person. This machine has had the demand-start install
+since the signed installer ran on 2026-09-26 (ADR 0047), so every item below can
+be run here now. None has been run against that install yet.
 
 - [ ] Launch Inwire. **`sc query` reports `RUNNING` within a second or two, and
       no UAC prompt appears.** A prompt means the unelevated `sc start` was
@@ -1086,7 +1086,9 @@ which the drive script says so about rather than failing on.
       counts clients, and this is why the app was never granted `WP`.
 - [ ] **Settings → Capture Health → Restart Driver** still works, and Npcap
       install still cycles the link and re-enumerates adapters. Both go through
-      paths the lifetime change touched.
+      paths the lifetime change touched. The Rust agent's restart has **not been
+      watched on the installed service**; see "Restart Driver, against the
+      installed agent" below for what `agent.log` should show.
 
 ### Capture Health says what nothing else does
 
@@ -1166,19 +1168,66 @@ knows not to repeat them; the rest need a person.
       different port, which no ordinary path should produce - and it is frames
       lost at the start of a capture.
 
-### The Rust agent as a service
+### The Rust agent: installed, signed, and at parity
 
-ADR 0037. **This block has been run, elevated, against the real SCM**, with the
-Python agent's service removed for the duration and restored afterwards. What
-follows is therefore a record of measurements rather than a list of things to
-check — repeat it after anything touching `service.rs`, `main.rs`'s verbs, or
-the installer's service registration.
+ADRs 0037 and 0047. **This is the agent the installer ships.** Most of this
+block is measurements, not a checklist. Repeat them after changing any of:
 
-**The runtime on its own is measured separately, and is not repeated here.**
-The runtime, the pipe, the control protocol, the capture path and the idle
-self-stop are driven by `scripts/agent/agent-interop.ts` against the real
-binary - point both at a private pipe with `INWIRE_AGENT_PIPE`, since the
-installed service owns the production name:
+- `control.rs`
+- `service.rs`
+- `main.rs`'s verbs
+- the installer's service registration
+- anything under `scripts/sign/`
+
+**Installed by the signed installer, 2026-09-26.** The installer ran elevated,
+once, over the Python agent's install.
+
+| What was read | What it said |
+|---|---|
+| the installer's signature | Valid, `CN=Inwire Code Signing (this PC)`; exit code 0 |
+| `sc qc InwireAgent` | ImagePath `"C:\Program Files\Inwire\agent\inwire-agent-windows.exe"` (unchanged), `DEMAND_START`, LocalSystem, depends on `npcap` |
+| `sc qfailure InwireAgent` | restart/5000 three times, reset 86400 |
+| the Python agent's leftovers | `{app}\agent\_internal` and `Services\InwireAgent\PythonClass`, both gone |
+| unelevated `sc start InwireAgent` | `RUNNING` in **112 ms** |
+| the running service | **9.6 MB** |
+| `agent.log` at every service start | `restart-on-failure policy written: restart after 5000 ms, 3 times, count reset after 86400 s`, then `restart is available (service restart-on-failure policy confirmed)` |
+
+**The last row matters.** The second line is written only by a process whose
+id is the one the SCM runs as `InwireAgent`. So the policy write, which both
+agents used to skip for want of `SERVICE_START`, happens under the real SCM.
+
+**Parity with the Python agent, 2026-09-26.** Both agents captured the real
+Ethernet adapter at the same moment and were sent the same commands:
+
+- **Python:** the installed service.
+- **Rust:** `debug` on a private pipe.
+
+| | Python | Rust |
+|---|---|---|
+| frames | 106,948 | 106,948, byte-identical |
+| dropped | 0 | 0 |
+| sequence | 0..106,947, no gaps | the same |
+| timestamps | exactly 1 µs off on 10.2% of frames (float rounding) | the driver's own |
+| CPU at 10 MB/s | 23.0% of a core | 10.1% |
+| working set | 65–69 MB, plus an 82–90 MB PowerShell child per adapter read | 10–12 MB |
+| first `hello` | 424–445 ms | 67–102 ms |
+| `start_capture` to first batch | 15.8 ms | 12.6 ms |
+
+**Every other case matched.** Every command, error path, ownership case and
+watchdog case sent the same messages to the same clients. The five exceptions
+are deliberate, and ADR 0047 lists them.
+
+**`adapter_config` matched on all eight adapters, except `source`.** The Rust
+agent reads the route table itself, so it says `route` and `windows_iflist`.
+The Python agent says `powershell` and `windows_iflist+powershell`.
+
+**`hello.npcapAccess` matches too.** Both agents send the same SDDL for the
+device on this machine. The live `kernelReceived` is now sampled at send time;
+it was up to 14,186 frames stale.
+
+**The runtime on its own** is driven by `scripts/agent/agent-interop.ts`
+against the real binary. Point both at a private pipe, because the installed
+service owns the production name:
 
 ```
 $env:INWIRE_AGENT_PIPE = '\\.\pipe\inwire-rs-live'
@@ -1187,162 +1236,201 @@ $env:INWIRE_PROBE_PIPE = '\\.\pipe\inwire-rs-live'
 npx tsx scripts/agent/agent-interop.ts
 ```
 
-Measured here: **131,781 frames / 2.88 GB, residual 0, none missing**; idle
-self-stop **2,200 ms** after the last client left; cold start **56 ms** to a
-served pipe. The harness captures on **loopback and generates its own traffic**,
-deliberately - the other adapters carry real traffic and a test must not be the
-thing that captures it.
+Measured when ADR 0037 was written:
 
-Build with `cargo build --release` in `agent-rs/`, and that command now means
-something: `agent-rs/rust-toolchain.toml` pins
-**`stable-x86_64-pc-windows-gnu`**. Without the pin cargo takes rustup's
-default, which on this machine is MSVC, whose linker is not installed - so the
-documented command compiled most of the tree and then failed at `link.exe was
-not found`. The pin's own comment carries what has to be re-checked if it ever
-moves to MSVC: the `windows-service` 0.7 hold exists because the GNU toolchain's
-`dlltool` ships without an assembler, and every size figure in ADR 0037 was
-measured on GNU.
+- **131,781 frames / 2.88 GB, residual 0**, none missing
+- idle self-stop **2,200 ms** after the last client left
+- cold start **56 ms** to a served pipe
 
-**The SCM's own side, measured.** Run elevated, with the Python agent's service
-removed first — both register `InwireAgent`, so the second install fails.
+**Build with `npm run build:agent`**, or with
+`cargo +stable-x86_64-pc-windows-gnu build --release` in `agent-rs/` for
+cargo's own output. The host is on the command line because
+`rust-toolchain.toml` cannot carry one. rustup refuses a target tuple in
+`channel` ("target tuple in channel name") wherever that toolchain is not
+installed yet, which means a fresh machine and every CI runner. A bare
+`cargo build` takes rustup's default host. On this machine that is MSVC, whose
+linker is not installed, so the build fails at `link.exe was not found`. The
+file's comment lists what has to be re-checked if the build ever moves to MSVC.
+
+**The SCM's own side**, measured when ADR 0037 was written. The Python agent's
+service was removed first, because both register `InwireAgent`:
 
 | What was run | What the SCM did |
 |---|---|
 | `inwire-agent.exe --startup manual install` | registered; `sc qc` reports `START_TYPE : 3 DEMAND_START`, `SERVICE_START_NAME : LocalSystem`, and the post-migration description |
-| `sc start InwireAgent`, **unelevated** | `RUNNING` in **16 ms**, `CHECKPOINT 0x0` — straight to Running, never seen in `START_PENDING` |
+| `sc start InwireAgent`, **unelevated** | `RUNNING` in **16 ms**, `CHECKPOINT 0x0`: straight to Running, never seen in `START_PENDING` |
 | the app's own client over `\\.\pipe\inwire-agent` | **184,614 frames / 4,039 MB, residual 0**, none missing |
 | last client leaves | `STOPPED` **2,436 ms** later, `WIN32_EXIT_CODE 0` |
-| `sc stop InwireAgent`, **unelevated** | **5**, ACCESS_DENIED — the withheld `WP`, enforced |
+| `sc stop InwireAgent`, **unelevated** | **5**, ACCESS_DENIED: the withheld `WP`, enforced |
 | `sc stop InwireAgent`, **elevated** | `STOPPED` in **30 ms** |
 | `inwire-agent.exe remove` while RUNNING | service gone (1060), no stray process |
 
-Four of those are the ones worth keeping, because each is a distinct failure
-somebody would otherwise have to imagine:
+Four of those are worth keeping, because each is a failure somebody would
+otherwise have to imagine:
 
-**`Running` is reported, not merely reached.** A status handler that never calls
-`set_service_status(Running)` shows up as a start that *times out* after 30
-seconds, with the service working perfectly the whole time. 16 ms with
-checkpoint 0 is that path having run.
+**`Running` is reported, not merely reached.** Suppose a status handler never
+calls `set_service_status(Running)`. The start then *times out* after 30
+seconds, while the service works perfectly the whole time. 16 ms at checkpoint
+0 shows that path ran.
 
 **The self-stop reports exit code 0, and that is load-bearing.** The installer
-sets `failure … actions= restart/5000` three times over. A self-stop reporting
-any non-zero exit would read to the SCM as a crash, and a *demand-start* service
-would then restart itself every five seconds for ever — a service that cannot
-be turned off, caused by a status field. Watched for 16 s, eight times the
-delay: it stays stopped.
+sets `failure … actions= restart/5000` three times over. If a self-stop reported
+any non-zero exit, the SCM would read it as a crash. A *demand-start* service
+would then restart itself every five seconds for ever: a service that cannot be
+turned off, caused by one status field. It was watched for 16 s, eight times
+the delay, and it stayed stopped.
 
-**An SCM-initiated stop is different code from the self-stop.** The watchdog's
-exit is the agent deciding; `sc stop` arrives as `ServiceControl::Stop` at the
-handler. Both now measured, and they are 30 ms and 2,436 ms for reasons that are
-correct in each case — the second is two watchdog ticks by design.
+**An SCM-initiated stop runs different code from the self-stop.** The
+watchdog's exit is the agent deciding. `sc stop` arrives at the handler as
+`ServiceControl::Stop`. Both are measured: 30 ms and 2,436 ms, and each is
+correct for its case, since the second is two watchdog ticks by design. A stop
+with a client still connected cancels the pipe I/O and takes about 20 ms. It
+used to hang.
 
-**`--startup manual install` is the installer's own line**, and the order is the
-whole point: the verb comes last. That is the line that shipped broken (ADR
-0037), and running it against a real SCM is the only thing that can tell you it
-registers rather than prints usage.
+**`--startup manual install` is the installer's own line**, and the verb comes
+last. That is the line that shipped broken (ADR 0037). Only running it against a
+real SCM can show that it registers rather than printing usage.
 
-One nuance that will mislead the next person at a prompt: the exe is
-`#![windows_subsystem = "windows"]`, so **PowerShell does not wait for it and
-`$LASTEXITCODE` is left stale from the previous command** — an `install` that
-succeeded can appear to exit with whatever ran before it. Its stderr *is*
-visible, inheriting the parent's console, but it arrives after the next prompt.
-Inno's `Exec(…, ewWaitUntilTerminated, ResultCode)` waits properly and reads the
-real code, so the installer's error path is unaffected; this is a hand-testing
-trap only. Check `sc qc` rather than an exit code.
+**The Rust exe is console-subsystem, and `windows_subsystem = "windows"` must
+not come back** (`agent-rs/src/main.rs` says why). When this block was first
+run it was GUI-subsystem. PowerShell does not wait for a GUI process, so
+`$LASTEXITCODE` after `install` was whatever ran before it. Now PowerShell
+waits, and the exit code is the agent's own. The PyInstaller build is still GUI,
+which is the trap described below.
 
-**Swapping the two agents is a script, not a checklist.** Both register the same
-service name, so a swap is remove-then-install and there is a window where the
-machine has no capture agent at all — a script does that window in one
-transaction where a person following steps can be interrupted inside it. From an
-elevated prompt:
+**Swapping the two agents is a script, not a checklist.** Both register the
+same service name, so a swap means remove-then-install, and for a moment the
+machine has no capture agent at all. A script does that in one transaction. A
+person following steps can be interrupted in the middle. From an elevated
+prompt:
 
 ```
-.\agent-rs\switch-agent.ps1 -Rust        # the Rust agent, demand start
-.\agent-rs\switch-agent.ps1 -Python      # back to what the installer put there
+.\agent-rs\switch-agent.ps1 -Rust        # agent-rs\dist\inwire-agent-windows.exe, what the installer ships
+.\agent-rs\switch-agent.ps1 -Python      # local-agent\dist\ - the comparison baseline
 .\agent-rs\switch-agent.ps1 -Status      # needs no elevation
 ```
 
-**`-Python` restores a current build**, which it did not always mean. The
-payload in Program Files was the **3.8.0** PyInstaller build from 11 September —
-older than the version collapse, so the app read it as outdated — and it carried
-none of this work's agent fixes, the pump included. Rebuild it with
-`python -m PyInstaller local-agent/inwire_agent.spec` and copy `_internal` and
-`inwire-agent-windows.exe` in; replace `_internal` **wholesale rather than
-merging**, or stale `.pyd` files from the previous build sit beside the new ones
-and PyInstaller's loader is perfectly happy to import one.
+Both install under the installer's own image name, so a swap and an install
+leave the service in the same shape.
 
-**Both agent binaries must be run with `Start-Process -Wait`, never `&`, and
-getting that wrong is silent.** PowerShell waits for console-subsystem processes
-and not for GUI-subsystem ones. The PyInstaller build is GUI (its bootloader is
-`runw.exe`), so `& $exe --startup manual install` returns *immediately*: the
-`sc sdset` that follows then runs against a service pywin32 has not created yet,
-pywin32 creates it afterwards with the SCM's default descriptor, and the `IU`
-ace comes out as `CCLCSWLOCRRC` — **no `RP`**. Nothing fails. What you get is an
-agent that looks perfectly installed and that the app cannot start without a UAC
-prompt, which is the exact regression the grant exists to prevent. Observed
-here, and fixed by waiting on a handle instead of on a heuristic. `setup.iss` is
-unaffected: Inno's `Exec(…, ewWaitUntilTerminated, ResultCode)` waits properly.
+**`-Python` replaces the signed exe with the unsigned PyInstaller tree.** To
+come back, run `-Rust` or re-run the installer. `-Python` installs whatever
+`local-agent\dist\` holds, so rebuild it first with
+`python -m PyInstaller local-agent/inwire_agent.spec`. The script replaces
+`_internal` wholesale rather than merging it. A merge would leave stale `.pyd`
+files beside the new ones, and PyInstaller's loader would happily import one.
 
-It **copies the build into `C:\Program Files\Inwire\agent\`** rather than
-registering it where it was built, and that is a security decision rather than
-tidiness: a LocalSystem service whose image sits in a user-writable directory
-can be replaced by any process running as that user, which turns "I can write my
-own files" into "I can run code as SYSTEM", and `agent-rs\target\release\` is
-exactly such a directory. The consequence to remember is that **rebuilding does
-not update the service** — run `-Rust` again after `cargo build --release`, or
-you are testing the previous binary and your change will look like it did
-nothing.
+**The PyInstaller build must be run with `Start-Process -Wait`, never `&`, and
+getting that wrong is silent.**
+
+- **Why:** its bootloader is `runw.exe`, a GUI-subsystem program, and PowerShell
+  does not wait for those. So `& $exe --startup manual install` returns
+  *immediately*.
+- **What goes wrong:** the `sc sdset` that follows runs against a service
+  pywin32 has not created yet. pywin32 then creates it with the SCM's default
+  descriptor, and the `IU` ACE comes out as `CCLCSWLOCRRC`, with **no `RP`**.
+- **What it looks like:** nothing fails. The agent looks perfectly installed,
+  but the app cannot start it without a UAC prompt, which is the exact
+  regression the grant exists to prevent.
+- **The fix:** `switch-agent.ps1` waits on a process handle for both agents.
+  `setup.iss` is unaffected, because Inno's
+  `Exec(…, ewWaitUntilTerminated, ResultCode)` waits properly.
+
+**The script copies the build into `C:\Program Files\Inwire\agent\`**, rather
+than registering it where it was built. That is a security decision, not
+tidiness. If a LocalSystem service's image sits in a user-writable directory,
+any process running as that user can replace it. That turns "I can write my own
+files" into "I can run code as SYSTEM", and `agent-rs\dist\` is exactly such a
+directory.
+
+One consequence: **rebuilding does not update the service.** Run `-Rust` again
+after `npm run build:agent`, or you are testing the previous binary.
+
+**Read what the script says it copied.** `-Rust` copies the stamped copy,
+which is signed when a certificate is configured. It never copies cargo's
+output, which has no VERSIONINFO, icon or manifest. The script prints the path
+and the file's age in minutes. `-Status` prints the installed file's size,
+version and write time. Those lines are the thing to read.
 
 With the Rust agent registered, `npm run build && npx tsx
-scripts/electron/agent-live-drive.ts` passes every check above **and** reaches
-"Agent connected" in **807 ms**, which is the real Inwire window against the
-real Rust service. That item used to be on the by-hand list below and is not any
-more.
+scripts/electron/agent-live-drive.ts` passed every check above and reached
+"Agent connected" in **807 ms**: the real Inwire window against the real Rust
+service.
 
-**What is left by hand, and one of the two cannot be automated here at all.**
+**What is left by hand.**
 
-- [ ] **Capture through the UI, against the Rust agent.** Launch Inwire, pick a
-      real adapter, Start, and confirm rows arrive and are dissected. This
-      cannot be a script, and the reason is a product decision rather than an
-      obstacle: `filterCapturableInterfaces` **removes loopback from the
-      picker** — it is the busiest device on a typical machine and capturing it
-      saturates the render loop — so the one adapter a harness could safely
-      capture is the one the app is designed never to offer. A person capturing
-      their own traffic is a person who has consented; a script doing it on
-      their machine is not. The two halves that *are* covered meet in the
-      middle: `agent-interop.ts` drives a real capture handle over the
-      production pipe (184,614 frames, residual 0), and `smoke.ts` drives the
-      real UI and the whole frame path against the stub.
-- [ ] **Two clients**, over Fast User Switching: one captures, the other is told
-      `capture_busy` rather than taking it over, and the second closing does not
-      stop the first's capture.
+- [ ] **Capture through the UI, against the installed agent.** Launch Inwire,
+      pick a real adapter, click Start, and confirm rows arrive and are
+      dissected. The side-by-side parity run captured the real adapter, but
+      through the pipe, not the UI. `smoke.ts` drives the UI against the stub.
+      `filterCapturableInterfaces` removes loopback from the picker, so this
+      needs a real adapter.
+- [ ] **Restart Driver, against the installed agent.** Open Settings → Capture
+      Health → Restart Driver. `%ProgramData%\Inwire\agent.log` should show:
+      1. `restart_agent requested by a client`
+      2. `restarting now - exiting so the service manager starts a new process`
+      3. about five seconds later, `Inwire agent 4.0.0 starting` with the policy
+         lines above
 
-Afterwards, **reinstall the Python agent**, which is what actually ships. What
-it was here, and what restoring means, is recorded in this repository's history
-rather than guessed: `sc qc`, `sc qfailure`, `sc sdshow` and the service's
-registry key, captured before the swap and compared byte-for-byte after it. Note
-that `sc sdshow` prints the SACL only when run **elevated**, so an unelevated
-reading and an elevated one of the same service differ by a trailing `S:(AU;…)`
-and neither is wrong.
+      The app should then reconnect on its own. If the installed service logs
+      `restart is unavailable`, the process-id match or the policy read failed,
+      and the button will get `restart_unavailable` back.
+- [ ] **Two clients**, over Fast User Switching. One captures. The other is told
+      `capture_busy` rather than taking the capture over, and closing the second
+      does not stop the first's capture.
 
-There is no known gap left to expect here: `npcapAccess` was null in `hello`
-until `npcap_access.rs` ported the DACL read, so the Update Center's
-driver-access row answered from the registry alone - read it now and it should
-agree with the Python agent's. The socket table, the adapter config, the log
-subscription and `interface_stats` were on that list before it - see
-`scripts/agent/message-coverage.ts`, which fails `npm run check` if a message
-the app can read stops being one the agent can send.
+**After a swap, put the shipped agent back** with `-Rust`, or by re-running the
+installer. What "restoring" means is recorded, not guessed: `sc qc`,
+`sc qfailure`, `sc sdshow` and the service's registry key, captured before the
+swap and compared byte for byte after it. `sc sdshow` prints the SACL only when
+run **elevated**. So an unelevated and an elevated reading of the same service
+differ by a trailing `S:(AU;…)`, and neither is wrong.
 
-**Rebuild before swapping, and read what the script says it copied.**
-`switch-agent.ps1 -Rust` copies a built binary into Program Files rather than
-registering it where it was built, so a stale `target\` is a stale service -
-and on a machine with no MSVC linker the build lands in
-`target_64-pc-windows-gnu
-elease\` rather than `target
-elease\`, which
-is a second way to install yesterday's work and be told it succeeded. The script
-now prints the path it chose and how many minutes old it is; that line is the
-thing to read.
+`scripts/agent/message-coverage.ts` fails `npm run check` if the app can read a
+message the agent cannot send.
+
+### The signed install
+
+ADR 0047. The certificate is trusted on **this PC only**, so every item here is
+about this machine.
+
+- [ ] **After every install or upgrade, verify what was installed, not what was
+      built:**
+
+      ```
+      powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sign\verify-payload.ps1 -RequireTrusted "C:\Program Files\Inwire"
+      ```
+
+      Every PE file should read `ok`:
+      - by `CN=Inwire Code Signing (this PC)`: the agent, `Inwire.exe`,
+        `ffmpeg.dll`, `vk_swiftshader.dll`, `vulkan-1.dll` and `unins000.exe`
+      - by Microsoft: `d3dcompiler_47.dll`, and `dxil.dll` until the next
+        install removes it
+
+      A `FAIL` is a file the upgrade kept. It is either `unins000.exe` from a
+      newer Inno Setup (Inno keeps the newer uninstaller, "Existing file is a
+      newer version. Skipping."), or a DLL a newer pack no longer ships.
+      **Measured 2026-09-26:** 8 of 9 ok. `dxcompiler.dll` was unsigned, left by
+      the 2026-09-22 build. `afterPack.cjs` prunes it and `dxil.dll` from every
+      pack, and `[InstallDelete]` now names both, so the next install should
+      read 7 of 7.
+- [ ] **The UAC prompt names the publisher.** Run `Inwire-Setup.exe`. The prompt
+      should read "Verified publisher: Inwire Code Signing (this PC)".
+      "Unknown publisher" means `trust-cert.ps1` has not run on this machine
+      (or was undone with `-Remove`), or the installer was compiled without
+      `/DSIGN`.
+- [ ] **Smart App Control.** Check the state with
+      `(Get-MpComputerStatus).SmartAppControlState`, or read
+      `VerifiedAndReputablePolicyState` under
+      `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy` (0 off, 1 on, 2
+      evaluation). On 2026-09-26 it read `Eval`/2.
+
+      If it ever reads **On**, launch Inwire and run an install, and expect
+      them to be judged as if unsigned. Smart App Control accepts only
+      certificates from CAs in Microsoft's Trusted Root Program, and it ignores
+      the local Root store. A block shows as a Windows Security notification
+      naming Smart App Control. The fix is a publicly trusted certificate, not
+      anything in this repository.
 
 ### Capturing on more than one adapter
 
@@ -1577,15 +1665,23 @@ tests only the window, and the window is what exports always covered.
 
 Not checkable yet, recorded so it is not mistaken for done.
 
-- **Electron fuses.** `runAsNode`, `enableNodeCliInspectArguments` and
-  `enableNodeOptionsEnvironmentVariable` are **not** flipped. Until they are, any
-  local process can run the signed exe with `ELECTRON_RUN_AS_NODE=1` and pass
-  every signature check. Flipping mutates the exe, so it must land **before**
-  signing.
-- **Code signing.** Phase 6 is blocked on a certificate (EV or Azure Trusted
-  Signing) outside this repository.
-- **Authenticode verification of downloads.** A sha256 says the bytes are the ones
-  the feed named. It says nothing about the publisher.
+- ~~**Electron fuses.**~~ **Flipped.** `runAsNode`,
+  `enableNodeCliInspectArguments` and `enableNodeOptionsEnvironmentVariable` are
+  off and `onlyLoadAppFromAsar` is on (`electron/afterPack.cjs`, held by
+  `scripts/electron/fuses.ts`), before signing as they must be. What is still
+  off is `enableEmbeddedAsarIntegrityValidation`. It is its own decision,
+  because the way it fails is an app that will not start.
+- **Code signing, for any machine but this one.** Everything the installer
+  carries is signed (ADR 0047), with a certificate trusted on this PC only. A
+  publicly trusted certificate (OV, EV, or Azure Artifact Signing) is what a
+  download would need. Until then SmartScreen warns everywhere, and Smart App
+  Control in enforcement treats the build as unsigned.
+- **Authenticode verification of downloads.** A sha256 says the bytes are the
+  ones the feed named. It says nothing about the publisher. A check pinned to
+  this PC's certificate would pass here and nowhere else, so it waits on the
+  item above.
+- **Restart Driver against the installed Rust agent**, and a UI capture against
+  it. See "The Rust agent: installed, signed, and at parity".
 - **The update feed.** `updates.inwire.app` does not resolve, so the Inwire row
   reads "Not checked" and every check is a quiet no-op.
 - **`crossOriginIsolated` in the packaged app.** Set via `ISOLATION_HEADERS` and

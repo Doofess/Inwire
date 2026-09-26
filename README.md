@@ -128,13 +128,16 @@ agent beside it, and registers that agent as the `InwireAgent` LocalSystem
 service. Nothing per-user is provisioned, and the app itself never elevates.
 
 **There is no download yet, and that is deliberate rather than an oversight.**
-The installer compiles, but it is not code-signed, so SmartScreen would warn
-every person who ran it — and teaching people to click through that warning for
-a tool that installs a kernel driver and a LocalSystem service is precisely the
-habit this project should not be building. Signing waits on a certificate
-(`docs/decisions/0030-one-installer-two-destinations.md`). Until then, build it
-from source with the steps below; [Releases](../../releases) carries the notes
-for each version and will carry the binary when it can be signed.
+The installer, the app and the agent are Authenticode-signed. But the
+certificate is one only the maintainer's own PC trusts, so on your machine it is
+an unknown publisher, and SmartScreen would warn everyone who ran it. Teaching
+people to click through that warning, for a tool that installs a kernel driver
+and a LocalSystem service, is exactly the habit this project should not be
+building. A download waits on a publicly trusted certificate
+(`docs/decisions/0047-windows-ships-the-rust-agent-signed-on-this-pc.md`). Until
+then, build it from source with the steps below. [Releases](../../releases)
+carries the notes for each version, and will carry the binary once it can be
+signed for everyone.
 
 **Npcap is not bundled.** The capture driver is a prerequisite the app manages
 rather than a payload the installer ships. Inwire's Update Center
@@ -155,9 +158,9 @@ step Inwire cannot do for you.
 Updates to Inwire itself are checked and applied from the same panel, one UAC
 prompt per update. **Automatic checking is off by default and opt-in**: an update
 check is an outbound request, and in a packet analyzer an unbidden request shows
-up in the user's own capture. *Coming:* the feed's host does not resolve yet and
-the installer is not code-signed, so the Inwire row reads "Not checked" today;
-the Npcap row works now.
+up in the user's own capture. *Coming:* the feed's host does not resolve yet,
+and the installer is signed only for the maintainer's PC, so the Inwire row
+reads "Not checked" today. The Npcap row works now.
 
 The agent's rotating log is `%ProgramData%\Inwire\agent.log` — a service has no
 console, so that file is the only place to look, and the app surfaces it under
@@ -172,7 +175,7 @@ using it, and it does not touch stored captures.
 `stable-x86_64-pc-windows-gnu` toolchain for the Windows agent, Python 3.10+
 for the macOS/Linux agent and its tests, and
 [Npcap](https://npcap.com/#download) for live capture. Packaging additionally
-needs Inno Setup 6.
+needs Inno Setup 6.3 or newer (7 works).
 
 ```
 npm install
@@ -189,16 +192,20 @@ and the installer are built separately, in that order:
 
 ```
 npm run build:agent                         # the Rust agent, then its resources
-iscc installer/setup.iss                    # the installer; needs both builds
+iscc installer/setup.iss                    # an unsigned installer; needs both builds
+npm run dist:signed                         # or all three, signed, refusing any unsigned file
 
 pip install -r local-agent/requirements.txt # or run the Python agent,
 python local-agent/agent.py                 # as Administrator
 ```
 
-Build outputs are not tracked; rebuild them rather than committing binaries.
-`local-agent/CLAUDE.md` holds the release checklist and the Python agent's
-packaging mechanics; `agent-rs/rust-toolchain.toml` says why the Rust build is
-pinned to the GNU toolchain and how.
+`npm run dist:signed` needs a code-signing certificate configured on the
+machine. `scripts/sign/` creates one that only that machine trusts, and no
+certificate or thumbprint is ever committed. Build outputs are not tracked;
+rebuild them rather than committing binaries. `local-agent/CLAUDE.md` holds the
+release checklist and the Python agent's packaging mechanics.
+`agent-rs/rust-toolchain.toml` says why the Rust build uses the GNU toolchain,
+and why the toolchain is named on the command line.
 
 ## Development
 
@@ -234,10 +241,12 @@ npx tsx scripts/parity/parity-check.ts
 python local-agent/test_protocol.py
 ```
 
-The second of those, the agent's own suite, also locks its protocol version
-across the three places it appears — `agent.py`, `src/services/agentProtocol.ts`,
-`installer/setup.iss` — and refuses a reset, because that version is
-an ordering rather than a label. Both suites run on every push and pull request.
+The second of those is the Python agent's own suite. The Rust agent's is
+`cargo test` in `agent-rs/`. The agent's version is the product's, held in every
+place it appears by `scripts/agent/version.ts`, and a reset is refused, because
+that version is an ordering rather than a label. Both agents' suites run on
+every push and pull request, the Rust one on Windows. The parity check needs the
+untracked captures, so it runs by hand.
 
 ## Layout
 
@@ -260,9 +269,12 @@ docs/specs/      historic specifications; read the banner at the top of each fir
 docs/verification.md  what only a person can check, and what each failure looks like
 docs/how-inwire-works.html  the illustrated explainer, twelve pages
 test/fixtures/   the parity captures and the acceptance floors (not tracked)
-local-agent/     the Python capture agent - what macOS and Linux run - and its tests
+local-agent/     the Python capture agent - what macOS and Linux run, and the
+                 baseline the Windows agent is compared against - and its tests
 agent-rs/        the same agent in Rust, which is what the Windows installer
                  ships (docs/decisions/0037-the-agent-is-rust-on-windows.md)
+scripts/sign/    code signing: one script signs everything, and no certificate
+                 is committed
 installer/       the unified Inno Setup installer
 logo/            the brand mark's sources; every icon is generated from
                  src/lib/brandMark.ts rather than committed as art

@@ -32,7 +32,14 @@ that reason: it holds the capture handle and the driver's user-mode library, and
 the process that parses hostile bytes is the one that does **not** have them.
 It dissects nothing — a record it sends carries no protocol, no addresses and no
 ports (ADR 0010) — so the privileged component's input surface is deliberately
-tiny.
+tiny. On Windows it is a single Rust executable (ADRs 0037 and 0047), installed
+under Program Files, where only administrators can replace it.
+
+**The Electron binary is fused.** `runAsNode`, `enableNodeCliInspectArguments`
+and `enableNodeOptionsEnvironmentVariable` are off, and `onlyLoadAppFromAsar` is
+on. So `ELECTRON_RUN_AS_NODE=1 Inwire.exe` no longer turns the signed app into a
+Node interpreter. A report of a way to run arbitrary code through the shipped
+`Inwire.exe` is a real finding.
 
 **The agent is reached over a named pipe, and the pipe's ACL is the
 authorization** (ADR 0029). Its security descriptor is
@@ -60,18 +67,31 @@ audience — so an unexpected outbound connection is a real finding.
 These are documented shortcomings, not vulnerabilities to report. They are listed
 because a security policy that only describes strengths is not worth reading.
 
-- **The installer is not code-signed.** SmartScreen will warn. Signing waits on a
-  certificate and is tracked in ADR 0030.
-- **Electron fuses are not flipped.** `runAsNode`,
-  `enableNodeCliInspectArguments` and `enableNodeOptionsEnvironmentVariable` are
-  still enabled. Until they are off, and until signing lands, a local process can
-  run the executable with `ELECTRON_RUN_AS_NODE=1`. Flipping them mutates the
-  binary, so it must happen before signing rather than after.
+- **The Windows build is signed with a certificate only the maintainer's PC
+  trusts** (ADR 0047). It is self-issued, code-signing only, with `cA=FALSE`.
+  On that one machine it is imported into the local Root store, so the
+  installer, the app and the agent verify as Valid there. **On every other
+  machine it is an untrusted root**: Windows shows "Unknown publisher" and
+  SmartScreen warns. Smart App Control never counts it, even on that PC,
+  because it accepts only certificates from CAs in Microsoft's Trusted Root
+  Program. That is why there is no public download yet.
+- **The signing key is a non-exportable software key with no prompt.** A process
+  running as the maintainer's account could sign silently with it. What that
+  buys an attacker is narrow: a binary that shows the Inwire publisher name, on
+  that one PC. The certificate cannot vouch for a TLS server or issue other
+  certificates.
+- **Nothing verifies a signature at runtime.** The app does not check the
+  agent's signature, or the agent the app's. The pipe's descriptor is the
+  authentication.
 - **Authenticode verification of downloads is not implemented.** The Update
   Center checks a sha256 against the feed and matches the download host against
   an exact list, but whoever controls the feed also writes the hash. This is
   written down because a hash check next to an elevation prompt looks like more
   assurance than it is.
+- **ASAR integrity is stamped but not validated.** The fuse that makes Electron
+  refuse a modified `app.asar` at startup, `enableEmbeddedAsarIntegrityValidation`,
+  is still off. Its failure mode is an app that will not start, so it is a
+  separate decision.
 - **Npcap's default install is open to every local user.** Its installer leaves
   the capture devices readable and writable by `WD`, meaning any local account
   can read the machine's traffic and inject raw frames. Because Inwire captures

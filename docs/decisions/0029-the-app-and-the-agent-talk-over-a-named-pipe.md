@@ -4,6 +4,18 @@
 pairing token, the origin allowlist and the peer verification that was planned
 to follow them. It does not replace them with anything. It deletes them.
 
+> **One detail is amended by
+> [0047](0047-windows-ships-the-rust-agent-signed-on-this-pc.md).** Below, this
+> ADR says `hello` reports `authRequired: false`.
+>
+> - **Windows:** the agent's `hello` now carries no `authRequired` field at all.
+>   No app reads the field, and the parser accepts a `hello` with or without it,
+>   so sending it only kept the word on the wire.
+> - **The check:** `scripts/agent/control-vectors.ts` holds the Rust agent to
+>   sending no `auth*` key, in any message.
+> - **The Python agent** still sends the field, for the macOS and Linux
+>   WebSocket, where this ADR kept the token.
+
 ## Context
 
 The agent listened on `ws://localhost:8999`. Everything defensive that grew

@@ -187,8 +187,11 @@ afterwards, since that user can already rewrite the app's own payload. Both are
 written down because a hash check next to a UAC prompt looks like more assurance
 than it is.
 
-The **Inwire row cannot be exercised yet**: there is no feed host and no
-signature, so it reads "Not checked". The Npcap row works today.
+The **Inwire row cannot be exercised yet**: there is no feed host, and the
+build is signed only with a certificate this PC trusts (ADR 0047), so the row
+reads "Not checked". Verifying a signature here would have to wait for a
+publicly trusted certificate anyway, because a check pinned to this one would
+pass on this PC and nowhere else. The Npcap row works today.
 
 ### "Driver missing" is not a link diagnosis
 

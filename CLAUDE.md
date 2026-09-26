@@ -6,7 +6,11 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 > them undoes a decision, not a cleanup:
 >
 > - the **pairing token**, `authenticate`, `authRequired`, `auth_required` /
->   `auth_failed` — the pipe's ACL is the authentication (ADR 0029)
+>   `auth_failed`, in the app or the Windows agent. The pipe's ACL is the
+>   authentication (ADR 0029). The Rust agent's `hello` has no `authRequired`
+>   at all, and `scripts/agent/control-vectors.ts` fails on any `auth*` key.
+>   The Python agent is the one place these may still appear, for the
+>   macOS/Linux WebSocket, where 0029 kept the token
 > - the **origin allowlist** and `is_origin_allowed` on Windows
 > - **`ws://localhost:8999` on Windows** — the port is not opened at all
 > - a **browser build**, a **service worker**, an **SPA fallback**, or anything
@@ -134,7 +138,9 @@ handle never lives in the process that parses hostile bytes. ADR 0033.
   wrapping unsigned contents is the thing it exists to make impossible.
   `scripts/sign/` holds the rest: the certificate is this PC's own
   (`new-cert.ps1`, trusted by the one elevated `trust-cert.ps1`), and
-  `sign.ps1` is the only thing that signs.
+  `sign.ps1` is the only thing that signs (ADR 0047). It compiles with the
+  **newest** Inno Setup it finds (7 here), because an upgrade keeps an installed
+  `unins000.exe` with a newer version, even an unsigned one.
 
 **Every assertion script runs under plain `tsx`, with no Electron and no
 browser.** That is a property to protect, not an accident: it is what makes the
@@ -211,7 +217,34 @@ On Windows its only transport is the named pipe, created with the security
 descriptor `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)`. `IU` is the point — the
 service is LocalSystem and the app deliberately is not. `WD`, `AN` and `NU` are
 absent because a pipe answers over SMB unless the descriptor says otherwise.
-`local-agent/pipe_server.py`; ADR 0029.
+`agent-rs/src/pipe.rs` and `local-agent/pipe_server.py`; ADR 0029.
+
+**On Windows it is the Rust agent, at parity with the Python one, and signed**
+(ADRs 0037, 0047). Side by side on the real adapter the two delivered the same
+106,948 frames byte for byte. They answered every command, error, ownership and
+watchdog case with the same messages to the same clients; 0047 lists the five
+deliberate deviations.
+
+What the port bought was never throughput:
+
+- one ~750 KB file a certificate covers, against a 23 MB `--onedir` tree of
+  unsigned `.pyd` files
+- a first `hello` in under 100 ms against ~430 ms, which matters because
+  demand start put the cold start on the path of opening the app
+- ~11 MB against ~67 MB, plus a PowerShell child per adapter read
+- a libpcap handle that cannot cross to the event loop, because a `Capture` is
+  `Send` and not `Sync`
+
+`scripts/agent/message-coverage.ts` fails if the app can read a message that
+`agent-rs/src/` never emits. Both agents write one log format to one file.
+`wpcap.dll` lives in `System32\Npcap`, which is off the default DLL search path,
+so `npcap.rs` loads it by full path. **A fix that lands in one agent and not the
+other is the failure mode to watch for.**
+
+An upgrade installs the Rust exe under the Python agent's path and file name,
+so the ImagePath does not move. `install` updates the registration in place.
+`agent-rs/switch-agent.ps1 -Python` puts the Python agent back for a comparison,
+which replaces the signed exe with an unsigned tree.
 
 ### main — `electron/main.ts`
 
@@ -492,7 +525,8 @@ took the whole bridge down with no message anywhere.
 platform gate, because a fuse belongs to the binary on every platform — and
 enforced by `scripts/electron/fuses.ts`, which reads the wire out of the packed
 exe and skips cleanly when nothing is packed. Flipping mutates the exe, so it
-must stay **before** signing.
+must stay **before** signing, and it does: electron-builder runs the signing
+hook after `afterPack`.
 
 What it was worth, quoted from the build this replaced rather than described:
 `ELECTRON_RUN_AS_NODE=1 Inwire.exe -e "console.log(process.version)"` printed
@@ -510,6 +544,21 @@ a window on every run. That one belongs in `docs/verification.md`.
 stamped (`npm run pack` logs `updating asar integrity executable resource`);
 turning the *validation* on is a separate decision whose failure mode is an app
 that will not start, and it wants its own commit.
+
+**Every signature goes through one script, and no certificate is in the
+repository.** ADR 0047. electron-builder (via `electron/sign.cjs`), Inno's
+`SignTool=` line and `npm run build:agent` all call `scripts/sign/sign.ps1`. It
+finds the certificate by thumbprint, from `INWIRE_SIGN_THUMBPRINT` or the
+gitignored `.signing.json`, so a real certificate is a thumbprint change.
+
+`scripts/sign/signing.ts` enforces three things:
+
+- the routing above
+- no tracked `.cer` or `.pfx`
+- this machine's thumbprint in no committable file
+
+At build time, `iscc /DSIGN` refuses an unsigned PE file in the payload.
+**Nothing verifies a signature at runtime**; §8 says what one is worth.
 
 **CSP is served as a header, not a meta tag.** `electron/csp.ts`, applied in
 `hardenSession`. `OUTBOUND_HOSTS` is the whole list of places the renderer can
@@ -559,7 +608,9 @@ verified by hand.
 `local-agent/test_protocol.py` pins the SDDL's shape — `IU` present, `WD`/`AN`/
 `NU` absent, `D:P` — and `scripts/electron/agent-link.ts` drives the real client
 against a real pipe. Neither can tell you the descriptor took **effect**; that
-needs a second Windows user account and is in `docs/verification.md`.
+needs a second Windows user account and is in `docs/verification.md`. The
+shipped agent's copy, `PIPE_SDDL` in `agent-rs/src/pipe.rs`, is the same literal,
+and *nothing asserts it*: `test_protocol.py` reads only the Python one.
 
 **The two TypeScript programs share their strictness flags, and stay
 separate.** `tsconfig.json` (renderer plus scripts) and
@@ -714,6 +765,17 @@ provisioned any more.
 
 **`uac_admin=True` makes `--version` raise a UAC prompt.** Harmless in the
 installer, which is already elevated; it hangs a command run by hand.
+
+**An upgrade keeps a newer uninstaller, even an unsigned one.** Inno skips
+`unins000.exe` when the installed copy is newer ("Existing file is a newer
+version. Skipping."). The first signed build came from a per-user Inno 6.7.3 and
+was installed over an Inno 7 install, so the old unsigned uninstaller stayed
+while every other file was signed. `build-signed.ps1` now picks the newest ISCC,
+ranked by `Setup.e32`'s version.
+
+The same install kept an unsigned `dxcompiler.dll` from an older build, because
+Inno never removes files; `[InstallDelete]` names it now. Check the installed
+files, not the build. `docs/verification.md` has the command; ADR 0047.
 
 **`reg query` error shapes.** A missing key gives `error.code === 1` (a
 **number**) with empty stdout; success gives no error at all. `provesAbsent` in
@@ -964,14 +1026,26 @@ measured — the store takes 31,000 frames a second and the app feeds it far les
 
 ## 8. Status
 
-The Electron migration is done bar two items, and `docs/history.md` has the
-phase-by-phase record.
+The Electron migration is done, bar the offline basemap and signing for any
+machine other than this one. `docs/history.md` has the phase-by-phase record.
 
-**Signing is deprioritised, not blocked.** It waits on a code-signing
-certificate (EV or Azure Trusted Signing) outside this repository — and
-signing, the VM matrix and the Npcap OEM licence were all set aside
-deliberately, because this is a machine the author works on rather than a fleet
-they ship to. The installer compiles.
+**The Windows build ships the Rust agent, signed for this PC only.** ADR 0047.
+The agent, `Inwire.exe`, its DLLs, the uninstaller and `Inwire-Setup.exe` are
+all signed by one certificate that `trust-cert.ps1` made trusted here. The
+owner installed the result elevated once, over the Python agent.
+
+On any other machine the certificate is an untrusted root. SmartScreen and
+Smart App Control ignore the local Root store everywhere. A public release waits
+on a publicly trusted certificate, which is a thumbprint change here. That was
+set aside deliberately, with the VM matrix and the Npcap OEM licence, because
+this is a machine the author works on rather than a fleet they ship to.
+
+**Still owed on the agent:**
+
+- a `restart_agent` round trip through the installed service (the
+  failure-policy write it depends on is confirmed under the SCM)
+- a capture through the UI against it
+- the two-client and second-account items in `docs/verification.md`
 
 **The fuses are flipped**, which was the one item here that had to precede
 signing rather than follow it. `electron/afterPack.cjs` does it and
@@ -1011,54 +1085,17 @@ banner at the top of this file and stays there.
 Validated sequencing, recorded so a future session inherits the reasoning.
 These are **not** work in progress and get an ADR when each is started.
 
-**The Rust agent, in `agent-rs/`, is what the Windows installer ships.**
-ADR 0037. The throughput argument the plan rested on was **measured and
-dropped**: the Python sniffer thread costs 2.87 µs of work per frame at a
-utilisation of 0.003, and the frames being lost were lost to a sleep in the
-pump. What justified it instead: **one file** — 449 KB when the ADR measured
-it, still under a megabyte stamped — against a 22 MB `--onedir` tree of unsigned
-`.pyd` files (signing a wrapper does not sign what the wrapper loads);
-**213 ms just to `import agent.py`**, load-bearing once demand start put the
-agent's cold start on the critical path of opening Inwire (ADR 0035); and a
-defect that is unrepresentable rather than fixed — a `Capture` is `Send` and
-not `Sync`, so a libpcap handle cannot cross to the event loop.
+**The Rust agent is no longer a direction: it ships** (ADRs 0037 and 0047;
+§3 says what it is). What is left on this line is the Python agent's future.
 
-**What is proven**: the wire format, the pipe and the whole capture path against
-the app's own client, with conservation asserted to a residual of 0 over 632,924
-frames — **and the SCM's side**, registered in the installed agent's place and
-driven elevated. An **unelevated** `sc start` reaches `RUNNING` in **16 ms at
-checkpoint 0**; the client moved **184,614 frames / 4,039 MB, residual 0** over
-the production pipe; the idle self-stop reports `STOPPED` **2,436 ms** later
-**with exit code 0**, which is what stops the installer's `restart/5000` policy
-from resurrecting a demand-start service for ever. `docs/verification.md` holds
-the table. `npcap_access.rs` sends `hello.npcapAccess` as the Python agent
-does - the device's DACL as SDDL, the same string from both on the same machine.
-
-**Every message the app can read, the Rust agent can send**, and that is a check
-rather than a claim: `scripts/agent/message-coverage.ts` reads the `type: '...'`
-literals out of `agentProtocol.ts` and asserts each is emitted somewhere in
-`agent-rs/src/`. ADR 0037's "not ported" list was written from what was
-consciously skipped rather than from the protocol, which is how `interface_stats`
-came to be missing from it — the app subscribed, the agent answered with a
-generic `state`, and the sparkline drew nothing with nothing erroring anywhere.
-The allow-list now holds one entry, `packet`, the binary frame path, which has
-no JSON form.
-
-**The two agents share one log file and one log format**: `agent_log.rs` matches
-`"%(asctime)s %(levelname)-7s %(message)s"` byte for byte, and `agent_log.py`'s
-parser strips exactly that computed seven-character width rather than a greedy
-`\s+`, because the agent indents some lines on purpose. A subscriber that
-connects after a swap sees continuous history across both implementations.
-
-**How the swap reaches a machine**: an elevated run of the installer, which
-puts the Rust exe at the Python agent's path and file name, so the service's
-ImagePath does not move; `install` then updates the existing `InwireAgent`
-registration in place (pywin32's fall-through from install to update, which
-the Rust agent failed with `ERROR_SERVICE_EXISTS` until it matched it), and
-`[InstallDelete]` takes the Python agent's `_internal` tree. The payload is
-the stamped copy, signed by `npm run build:agent` after the stamp. `wpcap.dll` living in
-`System32\Npcap` and off the default DLL search path was the gotcha to carry
-over, and `npcap.rs` carries it.
+- **macOS and Linux keep it.** Those platforms have no desktop app to talk to,
+  and a socket file needs a permission design of its own (0029).
+- **On Windows it is only a baseline**, which `switch-agent.ps1 -Python` puts
+  back for a side-by-side comparison.
+- **Its `--onedir` build** and the hidden-imports list in
+  `local-agent/CLAUDE.md` can go once nothing on Windows compares against it.
+- **The trigger for porting macOS and Linux** is 0037 §1's reason for not
+  porting them: a desktop app there to talk to.
 
 **Engine-side dissection.** Move the pipeline Worker's work into the store
 `utilityProcess` with a `worker_threads` pool over `SharedArrayBuffer`, sharded

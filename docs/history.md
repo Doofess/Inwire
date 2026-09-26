@@ -407,7 +407,7 @@ read this for the order things happened in.*
 | 3 | The named pipe; the token deleted; the agent bundled | `677cc41`…`4bbbfc7` |
 | 4 | Native save dialogs | `8b7be01` |
 | 5 | The web page deleted | `6d97c46`…`4010d7b` |
-| 6 | Installer, signing, updates | deprioritised — `d2423f2` |
+| 6 | Installer, signing, updates | deprioritised — `d2423f2`; signed for this PC only — `e5a0ee9` (ADR 0047) |
 | 7 | Rebuild what the browser forced | `73e5c26`…`3879433`, `380976e`, `b07f165` |
 | 8 | Import-to-disk; `captureScan` wired to the filter bar | `1bfcbf9`, `93cd08b`, `7c5dd21`, `992b1d5` |
 

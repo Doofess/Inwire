@@ -13,23 +13,39 @@ hands them to whoever asked. It does not dissect: a record carries no source,
 destination, protocol, ports or info (ADR 0010).
 
 **There is a second agent, in `agent-rs/`, and on Windows it is the one that
-ships.** The product installer carries the Rust build, not this one's
-PyInstaller tree (ADR 0037): its wire format, pipe and capture path are proven
-against the app's own client, and its SCM registration was driven as the
-installed service. This agent is what macOS and Linux run, and on Windows it is
-now built only to compare against (`agent-rs/switch-agent.ps1 -Python`). **Every
-behaviour fix still has to land in both**: the shared golden vectors and the
-matching kernel-buffer assertions
-are what keep them in step, and a fix applied to one and not the other is the
-failure mode to watch for. macOS and Linux keep this one regardless.
+ships**, signed (ADRs 0037 and 0047). The product installer carries the Rust
+build, not this one's PyInstaller tree. On 2026-09-26 the two were measured side
+by side on the real adapter: the same 106,948 frames byte for byte, and the
+same messages to the same clients for every command, error, ownership and
+watchdog case, apart from five deliberate deviations listed in 0047.
 
-On **Windows** it runs as the `InwireAgent` LocalSystem service, is installed by
-the product's installer, and its only transport is a named pipe. **It is
-demand-start** (ADR 0035): the app asks the SCM for it at launch, and the agent
-stops itself two watchdog ticks after its last client leaves. On **macOS and
-Linux** it installs from a tarball and keeps the WebSocket — and keeps the
-pairing token with it, because there is no interactive-user SID to name on a
-socket file and deciding who may open one is a genuinely different design.
+This agent has two jobs now:
+
+- **macOS and Linux run it.**
+- **On Windows it is the baseline** that `agent-rs/switch-agent.ps1 -Python`
+  puts back for a comparison. That swap replaces the signed Rust exe with this
+  unsigned tree, so run `-Rust`, or re-run the installer, when you are done.
+
+**Every behaviour fix still has to land in both.** What keeps them in step:
+
+- the shared golden vectors
+- the matching kernel-buffer assertions
+- `scripts/agent/message-coverage.ts`
+
+A fix applied to one and not the other is the failure mode to watch for.
+
+When this agent runs on **Windows**, it runs as the `InwireAgent` LocalSystem
+service, and its only transport is a named pipe. **It is demand-start** (ADR
+0035): the app asks the SCM for it at launch, and the agent stops itself two
+watchdog ticks after its last client leaves. The installer never puts it there
+any more; only `switch-agent.ps1 -Python` does.
+
+On **macOS and Linux** it installs from a tarball and keeps the WebSocket. It
+keeps the pairing token with it, because a socket file has no interactive-user
+SID to name, and deciding who may open one is a genuinely different design. So
+this agent still carries `authRequired` in `hello` (`false` over the pipe) and
+the `authenticate` handshake. Nothing on Windows reads either, and the Rust
+agent sends neither.
 
 ## The transport, on Windows
 
@@ -190,8 +206,10 @@ That is the **product's** installer, at the repository root — the app and the
 agent in one, under its own AppId. It needs `npm run build:agent` and
 `npm run pack` to have run first, and **it no longer ships this agent**: the
 payload is the Rust exe, installed under this agent's file name so the
-service's ImagePath does not move, and an upgrade deletes the `_internal` tree
-this build leaves behind.
+service's ImagePath does not move. An upgrade deletes the `_internal` tree this
+build leaves behind, along with pywin32's `PythonClass` key and event-log
+source. A plain `iscc` compile is unsigned; `npm run dist:signed` is the
+release.
 
 `local-agent/installer/setup.iss` is the older agent-only installer and is what
 a machine with agent 3.x has; the unified one uninstalls it, because it
@@ -208,7 +226,8 @@ python local-agent/agent.py
 ```
 
 As Administrator or root — raw capture needs elevation on every OS. On Windows
-this needs Npcap already installed; the installer normally handles that.
+this needs Npcap already installed; the app's Update Center installs it, and
+the product installer does not (ADR 0032).
 
 Two things about the frozen exe. `debug` requires the service to be `install`ed
 first, because pywin32's `debug` verb checks the SCM registry before running
@@ -256,17 +275,27 @@ A source-only bump ships nothing.
    whole of it — there is one number now (see the table above).
 2. `python local-agent/test_protocol.py`, and `npm run check` — the second is
    what covers every stamp, including the shipping installer's.
-3. `npm run build:agent -- -Test` — the Rust agent the installer ships: tested,
-   built, stamped, then signed, in that order, as
-   `agent-rs/dist/inwire-agent-windows.exe`. Set `INWIRE_REQUIRE_SIGNING=1` for
-   a release, or a machine with no certificate configured ships it unsigned
-   with only a warning.
-4. `npm run pack`
-5. `iscc installer/setup.iss`, then `npx tsx scripts/agent/built-version.ts` —
-   every artifact's version, and the agent's resources, read back.
-6. Install it here (elevated), then `npx tsx scripts/electron/agent-live-drive.ts`
-   — the real app against the installed service — and a capture on the real
-   adapter, frames on screen.
+3. `npm run build:agent -- -Test` — the Rust agent's tests, before anything is
+   packaged. The next step builds it again, but does not test it.
+4. `npm run dist:signed` — the release, in order:
+   - `build:agent`: built, stamped, then signed, as
+     `agent-rs/dist/inwire-agent-windows.exe`
+   - `pack`: fuses flipped, then `Inwire.exe` and its DLLs signed
+   - `iscc /DSIGN`: refuses any unsigned PE file in the payload, and signs the
+     uninstaller and `Inwire-Setup.exe`
+
+   It sets `INWIRE_REQUIRE_SIGNING=1`, so a machine with no certificate
+   configured fails here rather than shipping unsigned with a warning. It
+   compiles with the newest Inno Setup it finds. An upgrade keeps an installed
+   uninstaller whose version is newer, even an unsigned one (ADR 0047).
+5. `npx tsx scripts/agent/built-version.ts` — every artifact's version, and the
+   agent's resources, read back.
+6. Install it here, elevated. Then:
+   - run `scripts\sign\verify-payload.ps1 -RequireTrusted "C:\Program Files\Inwire"`,
+     which checks what was *installed*, not what was built
+   - run `npx tsx scripts/electron/agent-live-drive.ts`, the real app against
+     the installed service
+   - capture on the real adapter, and see frames on screen
 
 Step 3 was `pyinstaller --noconfirm --clean local-agent/inwire_agent.spec`
 until the installer took the Rust agent (ADR 0037); that build is still how this

@@ -7,6 +7,20 @@
 > UAC prompt and Npcap's own wizard. Everything else here - one installer, two
 > destinations, the app never elevates - stands.
 
+> **Its "Signing" is decided by
+> [0047](0047-windows-ships-the-rust-agent-signed-on-this-pc.md), for this PC
+> only.**
+>
+> - **Signed:** everything the installer carries is Authenticode-signed, through
+>   one script, with a certificate this PC trusts and no other machine does.
+> - **Refused:** a signed compile refuses to build around an unsigned payload.
+> - **The fuses:** the ADR below says they "wait", and they were flipped first,
+>   as it requires.
+> - **The agent:** `{app}\agent\` now holds one Rust executable, not the
+>   PyInstaller tree. The `--onedir` paragraph describes the Python agent, which
+>   Windows no longer ships (0037).
+> - **Updates:** unchanged; they stay where 0032 left them.
+
 **Status:** accepted for the mechanics; **signing and updates are deliberately
 unfinished** and are not decided here. **Extends `0027`**; depends on `0029`
 for why the service and the app can be different principals at all.

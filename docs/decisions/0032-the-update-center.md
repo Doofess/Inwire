@@ -5,6 +5,18 @@ installer no longer downloads or installs the driver. **Fills in the "Updates"
 half of `0030`'s "What is not decided here"** — the pipeline exists; the feed
 and the signature do not.
 
+> **A signature exists now
+> ([0047](0047-windows-ships-the-rust-agent-signed-on-this-pc.md)), but nothing
+> verifies one yet.**
+>
+> - **What is signed:** the installer and everything in it, with a certificate
+>   trusted on this PC only.
+> - **What the Update Center checks:** a sha256 and an exact download host. It
+>   still never checks Authenticode.
+> - **Why that waits:** a check pinned to this certificate would pass here and
+>   fail on every other machine. So "Authenticode verification is owed", in the
+>   Consequences below, stands until there is a publicly trusted certificate.
+
 ## Context
 
 `0030` decided that Npcap is fetched at install time rather than bundled, and

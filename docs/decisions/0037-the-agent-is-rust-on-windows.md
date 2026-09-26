@@ -11,6 +11,20 @@ changes what it is written in and nothing about where it runs. Does not touch
 `0029` (the pipe), `0010` (it dissects nothing) or `0005`'s surviving half (the
 wire format). Builds on `0035`: demand start is what made start time matter.
 
+> **It ships, and [0047](0047-windows-ships-the-rust-agent-signed-on-this-pc.md)
+> covers the rest.**
+>
+> - **What ships:** the Rust agent is what the installer puts in `{app}\agent\`.
+>   It is signed with a certificate this PC trusts, and no other machine does.
+> - **Parity:** measured side by side with the Python agent on the real adapter,
+>   106,948 frames came back byte-identical. The five deviations are each
+>   deliberate.
+> - **The Consequences below are history.** "Nothing ships yet" and "the Python
+>   agent is what is installed" describe the period before 0047. The blocker they
+>   name is removed on this PC and still stands on every other machine.
+> - **Sizes:** 449 KB and 34 MB were this build and the PyInstaller tree at the
+>   time. The stamped, signed exe is now about 750 KB, and the tree is 23 MB.
+
 ## Context
 
 `CLAUDE.md` §10 has carried "a Rust agent, as the first post-migration project"
