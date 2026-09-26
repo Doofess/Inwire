@@ -52,6 +52,9 @@ import type {
 } from './trackerApi';
 import { LIVE_ENV, type DissectEnv } from './dissectEnv';
 import { ValueReader, ValueWriter, registerRecordClass } from './valueCodec';
+import {
+  FRAME_RECORD_VERSION, readRecordHeader, recordRefs, writeRecordHeader,
+} from './recordHeader';
 import { HpackTable } from '../dissectors/hpack';
 import type { TlsConversationState, TlsRecordCursor } from '../tcpStreamTracker';
 
@@ -117,31 +120,13 @@ NAMES.push('(decrypted content)');
 KINDS.push(undefined);
 if (NAMES.length > 255) throw new Error('frameRecord: more methods than one byte can name');
 
-/** The record format; a different leading byte reads as no record at all. */
-export const FRAME_RECORD_VERSION = 2;
+export { FRAME_RECORD_VERSION, recordRefs };
 
-/**
- * The record's layout: the version byte, then the frames whose bytes a revisit
- * of it needs (a varint count and the ids, each as its distance above the
- * previous one), then the call log. The frame list comes first so the store
- * can fetch those frames' bytes without reading anything else.
- */
+/** The call log's reader, positioned past the header; null for a record this build does not read. */
 function openLog(record: Uint8Array): { reader: ValueReader; refs: number[] } | null {
-  if (record.length === 0 || record[0] !== FRAME_RECORD_VERSION) return null;
-  const reader = new ValueReader(record, 1);
-  const count = reader.varint();
-  const refs: number[] = [];
-  let previous = 0;
-  for (let i = 0; i < count; i++) {
-    previous += reader.varint();
-    refs.push(previous);
-  }
-  return { reader, refs };
-}
-
-/** The frames whose bytes a revisit of this record needs, ascending. */
-export function recordRefs(record: Uint8Array): number[] {
-  return openLog(record)?.refs ?? [];
+  const header = readRecordHeader(record);
+  if (header === null) return null;
+  return { reader: new ValueReader(record, header.logStart), refs: header.refs };
 }
 
 /** FNV-1a, 32 bits: whether a referenced piece is still the piece it was. */
@@ -351,18 +336,10 @@ export class FrameRecorder {
 
   /** The frame's record. */
   end(): Uint8Array {
-    const head = new ValueWriter();
-    head.byte(FRAME_RECORD_VERSION);
-    const refs = [...this.refs].sort((a, b) => a - b);
-    head.varint(refs.length);
-    let previous = 0;
-    for (const frame of refs) {
-      head.varint(frame - previous);
-      previous = frame;
-    }
+    const head = writeRecordHeader([...this.refs]);
     const log = this.out.bytes();
     const record = new Uint8Array(head.length + log.length);
-    record.set(head.bytes());
+    record.set(head);
     record.set(log, head.length);
     return record;
   }

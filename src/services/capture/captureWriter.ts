@@ -52,9 +52,10 @@ import type { InfoPatch } from '../dissect/types';
 import { applyInfoPatch } from '../dissect/infoPatch';
 import { encodeChunk, CHUNK_FRAMES } from './chunkCodec';
 import {
-  encodeChunkRecord, writeIndexHeader, CaptureIndex, INDEX_HEADER_BYTES, INDEX_RECORD_BYTES,
-  type ChunkRecord,
+  encodeChunkRecord, writeIndexHeader, indexVersionOf, CaptureIndex, INDEX_HEADER_BYTES,
+  INDEX_VERSION, type ChunkRecord,
 } from './captureIndex';
+import { encodeRecordBlock } from './recordBlock';
 import { append, type BlockFile } from './blockFile';
 
 export interface CaptureFiles {
@@ -65,6 +66,12 @@ export interface CaptureFiles {
   sum: BlockFile;
   /** Raw frame bytes, never compressed. */
   byt: BlockFile;
+  /**
+   * Frame records, deflated per chunk (ADR 0049) - what each frame's first
+   * dissection learned from the frames before it, so its tree can be built
+   * again from that frame alone. Empty for a version 1 capture.
+   */
+  rec: BlockFile;
 }
 
 export interface WriterOptions {
@@ -150,9 +157,22 @@ interface Staged {
    * holding the chunk back - see `placeholderRow`.
    */
   packet: Packet | null;
+  /**
+   * The frame's record, from the pipeline Worker, which dissects it. Like the
+   * row it may arrive before or after the bytes; a slot sealed without one is
+   * written as having none, and that frame's tree is built another way.
+   */
+  record: Uint8Array | null;
   /** Where this frame's bytes already are. Written before the row waits. */
   bytOffset: number;
   bytLength: number;
+}
+
+/** What a revisit of one frame needs, while that frame is still staged. */
+export interface StagedFrame {
+  record: Uint8Array | null;
+  packet: Packet | null;
+  bytes: Uint8Array | null;
 }
 
 /**
@@ -228,6 +248,13 @@ export interface WriterStats {
   rowsMissed: number;
   /** Slots sealed with a placeholder because no row ever arrived. */
   framesSealedWithoutRow: number;
+  /** Records matched to their frame's slot. */
+  recordsAttached: number;
+  /**
+   * Records that arrived after their chunk sealed, or never matched a frame.
+   * Nothing is lost with them - the frame's tree is rebuilt another way.
+   */
+  recordsMissed: number;
 }
 
 export class CaptureWriter {
@@ -247,6 +274,7 @@ export class CaptureWriter {
    * and holding is the only answer that cannot lose a row.
    */
   private readonly orphanRows = new Map<number, Packet>();
+  private readonly orphanRecords = new Map<number, Uint8Array>();
   /**
    * The highest frame id whose bytes this writer has staged.
    *
@@ -288,6 +316,7 @@ export class CaptureWriter {
     framesStaged: 0, framesWritten: 0, chunksWritten: 0, bytesWritten: 0,
     patchesApplied: 0, patchesMissed: 0, flushes: 0,
     rowsAttached: 0, rowsMissed: 0, framesSealedWithoutRow: 0,
+    recordsAttached: 0, recordsMissed: 0,
   };
 
   /**
@@ -304,7 +333,21 @@ export class CaptureWriter {
     this.horizonFrames = options.horizonFrames ?? DEFAULT_HORIZON_FRAMES;
     this.flushEveryChunks = options.flushEveryChunks ?? DEFAULT_FLUSH_EVERY_CHUNKS;
     this.deflate = options.deflate ?? defaultDeflate;
-    this.index = new CaptureIndex(options.resumeFrom ?? []);
+    // The file's own version, when it has one: a capture written by an older
+    // build is continued in its own format, because a file's stride is fixed by
+    // its header. A new file is written at this build's version.
+    //
+    // A header of zeros is no header: recovery truncates a new, empty index to
+    // the header's length, which on a real file pads it with zero bytes.
+    let version = INDEX_VERSION;
+    let headerPresent = false;
+    if (files.index.size() >= INDEX_HEADER_BYTES) {
+      const header = new Uint8Array(INDEX_HEADER_BYTES);
+      files.index.read(0, header);
+      headerPresent = header.some((b) => b !== 0);
+      if (headerPresent) version = indexVersionOf(header);
+    }
+    this.index = new CaptureIndex(options.resumeFrom ?? [], version);
     this.ordinal = this.index.frameCount;
     // Seeded from what survived, not started at zero. These counters are what
     // the panel reports as "N frames stored on disk", and a reopened capture
@@ -316,9 +359,9 @@ export class CaptureWriter {
       const last = this.index.record(this.index.chunkCount - 1);
       this.counters.bytesWritten = last.bytOffset + last.bytLength;
     }
-    if (files.index.size() === 0) {
+    if (!headerPresent) {
       const header = new Uint8Array(INDEX_HEADER_BYTES);
-      writeIndexHeader(header);
+      writeIndexHeader(header, version);
       files.index.write(0, header);
     }
   }
@@ -401,11 +444,17 @@ export class CaptureWriter {
       // than left in the map, so the map holds only what is genuinely early.
       const early = this.orphanRows.get(frame.id) ?? null;
       if (early !== null) this.orphanRows.delete(frame.id);
+      const earlyRecord = this.orphanRecords.get(frame.id) ?? null;
+      if (earlyRecord !== null) {
+        this.orphanRecords.delete(frame.id);
+        this.counters.recordsAttached += 1;
+      }
       if (frame.id > this.highestStagedId) this.highestStagedId = frame.id;
       this.staged.push({
         id: frame.id,
         tsUs: frame.tsUs,
         packet: early,
+        record: earlyRecord,
         bytOffset: at,
         bytLength: frame.bytes.length,
       });
@@ -460,6 +509,50 @@ export class CaptureWriter {
   clearOrphans(): void {
     this.counters.rowsMissed += this.orphanRows.size;
     this.orphanRows.clear();
+    this.counters.recordsMissed += this.orphanRecords.size;
+    this.orphanRecords.clear();
+  }
+
+  /**
+   * Frame records from the pipeline Worker, matched to their slots the way
+   * rows are (`attachRows`): a record may overtake its bytes and wait, and one
+   * whose chunk has already sealed is counted and dropped.
+   *
+   * A version 1 capture has nowhere to put them, and takes none.
+   */
+  attachRecords(frames: readonly { id: number; record: Uint8Array }[]): void {
+    if (!this.index.storesRecords) return;
+    for (const { id, record } of frames) {
+      const index = this.stagedAt.get(id);
+      const sealed = index !== undefined ? index < this.drained : id <= this.highestStagedId;
+      if (sealed) {
+        this.counters.recordsMissed += 1;
+        continue;
+      }
+      if (index === undefined) {
+        this.orphanRecords.set(id, record);
+        continue;
+      }
+      this.staged[index].record = record;
+      this.counters.recordsAttached += 1;
+    }
+  }
+
+  /**
+   * One still-staged frame's record, row and bytes, or null when it is not
+   * staged - sealed, or never seen. A revisit reads a sealed frame through the
+   * reader; the newest frames, up to `horizonFrames` of them, are only here.
+   */
+  stagedFrame(id: number): StagedFrame | null {
+    const index = this.stagedAt.get(id);
+    if (index === undefined || index < this.drained) return null;
+    const entry = this.staged[index];
+    let bytes: Uint8Array | null = null;
+    if (entry.bytLength > 0 && entry.bytOffset + entry.bytLength <= this.files.byt.size()) {
+      bytes = new Uint8Array(entry.bytLength);
+      this.files.byt.read(entry.bytOffset, bytes);
+    }
+    return { record: entry.record, packet: entry.packet, bytes };
   }
 
   /**
@@ -559,6 +652,16 @@ export class CaptureWriter {
     const sumBytes = this.deflate(encoded.summary);
     const pfxOffset = append(this.files.pfx, pfxBytes);
     const sumOffset = append(this.files.sum, sumBytes);
+    // The chunk's records, after its other blocks and before its index record,
+    // so the recovery rule covers them unchanged: a crash leaves records with no
+    // index record describing them, never an index record pointing past them.
+    let recOffset = 0;
+    let recLength = 0;
+    if (this.index.storesRecords && entries.some((e) => e.record !== null)) {
+      const recBytes = this.deflate(encodeRecordBlock(entries.map((e) => e.record)));
+      recOffset = append(this.files.rec, recBytes);
+      recLength = recBytes.length;
+    }
 
     // The bytes are already down, and contiguously: frames were appended in
     // order, so this chunk's byte extent is its first frame's offset to its
@@ -588,6 +691,8 @@ export class CaptureWriter {
       bytOffset: first.bytOffset,
       bytLength: last.bytOffset + last.bytLength - first.bytOffset,
       firstTsUs: encoded.firstTsUs,
+      recOffset,
+      recLength,
     };
 
     // Data first, then flush, THEN the index record. The recovery rule rests
@@ -596,8 +701,8 @@ export class CaptureWriter {
     this.chunksSinceFlush += 1;
     if (this.chunksSinceFlush >= this.flushEveryChunks) this.flushData();
 
-    const recordBytes = new Uint8Array(INDEX_RECORD_BYTES);
-    encodeChunkRecord(record, recordBytes, 0);
+    const recordBytes = new Uint8Array(this.index.stride);
+    encodeChunkRecord(record, recordBytes, 0, this.index.stride);
     append(this.files.index, recordBytes);
     this.index.append(record);
 
@@ -626,6 +731,7 @@ export class CaptureWriter {
     this.files.byt.flush();
     this.files.pfx.flush();
     this.files.sum.flush();
+    this.files.rec.flush();
     this.chunksSinceFlush = 0;
     this.counters.flushes += 1;
   }

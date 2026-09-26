@@ -41,6 +41,7 @@ import type { CaptureIndex } from './captureIndex';
 import { readExact, type BlockFile } from './blockFile';
 import type { CaptureFiles } from './captureWriter';
 import type { Packet } from '../../types/packet';
+import { decodeRecordBlock } from './recordBlock';
 
 /**
  * The most bytes one read may cover to satisfy the frames wanted from a chunk.
@@ -54,6 +55,13 @@ const MAX_SPAN = 8 * 1024 * 1024;
 
 /** Chunks whose directory is kept inflated. ~48 kB each. */
 const DIRECTORY_CACHE = 32;
+
+/**
+ * How many chunks' inflated records are kept. A revisit reads one frame's
+ * record, and the next one is usually a neighbour - arrowing down the list -
+ * so a few chunks are enough; each is 4,096 records, ~1 MB raw at worst.
+ */
+const RECORD_CACHE = 8;
 
 /**
  * Chunks one `readRowsAt` may decode.
@@ -78,6 +86,7 @@ const MAX_SCATTERED_ROWS = 256;
 
 export class CaptureReader {
   private readonly directories = new Map<number, ChunkDirectory>();
+  private readonly recordBlocks = new Map<number, (Uint8Array | null)[]>();
 
   constructor(
     private readonly files: CaptureFiles,
@@ -86,7 +95,42 @@ export class CaptureReader {
   ) {}
 
   /** Forgets every cached directory. For a capture that was discarded. */
-  clear(): void { this.directories.clear(); }
+  clear(): void {
+    this.directories.clear();
+    this.recordBlocks.clear();
+  }
+
+  /**
+   * One frame's record (ADR 0049), or null when it has none: a chunk sealed
+   * without one, a capture written before records existed, or an id this
+   * capture does not hold.
+   */
+  readRecord(id: number): Uint8Array | null {
+    const chunk = this.index.chunkForId(id);
+    if (chunk < 0) return null;
+    const record = this.index.record(chunk);
+    if (record.recLength === 0) return null;
+    const directory = this.directory(chunk);
+    if (directory === null) return null;
+    const within = directory.indexOfId(id);
+    if (within < 0) return null;
+
+    let block = this.recordBlocks.get(chunk);
+    if (block === undefined) {
+      const packed = this.readClamped(this.files.rec, record.recOffset, record.recLength);
+      if (packed === null) return null;
+      block = decodeRecordBlock(this.inflate(packed));
+      this.recordBlocks.set(chunk, block);
+      if (this.recordBlocks.size > RECORD_CACHE) {
+        const oldest = this.recordBlocks.keys().next();
+        if (!oldest.done) this.recordBlocks.delete(oldest.value);
+      }
+    } else {
+      this.recordBlocks.delete(chunk);
+      this.recordBlocks.set(chunk, block);
+    }
+    return block[within] ?? null;
+  }
 
   /**
    * One chunk's rows, exactly as they were written.

@@ -52,6 +52,7 @@ function files(): CaptureFiles & { byt: MemoryBlockFile } {
     pfx: new MemoryBlockFile(),
     sum: new MemoryBlockFile(),
     byt: new MemoryBlockFile(),
+    rec: new MemoryBlockFile(),
   };
 }
 

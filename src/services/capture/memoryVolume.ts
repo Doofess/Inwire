@@ -21,7 +21,7 @@ import type { CaptureFiles } from './captureWriter';
 function emptyFiles(): CaptureFiles {
   return {
     index: new MemoryBlockFile(), pfx: new MemoryBlockFile(),
-    sum: new MemoryBlockFile(), byt: new MemoryBlockFile(),
+    sum: new MemoryBlockFile(), byt: new MemoryBlockFile(), rec: new MemoryBlockFile(),
   };
 }
 

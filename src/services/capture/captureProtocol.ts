@@ -80,6 +80,18 @@ export type ToCapture =
    * build without one writes bytes and rows together exactly as it always did.
    */
   | { type: 'appendBytes'; frames: RawFrame[] }
+  /**
+   * Frame records from the pipeline Worker, on its own port, one-way
+   * (ADR 0049): what each frame's first dissection learned from the frames
+   * before it. Matched to their frames by id, like rows, in either order.
+   */
+  | { type: 'appendRecords'; frames: { id: number; record: Uint8Array }[] }
+  /**
+   * Everything a revisit of frame `id` needs - its record, its row, its bytes
+   * and the bytes of every frame its record names. Answered with `revisitKit`
+   * on the port that asked, which for the pipeline Worker is its own.
+   */
+  | { type: 'revisitKit'; requestId: number; id: number }
   /** Patches produced by this flush, for rows that are still staged. */
   | { type: 'patches'; patches: InfoPatch[] }
   /** Seals the staging ring and flushes. Pause, stop, and page hide. */
@@ -169,6 +181,18 @@ export type FromCapture =
     }
   /** Frames asked for by a `read`. Absent ids are frames the capture lacks. */
   | { type: 'bytes'; requestId: number; frames: [number, Uint8Array][] }
+  /**
+   * What a `revisitKit` asked for. `record` is null for a frame with none - a
+   * capture written before records existed, or one sealed before its record
+   * arrived - and `row` null for a frame this capture does not hold.
+   */
+  | {
+      type: 'revisitKit';
+      requestId: number;
+      record: Uint8Array | null;
+      row: Packet | null;
+      frames: [number, Uint8Array][];
+    }
   /**
    * Decoded chunks answering a `rowsAt`, each with where it starts and
    * whether its rows carry their own link type (`RowBlock.linkTypesStored`).

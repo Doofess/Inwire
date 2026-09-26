@@ -52,6 +52,7 @@ import { compile } from '../filter/compile';
 import { inflateSync } from 'fflate';
 import type { FromCapture, ToCapture } from './captureProtocol';
 import type { Packet } from '../../types/packet';
+import { recordRefs } from '../dissect/recordHeader';
 
 /** A capture's four files, and the handles behind them. */
 export interface OpenVolume extends CaptureFiles {
@@ -135,9 +136,16 @@ export class CaptureHost {
     this.scanSliceMs = options.scanSliceMs ?? DEFAULT_SLICE_MS;
   }
 
-  /** Queues a message. Handling is serialised; see the module header. */
-  receive(message: ToCapture): void {
-    this.queue.run(() => this.handle(message));
+  /**
+   * Queues a message. Handling is serialised; see the module header.
+   *
+   * `reply` is where an answer to THIS message goes, when it is not the client
+   * port - the pipeline Worker asks for revisit kits on its own port, and the
+   * answer must come back down that one. Failures still go to `post`, which is
+   * the channel the app watches for them.
+   */
+  receive(message: ToCapture, reply?: (message: FromCapture) => void): void {
+    this.queue.run(() => this.handle(message, reply ?? this.post));
   }
 
   /** Resolves once every queued message has been handled. For tests. */
@@ -170,7 +178,7 @@ export class CaptureHost {
 
   private bytesOnDisk(capture: OpenCapture): number {
     return capture.volume.index.size() + capture.volume.pfx.size()
-      + capture.volume.sum.size() + capture.volume.byt.size();
+      + capture.volume.sum.size() + capture.volume.byt.size() + capture.volume.rec.size();
   }
 
   private reportStats(): void {
@@ -185,12 +193,17 @@ export class CaptureHost {
     });
   }
 
-  private handle(message: ToCapture): void {
+  private handle(message: ToCapture, reply: (message: FromCapture) => void): void {
     try {
       switch (message.type) {
         case 'open': return this.onOpen(message);
         case 'append': return this.onAppend(message);
         case 'appendBytes': return this.onAppendBytes(message);
+        case 'appendRecords': {
+          this.open?.writer.attachRecords(message.frames);
+          return;
+        }
+        case 'revisitKit': return this.onRevisitKit(message, reply);
         case 'patches': {
           this.open?.writer.applyPatches(message.patches);
           return;
@@ -233,10 +246,11 @@ export class CaptureHost {
     // Recovery before the writer, not after. A crash can leave data past the
     // last index record, and a writer that appended to it would put its chunk
     // where nothing can find it and every offset after it wrong.
-    const { records, plan } = recoverIndex(volume.index, volume.pfx, volume.sum, volume.byt);
+    const { records, plan } = recoverIndex(volume.index, volume.pfx, volume.sum, volume.byt, volume.rec);
     volume.pfx.truncate(plan.pfxLength);
     volume.sum.truncate(plan.sumLength);
     volume.byt.truncate(plan.bytLength);
+    volume.rec.truncate(plan.recLength);
     volume.index.truncate(plan.indexLength);
 
     const writer = new CaptureWriter(volume, { resumeFrom: records.slice(0, plan.keepRecords) });
@@ -308,6 +322,54 @@ export class CaptureHost {
       this.fail(describe(error), false);
     }
     this.post({ type: 'bytes', requestId: message.requestId, frames });
+  }
+
+  /**
+   * One frame's revisit kit (ADR 0049): its record, its row, and the bytes of
+   * it and of every frame its record names - in one answer, because a revisit
+   * that had to come back for each referenced frame would pay a round trip per
+   * TLS segment a record spans.
+   *
+   * A frame still staged is answered from the writer, which holds the newest
+   * `horizonFrames` of them; everything else from the reader. Answers like
+   * every request here, even when it fails: an empty kit, which the Worker
+   * reads as "build this tree another way".
+   */
+  private onRevisitKit(
+    message: Extract<ToCapture, { type: 'revisitKit' }>,
+    reply: (message: FromCapture) => void,
+  ): void {
+    let record: Uint8Array | null = null;
+    let row: Packet | null = null;
+    const frames = new Map<number, Uint8Array>();
+    try {
+      const open = this.open;
+      if (open !== null) {
+        const staged = open.writer.stagedFrame(message.id);
+        if (staged !== null) {
+          record = staged.record;
+          row = staged.packet;
+        } else {
+          record = open.reader.readRecord(message.id);
+          const ordinal = open.reader.ordinalOf(message.id);
+          if (ordinal >= 0) row = open.reader.readRowsFor([ordinal]).get(ordinal) ?? null;
+        }
+        const wanted = [message.id, ...(record === null ? [] : recordRefs(record))];
+        const sealed: number[] = [];
+        for (const id of wanted) {
+          const bytes = open.writer.stagedFrame(id)?.bytes ?? null;
+          if (bytes !== null) frames.set(id, bytes);
+          else sealed.push(id);
+        }
+        for (const [id, bytes] of open.reader.readBytes(sealed)) frames.set(id, bytes);
+      }
+    } catch (error) {
+      this.fail(describe(error), false);
+      record = null;
+      row = null;
+      frames.clear();
+    }
+    reply({ type: 'revisitKit', requestId: message.requestId, record, row, frames: [...frames] });
   }
 
   private onChunk(message: Extract<ToCapture, { type: 'chunk' }>): void {

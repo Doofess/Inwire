@@ -26,7 +26,7 @@
  * `scripts/electron/store-protocol.ts`. Nothing here decides anything.
  */
 import { CaptureHost } from '../../src/services/capture/captureHost';
-import type { ToCapture } from '../../src/services/capture/captureProtocol';
+import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import { captureVolume } from './volume';
 import { HEAP_SAMPLE_MS, judgeHeap } from './heapGuard';
 import { getHeapStatistics } from 'node:v8';
@@ -66,9 +66,14 @@ process.parentPort.on('message', (event) => {
   if (!incoming) return;
   const role = (event.data as { role?: string } | null)?.role ?? 'client';
   if (role === 'ingest') {
-    // One-way: frames in, nothing out. It never becomes `port`, so nothing can
-    // accidentally answer a request on it.
-    incoming.on('message', (message) => host.receive(message.data as ToCapture));
+    // The pipeline Worker's port. Frames and records in; and the one kind of
+    // answer that belongs here, a revisit kit (ADR 0049), which goes back down
+    // THIS port because the Worker asked for it. The answer travels with the
+    // message rather than this port ever becoming `port`, so nothing meant for
+    // the renderer can be answered here - failures included, which `host`
+    // still reports on the client port the app watches.
+    const reply = (answer: FromCapture) => incoming.postMessage(answer);
+    incoming.on('message', (message) => host.receive(message.data as ToCapture, reply));
     incoming.start();
     return;
   }

@@ -18,35 +18,18 @@
  *
  * A revisit that finishes with a DIFFERENT tree is a confident wrong answer
  * about a frame somebody is looking at, and is the one thing that fails this
- * script. Misses are counted by reason and printed; which reasons are allowed
- * narrows phase by phase until none are.
+ * script. Misses are counted by reason and printed.
  *
  * Also printed, not asserted: what the records cost - bytes per frame raw and
- * deflated in the store's own 4,096-frame chunks at its own level.
+ * deflated in the store's own 4,096-frame chunks at its own level - and which
+ * answers the bytes go to.
  *
  * Real captures only (test/fixtures/README.md); skips cleanly without them.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { deflateSync } from 'fflate';
-import { PcapService, decodeRawEthernetPacket } from '../../src/services/pcapParser';
-import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
-import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
-import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
-import { DnsTracker } from '../../src/services/dnsTracker';
-import { L3Tracker } from '../../src/services/l3Tracker';
-import { applyInfoPatch } from '../../src/services/dissect/infoPatch';
-import { withDissectEnv } from '../../src/services/dissect/dissectEnv';
-import {
-  FrameRecorder, FrameRevisit, RecordMiss, recordComposition, recordRefs,
-} from '../../src/services/dissect/frameRecord';
-import type { InfoPatch } from '../../src/services/dissect/types';
-import type { Packet, ProtocolLayer } from '../../src/types/packet';
-
-const FIXTURES: { name: string; path: string; optional?: boolean }[] = [
-  { name: 'inwire', path: 'test/fixtures/inwire_capture_1788478187989.pcap' },
-  { name: 'bulk', path: 'test/fixtures/bulk_capture_1788426090876.pcap' },
-  { name: 'icmpErrors', path: 'test/fixtures/icmp_errors_capture_1790359378632.pcapng', optional: true },
-];
+import { RecordMiss, recordComposition, recordRefs } from '../../src/services/dissect/frameRecord';
+import { FIXTURES, arrive, firstDifference, render, revisit } from './arrival';
 
 /** The store's chunk size and deflate level (chunkCodec.ts, captureWriter.ts). */
 const CHUNK_FRAMES = 4096;
@@ -63,85 +46,12 @@ function check(name: string, actual: unknown, expected: unknown) {
   }
 }
 
-/** A tree, as a string, so a diff points at the row that moved. */
-function render(layers: ProtocolLayer[]): string {
-  const lines: string[] = [];
-  const visit = (fields: ProtocolLayer['fields'], depth: number) => {
-    for (const f of fields) {
-      lines.push(`${'  '.repeat(depth)}${f.name}: ${String(f.value)}`);
-      if (f.children) visit(f.children, depth + 1);
-    }
-  };
-  for (const layer of layers) {
-    lines.push(`${layer.name} | ${layer.summary}`);
-    visit(layer.fields, 1);
-  }
-  return lines.join('\n');
-}
-
-/** The first line two renders differ on, with a little context. */
-function firstDifference(want: string, got: string): string {
-  const a = want.split('\n');
-  const b = got.split('\n');
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    if (a[i] !== b[i]) return `line ${i + 1}: arrival "${a[i] ?? '(none)'}" / revisit "${b[i] ?? '(none)'}"`;
-  }
-  return '(identical)';
-}
-
 function percentile(sorted: number[], p: number): number {
   return sorted.length === 0 ? 0 : sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
 }
 
-interface Arrived {
-  packet: Packet;
-  record: Uint8Array;
-  input: { bytes: Uint8Array; tsUs: number; relativeTime: number; timeDelta: number; origLen: number; linktype: number };
-}
-
 async function runFixture(name: string, path: string) {
-  const file = new File([new Uint8Array(readFileSync(path))], `${name}.pcap`);
-  const { frames } = await PcapService.extractFrames(file, Number.POSITIVE_INFINITY);
-  const host = PcapService.inferHostFromFrames(frames);
-
-  // --- arrival: the importer's own loop, with a recorder in front ------------
-  const recorder = new FrameRecorder({
-    tcp: new TcpStreamTracker(), quic: new QuicFlowTracker(), dns: new DnsTracker(),
-    icmp: new IcmpEchoTracker(), l3: new L3Tracker(),
-  });
-  const src = recorder.sources;
-  const arrived: Arrived[] = [];
-  const patchesFor = new Map<number, InfoPatch[]>();
-  let baseNanos: bigint | null = null;
-  let prevNanos: bigint | null = null;
-  const t0 = performance.now();
-  for (const frame of frames) {
-    if (baseNanos === null) baseNanos = frame.tsNanos;
-    const relativeTime = Number(frame.tsNanos - baseNanos) / 1e9;
-    const timeDelta = prevNanos === null ? 0 : Number(frame.tsNanos - prevNanos) / 1e9;
-    prevNanos = frame.tsNanos;
-    const tsUs = Number(frame.tsNanos / 1000n);
-    const id = arrived.length + 1;
-
-    recorder.begin();
-    const { packet, icmpMatchedRequestFrameId, infoPatches } = withDissectEnv(src.env, () =>
-      decodeRawEthernetPacket(frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
-        src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host));
-    arrived.push({
-      packet, record: recorder.end(),
-      input: { bytes: frame.rawBytes, tsUs, relativeTime, timeDelta, origLen: frame.origLen, linktype: frame.linktype },
-    });
-    if (icmpMatchedRequestFrameId !== undefined) {
-      arrived[icmpMatchedRequestFrameId - 1].packet.info += ` (reply in ${packet.id})`;
-    }
-    for (const patch of infoPatches ?? []) {
-      applyInfoPatch(arrived[patch.frameId - 1].packet, patch);
-      const list = patchesFor.get(patch.frameId) ?? [];
-      list.push(patch);
-      patchesFor.set(patch.frameId, list);
-    }
-  }
-  const arrivalMs = performance.now() - t0;
+  const { arrived, patchesFor, host, ms: arrivalMs } = await arrive(path);
 
   // --- revisit: every frame alone ---------------------------------------------
   let equal = 0;
@@ -154,16 +64,10 @@ async function runFixture(name: string, path: string) {
       // Other frames' bytes, as the store hands them over: by id, and only for
       // the frames the record names.
       const named = new Set(recordRefs(record));
-      const revisit = new FrameRevisit(record, (frame) =>
-        (named.has(frame) ? arrived[frame - 1]?.input.bytes : undefined));
-      const rs = revisit.sources;
-      const { packet: again } = withDissectEnv(rs.env, () =>
-        decodeRawEthernetPacket(input.bytes, packet.id, input.tsUs, input.relativeTime, input.timeDelta,
-          input.origLen, rs.tcp, rs.icmp, rs.quic, rs.dns, undefined, input.linktype, rs.l3, host));
-      revisit.finish();
-      for (const patch of patchesFor.get(packet.id) ?? []) applyInfoPatch(again, patch);
+      const layers = revisit(input, packet.id, record, host, patchesFor.get(packet.id) ?? [],
+        (frame) => (named.has(frame) ? arrived[frame - 1]?.input.bytes : undefined));
       const want = render(packet.layers);
-      const got = render(again.layers);
+      const got = render(layers);
       if (want === got) {
         equal += 1;
       } else {
@@ -212,6 +116,9 @@ async function runFixture(name: string, path: string) {
 
   check(`${name}: no frame is revisited into a different tree`, wrong, 0);
   check(`${name}: every frame either matches or says why it cannot`, equal + missed + wrong, arrived.length);
+  // Phase 3 of ADR 0049 reached every frame of the real fixtures, none of which
+  // carries a key log. A miss here now is a regression, not a gap.
+  check(`${name}: every frame is rebuilt from its record`, missed, 0);
 }
 
 async function main() {

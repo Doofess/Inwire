@@ -61,7 +61,8 @@ function files(): CaptureFiles & { all: MemoryBlockFile[] } {
   const pfx = new MemoryBlockFile();
   const sum = new MemoryBlockFile();
   const byt = new MemoryBlockFile();
-  return { index, pfx, sum, byt, all: [index, pfx, sum, byt] };
+  const rec = new MemoryBlockFile();
+  return { index, pfx, sum, byt, rec, all: [index, pfx, sum, byt, rec] };
 }
 
 /**

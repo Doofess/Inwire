@@ -17,6 +17,10 @@ const FILES = {
   pfx: 'prefix.iwpfx',
   sum: 'summary.iwsum',
   byt: 'frames.iwbyt',
+  // Each frame's record, so its tree can be rebuilt from that frame alone
+  // (ADR 0049). Absent from a capture written before it existed, and opened
+  // (and so created) empty for one: a version 1 index never points into it.
+  rec: 'records.iwrec',
 } as const;
 
 export function captureVolume(directory: string): CaptureVolume {
@@ -31,10 +35,11 @@ export function captureVolume(directory: string): CaptureVolume {
       const pfx = NodeBlockFile.open(path.join(dir, FILES.pfx));
       const sum = NodeBlockFile.open(path.join(dir, FILES.sum));
       const byt = NodeBlockFile.open(path.join(dir, FILES.byt));
+      const rec = NodeBlockFile.open(path.join(dir, FILES.rec));
       return {
-        index, pfx, sum, byt,
+        index, pfx, sum, byt, rec,
         close() {
-          for (const file of [index, pfx, sum, byt]) {
+          for (const file of [index, pfx, sum, byt, rec]) {
             try { file.close(); } catch { /* already gone */ }
           }
         },

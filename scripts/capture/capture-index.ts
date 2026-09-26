@@ -24,7 +24,7 @@
  */
 import {
   CaptureIndex, planRecovery, recoverIndex, encodeChunkRecord, decodeChunkRecord,
-  writeIndexHeader, recordsIn, INDEX_HEADER_BYTES, INDEX_RECORD_BYTES,
+  writeIndexHeader, recordsIn, INDEX_HEADER_BYTES, INDEX_RECORD_BYTES, INDEX_RECORD_BYTES_V1,
   type ChunkRecord,
 } from '../../src/services/capture/captureIndex';
 import { MemoryBlockFile, readExact, append } from '../../src/services/capture/blockFile';
@@ -82,6 +82,7 @@ function chain(
       sumOffset: sum, sumLength: s.frameCount * 40,
       bytOffset: byt, bytLength: s.frameCount * 1100,
       firstTsUs: s.firstTsUs ?? 1_000_000 + i * 1_000_000,
+      recOffset: 0, recLength: 0,
     };
     ordinal += s.frameCount;
     pfx += record.pfxLength;
@@ -100,15 +101,23 @@ console.log('--- the record ---\n');
     sumOffset: 900_000_000, sumLength: 163_840,
     bytOffset: 40_000_000_000, bytLength: 4_505_600,
     firstTsUs: 1_788_477_971_653_284,
+    recOffset: 7_000_000_000, recLength: 151_552,
   };
   const buf = new Uint8Array(INDEX_RECORD_BYTES);
   encodeChunkRecord(record, buf, 0);
   check('a record round-trips', decodeChunkRecord(buf, 0), record);
+  // Version 1 has no records: its 64-byte stride ends at firstTsUs, and a
+  // chunk read from it says so rather than reading the next record's bytes.
+  const v1 = new Uint8Array(INDEX_RECORD_BYTES_V1);
+  encodeChunkRecord(record, v1, 0, INDEX_RECORD_BYTES_V1);
+  check('a version 1 record reads back with no records',
+    decodeChunkRecord(v1, 0, INDEX_RECORD_BYTES_V1), { ...record, recOffset: 0, recLength: 0 });
   // The reason offsets are f64 and not u64: a 40 GB offset is nowhere near
   // 2^53, and a BigInt read on the lookup path would cost more than the search.
   checkTrue('an offset past 2^32 survives exactly',
     decodeChunkRecord(buf, 0).bytOffset === 40_000_000_000);
-  check('the record is the stated width', INDEX_RECORD_BYTES, 64);
+  check('the record is the stated width', INDEX_RECORD_BYTES, 80);
+  check('...and version 1 is still the 64 bytes it always was', INDEX_RECORD_BYTES_V1, 64);
 }
 
 {
@@ -272,6 +281,7 @@ console.log('\n--- against a real file, through the seam ---\n');
       sumOffset: append(sum, sumBytes), sumLength: sumBytes.length,
       bytOffset: append(byt, bytBytes), bytLength: bytBytes.length,
       firstTsUs: 1_000_000 * (c + 1),
+      recOffset: 0, recLength: 0,
     };
     // Data first, flush, THEN the index record. The whole recovery rule rests
     // on this order, so the test writes in it too.

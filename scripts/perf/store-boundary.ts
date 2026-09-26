@@ -142,6 +142,7 @@ if (!isMainThread) {
     pfx: NodeBlockFile.open(path.join(dir, 'prefix.iwpfx')),
     sum: NodeBlockFile.open(path.join(dir, 'summary.iwsum')),
     byt: NodeBlockFile.open(path.join(dir, 'frames.iwbyt')),
+    rec: NodeBlockFile.open(path.join(dir, 'records.iwrec')),
   };
   const writer = new CaptureWriter(files);
   const writerMs = await time('CaptureWriter.append + finish', () => {

@@ -57,10 +57,11 @@ async function main(): Promise<void> {
       pfx: NodeBlockFile.open(path.join(work, 'prefix.iwpfx')),
       sum: NodeBlockFile.open(path.join(work, 'summary.iwsum')),
       byt: NodeBlockFile.open(path.join(work, 'frames.iwbyt')),
+      rec: NodeBlockFile.open(path.join(work, 'records.iwrec')),
     };
     const inflate = (b: Uint8Array) => new Uint8Array(inflateRawSync(b));
     const deflate = (b: Uint8Array) => new Uint8Array(deflateRawSync(b));
-    const { records, plan } = recoverIndex(files.index, files.pfx, files.sum, files.byt);
+    const { records, plan } = recoverIndex(files.index, files.pfx, files.sum, files.byt, files.rec);
     const index = new CaptureWriter(files, { deflate, resumeFrom: records.slice(0, plan.keepRecords) }).index;
     const reader = new CaptureReader(files, index, inflate);
 

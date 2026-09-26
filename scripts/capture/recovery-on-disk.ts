@@ -57,6 +57,7 @@ function openCapture(id: string): CaptureFiles & { close(): void } {
     pfx: NodeBlockFile.open(path.join(dir, 'prefix.iwpfx')),
     sum: NodeBlockFile.open(path.join(dir, 'summary.iwsum')),
     byt: NodeBlockFile.open(path.join(dir, 'frames.iwbyt')),
+    rec: NodeBlockFile.open(path.join(dir, 'records.iwrec')),
   };
   return {
     ...files,
@@ -99,8 +100,8 @@ try {
     const chunks = writer.index.chunkCount;
     files.close();
 
-    // Four real files, on a real disk, with the process's handles closed.
-    for (const name of ['index.iwidx', 'prefix.iwpfx', 'summary.iwsum', 'frames.iwbyt']) {
+    // Five real files, on a real disk, with the process's handles closed.
+    for (const name of ['index.iwidx', 'prefix.iwpfx', 'summary.iwsum', 'frames.iwbyt', 'records.iwrec']) {
       checkTrue(`${name} is on disk`, existsSync(path.join(root, 'healthy', name)));
     }
 

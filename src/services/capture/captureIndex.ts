@@ -39,18 +39,37 @@
  * `planRecovery` is that rule as a pure function, so it can be tested against a
  * real truncated file rather than reasoned about. It walks the records and
  * stops at the first one whose extents run past any of the three files, and the
- * caller truncates all four back to that boundary. What is lost is the last
+ * caller truncates all five back to that boundary. What is lost is the last
  * partial chunk - under 4,096 frames - which is the append-only contract and is
  * worth stating out loud rather than discovering.
+ *
+ * ## Version 2: a fifth file
+ *
+ * Version 2 adds `records.iwrec`, each chunk's frame records (ADR 0049), and
+ * sixteen bytes to every index record to find them: an 80-byte stride where
+ * version 1 had 64. A version 1 capture still opens - its chunks simply have no
+ * records, which is what `recLength === 0` means - and a writer continuing one
+ * keeps writing version 1, because a file's stride is set by its header and
+ * cannot change half way down it.
  */
 import type { BlockFile } from './blockFile';
 
 export const INDEX_MAGIC = 0x31584449;          // 'IDX1'
-export const INDEX_VERSION = 1;
+/** The version this build writes. It reads 1 and 2. */
+export const INDEX_VERSION = 2;
 /** A fixed header so a reader can refuse a file it does not understand. */
 export const INDEX_HEADER_BYTES = 16;
-/** One record per chunk. See the module header for why 64 B is cheap. */
-export const INDEX_RECORD_BYTES = 64;
+/** One record per chunk. See the module header for why 80 B is cheap. */
+export const INDEX_RECORD_BYTES = 80;
+/** Version 1's stride: everything up to and including `firstTsUs`. */
+export const INDEX_RECORD_BYTES_V1 = 64;
+
+/** The stride of each version this build reads. */
+export function strideOf(version: number): number {
+  if (version === 1) return INDEX_RECORD_BYTES_V1;
+  if (version === 2) return INDEX_RECORD_BYTES;
+  throw new Error(`captureIndex: version ${version} is not one this build reads`);
+}
 
 const OFF_FIRST_ID = 0;        // u32
 const OFF_FRAME_COUNT = 4;     // u32
@@ -67,6 +86,8 @@ const OFF_FIRST_TS = 56;       // f64 - only the low half fits; see below
 // firstTsUs bounds this chunk for a time seek, and the final chunk's end is the
 // capture's end, which meta already carries. Eight bytes a chunk is nothing,
 // but a field that can disagree with its neighbour is worth not having.
+const OFF_REC_OFFSET = 64;     // f64 - version 2
+const OFF_REC_LENGTH = 72;     // u32 - version 2; 76..79 reserved
 
 export interface ChunkRecord {
   firstId: number;
@@ -81,10 +102,18 @@ export interface ChunkRecord {
   bytOffset: number;
   bytLength: number;
   firstTsUs: number;
+  /**
+   * This chunk's frame records in `records.iwrec`. Both 0 when the chunk has
+   * none - every chunk of a version 1 capture.
+   */
+  recOffset: number;
+  recLength: number;
 }
 
-export function encodeChunkRecord(record: ChunkRecord, into: Uint8Array, at: number): void {
-  const view = new DataView(into.buffer, into.byteOffset + at, INDEX_RECORD_BYTES);
+export function encodeChunkRecord(
+  record: ChunkRecord, into: Uint8Array, at: number, stride = INDEX_RECORD_BYTES,
+): void {
+  const view = new DataView(into.buffer, into.byteOffset + at, stride);
   view.setUint32(OFF_FIRST_ID, record.firstId >>> 0, true);
   view.setUint32(OFF_FRAME_COUNT, record.frameCount >>> 0, true);
   view.setFloat64(OFF_FIRST_ORDINAL, record.firstOrdinal, true);
@@ -96,10 +125,17 @@ export function encodeChunkRecord(record: ChunkRecord, into: Uint8Array, at: num
   view.setUint32(OFF_BYT_LENGTH, record.bytLength >>> 0, true);
   view.setUint32(OFF_LAST_ID, record.lastId >>> 0, true);
   view.setFloat64(OFF_FIRST_TS, record.firstTsUs, true);
+  if (stride >= INDEX_RECORD_BYTES) {
+    view.setFloat64(OFF_REC_OFFSET, record.recOffset, true);
+    view.setUint32(OFF_REC_LENGTH, record.recLength >>> 0, true);
+  }
 }
 
-export function decodeChunkRecord(from: Uint8Array, at: number): ChunkRecord {
-  const view = new DataView(from.buffer, from.byteOffset + at, INDEX_RECORD_BYTES);
+export function decodeChunkRecord(
+  from: Uint8Array, at: number, stride = INDEX_RECORD_BYTES,
+): ChunkRecord {
+  const view = new DataView(from.buffer, from.byteOffset + at, stride);
+  const records = stride >= INDEX_RECORD_BYTES;
   return {
     firstId: view.getUint32(OFF_FIRST_ID, true),
     frameCount: view.getUint32(OFF_FRAME_COUNT, true),
@@ -112,21 +148,40 @@ export function decodeChunkRecord(from: Uint8Array, at: number): ChunkRecord {
     bytLength: view.getUint32(OFF_BYT_LENGTH, true),
     lastId: view.getUint32(OFF_LAST_ID, true),
     firstTsUs: view.getFloat64(OFF_FIRST_TS, true),
+    recOffset: records ? view.getFloat64(OFF_REC_OFFSET, true) : 0,
+    recLength: records ? view.getUint32(OFF_REC_LENGTH, true) : 0,
   };
 }
 
-export function writeIndexHeader(into: Uint8Array): void {
+export function writeIndexHeader(into: Uint8Array, version = INDEX_VERSION): void {
   const view = new DataView(into.buffer, into.byteOffset, INDEX_HEADER_BYTES);
   view.setUint32(0, INDEX_MAGIC, true);
-  view.setUint16(4, INDEX_VERSION, true);
-  view.setUint16(6, INDEX_RECORD_BYTES, true);
+  view.setUint16(4, version, true);
+  view.setUint16(6, strideOf(version), true);
   view.setFloat64(8, 0, true);                   // reserved: v2's segment ordinal
 }
 
 /** How many whole records a file of this size holds after its header. */
-export function recordsIn(fileSize: number): number {
+export function recordsIn(fileSize: number, stride = INDEX_RECORD_BYTES): number {
   if (fileSize < INDEX_HEADER_BYTES) return 0;
-  return Math.floor((fileSize - INDEX_HEADER_BYTES) / INDEX_RECORD_BYTES);
+  return Math.floor((fileSize - INDEX_HEADER_BYTES) / stride);
+}
+
+/**
+ * The version an index file's header declares, or `INDEX_VERSION` for a file
+ * too short to have one - a new capture, which is written at this version.
+ */
+export function indexVersionOf(header: Uint8Array): number {
+  if (header.length < INDEX_HEADER_BYTES) return INDEX_VERSION;
+  const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+  const magic = view.getUint32(0, true);
+  if (magic !== INDEX_MAGIC) throw new Error(`captureIndex: bad magic 0x${magic.toString(16)}`);
+  const version = view.getUint16(4, true);
+  const stride = view.getUint16(6, true);
+  if (stride !== strideOf(version)) {
+    throw new Error(`captureIndex: record stride ${stride}, expected ${strideOf(version)}`);
+  }
+  return version;
 }
 
 /**
@@ -149,6 +204,8 @@ export class CaptureIndex {
   private sumLength: Uint32Array;
   private bytLength: Uint32Array;
   private firstTs: Float64Array;
+  private recOffset: Float64Array;
+  private recLength: Uint32Array;
 
   private n = 0;
   private frames = 0;
@@ -163,7 +220,11 @@ export class CaptureIndex {
    * the same way. Appending doubles the arrays geometrically, so a whole
    * capture's growth costs a handful of copies in total.
    */
-  constructor(records: readonly ChunkRecord[] = []) {
+  constructor(
+    records: readonly ChunkRecord[] = [],
+    /** The index file's version, which decides its stride and whether chunks have records. */
+    readonly version: number = INDEX_VERSION,
+  ) {
     const capacity = Math.max(64, records.length);
     this.firstId = new Uint32Array(capacity);
     this.lastId = new Uint32Array(capacity);
@@ -176,10 +237,16 @@ export class CaptureIndex {
     this.sumLength = new Uint32Array(capacity);
     this.bytLength = new Uint32Array(capacity);
     this.firstTs = new Float64Array(capacity);
+    this.recOffset = new Float64Array(capacity);
+    this.recLength = new Uint32Array(capacity);
     for (const r of records) this.append(r);
   }
 
   get chunkCount(): number { return this.n; }
+  /** Whether this capture's chunks carry frame records at all. */
+  get storesRecords(): boolean { return this.version >= 2; }
+  /** Bytes each record takes in the file. */
+  get stride(): number { return strideOf(this.version); }
   get frameCount(): number { return this.frames; }
 
   /** Adds a sealed chunk. Records arrive in order and are never revised. */
@@ -197,6 +264,8 @@ export class CaptureIndex {
     this.sumLength[i] = r.sumLength;
     this.bytLength[i] = r.bytLength;
     this.firstTs[i] = r.firstTsUs;
+    this.recOffset[i] = r.recOffset;
+    this.recLength[i] = r.recLength;
     this.n += 1;
     this.frames += r.frameCount;
   }
@@ -211,33 +280,26 @@ export class CaptureIndex {
     this.pfxLength = u32(this.pfxLength);
     this.sumLength = u32(this.sumLength);
     this.bytLength = u32(this.bytLength);
+    this.recLength = u32(this.recLength);
     this.firstOrdinal = f64(this.firstOrdinal);
     this.pfxOffset = f64(this.pfxOffset);
     this.sumOffset = f64(this.sumOffset);
     this.bytOffset = f64(this.bytOffset);
     this.firstTs = f64(this.firstTs);
+    this.recOffset = f64(this.recOffset);
   }
 
   /** Parses a whole `index.iwidx`, refusing a header it does not know. */
   static parse(bytes: Uint8Array): CaptureIndex {
     if (bytes.length < INDEX_HEADER_BYTES) return new CaptureIndex([]);
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const magic = view.getUint32(0, true);
-    if (magic !== INDEX_MAGIC) throw new Error(`captureIndex: bad magic 0x${magic.toString(16)}`);
-    const version = view.getUint16(4, true);
-    if (version !== INDEX_VERSION) {
-      throw new Error(`captureIndex: version ${version} is not one this build reads`);
-    }
-    const stride = view.getUint16(6, true);
-    if (stride !== INDEX_RECORD_BYTES) {
-      throw new Error(`captureIndex: record stride ${stride}, expected ${INDEX_RECORD_BYTES}`);
-    }
-    const count = recordsIn(bytes.length);
+    const version = indexVersionOf(bytes);
+    const stride = strideOf(version);
+    const count = recordsIn(bytes.length, stride);
     const records: ChunkRecord[] = new Array(count);
     for (let i = 0; i < count; i++) {
-      records[i] = decodeChunkRecord(bytes, INDEX_HEADER_BYTES + i * INDEX_RECORD_BYTES);
+      records[i] = decodeChunkRecord(bytes, INDEX_HEADER_BYTES + i * stride, stride);
     }
-    return new CaptureIndex(records);
+    return new CaptureIndex(records, version);
   }
 
   record(chunk: number): ChunkRecord {
@@ -254,6 +316,8 @@ export class CaptureIndex {
       bytOffset: this.bytOffset[chunk],
       bytLength: this.bytLength[chunk],
       firstTsUs: this.firstTs[chunk],
+      recOffset: this.recOffset[chunk],
+      recLength: this.recLength[chunk],
     };
   }
 
@@ -346,10 +410,11 @@ export class CaptureIndex {
 export interface RecoveryPlan {
   /** How many index records describe data that is actually present. */
   keepRecords: number;
-  /** Truncate the three data files to these lengths. */
+  /** Truncate the four data files to these lengths. */
   pfxLength: number;
   sumLength: number;
   bytLength: number;
+  recLength: number;
   /** Truncate the index itself to this length. */
   indexLength: number;
   /** Frames the torn tail cost. Zero when nothing was lost. */
@@ -377,12 +442,16 @@ export function planRecovery(
   pfxSize: number,
   sumSize: number,
   bytSize: number,
+  /** `records.iwrec`'s size; a version 1 capture has none, and no record reaches into it. */
+  recSize = 0,
+  stride = INDEX_RECORD_BYTES,
 ): RecoveryPlan {
   let keep = 0;
   for (const r of records) {
     const complete = r.pfxOffset + r.pfxLength <= pfxSize
       && r.sumOffset + r.sumLength <= sumSize
-      && r.bytOffset + r.bytLength <= bytSize;
+      && r.bytOffset + r.bytLength <= bytSize
+      && (r.recLength === 0 || r.recOffset + r.recLength <= recSize);
     if (!complete) break;
     keep += 1;
   }
@@ -391,6 +460,15 @@ export function planRecovery(
   for (let i = keep; i < records.length; i++) framesLost += records[i].frameCount;
 
   const last = keep > 0 ? records[keep - 1] : null;
+  // The records file ends where the last kept chunk that HAS records ends: a
+  // chunk sealed without them writes nothing there.
+  let recLength = 0;
+  for (let i = keep - 1; i >= 0; i--) {
+    if (records[i].recLength > 0) {
+      recLength = records[i].recOffset + records[i].recLength;
+      break;
+    }
+  }
   return {
     keepRecords: keep,
     // Truncate the data back to the end of the last chunk an index record
@@ -400,22 +478,31 @@ export function planRecovery(
     pfxLength: last === null ? 0 : last.pfxOffset + last.pfxLength,
     sumLength: last === null ? 0 : last.sumOffset + last.sumLength,
     bytLength: last === null ? 0 : last.bytOffset + last.bytLength,
-    indexLength: INDEX_HEADER_BYTES + keep * INDEX_RECORD_BYTES,
+    recLength,
+    indexLength: INDEX_HEADER_BYTES + keep * stride,
     framesLost,
   };
 }
 
 /** Reads an index file and plans its recovery in one step. */
 export function recoverIndex(
-  index: BlockFile, pfx: BlockFile, sum: BlockFile, byt: BlockFile,
-): { records: ChunkRecord[]; plan: RecoveryPlan } {
+  index: BlockFile, pfx: BlockFile, sum: BlockFile, byt: BlockFile, rec?: BlockFile,
+): { records: ChunkRecord[]; plan: RecoveryPlan; version: number } {
   const size = index.size();
-  const count = recordsIn(size);
-  const bytes = new Uint8Array(INDEX_HEADER_BYTES + count * INDEX_RECORD_BYTES);
-  index.read(0, bytes);
+  const header = new Uint8Array(Math.min(size, INDEX_HEADER_BYTES));
+  if (header.length > 0) index.read(0, header);
+  const version = indexVersionOf(header);
+  const stride = strideOf(version);
+  const count = recordsIn(size, stride);
+  const bytes = new Uint8Array(INDEX_HEADER_BYTES + count * stride);
+  if (count > 0) index.read(0, bytes);
   const records: ChunkRecord[] = new Array(count);
   for (let i = 0; i < count; i++) {
-    records[i] = decodeChunkRecord(bytes, INDEX_HEADER_BYTES + i * INDEX_RECORD_BYTES);
+    records[i] = decodeChunkRecord(bytes, INDEX_HEADER_BYTES + i * stride, stride);
   }
-  return { records, plan: planRecovery(records, pfx.size(), sum.size(), byt.size()) };
+  return {
+    records,
+    plan: planRecovery(records, pfx.size(), sum.size(), byt.size(), rec?.size() ?? 0, stride),
+    version,
+  };
 }
