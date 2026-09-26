@@ -69,11 +69,18 @@ rebuilt from its bytes and its record, with no replay.**
   key log found why this has to be explicit: keys were only ever derived when
   a ServerHello was parsed, so a revisit of any later frame silently drew its
   records undecrypted - 19 wrong trees, where the design promised none.
-- **Decrypted content is never recorded.** An answer that carries plaintext -
-  HTTP/3 frames from a 1-RTT stream, a packet opened with a key-log key, a
-  decrypting connection's HTTP state - is marked, and a revisit misses there.
-  (The owner's rule: plaintext stays in memory. Rebuilding those trees without
-  a replay is the open item below.)
+- **Decrypted content is never recorded; it is kept in memory.** An answer
+  that carries plaintext - HTTP/3 frames from a 1-RTT stream, a packet opened
+  with a key-log key, a decrypting connection's HTTP state - is only marked in
+  the record. The recorder writes the answer itself to a second log for that
+  frame, which the pipeline Worker holds in a `DerivedStore`
+  (`services/pipeline/derivedStore.ts`): memory only, 64 MB, oldest out, and
+  emptied when the key log is cleared or the capture reset. A revisit given
+  that log reads a marked answer from it; one without it - after a restart,
+  past the budget, after a clear - misses, and the frame is replayed. That is
+  the owner's rule, *plaintext stays in memory*, kept exactly. An import
+  decrypts on the renderer's thread, so it hands its log to the Worker after
+  its reset, and the store is sent only `{ id, record }` of each entry.
 - **Records live in a fifth capture file, `records.iwrec`**, one deflated
   block per chunk, written before the chunk's index record so recovery covers
   them unchanged. The index is version 2 (an 80-byte stride with the records'
@@ -98,15 +105,19 @@ rebuilt from its bytes and its record, with no replay.**
 - **Every frame of the real fixtures revisits into the identical tree** -
   inwire 12,858, bulk 14,782, icmpErrors 66, and the key-log capture's 14,615
   without its keys: zero misses, zero wrong (`scripts/pipeline/revisit.ts`,
-  which fails on any miss). With its keys, 7,339 are equal and 7,276 miss on
-  decrypted content; with the key log present at only one of the two passes,
-  every frame is equal or misses. Zero wrong in all seven runs. Through the store
+  which fails on any miss). **With its keys and the Worker's memory, all
+  14,615 frames revisit, zero misses** - the 7,276 decrypted ones read their
+  decrypted answers from memory. Without that memory, and with the key log
+  present at only one of the two passes, every frame is equal or misses. Zero
+  wrong in all eight runs. Through the store
   and a v8 clone, every inwire frame rebuilds from its kit alone
   (`scripts/capture/records.ts`).
 - **In the built app**, `scripts/electron/revisit-drive.ts` imports the real
-  `inwire` capture and opens deep TCP, TLS, DNS and QUIC frames: each tree is on
-  screen in ~20 ms, and a spy on the Worker's `postMessage` sees a `detail` and
-  no `replay`. That spy is the part that matters. A replay draws the same tree,
+  `inwire` capture and opens deep TCP, TLS, DNS and QUIC frames, then imports
+  the key-log capture with its key log followed and opens HTTP/3 and HTTP/2
+  frames: each tree is on screen in ~20 ms, and a spy on the Worker's
+  `postMessage` sees a `detail` and no `replay`. With the import's hand-over of
+  its decrypted answers removed, the four decrypted frames fail that check. That spy is the part that matters. A replay draws the same tree,
   and the first run of the drive passed on correct trees while every click was
   replaying: the import never asked for records. `scripts/capture/records.ts`
   now drives an import through `importAnyFile` for exactly that reason.
@@ -123,10 +134,10 @@ rebuilt from its bytes and its record, with no replay.**
 
 ## Open
 
-- **Decrypted traffic without a replay.** Answers carrying plaintext miss
-  today. The plan is a memory-only store of derived content in the Worker
-  (decoded header lists, plaintext buffers), with the bounded replay after a
-  restart. It needs a real capture with a key log to be gated.
+- **How far back the memory reaches.** The key-log capture's decrypted
+  answers are 8.2 MB for 75 seconds, ~590 B a frame; 64 MB holds about nine
+  minutes of browsing like that, and a decrypted frame older than that is
+  replayed. Sizing it the way the buffer is sized (ADR 0036) is the lever.
 - **The arrival cost on TLS-heavy traffic**, measured above.
 - **A QUIC packet arrival could not open stays unopened on revisit** when its
   keys arrived later. That equals what arrival showed, so it is stale rather

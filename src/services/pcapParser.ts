@@ -30,8 +30,12 @@ import type {
 import { dissectEnv, withDissectEnv } from './dissect/dissectEnv';
 import type { FrameRecorder } from './dissect/frameRecord';
 
-/** One frame's record, as it travels to the store (ADR 0049). */
-export interface FrameRecordEntry { id: number; record: Uint8Array }
+/**
+ * One frame's record, as it travels to the store (ADR 0049), and its decrypted
+ * answers, which do not: those go to the pipeline Worker's memory, and
+ * `CaptureClient.appendRecords` takes only the record.
+ */
+export interface FrameRecordEntry { id: number; record: Uint8Array; derived?: Uint8Array | null }
 import { poolExpert, poolTokens } from './dissect/tokenPool';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 
@@ -577,7 +581,7 @@ export class PcapService {
           for (const packet of batch) {
             const r = records.get(packet.id);
             if (r === undefined) continue;
-            batchRecords.push({ id: packet.id, record: r });
+            batchRecords.push({ id: packet.id, ...r });
             records.delete(packet.id);
           }
           onBatch(batch, batchRecords);
@@ -599,7 +603,7 @@ export class PcapService {
     const recorder = Recorder === null ? null : new Recorder({
       tcp: tcpTracker, quic: quicTracker, dns: dnsTracker, icmp: icmpTracker, l3: l3Tracker,
     });
-    const records = new Map<number, Uint8Array>();
+    const records = new Map<number, { record: Uint8Array; derived: Uint8Array | null }>();
 
     for (const frame of frames) {
       if (baseNanos === null) baseNanos = frame.tsNanos;
@@ -627,7 +631,7 @@ export class PcapService {
           frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
           src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host,
         ));
-        records.set(id, recorder.end());
+        records.set(id, { record: recorder.end(), derived: recorder.endDerived() });
       }
       const { packet, icmpMatchedRequestFrameId, infoPatches } = decoded;
       packet.tsPrecision = frame.tsPrecision;

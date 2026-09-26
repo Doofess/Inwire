@@ -20,10 +20,12 @@
  * about a frame somebody is looking at, and is the one thing that fails this
  * script. Misses are counted by reason and printed.
  *
- * **The key-log capture runs three times**, because a record holds no key and
- * a revisit asks the key log it has NOW: with its keys at both passes; with
- * none at arrival and all of them at the revisit (a log that came later); and
- * the other way round (a log since cleared). A tree that needed a key the
+ * **The key-log capture runs four more times**, because a record holds no key
+ * or plaintext, and a revisit asks the key log it has NOW: with its keys at
+ * both passes and its decrypted answers still in memory, which is the app's
+ * own case and must miss nothing; the same with that memory gone (a restart);
+ * with no keys at arrival and all of them at the revisit (a log that came
+ * later); and the other way round (a log since cleared). A tree that needed a key the
  * revisit's log disagrees about must miss - not be drawn opened, or shut,
  * differently from arrival. The first run of this capture with its keys found
  * 19 frames doing exactly that.
@@ -40,8 +42,12 @@ import { RecordMiss, recordComposition, recordRefs } from '../../src/services/di
 import { keyLog } from '../../src/services/tls/keyLog';
 import { FIXTURES, arrive, firstDifference, render, revisit } from './arrival';
 
-/** Which passes see the capture's key log. */
-interface KeyPlan { label: string; arrival: boolean; revisit: boolean; text: string }
+/**
+ * Which passes see the capture's key log, and whether the revisit still has
+ * the decrypted answers arrival kept in memory - which the app drops on a
+ * restart and whenever the key log is cleared.
+ */
+interface KeyPlan { label: string; arrival: boolean; revisit: boolean; derived: boolean; text: string }
 
 /** The store's chunk size and deflate level (chunkCodec.ts, captureWriter.ts). */
 const CHUNK_FRAMES = 4096;
@@ -76,13 +82,14 @@ async function runFixture(name: string, path: string, keys: KeyPlan | null = nul
   const misses = new Map<string, number>();
   const wrongExamples: string[] = [];
   const t1 = performance.now();
-  for (const { packet, record, input } of arrived) {
+  for (const { packet, record, derived, input } of arrived) {
     try {
       // Other frames' bytes, as the store hands them over: by id, and only for
       // the frames the record names.
       const named = new Set(recordRefs(record));
       const layers = revisit(input, packet.id, record, host, patchesFor.get(packet.id) ?? [],
-        (frame) => (named.has(frame) ? arrived[frame - 1]?.input.bytes : undefined));
+        (frame) => (named.has(frame) ? arrived[frame - 1]?.input.bytes : undefined),
+        keys?.derived ? derived : null);
       const want = render(packet.layers);
       const got = render(layers);
       if (want === got) {
@@ -140,7 +147,12 @@ async function runFixture(name: string, path: string, keys: KeyPlan | null = nul
     check(`${name}: every frame is rebuilt from its record`, missed, 0);
     return;
   }
-  // With a key log, decrypted content still misses (phase 4). What is held
+  if (keys.arrival && keys.revisit && keys.derived) {
+    // The app's own case: the key log it had, and the decrypted answers still
+    // in memory. Every frame, decrypted or not, from its record.
+    check(`${name}: every frame is rebuilt from its record and what memory holds`, missed, 0);
+  }
+  // Otherwise decrypted frames miss, and the replay builds them. What is held
   // here is that a key log that changed between the passes is NOTICED.
   const reasonCount = (text: string) =>
     [...misses].filter(([reason]) => reason.includes(text)).reduce((s, [, n]) => s + n, 0);
@@ -168,9 +180,10 @@ async function main() {
     if (keysPath !== path && existsSync(keysPath)) {
       const text = readFileSync(keysPath, 'utf8');
       for (const plan of [
-        { label: 'with its keys', arrival: true, revisit: true },
-        { label: 'keys only at the revisit', arrival: false, revisit: true },
-        { label: 'keys only at arrival', arrival: true, revisit: false },
+        { label: 'with its keys', arrival: true, revisit: true, derived: true },
+        { label: 'with its keys, decrypted content dropped', arrival: true, revisit: true, derived: false },
+        { label: 'keys only at the revisit', arrival: false, revisit: true, derived: false },
+        { label: 'keys only at arrival', arrival: true, revisit: false, derived: false },
       ]) await runFixture(name, path, { ...plan, text });
     }
   }

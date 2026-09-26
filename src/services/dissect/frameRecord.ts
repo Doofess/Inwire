@@ -204,6 +204,17 @@ function snapshotConversation(conv: TlsConversationState): { state: unknown } | 
   return { state: { ...rest, pendingVersionFrames: [], keysAtArrival: Boolean(conv.keys) } };
 }
 
+/**
+ * A decrypting conversation, for the memory-only log: its HTTP state was read
+ * out of plaintext, which is exactly why the record cannot hold it. Still no
+ * keys - a revisit derives them from the key log as it does for any other
+ * rebuilt conversation, and `keysAtArrival` says it must find them.
+ */
+function plaintextConversation(conv: TlsConversationState): unknown {
+  const { keys: _keys, keyGeneration: _generation, keysAtArrival: _had, ...rest } = conv;
+  return { ...rest, pendingVersionFrames: [], keysAtArrival: true };
+}
+
 /** What a `checked` answer is recorded as, and compared by: never the secrets themselves. */
 function projectChecked(method: string, value: unknown): unknown {
   if (method === 'keyLogSecrets') return value !== undefined;
@@ -225,6 +236,15 @@ export class FrameRecorder {
   readonly sources: FrameSources;
   private readonly out = new ValueWriter();
   private derived = 0;
+  /**
+   * The answers the record refuses, in the order it refused them: decrypted
+   * content, which the owner's rule keeps in memory and never on disk. Handed
+   * out by `endDerived`, for whoever holds it in memory; a revisit given it
+   * reads a refused answer from here instead of missing.
+   */
+  private readonly derivedOut = new ValueWriter();
+  /** Something in this frame's derived answers could not be encoded. */
+  private derivedLost = false;
   /** Frames this frame's record names bytes of. */
   private readonly refs = new Set<number>();
   /**
@@ -318,6 +338,7 @@ export class FrameRecorder {
             if (decryptsWithKeyLog(call) && !carriesNothing(result)) {
               out.byte(DERIVED);
               this.derived += 1;
+              this.keepDerived(result);
             } else {
               out.byte(DECRYPT_CALL);
               out.value(result);
@@ -334,6 +355,7 @@ export class FrameRecorder {
           } else {
             out.byte(DERIVED);
             this.derived += 1;
+            this.keepDerived(answer);
           }
           return answer;
         };
@@ -344,6 +366,7 @@ export class FrameRecorder {
           if (snapshot === null) {
             out.byte(DERIVED);
             this.derived += 1;
+            this.keepDerived(plaintextConversation(live as TlsConversationState));
           } else {
             out.byte(id);
             out.value(snapshot.state);
@@ -355,8 +378,32 @@ export class FrameRecorder {
 
   begin(): void {
     this.out.reset();
+    this.derivedOut.reset();
     this.derived = 0;
+    this.derivedLost = false;
     this.refs.clear();
+  }
+
+  /**
+   * Encoded at once, because the live object goes on changing. A value the
+   * codec cannot encode loses this frame's derived answers - a miss later,
+   * never a failed arrival.
+   */
+  private keepDerived(value: unknown): void {
+    if (this.derivedLost) return;
+    try {
+      this.derivedOut.value(value);
+    } catch {
+      this.derivedLost = true;
+    }
+  }
+
+  /**
+   * The frame's decrypted answers, for memory only: null when it had none, or
+   * when one could not be kept. Read after `end`, before the next `begin`.
+   */
+  endDerived(): Uint8Array | null {
+    return this.derived === 0 || this.derivedLost ? null : this.derivedOut.bytes();
   }
 
   /** The frame's record. */
@@ -388,13 +435,18 @@ export class FrameRevisit {
    * `bytesOf` answers with another frame's stored bytes, for the frames
    * `recordRefs` names; a frame it cannot supply is a miss.
    */
+  /** The memory-only answers (`FrameRecorder.endDerived`), when they are still held. */
+  private readonly side: ValueReader | null;
+
   constructor(
     record: Uint8Array,
     private readonly bytesOf: (frame: number) => Uint8Array | undefined = () => undefined,
+    derived: Uint8Array | null = null,
   ) {
     const log = openLog(record);
     if (log === null) throw new RecordMiss(`not a version ${FRAME_RECORD_VERSION} record`);
     this.in = log.reader;
+    this.side = derived === null ? null : new ValueReader(derived);
     const sources = {} as Record<Group, Record<string, AnyFn>>;
     for (const group of Object.keys(GROUPS) as Group[]) {
       const answering: Record<string, AnyFn> = {};
@@ -406,13 +458,21 @@ export class FrameRevisit {
     this.sources = sources as unknown as FrameSources;
   }
 
-  private expect(id: number): void {
+  /**
+   * Checks the next entry is this question, and says where its answer is: in
+   * the record, or - for decrypted content - in the memory-only log.
+   */
+  private expect(id: number): ValueReader {
     if (this.in.done) throw new RecordMiss(`asked ${NAMES[id]} after the record ended`);
     const got = this.in.byte();
     if (got === DERIVED) {
-      throw new RecordMiss(`${NAMES[id]} answered with decrypted content, which records do not hold`);
+      if (this.side === null || this.side.done) {
+        throw new RecordMiss(`${NAMES[id]} answered with decrypted content, which is not held in memory`);
+      }
+      return this.side;
     }
     if (got !== id) throw new RecordMiss(`asked ${NAMES[id]} where arrival asked ${NAMES[got] ?? got}`);
+    return this.in;
   }
 
   /** A recorded TLS cursor, with its buffered body cut back out of its frames. */
@@ -442,8 +502,7 @@ export class FrameRevisit {
     switch (kind) {
       case 'checked':
         return (...args) => {
-          this.expect(id);
-          const recorded = this.in.value();
+          const recorded = this.expect(id).value();
           const live = (LIVE_ENV as unknown as Record<string, AnyFn>)[method](...args);
           if (JSON.stringify(projectChecked(method, live)) !== JSON.stringify(recorded)) {
             throw new RecordMiss(`${NAMES[id]} answers differently now than when this frame arrived`);
@@ -453,14 +512,10 @@ export class FrameRevisit {
       case 'answer':
       case 'peek':
       case 'derived':
-        return () => {
-          this.expect(id);
-          return this.in.value();
-        };
+        return () => this.expect(id).value();
       case 'snapshot':
         return () => {
-          this.expect(id);
-          const state = this.in.value();
+          const state = this.expect(id).value();
           return id === IDS.get('tcp:tlsCursor')
             ? this.hydrateCursor(state as Record<string, unknown>)
             : state;
@@ -473,16 +528,16 @@ export class FrameRevisit {
       case 'decryptor':
         return () => {
           this.expect(id);
-          return () => {
-            this.expect(DECRYPT_CALL);
-            return this.in.value();
-          };
+          return () => this.expect(DECRYPT_CALL).value();
         };
     }
   }
 
   finish(): void {
     if (!this.in.done) throw new RecordMiss('the revisit asked fewer questions than arrival did');
+    if (this.side !== null && !this.side.done) {
+      throw new RecordMiss('the revisit used less decrypted content than arrival did');
+    }
   }
 }
 

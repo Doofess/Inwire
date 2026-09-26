@@ -113,6 +113,7 @@ import {
 import { useThrottledValue } from "./lib/useThrottledValue";
 import type { FilterPresetLibrary } from "./types/packet";
 import type { FrameRecordEntry } from "./services/pcapParser";
+import { DerivedStore } from "./services/pipeline/derivedStore";
 
 import { TriangleAlert } from "lucide-react";
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
@@ -2305,6 +2306,12 @@ export default function App() {
    * empty directory behind for the next startup to find and restore from.
    */
   const importCaptureIdRef = useRef<string | null>(null);
+  /**
+   * The import's decrypted answers (ADR 0049), held until the import's reset
+   * has emptied the Worker's and then handed over. Memory only, and never to
+   * the store.
+   */
+  const importDerivedRef = useRef<DerivedStore | null>(null);
 
   /**
    * Every frame an import produced, on its way to disk.
@@ -2323,11 +2330,15 @@ export default function App() {
       cancelExportJob('an import started');
       stopCaptureForImportRef.current();
       importCaptureIdRef.current = newCaptureId();
+      importDerivedRef.current = new DerivedStore();
       captureStore.begin(importCaptureIdRef.current);
     }
     // Records first, so each is in the store before its frame: a record that
     // arrives after its frame's chunk has sealed is dropped (ADR 0049).
     captureStore.appendRecords(records);
+    for (const { id, derived } of records) {
+      if (derived) importDerivedRef.current?.set(id, derived);
+    }
     captureStore.append(batch);
   }, []);
 
@@ -2368,6 +2379,10 @@ export default function App() {
     // there and a later flush must not write it a second time.
     adoptBuffer(imported, storedImport === null ? null : Math.floor(lastId));
     pipeline.reset(Math.floor(lastId) + 1);
+    if (importDerivedRef.current !== null) {
+      pipeline.keepDerived(importDerivedRef.current.entries());
+      importDerivedRef.current = null;
+    }
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
     // Always assigned, never left alone: a selection held over from the

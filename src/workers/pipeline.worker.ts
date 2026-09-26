@@ -41,6 +41,7 @@ import { NetworkFactsCollector } from '../services/networkFacts';
 import { DuplicateFinder, duplicateSuffix } from '../services/duplicateFrames';
 import { dissectReplay, interfacesByLabel } from '../services/pipeline/replay';
 import { FrameRecorder, FrameRevisit, RecordMiss } from '../services/dissect/frameRecord';
+import { DerivedStore } from '../services/pipeline/derivedStore';
 import { withDissectEnv } from '../services/dissect/dissectEnv';
 import { applyInfoPatch } from '../services/dissect/infoPatch';
 import type { FromCapture } from '../services/capture/captureProtocol';
@@ -162,6 +163,11 @@ let pendingIcmpReplies: { requestFrameId: number; replyId: number }[] = [];
 let pendingInfoPatches: InfoPatch[] = [];
 /** This flush's frame records, for the store. */
 let pendingRecords: { id: number; record: Uint8Array }[] = [];
+/**
+ * Each frame's decrypted answers, which its record refuses to hold: memory
+ * only, here, and gone with the key log or the capture (ADR 0049).
+ */
+const derivedStore = new DerivedStore();
 
 /**
  * Recently dissected trees, oldest first, so the detail pane can be answered
@@ -195,6 +201,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   duplicates.reset();
   treeCache.clear();
   revisitedTrees.clear();
+  derivedStore.clear();
   pendingPackets = [];
   pendingIcmpReplies = [];
   pendingInfoPatches = [];
@@ -320,6 +327,8 @@ function ingest(frame: LiveFrame, id: number): void {
     // Only for a frame that dissected: one that threw has no record to trust,
     // and its tree is built the old way.
     pendingRecords.push({ id, record: recorder.end() });
+    const derived = recorder.endDerived();
+    if (derived !== null) derivedStore.set(id, derived);
     const packet = decoded.packet;
     packet.tsPrecision = 6;
 
@@ -416,7 +425,7 @@ async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
   if (own === undefined) return null;
   const row = kit.row;
   try {
-    const again = new FrameRevisit(kit.record, (frame) => bytes.get(frame));
+    const again = new FrameRevisit(kit.record, (frame) => bytes.get(frame), derivedStore.get(id));
     const rs = again.sources;
     const { packet } = withDissectEnv(rs.env, () => decodeRawEthernetPacket(
       own, id, row.tsUs, row.relativeTime, row.timeDelta, row.length,
@@ -800,9 +809,15 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       keyLog.clear();
       // And the cached trees, which are the other place a decrypted payload
       // lives: without this a recent frame would keep showing plaintext after
-      // the panel said the secrets were gone.
+      // the panel said the secrets were gone. The decrypted answers kept for
+      // revisits are the third.
       treeCache.clear();
       revisitedTrees.clear();
+      derivedStore.clear();
+      break;
+
+    case 'derived':
+      for (const [id, bytes] of command.frames) derivedStore.set(id, bytes);
       break;
 
     case 'detail': {

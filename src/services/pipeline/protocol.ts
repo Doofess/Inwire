@@ -121,6 +121,14 @@ export type ToPipeline =
    */
   | { type: 'keylog-clear' }
   /**
+   * An import's decrypted answers (ADR 0049), which the import made on the
+   * renderer's thread and the Worker holds in memory so a revisit of those
+   * frames needs no replay. Sent after the import's `reset`, which empties
+   * what the Worker held for the capture before it. Never sent to the store:
+   * decrypted content is not written anywhere.
+   */
+  | { type: 'derived'; frames: [number, Uint8Array][] }
+  /**
    * Who this machine is, for deciding which way each frame went.
    *
    * Sent as plain arrays rather than as a `HostIdentity` because a `Set` does

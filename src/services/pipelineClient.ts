@@ -313,6 +313,12 @@ export class PipelineClient {
     this.send({ type: 'keylog-clear' });
   }
 
+  /** An import's decrypted answers, for the Worker to hold. See `derived` in the protocol. */
+  keepDerived(frames: [number, Uint8Array][]) {
+    if (frames.length === 0) return;
+    this.send({ type: 'derived', frames }, frames.map(([, bytes]) => bytes.buffer as ArrayBuffer));
+  }
+
   /**
    * Who this machine is, so the Worker can say which way each frame went.
    *

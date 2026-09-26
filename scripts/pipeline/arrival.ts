@@ -33,6 +33,8 @@ export interface Arrived {
   /** With its tree, and with every patch later frames applied to it. */
   packet: Packet;
   record: Uint8Array;
+  /** Its decrypted answers, which the app holds in memory only; null when it had none. */
+  derived: Uint8Array | null;
   input: {
     bytes: Uint8Array; tsUs: number; relativeTime: number; timeDelta: number;
     origLen: number; linktype: number;
@@ -78,7 +80,7 @@ export async function arrive(path: string): Promise<Arrival> {
         src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host));
     packet.rawBytes = frame.rawBytes;
     arrived.push({
-      packet, record: recorder.end(),
+      packet, record: recorder.end(), derived: recorder.endDerived(),
       input: { bytes: frame.rawBytes, tsUs, relativeTime, timeDelta, origLen: frame.origLen, linktype: frame.linktype },
     });
     if (icmpMatchedRequestFrameId !== undefined) {
@@ -104,8 +106,9 @@ export async function arrive(path: string): Promise<Arrival> {
 export function revisit(
   input: Arrived['input'], id: number, record: Uint8Array, host: HostIdentity | undefined,
   patches: readonly InfoPatch[], bytesOf: (frame: number) => Uint8Array | undefined,
+  derived: Uint8Array | null = null,
 ): ProtocolLayer[] {
-  const again = new FrameRevisit(record, bytesOf);
+  const again = new FrameRevisit(record, bytesOf, derived);
   const rs = again.sources;
   const { packet } = withDissectEnv(rs.env, () =>
     decodeRawEthernetPacket(input.bytes, id, input.tsUs, input.relativeTime, input.timeDelta,

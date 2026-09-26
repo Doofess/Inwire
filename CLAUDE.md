@@ -1244,11 +1244,15 @@ stands in front of the trackers and writes every answer down, and on a click a
 `FrameRevisit` hands the same answers back to the same dissector code, so a
 tree costs one frame's dissection wherever the frame is. Facts from outside any
 conversation — the clock, HTTP/1's shared body budget, direction — go through
-`dissect/dissectEnv.ts` and are recorded too. A record never holds a key or
-plaintext; a revisit that needs either, or asks a question arrival did not,
-throws `RecordMiss` and falls back to replaying the conversation
-(`services/pipeline/replay.ts`). `scripts/pipeline/revisit.ts` revisits every
-frame of the fixtures and fails on any miss.
+`dissect/dissectEnv.ts` and are recorded too. **A record never holds a key or
+plaintext.** Keys are derived again from the key log, and a revisit whose log
+disagrees with arrival's misses. Plaintext answers go to a second, memory-only
+log per frame, held by the Worker's `DerivedStore`
+(`services/pipeline/derivedStore.ts`) and emptied with the key log. A revisit
+that lacks either, or asks a question arrival did not, throws `RecordMiss` and
+falls back to replaying the conversation (`services/pipeline/replay.ts`).
+`scripts/pipeline/revisit.ts` revisits every frame of the fixtures, the
+key-log capture four ways, and fails on any wrong tree.
 
 The per-frame lists are pooled (`dissect/tokenPool.ts`, ADR 0016) and the 33
 most common fields live in typed columns rather than in the bag

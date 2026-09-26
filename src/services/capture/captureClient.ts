@@ -385,7 +385,10 @@ class CaptureClient {
    */
   appendRecords(records: readonly { id: number; record: Uint8Array }[]): void {
     if (records.length === 0) return;
-    this.send({ type: 'appendRecords', frames: [...records] });
+    // The record and the id, and nothing else a caller's entry carries: an
+    // import's entries hold its decrypted answers too, which are never
+    // written anywhere (ADR 0049), and a message clones every field it is given.
+    this.send({ type: 'appendRecords', frames: records.map(({ id, record }) => ({ id, record })) });
   }
 
   /**
