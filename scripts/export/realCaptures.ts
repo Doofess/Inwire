@@ -33,9 +33,15 @@ export const REAL_CAPTURES: Record<string, string> = {
  *     2606:4700:4700::1111 - ICMPv4 and ICMPv6 Time Exceeded, each quoting
  *     the echo that expired, plus Neighbor Discovery and a Router
  *     Advertisement. Neither general capture holds a single ICMP error.
+ *   - `keyLog`: 75 seconds of this machine's Ethernet adapter while a
+ *     throwaway headless Chrome profile browsed eight sites with
+ *     `SSLKEYLOGFILE` set - TLS 1.3, HTTP/2 and QUIC/HTTP/3 - with the key log
+ *     beside it under the same name, `.keys`. The only capture here that
+ *     decrypts; the other processes' TLS in it does not, which is realistic.
  */
 export const OPTIONAL_CAPTURES: Record<string, string> = {
   icmpErrors: 'icmp_errors_capture_1790359378632.pcapng',
+  keyLog: 'keylog_capture_1790455330535.pcapng',
 };
 
 export interface RealCapture { name: string; path: string; packets: Packet[] }

@@ -20,6 +20,8 @@ One more is **optional**: scripts that need it name it, and everything else igno
 | name | file | frames | SHA-256 |
 |---|---|---|---|
 | `icmpErrors` | `icmp_errors_capture_1790359378632.pcapng` | 66 | `a8f445db710493c9911e4dfe700b78e5aeaeda515957e9e24c0c5d217268919a` |
+| `keyLog` | `keylog_capture_1790455330535.pcapng` | 14,615 | `f6683bd96fa94d3e244de36cdd226ce326891148fe3ca7663eda5740e9f68ec2` |
+| (its key log) | `keylog_capture_1790455330535.keys` | 67 connections | `9dcf7545bf3585dbc6adc7adb5322a5d0661d96cd99cc5e132d881e46749c563` |
 
 Neither general capture holds a single ICMP error, so the anonymiser's rewrite of the
 packet an error quotes had nothing real to run against. This is 50 seconds of
@@ -29,6 +31,17 @@ Time Exceeded, each quoting the echo that expired, plus Neighbor Solicitations a
 Advertisements and one Router Advertisement. pcapng, one interface.
 It carries this machine's addresses and MAC like the others, and is untracked for the
 same reason.
+
+`keyLog` is the only capture here that **decrypts**, and the only one that needs its
+key log beside it. 75 seconds of `dumpcap -i <Ethernet>` while a throwaway headless
+Chrome profile, with `SSLKEYLOGFILE` pointed at the `.keys` file and QUIC forced on for
+Google, YouTube and Cloudflare, loaded eight pages: five over HTTP/3 and three over
+HTTP/2. Recorded 2026-09-26, no frames dropped. With the key log, tshark 4.6 opens 37
+TLS 1.3 hellos' connections, HTTP/2 headers in 42 frames and 1,415 HTTP/3 frames. The
+TLS of the machine's other processes stays encrypted, because the key log is Chrome's
+alone - which is what a real key log looks like. **Treat the `.keys` file as the
+secret it is**: it opens every connection in the capture, and the pair is exactly as
+private as the browsing it records.
 
 They are named for what they hold, because a measurement is only comparable if you
 know which capture produced it. `inwire` is general browsing - 3,088 QUIC rows, 43

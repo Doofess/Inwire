@@ -25,6 +25,7 @@ export const FIXTURES: { name: string; path: string; optional?: boolean }[] = [
   { name: 'inwire', path: 'test/fixtures/inwire_capture_1788478187989.pcap' },
   { name: 'bulk', path: 'test/fixtures/bulk_capture_1788426090876.pcap' },
   { name: 'icmpErrors', path: 'test/fixtures/icmp_errors_capture_1790359378632.pcapng', optional: true },
+  { name: 'keyLog', path: 'test/fixtures/keylog_capture_1790455330535.pcapng', optional: true },
 ];
 
 /** One frame as it arrived: the eager dissection, and what a revisit needs. */
