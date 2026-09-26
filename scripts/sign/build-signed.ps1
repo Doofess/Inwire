@@ -28,8 +28,8 @@
   Every step must succeed; the first that does not stops the build with its
   exit code. Nothing here is elevated - installing the result is.
 
-  ISCC is found at $env:INWIRE_ISCC, on PATH, or in Inno Setup 6's per-user and
-  per-machine install directories, and looked for BEFORE the long steps run.
+  ISCC is $env:INWIRE_ISCC when set, else the NEWEST of PATH and the Inno Setup 7 and 6
+  per-user and per-machine directories (see Find-Iscc), looked for BEFORE the long steps run.
 #>
 [CmdletBinding()]
 param()
@@ -47,16 +47,36 @@ $PowerShell = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\Windows
 
 function Say([string]$m) { Write-Host "[dist:signed] $m" }
 
+# **The NEWEST compiler found, not the first.** An upgrade keeps the installed
+# unins000.exe whenever that file's version is newer than the one Setup carries
+# ("Existing file is a newer version. Skipping.") - so a build from an older
+# Inno than the last install leaves the machine on the OLD uninstaller, which is
+# unsigned, while every other file is signed. That happened: this PC had an
+# Inno 7 build installed and the first signed build came from a per-user Inno 6.
 function Find-Iscc {
+  if ($env:INWIRE_ISCC) {
+    if (Test-Path -LiteralPath $env:INWIRE_ISCC -PathType Leaf) { return $env:INWIRE_ISCC }
+    throw "INWIRE_ISCC points at $env:INWIRE_ISCC, which does not exist."
+  }
   $candidates = @()
-  if ($env:INWIRE_ISCC) { $candidates += $env:INWIRE_ISCC }
   $onPath = Get-Command ISCC.exe -ErrorAction SilentlyContinue
   if ($onPath) { $candidates += $onPath.Source }
-  if ($env:LOCALAPPDATA) { $candidates += Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe' }
-  if (${env:ProgramFiles(x86)}) { $candidates += Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe' }
-  if ($env:ProgramFiles) { $candidates += Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe' }
-  foreach ($c in $candidates) { if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) { return $c } }
-  throw 'ISCC.exe (Inno Setup 6) not found. Install it, or set INWIRE_ISCC to its path.'
+  foreach ($base in @((Join-Path $env:LOCALAPPDATA 'Programs'), ${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+    if (-not $base) { continue }
+    foreach ($dir in @('Inno Setup 7', 'Inno Setup 6')) { $candidates += Join-Path $base "$dir\ISCC.exe" }
+  }
+  # Ranked by Setup.e32, the stub Setup and the uninstaller are both built from:
+  # its FileVersion (51.1055 for Inno 7, 51.1054 for 6.7.3) is the exact number
+  # the upgrade compares. ISCC.exe's own version resource reads 0.0.0.0.
+  $rank = {
+    $stub = Join-Path (Split-Path -Parent $_) 'Setup.e32'
+    $v = if (Test-Path -LiteralPath $stub) { (Get-Item -LiteralPath $stub).VersionInfo.FileVersion } else { '0.0' }
+    [version]($v -replace '[^\d.].*$', '')
+  }
+  $found = @($candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+    Sort-Object -Unique | Sort-Object -Descending $rank)
+  if ($found.Count -gt 0) { return $found[0] }
+  throw 'ISCC.exe (Inno Setup 6 or 7) not found. Install it, or set INWIRE_ISCC to its path.'
 }
 
 function Step([string]$name, [scriptblock]$run) {

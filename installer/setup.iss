@@ -235,6 +235,13 @@ SignedUninstaller=yes
 ; the swap can exist.
 Type: filesandordirs; Name: "{app}\agent\_internal"
 Type: filesandordirs; Name: "{app}\resources"
+; The same leftover problem one level up. Earlier builds shipped DirectX's
+; shader compiler beside Inwire.exe and this one does not, so an upgrade left
+; both behind - and dxcompiler.dll is unsigned, which made it the one file in a
+; signed install that was not. Named rather than swept: {app} also holds the
+; uninstaller and its log, which a wildcard here would take with it.
+Type: files; Name: "{app}\dxcompiler.dll"
+Type: files; Name: "{app}\dxil.dll"
 
 [Files]
 ; The Electron app. `electron-builder --dir` output, verbatim.
