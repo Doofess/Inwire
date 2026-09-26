@@ -35,6 +35,7 @@
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { TlsConversationState, TlsRecordCursor } from '../tcpStreamTracker';
 import { applyGapToCursor } from '../tcpStreamTracker';
+import { dissectEnv } from '../dissect/dissectEnv';
 import { toHex } from '../addressFormat';
 import { md5Hex } from '../crypto/md5';
 import { sha256 } from '../crypto/sha256';
@@ -1881,7 +1882,7 @@ function certificateFields(certs: CertificateSummary[], conv: TlsConversationSta
   });
 }
 
-function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: number, serverPort: number | undefined, now: Date = new Date()): ProtocolLayer {
+function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: number, serverPort: number | undefined, now: Date = dissectEnv().now()): ProtocolLayer {
   const fields: ProtocolField[] = [];
   for (const r of records) {
     if (r.ignored) {

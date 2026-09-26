@@ -24,6 +24,9 @@ import { dissectCdp, CDP_SNAP_PID, CISCO_OUI } from './dissectors/cdp';
 import { DnsTracker } from './dnsTracker';
 import { QuicFlowTracker } from './quicFlowTracker';
 import { IcmpEchoTracker } from './icmpEchoTracker';
+import type {
+  TcpTrackerApi, IcmpTrackerApi, QuicTrackerApi, DnsTrackerApi, L3TrackerApi,
+} from './dissect/trackerApi';
 import { poolExpert, poolTokens } from './dissect/tokenPool';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 
@@ -749,10 +752,10 @@ export function decodeRawEthernetPacket(
   relativeTime: number,
   timeDelta: number,
   origLen: number,
-  tcpTracker?: TcpStreamTracker,
-  icmpTracker?: IcmpEchoTracker,
-  quicTracker?: QuicFlowTracker,
-  dnsTracker?: DnsTracker,
+  tcpTracker?: TcpTrackerApi,
+  icmpTracker?: IcmpTrackerApi,
+  quicTracker?: QuicTrackerApi,
+  dnsTracker?: DnsTrackerApi,
   /**
    * The adapter this frame was captured from, for the Frame layer's interface
    * rows. Absent for imported captures, which carry no live interface - the
@@ -771,7 +774,7 @@ export function decodeRawEthernetPacket(
    * beside the other trackers so no existing positional call site moves.
    * See services/l3Tracker.ts.
    */
-  l3Tracker?: L3Tracker,
+  l3Tracker?: L3TrackerApi,
   /**
    * Who this machine is, for deciding which way each frame went.
    *

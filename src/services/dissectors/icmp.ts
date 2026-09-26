@@ -30,7 +30,7 @@
  */
 import type { ProtocolField } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
-import type { IcmpEchoTracker } from '../icmpEchoTracker';
+import type { IcmpTrackerApi } from '../dissect/trackerApi';
 import { formatIpv6Address, formatMac } from '../addressFormat';
 import { checksumVerdict } from '../dissect/transportShared';
 import { dataLayer } from './mediaType';
@@ -51,7 +51,7 @@ export interface IcmpContext {
   frameId?: number;
   /** Capture time, epoch microseconds - the response time is measured from it. */
   tsUs?: number;
-  icmpTracker?: IcmpEchoTracker;
+  icmpTracker?: IcmpTrackerApi;
   /** Bytes the network layer says belong to this message, padding excluded. */
   l4SegmentLen?: number;
   /** The IPv6 pseudo-header. Undefined on ICMPv4, which checksums no such thing. */

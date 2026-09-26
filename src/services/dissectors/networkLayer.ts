@@ -22,11 +22,9 @@
  */
 import type { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
-import type { TcpStreamTracker } from '../tcpStreamTracker';
-import type { IcmpEchoTracker } from '../icmpEchoTracker';
-import type { QuicFlowTracker } from '../quicFlowTracker';
-import type { DnsTracker } from '../dnsTracker';
-import type { L3Tracker } from '../l3Tracker';
+import type {
+  TcpTrackerApi, IcmpTrackerApi, QuicTrackerApi, DnsTrackerApi, L3TrackerApi,
+} from '../dissect/trackerApi';
 import type { InfoPatch } from '../dissect/types';
 import { formatIpv6Address } from '../addressFormat';
 import { ETHERNET_MAX_FRAME } from '../direction';
@@ -199,11 +197,11 @@ export interface NetworkContext {
   relativeTime: number;
   timeDelta: number;
   origLen: number;
-  tcpTracker?: TcpStreamTracker;
-  icmpTracker?: IcmpEchoTracker;
-  quicTracker?: QuicFlowTracker;
-  dnsTracker?: DnsTracker;
-  l3Tracker?: L3Tracker;
+  tcpTracker?: TcpTrackerApi;
+  icmpTracker?: IcmpTrackerApi;
+  quicTracker?: QuicTrackerApi;
+  dnsTracker?: DnsTrackerApi;
+  l3Tracker?: L3TrackerApi;
   /** This machine sent the frame, so its checksums may not be filled in yet. */
   sentByUs: boolean | undefined;
   /**
@@ -994,9 +992,9 @@ function decodeTransportLayer(
   ipProtocolNum: number,
   srcIp: string,
   dstIp: string,
-  tcpTracker?: TcpStreamTracker,
+  tcpTracker?: TcpTrackerApi,
   ttl?: number,
-  icmpTracker?: IcmpEchoTracker,
+  icmpTracker?: IcmpTrackerApi,
   frameId?: number,
   /**
    * Number of bytes belonging to the transport header+payload as *declared by
@@ -1006,10 +1004,10 @@ function decodeTransportLayer(
    * rawBytes.length would count that padding as payload.
    */
   l4SegmentLen?: number,
-  quicTracker?: QuicFlowTracker,
+  quicTracker?: QuicTrackerApi,
   /** Capture time, epoch microseconds - the analysis flags compare timings. */
   tsUs?: number,
-  dnsTracker?: DnsTracker,
+  dnsTracker?: DnsTrackerApi,
   /**
    * The IP pseudo-header for the transport checksum (RFC 793 / RFC 8200), or
    * undefined when the network layer could not supply one.

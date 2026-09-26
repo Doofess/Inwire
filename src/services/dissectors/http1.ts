@@ -19,6 +19,7 @@
  * finished body carries the message it belongs to rather than the caller
  * having to remember.
  */
+import { dissectEnv, liveHttp1BodyBytes } from '../dissect/dissectEnv';
 
 const CR = 0x0d;
 const LF = 0x0a;
@@ -47,31 +48,21 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_BODY_PIECES = 2048;
 
 /**
- * The ceiling across every body being collected at once, anywhere.
+ * The ceiling across every body being collected at once, anywhere, lives in
+ * `dissect/dissectEnv.ts` with the counter it bounds.
  *
- * **This is the bound that actually binds.** The per-message cap multiplied
- * by `tcpStreamTracker.ts`'s 16,384 connections and two directions each is
+ * **It is the bound that actually binds.** The per-message cap multiplied by
+ * `tcpStreamTracker.ts`'s 16,384 connections and two directions each is
  * 32 GiB of headroom, so the per-message cap alone is not a bound on the
- * process at all. Everything in flight shares this instead.
+ * process at all. Everything in flight shares that one instead - which also
+ * makes it the one piece of HTTP state shared ACROSS connections, and why it
+ * is read through the environment rather than a module counter: a tree
+ * rebuilt later must see the room arrival saw, not the room there is now.
  */
-const MAX_TOTAL_BODY_BYTES = 32 * 1024 * 1024;
-
-/**
- * Bytes held by every body currently being collected.
- *
- * Module-level, which makes it per-pipeline-Worker and therefore per-capture.
- * **It is only correct because every path that stops collecting gives its
- * bytes back**: a completed body in `finishBody`, a replaced one in
- * `startBody`, and an evicted connection through `releaseHttp1Body`, which
- * `tcpStreamTracker.ts` calls from `evictPastCap`. A path that forgets costs
- * a permanent slice of the budget, and enough of them stop body collection
- * for the rest of the capture with nothing saying why.
- */
-let liveBodyBytes = 0;
 
 /** For an assertion script, which needs to see the counter return to zero. */
 export function http1LiveBodyBytes(): number {
-  return liveBodyBytes;
+  return liveHttp1BodyBytes();
 }
 
 /** Why a body is shorter than the sender said it would be. */
@@ -184,11 +175,10 @@ export function freshHttp1Direction(): Http1Direction {
  *
  * Called when the connection holding this direction is forgotten, which is
  * the one way a body stops being collected without finishing. See
- * `liveBodyBytes`.
+ * `dissect/dissectEnv.ts`.
  */
 export function releaseHttp1Body(direction: Http1Direction): void {
-  liveBodyBytes -= direction.bodyLength;
-  if (liveBodyBytes < 0) liveBodyBytes = 0;
+  dissectEnv().releaseBodyBytes(direction.bodyLength);
   direction.body = [];
   direction.bodyLength = 0;
   direction.bodyOwner = null;
@@ -211,7 +201,7 @@ function appendBody(direction: Http1Direction, piece: Uint8Array): void {
   if (direction.body.length >= MAX_BODY_PIECES) { direction.bodyTruncated = 'pieces'; return; }
 
   const perMessage = MAX_BODY_BYTES - direction.bodyLength;
-  const shared = MAX_TOTAL_BODY_BYTES - liveBodyBytes;
+  const shared = dissectEnv().sharedBodyRoom();
   const room = Math.min(perMessage, shared);
   if (room <= 0) {
     direction.bodyTruncated = perMessage <= 0 ? 'message' : 'total';
@@ -222,7 +212,7 @@ function appendBody(direction: Http1Direction, piece: Uint8Array): void {
   // view of it would pin the whole segment for as long as the body lives.
   direction.body.push(piece.slice(0, take));
   direction.bodyLength += take;
-  liveBodyBytes += take;
+  dissectEnv().takeBodyBytes(take);
   if (take < piece.length) direction.bodyTruncated = perMessage <= shared ? 'message' : 'total';
 }
 

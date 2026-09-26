@@ -16,7 +16,7 @@
  */
 import type { ExpertCategory, Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
-import type { TcpStreamTracker } from '../tcpStreamTracker';
+import type { TcpTrackerApi } from '../dissect/trackerApi';
 import { ABBREV_BY_FLAG, CATEGORY_BY_FLAG, type TcpAnalysis, type TcpAnalysisFlag } from '../dissect/tcpAnalysis';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { freshTlsConversation, freshTlsCursor } from '../tcpStreamTracker';
@@ -129,7 +129,7 @@ export interface TcpContext {
   frameId?: number;
   /** Capture time, epoch microseconds - the analysis flags compare timings. */
   tsUs?: number;
-  tcpTracker?: TcpStreamTracker;
+  tcpTracker?: TcpTrackerApi;
   /** Transport header + payload as the network layer declared it, not as the
    *  frame was padded. */
   l4SegmentLen?: number;

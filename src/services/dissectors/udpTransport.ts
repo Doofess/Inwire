@@ -14,8 +14,8 @@
  */
 import type { Packet, ProtocolLayer } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
-import type { QuicFlowTracker, QuicHandshakeFacts } from '../quicFlowTracker';
-import type { DnsTracker } from '../dnsTracker';
+import type { QuicHandshakeFacts } from '../quicFlowTracker';
+import type { QuicTrackerApi, DnsTrackerApi } from '../dissect/trackerApi';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
@@ -36,8 +36,8 @@ export interface UdpContext {
   frameId?: number;
   /** Capture time, epoch microseconds. */
   tsUs?: number;
-  quicTracker?: QuicFlowTracker;
-  dnsTracker?: DnsTracker;
+  quicTracker?: QuicTrackerApi;
+  dnsTracker?: DnsTrackerApi;
   /** The IP pseudo-header for the checksum, or undefined when there is none. */
   pseudoHeader?: Uint8Array;
   /** This machine sent the frame, so its checksum may not be filled in yet. */
