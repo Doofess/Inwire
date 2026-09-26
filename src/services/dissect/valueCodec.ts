@@ -33,6 +33,29 @@ const T_STRING = 6; // varint length + UTF-8
 const T_BYTES = 7; // varint length + bytes
 const T_ARRAY = 8; // varint count + values
 const T_OBJECT = 9; // varint count + (string key, value) pairs
+const T_MAP = 10; // varint count + (value key, value) pairs, in insertion order
+const T_INSTANCE = 11; // varint class index + an object's own fields
+const T_DATE = 12; // float64 milliseconds - the clock a certificate is judged by
+
+/**
+ * Classes whose instances a record may hold, by position.
+ *
+ * A snapshot of tracker state can contain an instance - an HTTP/2 connection
+ * carries its `HpackTable` - and a plain-object copy of one has the fields but
+ * none of the methods, so the dissector handed it on revisit would call a
+ * method that is not there. A registered class is written as its index plus
+ * its own fields and comes back with its prototype. An instance of any class
+ * NOT registered throws on write: that is state nobody has decided how to
+ * record, and the gate is where that should be found.
+ *
+ * Only classes whose whole state is in own, enumerable fields qualify -
+ * TypeScript `private` fields are, `#private` ones are not.
+ */
+const RECORD_CLASSES: { prototype: object; name: string }[] = [];
+
+export function registerRecordClass(ctor: { prototype: object; name: string }): void {
+  if (!RECORD_CLASSES.includes(ctor)) RECORD_CLASSES.push(ctor);
+}
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -77,6 +100,19 @@ export class ValueWriter {
     this.buf[this.length++] = n;
   }
 
+  private fields(v: Record<string, unknown>): void {
+    const keys = Object.keys(v);
+    this.varint(keys.length);
+    for (const key of keys) {
+      const utf8 = encoder.encode(key);
+      this.varint(utf8.length);
+      this.room(utf8.length);
+      this.buf.set(utf8, this.length);
+      this.length += utf8.length;
+      this.value(v[key]);
+    }
+  }
+
   value(v: unknown): void {
     switch (typeof v) {
       case 'undefined': this.byte(T_UNDEFINED); return;
@@ -119,18 +155,35 @@ export class ValueWriter {
           for (const item of v) this.value(item);
           return;
         }
-        {
-          const keys = Object.keys(v as object);
-          this.byte(T_OBJECT);
-          this.varint(keys.length);
-          for (const key of keys) {
-            const utf8 = encoder.encode(key);
-            this.varint(utf8.length);
-            this.room(utf8.length);
-            this.buf.set(utf8, this.length);
-            this.length += utf8.length;
-            this.value((v as Record<string, unknown>)[key]);
+        if (v instanceof Date) {
+          this.byte(T_DATE);
+          this.room(8);
+          this.view.setFloat64(this.length, v.getTime(), true);
+          this.length += 8;
+          return;
+        }
+        if (v instanceof Map) {
+          this.byte(T_MAP);
+          this.varint(v.size);
+          for (const [key, item] of v) {
+            this.value(key);
+            this.value(item);
           }
+          return;
+        }
+        {
+          const proto = Object.getPrototypeOf(v);
+          if (proto !== Object.prototype && proto !== null) {
+            const index = RECORD_CLASSES.findIndex((c) => c.prototype === proto);
+            if (index < 0) {
+              throw new Error(`valueCodec: cannot record an instance of ${proto?.constructor?.name ?? 'an unknown class'}`);
+            }
+            this.byte(T_INSTANCE);
+            this.varint(index);
+          } else {
+            this.byte(T_OBJECT);
+          }
+          this.fields(v as Record<string, unknown>);
         }
         return;
       default:
@@ -154,6 +207,11 @@ export class ValueReader {
 
   get done(): boolean {
     return this.at >= this.end;
+  }
+
+  /** Bytes not yet read. */
+  get remaining(): number {
+    return this.end - this.at;
   }
 
   byte(): number {
@@ -180,6 +238,22 @@ export class ValueReader {
     return s;
   }
 
+  private fields(out: Record<string, unknown>): Record<string, unknown> {
+    const n = this.varint();
+    for (let i = 0; i < n; i++) {
+      const key = this.utf8();
+      out[key] = this.value();
+    }
+    return out;
+  }
+
+  private float64(): number {
+    if (this.at + 8 > this.end) throw new RangeError('valueCodec: float past the end');
+    const f = this.view.getFloat64(this.at, true);
+    this.at += 8;
+    return f;
+  }
+
   value(): unknown {
     const tag = this.byte();
     switch (tag) {
@@ -191,12 +265,10 @@ export class ValueReader {
         const z = this.varint();
         return z % 2 === 0 ? z / 2 : -(z + 1) / 2;
       }
-      case T_FLOAT: {
-        if (this.at + 8 > this.end) throw new RangeError('valueCodec: float past the end');
-        const f = this.view.getFloat64(this.at, true);
-        this.at += 8;
-        return f;
-      }
+      case T_FLOAT:
+        return this.float64();
+      case T_DATE:
+        return new Date(this.float64());
       case T_STRING: return this.utf8();
       case T_BYTES: {
         const length = this.varint();
@@ -211,14 +283,21 @@ export class ValueReader {
         for (let i = 0; i < n; i++) out[i] = this.value();
         return out;
       }
-      case T_OBJECT: {
+      case T_OBJECT:
+        return this.fields({});
+      case T_MAP: {
         const n = this.varint();
-        const out: Record<string, unknown> = {};
+        const out = new Map<unknown, unknown>();
         for (let i = 0; i < n; i++) {
-          const key = this.utf8();
-          out[key] = this.value();
+          const key = this.value();
+          out.set(key, this.value());
         }
         return out;
+      }
+      case T_INSTANCE: {
+        const cls = RECORD_CLASSES[this.varint()];
+        if (cls === undefined) throw new RangeError('valueCodec: unknown class');
+        return this.fields(Object.create(cls.prototype) as Record<string, unknown>);
       }
       default:
         throw new RangeError(`valueCodec: unknown tag ${tag}`);

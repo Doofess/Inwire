@@ -62,6 +62,13 @@ export interface TlsRecordCursor {
   contributions: { frame: number; bytes: number }[];
   /** Handshake body collected so far, or null when the record is not buffered. */
   buffer: Uint8Array[] | null;
+  /**
+   * Where each piece of `buffer` was cut from: the frame, and the offset and
+   * length in that frame's bytes. Kept beside the buffer, entry for entry, so a
+   * record of this cursor can name the bytes instead of copying them - they are
+   * already stored as those frames' own bytes (ADR 0049).
+   */
+  bufferSources: { frame: number; at: number; length: number }[];
   bufferedBytes: number;
   /** True until this direction has shown a valid record header (mid-stream start). */
   unknown: boolean;
@@ -140,7 +147,7 @@ export interface TlsConversationState {
 export function freshTlsCursor(): TlsRecordCursor {
   return {
     remaining: 0, headerPartial: [], contentType: 0, version: 0, recordLength: 0,
-    contributors: [], contributions: [], buffer: null, bufferedBytes: 0, unknown: true, encrypted: false, holed: false,
+    contributors: [], contributions: [], buffer: null, bufferSources: [], bufferedBytes: 0, unknown: true, encrypted: false, holed: false,
     recordEndSeq: 0, role: 'unknown', readOnly: false, epoch: 0, recordSeq: 0,
   };
 }
@@ -167,6 +174,7 @@ export function applyGapToCursor(cursor: TlsRecordCursor, segmentSeq: number): v
   if (cursor.remaining > 0) {
     const owed = (cursor.recordEndSeq - segmentSeq) | 0;
     cursor.buffer = null;
+    cursor.bufferSources = [];
     cursor.bufferedBytes = 0;
     if (owed <= 0) {
       cursor.remaining = 0;

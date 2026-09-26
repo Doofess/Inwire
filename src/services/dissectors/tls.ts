@@ -828,6 +828,7 @@ function cloneCursor(c: TlsRecordCursor): TlsRecordCursor {
     ...c, readOnly: true,
     headerPartial: [...c.headerPartial], contributors: [...c.contributors],
     contributions: [...c.contributions], buffer: c.buffer ? [...c.buffer] : null,
+    bufferSources: [...c.bufferSources],
   };
 }
 
@@ -870,7 +871,8 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
         body, reassembledFrom: [...cursor.contributors], contributions: [...cursor.contributions], description: '',
       });
     }
-    cursor.remaining = 0; cursor.contributors = []; cursor.contributions = []; cursor.buffer = null; cursor.bufferedBytes = 0;
+    cursor.remaining = 0; cursor.contributors = []; cursor.contributions = [];
+    cursor.buffer = null; cursor.bufferSources = []; cursor.bufferedBytes = 0;
     cursor.holed = false;
   };
 
@@ -920,9 +922,10 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
       || (conv.keys != null && h.contentType !== CT_CHANGE_CIPHER_SPEC);
     if (wantBody && h.length <= MAX_BUFFERED_RECORD) {
       cursor.buffer = [bytes.slice(bodyStart, end)];
+      cursor.bufferSources = [{ frame, at: bodyStart, length: avail }];
       cursor.bufferedBytes = avail;
     } else {
-      cursor.buffer = null; cursor.bufferedBytes = 0;
+      cursor.buffer = null; cursor.bufferSources = []; cursor.bufferedBytes = 0;
     }
     contributed = true;
   };
@@ -972,7 +975,11 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
   // 2. The record in progress from earlier segments.
   if (cursor.remaining > 0 && p < end) {
     const take = Math.min(cursor.remaining, end - p);
-    if (cursor.buffer) { cursor.buffer.push(bytes.slice(p, p + take)); cursor.bufferedBytes += take; }
+    if (cursor.buffer) {
+      cursor.buffer.push(bytes.slice(p, p + take));
+      cursor.bufferSources.push({ frame, at: p, length: take });
+      cursor.bufferedBytes += take;
+    }
     cursor.contributions.push({ frame, bytes: take });
     cursor.remaining -= take;
     p += take;

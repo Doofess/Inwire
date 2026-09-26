@@ -38,26 +38,36 @@
  *   content is never written to a record (the owner's rule: plaintext stays in
  *   memory). An empty answer carries none and is recorded like any other;
  *   a full one is not recordable yet, and a revisit misses there;
- * - **object** - returns live state the dissector mutates (the TLS cursor and
- *   conversation, LDAP/SMB2/BGP state). Not yet recordable: a revisit throws
- *   `RecordMiss` when it gets there.
+ * - **snapshot** - returns live state the dissector goes on to mutate (the TLS
+ *   record cursor and conversation, LDAP/SMB2/BGP state). Recorded as it stood
+ *   when it was handed over; a revisit is handed a fresh copy, changes it, and
+ *   the copy is thrown away. A TLS conversation is recorded WITHOUT its keys:
+ *   a revisit derives them again from the key log held at that moment, which is
+ *   also what lets a key log loaded later open a frame that arrived opaque. A
+ *   decrypting connection's HTTP state was built from plaintext, so it is
+ *   derived content and not recorded.
  */
 import type {
   TcpTrackerApi, QuicTrackerApi, DnsTrackerApi, IcmpTrackerApi, L3TrackerApi,
 } from './trackerApi';
 import { LIVE_ENV, type DissectEnv } from './dissectEnv';
-import { ValueReader, ValueWriter } from './valueCodec';
+import { ValueReader, ValueWriter, registerRecordClass } from './valueCodec';
+import { HpackTable } from '../dissectors/hpack';
+import type { TlsConversationState, TlsRecordCursor } from '../tcpStreamTracker';
 
-type Kind = 'answer' | 'effect' | 'peek' | 'decryptor' | 'derived' | 'object';
+// Every HTTP/2-capable direction carries one, even on an HTTP/1 connection.
+registerRecordClass(HpackTable);
+
+type Kind = 'answer' | 'effect' | 'peek' | 'decryptor' | 'derived' | 'snapshot';
 
 const TCP = {
   setWindowScaleShift: 'effect', getWindowScaleShift: 'answer', getRelativeSeq: 'answer',
   getStreamId: 'answer', recordStreamPacket: 'answer', updateConnectionState: 'effect',
   noteFin: 'answer', isAtOrPastExpected: 'answer', analyze: 'answer', noteGap: 'effect',
   getConversationCompleteness: 'answer', getCompletenessMask: 'answer',
-  ldapConversation: 'object', smb2Conversation: 'object', peekBgpDirection: 'peek',
-  bgpDirection: 'object', peekTlsCursor: 'peek', tlsCursor: 'object',
-  tlsConversation: 'object', getTlsStreamId: 'answer',
+  ldapConversation: 'snapshot', smb2Conversation: 'snapshot', peekBgpDirection: 'peek',
+  bgpDirection: 'snapshot', peekTlsCursor: 'peek', tlsCursor: 'snapshot',
+  tlsConversation: 'snapshot', getTlsStreamId: 'answer',
 } as const satisfies Record<keyof TcpTrackerApi, Kind>;
 
 const QUIC = {
@@ -89,22 +99,60 @@ type Group = keyof typeof GROUPS;
 /** Method ids: one byte each, assigned in table order, 0 reserved. */
 const IDS = new Map<string, number>();
 const NAMES: string[] = ['(none)'];
+const KINDS: (Kind | undefined)[] = [undefined];
 for (const [group, table] of Object.entries(GROUPS)) {
-  for (const method of Object.keys(table)) {
+  for (const [method, kind] of Object.entries(table) as [string, Kind][]) {
     IDS.set(`${group}.${method}`, NAMES.length);
     NAMES.push(`${group}.${method}`);
+    KINDS.push(kind);
   }
 }
 /** A call to the function `createInitialDecryptor` returned. */
 const DECRYPT_CALL = NAMES.length;
 NAMES.push('quic.decrypt');
+KINDS.push('answer');
 /** An answer that carried decrypted content, which a record does not hold. */
 const DERIVED = NAMES.length;
 NAMES.push('(decrypted content)');
+KINDS.push(undefined);
 if (NAMES.length > 255) throw new Error('frameRecord: more methods than one byte can name');
 
 /** The record format; a different leading byte reads as no record at all. */
-export const FRAME_RECORD_VERSION = 1;
+export const FRAME_RECORD_VERSION = 2;
+
+/**
+ * The record's layout: the version byte, then the frames whose bytes a revisit
+ * of it needs (a varint count and the ids, each as its distance above the
+ * previous one), then the call log. The frame list comes first so the store
+ * can fetch those frames' bytes without reading anything else.
+ */
+function openLog(record: Uint8Array): { reader: ValueReader; refs: number[] } | null {
+  if (record.length === 0 || record[0] !== FRAME_RECORD_VERSION) return null;
+  const reader = new ValueReader(record, 1);
+  const count = reader.varint();
+  const refs: number[] = [];
+  let previous = 0;
+  for (let i = 0; i < count; i++) {
+    previous += reader.varint();
+    refs.push(previous);
+  }
+  return { reader, refs };
+}
+
+/** The frames whose bytes a revisit of this record needs, ascending. */
+export function recordRefs(record: Uint8Array): number[] {
+  return openLog(record)?.refs ?? [];
+}
+
+/** FNV-1a, 32 bits: whether a referenced piece is still the piece it was. */
+function fnv1a(bytes: Uint8Array): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i];
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
 
 /** Why a revisit could not give the tree back from the record. */
 export class RecordMiss extends Error {
@@ -140,6 +188,25 @@ function decryptsWithKeyLog(call: unknown[]): boolean {
   return call[5] !== 'initial';
 }
 
+/**
+ * What a TLS conversation snapshot records, or `null` when its state is
+ * derived from plaintext and so is not recorded at all.
+ */
+function snapshotConversation(conv: TlsConversationState): { state: unknown } | null {
+  // Keys present means this connection is being decrypted, so whatever its
+  // HTTP directions hold was read out of plaintext.
+  if (conv.keys && (conv.appClient !== undefined || conv.appServer !== undefined)) return null;
+  // Never the keys, nor the verdict and note that came with them - a revisit
+  // asks the key log again. A key in a record would be key material on disk.
+  const { keys: _keys, keyGeneration: _generation, keyNote: _note, ...rest } = conv;
+  // Emptied, not copied. It names the frames to relabel once the ServerHello
+  // settles the version - patches to OTHER frames, which a revisit discards -
+  // so no tree reads it. And on a connection first seen mid-stream the version
+  // is never settled, so it grows by one id every frame for the life of the
+  // connection: copied, it was half of every record on the bulk fixture.
+  return { state: { ...rest, pendingVersionFrames: [] } };
+}
+
 /** What a peek records: only the part of the live object the dissector tests. */
 function projectPeek(method: string, value: unknown): unknown {
   if (value === undefined || value === null) return value;
@@ -154,8 +221,14 @@ function projectPeek(method: string, value: unknown): unknown {
 export class FrameRecorder {
   readonly sources: FrameSources;
   private readonly out = new ValueWriter();
-  private objects = 0;
   private derived = 0;
+  /** Frames this frame's record names bytes of. */
+  private readonly refs = new Set<number>();
+  /**
+   * Each buffered piece's hash, computed once. A record spanning 45 segments
+   * is snapshotted 45 times, and hashing its pieces every time was quadratic.
+   */
+  private readonly pieceHashes = new WeakMap<Uint8Array, number>();
 
   constructor(real: Omit<FrameSources, 'env'> & { env?: DissectEnv }) {
     const all = { ...real, env: real.env ?? LIVE_ENV } as unknown as Record<Group, Record<string, AnyFn>>;
@@ -171,6 +244,37 @@ export class FrameRecorder {
       sources[group] = wrapped;
     }
     this.sources = sources as unknown as FrameSources;
+  }
+
+  /**
+   * What a snapshot records, or `null` when the state is derived from
+   * plaintext and so is not recorded at all.
+   */
+  private snapshotOf(method: string, live: unknown): { state: unknown } | null {
+    if (method === 'tlsConversation') return snapshotConversation(live as TlsConversationState);
+    if (method !== 'tlsCursor') return { state: live };
+    const cursor = live as TlsRecordCursor;
+    if (cursor.buffer === null || cursor.buffer.length !== cursor.bufferSources.length) {
+      return { state: cursor };
+    }
+    // The buffered body is earlier frames' bytes, which the store already holds
+    // as those frames. Named, not copied: frame, offset, length and a hash, so a
+    // revisit that finds different bytes there misses instead of reading them.
+    // A body that is not in its source any more - a segment carried inside a
+    // reassembled IP datagram is cut from the datagram, not from a frame - is
+    // caught by that hash too.
+    const bufferRefs: number[] = [];
+    cursor.bufferSources.forEach((source, i) => {
+      const piece = cursor.buffer![i];
+      let hash = this.pieceHashes.get(piece);
+      if (hash === undefined) {
+        hash = fnv1a(piece);
+        this.pieceHashes.set(piece, hash);
+      }
+      bufferRefs.push(source.frame, source.at, source.length, hash);
+      this.refs.add(source.frame);
+    });
+    return { state: { ...cursor, buffer: null, bufferSources: [], bufferRefs } };
   }
 
   private wrap(kind: Kind, id: number, method: string, fn: AnyFn): AnyFn {
@@ -223,30 +327,44 @@ export class FrameRecorder {
           }
           return answer;
         };
-      case 'object':
+      case 'snapshot':
         return (...args) => {
-          out.byte(id);
-          this.objects += 1;
-          return fn(...args);
+          const live = fn(...args);
+          const snapshot = this.snapshotOf(method, live);
+          if (snapshot === null) {
+            out.byte(DERIVED);
+            this.derived += 1;
+          } else {
+            out.byte(id);
+            out.value(snapshot.state);
+          }
+          return live;
         };
     }
   }
 
   begin(): void {
     this.out.reset();
-    this.out.byte(FRAME_RECORD_VERSION);
-    this.objects = 0;
     this.derived = 0;
+    this.refs.clear();
   }
 
   /** The frame's record. */
   end(): Uint8Array {
-    return this.out.bytes();
-  }
-
-  /** How many live objects the frame just recorded was handed - 0 means fully recorded. */
-  get objectCalls(): number {
-    return this.objects;
+    const head = new ValueWriter();
+    head.byte(FRAME_RECORD_VERSION);
+    const refs = [...this.refs].sort((a, b) => a - b);
+    head.varint(refs.length);
+    let previous = 0;
+    for (const frame of refs) {
+      head.varint(frame - previous);
+      previous = frame;
+    }
+    const log = this.out.bytes();
+    const record = new Uint8Array(head.length + log.length);
+    record.set(head.bytes());
+    record.set(log, head.length);
+    return record;
   }
 
   /** How many answers the frame just recorded carried decrypted content. */
@@ -264,11 +382,17 @@ export class FrameRevisit {
   readonly sources: FrameSources;
   private readonly in: ValueReader;
 
-  constructor(record: Uint8Array) {
-    if (record.length === 0 || record[0] !== FRAME_RECORD_VERSION) {
-      throw new RecordMiss(`not a version ${FRAME_RECORD_VERSION} record`);
-    }
-    this.in = new ValueReader(record, 1);
+  /**
+   * `bytesOf` answers with another frame's stored bytes, for the frames
+   * `recordRefs` names; a frame it cannot supply is a miss.
+   */
+  constructor(
+    record: Uint8Array,
+    private readonly bytesOf: (frame: number) => Uint8Array | undefined = () => undefined,
+  ) {
+    const log = openLog(record);
+    if (log === null) throw new RecordMiss(`not a version ${FRAME_RECORD_VERSION} record`);
+    this.in = log.reader;
     const sources = {} as Record<Group, Record<string, AnyFn>>;
     for (const group of Object.keys(GROUPS) as Group[]) {
       const answering: Record<string, AnyFn> = {};
@@ -289,6 +413,29 @@ export class FrameRevisit {
     if (got !== id) throw new RecordMiss(`asked ${NAMES[id]} where arrival asked ${NAMES[got] ?? got}`);
   }
 
+  /** A recorded TLS cursor, with its buffered body cut back out of its frames. */
+  private hydrateCursor(state: Record<string, unknown>): unknown {
+    const refs = state.bufferRefs as number[] | undefined;
+    if (refs === undefined) return state;
+    delete state.bufferRefs;
+    const buffer: Uint8Array[] = [];
+    const sources: { frame: number; at: number; length: number }[] = [];
+    for (let i = 0; i < refs.length; i += 4) {
+      const [frame, at, length, hash] = refs.slice(i, i + 4);
+      const bytes = this.bytesOf(frame);
+      if (bytes === undefined) throw new RecordMiss(`the bytes of frame ${frame} are not available`);
+      const piece = bytes.slice(at, at + length);
+      if (piece.length !== length || fnv1a(piece) !== hash) {
+        throw new RecordMiss(`frame ${frame} no longer holds the bytes its record names`);
+      }
+      buffer.push(piece);
+      sources.push({ frame, at, length });
+    }
+    state.buffer = buffer;
+    state.bufferSources = sources;
+    return state;
+  }
+
   private answer(kind: Kind, id: number): AnyFn {
     switch (kind) {
       case 'answer':
@@ -297,6 +444,14 @@ export class FrameRevisit {
         return () => {
           this.expect(id);
           return this.in.value();
+        };
+      case 'snapshot':
+        return () => {
+          this.expect(id);
+          const state = this.in.value();
+          return id === IDS.get('tcp.tlsCursor')
+            ? this.hydrateCursor(state as Record<string, unknown>)
+            : state;
         };
       case 'effect':
         return () => {
@@ -311,15 +466,46 @@ export class FrameRevisit {
             return this.in.value();
           };
         };
-      case 'object':
-        return () => {
-          this.expect(id);
-          throw new RecordMiss(`${NAMES[id]} hands out live state, which records do not hold yet`);
-        };
     }
   }
 
   finish(): void {
     if (!this.in.done) throw new RecordMiss('the revisit asked fewer questions than arrival did');
   }
+}
+
+/**
+ * Where a record's bytes go, by question - for the gate's cost report, so a
+ * record that grows says which answer grew rather than only that it did.
+ */
+export function recordComposition(record: Uint8Array): Map<string, number> {
+  const out = new Map<string, number>();
+  const log = openLog(record);
+  if (log === null) return out;
+  const reader = log.reader;
+  let at = record.length - reader.remaining;
+  out.set('(frames named)', at);
+  while (!reader.done) {
+    const id = reader.byte();
+    if (id !== DERIVED && KINDS[id] !== 'effect' && KINDS[id] !== 'decryptor') reader.value();
+    const end = record.length - reader.remaining;
+    out.set(NAMES[id] ?? `#${id}`, (out.get(NAMES[id] ?? `#${id}`) ?? 0) + (end - at));
+    at = end;
+  }
+  return out;
+}
+
+/** A record's entries, decoded - for diagnosing one record by hand. */
+export function recordEntries(record: Uint8Array): [string, unknown][] {
+  const out: [string, unknown][] = [];
+  const log = openLog(record);
+  if (log === null) return out;
+  const reader = log.reader;
+  out.push(['(frames named)', log.refs]);
+  while (!reader.done) {
+    const id = reader.byte();
+    const carries = id !== DERIVED && KINDS[id] !== 'effect' && KINDS[id] !== 'decryptor';
+    out.push([NAMES[id] ?? `#${id}`, carries ? reader.value() : undefined]);
+  }
+  return out;
 }

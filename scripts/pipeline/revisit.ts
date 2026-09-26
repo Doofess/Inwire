@@ -36,7 +36,9 @@ import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
 import { applyInfoPatch } from '../../src/services/dissect/infoPatch';
 import { withDissectEnv } from '../../src/services/dissect/dissectEnv';
-import { FrameRecorder, FrameRevisit, RecordMiss } from '../../src/services/dissect/frameRecord';
+import {
+  FrameRecorder, FrameRevisit, RecordMiss, recordComposition, recordRefs,
+} from '../../src/services/dissect/frameRecord';
 import type { InfoPatch } from '../../src/services/dissect/types';
 import type { Packet, ProtocolLayer } from '../../src/types/packet';
 
@@ -149,7 +151,11 @@ async function runFixture(name: string, path: string) {
   const t1 = performance.now();
   for (const { packet, record, input } of arrived) {
     try {
-      const revisit = new FrameRevisit(record);
+      // Other frames' bytes, as the store hands them over: by id, and only for
+      // the frames the record names.
+      const named = new Set(recordRefs(record));
+      const revisit = new FrameRevisit(record, (frame) =>
+        (named.has(frame) ? arrived[frame - 1]?.input.bytes : undefined));
       const rs = revisit.sources;
       const { packet: again } = withDissectEnv(rs.env, () =>
         decodeRawEthernetPacket(input.bytes, packet.id, input.tsUs, input.relativeTime, input.timeDelta,
@@ -183,6 +189,12 @@ async function runFixture(name: string, path: string) {
     deflated += deflateSync(joined, { level: STORE_LEVEL }).length;
   }
   const missed = [...misses.values()].reduce((s, n) => s + n, 0);
+  const byQuestion = new Map<string, number>();
+  for (const a of arrived) {
+    for (const [question, bytes] of recordComposition(a.record)) {
+      byQuestion.set(question, (byQuestion.get(question) ?? 0) + bytes);
+    }
+  }
 
   console.log(`\n--- ${name}: ${arrived.length.toLocaleString()} frames ---`);
   console.log(`      equal ${equal.toLocaleString()}, missed ${missed.toLocaleString()}, wrong ${wrong}`);
@@ -191,6 +203,9 @@ async function runFixture(name: string, path: string) {
   }
   console.log(`      record: mean ${(raw / arrived.length).toFixed(1)} B, p99 ${percentile(sizes, 0.99)} B, `
     + `max ${sizes[sizes.length - 1]} B raw; ${(deflated / arrived.length).toFixed(1)} B/frame deflated`);
+  const heaviest = [...byQuestion].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  console.log(`      raw bytes by question: ${heaviest
+    .map(([q, b]) => `${q} ${((100 * b) / raw).toFixed(0)}%`).join(', ')}`);
   console.log(`      arrival ${arrivalMs.toFixed(0)} ms, revisit of every frame ${revisitMs.toFixed(0)} ms `
     + `(${((revisitMs * 1000) / arrived.length).toFixed(1)} us a frame)`);
   for (const example of wrongExamples) console.log(`        WRONG ${example}`);
