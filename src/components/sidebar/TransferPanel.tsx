@@ -21,6 +21,7 @@ import type { AgentInterface, CaptureDropStats } from '../../services/agentProto
 import type { Capabilities, Packet } from '../../types/packet';
 import type { ImportFailure } from '../../services/exportSchema';
 import type { CaptureSource } from '../../services/export/captureMeta';
+import type { ImportBatchSink } from '../../services/tabularImport';
 
 /**
  * Export and Import, as one column read top to bottom.
@@ -94,7 +95,7 @@ export interface TransferPanelProps {
   /** Where these frames came from, for the metadata every format prints. */
   captureSource: CaptureSource;
   onImportPackets: (packets: Packet[], info: { filename: string }) => void;
-  onImportBatch?: (batch: Packet[]) => void;
+  onImportBatch?: ImportBatchSink;
 }
 
 type Scope = 'capture' | 'filter';

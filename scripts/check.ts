@@ -44,6 +44,9 @@ const NOT_TESTS: Record<string, string> = {
   'electron/update-center-drive.ts':
     'drives the Update Center against a loopback feed in the real app; needs dist/ and ~1 minute, run by hand',
   'electron/import-drive.ts': 'imports a 400,000-frame file to reach the disk path; ~1 minute, run by hand',
+  'electron/revisit-drive.ts':
+    'launches the built app, imports the real inwire fixture and opens frames whose trees '
+    + 'are rebuilt from their records (ADR 0049); needs a build and the fixture, run by hand',
   'electron/gpu-restore-drive.ts':
     'loses and restores a real WebGL context in the running app; needs dist/ and a GPU, run by hand',
   'electron/serveStub.ts': 'tool; serves the stub agent until Ctrl+C, for driving the app by hand',

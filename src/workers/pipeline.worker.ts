@@ -40,6 +40,11 @@ import { NO_HOST, type HostIdentity } from '../services/direction';
 import { NetworkFactsCollector } from '../services/networkFacts';
 import { DuplicateFinder, duplicateSuffix } from '../services/duplicateFrames';
 import { dissectReplay, interfacesByLabel } from '../services/pipeline/replay';
+import { FrameRecorder, FrameRevisit, RecordMiss } from '../services/dissect/frameRecord';
+import { withDissectEnv } from '../services/dissect/dissectEnv';
+import { applyInfoPatch } from '../services/dissect/infoPatch';
+import type { FromCapture } from '../services/capture/captureProtocol';
+import type { ProcessInfo } from '../services/flowAnnotations';
 import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
@@ -118,6 +123,19 @@ let l3Tracker = new L3Tracker();
  * rather than an inference - so it is empty until a client subscribes, and
  * every frame before that carries no direction rather than a guessed one.
  */
+/**
+ * The trackers, behind a recorder (ADR 0049). Every frame is dissected through
+ * `recorder.sources`, which answers from the real trackers and writes down what
+ * they said, so the frame's tree can be built again later from that frame and
+ * its record - with no replay of its conversation.
+ */
+function makeRecorder(): FrameRecorder {
+  return new FrameRecorder({
+    tcp: tcpTracker, quic: quicTracker, dns: dnsTracker, icmp: icmpTracker, l3: l3Tracker,
+  });
+}
+let recorder = makeRecorder();
+
 let host: HostIdentity = NO_HOST;
 const networkFacts = new NetworkFactsCollector();
 /**
@@ -142,6 +160,8 @@ let lastPacketUs: number | null = null;
 let pendingPackets: Packet[] = [];
 let pendingIcmpReplies: { requestFrameId: number; replyId: number }[] = [];
 let pendingInfoPatches: InfoPatch[] = [];
+/** This flush's frame records, for the store. */
+let pendingRecords: { id: number; record: Uint8Array }[] = [];
 
 /**
  * Recently dissected trees, oldest first, so the detail pane can be answered
@@ -166,6 +186,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   quicTracker = new QuicFlowTracker();
   dnsTracker = new DnsTracker();
   l3Tracker = new L3Tracker();
+  recorder = makeRecorder();
   // The facts, but not the identity. Clearing the buffer discards what this
   // capture observed; it does not make the machine a different machine, and
   // re-deriving the adapter's own MAC would mean every frame after a clear
@@ -173,9 +194,11 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   networkFacts.reset();
   duplicates.reset();
   treeCache.clear();
+  revisitedTrees.clear();
   pendingPackets = [];
   pendingIcmpReplies = [];
   pendingInfoPatches = [];
+  pendingRecords = [];
   // A restored session hands back the capture it is continuing, so the frames
   // that arrive next carry on its relative-time column rather than restarting
   // it at zero underneath frames that are already numbered in the thousands.
@@ -287,11 +310,16 @@ function ingest(frame: LiveFrame, id: number): void {
       : 0;
     lastPacketUs = frame.tsUs;
 
-    const decoded = decodeRawEthernetPacket(
+    recorder.begin();
+    const src = recorder.sources;
+    const decoded = withDissectEnv(src.env, () => decodeRawEthernetPacket(
       frame.bytes, id, frame.tsUs, relativeTime, timeDelta, frame.origLen,
-      tcpTracker, icmpTracker, quicTracker, dnsTracker, interfaceFor(frame.iface),
-      linkTypeFor(frame.iface), l3Tracker, host,
-    );
+      src.tcp, src.icmp, src.quic, src.dns, interfaceFor(frame.iface),
+      linkTypeFor(frame.iface), src.l3, host,
+    ));
+    // Only for a frame that dissected: one that threw has no record to trust,
+    // and its tree is built the old way.
+    pendingRecords.push({ id, record: recorder.end() });
     const packet = decoded.packet;
     packet.tsPrecision = 6;
 
@@ -329,6 +357,89 @@ function ingest(frame: LiveFrame, id: number): void {
     if (decoded.infoPatches) pendingInfoPatches.push(...decoded.infoPatches);
   } catch (err) {
     post({ type: 'failure', message: `failed to dissect a captured frame: ${String(err)}` });
+  }
+}
+
+// --- rebuilding a tree from its record (ADR 0049) ----------------------------
+
+type RevisitKit = Extract<FromCapture, { type: 'revisitKit' }>;
+
+/**
+ * How long a revisit waits for the store before building the tree the old way.
+ * The store answers in milliseconds; this is for a store that died, so the
+ * detail pane falls back rather than waiting for ever.
+ */
+const KIT_TIMEOUT_MS = 5000;
+/** Rebuilt trees kept, for a frame looked at twice. Arrival's cache is separate. */
+const REVISITED_TREES = 64;
+
+const kitWaiters = new Map<number, (kit: RevisitKit | null) => void>();
+let nextKitRequest = 1;
+const revisitedTrees = new Map<number, ProtocolLayer[]>();
+
+function requestKit(id: number): Promise<RevisitKit | null> {
+  if (storePort === null) return Promise.resolve(null);
+  const requestId = nextKitRequest++;
+  const port = storePort;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      kitWaiters.delete(requestId);
+      resolve(null);
+    }, KIT_TIMEOUT_MS);
+    kitWaiters.set(requestId, (kit) => {
+      clearTimeout(timer);
+      resolve(kit);
+    });
+    port.postMessage({ type: 'revisitKit', requestId, id });
+  });
+}
+
+/** The process a stored row was attributed to at arrival, as `annotatePacket` wrote it. */
+function processOfRow(row: Packet): ProcessInfo | null {
+  const name = row.fields?.['inwire.process.name'];
+  const pid = row.fields?.['inwire.process.pid'];
+  if (typeof name !== 'string' || typeof pid !== 'number') return null;
+  const exe = row.fields?.['inwire.process.path'];
+  return { name, pid, exe: typeof exe === 'string' ? exe : '' };
+}
+
+/**
+ * One frame's tree, from the store's kit: its bytes, its row and its record,
+ * plus the bytes of the frames its record names. Null when the frame has no
+ * record or the record cannot give the tree back - the caller then replays.
+ */
+async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
+  const kit = await requestKit(id);
+  if (kit === null || kit.record === null || kit.row === null) return null;
+  const bytes = new Map(kit.frames);
+  const own = bytes.get(id);
+  if (own === undefined) return null;
+  const row = kit.row;
+  try {
+    const again = new FrameRevisit(kit.record, (frame) => bytes.get(frame));
+    const rs = again.sources;
+    const { packet } = withDissectEnv(rs.env, () => decodeRawEthernetPacket(
+      own, id, row.tsUs, row.relativeTime, row.timeDelta, row.length,
+      rs.tcp, rs.icmp, rs.quic, rs.dns, interfaceByFrameLabel(row.interfaceName),
+      row.linkType ?? LINKTYPE.ETHERNET, rs.l3, host,
+    ));
+    again.finish();
+    // The one thing a LATER frame writes into a tree, carried on the row.
+    const responseIn = row.fields?.['dns.response_in'];
+    if (typeof responseIn === 'number') applyInfoPatch(packet, { frameId: id, responseInFrame: responseIn });
+    addProcessRow(packet.layers, processOfRow(row));
+    revisitedTrees.set(id, packet.layers);
+    while (revisitedTrees.size > REVISITED_TREES) {
+      const oldest = revisitedTrees.keys().next();
+      if (oldest.done) break;
+      revisitedTrees.delete(oldest.value);
+    }
+    return packet.layers;
+  } catch (error) {
+    if (!(error instanceof RecordMiss)) {
+      post({ type: 'failure', message: `failed to rebuild frame ${id} from its record: ${String(error)}` });
+    }
+    return null;
   }
 }
 
@@ -370,6 +481,17 @@ function flush(): void {
   }
 
   for (const { frame, id } of assigned) ingest(frame, id);
+
+  // The group's records, after its bytes and in the same flush - so no chunk
+  // can seal between a frame's bytes and its record. Transferred: each record
+  // is a fresh buffer of its own, and nothing here reads it again.
+  if (storePort !== null && pendingRecords.length > 0) {
+    storePort.postMessage(
+      { type: 'appendRecords', frames: pendingRecords },
+      pendingRecords.map((r) => r.record.buffer as ArrayBuffer),
+    );
+  }
+  pendingRecords = [];
 
   // Frames the same capture saw twice, on two adapters. Done over the batch
   // rather than per frame because a duplicate is a relationship BETWEEN
@@ -595,8 +717,15 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       const [port] = event.ports;
       if (!port) break;
       storePort = port;
-      // One-way. Nothing is read back on it, and nothing may be: replies go on
-      // the app's own port, and `entry.ts` keeps them apart by role.
+      // Frames and records go out on it; the one thing that comes back is a
+      // revisit kit this Worker asked for (ADR 0049). Everything else the store
+      // says goes to the app's own port - `entry.ts` keeps them apart.
+      port.onmessage = (message: MessageEvent<FromCapture>) => {
+        if (message.data?.type !== 'revisitKit') return;
+        const waiter = kitWaiters.get(message.data.requestId);
+        kitWaiters.delete(message.data.requestId);
+        waiter?.(message.data);
+      };
       port.start();
       break;
     }
@@ -661,6 +790,9 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
 
     case 'keylog':
       keyLog.add(command.text);
+      // A rebuilt tree read the key log as it was; with more keys, the same
+      // frame may now decrypt. Arrival's cache stays, as ADR 0045 records.
+      revisitedTrees.clear();
       break;
 
     case 'keylog-clear':
@@ -670,12 +802,24 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       // lives: without this a recent frame would keep showing plaintext after
       // the panel said the secrets were gone.
       treeCache.clear();
+      revisitedTrees.clear();
       break;
 
     case 'detail': {
-      const layers = treeCache.get(command.id);
-      if (layers) post({ type: 'detail', id: command.id, layers });
-      else post({ type: 'needReplay', id: command.id });
+      const layers = treeCache.get(command.id) ?? revisitedTrees.get(command.id);
+      if (layers) {
+        post({ type: 'detail', id: command.id, layers });
+        break;
+      }
+      // Not dissected recently: rebuilt from the frame's record, which the
+      // store holds for every frame of the capture (ADR 0049). Only a frame
+      // with no record - a capture older than records, a frame that failed to
+      // dissect - falls back to replaying its conversation.
+      const id = command.id;
+      void revisitFromStore(id).then((rebuilt) => {
+        if (rebuilt !== null) post({ type: 'detail', id, layers: rebuilt });
+        else post({ type: 'needReplay', id });
+      });
       break;
     }
 

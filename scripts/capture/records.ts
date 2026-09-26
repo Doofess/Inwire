@@ -10,6 +10,11 @@
  * process boundary uses. The check is the one that matters: every frame's tree,
  * rebuilt from nothing but a `revisitKit` answer, is the tree arrival built.
  *
+ * And an IMPORT, through `importAnyFile` - the entry point the import panel
+ * calls - fed to the store in the order `App` feeds it. That path is its own
+ * producer of records, and it once produced none: every check above passed
+ * while every imported frame's tree fell back to the replay.
+ *
  * Also: records arriving before their bytes and after them; a capture written
  * before records existed (index version 1), which must still open and answer
  * "no record"; and a torn records file, which recovery must cut back to the
@@ -18,13 +23,15 @@
  * The real `inwire` fixture only (test/fixtures/README.md); skips cleanly
  * without it.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { serialize, deserialize } from 'node:v8';
 import { CaptureHost } from '../../src/services/capture/captureHost';
 import { MemoryVolume } from '../../src/services/capture/memoryVolume';
 import { plainForStore } from '../../src/services/capture/storePacket';
 import { writeIndexHeader, INDEX_HEADER_BYTES } from '../../src/services/capture/captureIndex';
 import { RecordMiss } from '../../src/services/dissect/frameRecord';
+import { importAnyFile } from '../../src/services/tabularImport';
 import { LINKTYPE } from '../../src/services/dissect/types';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { InfoPatch } from '../../src/services/dissect/types';
@@ -228,6 +235,51 @@ async function main() {
     const kit = again.replies.find((r): r is Kit => r.type === 'revisitKit');
     checkTrue('...and a surviving frame still rebuilds', kit !== undefined
       && treeFromKit(kit, 2, arrival) === render(arrived[1].packet.layers));
+  }
+
+  console.log('\n--- an import, the way the app feeds it ---\n');
+  {
+    const imp = host();
+    imp.send({ type: 'open', captureId: 'cap-20260926-120000-rec4' });
+    let batches = 0;
+    let recordsMatchBatches = true;
+    const file = new File([new Uint8Array(readFileSync(fixture.path))], basename(fixture.path));
+    const outcome = await importAnyFile(file, {
+      onBatch: (packets, records) => {
+        batches += 1;
+        if (JSON.stringify(records.map((r) => r.id)) !== JSON.stringify(packets.map((p) => p.id))) {
+          recordsMatchBatches = false;
+        }
+        // `App.handleImportBatch`'s order: records, then the rows carrying
+        // their bytes.
+        imp.send({ type: 'appendRecords', frames: records });
+        imp.send({ type: 'append', packets: packets.map((p) => plainForStore(p)) });
+      },
+    });
+    imp.send({ type: 'finish' });
+    await imp.store.drain();
+    checkTrue('the import succeeded', outcome.ok === true);
+    checkTrue('...in more than one batch', batches > 1);
+    checkTrue('every batch carries a record for each of its frames, in order', recordsMatchBatches);
+
+    const byId = new Map(arrived.map((a) => [a.packet.id, a] as const));
+    let noRecord = 0;
+    let wrong = 0;
+    for (const a of arrived) imp.ask({ type: 'revisitKit', requestId: 10_000 + a.packet.id, id: a.packet.id });
+    await imp.store.drain();
+    for (const reply of imp.replies) {
+      if (reply.type !== 'revisitKit' || reply.requestId < 10_000) continue;
+      const id = reply.requestId - 10_000;
+      if (reply.record === null) { noRecord += 1; continue; }
+      try {
+        if (treeFromKit(reply, id, arrival) !== render(byId.get(id)!.packet.layers)) wrong += 1;
+      } catch (error) {
+        if (!(error instanceof RecordMiss)) throw error;
+        wrong += 1;
+      }
+    }
+    check('every imported frame\'s record is in the store', noRecord, 0);
+    check('...and rebuilds the tree arrival built', wrong, 0);
   }
 }
 

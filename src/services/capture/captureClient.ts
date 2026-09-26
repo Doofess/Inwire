@@ -379,6 +379,16 @@ class CaptureClient {
   }
 
   /**
+   * Hands over frame records for frames about to be appended (ADR 0049) - an
+   * import's, which dissects on this thread. A live capture's go straight from
+   * the pipeline Worker on its own port and never pass through here.
+   */
+  appendRecords(records: readonly { id: number; record: Uint8Array }[]): void {
+    if (records.length === 0) return;
+    this.send({ type: 'appendRecords', frames: [...records] });
+  }
+
+  /**
    * Hands over the patches this flush produced.
    *
    * Sent separately from the frames and immediately after them, because a

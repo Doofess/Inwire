@@ -1,5 +1,5 @@
 /**
- * The capture store has two ports, and only one of them may answer.
+ * The capture store has two ports, and only one of them is where replies go.
  *
  *   npx tsx scripts/electron/store-ports.ts
  *
@@ -18,6 +18,11 @@
  * can hold is the decisions: that a role travels with every port, that the
  * ingest port never becomes the one replies go to, and that the renderer only
  * ferries it.
+ *
+ * The ingest port answers exactly one thing, on itself: a revisit kit the
+ * Worker asked for there (ADR 0049). That answer travels with its request as a
+ * callback, so the port is still never `port`, and a failure is still
+ * reported on the client port the app watches.
  *
  * ADR 0038.
  */
@@ -57,7 +62,7 @@ checkTrue('host.ts hands ports over in one place',
 
 checkTrue('entry.ts reads the role off the message', /role\s*[=:]/.test(entry));
 
-console.log('\n--- and only the client port answers ---\n');
+console.log('\n--- and only the client port is the reply port ---\n');
 
 // The load-bearing one. `port` is what `CaptureHost`'s reply callback posts to;
 // if the ingest branch ever assigns it, every reply goes down a one-way channel.
@@ -71,6 +76,14 @@ checkTrue('...and feeds the same host', /host\.receive/.test(ingestBranch));
 // The reply path is unchanged and still singular.
 checkTrue('replies go to the client port alone',
   /port\?\.postMessage\(message\)/.test(entry));
+
+// ADR 0049's one exception, held to exactly one: the host answers down a
+// message's own callback for a revisit kit and for nothing else, so no reply
+// meant for the renderer can ever leave on the Worker's port.
+const captureHost = read('src/services/capture/captureHost.ts');
+checkTrue('the host answers down a message\'s own port only with a revisit kit',
+  JSON.stringify([...captureHost.matchAll(/\breply\(\{ type: '([a-zA-Z]+)'/g)].map((m) => m[1])) === '["revisitKit"]'
+  && (captureHost.match(/\breply\(/g) ?? []).length === 1);
 
 console.log('\n--- the renderer only ferries it ---\n');
 

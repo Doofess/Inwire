@@ -309,7 +309,7 @@ incompatible with `sandbox: true`; it does not work with `type: 'module'`
 workers, which `captureClient.ts` uses; and it would hand `child_process` to
 the same renderer that parses hostile bytes. `entry.ts` is the process,
 `host.ts` forks it and brokers the channel, `volume.ts` is the `node:fs`
-implementation of the four capture files.
+implementation of the five capture files.
 
 Forked with `stdio: 'pipe'`, because a packaged GUI app has no console to
 inherit and every `fail()` message the protocol calls "never silent" would go
@@ -362,11 +362,19 @@ decoding it there to get ids would end that. The Worker rather than the
 renderer's main thread, because of ADR 0007 — and it is the only place holding a
 frame's bytes and its id at the same moment.
 
-**Two ports into the store, and only one of them answers.** `entry.ts` took
-`event.ports[0]` from any parent message and assigned it to its single `port`,
-which was correct with one channel and silently wrong with two: the second would
-replace the first and every reply would go down a port nothing was reading. The
-role travels with the port now; `scripts/electron/store-ports.ts` holds it.
+**Two ports into the store, and only one of them is the reply port.**
+`entry.ts` took `event.ports[0]` from any parent message and assigned it to its
+single `port`, which was correct with one channel and silently wrong with two:
+the second would replace the first and every reply would go down a port nothing
+was reading. The role travels with the port now; `scripts/electron/store-ports.ts`
+holds it.
+
+The Worker's port carries **records** as well as bytes, posted after each
+flush's bytes, and it asks one question back: a **`revisitKit`** — a frame's
+record, its row, and the bytes of it and every frame the record names (ADR
+0049). That answer goes down the Worker's own port as a callback on the
+request, so the port still never becomes `port`, and a failure still reports on
+the client port. `store-ports.ts` holds the host to exactly that one answer.
 
 **The app never chooses between "bytes and row" and "row only".** There is no
 `attachRows` message. Rows keep arriving as `append`, and `CaptureWriter`
@@ -391,8 +399,13 @@ cross-process clone's own cost is in **What the store actually costs**.
 
 ### On disk — `src/services/capture/`
 
-A capture is a directory named `cap-YYYYMMDD-HHMMSS-xxxx` holding four files:
-`index.iwidx`, `prefix.iwpfx`, `summary.iwsum`, `frames.iwbyt`. Written by
+A capture is a directory named `cap-YYYYMMDD-HHMMSS-xxxx` holding five files:
+`index.iwidx`, `prefix.iwpfx`, `summary.iwsum`, `frames.iwbyt` and
+`records.iwrec` — the last one deflated block of frame records per chunk (ADR
+0049), written before the chunk's index record so recovery covers it unchanged.
+The index is **version 2**, an 80-byte stride carrying the records' extent; a
+version 1 capture (64 bytes, no records) still opens, is continued as version
+1, and its trees fall back to the replay. Written by
 `captureWriter.ts` through `chunkCodec.ts`, read back by `captureReader.ts`,
 addressed by `captureIndex.ts`, searched by `captureScan.ts` and `matchSet.ts`.
 
@@ -1222,11 +1235,20 @@ every commit twice because React does. `prepareBatch` is what must happen
 exactly once; `commitBatch` must survive repetition.
 
 A posted `Packet` carries its **bytes** and not its **tree**: a tree is 10.6 kB
-against the frame's 1.2 kB (ADR 0007). Trees are dissected on demand by
-replaying that frame's conversation (`services/pipeline/replay.ts`), because a
-frame's tree is not a function of its own bytes — the TLS record cursor, the
-QUIC keys, the DNS pairings and the TCP sequence bases are all state the frames
-before it built.
+against the frame's 1.2 kB (ADR 0007). A frame's tree is not a function of its
+own bytes — the TLS record cursor, the QUIC keys, the DNS pairings and the TCP
+sequence bases are all state the frames before it built — so **arrival records
+it** (ADR 0049, Wireshark's model). Dissectors reach that state only through
+`dissect/trackerApi.ts`; at arrival a `FrameRecorder` (`dissect/frameRecord.ts`)
+stands in front of the trackers and writes every answer down, and on a click a
+`FrameRevisit` hands the same answers back to the same dissector code, so a
+tree costs one frame's dissection wherever the frame is. Facts from outside any
+conversation — the clock, HTTP/1's shared body budget, direction — go through
+`dissect/dissectEnv.ts` and are recorded too. A record never holds a key or
+plaintext; a revisit that needs either, or asks a question arrival did not,
+throws `RecordMiss` and falls back to replaying the conversation
+(`services/pipeline/replay.ts`). `scripts/pipeline/revisit.ts` revisits every
+frame of the fixtures and fails on any miss.
 
 The per-frame lists are pooled (`dissect/tokenPool.ts`, ADR 0016) and the 33
 most common fields live in typed columns rather than in the bag

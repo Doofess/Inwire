@@ -27,6 +27,11 @@ import { IcmpEchoTracker } from './icmpEchoTracker';
 import type {
   TcpTrackerApi, IcmpTrackerApi, QuicTrackerApi, DnsTrackerApi, L3TrackerApi,
 } from './dissect/trackerApi';
+import { dissectEnv, withDissectEnv } from './dissect/dissectEnv';
+import type { FrameRecorder } from './dissect/frameRecord';
+
+/** One frame's record, as it travels to the store (ADR 0049). */
+export interface FrameRecordEntry { id: number; record: Uint8Array }
 import { poolExpert, poolTokens } from './dissect/tokenPool';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 
@@ -205,14 +210,26 @@ export class PcapService {
    */
   public static async streamCaptureFile(
     file: File,
-    onBatch: (packets: Packet[]) => void,
+    /**
+     * Each batch of frames, and - when `record` is set - each frame's record
+     * (ADR 0049), for the caller to hand the store ahead of the rows.
+     */
+    onBatch: (packets: Packet[], records?: FrameRecordEntry[]) => void,
     /**
      * `patchWindow` is settable for the same reason `CaptureHost` takes
      * `scanSliceMs`: what has to be asserted is the behaviour at the window's
      * edge, and reaching it honestly would mean a test that dissects several
      * hundred thousand frames.
      */
-    options: { keepTrees?: boolean; patchWindow?: number; batchFrames?: number } = {},
+    options: {
+      keepTrees?: boolean; patchWindow?: number; batchFrames?: number;
+      /**
+       * Whether to keep each frame's record (ADR 0049), so its tree can be
+       * rebuilt later from that frame alone rather than by replaying its
+       * conversation. They come with their batch.
+       */
+      record?: boolean;
+    } = {},
   ): Promise<{ totalFrames: number; built: number; missedPatches: number }> {
     // No cap: the point is the frames the cap used to throw away. What bounds
     // this is the patch window above, and whatever the caller does with each
@@ -223,11 +240,15 @@ export class PcapService {
     let built = 0;
     const { missedPatches } = PcapService.buildPacketsInBatches(
       extracted.frames,
-      (batch) => { built += batch.length; onBatch(batch); },
+      (batch, records) => { built += batch.length; onBatch(batch, records); },
       options.keepTrees ?? false,
       host,
       options.batchFrames ?? IMPORT_BATCH_FRAMES,
       options.patchWindow ?? IMPORT_PATCH_WINDOW,
+      // Fetched only when recording, so the recorder and its codec stay out of
+      // the renderer's eager chunk: only an import that goes to the store
+      // records, and it is already waiting on a file read.
+      options.record === true ? (await import('./dissect/frameRecord')).FrameRecorder : null,
     );
     return { totalFrames: extracted.totalFrames, built, missedPatches };
   }
@@ -510,11 +531,12 @@ export class PcapService {
    */
   private static buildPacketsInBatches(
     frames: ExtractedFrame[],
-    onBatch: (packets: Packet[]) => void,
+    onBatch: (packets: Packet[], records?: FrameRecordEntry[]) => void,
     keepTrees = false,
     host?: HostIdentity,
     batchFrames = IMPORT_BATCH_FRAMES,
     patchWindow = IMPORT_PATCH_WINDOW,
+    Recorder: typeof FrameRecorder | null = null,
   ): { missedPatches: number } {
     /** The window: frames built and not yet handed over, oldest first. */
     const parsedPackets: Packet[] = [];
@@ -548,7 +570,18 @@ export class PcapService {
         // nothing can still amend it, and this is that moment.
         fieldWriter.absorb(batch);
         shipped += batch.length;
-        onBatch(batch);
+        if (recorder === null) {
+          onBatch(batch);
+        } else {
+          const batchRecords: FrameRecordEntry[] = [];
+          for (const packet of batch) {
+            const r = records.get(packet.id);
+            if (r === undefined) continue;
+            batchRecords.push({ id: packet.id, record: r });
+            records.delete(packet.id);
+          }
+          onBatch(batch, batchRecords);
+        }
       }
     };
 
@@ -560,6 +593,13 @@ export class PcapService {
     const quicTracker = new QuicFlowTracker();
     const dnsTracker = new DnsTracker();
     const l3Tracker = new L3Tracker();
+    // Recording, every frame is dissected through a recorder in front of the
+    // trackers - the same one the live Worker uses. A frame's record waits here
+    // with the frame, and leaves with it.
+    const recorder = Recorder === null ? null : new Recorder({
+      tcp: tcpTracker, quic: quicTracker, dns: dnsTracker, icmp: icmpTracker, l3: l3Tracker,
+    });
+    const records = new Map<number, Uint8Array>();
 
     for (const frame of frames) {
       if (baseNanos === null) baseNanos = frame.tsNanos;
@@ -572,11 +612,24 @@ export class PcapService {
       prevNanos = frame.tsNanos;
       const tsUs = Number(frame.tsNanos / 1000n);
 
-      const { packet, icmpMatchedRequestFrameId, infoPatches } = decodeRawEthernetPacket(
-        frame.rawBytes, packetIndex++, tsUs, relativeTime, timeDelta, frame.origLen,
-        tcpTracker, icmpTracker, quicTracker, dnsTracker, undefined, frame.linktype, l3Tracker,
-        host,
-      );
+      const id = packetIndex++;
+      let decoded: ReturnType<typeof decodeRawEthernetPacket>;
+      if (recorder === null) {
+        decoded = decodeRawEthernetPacket(
+          frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
+          tcpTracker, icmpTracker, quicTracker, dnsTracker, undefined, frame.linktype, l3Tracker,
+          host,
+        );
+      } else {
+        recorder.begin();
+        const src = recorder.sources;
+        decoded = withDissectEnv(src.env, () => decodeRawEthernetPacket(
+          frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
+          src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host,
+        ));
+        records.set(id, recorder.end());
+      }
+      const { packet, icmpMatchedRequestFrameId, infoPatches } = decoded;
       packet.tsPrecision = frame.tsPrecision;
       if (frame.tsPrecision > 6) packet.tsNanos = frame.tsNanos;
       // Dissected, then dropped: the tree has already done its work by here -
@@ -824,7 +877,13 @@ export function decodeRawEthernetPacket(
   // including the broadcasts this machine sends - which is why the source is
   // tested before the destination. Links with no MACs at all (a TUN-style VPN)
   // fall through to the address test after dissection.
-  let direction = host ? directionFromMacs(link.srcMac, link.dstMac, host) : 0;
+  //
+  // Through the environment, because `host` is not fixed for a capture: a live
+  // one learns this machine's MACs when the agent first reports its adapters,
+  // so the same frame dissected later could decide differently - and the
+  // checksum verdict in its tree hangs on this. A revisit reads what arrival
+  // decided (ADR 0049).
+  let direction = dissectEnv().direction(host ? directionFromMacs(link.srcMac, link.dstMac, host) : 0);
   /**
    * Did this machine send the frame? `undefined` when that cannot be decided.
    *
@@ -1075,7 +1134,7 @@ export function decodeRawEthernetPacket(
   // compare, and a host identity that knows an address but not a MAC - which
   // is what the socket table alone gives.
   if (direction === 0 && host) {
-    direction = directionFromAddresses(srcIp, dstIp, host);
+    direction = dissectEnv().direction(directionFromAddresses(srcIp, dstIp, host));
   }
   if (direction === 0) {
     // Last, and only ever able to say "out". A frame larger than the link can

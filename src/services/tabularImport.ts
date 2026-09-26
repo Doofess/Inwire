@@ -1,7 +1,7 @@
 import { Packet } from '../types/packet';
 import { DnsTracker } from './dnsTracker';
 import { ImportFailure, rowsToFrames } from './exportSchema';
-import { PcapService } from './pcapParser';
+import { PcapService, type FrameRecordEntry } from './pcapParser';
 import { applyIcmpReplies, restoreBatch } from './sessionRestore';
 import { extensionOf, readTabularFile, TABULAR_EXTENSIONS } from './tabularReaders';
 import { IcmpEchoTracker } from './icmpEchoTracker';
@@ -242,7 +242,7 @@ async function importZip(file: File, maxFrames: number): Promise<ImportOutcome> 
 }
 
 async function importCapture(
-  file: File, maxFrames: number, onBatch?: (packets: Packet[]) => void,
+  file: File, maxFrames: number, onBatch?: ImportBatchSink,
 ): Promise<ImportOutcome> {
   try {
     const notes: string[] = [];
@@ -313,18 +313,26 @@ async function readWholeCapture(file: File, maxFrames: number): Promise<CaptureR
  * the same one a live capture leaves them at.
  */
 async function readStreamedCapture(
-  file: File, maxFrames: number, onBatch: (packets: Packet[]) => void,
+  file: File, maxFrames: number, onBatch: ImportBatchSink,
 ): Promise<CaptureRead> {
   const tail: Packet[] = [];
-  const outcome = await PcapService.streamCaptureFile(file, (batch) => {
-    onBatch(batch);
+  // Recorded, because every frame of a streamed import goes to the store, and
+  // a frame's record there is what rebuilds its tree later (ADR 0049).
+  const outcome = await PcapService.streamCaptureFile(file, (batch, records) => {
+    onBatch(batch, records ?? []);
     tail.push(...batch);
     // Trimmed as it goes, not at the end: holding the whole capture to slice
     // the last slab off it is the memory this route exists to avoid.
     if (tail.length > maxFrames) tail.splice(0, tail.length - maxFrames);
-  });
+  }, { record: true });
   return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built };
 }
+
+/**
+ * Where a streamed import's frames go: each batch, with each of its frames'
+ * records (ADR 0049) - which the store must be handed before the rows.
+ */
+export type ImportBatchSink = (packets: Packet[], records: FrameRecordEntry[]) => void;
 
 export interface ImportOptions {
   /**
@@ -342,7 +350,7 @@ export interface ImportOptions {
    * every script, and every format that is not a capture file - nothing
    * changes.
    */
-  onBatch?: (packets: Packet[]) => void;
+  onBatch?: ImportBatchSink;
 }
 
 export async function importAnyFile(file: File, options: ImportOptions = {}): Promise<ImportOutcome> {

@@ -94,25 +94,30 @@ const L3 = {
 
 const ENV = {
   now: 'answer', sharedBodyRoom: 'answer', takeBodyBytes: 'effect', releaseBodyBytes: 'effect',
+  direction: 'answer',
 } as const satisfies Record<keyof DissectEnv, Kind>;
 
 const GROUPS = { tcp: TCP, quic: QUIC, dns: DNS, icmp: ICMP, l3: L3, env: ENV } as const;
 type Group = keyof typeof GROUPS;
 
-/** Method ids: one byte each, assigned in table order, 0 reserved. */
+/**
+ * Method ids: one byte each, assigned in table order, 0 reserved. Named
+ * `group:method` rather than with a dot, because a dotted literal in a
+ * dissection source reads as a field name to `scripts/dissect/registry.ts`.
+ */
 const IDS = new Map<string, number>();
 const NAMES: string[] = ['(none)'];
 const KINDS: (Kind | undefined)[] = [undefined];
 for (const [group, table] of Object.entries(GROUPS)) {
   for (const [method, kind] of Object.entries(table) as [string, Kind][]) {
-    IDS.set(`${group}.${method}`, NAMES.length);
-    NAMES.push(`${group}.${method}`);
+    IDS.set(`${group}:${method}`, NAMES.length);
+    NAMES.push(`${group}:${method}`);
     KINDS.push(kind);
   }
 }
 /** A call to the function `createInitialDecryptor` returned. */
 const DECRYPT_CALL = NAMES.length;
-NAMES.push('quic.decrypt');
+NAMES.push('quic:decrypt');
 KINDS.push('answer');
 /** An answer that carried decrypted content, which a record does not hold. */
 const DERIVED = NAMES.length;
@@ -222,7 +227,7 @@ export class FrameRecorder {
       const target = all[group];
       const wrapped: Record<string, AnyFn> = {};
       for (const [method, kind] of Object.entries(GROUPS[group]) as [string, Kind][]) {
-        const id = IDS.get(`${group}.${method}`)!;
+        const id = IDS.get(`${group}:${method}`)!;
         const fn = target[method].bind(target) as AnyFn;
         wrapped[method] = this.wrap(kind, id, method, fn);
       }
@@ -374,7 +379,7 @@ export class FrameRevisit {
     for (const group of Object.keys(GROUPS) as Group[]) {
       const answering: Record<string, AnyFn> = {};
       for (const [method, kind] of Object.entries(GROUPS[group]) as [string, Kind][]) {
-        answering[method] = this.answer(kind, IDS.get(`${group}.${method}`)!);
+        answering[method] = this.answer(kind, IDS.get(`${group}:${method}`)!);
       }
       sources[group] = answering;
     }
@@ -426,7 +431,7 @@ export class FrameRevisit {
         return () => {
           this.expect(id);
           const state = this.in.value();
-          return id === IDS.get('tcp.tlsCursor')
+          return id === IDS.get('tcp:tlsCursor')
             ? this.hydrateCursor(state as Record<string, unknown>)
             : state;
         };

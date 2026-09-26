@@ -32,6 +32,12 @@ export interface DissectEnv {
   takeBodyBytes(n: number): void;
   /** `n` body bytes were given back - finished, replaced or evicted. */
   releaseBodyBytes(n: number): void;
+  /**
+   * Which way a frame went, as decided against the host identity known now.
+   * Identity at arrival; a revisit answers with what arrival decided, because
+   * a live capture learns this machine's identity part way through.
+   */
+  direction(decided: number): number;
 }
 
 /**
@@ -56,6 +62,7 @@ export const LIVE_ENV: DissectEnv = {
     liveBodyBytes -= n;
     if (liveBodyBytes < 0) liveBodyBytes = 0;
   },
+  direction: (decided) => decided,
 };
 
 let current: DissectEnv = LIVE_ENV;

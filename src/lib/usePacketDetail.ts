@@ -16,7 +16,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { pipeline, type ReplayBundle } from '../services/pipelineClient';
-import { seedsFor } from '../services/pipeline/replay';
+import { MAX_REPLAY_FRAMES, seedsFor } from '../services/pipeline/replay';
 import { streamPackets, targetForPacket } from '../services/followStream';
 import { bytesAreRecoverable, hasBytes, packetBytes, packetsBytes } from '../services/packetBytes';
 import { fieldValue } from '../services/dissect/fieldAccess';
@@ -25,17 +25,26 @@ import type { Packet } from '../types/packet';
 /**
  * The frames a replay of `packet`'s conversation needs: everything on its
  * stream up to and including it, oldest first.
+ *
+ * **The fallback now, not the way a tree is built.** A frame's tree comes from
+ * its record in the store (ADR 0049); this runs only for a frame with none - a
+ * capture written before records existed, or one whose dissection threw.
  */
 export async function replayBundleFor(
   packet: Packet,
   buffer: readonly Packet[],
 ): Promise<ReplayBundle> {
   const target = targetForPacket(packet);
-  const stream = target
+  const held = target
     ? streamPackets(buffer, target).filter((p) => p.id <= packet.id)
     // A frame on no stream at all - an ARP, a broadcast - has no conversation
     // to replay and needs none: nothing before it changed how it dissects.
     : [packet];
+  // The replay's own cap, applied HERE, before a single byte is fetched. It
+  // used to be applied after, inside the replay - so a frame deep in a
+  // multi-gigabyte download read every earlier frame of it off the disk to
+  // dissect the last 20,000.
+  const stream = held.length > MAX_REPLAY_FRAMES ? held.slice(-MAX_REPLAY_FRAMES) : held;
   // The bytes, from the packets themselves where they still have them and from
   // the store where they do not. A replay is wrong without them - it would
   // dissect a conversation of empty frames - so this is one of the few places
@@ -60,15 +69,26 @@ export async function replayBundleFor(
     interfaceName: p.interfaceName,
   }));
 
-  // A TCP conversation starts with a SYN. If the earliest frame we still hold
-  // for this one is not it, the buffer has forgotten the beginning, and the
-  // tree's sequence numbers and reassembly are relative to where the replay
-  // could start rather than to where the conversation did. Said rather than
-  // guessed at, because a reader cannot tell the difference by looking.
+  // Said rather than guessed at, because a reader cannot tell a tree rebuilt
+  // from part of its conversation by looking. Three ways it can be partial:
+  //
+  // - **the frame itself is not held.** It is below the RAM window, so the
+  //   stream scan found nothing up to it and the frame is dissected alone -
+  //   the right tree for under 8% of frames, measured. It used to be shown
+  //   as if it were the real one;
+  // - **the cap cut the start off**;
+  // - **the buffer has forgotten frames, and this TCP stream's earliest held
+  //   frame is not its SYN.** Only when frames have actually left the buffer:
+  //   a capture that STARTED mid-connection has lost nothing, and on the bulk
+  //   fixture this row appeared on all 30 of its streams for that reason.
+  //   Frame ids start at 1 for every capture and every import.
   const first = stream[0];
-  const truncated = target?.kind === 'tcp'
-    && first !== undefined
-    && fieldValue(first, 'tcp.flags.syn') !== 1;
+  const frameNotHeld = stream.length === 0 || stream[stream.length - 1].id !== packet.id;
+  const bufferTrimmed = (buffer[0]?.id ?? 1) > 1;
+  const truncated = frameNotHeld
+    || stream.length < held.length
+    || (target?.kind === 'tcp' && bufferTrimmed && first !== undefined
+      && fieldValue(first, 'tcp.flags.syn') !== 1);
 
   // `[Response In: N]` on a DNS query is written by the frame that answers it,
   // which sits after the target and so is not replayed. The frame recorded the

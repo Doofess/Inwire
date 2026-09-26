@@ -3,7 +3,7 @@ import { Check, Info, LoaderCircle, Upload } from 'lucide-react';
 
 import { Packet } from '../../types/packet';
 import { ImportFailure } from '../../services/exportSchema';
-import { importAnyFile, IMPORT_ACCEPT } from '../../services/tabularImport';
+import { importAnyFile, IMPORT_ACCEPT, type ImportBatchSink } from '../../services/tabularImport';
 import { performanceStore } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
@@ -31,7 +31,7 @@ interface ImportPanelProps {
    * test or a caller with no store gets - the old cap applies and the note
    * below says so.
    */
-  onImportBatch?: (batch: Packet[]) => void;
+  onImportBatch?: ImportBatchSink;
   onFailure: (filename: string, failure: ImportFailure) => void;
   /** Set when the error dialog's "Choose another file" reopens the picker. */
   retryToken: number;

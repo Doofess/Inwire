@@ -112,6 +112,7 @@ import {
 } from "./services/preferences";
 import { useThrottledValue } from "./lib/useThrottledValue";
 import type { FilterPresetLibrary } from "./types/packet";
+import type { FrameRecordEntry } from "./services/pcapParser";
 
 import { TriangleAlert } from "lucide-react";
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
@@ -2314,7 +2315,7 @@ export default function App() {
    * only what stays resident, so the list scrolls into the rest the same way
    * it scrolls into a live capture's history.
    */
-  const handleImportBatch = useCallback((batch: Packet[]) => {
+  const handleImportBatch = useCallback((batch: Packet[], records: FrameRecordEntry[]) => {
     if (importCaptureIdRef.current === null) {
       // Before the store is re-opened. The panel shuts the import while an
       // export runs; this is the other door, and the export's reader refuses
@@ -2324,6 +2325,9 @@ export default function App() {
       importCaptureIdRef.current = newCaptureId();
       captureStore.begin(importCaptureIdRef.current);
     }
+    // Records first, so each is in the store before its frame: a record that
+    // arrives after its frame's chunk has sealed is dropped (ADR 0049).
+    captureStore.appendRecords(records);
     captureStore.append(batch);
   }, []);
 

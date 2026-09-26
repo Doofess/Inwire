@@ -2,6 +2,12 @@
 
 **Status:** Accepted 2026-09-04 (Phase 11)
 
+> **Amended by [0049](0049-a-frames-tree-is-rebuilt-from-its-own-record.md).** The
+> boundary below still stands - bytes cross, trees do not. What changed is how a
+> tree that was not carried gets built: from the frame's own record, written at
+> arrival, rather than by replaying its conversation on the click. The replay
+> described here is now the fallback for a frame with no record.
+
 ## Context
 
 ADR 0003 decided that the whole pipeline moves into one Worker and that it

@@ -100,15 +100,39 @@ export class ValueWriter {
     this.buf[this.length++] = n;
   }
 
-  private fields(v: Record<string, unknown>): void {
-    const keys = Object.keys(v);
-    this.varint(keys.length);
-    for (const key of keys) {
-      const utf8 = encoder.encode(key);
+  /**
+   * A string's UTF-8 length and bytes. ASCII - every object key, and nearly
+   * every string a tracker answers with - is written a byte at a time; only a
+   * string with anything past 0x7f goes through `TextEncoder`.
+   *
+   * Measured, not assumed: `TextEncoder.encode` was the recorder's largest cost
+   * on the arrival path, 7.4% of the whole pass plus the collector's share of
+   * the thousands of small arrays it allocated a second.
+   */
+  private utf8(s: string): void {
+    const n = s.length;
+    let ascii = true;
+    for (let i = 0; i < n; i++) {
+      if (s.charCodeAt(i) > 0x7f) { ascii = false; break; }
+    }
+    if (!ascii) {
+      const utf8 = encoder.encode(s);
       this.varint(utf8.length);
       this.room(utf8.length);
       this.buf.set(utf8, this.length);
       this.length += utf8.length;
+      return;
+    }
+    this.varint(n);
+    this.room(n);
+    for (let i = 0; i < n; i++) this.buf[this.length++] = s.charCodeAt(i);
+  }
+
+  private fields(v: Record<string, unknown>): void {
+    const keys = Object.keys(v);
+    this.varint(keys.length);
+    for (const key of keys) {
+      this.utf8(key);
       this.value(v[key]);
     }
   }
@@ -130,15 +154,10 @@ export class ValueWriter {
           this.length += 8;
         }
         return;
-      case 'string': {
-        const utf8 = encoder.encode(v);
+      case 'string':
         this.byte(T_STRING);
-        this.varint(utf8.length);
-        this.room(utf8.length);
-        this.buf.set(utf8, this.length);
-        this.length += utf8.length;
+        this.utf8(v);
         return;
-      }
       case 'object':
         if (v === null) { this.byte(T_NULL); return; }
         if (v instanceof Uint8Array) {
