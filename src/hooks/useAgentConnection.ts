@@ -30,6 +30,7 @@ import {
   type AgentMessage, type CaptureDropStats,
 } from '../services/agentProtocol';
 import { filterCapturableInterfaces } from '../services/captureInterfaces';
+import { NO_RESYNC, planResync, readReply, type Resync } from '../services/captureResync';
 import { diagnoseAgent, type AgentServiceFacts } from '../services/agentHealth';
 import { hostFromAdapters } from '../services/hostIdentity';
 import type { HostIdentity } from '../services/direction';
@@ -216,6 +217,11 @@ export function useAgentConnection(host: AgentConnectionHost) {
     // once we know the agent is not there, three-second retries must not flash
     // "Connecting" for ever.
     let quietRetry = false;
+    // The reconnect resync in flight, if any: whether the next `state` is the
+    // agent's answer to our own `set_interfaces` rather than news about the
+    // capture. Per connection - every `hello` sets it afresh - and a closure
+    // variable rather than state, because nothing renders it.
+    let resync: Resync = NO_RESYNC;
 
     pipeline.onStatus = (status) => {
       if (status === 'connecting') {
@@ -319,16 +325,21 @@ export function useAgentConnection(host: AgentConnectionHost) {
         // to hijack it. Both commands would be refused now, but asking at all
         // would put a `capture_busy` error in front of a user who has done
         // nothing.
+        //
+        // **The agent answers the `set_interfaces` with an idle `state`**,
+        // before the `start_capture` behind it has arrived - and that idle,
+        // read as the agent's verdict, stopped the capture in the UI while the
+        // start began it on the agent. `resync` remembers that one answer is
+        // our own; see `services/captureResync.ts`.
         const ownedElsewhere = (message.owner ?? null) !== null
           && message.owner !== (message.clientId ?? null);
-        if (!ownedElsewhere) {
-          if (selectedInterfacesRef.current.length > 0) {
-            pipeline.command({ type: 'set_interfaces', interfaces: selectedInterfacesRef.current });
-          }
-          if (isCapturingRef.current) {
-            pipeline.command({ type: 'start_capture' });
-          }
-        }
+        const plan = planResync({
+          ownedElsewhere,
+          selected: selectedInterfacesRef.current,
+          capturing: isCapturingRef.current,
+        });
+        resync = plan.resync;
+        for (const command of plan.commands) pipeline.command(command);
         // A log subscription lives on the agent's socket, so a reconnect
         // drops it. Resubscribing here, and clearing first, avoids showing
         // a fresh backlog stitched onto the tail of the dead connection's
@@ -375,14 +386,18 @@ export function useAgentConnection(host: AgentConnectionHost) {
         // idle while this window believes otherwise when every selected adapter
         // failed to open, or when another Inwire window stopped it - either way the
         // Start button showing "stop" would be a promise about traffic
-        // nobody is capturing.
-        if (message.state === 'idle' && isCapturingRef.current) {
-          onCaptureStopped();
-        }
+        // nobody is capturing. Except the idle that answers our own reconnect
+        // `set_interfaces`, which says nothing about the start behind it.
+        const read = readReply(resync, message, isCapturingRef.current);
+        resync = read.resync;
+        if (read.stopped) onCaptureStopped();
         return;
       }
 
       if (message.type === 'error') {
+        // A refused reconnect `set_interfaces` answers with this and no
+        // `state`, so the wait for one ends here.
+        resync = readReply(resync, message, isCapturingRef.current).resync;
         console.warn('[Inwire] Agent error:', message.code ?? '', message.message);
         setAgentError(message.message);
         return;
