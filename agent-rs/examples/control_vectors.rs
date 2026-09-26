@@ -266,6 +266,10 @@ fn main() {
         control::empty_interfaces(),
     );
     add(
+        "error: set_interfaces while the sender's own capture is running",
+        control::capture_running(),
+    );
+    add(
         "error: start_capture with no adapter to capture on - a machine without Npcap",
         control::no_interfaces(),
     );

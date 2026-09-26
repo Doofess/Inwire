@@ -10,7 +10,9 @@ replace the binary — is removed **for this PC and for no other machine**.
 not built. **Amends [0029](0029-the-app-and-the-agent-talk-over-a-named-pipe.md) on one
 detail**: the Windows agent's `hello` carries no `authRequired` at all. Does not
 touch 0033, because the agent is still a separate LocalSystem service, and does
-not touch 0035.
+not touch 0035. **Amended by [0048](0048-a-captures-adapters-are-fixed-for-its-life.md)**:
+the `set_interfaces` restart below was ported to parity and is now gone from both
+agents. A mid-capture selection is refused with `capture_running`.
 
 ## Context
 

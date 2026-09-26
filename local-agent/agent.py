@@ -1256,11 +1256,11 @@ class AgentServer:
                     "message": "At least one interface must be selected.",
                 }))
                 return
+            if sniffer.is_sniffing():  # a capture's adapters are fixed for its life (ADR 0048)
+                return await ws.send(json.dumps({"type": "error", "code": "capture_running",
+                                                 "message": "Stop the capture before changing interfaces."}))
             log.info("set_interfaces: %d interface(s) selected", len(interfaces))
             sniffer.set_interfaces(interfaces)
-            if sniffer.is_sniffing():
-                self.stop_capture()
-                self.start_capture()
         elif msg_type == "subscribe_logs":
             backlog = agent_log.read_log_tail(self.log_file_path())
             await ws.send(json.dumps({
@@ -1592,9 +1592,9 @@ class AgentServer:
         except Exception as exc:
             log.warning("capture stats stopped: %s", exc)
         finally:
-            # Only if this reference is still to THIS task. `set_interfaces`
-            # while sniffing cancels and recreates in the same breath, so by
-            # the time a cancelled task unwinds, the attribute may already
+            # Only if this reference is still to THIS task. A stop_capture then
+            # a start_capture cancels and recreates it in the same breath, so
+            # by the time a cancelled task unwinds, the attribute may already
             # hold its replacement - and clearing it there would strand the
             # replacement, uncancellable, for the life of the process.
             if self._capture_stats_task is asyncio.current_task():

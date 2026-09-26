@@ -54,8 +54,9 @@ import type { AgentAdapter, AgentInterface } from '../../services/agentProtocol'
  * exception, and it earns it below.
  *
  * **It does not mark "capturing on this one" separately from "selected".** The
- * agent's `set_interfaces` handler stops and restarts the sniffer when a
- * capture is running, so the selection IS what is being captured on, always.
+ * selection is fixed for the life of a capture (ADR 0048) - the rows are
+ * disabled while one runs, and both agents refuse a `set_interfaces` that
+ * arrives mid-capture - so the selection IS what is being captured on, always.
  * A second mark for that would be a second mark for one fact.
  */
 export interface CaptureInterfacePanelProps {
@@ -78,9 +79,12 @@ export interface CaptureInterfacePanelProps {
   /** Packets per second, newest last, trimmed to the agent's sample window. */
   interfaceRates?: Record<string, number[]>;
   agentHealth: AgentHealth;
-  /** Whether THIS window is capturing, which changes what a click here does. */
+  /**
+   * Whether THIS window is capturing, which locks the list: adapters are
+   * chosen before Start and cannot change until Stop.
+   */
   isCapturing: boolean;
-  /** Whether another window owns the capture, in which case a click cannot land. */
+  /** Whether another window owns the capture, which locks the list the same way. */
   captureOwnedElsewhere: boolean;
   onOpenSettings: () => void;
   /**
@@ -198,19 +202,14 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
           would be a second statement of what the list already marks. */}
       {captureOwnedElsewhere ? (
         <p className="px-3 py-2 text-[11px] leading-tight text-muted-foreground">
-          Another Inwire window is capturing. Choosing here will not take effect
-          until it stops.
+          Another Inwire window is capturing. Adapters can be changed once it
+          stops.
         </p>
       ) : isCapturing ? (
-        /* The consequence nobody can discover: the agent stops and restarts the
-           sniffer on a change of interfaces, so this is not a live switch. Said
-           at the moment of the action, which is `ImportPanel`'s own rule.
-
-           `--warning` on `--card` clears 4.5:1, where on the chrome's
-           `--secondary` it measures 4.06 and the status bar had to move the
-           hue onto a glyph. This panel's ground is `--card`. */
-        <p className="px-3 py-2 text-[11px] leading-tight text-warning bg-warning/10">
-          Capturing. Adding or removing an adapter restarts the capture on the new set.
+        /* Why every row below has stopped answering. A disabled control with
+           no reason beside it reads as a broken one. */
+        <p className="px-3 py-2 text-[11px] leading-tight text-muted-foreground">
+          Capturing. Stop the capture to change adapters.
         </p>
       ) : selectedInterfaces.length === 0 ? (
         <p className="px-3 py-2 text-[11px] leading-tight text-muted-foreground">
@@ -254,9 +253,19 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
               // only two surfaces in the app that mark a chosen row.
               data-state={selected ? 'checked' : 'unchecked'}
               title={iface.label}
+              // Locked for the whole capture, not merely ignored: a row that
+              // still hovers and focuses would promise a change it cannot make.
+              // The rates keep drawing, so the list is still worth watching,
+              // and the chosen rows keep their colour because they are what is
+              // being captured; the rest step back.
+              // Another window's capture locks it too: the agent refuses a
+              // selection from a window that does not own the capture, and a
+              // row that changed anyway would show adapters nobody captures on.
+              disabled={isCapturing || captureOwnedElsewhere}
               onClick={() => onToggle(iface.name)}
-              className="group relative w-full text-left px-3 py-2 cursor-pointer
-                transition-colors hover:bg-accent/60
+              className="group relative w-full text-left px-3 py-2 enabled:cursor-pointer
+                transition-colors enabled:hover:bg-accent/60
+                disabled:data-[state=unchecked]:opacity-50
                 data-[state=checked]:bg-primary/15 data-[state=checked]:text-primary
                 data-[state=checked]:font-semibold
                 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring

@@ -1353,15 +1353,27 @@ try:
     check("start_capture broadcasts a state", [m["type"] for m in sent_states], ["state"])
     check("...that says sniffing", sent_states[-1]["state"], "sniffing")
 
+    # ADR 0048: a capture's adapters are fixed for its life. The change used to
+    # restart the capture on the new set; now it is refused, to the sender only.
     _drive(srv, ws, {"type": "set_interfaces", "interfaces": ["eth1"]})
-    check("set_interfaces broadcasts a state", len(sent_states), 2)
-    check("...and the controller now has the new list", agent.sniffer.selected_interfaces, ["eth1"])
-    check("...still sniffing after a live reconfigure", sent_states[-1]["state"], "sniffing")
+    check("set_interfaces mid-capture is refused",
+          [(m.get("code"), m.get("message")) for m in ws.sent],
+          [("capture_running", "Stop the capture before changing interfaces.")])
+    check("...and broadcasts no state", len(sent_states), 1)
+    check("...and the controller keeps the adapters it started on",
+          agent.sniffer.selected_interfaces, ["eth0"])
+    check("...and is still sniffing", agent.sniffer.is_sniffing(), True)
 
     _drive(srv, ws, {"type": "stop_capture"})
-    check("stop_capture broadcasts a state", len(sent_states), 3)
+    check("stop_capture broadcasts a state", len(sent_states), 2)
     check("...that says idle", sent_states[-1]["state"], "idle")
 
+    _drive(srv, ws, {"type": "set_interfaces", "interfaces": ["eth1"]})
+    check("stopped, set_interfaces broadcasts a state", len(sent_states), 3)
+    check("...and the controller now has the new list", agent.sniffer.selected_interfaces, ["eth1"])
+    check("...and stays idle", sent_states[-1]["state"], "idle")
+
+    ws.sent.clear()
     _drive(srv, ws, {"type": "set_interfaces", "interfaces": "eth1"})
     check("a malformed set_interfaces is answered, not ignored",
           [m.get("code") for m in ws.sent], ["invalid_interfaces"])

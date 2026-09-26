@@ -24,7 +24,7 @@
 //! `agent.py` gets serialisation for free: one event loop runs every handler to
 //! completion. Here each client has its own thread, so **`commands`** plays the
 //! loop's part - the three capture commands, a disconnect and the watchdog run
-//! one at a time, which is what makes `set_interfaces`' stop-then-start one
+//! one at a time, which is what makes `start_capture`'s check-then-open one
 //! step that another client's `start_capture` cannot land in the middle of.
 //!
 //! **`state`** is held only briefly and never across a join. It has to be
@@ -131,6 +131,8 @@ pub const CAPTURE_BUSY: &str =
 pub const INVALID_INTERFACES: &str = "set_interfaces needs a list of interface names.";
 /// agent.py:1256.
 pub const EMPTY_INTERFACES: &str = "At least one interface must be selected.";
+/// agent.py:1261. A selection sent while the sender's own capture is running.
+pub const CAPTURE_RUNNING: &str = "Stop the capture before changing interfaces.";
 /// There is no adapter to start on at all. **Not a message `agent.py` sends**:
 /// it starts "sniffing" on an empty selection instead (agent.py:656-663 with a
 /// default taken from an empty list at 2364), which is the silent
@@ -183,6 +185,10 @@ pub fn selection_too_large() -> Value {
 
 pub fn empty_interfaces() -> Value {
     protocol::error("empty_interfaces", EMPTY_INTERFACES)
+}
+
+pub fn capture_running() -> Value {
+    protocol::error("capture_running", CAPTURE_RUNNING)
 }
 
 pub fn no_interfaces() -> Value {
@@ -443,7 +449,7 @@ impl<R> Control<R> {
         match command {
             Command::StartCapture => self.start(env, driver, client),
             Command::StopCapture => self.stop(env, driver, client),
-            Command::SetInterfaces(names) => self.set_interfaces(env, driver, client, names),
+            Command::SetInterfaces(names) => self.set_interfaces(env, client, names),
             _ => return false,
         }
         true
@@ -599,42 +605,34 @@ impl<R> Control<R> {
 
     /// agent.py:1238-1263, then 1385.
     ///
-    /// **A running capture follows the change**: it is stopped and started
-    /// again on the new set, and every client is told the result. The app
-    /// relies on that - `handleToggleInterface` in `App.tsx` sends
-    /// `set_interfaces` mid-capture and expects to keep capturing, on the new
-    /// set. This used to store the names and answer the sender alone, so the
-    /// capture carried on reading the old adapters while the app showed the
-    /// new ones.
-    fn set_interfaces<D: Driver<Running = R>>(
-        &self,
-        env: &(impl Env + ?Sized),
-        driver: &D,
-        client: &str,
-        names: &[String],
-    ) {
+    /// **The selection is fixed for the life of a capture** (ADR 0048). Sent
+    /// while one is running, it is refused with `capture_running` - to the
+    /// sender alone, the stored selection untouched, the capture carrying on
+    /// as it was. Adapters are chosen before `start_capture`, and the app
+    /// disables its list while capturing.
+    ///
+    /// This used to stop the capture and start it again on the new set. What
+    /// that cost besides a feature nobody wanted: a restart zeroes the
+    /// driver's counters, and the app's drop totals, which replace rather
+    /// than add, lost every drop from before the change.
+    fn set_interfaces(&self, env: &(impl Env + ?Sized), client: &str, names: &[String]) {
         let _serial = self.commands.lock().unwrap();
-        let restart = {
+        {
             let mut st = self.state.lock().unwrap();
+            // The ownership gate first, as agent.py:1222 runs before 1238: a
+            // window that does not own the capture is told whose it is.
             if Self::busy(env, &st, client) {
                 env.send_to(client, &capture_busy());
                 return;
             }
+            if st.capture.is_some() {
+                env.send_to(client, &capture_running());
+                return;
+            }
             env.log(Level::Info, &format!("set_interfaces: {} interface(s) selected", names.len()));
             st.selected = Some(names.to_vec());
-            st.capture.take()
-        };
-        match restart {
-            None => env.broadcast(&idle(env)),
-            Some(active) => {
-                // `stop_capture()` then `start_capture()`, as agent.py:1262-1263
-                // does. No final figures: the capture carries on, and Python
-                // sends none here either. The owner is the asker - `busy`
-                // passed, so it either was already or its pipe has gone.
-                let _ = driver.stop(active.running, &active.owner);
-                self.open_and_start(env, driver, client, names);
-            }
         }
+        env.broadcast(&idle(env));
     }
 
     /// Everything that can go wrong before a `Command` exists.
@@ -1316,11 +1314,12 @@ mod tests {
 
     // --- set_interfaces ------------------------------------------------------
 
-    /// agent.py:1259-1263 then 1385: set_interfaces while sniffing stops the
-    /// capture and starts it on the new set, and every client is told. The app
-    /// depends on this (`handleToggleInterface`, App.tsx).
+    /// agent.py:1259-1261, ADR 0048: set_interfaces while the sender's own
+    /// capture runs is refused, to the sender alone, and changes nothing - the
+    /// capture keeps reading the adapters it started on, the stored selection
+    /// stays, nothing is logged and no client is sent a state.
     #[test]
-    fn set_interfaces_while_sniffing_restarts_on_the_new_set_and_tells_everyone() {
+    fn set_interfaces_while_sniffing_is_refused_and_the_capture_carries_on() {
         let env = FakeEnv::with(&["a", "b"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
@@ -1331,41 +1330,44 @@ mod tests {
 
         control.command(&env, &driver, "a", &set(&[B, LO]));
 
-        let stopped = driver.stopped.lock().unwrap();
-        assert_eq!(stopped.len(), 1);
-        assert_eq!(stopped[0].0, FakeRunning { generation: 1, names: vec![A.into()] });
+        assert_eq!(env.take(), vec![(To::One("a".into()), json!({
+            "type": "error", "code": "capture_running",
+            "message": "Stop the capture before changing interfaces.",
+        }))]);
+        assert!(driver.stopped.lock().unwrap().is_empty(), "nothing was stopped");
+        assert_eq!(*driver.started.lock().unwrap(), vec![(1, vec![A.to_string()])]);
+        assert_eq!(control.capture_state(), CaptureState::Sniffing);
+        assert_eq!(control.owner().as_deref(), Some("a"));
+        assert_eq!(control.selected(), Some(vec![A.to_string()]));
+        assert!(env.take_logs().is_empty(), "a refused selection is not a selection");
+
+        // Stopped, the same selection is accepted, and the next start uses it.
+        control.command(&env, &driver, "a", &Command::StopCapture);
+        env.take();
+        control.command(&env, &driver, "a", &set(&[B, LO]));
+        assert_eq!(states(&env.take()), vec![(To::All, "idle".into(), Value::Null)]);
+        control.command(&env, &driver, "a", &Command::StartCapture);
         assert_eq!(
-            *driver.started.lock().unwrap(),
-            vec![(1, vec![A.to_string()]), (2, vec![B.to_string(), LO.to_string()])]
-        );
-        let sent = env.take();
-        assert_eq!(states(&sent), vec![(To::All, "sniffing".into(), json!("a"))]);
-        assert!(
-            !sent.iter().any(|(_, m)| m["type"] == "capture_stats"),
-            "a restart sends no final figures - agent.py sends none, and the capture carries on"
-        );
-        assert_eq!(control.selected(), Some(vec![B.to_string(), LO.to_string()]));
-        assert_eq!(
-            env.take_logs(),
-            vec![(Level::Info, "set_interfaces: 2 interface(s) selected".into())]
+            driver.started.lock().unwrap().last(),
+            Some(&(2, vec![B.to_string(), LO.to_string()]))
         );
     }
 
-    /// A restart onto adapters that all refuse ends idle, like a start would.
+    /// The ownership gate still runs first: another window's selection during
+    /// a capture it does not own is `capture_busy`, which names whose it is,
+    /// not `capture_running`.
     #[test]
-    fn set_interfaces_onto_adapters_that_all_fail_ends_idle() {
-        let env = FakeEnv::with(&["a"], three());
-        let driver = FakeDriver::refusing(&[(B, "access denied")]);
+    fn set_interfaces_from_another_window_while_sniffing_is_busy_not_running() {
+        let env = FakeEnv::with(&["a", "b"], three());
+        let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &set(&[A]));
         control.command(&env, &driver, "a", &Command::StartCapture);
         env.take();
-        control.command(&env, &driver, "a", &set(&[B]));
 
-        let sent = env.take();
-        assert_eq!(errors(&sent).len(), 1);
-        assert_eq!(states(&sent), vec![(To::All, "idle".into(), Value::Null)]);
-        assert_eq!(control.capture_state(), CaptureState::Idle);
+        control.command(&env, &driver, "b", &set(&[B]));
+
+        assert_eq!(env.take(), vec![(To::One("b".into()), capture_busy())]);
+        assert_eq!(control.selected(), None);
     }
 
     /// agent.py:1385 again: set_interfaces while idle stores the selection and

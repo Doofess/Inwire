@@ -2035,10 +2035,14 @@ export default function App() {
   // Capture takes one adapter or several. What stays from the single-adapter
   // rule of 2026-08-26 is the part that was its point: nothing is pre-selected,
   // so a capture cannot begin without somebody having said where from.
-  // A running capture follows the change: the agent restarts its sniffer
-  // threads on set_interfaces, so adding or removing an adapter mid-capture
-  // keeps capturing, on the new set.
+  // **The set is fixed for the life of a capture** (ADR 0048): adapters are
+  // chosen before Start and change only after Stop. The panel disables its rows
+  // while any window captures; this is the same rule for any other way in. Both
+  // agents refuse the change - `capture_running` to the owner, `capture_busy`
+  // to anyone else - and a selection kept here after a refusal would name
+  // adapters the running capture is not reading.
   const handleToggleInterface = (interfaceName: string) => {
+    if (isCapturingRef.current || (captureOwner !== null && captureOwner !== agentClientId)) return;
     const next = toggleInterface(agentInterfaces, selectedInterfacesRef.current, interfaceName);
     setSelectedInterfaces(next);
     sendAgentCommand({ type: 'set_interfaces', interfaces: next });

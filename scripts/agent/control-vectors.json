@@ -536,6 +536,14 @@
     },
     {
       "message": {
+        "code": "capture_running",
+        "message": "Stop the capture before changing interfaces.",
+        "type": "error"
+      },
+      "note": "error: set_interfaces while the sender's own capture is running"
+    },
+    {
+      "message": {
         "code": "no_interfaces",
         "message": "There is no network adapter to capture on. Npcap may not be installed: https://npcap.com/#download",
         "type": "error"

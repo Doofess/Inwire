@@ -97,6 +97,10 @@ export type AgentErrorCode =
   | 'restart_unavailable'
   | 'capture_failed'
   | 'capture_busy'
+  // `set_interfaces` while this client's own capture is running. The adapter
+  // set is fixed for the life of a capture (ADR 0048); the app never sends
+  // one then, so this answers some other client, or a bug.
+  | 'capture_running'
   | 'unknown_command'
   // The Rust agent's two. `no_interfaces`: a start with no adapter to capture
   // on at all - a machine without Npcap - which the Python agent answers by
