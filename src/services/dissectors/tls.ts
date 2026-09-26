@@ -49,6 +49,7 @@ import {
 import { cipherSuiteSpec, undecryptableReason } from '../tls/cipherSuites';
 import { decryptRecord, deriveFromKeyLog } from '../tls/decrypt';
 import { keyLog } from '../tls/keyLog';
+import { RecordMiss } from '../dissect/recordMiss';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './appStream';
 
 /** One encoder, not one per call - see scripts/perf/hot-path-allocations.ts. */
@@ -486,12 +487,32 @@ function parseCertificates13(body: Uint8Array): CertificateSummary[] {
 // --- decryption ----------------------------------------------------------------
 
 /**
+ * Where a derivation asks the key log. At a ServerHello it asks through the
+ * dissect env, so a frame record notes whether the log had an answer and a
+ * revisit whose log disagrees misses (ADR 0049). A rebuilt conversation's
+ * later frame asks the log directly: arrival asked nothing in that frame, so
+ * there is nothing to check against there but `keysAtArrival`.
+ */
+interface KeySource {
+  secrets(clientRandom: Uint8Array): Map<string, Uint8Array> | undefined;
+  empty(): boolean;
+}
+const envKeys: KeySource = {
+  secrets: (clientRandom) => dissectEnv().keyLogSecrets(clientRandom),
+  empty: () => dissectEnv().keyLogEmpty(),
+};
+const directKeys: KeySource = {
+  secrets: (clientRandom) => keyLog.secretsFor(clientRandom),
+  empty: () => keyLog.isEmpty,
+};
+
+/**
  * Works out whether this conversation can be decrypted, once both hellos have
  * been seen. Runs at most once per key log version: a verdict of "no secret
  * for this connection" is only as good as the log it was reached against, and
  * the user may load one at any moment.
  */
-function deriveConversationKeys(conv: TlsConversationState): void {
+function deriveConversationKeys(conv: TlsConversationState, source: KeySource = envKeys): void {
   if (conv.keys !== undefined && conv.keyGeneration === keyLog.generation) return;
   conv.keyGeneration = keyLog.generation;
 
@@ -507,18 +528,45 @@ function deriveConversationKeys(conv: TlsConversationState): void {
     return;
   }
 
-  const secrets = keyLog.secretsFor(conv.clientRandom);
+  const secrets = source.secrets(conv.clientRandom);
   if (secrets === undefined) {
     conv.keys = null;
     // Silence when there is no key log at all: an unopened TLS conversation is
     // the normal state of the world, not a finding.
-    conv.keyNote = keyLog.isEmpty ? undefined : 'no key log entry for this connection';
+    conv.keyNote = source.empty() ? undefined : 'no key log entry for this connection';
     return;
   }
 
   const keys = deriveFromKeyLog(spec, conv.clientRandom, conv.serverRandom, secrets);
   conv.keys = keys;
   conv.keyNote = keys === null ? 'the key log covers this connection but has no usable secret for it' : undefined;
+}
+
+/**
+ * A conversation rebuilt from a frame record comes without keys - a record
+ * never holds one (ADR 0049) - so they are derived here, from the key log as it
+ * is now, the first time a record needs them.
+ *
+ * Only a rebuilt conversation gets here with nothing decided: a live one is
+ * past `deriveConversationKeys` from the moment its ServerHello is read, which
+ * sets `keyGeneration` whatever it finds. And a rebuilt one must find what
+ * arrival found. Keys that arrived after the frame, or have been cleared since,
+ * would open or shut records against a cursor that was advanced without them -
+ * so the revisit misses, and the replay builds that tree under the key log as
+ * it is. A record from before `keysAtArrival` existed is taken to have had
+ * none, which can only turn a revisit into a miss.
+ */
+function ensureRevisitKeys(conv: TlsConversationState): void {
+  if (conv.keys !== undefined || conv.keyGeneration !== undefined || !conv.serverHelloSeen) return;
+  // The note arrival wrote is the one to show; it is what the record kept.
+  const note = conv.keyNote;
+  deriveConversationKeys(conv, directKeys);
+  if (Boolean(conv.keys) !== (conv.keysAtArrival ?? false)) {
+    throw new RecordMiss(conv.keys
+      ? 'the key log opens this connection now, and did not when this frame arrived'
+      : 'the key log no longer opens this connection');
+  }
+  conv.keyNote = note;
 }
 
 /** True for a record whose body is ciphertext under the conversation's keys. */
@@ -542,6 +590,7 @@ function decryptIfPossible(
   record: TlsRecord, conv: TlsConversationState, cursor: TlsRecordCursor,
   appFrame?: { id: number; tsUs: number },
 ): void {
+  ensureRevisitKeys(conv);
   const keys = conv.keys;
   if (!keys || record.body === null || cursor.role === 'unknown' || cursor.readOnly) return;
   if (!isEncryptedRecord(record, conv, cursor)) return;

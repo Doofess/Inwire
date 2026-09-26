@@ -11,7 +11,7 @@
  */
 
 /** The record format; a record with any other leading byte reads as no record. */
-export const FRAME_RECORD_VERSION = 2;
+export const FRAME_RECORD_VERSION = 3;
 
 function varint(record: Uint8Array, at: { i: number }): number {
   let n = 0;

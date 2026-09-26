@@ -1,6 +1,6 @@
 # 0049 — A frame's tree is rebuilt from its own record
 
-**Status:** accepted 2026-09-26. **Amends [0007](0007-what-crosses-the-worker-boundary.md)** on
+**Status:** accepted 2026-09-26. Record version 3 (the key log checks); version 2 records miss and fall back to the replay. **Amends [0007](0007-what-crosses-the-worker-boundary.md)** on
 how a tree that is not carried gets built: from the frame's record, not by
 replaying its conversation. **Touches [0038](0038-bytes-and-rows-are-two-arrivals.md)**:
 the pipeline Worker's store port now also carries records out and revisit
@@ -58,6 +58,17 @@ rebuilt from its bytes and its record, with no replay.**
   buffered body is **named, not copied** - frame, offset, length and an FNV-1a
   hash per piece (`bufferSources`), so the store answers with those frames'
   own bytes and a revisit that finds different bytes misses.
+- **The key log is asked again, and checked, never replayed.** A revisit
+  derives a conversation's keys from the key log it holds now, the first time
+  a record needs them. What the record keeps is only whether arrival had keys
+  (`keysAtArrival`), and at a ServerHello whether the log had secrets for the
+  connection and whether any log was loaded - a `checked` env answer, recorded
+  as a yes or no and compared with the live log on revisit. A key log that
+  came later, or was cleared, makes the revisit miss rather than draw a
+  record opened, or shut, differently from arrival. The first run with a real
+  key log found why this has to be explicit: keys were only ever derived when
+  a ServerHello was parsed, so a revisit of any later frame silently drew its
+  records undecrypted - 19 wrong trees, where the design promised none.
 - **Decrypted content is never recorded.** An answer that carries plaintext -
   HTTP/3 frames from a 1-RTT stream, a packet opened with a key-log key, a
   decrypting connection's HTTP state - is marked, and a revisit misses there.
@@ -85,8 +96,11 @@ rebuilt from its bytes and its record, with no replay.**
   fixtures, against up to 146 ms. Frames below the RAM window get their real
   tree for the first time.
 - **Every frame of the real fixtures revisits into the identical tree** -
-  inwire 12,858, bulk 14,782, icmpErrors 66, zero misses, zero wrong
-  (`scripts/pipeline/revisit.ts`, which fails on any miss). Through the store
+  inwire 12,858, bulk 14,782, icmpErrors 66, and the key-log capture's 14,615
+  without its keys: zero misses, zero wrong (`scripts/pipeline/revisit.ts`,
+  which fails on any miss). With its keys, 7,339 are equal and 7,276 miss on
+  decrypted content; with the key log present at only one of the two passes,
+  every frame is equal or misses. Zero wrong in all seven runs. Through the store
   and a v8 clone, every inwire frame rebuilds from its kit alone
   (`scripts/capture/records.ts`).
 - **In the built app**, `scripts/electron/revisit-drive.ts` imports the real
@@ -114,3 +128,8 @@ rebuilt from its bytes and its record, with no replay.**
   (decoded header lists, plaintext buffers), with the bounded replay after a
   restart. It needs a real capture with a key log to be gated.
 - **The arrival cost on TLS-heavy traffic**, measured above.
+- **A QUIC packet arrival could not open stays unopened on revisit** when its
+  keys arrived later. That equals what arrival showed, so it is stale rather
+  than wrong; a replay with the fuller key log would open it. TLS misses in
+  that case, and QUIC does not yet, because its keys are derived inside the
+  tracker, whose calls a revisit does not repeat.

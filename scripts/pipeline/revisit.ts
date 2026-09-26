@@ -20,16 +20,28 @@
  * about a frame somebody is looking at, and is the one thing that fails this
  * script. Misses are counted by reason and printed.
  *
+ * **The key-log capture runs three times**, because a record holds no key and
+ * a revisit asks the key log it has NOW: with its keys at both passes; with
+ * none at arrival and all of them at the revisit (a log that came later); and
+ * the other way round (a log since cleared). A tree that needed a key the
+ * revisit's log disagrees about must miss - not be drawn opened, or shut,
+ * differently from arrival. The first run of this capture with its keys found
+ * 19 frames doing exactly that.
+ *
  * Also printed, not asserted: what the records cost - bytes per frame raw and
  * deflated in the store's own 4,096-frame chunks at its own level - and which
  * answers the bytes go to.
  *
  * Real captures only (test/fixtures/README.md); skips cleanly without them.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { deflateSync } from 'fflate';
 import { RecordMiss, recordComposition, recordRefs } from '../../src/services/dissect/frameRecord';
+import { keyLog } from '../../src/services/tls/keyLog';
 import { FIXTURES, arrive, firstDifference, render, revisit } from './arrival';
+
+/** Which passes see the capture's key log. */
+interface KeyPlan { label: string; arrival: boolean; revisit: boolean; text: string }
 
 /** The store's chunk size and deflate level (chunkCodec.ts, captureWriter.ts). */
 const CHUNK_FRAMES = 4096;
@@ -50,8 +62,13 @@ function percentile(sorted: number[], p: number): number {
   return sorted.length === 0 ? 0 : sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
 }
 
-async function runFixture(name: string, path: string) {
+async function runFixture(name: string, path: string, keys: KeyPlan | null = null) {
+  keyLog.clear();
+  if (keys?.arrival) keyLog.add(keys.text);
   const { arrived, patchesFor, host, ms: arrivalMs } = await arrive(path);
+  keyLog.clear();
+  if (keys?.revisit) keyLog.add(keys.text);
+  if (keys !== null) name = `${name} (${keys.label})`;
 
   // --- revisit: every frame alone ---------------------------------------------
   let equal = 0;
@@ -116,10 +133,26 @@ async function runFixture(name: string, path: string) {
 
   check(`${name}: no frame is revisited into a different tree`, wrong, 0);
   check(`${name}: every frame either matches or says why it cannot`, equal + missed + wrong, arrived.length);
-  // Phase 3 of ADR 0049 reached every frame of the real fixtures, none of which
-  // carries a key log. A miss here now is a regression, not a gap.
-  check(`${name}: every frame is rebuilt from its record`, missed, 0);
+  keyLog.clear();
+  if (keys === null) {
+    // Phase 3 of ADR 0049 reached every frame of every capture with no key
+    // log. A miss here now is a regression, not a gap.
+    check(`${name}: every frame is rebuilt from its record`, missed, 0);
+    return;
+  }
+  // With a key log, decrypted content still misses (phase 4). What is held
+  // here is that a key log that changed between the passes is NOTICED.
+  const reasonCount = (text: string) =>
+    [...misses].filter(([reason]) => reason.includes(text)).reduce((s, [, n]) => s + n, 0);
+  if (keys.arrival && !keys.revisit) {
+    checkTrue(`${name}: a cleared key log is noticed`, reasonCount('no longer opens this connection') > 0);
+  }
+  if (!keys.arrival && keys.revisit) {
+    checkTrue(`${name}: a key log that came later is noticed`, reasonCount('opens this connection now') > 0);
+  }
 }
+
+const checkTrue = (name: string, condition: boolean) => check(name, condition, true);
 
 async function main() {
   let ran = 0;
@@ -130,6 +163,16 @@ async function main() {
     }
     await runFixture(name, path);
     ran += 1;
+    // A capture with its key log beside it runs again under each plan.
+    const keysPath = path.replace(/\.pcapng?$/, '.keys');
+    if (keysPath !== path && existsSync(keysPath)) {
+      const text = readFileSync(keysPath, 'utf8');
+      for (const plan of [
+        { label: 'with its keys', arrival: true, revisit: true },
+        { label: 'keys only at the revisit', arrival: false, revisit: true },
+        { label: 'keys only at arrival', arrival: true, revisit: false },
+      ]) await runFixture(name, path, { ...plan, text });
+    }
   }
   if (ran === 0) console.log('\nAll revisit checks passed (skipped).');
 }

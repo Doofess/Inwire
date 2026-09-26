@@ -57,11 +57,18 @@ import {
 } from './recordHeader';
 import { HpackTable } from '../dissectors/hpack';
 import type { TlsConversationState, TlsRecordCursor } from '../tcpStreamTracker';
+import { RecordMiss } from './recordMiss';
 
 // Every HTTP/2-capable direction carries one, even on an HTTP/1 connection.
 registerRecordClass(HpackTable);
 
-type Kind = 'answer' | 'effect' | 'peek' | 'decryptor' | 'derived' | 'snapshot';
+/**
+ * `checked`: an env answer that must not be replayed from the record, because
+ * it is key material or leads to it. Arrival records a projection of it
+ * (`projectChecked`); a revisit asks `LIVE_ENV` again and misses if the
+ * projection differs.
+ */
+type Kind = 'answer' | 'effect' | 'peek' | 'decryptor' | 'derived' | 'snapshot' | 'checked';
 
 const TCP = {
   setWindowScaleShift: 'effect', getWindowScaleShift: 'answer', getRelativeSeq: 'answer',
@@ -94,7 +101,7 @@ const L3 = {
 
 const ENV = {
   now: 'answer', sharedBodyRoom: 'answer', takeBodyBytes: 'effect', releaseBodyBytes: 'effect',
-  direction: 'answer',
+  direction: 'answer', keyLogSecrets: 'checked', keyLogEmpty: 'checked',
 } as const satisfies Record<keyof DissectEnv, Kind>;
 
 const GROUPS = { tcp: TCP, quic: QUIC, dns: DNS, icmp: ICMP, l3: L3, env: ENV } as const;
@@ -144,13 +151,7 @@ function fnv1a(bytes: Uint8Array): number {
   return h >>> 0;
 }
 
-/** Why a revisit could not give the tree back from the record. */
-export class RecordMiss extends Error {
-  constructor(readonly reason: string) {
-    super(`frame record: ${reason}`);
-    this.name = 'RecordMiss';
-  }
-}
+export { RecordMiss };
 
 /** The five trackers and the environment, as one dissection sees them. */
 export interface FrameSources {
@@ -188,13 +189,25 @@ function snapshotConversation(conv: TlsConversationState): { state: unknown } | 
   if (conv.keys && (conv.appClient !== undefined || conv.appServer !== undefined)) return null;
   // Never the keys, nor the verdict and note that came with them - a revisit
   // asks the key log again. A key in a record would be key material on disk.
-  const { keys: _keys, keyGeneration: _generation, keyNote: _note, ...rest } = conv;
+  // What IS kept is whether there were keys, which is not key material: a
+  // revisit whose key log disagrees - keys that came later, or were cleared -
+  // misses rather than drawing a record opened, or left shut, differently
+  // from arrival (`ensureRevisitKeys` in tls.ts).
+  // The note is kept: it is prose about the key log, not a key, and it is what
+  // a rebuilt conversation's "[Not decrypted]" row must go on saying.
+  const { keys: _keys, keyGeneration: _generation, keysAtArrival: _had, ...rest } = conv;
   // Emptied, not copied. It names the frames to relabel once the ServerHello
   // settles the version - patches to OTHER frames, which a revisit discards -
   // so no tree reads it. And on a connection first seen mid-stream the version
   // is never settled, so it grows by one id every frame for the life of the
   // connection: copied, it was half of every record on the bulk fixture.
-  return { state: { ...rest, pendingVersionFrames: [] } };
+  return { state: { ...rest, pendingVersionFrames: [], keysAtArrival: Boolean(conv.keys) } };
+}
+
+/** What a `checked` answer is recorded as, and compared by: never the secrets themselves. */
+function projectChecked(method: string, value: unknown): unknown {
+  if (method === 'keyLogSecrets') return value !== undefined;
+  return value;
 }
 
 /** What a peek records: only the part of the live object the dissector tests. */
@@ -289,6 +302,13 @@ export class FrameRecorder {
           out.value(projectPeek(method, live));
           return live;
         };
+      case 'checked':
+        return (...args) => {
+          const live = fn(...args);
+          out.byte(id);
+          out.value(projectChecked(method, live));
+          return live;
+        };
       case 'decryptor':
         return (...args) => {
           const decrypt = fn(...args) as AnyFn;
@@ -379,7 +399,7 @@ export class FrameRevisit {
     for (const group of Object.keys(GROUPS) as Group[]) {
       const answering: Record<string, AnyFn> = {};
       for (const [method, kind] of Object.entries(GROUPS[group]) as [string, Kind][]) {
-        answering[method] = this.answer(kind, IDS.get(`${group}:${method}`)!);
+        answering[method] = this.answer(kind, IDS.get(`${group}:${method}`)!, method);
       }
       sources[group] = answering;
     }
@@ -418,8 +438,18 @@ export class FrameRevisit {
     return state;
   }
 
-  private answer(kind: Kind, id: number): AnyFn {
+  private answer(kind: Kind, id: number, method: string): AnyFn {
     switch (kind) {
+      case 'checked':
+        return (...args) => {
+          this.expect(id);
+          const recorded = this.in.value();
+          const live = (LIVE_ENV as unknown as Record<string, AnyFn>)[method](...args);
+          if (JSON.stringify(projectChecked(method, live)) !== JSON.stringify(recorded)) {
+            throw new RecordMiss(`${NAMES[id]} answers differently now than when this frame arrived`);
+          }
+          return live;
+        };
       case 'answer':
       case 'peek':
       case 'derived':

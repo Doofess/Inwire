@@ -18,7 +18,14 @@
  * So both go through this one door. Arrival uses `LIVE_ENV`, which is exactly
  * the old behaviour. A revisit installs an env that answers from what arrival
  * recorded, for the length of one synchronous dissection (`withDissectEnv`).
+ *
+ * **The key log is the one fact here a revisit does not take from the record.**
+ * A record never holds key material, so a revisit asks the key log it has now -
+ * and what arrival recorded is only whether there WAS an answer. When the two
+ * disagree the revisit misses rather than drawing a connection opened, or shut,
+ * differently from arrival.
  */
+import { keyLog } from '../tls/keyLog';
 
 /** Everything in flight together may hold this much HTTP/1 body. */
 export const MAX_TOTAL_BODY_BYTES = 32 * 1024 * 1024;
@@ -38,6 +45,13 @@ export interface DissectEnv {
    * a live capture learns this machine's identity part way through.
    */
   direction(decided: number): number;
+  /**
+   * The key log's secrets for a TLS connection, looked up when its ServerHello
+   * is read. Recorded only as whether there were any.
+   */
+  keyLogSecrets(clientRandom: Uint8Array): Map<string, Uint8Array> | undefined;
+  /** Whether any key log is loaded, which decides if "no entry" is worth saying. */
+  keyLogEmpty(): boolean;
 }
 
 /**
@@ -63,6 +77,8 @@ export const LIVE_ENV: DissectEnv = {
     if (liveBodyBytes < 0) liveBodyBytes = 0;
   },
   direction: (decided) => decided,
+  keyLogSecrets: (clientRandom) => keyLog.secretsFor(clientRandom),
+  keyLogEmpty: () => keyLog.isEmpty,
 };
 
 let current: DissectEnv = LIVE_ENV;
