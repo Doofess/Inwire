@@ -364,7 +364,10 @@ where
             Err(e) => {
                 // Unrecoverable by construction: the stream position is no
                 // longer known, so there is nothing to resynchronise to.
-                return Err(io::Error::other(format!("pipe framing error: {e}")));
+                // `InvalidData` so the caller can log it as `pipe_server.py`
+                // does - "pipe framing error, dropping the client" - rather
+                // than as one more way a connection ends.
+                return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
             }
         }
     }
@@ -424,6 +427,28 @@ pub fn write_loop(instance: &PipeInstance, outbound: &Outbound) -> io::Result<()
 /// Stops a blocked read or write so a thread can leave.
 pub fn cancel_io(instance: &PipeInstance) {
     unsafe { CancelIoEx(instance.handle, ptr::null_mut()) };
+}
+
+/// Ends a connected client's session from outside the thread serving it.
+///
+/// **What a service stop with a client connected needs, and `poke` cannot
+/// give.** The serving thread sits in `GetOverlappedResult(INFINITE)` on a
+/// `ReadFile` for a command the app may not send for hours, and `run` joins
+/// that thread on the way out - so an SCM stop with Inwire open never finished.
+/// `CancelIoEx` completes the pending read with `ERROR_OPERATION_ABORTED`;
+/// `DisconnectNamedPipe` then closes the client's end, so a read issued after
+/// the cancel - the race a cancel alone loses, a thread between two reads -
+/// fails at once with `ERROR_PIPE_NOT_CONNECTED` instead of blocking. Either
+/// way `read_loop` returns and the thread unwinds through its own cleanup.
+///
+/// Safe on a handle another thread is using: the caller holds an `Arc` to the
+/// instance, so the handle cannot be closed underneath this, and both calls are
+/// documented for use against I/O issued by other threads.
+pub fn disconnect(instance: &PipeInstance) {
+    unsafe {
+        CancelIoEx(instance.handle, ptr::null_mut());
+        DisconnectNamedPipe(instance.handle);
+    }
 }
 
 /// Connects to the pipe and immediately drops it, to release one acceptor.

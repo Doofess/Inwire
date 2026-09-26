@@ -2,8 +2,9 @@
 
 # Inwire
 
-A Windows desktop network packet analyzer. Capture happens in a small Python
-agent that ships inside the same installer and runs as a LocalSystem service;
+A Windows desktop network packet analyzer. Capture happens in a small agent —
+one Rust executable — that ships inside the same installer and runs as a
+LocalSystem service;
 everything else — dissection, decryption, display filters, colour rules, expert
 analysis, statistics, pcap/pcapng import and export — happens locally in
 TypeScript, inside an Electron app. No account, no backend, no telemetry, no
@@ -18,7 +19,7 @@ capture agent — one tarball, built from these sources — but no desktop app y
 ## How it works
 
 ![Five processes, one direction of flow: the kernel driver hands frames to a
-privileged Python service, which pushes them over a named pipe to the Electron
+privileged Rust service, which pushes them over a named pipe to the Electron
 main process, which forwards the bytes untouched to a Worker that dissects them.
 The React UI only ever sees dissected rows, and hands every frame to a separate
 store process that owns the files on disk.](docs/images/processes.svg)
@@ -167,9 +168,11 @@ using it, and it does not touch stored captures.
 
 ## Building from source
 
-**Prerequisites:** Node.js 24+, Python 3.10+ for the agent, and
+**Prerequisites:** Node.js 24+, [rustup](https://rustup.rs) with the
+`stable-x86_64-pc-windows-gnu` toolchain for the Windows agent, Python 3.10+
+for the macOS/Linux agent and its tests, and
 [Npcap](https://npcap.com/#download) for live capture. Packaging additionally
-needs PyInstaller and Inno Setup 6.
+needs Inno Setup 6.
 
 ```
 npm install
@@ -185,17 +188,17 @@ handler, the MIME table, the 404 rule and the CSP all behave differently, so
 and the installer are built separately, in that order:
 
 ```
-pyinstaller local-agent/inwire_agent.spec   # the agent; output is a directory
+npm run build:agent                         # the Rust agent, then its resources
 iscc installer/setup.iss                    # the installer; needs both builds
 
-pip install -r local-agent/requirements.txt # or run the agent unfrozen,
+pip install -r local-agent/requirements.txt # or run the Python agent,
 python local-agent/agent.py                 # as Administrator
 ```
 
 Build outputs are not tracked; rebuild them rather than committing binaries.
-`local-agent/CLAUDE.md` holds the packaging mechanics — why the build is
-`--onedir`, every hidden import and why each one is needed, and the release
-checklist.
+`local-agent/CLAUDE.md` holds the release checklist and the Python agent's
+packaging mechanics; `agent-rs/rust-toolchain.toml` says why the Rust build is
+pinned to the GNU toolchain and how.
 
 ## Development
 
@@ -257,10 +260,9 @@ docs/specs/      historic specifications; read the banner at the top of each fir
 docs/verification.md  what only a person can check, and what each failure looks like
 docs/how-inwire-works.html  the illustrated explainer, twelve pages
 test/fixtures/   the parity captures and the acceptance floors (not tracked)
-local-agent/     the Python capture agent, its tests and its PyInstaller build
-agent-rs/        the same agent in Rust - complete, measured, proven as a
-                 registered Windows service, and deliberately not what ships
-                 yet (docs/decisions/0037-the-agent-is-rust-on-windows.md)
+local-agent/     the Python capture agent - what macOS and Linux run - and its tests
+agent-rs/        the same agent in Rust, which is what the Windows installer
+                 ships (docs/decisions/0037-the-agent-is-rust-on-windows.md)
 installer/       the unified Inno Setup installer
 logo/            the brand mark's sources; every icon is generated from
                  src/lib/brandMark.ts rather than committed as art

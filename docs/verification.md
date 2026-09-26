@@ -1325,10 +1325,11 @@ that `sc sdshow` prints the SACL only when run **elevated**, so an unelevated
 reading and an elevated one of the same service differ by a trailing `S:(AU;…)`
 and neither is wrong.
 
-The one known gap to expect rather than report: `npcapAccess` is absent from
-`hello` (not ported), so the Update Center's driver-access row falls back to the
-registry. The socket table, the adapter config, the log subscription and
-`interface_stats` were on that list and are not any more - see
+There is no known gap left to expect here: `npcapAccess` was null in `hello`
+until `npcap_access.rs` ported the DACL read, so the Update Center's
+driver-access row answered from the registry alone - read it now and it should
+agree with the Python agent's. The socket table, the adapter config, the log
+subscription and `interface_stats` were on that list before it - see
 `scripts/agent/message-coverage.ts`, which fails `npm run check` if a message
 the app can read stops being one the agent can send.
 

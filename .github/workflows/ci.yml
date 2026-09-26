@@ -53,6 +53,55 @@ jobs:
       - name: Build
         run: npm run build
 
+  agent-rs:
+    # The agent the Windows installer ships (ADR 0037). Windows only, because
+    # that is all it is: the macOS and Linux agent is the Python one, below.
+    #
+    # Ends with the SHIPPABLE file, not cargo's output: `npm run build:agent`
+    # builds and then stamps VERSIONINFO, the app's icon and an asInvoker
+    # manifest onto a copy in agent-rs/dist, and `built-version.ts` reads that
+    # copy back through Windows' own version reader. A release build that
+    # compiles but would install as a resource-less exe, or as one reporting a
+    # version the app refuses, fails here rather than in someone's installer.
+    #
+    # The script's last step, signing, runs too and does nothing here: the
+    # runner has no certificate, so scripts/sign/sign.ps1 warns and leaves the
+    # file unsigned - which is the behaviour for any machine without one, and
+    # why INWIRE_REQUIRE_SIGNING is deliberately NOT set on this job.
+    name: Rust capture agent (tests, release build, resources)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      # For tsx and `resedit`, which stamp and check the resources. Electron's
+      # own ~100 MB binary is skipped: nothing in this job launches it.
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      # By name, because `agent-rs/rust-toolchain.toml` cannot carry a host:
+      # rustup refuses a target tuple in the channel wherever that toolchain is
+      # not already installed - which on a fresh runner is always. The runner's
+      # default is MSVC, and every number ADR 0037 quotes was measured on GNU.
+      - name: Install the GNU toolchain
+        run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+
+      - name: Test
+        working-directory: agent-rs
+        run: cargo +stable-x86_64-pc-windows-gnu test --locked
+
+      - name: Build the release exe and stamp its resources
+        run: npm run build:agent
+
+      - name: Check the built agent's version and resources
+        run: npx tsx scripts/agent/built-version.ts
+
   agent:
     # On macOS as well as Linux since 3.3.0, because the Unix installer is no
     # longer a shell script with a stale copy of the agent inside it - it

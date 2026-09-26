@@ -21,9 +21,18 @@
 //! pywin32's `HandleCommandLine` parses with `getopt`, which stops at the first
 //! non-option token - so `install --startup manual` silently printed a usage
 //! screen and exited 1 without registering anything, and options had to precede
-//! the verb. This parser has no such rule and accepts either order, but
-//! `setup.iss` keeps writing options first, because the installer is shared and
-//! the Python agent is still what ships.
+//! the verb. This parser has no such rule and accepts either order. `setup.iss`
+//! still writes options first: it is the one order both agents ever accepted,
+//! and `switch-agent.ps1 -Python` still registers the Python one.
+//!
+//! ## `install` over an existing registration updates it
+//!
+//! This is the binary the installer ships (ADR 0037), and every upgrade runs
+//! `--startup manual install` against a machine that already has an
+//! `InwireAgent` - registered by the Python agent, by an earlier Rust build, or
+//! by the standalone agent product. pywin32 falls through from `install` to
+//! `update` on `ERROR_SERVICE_EXISTS`; so does this, rewriting the registration
+//! in place rather than failing the one step the installer checks.
 
 #![cfg(windows)]
 
@@ -195,51 +204,193 @@ fn report(result: windows_service::Result<()>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // The SCM's refusals arrive as a fairly opaque "IO error in winapi
-            // call", and the overwhelmingly common reason for one here is that
-            // this was not run elevated. Saying so costs a line and is the
+            // call". Saying what the code usually means costs a line and is the
             // difference between a person retrying correctly and filing a bug.
             eprintln!("[inwire-agent] {error}");
-            eprintln!("[inwire-agent] install, remove, start and stop need an elevated prompt");
+            eprintln!("[inwire-agent] {}", hint(win32_code(&error)));
             ExitCode::FAILURE
         }
     }
+}
+
+/// `ERROR_ACCESS_DENIED`.
+const ACCESS_DENIED: i32 = 5;
+/// `ERROR_SERVICE_DOES_NOT_EXIST`.
+const SERVICE_DOES_NOT_EXIST: i32 = 1060;
+/// `ERROR_SERVICE_MARKED_FOR_DELETE`.
+const SERVICE_MARKED_FOR_DELETE: i32 = 1072;
+/// `ERROR_SERVICE_EXISTS`.
+const SERVICE_EXISTS: i32 = 1073;
+
+/// The Win32 error code inside a `windows-service` error, when there is one.
+fn win32_code(error: &windows_service::Error) -> Option<i32> {
+    match error {
+        windows_service::Error::Winapi(io) => io.raw_os_error(),
+        _ => None,
+    }
+}
+
+/// What to tell a person about a failed verb.
+///
+/// It used to say "need an elevated prompt" whatever the code, which was right
+/// for the common case and actively wrong for the other two a person meets:
+/// a registration **marked for deletion** fails identically when elevated, and
+/// telling somebody to elevate for a service that is not installed sends them
+/// round the loop again.
+fn hint(code: Option<i32>) -> &'static str {
+    match code {
+        Some(ACCESS_DENIED) => "install, remove, start and stop need an elevated prompt",
+        Some(SERVICE_MARKED_FOR_DELETE) => {
+            "the InwireAgent registration is marked for deletion; close services.msc \
+             (or anything else holding it open) and try again, or reboot"
+        }
+        Some(SERVICE_DOES_NOT_EXIST) => "no InwireAgent service is registered; run `install` first",
+        _ => "install, remove, start and stop need an elevated prompt",
+    }
+}
+
+/// Whether a failed `CreateService` means "there is one already", which
+/// `install` answers by updating it rather than by failing.
+///
+/// Only that one code. `MARKED_FOR_DELETE` in particular is **not** an update:
+/// `ChangeServiceConfig` fails on such a service exactly as `CreateService`
+/// does, and reporting it as what it is beats a second, more confusing error.
+fn already_registered(error: &windows_service::Error) -> bool {
+    win32_code(error) == Some(SERVICE_EXISTS)
 }
 
 fn manager(access: ServiceManagerAccess) -> windows_service::Result<ServiceManager> {
     ServiceManager::local_computer(None::<&str>, access)
 }
 
+/// The registration, stated once and used for both a new service and an
+/// existing one - so an upgrade cannot leave behind a setting a fresh install
+/// would not have.
+fn service_info(manual: bool, executable_path: std::path::PathBuf) -> ServiceInfo {
+    ServiceInfo {
+        name: OsString::from(SERVICE_NAME),
+        display_name: OsString::from(DISPLAY_NAME),
+        service_type: ServiceType::OWN_PROCESS,
+        // **Manual by default.** Auto meant a LocalSystem capture service
+        // running from boot on a machine where Inwire may never be opened.
+        // ADR 0035.
+        start_type: if manual {
+            ServiceStartType::OnDemand
+        } else {
+            ServiceStartType::AutoStart
+        },
+        // `Normal` rather than `Critical`: a capture agent that fails to
+        // start must not affect the boot, and the app diagnoses it anyway.
+        error_control: ServiceErrorControl::Normal,
+        // `windows-service` quotes it, which is what makes a path under
+        // `Program Files` an image path rather than an unquoted-path hijack.
+        // The installer's image path is the same string for both agents,
+        // `{app}\agent\inwire-agent-windows.exe`, so an upgrade rewrites it to
+        // the value it already had.
+        executable_path,
+        launch_arguments: vec![],
+        // **Empty means "leave them alone" on an update**: `windows-service`
+        // passes NULL for an empty list, and `ChangeServiceConfig` reads NULL as
+        // unchanged. That is what keeps the installer's `depend= npcap` across a
+        // re-registration: `install` never sets or clears it, and whatever
+        // registers the service owns that decision - the installer and
+        // `switch-agent.ps1`'s `Set-InstallerPolicy` both set it with
+        // `sc config ... depend= npcap`, and only where Npcap is installed.
+        dependencies: vec![],
+        // LocalSystem, which is the whole of ADR 0033: it is what lets Npcap
+        // be installed admin-only, and what keeps the capture handle out of
+        // the process that parses hostile bytes.
+        //
+        // Named rather than left NULL, because NULL means LocalSystem to
+        // `CreateService` and "unchanged" to `ChangeServiceConfig` - so an
+        // update over a registration somebody had pointed at another account
+        // would have kept that account. The empty password is what both APIs
+        // document for LocalSystem.
+        account_name: Some(OsString::from("LocalSystem")),
+        account_password: Some(OsString::new()),
+    }
+}
+
 fn install(manual: bool) -> windows_service::Result<()> {
     let manager = manager(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
-    let service = manager.create_service(
-        &ServiceInfo {
-            name: OsString::from(SERVICE_NAME),
-            display_name: OsString::from(DISPLAY_NAME),
-            service_type: ServiceType::OWN_PROCESS,
-            // **Manual by default.** Auto meant a LocalSystem capture service
-            // running from boot on a machine where Inwire may never be opened.
-            // ADR 0035.
-            start_type: if manual {
-                ServiceStartType::OnDemand
-            } else {
-                ServiceStartType::AutoStart
-            },
-            // `Normal` rather than `Critical`: a capture agent that fails to
-            // start must not affect the boot, and the app diagnoses it anyway.
-            error_control: ServiceErrorControl::Normal,
-            executable_path: env::current_exe().map_err(windows_service::Error::Winapi)?,
-            launch_arguments: vec![],
-            dependencies: vec![],
-            // LocalSystem, which is the whole of ADR 0033: it is what lets Npcap
-            // be installed admin-only, and what keeps the capture handle out of
-            // the process that parses hostile bytes.
-            account_name: None,
-            account_password: None,
-        },
-        ServiceAccess::CHANGE_CONFIG,
-    )?;
+    let info = service_info(
+        manual,
+        env::current_exe().map_err(windows_service::Error::Winapi)?,
+    );
+    let service = match manager.create_service(&info, ServiceAccess::CHANGE_CONFIG) {
+        Ok(service) => service,
+        // pywin32's fall-through from `install` to `update`: the image path,
+        // the start type, the account and the display name are rewritten to
+        // what a fresh install would have written.
+        Err(error) if already_registered(&error) => {
+            let service = manager.open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)?;
+            service.change_config(&info)?;
+            service
+        }
+        Err(error) => return Err(error),
+    };
+    // Rewritten on an update too: the Python agent's said "Idle until Inwire
+    // connects", which stopped being true when the service became demand-start.
     service.set_description(DESCRIPTION)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+    use std::io;
+    use std::path::PathBuf;
+
+    fn winapi(code: i32) -> windows_service::Error {
+        windows_service::Error::Winapi(io::Error::from_raw_os_error(code))
+    }
+
+    /// The upgrade case, which failed the installer's one checked step.
+    #[test]
+    fn an_existing_service_is_updated_rather_than_refused() {
+        assert!(already_registered(&winapi(SERVICE_EXISTS)));
+    }
+
+    #[test]
+    fn nothing_else_is_mistaken_for_an_existing_service() {
+        // Marked for deletion is the tempting one: the name is taken, but
+        // ChangeServiceConfig fails on it too, so it has to be reported.
+        assert!(!already_registered(&winapi(SERVICE_MARKED_FOR_DELETE)));
+        assert!(!already_registered(&winapi(ACCESS_DENIED)));
+        assert!(!already_registered(&windows_service::Error::LaunchArgumentsNotSupported));
+    }
+
+    #[test]
+    fn a_fresh_install_and_an_update_write_the_same_registration() {
+        let exe = PathBuf::from(r"C:\Program Files\Inwire\agent\inwire-agent-windows.exe");
+        let info = service_info(true, exe.clone());
+        assert_eq!(info.name, OsString::from("InwireAgent"));
+        assert_eq!(info.display_name, OsString::from("Inwire Capture Agent"));
+        assert_eq!(info.service_type, ServiceType::OWN_PROCESS);
+        assert_eq!(info.start_type, ServiceStartType::OnDemand);
+        assert_eq!(info.error_control, ServiceErrorControl::Normal);
+        assert_eq!(info.executable_path, exe);
+        assert!(info.launch_arguments.is_empty());
+        // Empty is "unchanged" to ChangeServiceConfig, which keeps depend= npcap.
+        assert!(info.dependencies.is_empty());
+        assert_eq!(info.account_name, Some(OsString::from("LocalSystem")));
+        assert_eq!(info.account_password, Some(OsString::new()));
+    }
+
+    #[test]
+    fn auto_is_still_honoured_when_asked_for() {
+        let info = service_info(false, PathBuf::from("x.exe"));
+        assert_eq!(info.start_type, ServiceStartType::AutoStart);
+    }
+
+    #[test]
+    fn the_hint_names_the_cause_it_can_name() {
+        assert!(hint(Some(ACCESS_DENIED)).contains("elevated"));
+        assert!(hint(Some(SERVICE_MARKED_FOR_DELETE)).contains("marked for deletion"));
+        assert!(hint(Some(SERVICE_DOES_NOT_EXIST)).contains("install"));
+        // Anything unrecognised keeps the old, usually-right advice.
+        assert!(hint(None).contains("elevated"));
+    }
 }
 
 fn remove() -> windows_service::Result<()> {

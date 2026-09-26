@@ -94,18 +94,31 @@ impl FrameQueue {
     /// pump looking at finished bytes rather than at live driver buffers, and
     /// it is what lets the queue drop, reorder and re-batch records freely.
     pub fn push(&self, record: Vec<u8>) {
+        self.push_counting(record);
+    }
+
+    /// `push`, answering how many of the oldest frames it shed to make room.
+    ///
+    /// Almost always 0. The sniffer uses the figure to keep the process-wide
+    /// drop count that `shed_warning` reads - `agent.py`'s `_dropped_sends`,
+    /// which is the process's and not the capture's, and which its sparse
+    /// "the client is not keeping up" line is keyed to (agent.py:1767).
+    pub fn push_counting(&self, record: Vec<u8>) -> u64 {
         let mut q = self.inner.lock().expect("frame queue mutex");
         q.bytes += record.len();
         q.frames.push_back(record);
+        let mut shed = 0;
         while q.frames.len() > self.max_frames || q.bytes > self.max_bytes {
             match q.frames.pop_front() {
                 Some(old) => {
                     q.bytes -= old.len();
                     q.dropped += 1;
+                    shed += 1;
                 }
                 None => break,
             }
         }
+        shed
     }
 
     /// Takes at most one batch, and says whether more is waiting.
@@ -156,6 +169,104 @@ impl FrameQueue {
 impl Default for FrameQueue {
     fn default() -> Self {
         Self::with_defaults()
+    }
+}
+
+/// When a frame was captured, in epoch microseconds.
+///
+/// The driver's own stamp, except when the driver reported **none** - a stamp
+/// of exactly zero - which `agent.py`'s `capture_time_us` answers with the wall
+/// clock (agent.py:715-716), and for its stated reason: "a frame with no time at
+/// all would break the browser's relative-time column outright, which is a
+/// worse outcome than one slightly-late timestamp." Only exact zero: a stamp
+/// that is merely old is a fact about the frame, not a missing one.
+pub fn capture_time_us(ts_us: f64, now_us: impl FnOnce() -> f64) -> f64 {
+    if ts_us == 0.0 {
+        now_us()
+    } else {
+        ts_us
+    }
+}
+
+/// The wall clock in epoch microseconds, for `capture_time_us`'s fallback.
+pub fn wall_clock_us() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as f64)
+        .unwrap_or(0.0)
+}
+
+/// The log line owed after the `count`th frame this process has captured.
+///
+/// `agent.py`'s `sniff_callback` (agent.py:1934-1943), whose counter is the
+/// process's and never reset: the first frame says the capture works, and then
+/// one line per 10,000 - "at 100 this single line was 82% of the log file",
+/// which churned the rotation fast enough to discard real history.
+pub fn captured_milestone(count: u64) -> Option<String> {
+    if count == 1 {
+        Some("first packet captured - capture is working".to_string())
+    } else if count > 0 && count % 10_000 == 0 {
+        Some(format!("{count} packets captured so far"))
+    } else {
+        None
+    }
+}
+
+/// The process-lifetime counts `agent.py`'s two sparse log lines are keyed to:
+/// `_captured_count` and `_dropped_sends`, neither of which is ever reset.
+pub struct ProcessCounts {
+    captured: std::sync::atomic::AtomicU64,
+    shed: std::sync::atomic::AtomicU64,
+}
+
+impl Default for ProcessCounts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProcessCounts {
+    pub const fn new() -> Self {
+        Self {
+            captured: std::sync::atomic::AtomicU64::new(0),
+            shed: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// One more frame captured: the milestone line owed, if any.
+    pub fn captured(&self) -> Option<String> {
+        use std::sync::atomic::Ordering;
+        captured_milestone(self.captured.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    /// `n` more frames shed by one push: the warning owed, if any.
+    ///
+    /// Only the total **after** the push is tested, because that is what
+    /// `agent.py` tests - `dropped` is read once, after its eviction loop - so a
+    /// push that sheds two frames across a boundary says nothing for it, there
+    /// as here.
+    pub fn shed(&self, n: u64) -> Option<String> {
+        use std::sync::atomic::Ordering;
+        if n == 0 {
+            return None;
+        }
+        shed_warning(self.shed.fetch_add(n, Ordering::Relaxed) + n)
+    }
+}
+
+/// The warning owed when this process's shed total reaches `total`.
+///
+/// `agent.py`'s `queue_packet` (agent.py:1767-1776): at 1, 100, 1000 and every
+/// 10,000 after, and nowhere else, because the drop path is the hot path when it
+/// runs at all and a line per drop would recreate the flood one level up. The
+/// full figure reaches the app every second in `capture_stats` regardless.
+pub fn shed_warning(total: u64) -> Option<String> {
+    if matches!(total, 1 | 100 | 1000) || (total > 0 && total % 10_000 == 0) {
+        Some(format!(
+            "dropped {total} packet(s): the client is not keeping up with this interface"
+        ))
+    } else {
+        None
     }
 }
 
@@ -380,5 +491,91 @@ mod kernel_buffer_tests {
         for cores in [Some(1usize), Some(8), Some(64), Some(0), None] {
             assert!(kernel_buffer_bytes(cores) > 2 * 1024 * 1024);
         }
+    }
+}
+
+/// The sniffer's per-frame accounting, driven by the frames of a real capture.
+///
+/// **Real frames, not built ones**: every test here replays
+/// `test/fixtures/*.pcap` through the same calls the runtime's sniffer makes -
+/// `capture_time_us`, `wire::encode_record`, `FrameQueue::push_counting` and
+/// `ProcessCounts` - and holds the result to `agent.py`. The fixtures are
+/// untracked (ADR 0004), so each test prints `SKIP` and passes when they are
+/// absent rather than failing on a machine that never had them.
+#[cfg(all(test, windows))]
+mod frame_accounting_tests {
+    use super::*;
+    use crate::fixture;
+    use crate::wire;
+
+    /// agent.py:715-719 - the driver's stamp is carried exactly, and a stamp of
+    /// zero is replaced by the wall clock rather than sent as 1970.
+    #[test]
+    fn a_frame_keeps_its_driver_stamp_and_a_missing_one_gets_the_wall_clock() {
+        let Some(frames) = fixture::any_capture() else { return };
+        let frame = &frames[0];
+        assert!(frame.ts_us > 1.0e15, "the fixture's own stamp is a real epoch time");
+
+        let stamped = capture_time_us(frame.ts_us, || panic!("a stamped frame never asks the clock"));
+        let record = wire::encode_record(0, 0, stamped, frame.wire_len as usize, &frame.data).unwrap();
+        let decoded = wire::decode_batch(&wire::encode_batch(&[record]).unwrap()).unwrap();
+        assert_eq!(decoded[0].ts_us, frame.ts_us);
+        assert_eq!(decoded[0].data, frame.data, "the bytes go through untouched");
+
+        // The same real frame, as a driver that stamped nothing would hand it
+        // over.
+        let before = wall_clock_us();
+        let unstamped = capture_time_us(0.0, wall_clock_us);
+        let after = wall_clock_us();
+        assert!(before <= unstamped && unstamped <= after, "{before} <= {unstamped} <= {after}");
+        let record = wire::encode_record(1, 0, unstamped, frame.wire_len as usize, &frame.data).unwrap();
+        let decoded = wire::decode_batch(&wire::encode_batch(&[record]).unwrap()).unwrap();
+        assert_eq!(decoded[0].ts_us, unstamped);
+        assert_eq!(decoded[0].orig_len, frame.wire_len);
+    }
+
+    /// agent.py:1934-1943 and 1767-1776, replayed: a whole real capture pushed
+    /// into a queue nobody drains, the way a stalled pump would leave it.
+    ///
+    /// The log owes exactly: the first frame, every 10,000th, and a shed warning
+    /// at 1, 100, 1000 and 10,000 - and nothing else, however many frames go
+    /// through. The byte budget is set wide so the count bound is the one that
+    /// bites and every push sheds exactly one frame, which is what makes the
+    /// crossings exact rather than dependent on frame sizes.
+    #[test]
+    fn a_real_capture_owes_the_log_its_first_frame_and_sparse_milestones() {
+        let Some(frames) = fixture::any_capture() else { return };
+        let counts = ProcessCounts::new();
+        let queue = FrameQueue::new(1_000, usize::MAX / 2);
+        let (mut milestones, mut warnings) = (Vec::new(), Vec::new());
+
+        for (n, frame) in frames.iter().enumerate() {
+            if let Some(line) = counts.captured() {
+                milestones.push((n + 1, line));
+            }
+            let ts = capture_time_us(frame.ts_us, wall_clock_us);
+            let record = wire::encode_record(n as u32, 0, ts, frame.wire_len as usize, &frame.data)
+                .expect("a captured frame encodes");
+            if let Some(line) = counts.shed(queue.push_counting(record)) {
+                warnings.push(line);
+            }
+        }
+
+        assert_eq!(milestones[0], (1, "first packet captured - capture is working".to_string()));
+        let tens: Vec<usize> = milestones[1..].iter().map(|(n, _)| *n).collect();
+        let expected: Vec<usize> = (1..=frames.len() / 10_000).map(|k| k * 10_000).collect();
+        assert_eq!(tens, expected, "one line per 10,000 frames of a {}-frame capture", frames.len());
+        if let Some((_, line)) = milestones.get(1) {
+            assert_eq!(line, "10000 packets captured so far");
+        }
+
+        let shed = frames.len().saturating_sub(1_000) as u64;
+        assert_eq!(queue.dropped(), shed, "every frame past the bound was shed, oldest first");
+        let expected: Vec<String> = [1u64, 100, 1000, 10_000, 20_000, 30_000]
+            .into_iter()
+            .filter(|n| *n <= shed)
+            .map(|n| format!("dropped {n} packet(s): the client is not keeping up with this interface"))
+            .collect();
+        assert_eq!(warnings, expected);
     }
 }

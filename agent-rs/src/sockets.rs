@@ -180,6 +180,23 @@ fn port_of(raw: u32) -> u16 {
     u16::from_be_bytes([(raw & 0xff) as u8, ((raw >> 8) & 0xff) as u8])
 }
 
+/// Records one socket unless its endpoint is already in the table.
+///
+/// **First writer wins**, which is `sockets.py`'s `table.setdefault(key, pid)`.
+/// Several rows share one local endpoint - every connection accepted on a
+/// server port, and the `TIME_WAIT` rows those leave behind, which the kernel
+/// attributes to pid 0. `insert` let the last row read decide, so a port a
+/// process still owned could be keyed to "no process" by a connection that had
+/// already closed. The test below counts how often that choice matters here.
+///
+/// "First" is table order: TCP before UDP, IPv4 before IPv6, and each table as
+/// the kernel lists it. psutil returns its rows through a `set`, so the Python
+/// agent's first is hash order - the same rule, applied to an order nobody can
+/// predict.
+fn keep_first(table: &mut HashMap<SocketKey, u32>, key: SocketKey, pid: u32) {
+    table.entry(key).or_insert(pid);
+}
+
 fn format_ipv4(raw: u32) -> String {
     let b = raw.to_ne_bytes();
     format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
@@ -241,7 +258,7 @@ fn read_tcp(af: u32, table: &mut HashMap<SocketKey, u32>) {
     };
     if af == AF_INET {
         for row in unsafe { rows::<MibTcpRowOwnerPid>(&buffer) } {
-            table.insert(("tcp", format_ipv4(row.local_addr), port_of(row.local_port)), row.owning_pid);
+            keep_first(table, ("tcp", format_ipv4(row.local_addr), port_of(row.local_port)), row.owning_pid);
         }
     } else {
         for row in unsafe { rows::<MibTcp6RowOwnerPid>(&buffer) } {
@@ -249,7 +266,8 @@ fn read_tcp(af: u32, table: &mut HashMap<SocketKey, u32>) {
             // the Python agent read the other way round: a captured frame
             // carries the address alone, so an address with `%eth0` on it would
             // never compare equal to one.
-            table.insert(
+            keep_first(
+                table,
                 ("tcp", format_ipv6(&row.local_addr), port_of(row.local_port)),
                 row.owning_pid,
             );
@@ -263,11 +281,12 @@ fn read_udp(af: u32, table: &mut HashMap<SocketKey, u32>) {
     };
     if af == AF_INET {
         for row in unsafe { rows::<MibUdpRowOwnerPid>(&buffer) } {
-            table.insert(("udp", format_ipv4(row.local_addr), port_of(row.local_port)), row.owning_pid);
+            keep_first(table, ("udp", format_ipv4(row.local_addr), port_of(row.local_port)), row.owning_pid);
         }
     } else {
         for row in unsafe { rows::<MibUdp6RowOwnerPid>(&buffer) } {
-            table.insert(
+            keep_first(
+                table,
                 ("udp", format_ipv6(&row.local_addr), port_of(row.local_port)),
                 row.owning_pid,
             );
@@ -448,6 +467,21 @@ mod tests {
         assert_eq!(port_of(0x0000_bb01), 443);
         assert_eq!(port_of(0xdead_bb01), 443);
         assert_eq!(port_of(0x0000_5000), 80);
+    }
+
+    /// `sockets.py`'s `setdefault`: the first row for an endpoint decides.
+    /// `127.0.0.1:28338` is an endpoint this machine held three TCP rows for -
+    /// two established connections and the listener, all one process - when
+    /// this was written; the second pid is what a `TIME_WAIT` row carries.
+    #[test]
+    fn a_shared_endpoint_keeps_the_first_rows_pid() {
+        let mut table = HashMap::new();
+        let key: SocketKey = ("tcp", "127.0.0.1".into(), 28338);
+        keep_first(&mut table, key.clone(), 34664);
+        keep_first(&mut table, key.clone(), 0);
+        keep_first(&mut table, key.clone(), 34664);
+        assert_eq!(table.get(&key), Some(&34664));
+        assert_eq!(table.len(), 1);
     }
 
     /// The runtime half of the layout assertion above: the call works on this

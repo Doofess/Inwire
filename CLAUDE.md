@@ -48,8 +48,10 @@ Read it when you want to know *why* something is not here; read this for what is
 
 Inwire is a **Windows desktop network packet analyzer**: an Electron app whose
 renderer is React + Vite served from a custom `app://inwire` scheme, plus a
-Python capture agent that ships inside the same installer and runs as a
-LocalSystem service. The app talks to the agent over a named pipe. Protocol
+capture agent that ships inside the same installer and runs as a LocalSystem
+service — the **Rust** one in `agent-rs/` (ADR 0037); the Python one in
+`local-agent/` is what macOS and Linux run. The app talks to the agent over a
+named pipe. Protocol
 dissection, filtering, colour rules, expert analysis, statistics and pcap /
 pcapng import and export all happen client-side in TypeScript.
 
@@ -91,8 +93,19 @@ handle never lives in the process that parses hostile bytes. ADR 0033.
   fails the build. `noImplicitReturns` is deliberately off.
 - `npm run check` — lint, then every assertion script under `scripts/`,
   discovered by walking the directory.
-- `npm run sync:version` — regenerates `local-agent/agent_version.py` from
+- `npm run sync:version` — rewrites `local-agent/agent_version.py`,
+  `agent-rs/Cargo.toml` and the crate's entry in `agent-rs/Cargo.lock` from
   `package.json`. See **One version number**.
+- `npm run build:agent` — the agent the installer ships. A locked release
+  build on the **GNU** toolchain, named with `+stable-x86_64-pc-windows-gnu`
+  because `agent-rs/rust-toolchain.toml` cannot carry a host (the file says why),
+  then `scripts/agent/stamp-agent.ts` writes VERSIONINFO, the app's icon and an
+  `asInvoker` manifest onto a copy at `agent-rs/dist/inwire-agent-windows.exe`.
+  Cargo's own output has no resources; that copy is the payload. Then it signs
+  that copy through `scripts/sign/sign.ps1` — **after** the stamp, because a
+  resource edit rewrites the bytes a signature covers; with no certificate
+  configured that step warns and leaves it unsigned. `-- -Test` runs
+  `cargo test` first.
 - One script on its own: `npx tsx scripts/capture/reader.ts`.
 - `npx tsx scripts/parity/parity-check.ts` — the dissection acceptance gate for
   the packet-list **columns**. **It fails without the untracked fixtures**, it
@@ -105,12 +118,23 @@ handle never lives in the process that parses hostile bytes. ADR 0033.
   cannot. Floors are **counts, not percentages**: the denominator of a coverage
   ratio is Wireshark's vocabulary, so a ratio would fail on a reference upgrade
   that changed nothing here.
-- `pyinstaller local-agent/inwire_agent.spec` — builds the agent to
-  `local-agent/dist/inwire-agent-windows/` (a **directory**; see
-  `local-agent/CLAUDE.md`).
+- `pyinstaller local-agent/inwire_agent.spec` — builds the Python agent for
+  Windows to `local-agent/dist/inwire-agent-windows/` (a **directory**; see
+  `local-agent/CLAUDE.md`). **Not shipped any more**; the `-Python` switch of
+  `agent-rs/switch-agent.ps1` is what still uses it, for a comparison.
 - `iscc installer/setup.iss` — compiles the unified installer to
-  `installer/output/Inwire-Setup.exe`. Needs `npm run pack` and the PyInstaller
-  build to have run first.
+  `installer/output/Inwire-Setup.exe`. Needs `npm run build:agent` and
+  `npm run pack` to have run first. Unsigned; a plain compile is for trying the
+  installer, not for shipping it.
+- `npm run dist:signed` — the release: `build:agent`, `pack`, then
+  `iscc /DSIGN` with `INWIRE_REQUIRE_SIGNING=1`, so a missing certificate is a
+  failure rather than a warning. Under `/DSIGN` the preprocessor runs
+  `scripts/sign/verify-payload.ps1` over exactly what `[Files]` installs and
+  refuses to compile around a single unsigned PE file - a signed installer
+  wrapping unsigned contents is the thing it exists to make impossible.
+  `scripts/sign/` holds the rest: the certificate is this PC's own
+  (`new-cert.ps1`, trusted by the one elevated `trust-cert.ps1`), and
+  `sign.ps1` is the only thing that signs.
 
 **Every assertion script runs under plain `tsx`, with no Electron and no
 browser.** That is a property to protect, not an accident: it is what makes the
@@ -123,7 +147,7 @@ beside `electron/agentService.ts`.
 ## 3. Process topology
 
 ```
-  agent (Python, LocalSystem service, DEMAND START — ADR 0035)
+  agent (Rust, LocalSystem service, DEMAND START — ADRs 0035, 0037)
     │  named pipe \\.\pipe\inwire-agent, SDDL-gated
     ▼
   main (Node)  ── app:// handler · window · menu · quit guard
@@ -139,9 +163,11 @@ beside `electron/agentService.ts`.
     ferries both ports across, then sees no frame      trackers
 ```
 
-### The agent — `local-agent/agent.py`
+### The agent — `agent-rs/` on Windows, `local-agent/agent.py` elsewhere
 
-Runs as LocalSystem for **two** reasons (ADR 0033). It is what lets Npcap be
+Two implementations of one behaviour, held together by shared golden vectors
+(ADR 0037); what follows describes both, and names the Python where it says a
+Python thing. Runs as LocalSystem for **two** reasons (ADR 0033). It is what lets Npcap be
 installed **admin-only**, because with the agent holding the handle the app
 never needs to open one — Npcap's *default* install leaves the capture devices
 open to every local user, so any local account can read this machine's traffic
@@ -396,8 +422,15 @@ only place it is authored; everything else derives from it or is a literal that
 | `package.json` | **the source** |
 | `local-agent/agent_version.py` | generated by `npm run sync:version`, committed |
 | `local-agent/agent.py` | `from agent_version import AGENT_VERSION` |
+| `agent-rs/Cargo.toml`, and the crate's entry in `Cargo.lock` | rewritten by `npm run sync:version`, committed, checked |
+| `agent-rs/src/lib.rs` | `VERSION = env!("CARGO_PKG_VERSION")` — `hello` and `--version` |
+| the shipped agent's VERSIONINFO | stamped by `stamp-agent.ts`, which refuses unless `package.json`, `Cargo.toml` and the binary's own `--version` agree; `built-version.ts` reads it back |
 | `src/services/agentProtocol.ts` | `REQUIRED_AGENT_VERSION`, a literal, checked |
 | `installer/setup.iss` | `MyAppVersion`, a literal, checked |
+
+The lock entry is in the table because `npm run build:agent` builds `--locked`:
+a lock still naming the previous version fails the release build instead of
+being quietly rewritten by it.
 
 **It is an ordering, and that is why the product jumped to 4.0.0.** The number
 is the left-hand side of `isAgentOutdated`, so an agent left behind by an
@@ -978,16 +1011,17 @@ banner at the top of this file and stays there.
 Validated sequencing, recorded so a future session inherits the reasoning.
 These are **not** work in progress and get an ADR when each is started.
 
-**The Rust agent is written, in `agent-rs/`, and is not yet what ships.**
+**The Rust agent, in `agent-rs/`, is what the Windows installer ships.**
 ADR 0037. The throughput argument the plan rested on was **measured and
 dropped**: the Python sniffer thread costs 2.87 µs of work per frame at a
 utilisation of 0.003, and the frames being lost were lost to a sleep in the
-pump. What justified it instead: **449 KB in one file** against a 34 MB
-`--onedir` tree of unsigned `.pyd` files (signing a wrapper does not sign what
-the wrapper loads); **213 ms just to `import agent.py`**, load-bearing once
-demand start put the agent's cold start on the critical path of opening Inwire
-(ADR 0035); and a defect that is unrepresentable rather than fixed — a `Capture`
-is `Send` and not `Sync`, so a libpcap handle cannot cross to the event loop.
+pump. What justified it instead: **one file** — 449 KB when the ADR measured
+it, still under a megabyte stamped — against a 22 MB `--onedir` tree of unsigned
+`.pyd` files (signing a wrapper does not sign what the wrapper loads);
+**213 ms just to `import agent.py`**, load-bearing once demand start put the
+agent's cold start on the critical path of opening Inwire (ADR 0035); and a
+defect that is unrepresentable rather than fixed — a `Capture` is `Send` and
+not `Sync`, so a libpcap handle cannot cross to the event loop.
 
 **What is proven**: the wire format, the pipe and the whole capture path against
 the app's own client, with conservation asserted to a residual of 0 over 632,924
@@ -997,8 +1031,8 @@ checkpoint 0**; the client moved **184,614 frames / 4,039 MB, residual 0** over
 the production pipe; the idle self-stop reports `STOPPED` **2,436 ms** later
 **with exit code 0**, which is what stops the installer's `restart/5000` policy
 from resurrecting a demand-start service for ever. `docs/verification.md` holds
-the table. `npcap_access.py` is not ported and the Rust agent sends `None`,
-which falls back to the registry.
+the table. `npcap_access.rs` sends `hello.npcapAccess` as the Python agent
+does - the device's DACL as SDDL, the same string from both on the same machine.
 
 **Every message the app can read, the Rust agent can send**, and that is a check
 rather than a claim: `scripts/agent/message-coverage.ts` reads the `type: '...'`
@@ -1016,10 +1050,15 @@ parser strips exactly that computed seven-character width rather than a greedy
 `\s+`, because the agent indents some lines on purpose. A subscriber that
 connects after a swap sees continuous history across both implementations.
 
-**What blocks the swap** is `0030`/`0032`'s constraint rather than this one: a
-code-signing certificate, and elevation to replace the installed binary.
-`wpcap.dll` living in `System32\Npcap` and off the default DLL search path was
-the gotcha to carry over, and `npcap.rs` carries it.
+**How the swap reaches a machine**: an elevated run of the installer, which
+puts the Rust exe at the Python agent's path and file name, so the service's
+ImagePath does not move; `install` then updates the existing `InwireAgent`
+registration in place (pywin32's fall-through from install to update, which
+the Rust agent failed with `ERROR_SERVICE_EXISTS` until it matched it), and
+`[InstallDelete]` takes the Python agent's `_internal` tree. The payload is
+the stamped copy, signed by `npm run build:agent` after the stamp. `wpcap.dll` living in
+`System32\Npcap` and off the default DLL search path was the gotcha to carry
+over, and `npcap.rs` carries it.
 
 **Engine-side dissection.** Move the pipeline Worker's work into the store
 `utilityProcess` with a `worker_threads` pool over `SharedArrayBuffer`, sharded

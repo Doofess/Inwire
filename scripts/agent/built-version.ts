@@ -33,14 +33,25 @@
  * ## Why it SKIPS rather than fails when nothing is built
  *
  * `npm run check` does not build, and CI on ubuntu never will - there is no
- * PyInstaller run and no `iscc` there. A missing artifact has not failed
- * anything. A **present and stale** one has, which is the whole distinction
- * this file exists to draw, and it is the one `tree-coverage.ts` draws too.
+ * cargo run and no `iscc` there. A missing artifact has not failed anything. A
+ * **present and stale** one has, which is the whole distinction this file
+ * exists to draw, and it is the one `tree-coverage.ts` draws too.
+ *
+ * ## The Rust agent gets more than its version checked
+ *
+ * Its resources are not written by a spec file the way PyInstaller's were:
+ * cargo emits none, and `scripts/agent/stamp-agent.ts` adds them after the
+ * link. So beyond the version, the ones a person or Windows actually reads are
+ * held here - the strings Explorer shows, the manifest's execution level, and
+ * the icon. The expected values are written out below rather than imported
+ * from the stamper, because a check that reads its answers from the code under
+ * test agrees with that code by construction.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Data, NtExecutable, NtExecutableResource, Resource } from 'resedit';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -89,11 +100,20 @@ function fileVersion(exe: string): string | null {
   }
 }
 
+/** The agent the installer ships: cargo's output, stamped by `stamp-agent.ts`. */
+const RUST_AGENT = join(root, 'agent-rs', 'dist', 'inwire-agent-windows.exe');
+
 /** Every built thing that stamps a version, and what it is. */
 const ARTIFACTS: { path: string; what: string }[] = [
   {
+    path: RUST_AGENT,
+    what: 'the Rust agent the installer ships',
+  },
+  {
+    // No longer shipped on Windows (ADR 0037), and still buildable - so a
+    // stale one is still worth naming before somebody registers it by hand.
     path: join(root, 'local-agent', 'dist', 'inwire-agent-windows', 'inwire-agent-windows.exe'),
-    what: 'the PyInstaller agent',
+    what: 'the PyInstaller agent, not shipped',
   },
   {
     path: join(root, 'release', 'win-unpacked', 'Inwire.exe'),
@@ -107,8 +127,8 @@ const ARTIFACTS: { path: string; what: string }[] = [
 
 const present = ARTIFACTS.filter((a) => existsSync(a.path));
 if (present.length === 0) {
-  console.log('SKIP  nothing is built - `pyinstaller local-agent/inwire_agent.spec`, '
-    + '`npm run pack` and `iscc installer/setup.iss` produce what this reads.');
+  console.log('SKIP  nothing is built - `npm run build:agent`, `npm run pack` and '
+    + '`iscc installer/setup.iss` produce what this reads.');
   process.exit(0);
 }
 
@@ -129,6 +149,65 @@ for (const artifact of present) {
   const normalised = stamped.replace(/^(\d+\.\d+\.\d+)\.0$/, '$1');
   check(`${name} (${artifact.what}) is built from ${version}`, normalised, version);
 }
+
+/**
+ * The rest of what the stamp promises, read with the same library that wrote
+ * it but against literals written here.
+ *
+ * `resedit` rather than PowerShell for these because none of them is a field
+ * `VersionInfo` exposes - the manifest and the icon are raw resources - and
+ * because it is pure JavaScript, so this half needs no Windows to run.
+ */
+function rustAgentResources(exe: string): void {
+  const name = relative(root, exe).split(sep).join('/');
+  let entries: ReturnType<typeof NtExecutableResource.from>['entries'];
+  try {
+    entries = NtExecutableResource.from(NtExecutable.from(readFileSync(exe), { ignoreCert: true })).entries;
+  } catch (error) {
+    check(`${name} parses as a PE with resources`, (error as Error).message, 'no error');
+    return;
+  }
+
+  const info = Resource.VersionInfo.fromEntries(entries)[0];
+  const strings = info?.getStringValues({ lang: 1033, codepage: 1200 }) ?? {};
+  // The PyInstaller agent's strings, so Explorer reads the same across the
+  // swap. OriginalFilename is the installed name - the one the service's
+  // ImagePath has always had - not cargo's `inwire-agent.exe`.
+  check(`${name} VERSIONINFO names the product and the file`, {
+    CompanyName: strings.CompanyName,
+    ProductName: strings.ProductName,
+    FileDescription: strings.FileDescription,
+    OriginalFilename: strings.OriginalFilename,
+    ProductVersion: strings.ProductVersion,
+  }, {
+    CompanyName: 'Inwire',
+    ProductName: 'Inwire',
+    FileDescription: 'Inwire capture agent',
+    OriginalFilename: 'inwire-agent-windows.exe',
+    ProductVersion: version,
+  });
+
+  // asInvoker, never requireAdministrator: the PyInstaller agent's level is
+  // what made `--version` raise a UAC prompt, and the SCM ignores it anyway.
+  const manifest = entries.find((e) => Number(e.type) === 24 && Number(e.id) === 1);
+  const xml = manifest ? Buffer.from(manifest.bin).toString('utf8') : '';
+  check(`${name} carries a manifest`, manifest !== undefined, true);
+  check(`${name} manifest asks for asInvoker`,
+    /<requestedExecutionLevel\s+level="([^"]+)"/.exec(xml)?.[1] ?? null, 'asInvoker');
+
+  // The app's icon, image for image. `win.icon` in electron-builder.yml.
+  const ico = Data.IconFile.from(readFileSync(join(root, 'electron', 'resources', 'icon.ico')));
+  const group = Resource.IconGroupEntry.fromEntries(entries)[0];
+  const images = group?.getIconItemsFromEntries(entries) ?? [];
+  // A PNG-compressed image (the 256 px one, usually) comes back raw; the rest
+  // as DIBs. Either way the bytes are what is compared.
+  const bytes = (item: (typeof images)[number]) => Buffer.from(item.isRaw() ? item.bin : item.generate());
+  const same = images.length === ico.icons.length
+    && images.every((image, i) => bytes(image).equals(bytes(ico.icons[i].data)));
+  check(`${name} carries the app's icon (electron/resources/icon.ico)`, same, true);
+}
+
+if (existsSync(RUST_AGENT)) rustAgentResources(RUST_AGENT);
 
 const absent = ARTIFACTS.filter((a) => !existsSync(a.path));
 if (absent.length > 0) {

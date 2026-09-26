@@ -1,7 +1,11 @@
 # 0037 — The capture agent is Rust on Windows
 
 **Status:** accepted; **the port is complete, measured — including as a
-registered Windows service — and is not yet what ships.** Does
+registered Windows service — and is what `installer/setup.iss` ships**, as
+`{app}\agent\inwire-agent-windows.exe`, the Python agent's own file name, so
+an upgrade leaves the service's ImagePath where it was. (Until then this line
+read "not yet what ships"; the Consequences below are the record of that
+period.) Does
 not supersede `0033` — the agent stays a separate LocalSystem service, and this
 changes what it is written in and nothing about where it runs. Does not touch
 `0029` (the pipe), `0010` (it dissects nothing) or `0005`'s surviving half (the
@@ -176,10 +180,16 @@ drives a real capture handle over the production pipe, `smoke.ts` drives the
 real UI and the whole frame path against the stub. The other is the
 **two-client** `capture_busy` case, which needs two logons.
 
-**Not ported.** `npcap_access.py` — the DACL on the Npcap device object, which
-`hello` carries as `npcapAccess`. The Rust agent sends `None`, which falls back
-to the registry answer. That is the weaker answer but never the wrongly
-permissive one, which is the direction `npcapAccess.ts` says must not go wrong.
+**Not ported, then; ported now.** `npcap_access.py` — the DACL on the Npcap
+device object, which `hello` carries as `npcapAccess`. The Rust agent sent
+`None`, and this paragraph called the registry fallback "the weaker answer but
+never the wrongly permissive one". **That was wrong in the direction that
+matters**: `AdminOnly` is what the installer recorded, so a machine whose value
+was edited without the driver restarting read as "administrators only" over a
+device still granting `WD` — the confident wrong answer `npcapAccess.ts` exists
+to avoid. `npcap_access.rs` reads the DACL the way the Python agent does, and
+sends the same string (compared on the same machine:
+`D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12019f;;;WD)` from both).
 
 **The rest of this list was four messages long and is now empty**, and how it
 got that way is the part worth keeping. It read: the socket table, the adapter
@@ -205,6 +215,23 @@ All four are ported: `if_table.rs`, `adapters.rs`, `sockets.rs` and
 contains, which really is a better join than the name heuristic Python uses,
 with the 64-bit `MIB_IF_ROW2` counters because `MIB_IFROW`'s 32-bit octets wrap
 about every 34 seconds on a gigabit link.
+
+**Ported, and then made to match**, which was a second pass. `adapter_config`
+sent the picker label as `name`, the same label as `description`, a loopback
+entry the Python agent never sends, and nulls for the speed, the lease, the
+gateways, the broadcast and the privacy flag; it was answered once and never
+polled, and `unsubscribe_adapters` got a `state`. `interface_stats` sent nothing
+on its first tick and nothing for an adapter it could not join, which the app
+reads as that adapter's history being wiped. `adapter_config.rs` and
+`host_feeds.rs` now follow `adapters.py` and `agent.py`'s loops field for
+field, from the same sources where only one source holds the fact (the DHCP
+lease is in the registry and nowhere else) and from `iphlpapi` where the Python
+agent spawns PowerShell for a table `iphlpapi` hands over. Diffed against the
+Python agent's own functions on one machine, every adapter and every field
+agrees; the one remaining difference is deliberate — `source` says
+`windows_iflist` and `route` where the Python agent says
+`windows_iflist+powershell` and `powershell`, because no PowerShell ran and the
+tooltip is there so a value can be traced to what produced it.
 
 **A list is the wrong instrument and it has been replaced by a check.**
 `scripts/agent/message-coverage.ts` reads the `type: '...'` literals out of

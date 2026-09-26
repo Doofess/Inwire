@@ -48,5 +48,17 @@ test/fixtures/*
 !test/fixtures/acceptance.json
 *.tmp
 
-# The Rust agent's build output.
+# The Rust agent's build output, and the stamped exe the installer ships
+# (`npm run build:agent` -> agent-rs/dist/inwire-agent-windows.exe).
 agent-rs/target/
+agent-rs/dist/
+# A second target directory, for building while something is running the exe
+# out of target/ (CARGO_TARGET_DIR=agent-rs/target-fix).
+agent-rs/target-fix/
+
+# Which code-signing certificate THIS machine signs with (scripts/sign/sign.ps1).
+# A thumbprint names a certificate in one account's store on one PC, so it is
+# configuration, not source - and the day a real certificate replaces the
+# self-signed one, the build must not change. Certificates themselves never
+# belong here either; scripts/sign/signing.ts fails on a tracked .cer/.pfx.
+.signing.json

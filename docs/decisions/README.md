@@ -106,10 +106,14 @@ Revised order: 1 -> 1b -> 2a -> 3 -> 4 -> 5 -> (2b alongside) -> 6 -> 7 -> 8 -> 
 - No new `async` in the dissection path (0003).
 - No fixture bytes, names or addresses in the diff (0004).
 - Agent protocol change => bump `version` in **`package.json`**, then
-  `npm run sync:version`. The agent's version is the product's (0035), so there is one
-  number: it was four places, and before that three, held by two scripts covering
-  different subsets. `scripts/agent/version.ts` holds every derived copy to
-  `package.json` under `npm run check`, including the two deletions that keep it
-  singular. It is still an ordering and only ever climbs - reset it and an older agent
-  reads as newer than required, which shows as "not connected" rather than "update your
-  agent".
+  `npm run sync:version`, which rewrites `local-agent/agent_version.py`,
+  `agent-rs/Cargo.toml` and the `inwire-agent` entry in `agent-rs/Cargo.lock`, then
+  rebuild with `npm run build:agent` - the Rust agent compiles its version in, and its
+  VERSIONINFO is stamped only when package.json, Cargo.toml and the binary agree. The
+  agent's version is the product's (0035), so there is one number: it was four places,
+  and before that three, held by two scripts covering different subsets.
+  `scripts/agent/version.ts` holds every derived copy to `package.json` under
+  `npm run check`, including the two deletions that keep it singular, and
+  `scripts/agent/built-version.ts` holds the built exe. It is still an ordering and only
+  ever climbs - reset it and an older agent reads as newer than required, which shows as
+  "not connected" rather than "update your agent".

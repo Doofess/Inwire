@@ -106,6 +106,10 @@ fn serve() -> windows_service::Result<()> {
             // answer is "accepted" immediately and the unwinding happens on the
             // main thread. Doing the work here would block a control thread.
             ServiceControl::Stop | ServiceControl::Shutdown => {
+                // service_windows.py:67's line. Written here, on the control
+                // thread, because it is the moment the SCM asked - "shutting
+                // down: ..." follows from the main thread once it unwinds.
+                crate::log_info!("service stop requested - shutting down");
                 handler_shutdown.request("the service control manager asked");
                 ServiceControlHandlerResult::NoError
             }

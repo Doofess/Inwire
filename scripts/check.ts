@@ -31,9 +31,12 @@ const repoRoot = join(here, '..');
 const NOT_TESTS: Record<string, string> = {
   'gen-oui.ts': 'generator; downloads ~5MB from IEEE',
   'agent/sync-version.ts':
-    'generator; WRITES local-agent/agent_version.py from package.json. '
-    + 'A check suite that rewrites its own inputs cannot fail - '
+    'generator; WRITES local-agent/agent_version.py, agent-rs/Cargo.toml and Cargo.lock '
+    + 'from package.json. A check suite that rewrites its own inputs cannot fail - '
     + '`scripts/agent/version.ts` is the half that asserts',
+  'agent/stamp-agent.ts':
+    'build step; WRITES agent-rs/dist/inwire-agent-windows.exe from cargo\'s output. '
+    + 'Run by `npm run build:agent`; `scripts/agent/built-version.ts` is the half that asserts',
   'electron/disk-drive.ts': 'drives a 180,000-frame capture to reach the disk path; ~2 minutes, run by hand',
   'electron/agent-live-drive.ts':
     'drives the app against the REAL installed agent service and reads the SCM; '

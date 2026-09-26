@@ -1,12 +1,14 @@
-# The GNU toolchain, pinned, because `cargo build --release` has to mean
-# something.
+# The channel, and deliberately NOT the host - which is pinned by the build
+# instead. Build with `npm run build:agent` (scripts/agent/build-rust.ps1), or
+# spell the toolchain out: `cargo +stable-x86_64-pc-windows-gnu build --release`.
 #
-# Without this file cargo takes rustup's default, which on this machine is
-# `stable-x86_64-pc-windows-msvc` - and the MSVC linker is not installed, so the
-# build fails at `link.exe was not found` after compiling most of the tree. ADR
-# 0037 and `docs/verification.md` both tell a reader to run `cargo build
-# --release`; before this they were telling them to run a command that does not
-# work here.
+# ## Why the GNU host
+#
+# rustup's default on this machine is `stable-x86_64-pc-windows-msvc`, and the
+# MSVC linker is not installed, so a plain `cargo build` compiles most of the
+# tree and then fails at `link.exe was not found`. ADR 0037 and
+# `docs/verification.md` both tell a reader how to build this; before the pin
+# they were telling them to run a command that does not work here.
 #
 # **Changing this to MSVC is a real decision, not a preference**, and two things
 # have to be re-checked with it:
@@ -15,11 +17,40 @@
 #     precisely because the GNU toolchain's `dlltool` ships without an assembler
 #     in its `self-contained` directory, so the newer crate's raw-dylib imports
 #     cannot be linked. On MSVC that pin is unnecessary.
-#   - every size figure in ADR 0037 - the 449 KB that the "one signed
-#     executable" argument rests on - was measured on this toolchain.
+#   - every size figure in ADR 0037 - the one-file argument rests on them - was
+#     measured on this toolchain.
 #
 # So MSVC is likely where a *shipping*, Authenticode-signed build wants to be.
 # It is not where the measurements came from, and swapping silently would leave
 # the ADR quoting a number nothing produces.
+#
+# ## Why the host is not written here any more
+#
+# This file used to say `channel = "stable-x86_64-pc-windows-gnu"`. rustup's
+# grammar for the key is `(<channel>[-<date>])|<custom toolchain name>` - no
+# host - and that line only ever worked by coincidence: an INSTALLED toolchain
+# of that exact name matches the custom-name branch. Where it is not installed
+# yet, which is a fresh machine and every CI runner, rustup takes the install
+# branch and refuses the whole file (rustup 1.29.1, reproduced):
+#
+#     error: target tuple in channel name 'stable-x86_64-pc-windows-gnu'
+#
+# and `rustup toolchain install` with no arguments - the documented way to
+# provision what this file names - fails the same way. So the one situation the
+# file existed for was the one it broke in.
+#
+# rustup has no per-directory host setting that lives in a repository. What it
+# offers is precedence: `+toolchain` on the command line beats
+# `RUSTUP_TOOLCHAIN`, which beats a `rustup override`, which beats this file.
+# The build script and CI use the first, so the host is named on every command
+# that produces something this repository ships. For a bare `cargo test` here to
+# mean GNU as well, once per machine:
+#
+#     rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+#     rustup override set stable-x86_64-pc-windows-gnu --path <this directory>
+#
+# The override lives in rustup's own settings, not in the tree, which is exactly
+# why it cannot be the pin - and why without it a bare `cargo` here takes the
+# default host and, on a machine with no MSVC linker, fails at the link.
 [toolchain]
-channel = "stable-x86_64-pc-windows-gnu"
+channel = "stable"

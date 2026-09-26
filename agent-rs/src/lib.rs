@@ -57,18 +57,37 @@ pub mod wire;
 // Windows-only: this is the Npcap surface, and the Python agent remains the
 // implementation on macOS and Linux.
 #[cfg(windows)]
+pub mod adapter_config;
+#[cfg(windows)]
 pub mod adapters;
 #[cfg(windows)]
 pub mod agent_log;
+// The capture lifecycle's decisions - ownership, start, stop, re-pointing, an
+// adapter dying - behind two traits, so they can be tested without Npcap or a
+// pipe. `runtime.rs` is the real implementation of both.
+#[cfg(windows)]
+pub mod control;
+// The subscriptions that report on the machine rather than on a capture -
+// `interface_stats` and `adapter_config` - and their timers.
+#[cfg(windows)]
+pub mod host_feeds;
 #[cfg(windows)]
 pub mod if_table;
 #[cfg(windows)]
 pub mod npcap;
 #[cfg(windows)]
+pub mod npcap_access;
+#[cfg(windows)]
 pub mod pipe;
+#[cfg(windows)]
+pub mod restart;
 #[cfg(windows)]
 pub mod runtime;
 #[cfg(windows)]
 pub mod service;
 #[cfg(windows)]
 pub mod sockets;
+
+// Real frames from `test/fixtures/`, for the tests that carry any.
+#[cfg(test)]
+pub(crate) mod fixture;

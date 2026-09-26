@@ -2,7 +2,6 @@
   "cases": [
     {
       "message": {
-        "authRequired": false,
         "clientId": "rs-1",
         "interfaces": [
           {
@@ -28,7 +27,6 @@
     },
     {
       "message": {
-        "authRequired": false,
         "clientId": "rs-2",
         "interfaces": [
           {
@@ -54,7 +52,6 @@
     },
     {
       "message": {
-        "authRequired": false,
         "clientId": "rs-3",
         "interfaces": [],
         "npcapAccess": null,
@@ -131,11 +128,19 @@
     {
       "message": {
         "code": "capture_failed",
-        "iface": 2,
-        "message": "Capture stopped on interface 2: pcap_next_ex failed (-1): device removed",
+        "iface": 0,
+        "message": "Could not capture on Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2): pcap_next_ex failed (-1): device removed",
         "type": "error"
       },
-      "note": "a capture that stopped on its own, with the reason"
+      "note": "an adapter that stopped delivering under a capture, named by its label"
+    },
+    {
+      "message": {
+        "code": "capture_failed",
+        "message": "Could not capture on \\Device\\NPF_{00000000-0000-0000-0000-000000000000}: no capture adapter by that name - it may have been removed",
+        "type": "error"
+      },
+      "note": "a selected device the interface list does not have - no id, rather than a wrong one"
     },
     {
       "message": {
@@ -308,8 +313,199 @@
     },
     {
       "message": {
+        "adapters": [
+          {
+            "description": "Intel(R) Ethernet Controller (3) I225-V",
+            "dhcpEnabled": true,
+            "dhcpServer": "10.0.0.138",
+            "dnsServers": [
+              "10.0.0.138",
+              "2a06:c701:ffff::1",
+              "2a06:c701:ffff::2"
+            ],
+            "dnsSuffix": "home",
+            "gatewayMac": "44:15:24:5d:cc:62",
+            "gatewayV4": "10.0.0.138",
+            "gatewayV6": "fe80::4615:24ff:fe5d:cc62",
+            "id": "\\Device\\NPF_{64455981-5CEF-4A70-8218-4E5C316C795B}",
+            "ipv4": [
+              {
+                "address": "10.0.0.7",
+                "broadcast": "10.0.0.255",
+                "prefixLength": 24
+              }
+            ],
+            "ipv6": [
+              {
+                "address": "2a06:c701:423b:fa00:ded:f6ae:9a1c:d19a",
+                "prefixLength": 64,
+                "scope": "global",
+                "temporary": false
+              },
+              {
+                "address": "2a06:c701:423b:fa00:905:b5f6:7cc4:a1d0",
+                "prefixLength": 128,
+                "scope": "global",
+                "temporary": true
+              },
+              {
+                "address": "2a06:c701:423b:fa00:4cf7:82a:8f92:7df7",
+                "prefixLength": 128,
+                "scope": "global",
+                "temporary": true
+              },
+              {
+                "address": "fe80::3f65:9cc9:cb3d:8e6e",
+                "prefixLength": 64,
+                "scope": "link-local",
+                "temporary": false
+              }
+            ],
+            "leaseExpires": 1790420588,
+            "leaseObtained": 1790416988,
+            "mac": "04:7c:16:52:db:17",
+            "mtu": 1500,
+            "name": "Ethernet",
+            "source": {
+              "adapter": "windows_iflist",
+              "addresses": "windows_iflist",
+              "dhcp": "registry",
+              "dns": "registry",
+              "gateway": "registry"
+            },
+            "speedMbps": 2500,
+            "status": "up"
+          },
+          {
+            "description": "Microsoft Wi-Fi Direct Virtual Adapter",
+            "dhcpEnabled": true,
+            "dhcpServer": null,
+            "dnsServers": [
+              "fec0:0:0:ffff::1",
+              "fec0:0:0:ffff::2",
+              "fec0:0:0:ffff::3"
+            ],
+            "dnsSuffix": null,
+            "gatewayMac": null,
+            "gatewayV4": null,
+            "gatewayV6": null,
+            "id": "\\Device\\NPF_{BEE4DB11-2AFA-4426-BA16-C443DE930911}",
+            "ipv4": [
+              {
+                "address": "169.254.174.10",
+                "broadcast": "169.254.255.255",
+                "prefixLength": 16
+              }
+            ],
+            "ipv6": [
+              {
+                "address": "fe80::b56f:39b7:6f12:fb47",
+                "prefixLength": 64,
+                "scope": "link-local",
+                "temporary": false
+              }
+            ],
+            "leaseExpires": null,
+            "leaseObtained": null,
+            "mac": "b0:3c:dc:d1:89:8c",
+            "mtu": 1500,
+            "name": "Local Area Connection* 8",
+            "source": {
+              "adapter": "windows_iflist",
+              "addresses": "windows_iflist",
+              "dhcp": "registry",
+              "dns": "registry",
+              "gateway": "route"
+            },
+            "speedMbps": null,
+            "status": "down"
+          },
+          {
+            "description": "WAN Miniport (Network Monitor)",
+            "dhcpEnabled": null,
+            "dhcpServer": null,
+            "dnsServers": [],
+            "dnsSuffix": null,
+            "gatewayMac": null,
+            "gatewayV4": null,
+            "gatewayV6": null,
+            "id": "\\Device\\NPF_{C058D089-E644-427C-9C9A-53337892E5DB}",
+            "ipv4": [],
+            "ipv6": [],
+            "leaseExpires": null,
+            "leaseObtained": null,
+            "mac": null,
+            "mtu": null,
+            "name": "Local Area Connection* 3",
+            "source": {
+              "adapter": "windows_iflist",
+              "addresses": "windows_iflist",
+              "dhcp": "registry",
+              "dns": "registry",
+              "gateway": "route"
+            },
+            "speedMbps": null,
+            "status": null
+          }
+        ],
+        "type": "adapter_config"
+      },
+      "note": "adapter_config: a wired adapter, a disconnected virtual one and a WAN Miniport"
+    },
+    {
+      "message": {
+        "adapters": [],
+        "type": "adapter_config"
+      },
+      "note": "adapter_config with no adapters - a machine with no Npcap has no capture list to narrow to"
+    },
+    {
+      "message": {
+        "lines": [
+          {
+            "level": "ERROR",
+            "message": "packet capture requires elevated privileges. Right-click and choose 'Run as administrator'.",
+            "time": "2026-09-22 10:01:23,743"
+          },
+          {
+            "level": "INFO",
+            "message": "  interface available: Ethernet (Intel(R) Ethernet Controller (3) I225-V) -> \\Device\\NPF_{64455981-5CEF-4A70-8218-4E5C316C795B}",
+            "time": "2026-09-26 11:30:16,833"
+          },
+          {
+            "level": "INFO",
+            "message": "start_capture requested on 1 interface(s)",
+            "time": "2026-09-26 11:49:06,073"
+          }
+        ],
+        "type": "log"
+      },
+      "note": "log: a backlog of real lines, one of them indented on purpose"
+    },
+    {
+      "message": {
+        "lines": [
+          {
+            "level": "INFO",
+            "message": "first packet captured - capture is working",
+            "time": "2026-09-26 11:49:06,260"
+          }
+        ],
+        "type": "log"
+      },
+      "note": "log: one live line"
+    },
+    {
+      "message": {
+        "lines": [],
+        "type": "log"
+      },
+      "note": "log: the backlog of an agent that has written nothing yet"
+    },
+    {
+      "message": {
         "code": "capture_busy",
-        "message": "Another client is capturing on this machine.",
+        "message": "Another Inwire window started this capture. Stop it there, or close that window.",
         "type": "error"
       },
       "note": "error: a second client tried to start a capture somebody else owns"
@@ -317,10 +513,42 @@
     {
       "message": {
         "code": "unknown_command",
-        "message": "This agent does not understand 'fly'.",
+        "message": "This agent (4.0.0) does not understand 'fly'.",
         "type": "error"
       },
       "note": "error: a command this build does not know, named so the app can say which"
+    },
+    {
+      "message": {
+        "code": "invalid_interfaces",
+        "message": "set_interfaces needs a list of interface names.",
+        "type": "error"
+      },
+      "note": "error: set_interfaces with something that is not a list of names"
+    },
+    {
+      "message": {
+        "code": "empty_interfaces",
+        "message": "At least one interface must be selected.",
+        "type": "error"
+      },
+      "note": "error: set_interfaces with an empty list"
+    },
+    {
+      "message": {
+        "code": "no_interfaces",
+        "message": "There is no network adapter to capture on. Npcap may not be installed: https://npcap.com/#download",
+        "type": "error"
+      },
+      "note": "error: start_capture with no adapter to capture on - a machine without Npcap"
+    },
+    {
+      "message": {
+        "code": "restart_unavailable",
+        "message": "Restart is unavailable: this agent is not running as the Inwire service.",
+        "type": "error"
+      },
+      "note": "error: restart_agent from a process that is not the Inwire service"
     }
   ],
   "note": "Control messages the Rust agent emits. Generated by `cargo run --example control_vectors`. Checked against the app's own parser by scripts/agent/control-vectors.ts."

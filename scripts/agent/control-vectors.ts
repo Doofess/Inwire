@@ -29,8 +29,11 @@ import { join } from 'node:path';
 import {
   parseAgentMessage,
   summarizeCaptureStats,
+  type AgentAdapterConfigMessage,
   type AgentCaptureStatsMessage,
+  type AgentLogMessage,
 } from '../../src/services/agentProtocol';
+import { hostFromAdapters } from '../../src/services/hostIdentity';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -107,12 +110,74 @@ console.log();
   // it, and an agent that never sends a recognisable one reads as incompatible.
   const hellos = fixture.cases.map((c) => c.message).filter((m) => m.type === 'hello');
   check('every hello parses', hellos.every((h) => parseAgentMessage(JSON.stringify(h)) !== null), true);
-  check('...and none of them asks for a pairing token',
-    hellos.every((h) => h.authRequired === false), true);
+  // **Absent, not `false`.** CLAUDE.md's banner lists `authRequired` and the
+  // `auth_*` codes among what must not come back: the pipe's ACL is the
+  // authentication (ADR 0029). The Rust agent sent `authRequired: false` "for
+  // an older app", which no app reads - the parser takes a hello with or
+  // without it (scripts/agent-protocol/message-parsing.ts) - so the only thing
+  // the field did was keep the word on the wire. Every message is checked, not
+  // only hellos, and every key at any depth, so it cannot return by another
+  // door either.
+  const authKeys = (value: unknown): string[] => {
+    if (Array.isArray(value)) return value.flatMap(authKeys);
+    if (value === null || typeof value !== 'object') return [];
+    return Object.entries(value).flatMap(([key, inner]) =>
+      [...(/^auth/i.test(key) ? [key] : []), ...authKeys(inner)]);
+  };
+  check('...and no Rust message names authentication - no authRequired, no auth_* key',
+    fixture.cases.flatMap((c) => authKeys(c.message)), []);
+  check('...nor an auth_* error code',
+    fixture.cases.map((c) => c.message).filter((m) => typeof m.code === 'string' && /^auth_/.test(m.code))
+      .map((m) => m.code), []);
   // A machine with no Npcap has no interfaces, and that must still be a valid
   // hello - it is the state a fresh install lands in.
   check('...including one with no interfaces at all',
     hellos.some((h) => Array.isArray(h.interfaces) && h.interfaces.length === 0), true);
+}
+
+{
+  // `adapter_config` is read as a FACT by `hostFromAdapters` - every frame's
+  // direction, and with it the checksum verdict, rests on the MACs it yields.
+  // So the Rust shape is held to the consumer, not only to the parser.
+  const configs = fixture.cases.map((c) => c.message).filter((m) => m.type === 'adapter_config');
+  check('the fixture carries adapter_config cases', configs.length >= 2, true);
+  const full = configs
+    .map((m) => parseAgentMessage(JSON.stringify(m)) as AgentAdapterConfigMessage | null)
+    .find((m) => m !== null && m.adapters.length > 0);
+  if (full) {
+    const host = hostFromAdapters(full.adapters);
+    check('hostFromAdapters finds the wired MAC', host?.macs.has('04:7c:16:52:db:17'), true);
+    check('...and its addresses, both families', ['10.0.0.7', 'fe80::3f65:9cc9:cb3d:8e6e']
+      .every((a) => host?.addresses.has(a)), true);
+    // A WAN Miniport has no MAC; `null` must not become a MAC called "null".
+    check('...and no MAC for an adapter that has none', host?.macs.size, 2);
+    const wired = full.adapters[0];
+    check('the lease travels as epoch seconds', typeof wired.leaseExpires, 'number');
+    check('a privacy address is marked temporary and the stable one is not',
+      wired.ipv6.map((a) => a.temporary), [false, true, true, false]);
+    check('every source group is named', Object.keys(wired.source).sort(),
+      ['adapter', 'addresses', 'dhcp', 'dns', 'gateway']);
+  } else {
+    check('an adapter_config with adapters parses', false, true);
+  }
+  // A machine with no Npcap has no capture list, and so no adapters - and that
+  // must still parse, or `hostFromAdapters` is never asked and says nothing.
+  check('...and one with no adapters at all parses', configs.some((m) =>
+    Array.isArray(m.adapters) && m.adapters.length === 0
+    && parseAgentMessage(JSON.stringify(m)) !== null), true);
+}
+
+{
+  // The agent indents some lines on purpose; the parser strips the level's
+  // computed width and nothing more, so the indentation reaches Driver Info.
+  const logs = fixture.cases.map((c) => c.message).filter((m) => m.type === 'log');
+  check('the fixture carries log cases', logs.length >= 2, true);
+  const lines = logs.flatMap((m) =>
+    (parseAgentMessage(JSON.stringify(m)) as AgentLogMessage | null)?.lines ?? []);
+  check('every log line parses with a time and a level',
+    lines.length > 0 && lines.every((l) => l.time !== null && l.level !== null), true);
+  check('...and an indented line keeps its indentation',
+    lines.some((l) => l.message.startsWith('  interface available:')), true);
 }
 
 console.log();

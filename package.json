@@ -34,10 +34,12 @@
     "build:electron": "node electron/build.cjs",
     "start:app": "npm run build && node electron/start.cjs",
     "pack": "npm run build && electron-builder --dir",
+    "build:agent": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/agent/build-rust.ps1",
+    "dist:signed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign/build-signed.ps1",
     "lint": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "sync:version": "tsx scripts/agent/sync-version.ts",
     "check": "npm run lint && tsx scripts/check.ts",
-    "clean": "node -e \"for (const d of ['dist','dist-electron','release','build','installer/output','local-agent/build','local-agent/dist','local-agent/installer/output']) require('node:fs').rmSync(d,{recursive:true,force:true})\""
+    "clean": "node -e \"for (const d of ['dist','dist-electron','release','build','installer/output','local-agent/build','local-agent/dist','local-agent/installer/output','agent-rs/dist']) require('node:fs').rmSync(d,{recursive:true,force:true})\""
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
@@ -70,6 +72,7 @@
     "electron": "^44.3.0",
     "electron-builder": "^26.15.3",
     "playwright": "^1.63.0",
+    "resedit": "1.7.2",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

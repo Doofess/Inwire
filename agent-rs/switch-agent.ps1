@@ -1,27 +1,37 @@
-# Switches the installed `InwireAgent` service between the Python agent that
-# ships and the Rust one in this directory. Run it from an ELEVATED prompt.
+# Puts a freshly built agent under the installed `InwireAgent` service, without
+# running the installer. Run it from an ELEVATED prompt.
 #
-#   .\switch-agent.ps1 -Rust      the Rust agent, demand start (ADR 0035)
-#   .\switch-agent.ps1 -Python    back to what the installer put there
+#   .\switch-agent.ps1 -Rust      this directory's build (npm run build:agent)
+#   .\switch-agent.ps1 -Python    a PyInstaller build of local-agent/, by hand
 #   .\switch-agent.ps1 -Status    what is registered now; needs no elevation
 #
-# **Why this exists rather than instructions in a document.** Both agents
-# register the same service name, so swapping is remove-then-install and there
-# is a window where the machine has no capture agent at all. A script does that
-# window in one transaction; a person following a checklist can be interrupted
-# in the middle of it.
+# **The installer ships the Rust agent now** (ADR 0037), so `-Rust` is the
+# development loop - rebuild, swap, test against the real app - and `-Python` is
+# the way back for a comparison such as `scripts/agent/agent-compare.ts`.
 #
-# **The Rust binary is COPIED into Program Files rather than registered where it
-# is built, and that is a security decision.** A LocalSystem service whose image
+# **Both install under the installer's own image name**,
+# `{app}\agent\inwire-agent-windows.exe`. This script used to copy the Rust
+# build in beside it as `inwire-agent-rs.exe` and re-register the service
+# there, which was right while the installer put the Python agent at the real
+# name and a swap had to leave it intact to swap back to. It is wrong now: the
+# next installer run would find a service pointing at a file it did not
+# install, and a status check comparing the image to what the installer ships
+# would be comparing two different paths. One name means a swap by hand and an
+# install leave the service in the same shape, and `install`'s own
+# create-or-update (main.rs) keeps the registration in place instead of
+# removing and re-creating it.
+#
+# **The binary is COPIED into Program Files rather than registered where it is
+# built, and that is a security decision.** A LocalSystem service whose image
 # path is a user-writable directory can be replaced by any process running as
 # that user, which turns "I can write my own files" into "I can run code as
-# SYSTEM". `agent-rs\target\release\` is exactly such a directory. Program Files
-# is not writable without elevation, so the copy is what keeps the service's
-# image as privileged as the service.
+# SYSTEM". `agent-rs\dist\` is exactly such a directory. Program Files is not
+# writable without elevation, so the copy is what keeps the service's image as
+# privileged as the service.
 #
 # A consequence worth knowing: **rebuilding does not update the service.** Run
-# `-Rust` again after `cargo build --release`, or you will be testing the
-# previous binary and it will look like your change did nothing.
+# `-Rust` again after `npm run build:agent`, or you will be testing the previous
+# binary and it will look like your change did nothing.
 
 [CmdletBinding(DefaultParameterSetName = 'Status')]
 param(
@@ -34,29 +44,19 @@ $ErrorActionPreference = 'Stop'
 
 $Service   = 'InwireAgent'
 $AgentDir  = 'C:\Program Files\Inwire\agent'
-$PythonExe = Join-Path $AgentDir 'inwire-agent-windows.exe'
-$RustDest  = Join-Path $AgentDir 'inwire-agent-rs.exe'
-# **Where cargo actually put it, which is not always `target\release\`.**
-#
-# This machine has no MSVC linker, so the agent is built with
-# `--target x86_64-pc-windows-gnu` - and an explicit `--target` makes cargo
-# write to `target\<triple>\release\` instead. Naming only the untargeted path
-# meant `-Rust` found a binary from whenever the host target last worked,
-# copied it, reported success, and installed a build nobody had asked for. That
-# is the same trap the comment above warns about ("rebuilding does not update
-# the service") arriving by a door the comment does not cover, and it is worse,
-# because here the rebuild happened.
-#
-# So both are considered and the NEWEST wins, with the choice printed. Picking
-# the newest rather than preferring one path keeps this right on a machine that
-# does have MSVC, where `target\release\` is the real output.
-$RustCandidates = @(
-  (Join-Path $PSScriptRoot 'target\x86_64-pc-windows-gnu\release\inwire-agent.exe'),
-  (Join-Path $PSScriptRoot 'target\release\inwire-agent.exe')
-) | Where-Object { Test-Path $_ } | Sort-Object { (Get-Item $_).LastWriteTimeUtc } -Descending
-$RustBuilt = if ($RustCandidates) { $RustCandidates[0] } else {
-  Join-Path $PSScriptRoot 'target\x86_64-pc-windows-gnu\release\inwire-agent.exe'
-}
+$ExeName   = 'inwire-agent-windows.exe'
+$Installed = Join-Path $AgentDir $ExeName
+# What this script's earlier versions installed the Rust agent as. Removed on
+# sight, so a machine that used them converges on the installer's layout.
+$OldRustName = Join-Path $AgentDir 'inwire-agent-rs.exe'
+
+# **The stamped copy, not cargo's output.** `target\release\inwire-agent.exe`
+# has no VERSIONINFO, icon or manifest; `npm run build:agent` writes the one the
+# installer ships here, and that is the only one worth testing as the service.
+# (This used to pick the newest of two `target\` paths, because an explicit
+# `--target` moved cargo's output; the build script owns that question now.)
+$RustBuilt   = Join-Path $PSScriptRoot "dist\$ExeName"
+$PythonBuilt = Join-Path $PSScriptRoot "..\local-agent\dist\inwire-agent-windows"
 
 # The descriptor the installer writes, stated in full rather than edited into
 # whatever `sc sdshow` returns - string surgery on a security descriptor is how
@@ -65,23 +65,6 @@ $RustBuilt = if ($RustCandidates) { $RustCandidates[0] } else {
 # so a stop right would let a second Windows user stop a capture the first is
 # running. Both agents stop themselves instead. ADR 0035.
 $Sddl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)'
-
-# **There was a `$PythonDesc` here and it is deliberately gone.**
-#
-# This script first restored the Python agent exactly as it was found on this
-# machine: AUTO_START, with a description still reading "for the Inwire web
-# app". That was right while the payload in Program Files was the 3.8.0 build
-# from 11 September, because restoring a stale binary to a fresh configuration
-# is how you get a service whose settings promise behaviour its code does not
-# have - demand start on an agent with no idle self-stop is a service that
-# starts on request and then never leaves.
-#
-# The payload is a current build now, so the reasoning expired with it.
-# `install` is left to write its own description (`_svc_description_` in
-# `service_windows.py`, which has said "desktop app" for two phases) and its own
-# start type from `--startup manual`. Both agents are then configured the same
-# way, by the same rule, which is what ADR 0035 actually asks for - and what
-# `setup.iss` does today.
 
 function Say($m) { Write-Host "[switch-agent] $m" }
 
@@ -97,11 +80,6 @@ function Say($m) { Write-Host "[switch-agent] $m" }
   `Set-InstallerPolicy` ran `sc sdset` against a service pywin32 had not created
   yet, and pywin32 then created it with the SCM's default descriptor - no `RP`
   on the `IU` ace.
-
-  The result was an agent that looked perfectly installed and could not be
-  started by the app without a UAC prompt, which is the exact regression the
-  grant exists to prevent. Nothing failed; a step just landed in the wrong
-  order.
 
   `Start-Process -Wait -PassThru` waits on a handle rather than on a heuristic,
   so it is right for both agents and stays right if either one's subsystem
@@ -120,11 +98,19 @@ function Show-State {
   $start = if ($q -match 'START_TYPE\s*:\s*(.+)')        { $Matches[1].Trim() } else { '?' }
   $state = ((& sc.exe query $Service) -join "`n")
   $st    = if ($state -match 'STATE\s*:\s*\d+\s+(\w+)')  { $Matches[1] }        else { '?' }
-  $which = if ($path -like '*inwire-agent-rs.exe*') { 'RUST' }
-           elseif ($path -like '*inwire-agent-windows.exe*') { 'PYTHON' }
-           else { 'unrecognised' }
+  # Told apart by what sits beside the exe, because both carry the same name
+  # and the same VERSIONINFO strings: the PyInstaller build is a directory with
+  # `_internal` in it, and the Rust one is a single file.
+  $which = if ($path -like '*inwire-agent-rs.exe*') { 'RUST (old layout - run -Rust to move it)' }
+           elseif ($path -notlike "*$ExeName*") { 'unrecognised' }
+           elseif (Test-Path (Join-Path $AgentDir '_internal')) { 'PYTHON' }
+           else { 'RUST' }
   Say "$which  |  $start  |  $st"
   Say "  image: $path"
+  if (Test-Path $Installed) {
+    $item = Get-Item $Installed
+    Say ("  file:  {0} bytes, version {1}, written {2}" -f $item.Length, $item.VersionInfo.FileVersion, $item.LastWriteTime)
+  }
 }
 
 function Assert-Elevated {
@@ -135,33 +121,34 @@ function Assert-Elevated {
   }
 }
 
-# Remove whatever is registered, whichever agent it is. Both exes take a
-# `remove` verb, but the service may point at a binary that is gone, so sc.exe
-# is what does it - it talks to the SCM rather than to a file.
-function Remove-Registration {
-  & sc.exe stop $Service   2>&1 | Out-Null
+# Stops the service and makes sure its image is no longer held open, which is
+# what the copy below needs. Mirrors the installer's PrepareToInstall: ask, wait,
+# and only then force - an agent can be alive and not answer a stop.
+function Stop-Agent {
+  & sc.exe stop $Service 2>&1 | Out-Null
   for ($i = 0; $i -lt 50; $i++) {
     $out = (& sc.exe query $Service) -join ' '
-    if ($LASTEXITCODE -eq 1060 -or $out -match 'STATE\s*:\s*1\s+STOPPED') { break }
+    if ($LASTEXITCODE -eq 1060 -or $out -match 'STATE\s*:\s*1\s+STOPPED') { return }
     Start-Sleep -Milliseconds 100
   }
-  & sc.exe delete $Service 2>&1 | Out-Null
-  # The SCM keeps a deleted service until its last handle closes. Registering
-  # the replacement inside that window fails with "marked for deletion", which
-  # reads as a permissions problem and is not one.
-  for ($i = 0; $i -lt 50; $i++) {
-    & sc.exe query $Service 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 1060) { return }
-    Start-Sleep -Milliseconds 100
-  }
-  Say 'warning: the old registration is still present; the install below may fail'
+  Say 'the service did not stop when asked; ending the process'
+  & taskkill.exe /F /IM $ExeName 2>&1 | Out-Null
+  & taskkill.exe /F /IM (Split-Path $OldRustName -Leaf) 2>&1 | Out-Null
+  # The kernel releases the image's handle when the process object goes, which
+  # lags the kill slightly.
+  Start-Sleep -Seconds 1
 }
 
-# Everything the installer does after registering, which `install` itself does
-# not: the interactive-user start right, and the restart-on-failure policy.
+# Everything the installer does after `install`, which `install` itself does
+# not: the interactive-user start right, the restart-on-failure policy, and the
+# npcap ordering - conditional, exactly as the installer makes it, because a
+# dependency on a service that does not exist is a service that never starts.
 function Set-InstallerPolicy {
   & sc.exe sdset $Service $Sddl | Out-Null
   & sc.exe failure $Service reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+  if (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\npcap') {
+    & sc.exe config $Service depend= npcap | Out-Null
+  }
   # Read back. A descriptor that did not take is indistinguishable from one that
   # did, until somebody presses a button that then does nothing.
   if (((& sc.exe sdshow $Service) -join '') -notmatch '\(A;;CCLCSWRPLOCRRC;;;IU\)') {
@@ -169,31 +156,55 @@ function Set-InstallerPolicy {
   }
 }
 
+# What pywin32 registered and the Rust agent never reads - the same cleanup the
+# installer's RemovePythonAgentRegistrations does, for the same reason: with
+# `_internal` gone, the event-log source's message file is gone with it.
+function Remove-PythonRegistrations {
+  Remove-Item "HKLM:\SYSTEM\CurrentControlSet\Services\$Service\PythonClass" -Recurse -ErrorAction SilentlyContinue
+  $source = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$Service"
+  $file = (Get-ItemProperty $source -Name EventMessageFile -ErrorAction SilentlyContinue).EventMessageFile
+  if ($file -and $file -like '*\_internal\*') { Remove-Item $source -Recurse }
+}
+
 if ($Status -or $PSCmdlet.ParameterSetName -eq 'Status') { Show-State; exit 0 }
 
 Assert-Elevated
 
+if (-not (Test-Path $AgentDir)) {
+  throw "$AgentDir does not exist. Install Inwire first - this swaps the agent, it does not install the app."
+}
+
 if ($Rust) {
   if (-not (Test-Path $RustBuilt)) {
-    throw "No Rust build at $RustBuilt. Run ``cargo build --release`` in agent-rs first."
-  }
-  if (-not (Test-Path $AgentDir)) {
-    throw "$AgentDir does not exist. Install Inwire first - this swaps the agent, it does not install the app."
+    throw "No stamped Rust build at $RustBuilt. Run ``npm run build:agent`` first."
   }
 
-  Say 'stopping and removing the current registration'
-  Remove-Registration
+  Say 'stopping the service'
+  Stop-Agent
 
   # Named, and with its age, because installing yesterday's binary and being
-  # told nothing is the mistake this whole block is written around.
+  # told nothing is the mistake this whole script is written around.
   $age = [int]((Get-Date).ToUniversalTime() - (Get-Item $RustBuilt).LastWriteTimeUtc).TotalMinutes
-  Say "copying $RustBuilt (built $age minute(s) ago) into $AgentDir"
+  Say "copying $RustBuilt (built $age minute(s) ago) to $Installed"
   Say '  admin-only, so the image is as privileged as the service'
-  Copy-Item $RustBuilt $RustDest -Force
+  Copy-Item $RustBuilt $Installed -Force
 
-  Say 'registering, on the installer''s own command line - options before the verb'
-  $code = Invoke-AgentVerb $RustDest @('--startup', 'manual', 'install')
+  # The Python agent's tree, if it was there, and this script's old name for the
+  # Rust one. Build output both, and removing them is what makes -Status right.
+  if (Test-Path (Join-Path $AgentDir '_internal')) {
+    Say 'removing the Python agent''s _internal tree'
+    Remove-Item (Join-Path $AgentDir '_internal') -Recurse -Force
+  }
+  Remove-PythonRegistrations
+
+  # Options before the verb, as the installer writes it. Over an existing
+  # registration this UPDATES it - image path, start type, LocalSystem, display
+  # name - so a registration pointing at the old `inwire-agent-rs.exe` is moved
+  # back to the installer's name here.
+  Say 'registering, on the installer''s own command line'
+  $code = Invoke-AgentVerb $Installed @('--startup', 'manual', 'install')
   if ($code -ne 0) { throw "install failed with exit code $code" }
+  if (Test-Path $OldRustName) { Remove-Item $OldRustName -Force }
 
   Set-InstallerPolicy
   Say 'registered. It is DEMAND start: the app asks the SCM for it at launch,'
@@ -203,20 +214,29 @@ if ($Rust) {
 }
 
 if ($Python) {
-  if (-not (Test-Path $PythonExe)) {
-    throw "$PythonExe is missing. The Python agent's files are gone, not just its registration."
+  $pythonExe = Join-Path $PythonBuilt $ExeName
+  if (-not (Test-Path $pythonExe)) {
+    throw "No PyInstaller build at $PythonBuilt. Run ``pyinstaller local-agent/inwire_agent.spec`` first."
   }
 
-  Say 'stopping and removing the current registration'
-  Remove-Registration
+  Say 'stopping the service'
+  Stop-Agent
 
-  # Options before the verb. pywin32's `HandleCommandLine` parses with `getopt`,
-  # which stops at the first non-option token - so `install --startup manual`
-  # prints a usage screen and exits 1 without registering anything. The Rust
-  # agent's parser accepts either order and the installer writes this one for
-  # both, which is why the two lines above and below are identical.
+  # The whole --onedir tree: the exe is a bootloader and `_internal` is the
+  # agent. Replaced rather than merged, as the installer's [InstallDelete] does.
+  Say "copying $PythonBuilt into $AgentDir"
+  if (Test-Path (Join-Path $AgentDir '_internal')) {
+    Remove-Item (Join-Path $AgentDir '_internal') -Recurse -Force
+  }
+  Copy-Item (Join-Path $PythonBuilt '*') $AgentDir -Recurse -Force
+
+  # Options before the verb, and here it is not a preference: pywin32's
+  # `HandleCommandLine` parses with `getopt`, which stops at the first
+  # non-option token, so `install --startup manual` prints a usage screen and
+  # exits 1 without registering anything. Over an existing registration pywin32
+  # falls through from install to update.
   Say 'registering the Python agent'
-  $code = Invoke-AgentVerb $PythonExe @('--startup', 'manual', 'install')
+  $code = Invoke-AgentVerb $Installed @('--startup', 'manual', 'install')
   if ($code -ne 0) { Say "warning: install reported exit code $code" }
 
   Set-InstallerPolicy
@@ -224,6 +244,7 @@ if ($Python) {
   & sc.exe start $Service | Out-Null
   Start-Sleep -Seconds 2
   Show-State
+  Say 'the next Inwire install puts the Rust agent back.'
   exit 0
 }
 

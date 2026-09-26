@@ -129,13 +129,23 @@ check(`${SHIPPING} MyAppVersion matches package.json`,
   define(shipping, 'MyAppVersion'), version);
 
 // The Rust agent's crate version, which `lib.rs` re-exports as `VERSION` via
-// `env!("CARGO_PKG_VERSION")` - so this is what its `hello` carries and what
-// `--version` prints. It was deliberately `0.0.0` while the agent still had a
-// version of its own; it joined the lock when the collapse landed.
+// `env!("CARGO_PKG_VERSION")` - so this is what its `hello` carries, what
+// `--version` prints, and what `stamp-agent.ts` insists the VERSIONINFO agrees
+// with. It was deliberately `0.0.0` while the agent still had a version of its
+// own; it joined the lock when the collapse landed, and `npm run sync:version`
+// has written it since the Rust agent became what the installer ships.
 const cargo = text('agent-rs/Cargo.toml');
 check('agent-rs/Cargo.toml was read', cargo.length > 0, true);
 const crateVersion = /^version = "([^"]+)"$/m.exec(cargo)?.[1] ?? null;
-check('agent-rs/Cargo.toml version matches package.json', crateVersion, version);
+check('agent-rs/Cargo.toml version matches package.json (run `npm run sync:version`)',
+  crateVersion, version);
+
+// And the crate's own entry in the lock, because `npm run build:agent` builds
+// `--locked`: a lock naming the previous version fails the release build
+// rather than being rewritten by it, which is the right failure but a late one.
+const lock = text('agent-rs/Cargo.lock');
+const lockVersion = /^name = "inwire-agent"\r?\nversion = "([^"]+)"$/m.exec(lock)?.[1] ?? null;
+check('agent-rs/Cargo.lock inwire-agent entry matches package.json', lockVersion, version);
 
 console.log('\n--- and no second number beside it ---\n');
 

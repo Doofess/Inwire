@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[link(name = "iphlpapi")]
 extern "system" {
@@ -59,7 +60,13 @@ extern "system" {
 /// alignment the buffer below is allocated for.
 #[repr(C)]
 struct IpAdapterAddresses {
-    _alignment: u64,
+    /// The first half of the leading union's `{ULONG Length; IF_INDEX IfIndex}`.
+    _length: u32,
+    /// `IfIndex` - the **IPv4** interface index, 0 on an adapter with IPv4
+    /// unbound. It is what scapy reports as `index` and therefore what
+    /// `local-agent/adapters.py` joins routes and neighbours on, so it is the
+    /// join key here too rather than the IPv6 index further down.
+    if_index: u32,
     next: *mut IpAdapterAddresses,
     /// ANSI, and the join key: the adapter's GUID in braces, e.g.
     /// `{28524299-03EF-4F59-A8D2-419D761418B7}`. Npcap's device name is that
@@ -69,10 +76,11 @@ struct IpAdapterAddresses {
     _first_anycast: *mut c_void,
     _first_multicast: *mut c_void,
     first_dns_server: *mut c_void,
-    dns_suffix: *mut u16,
+    _dns_suffix: *mut u16,
     /// Wide. Windows' own hardware description - usually the same string pcap
-    /// reports, which is why it is not what this module is after.
-    _description: *mut u16,
+    /// reports. Not what the label is after, and exactly what `adapter_config`
+    /// sends as `description`.
+    description: *mut u16,
     /// Wide. The connection name: `Ethernet 2`, `Wi-Fi`, or a localized one.
     friendly_name: *mut u16,
     /// `MAX_ADAPTER_ADDRESS_LENGTH` is 8; an Ethernet MAC uses the first 6 and
@@ -83,12 +91,15 @@ struct IpAdapterAddresses {
     physical_address: [u8; 8],
     physical_address_length: u32,
     _flags: u32,
-    mtu: u32,
-    _if_type: u32,
-    /// `IF_OPER_STATUS`: 1 is up, 2 is down. Anything else is a state this does
-    /// not translate, and is reported as "not known" rather than as either.
-    oper_status: u32,
+    _mtu: u32,
+    /// `IFTYPE`. 24 is `IF_TYPE_SOFTWARE_LOOPBACK`, the one row Npcap's
+    /// GUID-less `\Device\NPF_Loopback` corresponds to.
+    if_type: u32,
+    _oper_status: u32,
 }
+
+/// `IF_TYPE_SOFTWARE_LOOPBACK`.
+pub const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
 
 /// `SOCKET_ADDRESS`, declared as its own struct **on purpose**.
 ///
@@ -109,7 +120,9 @@ struct IpAdapterUnicastAddress {
     next: *mut IpAdapterUnicastAddress,
     address: SocketAddress,
     _prefix_origin: u32,
-    _suffix_origin: u32,
+    /// `NL_SUFFIX_ORIGIN`. 5 is `IpSuffixOriginRandom`: an RFC 4941 privacy
+    /// address, which is the whole of what `temporary` means.
+    suffix_origin: u32,
     _dad_state: u32,
     _valid_lifetime: u32,
     _preferred_lifetime: u32,
@@ -166,8 +179,14 @@ const ERROR_BUFFER_OVERFLOW: u32 = 111;
 /// `SKIP_FRIENDLY_NAME` (0x0020) is deliberately absent, which is worth stating
 /// because setting it would empty this module's only output while leaving every
 /// call here returning success.
+///
+/// **The two that matter are scapy's two**, `INCLUDE_PREFIX | INCLUDE_ALL_INTERFACES`,
+/// because scapy's `get_windows_if_list` is what `local-agent/adapters.py` walks
+/// and the adapter report has to list the same adapters in the same order. The
+/// two `SKIP_` bits only drop lists neither agent reads.
 const GAA_FLAGS: u32 = 0x0002 /* SKIP_ANYCAST */
     | 0x0004 /* SKIP_MULTICAST */
+    | 0x0010 /* INCLUDE_PREFIX */
     | 0x0100 /* INCLUDE_ALL_INTERFACES */;
 
 /// U+200E LEFT-TO-RIGHT MARK and U+200F RIGHT-TO-LEFT MARK.
@@ -225,58 +244,74 @@ pub fn guid_of(device_name: &str) -> Option<String> {
     Some(device_name[start..=end].to_uppercase())
 }
 
-/// One IPv4 address the OS has configured.
-pub struct Ipv4Entry {
-    pub address: String,
-    pub prefix_length: Option<u8>,
+/// One unicast address, as `GetAdaptersAddresses` lists it.
+pub struct UnicastAddress {
+    /// The address itself, for arithmetic - the broadcast is computed from it
+    /// and the IPv6 scope is read from it.
+    pub ip: IpAddr,
+    /// The same address as text, written by Windows' own formatter - see
+    /// `format_ipv6` for why that and not RFC 5952.
+    pub text: String,
+    /// `OnLinkPrefixLength`, which is what `Get-NetIPAddress` reports as
+    /// `PrefixLength` - the same row of the same table.
+    pub prefix_length: u8,
+    /// `NL_SUFFIX_ORIGIN`; 5 is a privacy address.
+    pub suffix_origin: u32,
 }
 
-/// One IPv6 address, with the scope the app renders beside it.
-pub struct Ipv6Entry {
-    pub address: String,
-    pub prefix_length: Option<u8>,
-    pub scope: Option<&'static str>,
+/// One adapter, as `GetAdaptersAddresses` reports it **and in the order it
+/// reports them**, which is the order `adapter_config` lists them in - scapy's
+/// `get_windows_if_list` walks the same linked list, so the Python agent's
+/// order is this order.
+pub struct WinAdapter {
+    /// `AdapterName` as given: the GUID in braces.
+    pub guid: String,
+    /// `IfIndex` - see the struct field for why the IPv4 one.
+    pub if_index: u32,
+    pub if_type: u32,
+    /// Raw, right-to-left marks and all. `adapter_config` looks the adapter's
+    /// link statistics up by this exact string before it cleans it, because
+    /// that is the key they are filed under.
+    pub friendly_name: Option<String>,
+    pub description: Option<String>,
+    /// **Only a six-byte address is a MAC**, which is scapy's `_get_mac` rule:
+    /// a tunnel's 8-byte or a WAN Miniport's 0-byte address is reported as no
+    /// MAC rather than as a string of the wrong shape.
+    pub mac: Option<String>,
+    /// Every unicast address, IPv4 and IPv6 interleaved as the OS lists them.
+    pub unicast: Vec<UnicastAddress>,
+    /// `FirstDnsServerAddress`, in order - what scapy calls `nameservers`.
+    pub dns_servers: Vec<String>,
 }
 
-/// What Windows knows about one adapter, keyed by GUID.
+/// What the capture label needs about one adapter, keyed by GUID.
 ///
-/// Every field is optional and a `None` means **not known** - never zero,
-/// absent or disabled. That is `AgentAdapter`'s stated contract in
-/// `src/services/agentProtocol.ts`, and it is what makes a partial
-/// implementation honest rather than a lie by omission: the app validates only
-/// `id` and the three lists, precisely so an agent can answer with the half it
-/// can read.
+/// The name alone. `adapter_config` used to be built from this too, carrying a
+/// MAC, addresses and resolvers with no order and nothing to pair them with; it
+/// reads `enumerate` now, which keeps the order `adapters.py` sends.
 pub struct AdapterFacts {
     pub friendly_name: Option<String>,
-    /// Lowercase, colon-separated. **The field the checksum verdict rests on.**
-    pub mac: Option<String>,
-    pub status: Option<&'static str>,
-    pub mtu: Option<u32>,
-    pub ipv4: Vec<Ipv4Entry>,
-    pub ipv6: Vec<Ipv6Entry>,
-    pub dns_servers: Vec<String>,
-    pub dns_suffix: Option<String>,
 }
 
-/// `aa:bb:cc:dd:ee:02`, or `None` when the adapter has no hardware address.
+/// `aa:bb:cc:dd:ee:02`, or `None` unless there are exactly six bytes.
 ///
 /// Lowercase because `hostFromAdapters` lowercases what it stores and the
 /// dissector formats the frame's MACs the same way. A mismatch in case would
 /// leave `host.macs` full and every lookup missing - the same symptom as
 /// sending no MAC at all, which is the bug this whole message exists to fix.
-fn format_mac(bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
+pub fn format_mac(bytes: &[u8]) -> Option<String> {
+    if bytes.len() != 6 {
         return None;
     }
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":"))
 }
 
-/// The address behind a `SOCKET_ADDRESS`, as text, with its family.
+/// The address behind a `SOCKET_ADDRESS`, parsed and as text.
 ///
 /// Reads the family first and picks the struct from it rather than trusting the
 /// declared length: the length is what the OS says it wrote, the family is what
 /// says how to read it.
-unsafe fn sockaddr_to_string(addr: &SocketAddress) -> Option<(u16, String)> {
+unsafe fn sockaddr_to_ip(addr: &SocketAddress) -> Option<(IpAddr, String)> {
     let p = addr.lp_sockaddr;
     if p.is_null() {
         return None;
@@ -284,97 +319,62 @@ unsafe fn sockaddr_to_string(addr: &SocketAddress) -> Option<(u16, String)> {
     match *(p as *const u16) {
         AF_INET => {
             let v4 = &*(p as *const SockaddrIn);
-            let a = v4.addr;
-            Some((AF_INET, format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])))
+            let ip = Ipv4Addr::from(v4.addr);
+            Some((IpAddr::V4(ip), ip.to_string()))
         }
         AF_INET6 => {
             let v6 = &*(p as *const SockaddrIn6);
-            Some((AF_INET6, format_ipv6(&v6.addr)))
+            Some((IpAddr::V6(Ipv6Addr::from(v6.addr)), format_ipv6(&v6.addr)))
         }
         _ => None,
     }
 }
 
-/// RFC 5952 text for an IPv6 address: lowercase hex, the longest run of zero
-/// groups collapsed once, and a run of one never collapsed.
-pub fn format_ipv6(bytes: &[u8; 16]) -> String {
-    let groups: [u16; 8] =
-        std::array::from_fn(|i| ((bytes[i * 2] as u16) << 8) | bytes[i * 2 + 1] as u16);
-
-    let (mut best_at, mut best_len, mut at, mut len) = (usize::MAX, 0usize, usize::MAX, 0usize);
-    for (i, g) in groups.iter().enumerate() {
-        if *g == 0 {
-            if len == 0 {
-                at = i;
-            }
-            len += 1;
-            if len > best_len {
-                best_at = at;
-                best_len = len;
-            }
-        } else {
-            len = 0;
-        }
-    }
-    // A run of one is written out. `::` for a single zero group parses, and is
-    // not what RFC 5952 asks anyone to print.
-    if best_len < 2 {
-        best_at = usize::MAX;
-    }
-
-    let mut out = String::new();
-    let mut i = 0usize;
-    while i < 8 {
-        if i == best_at {
-            // Always both colons. Writing one on the theory that the previous
-            // group left the other is wrong in the middle of an address, where
-            // the separator before a group is only added when the buffer does
-            // not already end in one - `fe80::1` came out as `fe80:1`.
-            out.push_str("::");
-            i += best_len;
-            continue;
-        }
-        if !out.is_empty() && !out.ends_with(':') {
-            out.push(':');
-        }
-        out.push_str(&format!("{:x}", groups[i]));
-        i += 1;
-    }
-    if out.is_empty() {
-        "::".to_string()
-    } else {
-        out
-    }
+#[link(name = "ntdll")]
+extern "system" {
+    /// Writes the text and returns a pointer to its terminating NUL.
+    fn RtlIpv6AddressToStringW(address: *const [u8; 16], text: *mut u16) -> *mut u16;
 }
 
-/// Which of the app's four IPv6 scopes an address falls in.
+/// An IPv6 address as **Windows** writes it, which is not quite RFC 5952.
 ///
-/// `None` is a real answer rather than a default: an address whose scope this
-/// does not recognise is not quietly called global.
-fn ipv6_scope(bytes: &[u8; 16]) -> Option<&'static str> {
-    if bytes[..15].iter().all(|b| *b == 0) && bytes[15] == 1 {
-        return Some("loopback");
-    }
-    if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80 {
-        return Some("link-local");
-    }
-    if (bytes[0] & 0xfe) == 0xfc {
-        return Some("ula");
-    }
-    if bytes[0] == 0xff {
-        return None; // multicast, which is none of the four
-    }
-    Some("global")
+/// This was an RFC 5952 formatter written here, and it agreed with Windows on
+/// every address with no IPv4 inside it - and disagreed on the ones with:
+/// Windows writes `::ffff:10.0.0.7`, `::10.0.0.7`, `::ffff:0:10.0.0.7` and the
+/// ISATAP `fe80::5efe:10.0.0.7` with a dotted quad, where the formatter wrote
+/// hex. Every address the Python agent reports went through that same Windows
+/// function - `socket.inet_ntop` for scapy's adapter list, psutil's
+/// `RtlIpv6AddressToStringA` for the socket table - so asking the OS is the
+/// only way the two agents are guaranteed to write the same string. And the
+/// string is the key: a socket or an adapter address spelled differently from
+/// the one it is compared against matches nothing.
+pub fn format_ipv6(bytes: &[u8; 16]) -> String {
+    // 46 is INET6_ADDRSTRLEN for the non-Ex call; the headroom is free.
+    let mut buffer = [0u16; 64];
+    let end = unsafe { RtlIpv6AddressToStringW(bytes, buffer.as_mut_ptr()) };
+    let len = if end.is_null() {
+        buffer.iter().position(|c| *c == 0).unwrap_or(0)
+    } else {
+        (end as usize - buffer.as_ptr() as usize) / 2
+    };
+    String::from_utf16_lossy(&buffer[..len.min(buffer.len())])
 }
 
-/// Everything Windows will say about every adapter, as GUID -> facts.
+/// Every adapter Windows will name, in the order it names them.
 ///
 /// Empty on any failure, which every caller degrades through: `label_for` falls
 /// back to the pcap description and the adapter report has nothing to send. An
 /// agent that refused to enumerate because one lookup failed would trade the
 /// capture for a nicer string.
-pub fn adapter_facts() -> HashMap<String, AdapterFacts> {
-    let mut facts = HashMap::new();
+pub fn enumerate() -> Vec<WinAdapter> {
+    enumerate_with(GAA_FLAGS)
+}
+
+/// The same walk with the caller's flags - `adapter_config` also needs the
+/// list psutil reads, which is `GetAdaptersAddresses` with **no** flags: only
+/// adapters with an IP binding, and so no WAN Miniports.
+pub fn enumerate_with(flags: u32) -> Vec<WinAdapter> {
+    let mut out = Vec::new();
 
     // 15 KB is what the docs suggest to avoid the common second call; the retry
     // is still here because the count is not ours to predict. `u64` rather than
@@ -391,7 +391,7 @@ pub fn adapter_facts() -> HashMap<String, AdapterFacts> {
         let result = unsafe {
             GetAdaptersAddresses(
                 AF_UNSPEC,
-                GAA_FLAGS,
+                flags,
                 std::ptr::null_mut(),
                 words.as_mut_ptr() as *mut IpAdapterAddresses,
                 &mut size,
@@ -404,7 +404,7 @@ pub fn adapter_facts() -> HashMap<String, AdapterFacts> {
             continue;
         }
         if result != ERROR_SUCCESS {
-            return facts;
+            return out;
         }
 
         let mut adapter = words.as_ptr() as *const IpAdapterAddresses;
@@ -414,65 +414,58 @@ pub fn adapter_facts() -> HashMap<String, AdapterFacts> {
                 if let Some(guid) = ansi_to_string(a.adapter_name) {
                     let mac_len =
                         (a.physical_address_length as usize).min(a.physical_address.len());
-                    let (mut ipv4, mut ipv6) = (Vec::new(), Vec::new());
 
-                    let mut unicast = a.first_unicast as *const IpAdapterUnicastAddress;
-                    while !unicast.is_null() {
-                        let u = &*unicast;
-                        if let Some((family, text)) = sockaddr_to_string(&u.address) {
-                            let prefix = Some(u.on_link_prefix_length);
-                            if family == AF_INET {
-                                ipv4.push(Ipv4Entry { address: text, prefix_length: prefix });
-                            } else {
-                                let v6 = &*(u.address.lp_sockaddr as *const SockaddrIn6);
-                                ipv6.push(Ipv6Entry {
-                                    address: text,
-                                    prefix_length: prefix,
-                                    scope: ipv6_scope(&v6.addr),
-                                });
-                            }
+                    let mut unicast = Vec::new();
+                    let mut entry = a.first_unicast as *const IpAdapterUnicastAddress;
+                    while !entry.is_null() {
+                        let u = &*entry;
+                        if let Some((ip, text)) = sockaddr_to_ip(&u.address) {
+                            unicast.push(UnicastAddress {
+                                ip,
+                                text,
+                                prefix_length: u.on_link_prefix_length,
+                                suffix_origin: u.suffix_origin,
+                            });
                         }
-                        unicast = u.next;
+                        entry = u.next;
                     }
 
                     let mut dns_servers = Vec::new();
                     let mut dns = a.first_dns_server as *const IpAdapterDnsServerAddress;
                     while !dns.is_null() {
                         let d = &*dns;
-                        if let Some((_, text)) = sockaddr_to_string(&d.address) {
+                        if let Some((_, text)) = sockaddr_to_ip(&d.address) {
                             dns_servers.push(text);
                         }
                         dns = d.next;
                     }
 
-                    facts.insert(
-                        guid.to_uppercase(),
-                        AdapterFacts {
-                            friendly_name: wide_to_string(a.friendly_name),
-                            mac: format_mac(&a.physical_address[..mac_len]),
-                            // 1 is up, 2 is down. Every other IF_OPER_STATUS is
-                            // a state this does not translate, and saying
-                            // nothing beats rounding it to either.
-                            status: match a.oper_status {
-                                1 => Some("up"),
-                                2 => Some("down"),
-                                _ => None,
-                            },
-                            mtu: if a.mtu == 0 || a.mtu == u32::MAX { None } else { Some(a.mtu) },
-                            ipv4,
-                            ipv6,
-                            dns_servers,
-                            dns_suffix: wide_to_string(a.dns_suffix).filter(|s| !s.is_empty()),
-                        },
-                    );
+                    out.push(WinAdapter {
+                        guid,
+                        if_index: a.if_index,
+                        if_type: a.if_type,
+                        friendly_name: wide_to_string(a.friendly_name),
+                        description: wide_to_string(a.description),
+                        mac: format_mac(&a.physical_address[..mac_len]),
+                        unicast,
+                        dns_servers,
+                    });
                 }
                 adapter = a.next;
             }
         }
-        return facts;
+        return out;
     }
 
-    facts
+    out
+}
+
+/// The connection name of every adapter, as GUID -> facts, for the labels.
+pub fn adapter_facts() -> HashMap<String, AdapterFacts> {
+    enumerate()
+        .into_iter()
+        .map(|a| (a.guid.to_uppercase(), AdapterFacts { friendly_name: a.friendly_name }))
+        .collect()
 }
 
 /// The label for one adapter, by the rule `agent.py`'s `build_interface_label`
@@ -534,16 +527,7 @@ mod tests {
     /// reads. Written out rather than derived so a field added to `AdapterFacts`
     /// does not quietly change what this test is about.
     fn named(name: &str) -> AdapterFacts {
-        AdapterFacts {
-            friendly_name: Some(name.to_string()),
-            mac: None,
-            status: None,
-            mtu: None,
-            ipv4: Vec::new(),
-            ipv6: Vec::new(),
-            dns_servers: Vec::new(),
-            dns_suffix: None,
-        }
+        AdapterFacts { friendly_name: Some(name.to_string()) }
     }
 
     /// A MAC has to come out in the case and separator `hostFromAdapters`
@@ -558,6 +542,10 @@ mod tests {
         // Six of the eight bytes are real on Ethernet; a zero-length address is
         // "no MAC" rather than an empty string.
         assert_eq!(format_mac(&[]), None);
+        // scapy's `_get_mac` answers "" for any length but six, and
+        // `adapters.py`'s `_mac` turns "" into None - so an 8-byte tunnel
+        // address is no MAC, not a MAC of the wrong shape.
+        assert_eq!(format_mac(&[0, 0, 0, 0, 0, 0, 0, 0xe0]), None);
     }
 
     #[test]
@@ -593,29 +581,28 @@ mod tests {
         assert_eq!(format_ipv6(&full), "2001:db8:1111:2222:3333:4444:5555:6666");
     }
 
+    /// Where Windows' formatter parts from RFC 5952, and why the OS is asked.
+    ///
+    /// Every expected string is what `socket.inet_ntop` printed for the same
+    /// bytes on the machine this was written on - the call scapy's adapter list
+    /// and psutil's socket table both go through, so it is the spelling the
+    /// Python agent sends. A hand-written RFC formatter printed the hex forms.
     #[test]
-    fn a_scope_is_named_or_withheld_but_never_guessed() {
-        let mut ll = [0u8; 16];
-        ll[0] = 0xfe; ll[1] = 0x80;
-        assert_eq!(ipv6_scope(&ll), Some("link-local"));
-
-        let mut ula = [0u8; 16];
-        ula[0] = 0xfd;
-        assert_eq!(ipv6_scope(&ula), Some("ula"));
-
-        let mut lo = [0u8; 16];
-        lo[15] = 1;
-        assert_eq!(ipv6_scope(&lo), Some("loopback"));
-
-        let mut global = [0u8; 16];
-        global[0] = 0x20; global[1] = 0x01;
-        assert_eq!(ipv6_scope(&global), Some("global"));
-
-        // Multicast is none of the four, and is withheld rather than called
-        // global - `null` is a value the app renders.
-        let mut mcast = [0u8; 16];
-        mcast[0] = 0xff; mcast[1] = 0x02;
-        assert_eq!(ipv6_scope(&mcast), None);
+    fn ipv6_text_is_windows_own_including_embedded_ipv4() {
+        let v6 = |hex: &str| -> [u8; 16] {
+            std::array::from_fn(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+        };
+        assert_eq!(format_ipv6(&v6("00000000000000000000ffff0a000007")), "::ffff:10.0.0.7");
+        assert_eq!(format_ipv6(&v6("0000000000000000000000000a000007")), "::10.0.0.7");
+        assert_eq!(format_ipv6(&v6("0000000000000000ffff00000a000007")), "::ffff:0:10.0.0.7");
+        assert_eq!(format_ipv6(&v6("fe8000000000000000005efe0a000007")), "fe80::5efe:10.0.0.7");
+        // Ties go to the first run, as RFC 5952 says too.
+        assert_eq!(format_ipv6(&v6("fe800000000000000200000000000000")), "fe80::200:0:0:0");
+        assert_eq!(format_ipv6(&v6("20010db8000000000001000000000001")), "2001:db8::1:0:0:1");
+        assert_eq!(format_ipv6(&v6("00000000000000000000000000000000")), "::");
+        // A resolver Windows configures on an adapter with none of its own,
+        // as `adapters.py` reported it on this machine.
+        assert_eq!(format_ipv6(&v6("fec000000000ffff0000000000000001")), "fec0:0:0:ffff::1");
     }
 
     /// The pairing rule, against the four shapes `agent.py` distinguishes.

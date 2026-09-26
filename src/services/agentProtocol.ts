@@ -97,14 +97,24 @@ export type AgentErrorCode =
   | 'restart_unavailable'
   | 'capture_failed'
   | 'capture_busy'
-  | 'unknown_command';
+  | 'unknown_command'
+  // The Rust agent's two. `no_interfaces`: a start with no adapter to capture
+  // on at all - a machine without Npcap - which the Python agent answers by
+  // reporting `sniffing` on nothing. `frame_too_long`: a frame receive offload
+  // coalesced past the record's 16-bit length, counted in `droppedOversize`.
+  | 'no_interfaces'
+  | 'frame_too_long';
 
 export interface AgentErrorMessage {
   type: 'error';
   message: string;
   // Optional, so an agent that sends a bare message still parses.
   code?: AgentErrorCode | string;
-  /** For `capture_failed`: which interface (id) could not be opened. */
+  /**
+   * For `capture_failed`: which interface (id) could not be opened or stopped
+   * delivering. Absent when the selection named a device the interface list
+   * does not have, rather than an id that belongs to a different adapter.
+   */
   iface?: number;
 }
 

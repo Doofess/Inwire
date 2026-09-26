@@ -115,6 +115,8 @@ type FnFreeAllDevs = unsafe extern "C" fn(*mut PcapIf);
 type FnSetBuff = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
 type FnSetMinToCopy = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
 type FnDatalink = unsafe extern "C" fn(*mut PcapT) -> c_int;
+#[cfg(test)]
+type FnOpenOffline = unsafe extern "C" fn(*const c_char, *mut c_char) -> *mut PcapT;
 
 /// The loaded library and its entry points.
 pub struct Npcap {
@@ -132,6 +134,13 @@ pub struct Npcap {
     /// Npcap's too, and absent for the same reason - see `set_min_to_copy`.
     setmintocopy: Option<FnSetMinToCopy>,
     datalink: FnDatalink,
+    /// `pcap_open_offline`, for the tests alone: it is how `runtime.rs`'s tests
+    /// drive the real sniffer, pump and reaper with the real frames of
+    /// `test/fixtures/*.pcap`, read through Npcap exactly as a live adapter's
+    /// are - including `pcap_next_ex`'s -2 at the end of the file, which is an
+    /// adapter "failing" the same way a removed one does.
+    #[cfg(test)]
+    open_offline: FnOpenOffline,
 }
 
 #[derive(Debug)]
@@ -161,13 +170,18 @@ impl Npcap {
             LoadLibraryExW(path.as_ptr(), ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH)
         };
         if module.is_null() {
+            // Taken first: nothing below may disturb the thread's last error.
+            let error = io::Error::last_os_error();
+            // Short, because it is quoted inside the runtime's own sentence -
+            // "Npcap's packet driver is not available (...). Packet capture
+            // will not work. Install Npcap from ..." - once per connection
+            // until Npcap is installed.
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "wpcap.dll could not be loaded from the Npcap system directory: {}. \
-                     Npcap is what this agent captures through; without it there is \
-                     nothing to capture on.",
-                    io::Error::last_os_error()
+                    "could not load {}: {}",
+                    String::from_utf16_lossy(&path[..path.len() - 1]),
+                    error
                 ),
             ));
         }
@@ -206,6 +220,10 @@ impl Npcap {
                     .ok()
                     .map(|p| std::mem::transmute::<Farproc, FnSetMinToCopy>(p)),
                 datalink: std::mem::transmute::<Farproc, FnDatalink>(sym(module, "pcap_datalink")?),
+                #[cfg(test)]
+                open_offline: std::mem::transmute::<Farproc, FnOpenOffline>(
+                    sym(module, "pcap_open_offline")?,
+                ),
             })
         }
     }
@@ -242,6 +260,20 @@ impl Npcap {
     ///
     /// `to_ms` is 100 deliberately: the read returns on its own timeout, which
     /// is how a stop is honoured promptly on an adapter with no traffic.
+    /// Opens a capture file as if it were an adapter. Tests only - see the
+    /// `open_offline` field.
+    #[cfg(test)]
+    pub fn open_file(&self, path: &std::path::Path) -> io::Result<Capture<'_>> {
+        let name = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| io::Error::other("a path cannot contain a nul"))?;
+        let mut errbuf = [0 as c_char; PCAP_ERRBUF_SIZE];
+        let handle = unsafe { (self.open_offline)(name.as_ptr(), errbuf.as_mut_ptr()) };
+        if handle.is_null() {
+            return Err(io::Error::other(unsafe { cstr(errbuf.as_ptr()) }));
+        }
+        Ok(Capture { npcap: self, handle })
+    }
+
     pub fn open(&self, device: &str, promiscuous: bool) -> io::Result<Capture<'_>> {
         let name = CString::new(device)
             .map_err(|_| io::Error::other("a device name cannot contain a nul"))?;
@@ -393,6 +425,14 @@ impl Capture<'_> {
                     wire_len: h.len,
                 })
             }
+            // The end of a capture file. Named rather than described by
+            // `pcap_geterr`, which reports whatever the handle last failed at
+            // - on a file, the `pcap_setmintocopy` the open refused - and so
+            // says something true about the wrong call. A live adapter never
+            // answers -2; the tests' fixture captures do.
+            -2 => Err(io::Error::other(
+                "pcap_next_ex failed (-2): the end of the capture file",
+            )),
             _ => Err(io::Error::other(format!(
                 "pcap_next_ex failed ({rc}): {}",
                 self.error()
@@ -454,9 +494,22 @@ mod tests {
     /// either name would cost the setting and report nothing. `set_min_to_copy`
     /// in particular buys latency and no content, so its absence has no symptom
     /// at all beyond frames arriving up to `to_ms` late.
+    ///
+    /// **Skips where Npcap is not installed** - a GitHub `windows-latest`
+    /// runner, or a fresh machine the Update Center has not reached - because
+    /// that is a legal machine and the agent serves it (runtime.rs). It skips
+    /// on the *file* being absent, not on the load failing: a `wpcap.dll` that
+    /// is present and will not load, or lacks a required export, is exactly
+    /// what this test exists to catch.
     #[test]
     fn npcaps_own_symbols_resolve_on_this_machine() {
-        let npcap = Npcap::load().expect("wpcap.dll loads");
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let dll = std::path::Path::new(&system).join(r"System32\Npcap\wpcap.dll");
+        if !dll.exists() {
+            eprintln!("SKIP  Npcap is not installed on this machine ({} is absent)", dll.display());
+            return;
+        }
+        let npcap = Npcap::load().expect("wpcap.dll is installed and loads");
         assert!(npcap.setbuff.is_some(), "wpcap.dll exports no pcap_setbuff");
         assert!(
             npcap.setmintocopy.is_some(),

@@ -73,3 +73,35 @@ win:
   icon: electron/resources/icon.ico
   target:
     - dir
+
+  # Authenticode. Everything is handed to `electron/sign.cjs`, which hands it to
+  # `scripts/sign/sign.ps1` - the one script that signs anything, for this build
+  # and for the Inno installer alike. No certificate, thumbprint or password
+  # appears here, and none may: the certificate is found by thumbprint from
+  # INWIRE_SIGN_THUMBPRINT or the untracked `.signing.json`, so replacing the
+  # self-signed certificate with a real one touches neither build.
+  #
+  # With no certificate configured, sign.ps1 leaves the files unsigned and says
+  # so, and the pack still succeeds; INWIRE_REQUIRE_SIGNING=1 makes that fatal.
+  #
+  # Order: electron-builder runs this AFTER `afterPack`, which is where the
+  # fuses are flipped. That is the order the fuses require - flipping one
+  # rewrites the executable - and it is electron-builder's order rather than
+  # something configured here.
+  signtoolOptions:
+    # `./` and not `electron/sign.cjs`: a bare specifier is tried as a package
+    # first (`require.resolve`), and `electron/...` is the Electron package's
+    # namespace. The leading `./` also makes electron-builder check the hook
+    # resolves inside the workspace.
+    sign: ./electron/sign.cjs
+    # The default is ['sha1', 'sha256'], which calls the hook twice per file for
+    # a dual signature nothing here wants: sign.ps1 signs SHA-256 only.
+    signingHashAlgorithms:
+      - sha256
+  # Only `.exe` is signed by default. The unsigned DLLs Electron ships beside
+  # the exe - ffmpeg.dll, vk_swiftshader.dll, vulkan-1.dll - are loaded into the
+  # app's process, so an unsigned one is the file to swap. d3dcompiler_47.dll is
+  # handed over too and left alone: it carries Microsoft's valid signature, and
+  # sign.ps1 does not overwrite somebody else's.
+  signExts:
+    - .dll
