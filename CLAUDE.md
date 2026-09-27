@@ -722,7 +722,7 @@ segment is a hole to the record cursor and named from what it kept, and
 `[Packet size limited during capture]` marks every frame whose content ran past
 the cut (`dissect/captureShort.ts` - a superset of Wireshark's marks, on
 purpose). `scripts/parity/snaplen.ts` holds `tcp.len` exactly, and the analysis,
-Protocol, Info and marks as floors in `acceptance.json`, beside a ceiling on the
+Protocol, Info and marks as floors in `test/fixtures/acceptance.json`, beside a ceiling on the
 marks tshark makes that this build does not; `revisit.ts` rebuilds every frame
 of every cut from its record.
 
