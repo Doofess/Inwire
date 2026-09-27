@@ -176,6 +176,36 @@ check(`${LEGACY} MyAgentVersion stays at the last agent-only release`,
 check(`${LEGACY} MyAppVersion stays where it was`,
   define(legacy, 'MyAppVersion'), '1.0.0');
 
+console.log('\n--- the installer finds what an install registered ---\n');
+
+/**
+ * The key Inno registers an `AppId` under: `{{` is an escaped brace and a lone
+ * `}` is itself, so `{{GUID}}` registers as `{GUID}}`.
+ *
+ * Asserted because the reads got it wrong and nothing could tell: the upgrade
+ * guard looked up `{GUID}_is1`, found no install, and so refused none - never
+ * noticed until 0.4.1 was the first installer to go below what was installed
+ * (ADR 0051). A read that finds nothing is indistinguishable from a machine
+ * with nothing on it.
+ */
+function registeredKey(source: string): string | null {
+  const line = lines(source).find((l) => l.startsWith('AppId='));
+  if (line === undefined) return null;
+  return `${line.slice('AppId='.length).replace(/\{\{/g, '{')}_is1`;
+}
+
+const ownKey = registeredKey(shipping);
+check(`${SHIPPING} has an AppId`, ownKey !== null, true);
+check('...and the upgrade guard reads the key that AppId registers',
+  ownKey !== null && shipping.includes(`CurrentVersion\\Uninstall\\${ownKey}'`), true);
+
+const standaloneKey = registeredKey(legacy);
+const standaloneRead = `CurrentVersion\\Uninstall\\${define(shipping, 'StandaloneAgentAppId')}}_is1`;
+check(`${LEGACY} has an AppId`, standaloneKey !== null, true);
+check('the standalone agent is looked up under the key its AppId registered',
+  standaloneKey !== null && standaloneRead.endsWith(`\\${standaloneKey}`)
+    && shipping.includes(`CurrentVersion\\Uninstall\\{#StandaloneAgentAppId}}_is1'`), true);
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);

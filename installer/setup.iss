@@ -348,11 +348,17 @@ begin
   end;
 end;
 
+// The uninstall key ends `}}_is1`, and that is not a typo. [Setup] writes the
+// AppId as `{{GUID}}`: Inno reads `{{` as an escaped brace and a lone `}` as
+// itself, so the AppId it registers under is `{GUID}}`. This read had a single
+// brace, found nothing, and so refused nothing - an upgrade guard that never
+// fired, until 0.4.1 was the first installer to go below what was installed
+// (ADR 0051) and the registry was read by hand.
 function InstalledProductVersion: String;
 begin
   Result := '';
   if not RegQueryStringValue(HKLM,
-      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{F384C012-C351-40DE-B9E9-62AC2B6ED001}_is1',
+      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{F384C012-C351-40DE-B9E9-62AC2B6ED001}}_is1',
       'DisplayVersion', Result) then
     Result := '';
 end;
@@ -423,8 +429,10 @@ var
   UninstallString: String;
   ResultCode: Integer;
 begin
+  // `}}_is1` for the reason InstalledProductVersion gives: that installer's
+  // AppId is `{{GUID}}` too, so what it registered under ends in two braces.
   if not RegQueryStringValue(HKLM,
-      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#StandaloneAgentAppId}_is1',
+      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#StandaloneAgentAppId}}_is1',
       'UninstallString', UninstallString) then Exit;
   if UninstallString = '' then Exit;
 
