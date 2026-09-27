@@ -37,6 +37,7 @@ import type { FrameRecorder } from './dissect/frameRecord';
  */
 export interface FrameRecordEntry { id: number; record: Uint8Array; derived?: Uint8Array | null }
 import { poolExpert, poolTokens } from './dissect/tokenPool';
+import { SIZE_LIMITED, bytesNotCaptured } from './dissect/captureShort';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 
 /**
@@ -1150,6 +1151,18 @@ export function decodeRawEthernetPacket(
     direction = directionFromOffload(
       origLen || rawBytes.length, link.srcMac !== undefined, unfilled,
     );
+  }
+
+  // Last, so it lands after whatever the deepest dissector wrote - which is
+  // where Wireshark's column puts it, and what the marker is about.
+  const notCaptured = bytesNotCaptured(rawBytes, l3Offset, currentEtherType, origLen);
+  if (notCaptured > 0) {
+    info = `${info}${SIZE_LIMITED}`;
+    layers[layers.length - 1].fields.push({
+      name: SIZE_LIMITED,
+      value: `${notCaptured} byte${notCaptured === 1 ? '' : 's'} of this frame were not captured`,
+      generated: true,
+    });
   }
 
   const { expert, strongest } = collectExpert(layers);

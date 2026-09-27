@@ -29,6 +29,9 @@ import { dissectNtp, dissectStun } from './udpApps';
 import { dataLayer } from './mediaType';
 import { findUdpPort } from './dispatch';
 
+/** A cut SSDP datagram's start line, which is all of it there may be to name. */
+const START_LINE_DECODER = new TextDecoder();
+
 /** Everything the UDP decode needs that is not the bytes themselves. */
 export interface UdpContext {
   srcIp: string;
@@ -94,6 +97,9 @@ export function dissectUdpTransport(
   // The UDP header's Length field counts the 8-byte header itself, but
   // The reference analyzer's "Len=" - like TCP's - reports payload only.
   const udpPayloadLen = Math.max(0, udpLen - 8);
+  // The datagram the capture did not keep all of - a snaplen. A dissector is
+  // given what was kept; this is how the row says why it may be short.
+  const payloadCut = udpPayloadStart + udpPayloadLen > rawBytes.length && udpLen >= 8;
 
   // Each subdissector that claims the payload replaces the generic
   // "src → dst Len=n" summary entirely, the way the reference analyzer does.
@@ -147,7 +153,13 @@ export function dissectUdpTransport(
     const multicast = dnsPortLabel === 'MDNS';
     const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
     const parsed = parseDnsMessage(rawBytes, udpPayloadStart, payloadEnd);
-    if (parsed) {
+    if (!parsed && payloadCut) {
+      // Too little of the message kept to read even its header. The port has
+      // named it, and a column saying so with nothing after it is what
+      // Wireshark shows for one that ran out before it could say more.
+      protocolLabel = dnsPortLabel;
+      info = '';
+    } else if (parsed) {
       protocolLabel = dnsPortLabel;
       info = dnsInfoLine(parsed, multicast);
 
@@ -184,6 +196,15 @@ export function dissectUdpTransport(
       info = ssdp.info;
       extraLayers.push(ssdp.layer);
       Object.assign(ssdpFields, ssdp.fields);
+    } else if (payloadCut) {
+      // The headers ran past what was kept, so there is no message to read -
+      // but a start line that was kept whole is still the row's name.
+      const lineEnd = rawBytes.subarray(udpPayloadStart, payloadEnd).indexOf(0x0a);
+      protocolLabel = 'SSDP';
+      protocolTokens.push('ssdp');
+      info = lineEnd > 0
+        ? `${START_LINE_DECODER.decode(rawBytes.subarray(udpPayloadStart, udpPayloadStart + lineEnd)).replace(/\r$/, '')} `
+        : '';
     }
   } else if (isQuic) {
     // A short header is only identifiable as QUIC in the context of a

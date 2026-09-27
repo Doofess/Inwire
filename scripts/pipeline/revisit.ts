@@ -36,8 +36,13 @@
  *
  * Real captures only (test/fixtures/README.md); skips cleanly without them.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { deflateSync } from 'fflate';
+import { SNAPLENS } from '../parity/snaplens';
+import { findWiresharkTool } from '../export/realCaptures';
 import { RecordMiss, recordComposition, recordRefs } from '../../src/services/dissect/frameRecord';
 import { keyLog } from '../../src/services/tls/keyLog';
 import { FIXTURES, arrive, firstDifference, render, revisit } from './arrival';
@@ -202,6 +207,28 @@ async function main() {
           arrivalLines: (line: string) => !/^(CLIENT|SERVER)_TRAFFIC_SECRET_0 /.test(line),
         },
       ]) await runFixture(name, path, { ...plan, text });
+    }
+  }
+  // **And cut short, as a snaplen leaves them** (ADR 0050). A cut frame takes
+  // paths a whole one never does - a segment the TLS cursor sees only as a
+  // hole, a conversation that learns its version from a header alone - and
+  // each of those is a tracker answer the record has to carry, so every frame
+  // of each cut is revisited too.
+  const editcap = findWiresharkTool('editcap');
+  const cuts = editcap === null ? [] : FIXTURES.filter((f) => !f.optional && existsSync(f.path));
+  if (editcap === null) console.log('SKIP  the snaplen cuts: editcap not found');
+  if (editcap !== null && cuts.length > 0) {
+    const scratch = mkdtempSync(join(tmpdir(), 'inwire-revisit-cut-'));
+    try {
+      for (const { name, path } of cuts) {
+        for (const snaplen of SNAPLENS) {
+          const cutPath = join(scratch, `${name}_s${snaplen}.pcap`);
+          execFileSync(editcap, ['-F', 'pcap', '-s', String(snaplen), path, cutPath]);
+          await runFixture(`${name} cut at ${snaplen}`, cutPath);
+        }
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
   if (ran === 0) console.log('\nAll revisit checks passed (skipped).');

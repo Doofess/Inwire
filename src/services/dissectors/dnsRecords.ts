@@ -77,6 +77,13 @@ export interface DnsName {
   name: string;
   /** Offset just past the name as encoded here - a pointer is 2 bytes however long the name it names. */
   nextOffset: number;
+  /**
+   * Whether the name ended the way a name ends - a zero label or a pointer -
+   * rather than by running out of bytes. A name the capture cut short used to
+   * read as complete, so the two bytes after it were taken from the middle of
+   * its own last label and a question came out as `TYPE2418`.
+   */
+  complete: boolean;
 }
 
 /**
@@ -90,10 +97,11 @@ export function readDnsName(b: Uint8Array, messageStart: number, offset: number,
   const labels: string[] = [];
   let cursor = offset;
   let nextOffset = -1;
+  let complete = false;
 
   while (cursor < b.length) {
     const length = b[cursor];
-    if (length === 0) { cursor += 1; break; }
+    if (length === 0) { cursor += 1; complete = true; break; }
     if ((length & 0xc0) === 0xc0) {
       if (cursor + 1 >= b.length || jumps >= 8) break;
       const pointer = ((length & 0x3f) << 8) | b[cursor + 1];
@@ -101,13 +109,16 @@ export function readDnsName(b: Uint8Array, messageStart: number, offset: number,
       const target = readDnsName(b, messageStart, messageStart + pointer, jumps + 1);
       if (target.name) labels.push(target.name);
       cursor += 2;
+      // The name's own bytes end at the pointer however far the target runs,
+      // so the pointer completes it here; what the target lacked is its name.
+      complete = true;
       break;
     }
     if (cursor + 1 + length > b.length) break;
     labels.push(utf8Decoder.decode(b.subarray(cursor + 1, cursor + 1 + length)));
     cursor += 1 + length;
   }
-  return { name: labels.join('.'), nextOffset: nextOffset === -1 ? cursor : nextOffset };
+  return { name: labels.join('.'), nextOffset: nextOffset === -1 ? cursor : nextOffset, complete };
 }
 
 export interface DnsQuestion {
@@ -162,6 +173,13 @@ export interface DnsMessage {
   records: DnsRecord[];
   /** Where the message ends as parsed; the caller uses it for byte ranges. */
   end: number;
+  /**
+   * The type of a record the message ran out in the middle of, where its type
+   * was kept - which is where a snaplen usually ends a response. Wireshark
+   * has written the type into the Info column by the time it runs out, so a
+   * cut answer reads `... A`.
+   */
+  cutType?: number;
 }
 
 const u16 = (b: Uint8Array, p: number) => (b[p] << 8) | b[p + 1];
@@ -206,9 +224,9 @@ export function parseDnsMessage(
   let p = messageStart + 12;
   for (let i = 0; i < msg.counts[0] && p < messageEnd; i++) {
     const start = p;
-    const { name, nextOffset } = readDnsName(b, messageStart, p);
+    const { name, nextOffset, complete } = readDnsName(b, messageStart, p);
     p = nextOffset;
-    if (p + 4 > messageEnd) return msg;
+    if (!complete || p + 4 > messageEnd) return msg;
     const type = u16(b, p);
     const qclass = u16(b, p + 2);
     p += 4;
@@ -219,7 +237,11 @@ export function parseDnsMessage(
   for (let s = 0; s < 3; s++) {
     for (let i = 0; i < msg.counts[s + 1] && p < messageEnd; i++) {
       const record = parseRecord(b, messageStart, p, messageEnd, sections[s]);
-      if (!record) return msg;
+      if (!record) {
+        const { nextOffset, complete } = readDnsName(b, messageStart, p);
+        if (complete && nextOffset + 2 <= messageEnd) msg.cutType = u16(b, nextOffset);
+        return msg;
+      }
       msg.records.push(record);
       p = record.end;
     }
@@ -229,9 +251,9 @@ export function parseDnsMessage(
 
 function parseRecord(b: Uint8Array, messageStart: number, p: number, end: number, section: DnsRecord['section']): DnsRecord | null {
   const start = p;
-  const { name, nextOffset } = readDnsName(b, messageStart, p);
+  const { name, nextOffset, complete } = readDnsName(b, messageStart, p);
   p = nextOffset;
-  if (p + 10 > end) return null;
+  if (!complete || p + 10 > end) return null;
   const type = u16(b, p);
   const rclassRaw = u16(b, p + 2);
   const ttl = u32(b, p + 4);
@@ -426,5 +448,6 @@ export function dnsInfoLine(msg: DnsMessage, multicast: boolean): string {
     parts.push(dnsTypeName(r.type));
     if (r.summary) parts.push(r.summary);
   }
+  if (msg.cutType !== undefined && msg.cutType !== 41) parts.push(dnsTypeName(msg.cutType));
   return parts.join(' ');
 }

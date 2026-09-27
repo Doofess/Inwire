@@ -28,7 +28,7 @@ import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2
 import { dataLayer } from './mediaType';
 import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
 import type { TcpReassembly } from './tls';
-import { dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
+import { describeCutSegment, dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
 
 /**
  * The ports the cleartext HTTP family is dispatched on. 443 is not here: that
@@ -137,6 +137,12 @@ export interface TcpContext {
   pseudoHeader?: Uint8Array;
   /** This machine sent the frame, so its checksum may not be filled in yet. */
   sentByUs?: boolean;
+  /**
+   * How many bytes of the frame the capture did not keep - a snaplen - or 0.
+   * Then `l4SegmentLen` is the segment's length and the bytes are only the
+   * start of it; see `payloadLength` below.
+   */
+  notCaptured?: number;
 }
 
 /** Reads a TCP segment and whatever claims its payload. */
@@ -196,7 +202,11 @@ export function dissectTcpTransport(
   else if (srcPort === 80 || dstPort === 80) proto = 'HTTP';
   else if (srcPort === 22 || dstPort === 22) proto = 'SSH';
 
-  const tcpOptions = tcpHeaderLen > 20 ? parseTcpOptions(rawBytes, transportOffset + 20, transportOffset + tcpHeaderLen, ackNum) : null;
+  // Bounded by what was captured: a snaplen can end the frame inside the
+  // options, and an option read past the end would be read out of nothing.
+  const tcpOptions = tcpHeaderLen > 20
+    ? parseTcpOptions(rawBytes, transportOffset + 20, Math.min(rawBytes.length, transportOffset + tcpHeaderLen), ackNum)
+    : null;
   // Handshake-only options. SACK blocks are handled further down, once the
   // stream tracker is available, because their edges display relative to the
   // peer's sequence space just like Ack= does.
@@ -216,10 +226,29 @@ export function dissectTcpTransport(
   // setup), and without this guard that reads as "0 bytes of payload" on
   // segments that may carry a full MSS or more, silently disabling
   // retransmission/out-of-order detection for that entire direction.
+  //
+  // **Except when the capture cut the frame short.** Then the declared length
+  // IS the segment's length and the captured bytes are only its start - which
+  // is what Wireshark's `tcp.len` says, and what the sequence analysis has to
+  // be given: clamped, every segment a snaplen cut read as a short one, the
+  // next segment as a hole before it, and a capture with no loss at all
+  // reported "previous segment not captured" on most of its frames.
+  //
+  // A segment with no declared length - offload's IP length of 0 - is as long
+  // as the frame was on the wire, which is what the capture kept plus what it
+  // did not.
+  const notCaptured = context.notCaptured ?? 0;
   const capturedPayloadLength = Math.max(0, rawBytes.length - tcpPayloadStart);
-  const payloadLength = l4SegmentLen !== undefined && l4SegmentLen >= tcpHeaderLen
+  const declaresSegment = l4SegmentLen !== undefined && l4SegmentLen >= tcpHeaderLen;
+  const payloadLength = declaresSegment && notCaptured > 0
+    ? l4SegmentLen - tcpHeaderLen
+    : declaresSegment
     ? Math.max(0, Math.min(capturedPayloadLength, l4SegmentLen - tcpHeaderLen))
-    : capturedPayloadLength;
+    : capturedPayloadLength + notCaptured;
+  // The payload this segment carried and the capture did not keep all of. No
+  // subdissector is handed half a message; TLS alone reads what was kept, and
+  // the rest becomes a gap its record cursor can resynchronise across.
+  const payloadCut = tcpPayloadStart + payloadLength > rawBytes.length;
   // TLS is dissected further down, once the tracker has said whether this
   // segment continues its direction in order: the record cursor that
   // decides which frame a record belongs to may only advance on in-order
@@ -365,7 +394,7 @@ export function dissectTcpTransport(
     fields: Record<string, string | number>;
     resolved: { name: string; addresses: string[] }[];
   } | null = null;
-  if ((srcPort === 53 || dstPort === 53) && payloadLength > 2) {
+  if ((srcPort === 53 || dstPort === 53) && payloadLength > 2 && !payloadCut) {
     const declared = (rawBytes[tcpPayloadStart] << 8) | rawBytes[tcpPayloadStart + 1];
     const messageStart = tcpPayloadStart + 2;
     const messageEnd = Math.min(rawBytes.length, messageStart + declared);
@@ -398,7 +427,7 @@ export function dissectTcpTransport(
   // protocols share. Claiming an arbitrary TCP stream on that would be the
   // confident wrong label `dissectors/heuristics.ts` exists to avoid.
   let ldapResult: LdapResult | null = null;
-  if (!tcpDns && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder
+  if (!tcpDns && payloadLength > 0 && !payloadCut && !isKeepAlive && !isRetransmitted && tlsInOrder
     && (LDAP_PORTS.has(srcPort) || LDAP_PORTS.has(dstPort))) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     if (looksLikeLdap(rawBytes, tcpPayloadStart, payloadEnd)) {
@@ -415,7 +444,7 @@ export function dissectTcpTransport(
   // prints only the message's name. `framed` is true here and false on UDP,
   // which is the whole difference between the two transports.
   let kerberosResult: KerberosResult | null = null;
-  if (!tcpDns && !ldapResult && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder
+  if (!tcpDns && !ldapResult && payloadLength > 0 && !payloadCut && !isKeepAlive && !isRetransmitted && tlsInOrder
     && (srcPort === KERBEROS_PORT || dstPort === KERBEROS_PORT)) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     // Past the four-byte length prefix before asking what the message looks
@@ -429,7 +458,7 @@ export function dissectTcpTransport(
   // port, with per-connection state - a Create response names the file the
   // REQUEST asked for, which no single frame carries.
   let smb2Result: Smb2Result | null = null;
-  if (!tcpDns && !ldapResult && !kerberosResult && payloadLength > 0 && !isKeepAlive
+  if (!tcpDns && !ldapResult && !kerberosResult && payloadLength > 0 && !payloadCut && !isKeepAlive
     && !isRetransmitted && tlsInOrder && (srcPort === SMB2_PORT || dstPort === SMB2_PORT)) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     if (looksLikeSmb2(rawBytes, tcpPayloadStart, payloadEnd)) {
@@ -446,7 +475,7 @@ export function dissectTcpTransport(
   // the stream, and a segment already inside a message is recognised by the
   // state in flight rather than by a marker it does not carry.
   let bgpResult: BgpResult | null = null;
-  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && payloadLength > 0
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && payloadLength > 0 && !payloadCut
     && !isKeepAlive && !isRetransmitted && tlsInOrder
     && (srcPort === BGP_PORT || dstPort === BGP_PORT)) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
@@ -460,7 +489,7 @@ export function dissectTcpTransport(
   }
 
   if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && payloadLength > 0
-    && !isKeepAlive && !isRetransmitted) {
+    && !payloadCut && !isKeepAlive && !isRetransmitted) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
     if (isTlsPort || existing !== undefined || looksLikeTlsRecord(rawBytes, tcpPayloadStart, payloadEnd)) {
@@ -498,6 +527,29 @@ export function dissectTcpTransport(
       }
     }
   }
+  // A cut segment is never handed to the record cursor: the bytes that would
+  // join it to the next were not captured, so it cannot be reassembled, and
+  // Wireshark reads such a segment on its own - `describeCutSegment` below.
+  // To the cursor the whole segment is a hole ending where the next one
+  // starts: a record already in progress survives as a span it can
+  // resynchronise at the end of, and one that ended inside the hole is
+  // abandoned rather than finished with bytes from the next segment.
+  // Out-of-order and retransmitted segments never moved the cursor, so they
+  // leave it alone here too.
+  if (payloadCut && tcpTracker && tlsInOrder && !isRetransmitted) {
+    tcpTracker.noteGap(srcIp, srcPort, dstIp, dstPort, (seqNum + payloadLength) >>> 0);
+  }
+  // ...and named from what it holds rather than from a reassembly it cannot
+  // be part of (`describeCutSegment`).
+  let cutTls: { protocolLabel: string; info: string } | null = null;
+  // Retransmissions too: a copy is named for what it carries, as Wireshark
+  // names a cut one, even though its bytes never reach the cursor.
+  if (payloadCut && !isKeepAlive && tcpPayloadStart < rawBytes.length
+    && (isTlsPort || tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort) !== undefined
+      || looksLikeTlsRecord(rawBytes, tcpPayloadStart, rawBytes.length))) {
+    cutTls = describeCutSegment(rawBytes, tcpPayloadStart, rawBytes.length,
+      tcpTracker?.tlsConversation(srcIp, srcPort, dstIp, dstPort));
+  }
   // Cleartext HTTP, which until now was a Protocol column filled in from the
   // port number over a payload nothing read. Gated on the port list rather
   // than sniffed from every TCP stream: `looksLikeHttp1` is strict, but a
@@ -519,7 +571,7 @@ export function dissectTcpTransport(
     || tcpTracker.peekTlsCursor(dstIp, dstPort, srcIp, srcPort)?.unknown === false
   );
   if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection
-    && payloadLength > 0 && !isKeepAlive && !isRetransmitted && tlsInOrder && tcpTracker) {
+    && payloadLength > 0 && !payloadCut && !isKeepAlive && !isRetransmitted && tlsInOrder && tcpTracker) {
     const conversation = tcpTracker.tlsConversation(srcIp, srcPort, dstIp, dstPort);
     const serverIsDestination = HTTP_PORTS.has(dstPort) || (!HTTP_PORTS.has(srcPort) && dstPort < srcPort);
     const known = serverIsDestination ? conversation.appClient : conversation.appServer;
@@ -560,6 +612,9 @@ export function dissectTcpTransport(
   } else if (httpResult) {
     proto = 'HTTP';
     protocolLabel = httpResult.protocolLabel ?? 'HTTP';
+  } else if (cutTls) {
+    proto = 'TLS';
+    protocolLabel = cutTls.protocolLabel;
   } else if (proto === 'TLS' || proto === 'HTTP') {
     // The port was only ever a hint. A bare ACK or a handshake segment on
     // port 80 carries no HTTP, and calling it HTTP is what made the shipped
@@ -596,6 +651,8 @@ export function dissectTcpTransport(
     ? [tlsResult.info]
     : httpResult
     ? [httpResult.info.join(', ')]
+    : cutTls
+    ? [cutTls.info]
     : [
         `${srcPort} → ${dstPort}`,
         `[${flagList.join(', ')}]`,
@@ -610,7 +667,10 @@ export function dissectTcpTransport(
   // subdissector provided the Info, Wireshark's column joins the TCP expert
   // tags to it with " , " - the artefact of two dissectors each appending
   // to one column. Matched exactly, since the column text is the contract.
-  const info = (tlsResult || tcpDns || httpResult || ldapResult || smb2Result || kerberosResult || bgpResult)
+  // A cut continuation says nothing of its own, and then the tags stand alone
+  // as they would over an empty column: "[TCP Retransmission] ".
+  const info = (tlsResult || (cutTls && cutTls.info !== '') || tcpDns || httpResult || ldapResult || smb2Result
+    || kerberosResult || bgpResult)
     && expertTags.length > 0
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;

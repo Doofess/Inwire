@@ -38,7 +38,20 @@ export interface FixtureSpec {
    * `acceptance.ts` fails a fixture that has `floors` and no `tree`.
    */
   tree?: TreeAcceptance;
+  /**
+   * What a snaplen does to this fixture, per cut (`scripts/parity/snaplen.ts`,
+   * ADR 0050). Optional so a fixture measured before that script still parses.
+   */
+  snaplen?: SnaplenAcceptance;
 }
+
+/**
+ * Counts per snaplen, keyed by the snaplen as a string. `tcpLenKept`,
+ * `analysisKept`, `protocolKept`, `infoKept` and `limitedBoth` are floors;
+ * `limitedMissed` is a ceiling; the rest are recorded. Counts rather than
+ * ratios for ADR 0039's reason.
+ */
+export type SnaplenAcceptance = Record<string, Record<string, number>>;
 
 /**
  * The tree's side of the acceptance file.

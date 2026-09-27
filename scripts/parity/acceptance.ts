@@ -37,6 +37,10 @@ function check(name: string, actual: unknown, expected: unknown) {
 
 
 const acceptance = JSON.parse(readFileSync(join(root, ACCEPTANCE_PATH), 'utf8')) as Acceptance;
+
+/** `snaplen.ts`'s enforced counts: floors that only rise, a ceiling that only falls. */
+const SNAPLEN_FLOORS = ['tcpLenKept', 'analysisKept', 'protocolKept', 'infoKept', 'limitedBoth'];
+const SNAPLEN_CEILINGS = ['limitedMissed'];
 const readme = readFileSync(join(root, 'test/fixtures/README.md'), 'utf8');
 const fixtures = Object.entries(acceptance.fixtures);
 
@@ -85,6 +89,19 @@ for (const [name, f] of fixtures) {
   // the statement that the first is deliberately absent.
   check(`${name}: no layer is both floored and unimplemented`,
     Object.keys(t.layers).filter((k) => k in t.unimplemented), []);
+
+  // --- and what a snaplen does to it (ADR 0050) ---------------------------------
+  //
+  // Counts per cut, by `scripts/parity/snaplen.ts`. Every key it enforces must
+  // be there, because an absent floor is one nobody is held to.
+  const cuts = f.snaplen;
+  check(`${name}: has a snaplen block`, cuts !== undefined, true);
+  if (cuts === undefined) continue;
+  for (const [cut, counts] of Object.entries(cuts)) {
+    check(`${name} @${cut}: the snaplen is a whole number of bytes`, /^[1-9]\d*$/.test(cut), true);
+    check(`${name} @${cut}: every enforced snaplen count is there and a count`,
+      [...SNAPLEN_FLOORS, ...SNAPLEN_CEILINGS].filter((k) => notACount(counts[k] ?? -1)), []);
+  }
 }
 
 // --- floors only rise ---------------------------------------------------------
@@ -113,6 +130,17 @@ if (previous) {
     // fails here rather than quietly disappearing.
     check(`${name}: no floor was lowered since HEAD`,
       Object.entries(before?.floors ?? {}).filter(([col, v]) => (f.floors[col] ?? 0) < v).map(([col]) => col), []);
+
+    // The snaplen counts ratchet the same way, per cut. A cut or a floor that
+    // vanished reads as zero, so deleting one is the failure it looks like.
+    for (const [cut, wasCounts] of Object.entries(before?.snaplen ?? {})) {
+      const nowCounts = f.snaplen?.[cut] ?? {};
+      check(`${name} @${cut}: no snaplen floor was lowered since HEAD`,
+        SNAPLEN_FLOORS.filter((k) => wasCounts[k] !== undefined && (nowCounts[k] ?? 0) < wasCounts[k]), []);
+      check(`${name} @${cut}: no snaplen ceiling was raised since HEAD`,
+        SNAPLEN_CEILINGS.filter((k) => wasCounts[k] !== undefined
+          && (nowCounts[k] ?? Number.POSITIVE_INFINITY) > wasCounts[k]), []);
+    }
 
     const was = before?.tree;
     const now = f.tree;

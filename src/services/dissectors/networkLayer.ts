@@ -242,6 +242,10 @@ export function decodeNetworkLayer(
     id, tsUs, relativeTime, timeDelta, origLen, tcpTracker, icmpTracker, quicTracker,
     dnsTracker, l3Tracker, sentByUs,
   } = context;
+  // What the capture did not keep of this frame: a snaplen. The transport
+  // then reads its lengths from its headers rather than from what was kept
+  // (`dissectTcpTransport`'s `payloadLength`).
+  const captureShort = Math.max(0, origLen - rawBytes.length);
 
 
   /**
@@ -656,7 +660,7 @@ export function decodeNetworkLayer(
       : isFragment
         ? null
         : decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen, quicTracker, tsUs, dnsTracker,
-          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen), sentByUs);
+          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen), sentByUs, captureShort);
 
     if (isFragment && !reassembled) {
       // Wireshark's own wording for a fragment it cannot yet reassemble.
@@ -914,7 +918,7 @@ export function decodeNetworkLayer(
         ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset), sentByUs)
         : (chain?.stopsHere ?? false)
           ? null
-          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen), sentByUs);
+          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen), sentByUs, captureShort);
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
@@ -1017,14 +1021,21 @@ function decodeTransportLayer(
    *  may not have been filled in yet. Undefined is "not known", which is a
    *  third answer and not a synonym for `false`. */
   sentByUs?: boolean,
+  /** How many bytes of the frame the capture did not keep - a snaplen. */
+  notCaptured = 0,
 ): TransportResult | null {
   // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {
     // TCP - see dissectors/tcpTransport.ts.
     const read = dissectTcpTransport(rawBytes, transportOffset, {
-      srcIp, dstIp, frameId, tsUs, tcpTracker, l4SegmentLen, pseudoHeader, sentByUs,
+      srcIp, dstIp, frameId, tsUs, tcpTracker, l4SegmentLen, pseudoHeader, sentByUs, notCaptured,
     });
     if (read) return read;
+  } else if (ipProtocolNum === 6 && notCaptured > 0 && rawBytes.length >= transportOffset + 4) {
+    // A snaplen that ended the frame inside the TCP header. The ports are
+    // there, so the segment is named by them - as Wireshark does - rather
+    // than written off as an IP payload nobody dissected.
+    return partialTcpHeader(rawBytes, transportOffset);
   } else if (ipProtocolNum === 17 && rawBytes.length >= transportOffset + 8) {
     // UDP - see dissectors/udpTransport.ts.
     const read = dissectUdpTransport(rawBytes, transportOffset, {
@@ -1097,6 +1108,31 @@ function describeIpv6NextHeader(n: number): string {
   if (n === NO_NEXT_HEADER) return 'No Next Header (59)';
   const name = IP_PROTOCOL_NAMES[n];
   return name ? `${name} (${n})` : String(n);
+}
+
+/**
+ * A TCP header the capture kept only the start of: its ports, and nothing a
+ * reader would have to guess at. No stream, no analysis - a sequence number
+ * that was not captured cannot place the segment in one.
+ */
+function partialTcpHeader(rawBytes: Uint8Array, transportOffset: number): TransportResult {
+  const srcPort = (rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1];
+  const dstPort = (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3];
+  return {
+    proto: 'TCP',
+    srcPort,
+    dstPort,
+    info: `${srcPort} → ${dstPort}`,
+    layer: {
+      name: 'Transmission Control Protocol',
+      summary: `Transmission Control Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
+      fields: [
+        { name: 'Source Port', value: srcPort, abbrev: 'tcp.srcport' },
+        { name: 'Destination Port', value: dstPort, abbrev: 'tcp.dstport' },
+      ],
+    },
+    fields: { 'tcp.srcport': srcPort, 'tcp.dstport': dstPort },
+  };
 }
 
 /**

@@ -162,6 +162,53 @@ function readRecordHeader(b: Uint8Array, p: number, strict: boolean): RecordHead
   return { contentType, version, length };
 }
 
+/**
+ * A TLS segment the capture cut short, as a row names it.
+ *
+ * A cut segment cannot be reassembled - the bytes that would join it to the
+ * next were never captured - so it is named from what it holds, the way
+ * Wireshark names one it could not desegment: the records whose headers start
+ * inside the kept bytes, walked while each header fits. A segment that opens
+ * in the middle of a record names nothing: on a conversation whose version
+ * the capture has seen, its row is the version with nothing after it, and on
+ * one it never saw - a capture that began mid-connection - it is `SSL` and
+ * `Continuation Data`, the reference's words for a record layer it cannot
+ * place.
+ */
+export function describeCutSegment(
+  b: Uint8Array, start: number, end: number, conv: TlsConversationState | undefined,
+): { protocolLabel: string; info: string } {
+  const names: string[] = [];
+  let version: number | undefined;
+  let p = start;
+  while (end - p >= 5) {
+    const header = readRecordHeader(b, p, names.length === 0);
+    if (header === null) break;
+    names.push(CONTENT_TYPE_NAMES[header.contentType] ?? `Unknown (${header.contentType})`);
+    if (TLS_VERSION_NAMES[header.version] !== undefined) version ??= header.version;
+    p += 5 + header.length;
+  }
+  // A header the capture kept teaches the conversation its version, as a whole
+  // record does - on a capture this short, usually the only part of any record
+  // there is to learn it from.
+  //
+  // **Not quite Wireshark's rule, because Wireshark does not have one.** On
+  // the inwire fixture it labels a mid-stream connection's cut continuations
+  // with the version its Application Data headers showed; on bulk it leaves a
+  // mid-stream connection `SSL` through hundreds of the same headers. Measured
+  // both ways, learning from any header keeps as many Protocol cells as
+  // learning from the handshake alone (47,522 against 47,492 over the four
+  // cuts `scripts/parity/snaplen.ts` takes), and says the more useful thing.
+  if (conv !== undefined && version !== undefined) conv.lastRecordVersion = version;
+  const learned = conv?.negotiatedVersion ?? conv?.lastRecordVersion;
+  // A record names its row from the conversation's version, or failing that
+  // from its own header's; a continuation has only the conversation's.
+  const known = learned ?? version;
+  if (names.length > 0) return { protocolLabel: known !== undefined ? nameVersion(known) : 'SSL', info: names.join(', ') };
+  if (learned === undefined) return { protocolLabel: 'SSL', info: 'Continuation Data' };
+  return { protocolLabel: nameVersion(learned), info: '' };
+}
+
 /** Whether a plausible record header starts at `p` - the cheap test that decides if a stream gets cursor state. */
 export function looksLikeTlsRecord(b: Uint8Array, p: number, end: number): boolean {
   return end - p >= 5 && readRecordHeader(b, p, true) !== null;
