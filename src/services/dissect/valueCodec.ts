@@ -61,6 +61,10 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /** A growable byte buffer, reused across frames by its owner. */
+/** Encoded object keys (`ValueWriter.key`). Bounded, in case a key is ever data. */
+const KEY_BYTES = new Map<string, Uint8Array>();
+const MAX_CACHED_KEYS = 4096;
+
 export class ValueWriter {
   private buf = new Uint8Array(256);
   private view = new DataView(this.buf.buffer);
@@ -132,9 +136,60 @@ export class ValueWriter {
     const keys = Object.keys(v);
     this.varint(keys.length);
     for (const key of keys) {
-      this.utf8(key);
+      this.key(key);
       this.value(v[key]);
     }
+  }
+
+  /**
+   * Writes `{ ...v, ...set }` without the keys in `omit` - the same bytes that
+   * object would encode to - without building it. A snapshot of a live tracker
+   * object is one of those on nearly every TLS frame, and building each only to
+   * encode it and drop it was a large part of what recording cost the
+   * collector.
+   *
+   * Spread's own order, which the bytes depend on: `v`'s keys in order, a key
+   * `set` also names taking `set`'s value in place, then `set`'s other keys -
+   * including one `omit` removed from `v` - at the end. Always a plain object,
+   * as a spread is.
+   */
+  objectWith(v: object, omit: readonly string[], set: Readonly<Record<string, unknown>>): void {
+    const source = v as Record<string, unknown>;
+    const own = Object.keys(source);
+    const replaced = Object.keys(set);
+    let count = 0;
+    for (const key of own) if (!omit.includes(key)) count++;
+    const appended = replaced.filter((key) => omit.includes(key) || !own.includes(key));
+    this.byte(T_OBJECT);
+    this.varint(count + appended.length);
+    for (const key of own) {
+      if (omit.includes(key)) continue;
+      this.key(key);
+      this.value(Object.prototype.hasOwnProperty.call(set, key) ? set[key] : source[key]);
+    }
+    for (const key of appended) {
+      this.key(key);
+      this.value(set[key]);
+    }
+  }
+
+  /**
+   * An object key, exactly as `utf8` writes it, from a cache. Keys are a few
+   * dozen property names written millions of times, so their bytes are worked
+   * out once; the output is the same bytes either way.
+   */
+  private key(key: string): void {
+    let bytes = KEY_BYTES.get(key);
+    if (bytes === undefined) {
+      const saved = this.length;
+      this.utf8(key);
+      bytes = this.buf.slice(saved, this.length);
+      this.length = saved;
+      if (KEY_BYTES.size < MAX_CACHED_KEYS) KEY_BYTES.set(key, bytes);
+    }
+    this.room(bytes.length);
+    this.buf.set(bytes, this.length);
+    this.length += bytes.length;
   }
 
   value(v: unknown): void {

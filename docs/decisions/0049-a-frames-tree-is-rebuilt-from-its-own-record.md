@@ -136,11 +136,20 @@ rebuilt from its bytes and its record, with no replay.**
   to record, and live decryption failed across flushes), and Stop sealed ahead
   of the Worker's tail. All three are fixed; CLAUDE.md §6 has them.
 - **Records cost ~58-64 B a frame on disk**, about 5% of a capture.
-- **Recording costs arrival time:** 8% of dissection on `inwire`, 24% (~5 us a
-  frame) on `bulk`, whose TLS-continuation frames dissect in ~20 us and each
-  snapshot a cursor. Measured, not yet reduced; encoding snapshots by a fixed
-  field order was rejected because records outlive builds and a changed
-  literal would decode old records silently wrong.
+- **Recording costs arrival time:** ~9% of dissection on `inwire` and ~22%
+  (~5 us a frame) on `bulk`, whose TLS-continuation frames dissect in ~21 us
+  and each snapshot a cursor. Profiled first: the codec's `fields` and `value`
+  and the collector. Two changes that write **the same bytes** took `bulk`
+  from 25% to 22% - encoded key names cached, and snapshots written straight
+  from the live object rather than spread into a copy first - shown identical
+  by hashing every record and every derived log of three real captures before
+  and after, with the clock pinned. What is left is the work itself, ~600 B of
+  small values a `bulk` frame. Encoding snapshots by a fixed field order was
+  rejected because records outlive builds and a changed literal would decode
+  old records silently wrong. **It does not bind the pipeline on `bulk`**: the
+  recording Worker takes ~26 us a frame there, and the store's writer ~32 us
+  (CLAUDE.md, *What the store actually costs*). On `inwire` dissection itself
+  is the bound, ~40 us a frame, and recording adds its 9% to it.
 - **Two rows added outside the dissector** are applied again on revisit from
   the stored row: the process that owned the socket, and `[Response In]`,
   the one thing a later frame writes into a tree. The JA4 "matches process"
@@ -152,4 +161,3 @@ rebuilt from its bytes and its record, with no replay.**
   answers are 8.2 MB for 75 seconds, ~590 B a frame; 64 MB holds about nine
   minutes of browsing like that, and a decrypted frame older than that is
   replayed. Sizing it the way the buffer is sized (ADR 0036) is the lever.
-- **The arrival cost on TLS-heavy traffic**, measured above.

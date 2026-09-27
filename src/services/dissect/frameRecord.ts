@@ -193,7 +193,14 @@ function decryptsWithKeyLog(call: unknown[]): boolean {
  * What a TLS conversation snapshot records, or `null` when its state is
  * derived from plaintext and so is not recorded at all.
  */
-function snapshotConversation(conv: TlsConversationState): { state: unknown } | null {
+/** What a snapshot leaves out of a conversation, and the one field it empties. */
+const CONVERSATION_OMITS = ['keys', 'keyGeneration', 'keyLabelsAtArrival'] as const;
+const NOTHING: readonly never[] = [];
+
+/** How a snapshot is written: straight from the live object, into the log. */
+type SnapshotWriter = (out: ValueWriter) => void;
+
+function snapshotConversation(conv: TlsConversationState): SnapshotWriter | null {
   // Keys present means this connection is being decrypted, so whatever its
   // HTTP directions hold was read out of plaintext.
   if (conv.keys && (conv.appClient !== undefined || conv.appServer !== undefined)) return null;
@@ -205,13 +212,16 @@ function snapshotConversation(conv: TlsConversationState): { state: unknown } | 
   // opened, or left shut, differently from arrival (`ensureRevisitKeys`).
   // The note is kept: it is prose about the key log, not a key, and it is what
   // a rebuilt conversation's "[Not decrypted]" row must go on saying.
-  const { keys: _keys, keyGeneration: _generation, keyLabelsAtArrival: _had, ...rest } = conv;
-  // Emptied, not copied. It names the frames to relabel once the ServerHello
-  // settles the version - patches to OTHER frames, which a revisit discards -
-  // so no tree reads it. And on a connection first seen mid-stream the version
-  // is never settled, so it grows by one id every frame for the life of the
-  // connection: copied, it was half of every record on the bulk fixture.
-  return { state: { ...rest, pendingVersionFrames: [], keyLabelsAtArrival: keyLabels(conv.keys) } };
+  //
+  // `pendingVersionFrames` is emptied, not copied. It names the frames to
+  // relabel once the ServerHello settles the version - patches to OTHER
+  // frames, which a revisit discards - so no tree reads it. And on a
+  // connection first seen mid-stream the version is never settled, so it
+  // grows by one id every frame for the life of the connection: copied, it was
+  // half of every record on the bulk fixture.
+  const labels = keyLabels(conv.keys);
+  return (out) => out.objectWith(conv, CONVERSATION_OMITS,
+    { pendingVersionFrames: NOTHING, keyLabelsAtArrival: labels });
 }
 
 /**
@@ -220,9 +230,10 @@ function snapshotConversation(conv: TlsConversationState): { state: unknown } | 
  * keys - a revisit derives them from the key log as it does for any other
  * rebuilt conversation, and `keyLabelsAtArrival` says which it must find.
  */
-function plaintextConversation(conv: TlsConversationState): unknown {
-  const { keys: _keys, keyGeneration: _generation, keyLabelsAtArrival: _had, ...rest } = conv;
-  return { ...rest, pendingVersionFrames: [], keyLabelsAtArrival: keyLabels(conv.keys) };
+function plaintextConversation(conv: TlsConversationState): SnapshotWriter {
+  const labels = keyLabels(conv.keys);
+  return (out) => out.objectWith(conv, CONVERSATION_OMITS,
+    { pendingVersionFrames: NOTHING, keyLabelsAtArrival: labels });
 }
 
 /** What a `checked` answer is recorded as, and compared by: never the secrets themselves. */
@@ -289,12 +300,12 @@ export class FrameRecorder {
    * What a snapshot records, or `null` when the state is derived from
    * plaintext and so is not recorded at all.
    */
-  private snapshotOf(method: string, live: unknown): { state: unknown } | null {
+  private snapshotOf(method: string, live: unknown): SnapshotWriter | null {
     if (method === 'tlsConversation') return snapshotConversation(live as TlsConversationState);
-    if (method !== 'tlsCursor') return { state: live };
+    if (method !== 'tlsCursor') return (out) => out.value(live);
     const cursor = live as TlsRecordCursor;
     if (cursor.buffer === null || cursor.buffer.length !== cursor.bufferSources.length) {
-      return { state: cursor };
+      return (out) => out.value(cursor);
     }
     // The buffered body is earlier frames' bytes, which the store already holds
     // as those frames. Named, not copied: frame, offset, length and a hash, so a
@@ -313,7 +324,7 @@ export class FrameRecorder {
       bufferRefs.push(source.frame, source.at, source.length, hash);
       this.refs.add(source.frame);
     });
-    return { state: { ...cursor, buffer: null, bufferSources: [], bufferRefs } };
+    return (out) => out.objectWith(cursor, NOTHING, { buffer: null, bufferSources: NOTHING, bufferRefs });
   }
 
   private wrap(kind: Kind, id: number, method: string, fn: AnyFn): AnyFn {
@@ -387,10 +398,10 @@ export class FrameRecorder {
           if (snapshot === null) {
             out.byte(DERIVED);
             this.derived += 1;
-            this.keepDerived(plaintextConversation(live as TlsConversationState));
+            this.keepDerivedWith(plaintextConversation(live as TlsConversationState));
           } else {
             out.byte(id);
-            out.value(snapshot.state);
+            snapshot(out);
           }
           return live;
         };
@@ -411,9 +422,13 @@ export class FrameRecorder {
    * never a failed arrival.
    */
   private keepDerived(value: unknown): void {
+    this.keepDerivedWith((out) => out.value(value));
+  }
+
+  private keepDerivedWith(write: SnapshotWriter): void {
     if (this.derivedLost) return;
     try {
-      this.derivedOut.value(value);
+      write(this.derivedOut);
     } catch {
       this.derivedLost = true;
     }
