@@ -7,6 +7,11 @@
 > UAC prompt and Npcap's own wizard. Everything else here - one installer, two
 > destinations, the app never elevates - stands.
 
+> **Its "only ever climbs" is retired by
+> [0051](0051-the-version-is-0x-in-development.md)**, by way of 0035, which
+> had already made the two numbers one: the app compares versions for equality,
+> and the product is 0.x.
+
 > **Its "Signing" is decided by
 > [0047](0047-windows-ships-the-rust-agent-signed-on-this-pc.md), for this PC
 > only.**

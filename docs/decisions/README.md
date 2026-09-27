@@ -53,7 +53,7 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0032](0032-the-update-center.md) | Npcap is a prerequisite the app manages, not a payload the installer ships — **corrects 0030**: no silent install, a feed instead of a `#define`, and the version is not in `wpcap.dll` | Accepted 2026-09-12; **a signature now exists, trusted on this PC only (0047)**; verifying one is still not built |
 | [0033](0033-the-agent-stays-a-separate-service.md) | The agent stays a separate LocalSystem service, and Npcap should be installed admin-only — the browser reason is gone and three better ones replace it | Accepted 2026-09-12 |
 | [0034](0034-the-side-bar-is-a-place.md) | The side bar is a place, so Escape does not close it and navigating does not either — two negatives that leave no code behind to explain themselves | Accepted 2026-09-19 |
-| [0035](0035-the-agent-lives-as-long-as-the-app.md) | The agent is demand-start and stops itself, and its version is the product's — retires 0033's reason #2, re-justifies 0030's withheld WP | Accepted 2026-09-19 |
+| [0035](0035-the-agent-lives-as-long-as-the-app.md) | The agent is demand-start and stops itself, and its version is the product's — retires 0033's reason #2, re-justifies 0030's withheld WP | Accepted 2026-09-19; **amended by 0051**: the version is compared for equality, not order, and is 0.x |
 | [0036](0036-the-buffer-sizes-itself.md) | The packet buffer sizes itself from RAM and the V8 heap, and the renderer stands down before V8 aborts | Accepted 2026-09-19 |
 | [0037](0037-the-agent-is-rust-on-windows.md) | The capture agent is Rust on Windows — one 449 KB signed exe instead of a 34 MB tree, and the throughput argument was measured and dropped | Accepted 2026-09-19; **driven end to end, including as a registered service**; **ships, signed on this PC, by 0047** |
 | [0038](0038-bytes-and-rows-are-two-arrivals.md) | Bytes and rows are two arrivals, so a frame reaches disk before anything dissects it — and a dissection that throws no longer loses the frame | Accepted 2026-09-19; **0049** adds records out and revisit kits back on the same port |
@@ -69,6 +69,7 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0048](0048-a-captures-adapters-are-fixed-for-its-life.md) | A capture's adapters are fixed for its life - chosen before Start, changed only after Stop. The panel locks while capturing and both agents refuse a mid-capture `set_interfaces` with `capture_running`, which ends the restart that zeroed the drop counters; reverses one behaviour 0047 ported | Accepted 2026-09-26 |
 | [0049](0049-a-frames-tree-is-rebuilt-from-its-own-record.md) | A frame's tree is rebuilt from its own record - Wireshark's model: arrival records every tracker answer a frame's dissection took, a fifth capture file keeps them (~60 B a frame), and a click dissects that one frame against its record instead of replaying its conversation. Every frame of the real fixtures revisits into the identical tree; decrypted content is never recorded, and still falls back to the replay - **amends 0007** | Accepted 2026-09-26 |
 | [0050](0050-a-capture-is-narrowed-by-the-driver.md) | A capture is narrowed by the driver - a libpcap capture filter and a snaplen on `start_capture`, applied per adapter before a frame is read, checked live in libpcap's words, fixed for the capture and recorded in every export; nanosecond stamps on a version-3 wire record; a cut frame is dissected from its headers and marked, held to tshark on the fixtures cut at 64 and 128 bytes - **amends 0005** | Accepted 2026-09-27 |
+| [0051](0051-the-version-is-0x-in-development.md) | The version is 0.x while Inwire is in development - 0.4.1, and the app compares the agent's number to its own for equality rather than order, so the number may go down; the anti-reset floor is deleted and a machine with 4.x uninstalls it once - **amends 0035** | Accepted 2026-09-28 |
 
 ## Review outcome: amendments to the spec's execution order
 
@@ -118,6 +119,5 @@ Revised order: 1 -> 1b -> 2a -> 3 -> 4 -> 5 -> (2b alongside) -> 6 -> 7 -> 8 -> 
   and before that three, held by two scripts covering different subsets.
   `scripts/agent/version.ts` holds every derived copy to `package.json` under
   `npm run check`, including the two deletions that keep it singular, and
-  `scripts/agent/built-version.ts` holds the built exe. It is still an ordering and only
-  ever climbs - reset it and an older agent reads as newer than required, which shows as
-  "not connected" rather than "update your agent".
+  `scripts/agent/built-version.ts` holds the built exe. The app compares it for equality,
+  not order (0051), so it may go down; it is 0.x while Inwire is in development.

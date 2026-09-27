@@ -71,7 +71,7 @@ function manifest(npcapVersion: string): string {
       npcap: {
         version: npcapVersion,
         kind: 'vendor-installer',
-        minAppVersion: '1.0.0',
+        minAppVersion: '0.0.0',
         // The real URL. Nothing here downloads it, but the manifest is held to
         // the same host allowlist a published one would be, so a rule that
         // rejected npcap.com would fail here rather than in front of a user.

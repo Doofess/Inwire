@@ -19,15 +19,18 @@
  * place a version is authored, and everything below either derives from it or
  * is a literal this file holds to it.
  *
- * ## Why the product jumped to 4.0.0
+ * ## Why there is no floor any more
  *
- * `REQUIRED_AGENT_VERSION` is the left-hand side of `isAgentOutdated`, so the
- * number is an **ordering**. Collapsing two numbers into one means the survivor
- * must be at least the highest either half ever shipped - and the agent had
- * shipped 3.9.0 while the app was still on 1.0.0. Moving the agent down instead
- * would make every already-installed 3.9.0 agent read as NEWER than required,
- * which the UI renders as "not connected": a state with no instruction attached
- * to it, on the machines most likely to hit it.
+ * There was one, at 3.9.0, because `REQUIRED_AGENT_VERSION` was the left-hand
+ * side of an ORDERING: an agent left behind by a higher-numbered build read as
+ * newer than required and passed. That is what jumped the product to 4.0.0 when
+ * the two numbers were collapsed. The app now asks for equality instead
+ * (`isAgentMismatched`, ADR 0051) - an agent the same installer did not put
+ * down is from another build whichever way its number moved - so the number is
+ * free to say what it means: 0.x, because Inwire is in development.
+ *
+ * The one ordering left is the installer's refusal to install over a newer
+ * Inwire, which a reset trips exactly once per machine; 0051 says how.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -172,30 +175,6 @@ check(`${LEGACY} MyAgentVersion stays at the last agent-only release`,
   define(legacy, 'MyAgentVersion'), '3.9.0');
 check(`${LEGACY} MyAppVersion stays where it was`,
   define(legacy, 'MyAppVersion'), '1.0.0');
-
-console.log('\n--- the floor, which is the rule with a failure mode behind it ---\n');
-
-/**
- * The highest version either half ever shipped.
- *
- * Compared as numbers and never as a string: "3.10.0" sorts *before* "3.9.0"
- * lexically, so a string floor would reject the first version past 3.9 and
- * every version after it.
- */
-const FLOOR: readonly [number, number, number] = [3, 9, 0];
-
-function tuple(v: string | null): [number, number, number] {
-  const parts = (v ?? '').split('.').map((part) => Number.parseInt(part, 10) || 0);
-  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
-}
-
-function atLeast(a: [number, number, number], b: readonly [number, number, number]): boolean {
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
-  return true;
-}
-
-check(`the product version is not reset below ${FLOOR.join('.')}`,
-  atLeast(tuple(version), FLOOR), true);
 
 console.log();
 if (failures) {

@@ -79,7 +79,7 @@ import {
 } from "./services/sessionStore";
 import { ColorRulesEngine, DEFAULT_COLOR_RULES } from "./services/colorRules";
 import {
-  isAgentOutdated, REQUIRED_AGENT_VERSION, type AgentMessage,
+  isAgentMismatched, REQUIRED_AGENT_VERSION, type AgentMessage,
 } from "./services/agentProtocol";
 
 // UI Components
@@ -1665,7 +1665,7 @@ export default function App() {
   // version comparison below (agentVersion just stays null forever), so
   // agentIncompatible - set by the hello-grace-period timer above - folds
   // into the same flag rather than needing its own UI treatment.
-  const agentOutdated = (agentVersion !== null && isAgentOutdated(agentVersion, REQUIRED_AGENT_VERSION)) || agentIncompatible;
+  const agentOutdated = (agentVersion !== null && isAgentMismatched(agentVersion, REQUIRED_AGENT_VERSION)) || agentIncompatible;
 
   /**
    * The last display-filter result, so a growing buffer only filters what is

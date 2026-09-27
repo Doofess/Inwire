@@ -493,15 +493,14 @@ The lock entry is in the table because `npm run build:agent` builds `--locked`:
 a lock still naming the previous version fails the release build instead of
 being quietly rewritten by it.
 
-**It is an ordering, and that is why the product jumped to 4.0.0.** The number
-is the left-hand side of `isAgentOutdated`, so an agent left behind by an
-earlier install must read as *older*; one that reads as newer than required
-shows in the UI as "not connected", a state with no instruction attached to it.
-Collapsing two numbers means the survivor has to be at least the highest either
-half ever shipped — the agent had shipped 3.9.0 while the app was on 1.0.0. The
-anti-reset floor is compared as numbers rather than as a string: `"3.10.0"`
-sorts before `"3.9.0"` lexically, so a string floor would reject the first
-version past 3.9 and every one after it.
+**It is 0.x, because Inwire is in development, and it is compared for
+equality** (ADR 0051). `isAgentMismatched` asks whether the agent the app
+reached reports this build's own number; any other, older or newer, is one a
+different install left behind, and shows as outdated with the installer as the
+fix. It used to be an ordering, which held the number at 4.x - an agent from a
+higher-numbered build read as newer than required and passed - and a floor
+under it; both are gone. What still orders is the installer's refusal to
+install over a newer Inwire, so a machine with 4.x uninstalls it once.
 
 `MyAppVersion` is also what Windows compares to decide whether an install is an
 upgrade. `local-agent/installer/setup.iss` keeps a frozen `MyAgentVersion
@@ -1043,7 +1042,7 @@ by hand:
   disk must be one the filter admits - judged from its own headers, not by
   asking libpcap again - no longer than the snaplen, marked where cut, and
   stamped to the nanosecond (ADR 0050). Run after anything on the capture-start
-  path or the agent's open; needs the 4.1.0 agent installed.
+  path or the agent's open; needs the 0.4.1 agent installed.
 - **`scripts/electron/revisit-drive.ts`** imports the real `inwire` capture,
   and the key-log capture with its key log followed, and opens frames whose
   trees need the frames before them, or decrypted content (ADR 0049).

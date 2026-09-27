@@ -72,21 +72,17 @@
 ; this installer carries both halves and replaces them in one transaction, so
 ; two numbers could only ever disagree by mistake.
 ;
-; What the number still has to be is an ORDERING: it is the left-hand side of
-; `isAgentOutdated`, so an agent left behind by an earlier install must read as
-; older rather than newer - the second of those shows in the UI as "not
-; connected", which is a state with no instruction attached to it. That is why
-; unifying moved the PRODUCT up to 4.0.0 rather than moving the agent down to
-; 1.0.0: the shared number has to be at least the highest either half ever
-; shipped, and the agent had shipped 3.9.0.
+; It is 0.x because Inwire is in development (ADR 0051). The app compares the
+; agent's number to its own for EQUALITY, so the number is free to go down; it
+; was held at 4.x while that comparison was an ordering. What still orders is
+; InitializeSetup below, which refuses to install over a newer Inwire - so a
+; machine with 4.x on it uninstalls that once, and this installer after it.
 ;
 ; Locked to package.json, to agent_version.py, to agent-rs/Cargo.toml (which
 ; the Rust agent compiles in, and its VERSIONINFO is stamped from) and to
 ; REQUIRED_AGENT_VERSION by scripts/agent/version.ts, which runs on every
-; `npm run check` and holds the anti-reset floor as numbers rather than as a
-; string - "3.10.0" sorts before "3.9.0" lexically, and a string floor would
-; reject every version past 3.9.
-#define MyAppVersion "4.1.0"
+; `npm run check`.
+#define MyAppVersion "0.4.1"
 
 #define AgentExeName "inwire-agent-windows.exe"
 #define ServiceName "InwireAgent"

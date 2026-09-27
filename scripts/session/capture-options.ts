@@ -96,7 +96,7 @@ check('...and a plain start when none is given, as before',
 console.log('\n--- what an export says about it ---\n');
 
 const meta = (source: CaptureMeta['source']): CaptureMeta => ({
-  app: 'Inwire', version: '4.1.0', os: null, generatedAt: 0, source, firstUs: null, lastUs: null,
+  app: 'Inwire', version: '0.4.1', os: null, generatedAt: 0, source, firstUs: null, lastUs: null,
   scope: 'capture', filter: '', frames: { exported: 0, inCapture: 0, unreadable: 0 },
   drops: { kernel: null, agent: null, pipe: null },
   flags: { anonymised: false, rawBytes: true, fields: false, secrets: false },

@@ -138,7 +138,7 @@ export function compareVersions(a: string, b: string): number {
  *
  * Deliberately does NOT cover the agent row, whose availability is not a
  * manifest question - it ships inside the Inwire installer, so it is
- * informational and its state comes from `isAgentOutdated`.
+ * informational and its state comes from `isAgentMismatched`.
  *
  * The order of the guards is the content. An unparseable installed version
  * answers `unknown` rather than falling through to a comparison, because

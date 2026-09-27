@@ -1,5 +1,11 @@
 # 0035 — The agent lives as long as the app, and shares its version
 
+> **§3's ordering is amended by [0051](0051-the-version-is-0x-in-development.md).**
+> The version is still the product's, but the app compares the agent's number to
+> its own for equality, so it no longer only climbs - and it is 0.x while Inwire
+> is in development. Why the product jumped to 4.0.0 below is the record of a
+> constraint that is gone.
+
 **Status:** accepted. **Retires reason #2 of `0033`** ("a capture can outlive
 the window"); reasons #1 and #3 carry that decision unchanged. **Re-justifies
 rather than reverses `0030`'s "`WP` is withheld" paragraph.** Does not touch

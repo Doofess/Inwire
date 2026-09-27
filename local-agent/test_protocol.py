@@ -87,15 +87,9 @@ check_true(
     "the version is MAJOR.MINOR.PATCH",
     re.fullmatch(r"\d+\.\d+\.\d+", agent.AGENT_VERSION) is not None,
 )
-# Never reset below an agent that is already installed out there. Stated as an
-# assertion rather than a comment because "only ever climbs" is exactly the rule
-# a release under time pressure breaks - and collapsing two numbers into one is
-# the single most likely way to break it, since the surviving number has to be
-# at least the highest either half ever shipped.
-check_true(
-    "the version has not been reset below what has already shipped",
-    tuple(int(part) for part in agent.AGENT_VERSION.split(".")) >= (3, 9, 0),
-)
+# There was a floor here, at 3.9.0, while the app compared versions as an
+# ordering. It compares them for equality now (ADR 0051), so the number is free
+# to go down - and did, to 0.x, because Inwire is in development.
 
 # --- build_hello_message ---
 hello = agent.build_hello_message(

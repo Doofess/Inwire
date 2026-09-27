@@ -14,13 +14,10 @@ for two halves that cannot be apart is two numbers that can only ever disagree
 by mistake - and they did, across six stamps, three of which were checked by
 different scripts covering different subsets.
 
-What the number still has to be is an **ordering**. It is the left-hand side of
-`isAgentOutdated`, so an agent left behind by an earlier install has to read as
-older rather than newer; a version that goes backwards shows in the UI as "not
-connected", which is a state with no instruction attached to it. That is the
-whole reason the product's own number jumped to 4.0.0 rather than the agent's
-dropping to 1.0.0: the unified number has to be at least the highest either half
-ever shipped, and the agent had shipped 3.9.0.
+It is compared for **equality**, not order (ADR 0051): the app asks whether the
+agent it reached is from its own build, and an agent reporting any other number
+is one a different install left behind. That is what let the number go down to
+0.x, where an ordering had held it at 4.x.
 """
 
-AGENT_VERSION = "4.1.0"
+AGENT_VERSION = "0.4.1"

@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { encodeAgentCommand, isAgentOutdated, REQUIRED_AGENT_VERSION } from '../../src/services/agentProtocol';
+import { encodeAgentCommand, isAgentMismatched, REQUIRED_AGENT_VERSION } from '../../src/services/agentProtocol';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -20,16 +20,18 @@ function check(name: string, actual: unknown, expected: unknown) {
   }
 }
 
-check('exact match is not outdated', isAgentOutdated('1.1.0', '1.1.0'), false);
-check('lower patch is outdated', isAgentOutdated('1.1.0', '1.1.1'), true);
-check('lower minor is outdated', isAgentOutdated('1.1.0', '1.2.0'), true);
-check('lower major is outdated', isAgentOutdated('1.1.0', '2.0.0'), true);
-check('higher patch is not outdated', isAgentOutdated('1.1.5', '1.1.0'), false);
-check('minor beats patch: 1.9.9 vs 1.10.0 is outdated', isAgentOutdated('1.9.9', '1.10.0'), true);
-check('minor beats patch: 1.10.0 vs 1.9.9 is not outdated', isAgentOutdated('1.10.0', '1.9.9'), false);
-check('missing patch segment treated as 0: 1.0 vs 1.0.5 is outdated', isAgentOutdated('1.0', '1.0.5'), true);
-check('missing patch segment treated as 0: 1.0.5 vs 1.0 is not outdated', isAgentOutdated('1.0.5', '1.0'), false);
-check('missing minor and patch: 1 vs 1.0.1 is outdated', isAgentOutdated('1', '1.0.1'), true);
+// Equality, not order (ADR 0051): an agent from any other build is one a
+// different install left behind, whichever way the number moved.
+check('exact match is this build', isAgentMismatched('0.4.1', '0.4.1'), false);
+check('lower patch is mismatched', isAgentMismatched('0.4.0', '0.4.1'), true);
+check('lower minor is mismatched', isAgentMismatched('0.3.9', '0.4.1'), true);
+check('higher patch is mismatched too', isAgentMismatched('0.4.2', '0.4.1'), true);
+check('an agent from before the 0.x reset is mismatched', isAgentMismatched('4.1.0', '0.4.1'), true);
+check('...and so is the 4.0.0 one', isAgentMismatched('4.0.0', '0.4.1'), true);
+check('segments are numbers: 0.4.01 is 0.4.1', isAgentMismatched('0.4.01', '0.4.1'), false);
+check('segments are numbers: 0.10.0 is not 0.1.0', isAgentMismatched('0.10.0', '0.1.0'), true);
+check('a missing patch segment is 0: 0.4 is 0.4.0', isAgentMismatched('0.4', '0.4.0'), false);
+check('a missing patch segment is 0: 0.4 is not 0.4.1', isAgentMismatched('0.4', '0.4.1'), true);
 
 check('start_capture encodes', encodeAgentCommand({ type: 'start_capture' }), '{"type":"start_capture"}');
 check('stop_capture encodes', encodeAgentCommand({ type: 'stop_capture' }), '{"type":"stop_capture"}');
@@ -43,7 +45,7 @@ check('set_interfaces encodes', encodeAgentCommand({ type: 'set_interfaces', int
 // assertion is that this constant equals the one place a version is authored.
 //
 // The rest of the lock - the generated `agent_version.py`, the installer, and
-// the anti-reset floor - is `scripts/agent/version.ts`.
+// the stamps' shape - is `scripts/agent/version.ts`.
 const productVersion = (
   JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../package.json'), 'utf8')) as
     { version: string }
@@ -55,10 +57,8 @@ check('REQUIRED_AGENT_VERSION is the product version', REQUIRED_AGENT_VERSION, p
 // transport is a named pipe whose security descriptor names who may open it,
 // so there is nothing to present and nothing to paste.
 
-check('a 1.1.0 agent is outdated against 2.4.0', isAgentOutdated('1.1.0', '2.4.0'), true);
-check('a 2.3.0 agent is outdated against 2.4.0', isAgentOutdated('2.3.0', '2.4.0'), true);
-check('a 2.4.0 agent is current', isAgentOutdated('2.4.0', '2.4.0'), false);
-check('a 2.5.0 agent is not outdated', isAgentOutdated('2.5.0', '2.4.0'), false);
+check('this build\'s own agent is not mismatched',
+  isAgentMismatched(REQUIRED_AGENT_VERSION, REQUIRED_AGENT_VERSION), false);
 
 // 3.6.0: how this machine's adapters are configured. Subscribed for the same
 // reason the socket table is - reading it spawns PowerShell on Windows when

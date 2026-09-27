@@ -38,7 +38,7 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { ve
 const version = pkg.version ?? '';
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
-  // Not a formatting preference. `isAgentOutdated` parses each segment as a
+  // Not a formatting preference. `isAgentMismatched` parses each segment as a
   // number, so a pre-release tag or build metadata would be silently truncated
   // into a different version than the one written down.
   console.error(`package.json version is "${version}", which is not MAJOR.MINOR.PATCH`);

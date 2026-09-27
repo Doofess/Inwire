@@ -51,7 +51,7 @@ function npcapRow(version) {
   return {
     version,
     kind: 'vendor-installer',
-    minAppVersion: '1.0.0',
+    minAppVersion: '0.0.0',
     url: `https://npcap.com/dist/npcap-${version}.exe`,
     sha256: '0'.repeat(64),
     size: 1320424,

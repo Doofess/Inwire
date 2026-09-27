@@ -153,9 +153,11 @@ differences, each one deliberate:
 
 ## Consequences
 
-The product moves to 4.1.0. An agent from 4.0.0 sends version 2 records,
-which this app refuses, so `REQUIRED_AGENT_VERSION` moves with it and the old
-agent reads as outdated rather than as broken.
+The product moves to 4.1.0, renumbered 0.4.1 by
+[0051](0051-the-version-is-0x-in-development.md) before it was installed. An
+agent from 4.0.0 sends version 2 records, which this app refuses, so
+`REQUIRED_AGENT_VERSION` moves with it and the old agent reads as outdated
+rather than as broken.
 
 This is items 1–3 of the dumpcap comparison. The rest are what only dumpcap
 gives, and are the next decision: ring buffers, per-interface end-of-capture

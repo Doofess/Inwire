@@ -563,28 +563,27 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
  * JSON module into all three to read one string costs more than a line that
  * `scripts/agent/version.ts` holds to the product on every `npm run check`.
  *
- * **It only ever climbs.** This is the left-hand side of `isAgentOutdated`, so
- * an agent from an older install must read as older; a number that went
- * backwards would make that agent read as *newer than required*, which the UI
- * renders as "not connected" - a state with no instruction attached. That
- * ordering is why unifying the two numbers moved the PRODUCT to 4.0.0 instead
- * of moving the agent down to 1.0.0.
+ * **Compared for equality, not order** (ADR 0051). The installer puts the app
+ * and the agent down together, so an agent reporting any other version is one
+ * a different install left behind - older or newer, the app cannot trust its
+ * wire format, and the fix is the same installer either way. An ordering is
+ * what this used to be, and it made the number unable to go down: an agent from
+ * a higher-numbered build read as newer than required, and passed.
  */
-export const REQUIRED_AGENT_VERSION = '4.1.0';
+export const REQUIRED_AGENT_VERSION = '0.4.1';
 
 /**
- * Simple major.minor.patch comparison - good enough for this agent's
- * versioning (no pre-release tags, no build metadata). Plain string
- * inequality would get "1.9.9" vs "1.10.0" backwards, which is why this
- * parses each segment as a number instead.
+ * Is the running agent from a different build than this app?
+ *
+ * Segment by segment as numbers, so "0.4.1" and "0.4.01" are one version and a
+ * missing segment is 0. No pre-release tags and no build metadata: the version
+ * is MAJOR.MINOR.PATCH, which `sync-version.ts` refuses to stamp otherwise.
  */
-export function isAgentOutdated(reportedVersion: string, requiredVersion: string): boolean {
+export function isAgentMismatched(reportedVersion: string, requiredVersion: string): boolean {
   const parse = (v: string) => v.split('.').map((n) => parseInt(n, 10) || 0);
   const [rMajor = 0, rMinor = 0, rPatch = 0] = parse(reportedVersion);
   const [qMajor = 0, qMinor = 0, qPatch = 0] = parse(requiredVersion);
-  if (rMajor !== qMajor) return rMajor < qMajor;
-  if (rMinor !== qMinor) return rMinor < qMinor;
-  return rPatch < qPatch;
+  return rMajor !== qMajor || rMinor !== qMinor || rPatch !== qPatch;
 }
 
 export type AgentCommand =

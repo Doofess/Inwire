@@ -154,10 +154,11 @@ export function normalizeSnapshot(raw: unknown): UpdateSnapshot | null {
  * only ever changes when the app's does, and putting it anywhere else would
  * invite somebody to look for a way to update it on its own.
  *
- * Its state is not a manifest question. `outdated` is `isAgentOutdated`'s
- * answer, which compares the running agent against the protocol version this
- * build requires - so "out of date" here means "the app cannot talk to it",
- * and the fix is the Inwire row above rather than anything on this one.
+ * Its state is not a manifest question. `outdated` is `isAgentMismatched`'s
+ * answer, which compares the running agent against this build's own version -
+ * so "out of date" here means "a different install left it, and the app cannot
+ * trust it", and the fix is the Inwire row above rather than anything on this
+ * one.
  */
 export function withAgentRow(
   snapshot: UpdateSnapshot, version: string | null, outdated: boolean,

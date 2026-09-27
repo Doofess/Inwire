@@ -115,18 +115,14 @@ TypeScript — never ran it; a second script read both `.iss` files and
 ran unprompted. The shipping installer's stamps agreed with the code by hand.
 
 `test_protocol.py` still checks the half a Python test is right for: that a
-running agent reports the product's version, and that the number has not gone
-backwards. `version.ts` is the authoritative one, because it runs unprompted.
+running agent reports the product's version. `version.ts` is the authoritative
+one, because it runs unprompted.
 
-Any change to the wire protocol bumps the **product**, and it is still an
-**ordering** — the left-hand side of `isAgentOutdated` — so it only ever climbs.
-An agent left behind by an earlier install would otherwise read as newer than
-required, which shows as "not connected" rather than "update your agent". That
-ordering is why unifying moved the product from 1.0.0 to **4.0.0** rather than
-moving the agent down from 3.9.0: the surviving number has to be at least the
-highest either half ever shipped. The floor is compared as numbers rather than
-as a string, because `"3.10.0"` sorts before `"3.9.0"` lexically and a string
-floor would reject the first version past 3.9 and every one after it.
+Any change to the wire protocol bumps the **product**. The app compares the
+agent's number to its own for **equality** (`isAgentMismatched`, ADR 0051), so
+an agent from any other build reads as outdated, and the number is free to go
+down: it is 0.x while Inwire is in development. It was an ordering until then,
+which is what had jumped it to 4.0.0 and held a 3.9.0 floor under it.
 
 `local-agent/installer/setup.iss` keeps a **frozen** `MyAgentVersion "3.9.0"`
 and `MyAppVersion "1.0.0"`. Nothing builds it; it records what an agent-only
