@@ -52,13 +52,27 @@ pub struct Interface {
     /// from having asked. `AgentInterface.linkType` is optional for the same
     /// reason, and an agent that predates the field is a legal one.
     pub link_type: Option<i32>,
+    /// How many decimals of a second this adapter's timestamps carry: 9 when
+    /// the driver stamps in nanoseconds, 6 when it would only give
+    /// microseconds. Read when the link type is, from the same open.
+    ///
+    /// **The wire always carries nanoseconds** (`wire.rs`), so this is what
+    /// tells a stamp that ends in `000` because the clock said so from one that
+    /// ends in `000` because it was never finer. `None`, and omitted, when the
+    /// device could not be opened to ask.
+    pub ts_precision: Option<u8>,
 }
 
 impl Interface {
     fn to_value(&self) -> Value {
         let mut value = json!({ "id": self.id, "name": self.name, "label": self.label });
-        if let (Some(link_type), Some(object)) = (self.link_type, value.as_object_mut()) {
-            object.insert("linkType".into(), json!(link_type));
+        if let Some(object) = value.as_object_mut() {
+            if let Some(link_type) = self.link_type {
+                object.insert("linkType".into(), json!(link_type));
+            }
+            if let Some(precision) = self.ts_precision {
+                object.insert("tsPrecision".into(), json!(precision));
+            }
         }
         value
     }
@@ -403,12 +417,52 @@ pub fn error(code: &str, message: &str) -> Value {
     json!({ "type": "error", "code": code, "message": message })
 }
 
+/// The answer to `check_capture_filter`: the filter it was asked about, and
+/// libpcap's reason when it will not compile - `null` when it will.
+///
+/// The filter is echoed so a client that asked again while this was on its way
+/// can tell a stale answer from the one it is waiting for; a filter box asks
+/// on every pause in typing.
+pub fn capture_filter_check(filter: &str, error: Option<&str>) -> Value {
+    json!({ "type": "capture_filter_check", "filter": filter, "error": error })
+}
+
 // --- what the client may send ------------------------------------------------
+
+/// What a `start_capture` asks of the capture it starts.
+///
+/// Both are the driver's to apply, before a frame is copied anywhere - which is
+/// what makes them worth having over anything the app could do after the fact.
+/// A filter the app applied would still have every refused frame fill the
+/// kernel ring, cross the pipe and be written to disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaptureOptions {
+    /// A libpcap capture filter (`tcp port 443`, `not arp`), compiled per
+    /// adapter against its own link type. `None` captures everything.
+    pub filter: Option<String>,
+    /// The most bytes of each frame to keep; the rest is counted in the
+    /// frame's wire length and not captured. 65535 keeps everything.
+    pub snaplen: u16,
+}
+
+impl Default for CaptureOptions {
+    fn default() -> Self {
+        CaptureOptions { filter: None, snaplen: 65535 }
+    }
+}
+
+/// The longest capture filter a client may send. A long host list is a few
+/// thousand characters; the text reaches log lines and error messages, so it
+/// is bounded once, here.
+pub const MAX_CAPTURE_FILTER_CHARS: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    StartCapture,
+    StartCapture(CaptureOptions),
     StopCapture,
+    /// Would `filter` compile for these adapters? Asks nothing of the capture,
+    /// so any client may, and answered with `capture_filter_check`.
+    CheckCaptureFilter { filter: String, interfaces: Vec<String> },
     /// The adapters to capture on, as the device NAMES the app was given in
     /// `hello` - `\Device\NPF_{GUID}` - and never as indices into that list.
     /// `src/services/agentProtocol.ts` declares `interfaces: string[]`, and
@@ -458,6 +512,11 @@ pub enum ParseError {
     /// `set_interfaces` naming more than `MAX_SELECTED_INTERFACES` devices, or
     /// one whose name is longer than `MAX_INTERFACE_NAME_CHARS`.
     SelectionTooLarge,
+    /// `start_capture` or `check_capture_filter` with a filter or a snaplen
+    /// that is not one, carrying the sentence that says which. **Not a
+    /// capture on defaults**: a filter the agent could not read and ignored
+    /// would be a capture of everything that its owner believes is narrowed.
+    BadCaptureOptions(String),
 }
 
 /// The most devices one `set_interfaces` may name.
@@ -504,7 +563,34 @@ pub fn parse_command(text: &str) -> Result<Command, ParseError> {
         Some(other) => return Err(ParseError::Unknown(python_str(other))),
     };
     match kind {
-        "start_capture" => Ok(Command::StartCapture),
+        "start_capture" => Ok(Command::StartCapture(CaptureOptions {
+            filter: filter_of(&value, "start_capture")?,
+            snaplen: snaplen_of(&value)?,
+        })),
+        "check_capture_filter" => {
+            let filter = filter_of(&value, "check_capture_filter")?.unwrap_or_default();
+            // The adapters are optional and only choose which link types the
+            // filter is compiled for, so a list that is not one is refused in
+            // the same breath as a filter that is not one.
+            let interfaces = match value.get("interfaces") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(list)) if list.len() <= MAX_SELECTED_INTERFACES => list
+                    .iter()
+                    .map(|entry| entry.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        ParseError::BadCaptureOptions(
+                            "check_capture_filter's interfaces must be a list of names.".into(),
+                        )
+                    })?,
+                Some(_) => {
+                    return Err(ParseError::BadCaptureOptions(
+                        "check_capture_filter's interfaces must be a list of names.".into(),
+                    ))
+                }
+            };
+            Ok(Command::CheckCaptureFilter { filter, interfaces })
+        }
         "stop_capture" => Ok(Command::StopCapture),
         "set_interfaces" => {
             let list = value.get("interfaces").and_then(Value::as_array);
@@ -547,6 +633,38 @@ pub fn parse_command(text: &str) -> Result<Command, ParseError> {
     }
 }
 
+/// A command's `filter`: absent, `null` or blank is no filter at all.
+fn filter_of(value: &Value, command: &str) -> Result<Option<String>, ParseError> {
+    match value.get("filter") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.chars().count() > MAX_CAPTURE_FILTER_CHARS => {
+            Err(ParseError::BadCaptureOptions(format!(
+                "A capture filter is at most {MAX_CAPTURE_FILTER_CHARS} characters long."
+            )))
+        }
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(ParseError::BadCaptureOptions(format!("{command}'s filter must be text."))),
+    }
+}
+
+/// `start_capture`'s `snaplen`: absent or `null` keeps every byte.
+fn snaplen_of(value: &Value) -> Result<u16, ParseError> {
+    match value.get("snaplen") {
+        None | Some(Value::Null) => Ok(CaptureOptions::default().snaplen),
+        Some(n) => n
+            .as_u64()
+            .filter(|n| (1..=65535).contains(n))
+            .map(|n| n as u16)
+            .ok_or_else(|| {
+                ParseError::BadCaptureOptions(
+                    "start_capture's snaplen must be a whole number of bytes from 1 to 65535."
+                        .into(),
+                )
+            }),
+    }
+}
+
 /// Does this command change the capture, and therefore need ownership?
 ///
 /// A pure function so the rule can be asserted without a service. The three
@@ -555,7 +673,7 @@ pub fn parse_command(text: &str) -> Result<Command, ParseError> {
 pub fn needs_ownership(command: &Command) -> bool {
     matches!(
         command,
-        Command::StartCapture | Command::StopCapture | Command::SetInterfaces(_)
+        Command::StartCapture(_) | Command::StopCapture | Command::SetInterfaces(_)
     )
 }
 
@@ -595,12 +713,14 @@ mod tests {
                 name: r"\Device\NPF_{A}".into(),
                 label: "Ethernet".into(),
                 link_type: Some(1),
+                ts_precision: Some(9),
             },
             Interface {
                 id: 1,
                 name: r"\Device\NPF_{B}".into(),
                 label: "Wi-Fi".into(),
                 link_type: None,
+                ts_precision: None,
             },
         ]
     }
@@ -614,6 +734,9 @@ mod tests {
             list[1].get("linkType").is_none(),
             "an adapter that could not be asked must not claim Ethernet",
         );
+        // The same for the precision, which the same open answers.
+        assert_eq!(list[0]["tsPrecision"], 9);
+        assert!(list[1].get("tsPrecision").is_none(), "nor claim a precision");
     }
 
     #[test]
@@ -703,7 +826,10 @@ mod tests {
 
     #[test]
     fn commands_parse_and_unknown_ones_are_named() {
-        assert_eq!(parse_command(r#"{"type":"start_capture"}"#), Ok(Command::StartCapture));
+        assert_eq!(
+            parse_command(r#"{"type":"start_capture"}"#),
+            Ok(Command::StartCapture(CaptureOptions::default()))
+        );
         assert_eq!(parse_command("{not json"), Err(ParseError::NotJson));
         assert_eq!(parse_command("{}"), Err(ParseError::NoType));
         assert_eq!(parse_command(r#"{"type":null}"#), Err(ParseError::NoType));
@@ -718,6 +844,51 @@ mod tests {
             Err(ParseError::Unknown("fly".into())),
             "named, so the reply can say which command it did not know"
         );
+    }
+
+    /// A filter and a snaplen are read, blank is no filter, and anything that
+    /// is not one is refused with a sentence rather than captured on defaults.
+    #[test]
+    fn start_capture_carries_a_filter_and_a_snaplen_or_is_refused() {
+        assert_eq!(
+            parse_command(r#"{"type":"start_capture","filter":"tcp port 443","snaplen":128}"#),
+            Ok(Command::StartCapture(CaptureOptions {
+                filter: Some("tcp port 443".into()),
+                snaplen: 128,
+            }))
+        );
+        assert_eq!(
+            parse_command(r#"{"type":"start_capture","filter":"   ","snaplen":null}"#),
+            Ok(Command::StartCapture(CaptureOptions::default()))
+        );
+        for bad in [
+            r#"{"type":"start_capture","filter":5}"#,
+            r#"{"type":"start_capture","snaplen":0}"#,
+            r#"{"type":"start_capture","snaplen":65536}"#,
+            r#"{"type":"start_capture","snaplen":1.5}"#,
+            r#"{"type":"start_capture","snaplen":"128"}"#,
+        ] {
+            assert!(
+                matches!(parse_command(bad), Err(ParseError::BadCaptureOptions(_))),
+                "{bad} was not refused"
+            );
+        }
+        let long = format!(
+            r#"{{"type":"start_capture","filter":"{}"}}"#,
+            "a".repeat(MAX_CAPTURE_FILTER_CHARS + 1)
+        );
+        assert!(matches!(parse_command(&long), Err(ParseError::BadCaptureOptions(_))));
+        assert_eq!(
+            parse_command(r#"{"type":"check_capture_filter","filter":"arp","interfaces":["\\Device\\NPF_{A}"]}"#),
+            Ok(Command::CheckCaptureFilter {
+                filter: "arp".into(),
+                interfaces: vec![r"\Device\NPF_{A}".into()],
+            })
+        );
+        assert!(matches!(
+            parse_command(r#"{"type":"check_capture_filter","filter":"arp","interfaces":[0]}"#),
+            Err(ParseError::BadCaptureOptions(_))
+        ));
     }
 
     #[test]
@@ -772,7 +943,7 @@ mod tests {
 
     #[test]
     fn ownership_gates_exactly_the_three_that_can_disturb_another_client() {
-        let start = Command::StartCapture;
+        let start = Command::StartCapture(CaptureOptions::default());
         let logs = Command::SubscribeLogs;
 
         // Nobody owns it: the first to ask may have it.
@@ -789,6 +960,9 @@ mod tests {
         assert!(may_run(&logs, "b", Some("a")));
         assert!(may_run(&Command::SubscribeAdapters, "b", Some("a")));
         assert!(may_run(&Command::RefreshAdapters, "b", Some("a")));
+        // Asking whether a filter compiles changes nothing.
+        let check = Command::CheckCaptureFilter { filter: "arp".into(), interfaces: vec![] };
+        assert!(may_run(&check, "b", Some("a")));
     }
 }
 

@@ -100,8 +100,8 @@ const appReads = [...protocol.matchAll(/^\s{2}type: '([a-z_]+)';$/gm)]
   .sort();
 
 check('the app declares the messages this build expects', appReads, [
-  'adapter_config', 'capture_stats', 'error', 'hello', 'interface_stats',
-  'log', 'packet', 'socket_table', 'state',
+  'adapter_config', 'capture_filter_check', 'capture_stats', 'error', 'hello',
+  'interface_stats', 'log', 'packet', 'socket_table', 'state',
 ]);
 
 // --- what the Rust agent can write -------------------------------------------
@@ -176,7 +176,7 @@ const appSends = [...protocol.matchAll(/^\s{2}\|\s*\{\s*type: '([a-z_]+)'/gm)]
   .sort();
 
 check('the app declares the commands this build expects', appSends, [
-  'refresh_adapters', 'set_interfaces', 'start_capture',
+  'check_capture_filter', 'refresh_adapters', 'set_interfaces', 'start_capture',
   'stop_capture', 'subscribe_adapters', 'subscribe_interface_stats',
   'subscribe_logs', 'subscribe_sockets', 'unsubscribe_adapters',
   'unsubscribe_interface_stats', 'unsubscribe_logs', 'unsubscribe_sockets',

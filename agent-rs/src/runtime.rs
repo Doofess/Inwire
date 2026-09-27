@@ -45,12 +45,12 @@ use crate::control::{self, Control, Driver, Env, Lazy, Level, RestartSupport};
 use crate::framing::{FRAME_BINARY, FRAME_JSON};
 use crate::host_feeds::{self, HostFeeds, Outlet};
 use crate::npcap_access;
-use crate::npcap::{Capture, Npcap, Read};
+use crate::npcap::{self, Capture, Npcap, OpenOptions, Read};
 use crate::pipe::{self, Connection, PipeInstance};
-use crate::protocol::{self, CaptureState, Command, Interface, InterfaceStats};
+use crate::protocol::{self, CaptureOptions, CaptureState, Command, Interface, InterfaceStats};
 use crate::restart;
 use crate::session::{
-    available_cores, capture_time_us, kernel_buffer_bytes, wall_clock_us, Drain, FrameQueue,
+    available_cores, capture_time_ns, kernel_buffer_bytes, wall_clock_ns, Drain, FrameQueue,
     ProcessCounts, BATCH_INTERVAL_MS,
 };
 use crate::sockets;
@@ -154,7 +154,7 @@ impl Drop for Alive {
 struct Hardware {
     load: fn() -> io::Result<Npcap>,
     devices: fn(&Npcap) -> io::Result<Vec<Interface>>,
-    open: fn(&'static Npcap, &Interface) -> io::Result<Capture<'static>>,
+    open: fn(&'static Npcap, &Interface, &CaptureOptions) -> io::Result<Capture<'static>>,
 }
 
 impl Hardware {
@@ -165,9 +165,16 @@ impl Hardware {
     };
 }
 
-/// Opens an adapter for capture, promiscuous - what every real capture does.
-fn open_adapter(npcap: &'static Npcap, iface: &Interface) -> io::Result<Capture<'static>> {
-    npcap.open(&iface.name, true)
+/// Opens an adapter for capture, promiscuous - what every real capture does -
+/// at the snaplen its `start_capture` asked for. The filter is applied by the
+/// caller, to whichever handle this returns, so it is the same code on a live
+/// adapter and on the fixture a test opens in its place.
+fn open_adapter(
+    npcap: &'static Npcap,
+    iface: &Interface,
+    options: &CaptureOptions,
+) -> io::Result<Capture<'static>> {
+    npcap.open(&iface.name, OpenOptions { promiscuous: true, snaplen: options.snaplen })
 }
 
 /// Signals a stop from any thread, and lets one thread wait for it.
@@ -623,13 +630,24 @@ impl Driver for Live<'_> {
     /// on at all - where `agent.py` notes that "a smaller buffer drops more
     /// frames, it does not stop a capture" (agent.py:835-838) and says which
     /// it got in the log (agent.py:2113-2115), which is what this does.
-    fn open(&self, iface: &Interface) -> Result<Capture<'static>, String> {
+    fn open(&self, iface: &Interface, options: &CaptureOptions) -> Result<Capture<'static>, String> {
         let npcap = self
             .shared
             .npcap
             .get()
             .ok_or_else(|| "Npcap is not installed".to_string())?;
-        let capture = (self.shared.hardware.open)(npcap, iface).map_err(|error| error.to_string())?;
+        let mut capture =
+            (self.shared.hardware.open)(npcap, iface, options).map_err(|error| error.to_string())?;
+        capture.keep_at_most(options.snaplen);
+        // Before a single frame is read, and a failure fails this adapter:
+        // compiled against ITS link type, a filter can be fine on Ethernet and
+        // meaningless on the loopback, and a capture that went on unfiltered
+        // would deliver exactly what its owner asked not to see.
+        if let Some(filter) = &options.filter {
+            capture
+                .set_filter(filter)
+                .map_err(|error| format!("the capture filter does not apply here: {error}"))?;
+        }
         // Sized per core: Npcap splits the buffer into one segment per
         // processor and drops when the segment for the receiving core is full,
         // so a flat figure is that figure divided by the core count. See
@@ -777,11 +795,15 @@ fn read_interfaces(npcap: &Npcap) -> io::Result<Vec<Interface>> {
         .devices()?
         .into_iter()
         .enumerate()
-        .map(|(index, device)| Interface {
-            id: index,
-            label: adapters::label_for(&device.name, device.description.as_deref(), &friendly),
-            link_type: datalink_of(npcap, &device.name),
-            name: device.name,
+        .map(|(index, device)| {
+            let probe = probe(npcap, &device.name);
+            Interface {
+                id: index,
+                label: adapters::label_for(&device.name, device.description.as_deref(), &friendly),
+                link_type: probe.link_type,
+                ts_precision: probe.ts_precision,
+                name: device.name,
+            }
         })
         .collect())
 }
@@ -809,16 +831,82 @@ fn read_interfaces(npcap: &Npcap) -> io::Result<Vec<Interface>> {
 /// something that will not share it, or one the driver has just removed. The
 /// app's own fallback is Ethernet, so a `1` written here would be
 /// indistinguishable from having asked and been told.
-fn datalink_of(npcap: &Npcap, device: &str) -> Option<i32> {
-    static CACHE: Mutex<Option<HashMap<String, Option<i32>>>> = Mutex::new(None);
+///
+/// **The timestamp precision comes from the same open**, and is cached for the
+/// same reason: it is what the driver answers when asked for nanoseconds, which
+/// is a property of the driver rather than of any one capture - and the capture
+/// asks the same question the same way (`Npcap::open`).
+fn probe(npcap: &Npcap, device: &str) -> Probe {
+    static CACHE: Mutex<Option<HashMap<String, Probe>>> = Mutex::new(None);
     let mut held = CACHE.lock().unwrap();
     let cache = held.get_or_insert_with(HashMap::new);
     if let Some(known) = cache.get(device) {
         return *known;
     }
-    let answer = npcap.open(device, false).ok().map(|handle| handle.datalink());
+    let question = OpenOptions { promiscuous: false, snaplen: npcap::SNAPLEN as u16 };
+    let answer = match npcap.open(device, question) {
+        Ok(handle) => Probe {
+            link_type: Some(handle.datalink()),
+            ts_precision: Some(if handle.nanoseconds() { 9 } else { 6 }),
+        },
+        Err(_) => Probe { link_type: None, ts_precision: None },
+    };
     cache.insert(device.to_string(), answer);
     answer
+}
+
+/// What opening a device once says about it. See `probe`.
+#[derive(Clone, Copy)]
+struct Probe {
+    link_type: Option<i32>,
+    ts_precision: Option<u8>,
+}
+
+/// The answer to `check_capture_filter`: whether `filter` compiles for every
+/// link type among `names`, and libpcap's reason when it does not.
+///
+/// **Per link type, not per adapter**, because that is all a compile depends
+/// on - so a selection of Ethernet and Wi-Fi is one compile, and Ethernet with
+/// the loopback is two. An adapter whose link type is unknown is checked as
+/// Ethernet, which is what the app will read its frames as. With no adapters
+/// named, Ethernet alone: the question is then about the filter's spelling.
+///
+/// **A hostname in a filter is resolved by libpcap while it compiles**, here
+/// and again when the capture starts - `host example.com` costs a DNS lookup
+/// from this service, exactly as it does in Wireshark's filter box. A cost of
+/// what was typed, and visible in the capture it narrows.
+fn check_capture_filter(shared: &Shared, filter: &str, names: &[String]) -> Value {
+    if filter.trim().is_empty() {
+        return protocol::capture_filter_check(filter, None);
+    }
+    let Some(npcap) = shared.npcap.get() else {
+        return protocol::capture_filter_check(filter, Some("Npcap is not installed, so a capture filter cannot be checked"));
+    };
+    let interfaces = shared.interfaces.lock().unwrap().clone();
+    let mut kinds: Vec<(i32, Option<String>)> = Vec::new();
+    for name in names {
+        let Some(iface) = interfaces.iter().find(|i| &i.name == name) else { continue };
+        let link_type = iface.link_type.unwrap_or(1);
+        if !kinds.iter().any(|(known, _)| *known == link_type) {
+            kinds.push((link_type, Some(iface.label.clone())));
+        }
+    }
+    if kinds.is_empty() {
+        kinds.push((1, None));
+    }
+    let named = kinds.len() > 1;
+    for (link_type, label) in &kinds {
+        if let Err(reason) = npcap.check_filter(*link_type, filter) {
+            // Named only when the selection mixes link types: then the reason
+            // is about one adapter and not the others.
+            let reason = match label {
+                Some(label) if named => format!("{label}: {reason}"),
+                _ => reason,
+            };
+            return protocol::capture_filter_check(filter, Some(&reason));
+        }
+    }
+    protocol::capture_filter_check(filter, None)
 }
 
 /// What the machine feeds (`host_feeds.rs`) need from the agent: somewhere to
@@ -919,7 +1007,7 @@ fn start_capture(
             while run.load(Ordering::SeqCst) && !shutdown.requested() {
                 match capture.next() {
                     Ok(Read::Timeout) => {}
-                    Ok(Read::Frame { data, ts_us, wire_len }) => {
+                    Ok(Read::Frame { data, ts_ns, wire_len }) => {
                         rx.fetch_add(1, Ordering::Relaxed);
                         // agent.py:1934-1943: the first frame this process
                         // captures says the capture works, then one line per
@@ -945,8 +1033,8 @@ fn start_capture(
                         let n = sq.fetch_add(1, Ordering::Relaxed);
                         // agent.py:715-716: a driver that stamped nothing gets
                         // the wall clock rather than a frame at 1970.
-                        let ts_us = capture_time_us(ts_us, wall_clock_us);
-                        match wire::encode_record(n as u32, iface as u16, ts_us, wire_len as usize, data) {
+                        let ts_ns = capture_time_ns(ts_ns, wall_clock_ns);
+                        match wire::encode_record(n as u32, iface as u16, ts_ns, wire_len as usize, data) {
                             Ok(record) => {
                                 let shed = q.push_counting(record);
                                 if shed > 0 {
@@ -1250,6 +1338,9 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
                     // impossible burst.
                     shared.sockets.lock().unwrap().reset();
                 }
+            }
+            Command::CheckCaptureFilter { filter, interfaces } => {
+                shared.send_to(&client, &check_capture_filter(&shared, &filter, &interfaces));
             }
             Command::RestartAgent => {
                 // Refused unless this process is the SCM's and a restart policy

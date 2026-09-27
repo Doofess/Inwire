@@ -40,6 +40,14 @@ export interface AgentInterface {
    * facts, and only the second may be overridden by a later answer.
    */
   linkType?: number;
+  /**
+   * How many decimals of a second this adapter's timestamps carry: 9 when
+   * its driver stamps in nanoseconds, 6 when in microseconds. The wire always
+   * carries nanoseconds (`agentBinary.ts`); this says how many of them were
+   * measured. Absent when the agent could not open the adapter to ask, which
+   * reads as 6.
+   */
+  tsPrecision?: number;
 }
 
 export interface AgentHelloMessage {
@@ -107,7 +115,11 @@ export type AgentErrorCode =
   // reporting `sniffing` on nothing. `frame_too_long`: a frame receive offload
   // coalesced past the record's 16-bit length, counted in `droppedOversize`.
   | 'no_interfaces'
-  | 'frame_too_long';
+  | 'frame_too_long'
+  // A `start_capture` or `check_capture_filter` whose filter or snaplen was
+  // not one. Refused rather than started on defaults, which would be a capture
+  // of everything its owner believes is narrowed.
+  | 'invalid_capture_options';
 
 export interface AgentErrorMessage {
   type: 'error';
@@ -375,7 +387,22 @@ export interface AgentAdapterConfigMessage {
   adapters: AgentAdapter[];
 }
 
+/**
+ * Whether a capture filter compiles, answering `check_capture_filter`.
+ *
+ * `filter` is the text that was asked about, echoed so an answer that crossed
+ * a newer question on the way can be recognised as stale - a filter box asks
+ * on every pause in typing. `error` is libpcap's own sentence, or null when
+ * the filter compiles for every link type among the adapters named.
+ */
+export interface AgentCaptureFilterCheckMessage {
+  type: 'capture_filter_check';
+  filter: string;
+  error: string | null;
+}
+
 export type AgentMessage =
+  | AgentCaptureFilterCheckMessage
   | AgentHelloMessage
   | AgentStateMessage
   | AgentErrorMessage
@@ -422,6 +449,11 @@ function isValidInterfaceList(interfaces: unknown): interfaces is AgentInterface
     if (entry.linkType !== undefined
       && !(typeof entry.linkType === 'number' && Number.isInteger(entry.linkType)
         && entry.linkType >= 0)) return false;
+    // Decimals of a second, so 0 to 9: a precision past nanoseconds is one
+    // the wire cannot carry, and would print digits nobody measured.
+    if (entry.tsPrecision !== undefined
+      && !(typeof entry.tsPrecision === 'number' && Number.isInteger(entry.tsPrecision)
+        && entry.tsPrecision >= 0 && entry.tsPrecision <= 9)) return false;
     return entry.id === undefined || (typeof entry.id === 'number' && Number.isInteger(entry.id));
   });
 }
@@ -513,6 +545,9 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
       return msg as unknown as AgentAdapterConfigMessage;
     case 'packet':
       return msg as unknown as AgentPacketMessage;
+    case 'capture_filter_check':
+      if (typeof msg.filter !== 'string' || !(msg.error === null || typeof msg.error === 'string')) return null;
+      return msg as unknown as AgentCaptureFilterCheckMessage;
     default:
       return null;
   }
@@ -553,7 +588,21 @@ export function isAgentOutdated(reportedVersion: string, requiredVersion: string
 }
 
 export type AgentCommand =
-  | { type: 'start_capture' }
+  /**
+   * Starts a capture on the selected adapters.
+   *
+   * `filter` is a libpcap capture filter and `snaplen` the most bytes of each
+   * frame to keep; the driver applies both before a frame is copied anywhere
+   * (`services/captureOptions.ts`). Each is left out when it asks for nothing
+   * - no filter, every byte - so a plain start is the same message it always
+   * was.
+   */
+  | { type: 'start_capture'; filter?: string; snaplen?: number }
+  /**
+   * Would this filter compile for these adapters? Asks nothing of the
+   * capture, and is answered with `capture_filter_check`.
+   */
+  | { type: 'check_capture_filter'; filter: string; interfaces: string[] }
   | { type: 'stop_capture' }
   | { type: 'set_interfaces'; interfaces: string[] }
   | { type: 'subscribe_logs' }

@@ -63,7 +63,14 @@ const checkTrue = (name: string, condition: boolean) => check(name, condition, t
  * and taught nobody anything.
  */
 const SAMPLES: Record<AgentCommand['type'], AgentCommand> = {
-  start_capture: { type: 'start_capture' },
+  // The full shape, because the options are what an agent could misread: a
+  // filter it ignored would be a capture of everything its owner believes is
+  // narrowed. The plain `{"type":"start_capture"}` is the same command with
+  // both left out, and both agents' unit tests hold that one.
+  start_capture: { type: 'start_capture', filter: 'tcp port 443 or udp port 53', snaplen: 128 },
+  check_capture_filter: {
+    type: 'check_capture_filter', filter: 'not arp', interfaces: ['\\Device\\NPF_{A}'],
+  },
   stop_capture: { type: 'stop_capture' },
   set_interfaces: { type: 'set_interfaces', interfaces: ['\\Device\\NPF_{A}'] },
   subscribe_logs: { type: 'subscribe_logs' },

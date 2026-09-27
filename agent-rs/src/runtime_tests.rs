@@ -350,6 +350,7 @@ fn fixture_devices(npcap: &Npcap) -> io::Result<Vec<Interface>> {
         name: FIXTURE_DEVICE.into(),
         label: FIXTURE_LABEL.into(),
         link_type: Some(1),
+        ts_precision: Some(9),
     }];
     if let Some(loopback) =
         npcap.devices()?.into_iter().find(|d| d.name.to_ascii_lowercase().contains("loopback"))
@@ -359,6 +360,7 @@ fn fixture_devices(npcap: &Npcap) -> io::Result<Vec<Interface>> {
             name: loopback.name,
             label: "Adapter for loopback traffic capture".into(),
             link_type: None,
+            ts_precision: None,
         });
     }
     Ok(list)
@@ -372,11 +374,15 @@ fn fixture_devices(npcap: &Npcap) -> io::Result<Vec<Interface>> {
 /// a dead capture's threads were stopped - it never ends on its own. What it
 /// captures, if the machine happens to send anything over loopback, is
 /// counted and dropped with the rest, never looked at.
-fn fixture_open(npcap: &'static Npcap, iface: &Interface) -> io::Result<Capture<'static>> {
+fn fixture_open(
+    npcap: &'static Npcap,
+    iface: &Interface,
+    options: &CaptureOptions,
+) -> io::Result<Capture<'static>> {
     if iface.name == FIXTURE_DEVICE {
         npcap.open_file(&fixture_file().expect("checked before the capture started"))
     } else {
-        npcap.open(&iface.name, true)
+        npcap.open(&iface.name, crate::npcap::OpenOptions { promiscuous: true, snaplen: options.snaplen })
     }
 }
 
@@ -510,7 +516,7 @@ fn the_last_adapter_dying_stops_the_capture_and_its_threads() {
     let (_watcher, watched) = rig.connect("watcher");
 
     rig.command("owner", Command::SetInterfaces(vec![FIXTURE_DEVICE.into()]));
-    rig.command("owner", Command::StartCapture);
+    rig.command("owner", Command::StartCapture(CaptureOptions::default()));
 
     assert!(
         eventually(Duration::from_secs(10), || rig.shared.control.capture_state() == CaptureState::Idle),
@@ -557,13 +563,91 @@ fn the_last_adapter_dying_stops_the_capture_and_its_threads() {
         assert_eq!(record.iface, 0);
         assert_eq!(record.data, original.data, "frame {n}'s bytes");
         assert_eq!(record.orig_len, original.wire_len, "frame {n}'s wire length");
-        assert_eq!(record.ts_us, original.ts_us, "frame {n}'s timestamp");
+        assert_eq!(record.ts_ns, original.ts_ns, "frame {n}'s timestamp");
     }
     eprintln!(
         "delivered {} of the fixture's {} frames before it ended",
         got.frames.len(),
         rig.frames.len()
     );
+}
+
+/// **A filter and a snaplen are applied by the open, before a frame is read**,
+/// through the real `Live::open` over the fixture's real frames.
+///
+/// The handle is read directly rather than through a running capture: with
+/// the filter on, the file is consumed in a moment and the capture ends before
+/// the pump's first batch, so a test through the pipe would be a race it lost.
+///
+/// `arp` because its meaning is exact at the byte level - the EtherType at
+/// offset 12 is 0x0806 - so the oracle is the fixture's own frames with that
+/// EtherType, read without libpcap, and nothing here grades libpcap's filter
+/// by libpcap's filter. Every frame read must be the next ARP frame of the
+/// file, cut to the snaplen, with its wire length and its nanosecond stamp
+/// intact - and there must be exactly as many.
+#[test]
+fn a_filter_and_a_snaplen_narrow_what_the_open_hands_out() {
+    let Some(rig) = Rig::new() else { return };
+    let arp: Vec<&fixture::Frame> =
+        rig.frames.iter().filter(|f| f.data.len() >= 14 && f.data[12..14] == [0x08, 0x06]).collect();
+    assert!(arp.len() > 10, "the fixture has ARP frames to find ({})", arp.len());
+
+    let fixture = rig.shared.interfaces.lock().unwrap()[0].clone();
+    let options = CaptureOptions { filter: Some("arp".into()), snaplen: 32 };
+    let mut capture = Live { shared: &rig.shared }.open(&fixture, &options).expect("the fixture opens");
+    let mut read = Vec::new();
+    loop {
+        match capture.next() {
+            Ok(Read::Frame { data, ts_ns, wire_len }) => read.push((data.to_vec(), ts_ns, wire_len)),
+            Ok(Read::Timeout) => {}
+            Err(_) => break, // -2: the end of the file
+        }
+    }
+    assert_eq!(read.len(), arp.len(), "one frame for every ARP frame in the file, and no other");
+    for (n, ((data, ts_ns, wire_len), original)) in read.iter().zip(&arp).enumerate() {
+        assert_eq!(data[..], original.data[..original.data.len().min(32)], "frame {n}, cut to 32 bytes");
+        assert_eq!(*wire_len, original.wire_len, "frame {n} keeps its wire length");
+        assert_eq!(*ts_ns, original.ts_ns, "frame {n}'s timestamp, to the nanosecond");
+    }
+    eprintln!("read the fixture's {} ARP frames, each cut to 32 bytes", arp.len());
+}
+
+/// **A filter one adapter cannot compile fails that adapter, in libpcap's
+/// words**, and a start whose only adapter failed never reports `sniffing`.
+#[test]
+fn a_filter_that_does_not_compile_fails_the_adapter_and_says_why() {
+    let Some(rig) = Rig::new() else { return };
+    let (_owner, delivered) = rig.connect("owner");
+    rig.command("owner", Command::SetInterfaces(vec![FIXTURE_DEVICE.into()]));
+    let options = CaptureOptions { filter: Some("tcp prot 443".into()), snaplen: 65535 };
+    rig.command("owner", Command::StartCapture(options));
+
+    assert_eq!(rig.shared.control.capture_state(), CaptureState::Idle);
+    let got = delivered.lock().unwrap();
+    assert!(got.frames.is_empty());
+    let failed: Vec<&Value> = got.control.iter().filter(|m| m["code"] == "capture_failed").collect();
+    assert_eq!(failed.len(), 1, "{:?}", got.control);
+    let message = failed[0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(&format!("Could not capture on {FIXTURE_LABEL}: the capture filter does not apply here: ")),
+        "{message}"
+    );
+    assert!(message.contains("syntax error"), "{message}");
+}
+
+/// `check_capture_filter` over the real library: a spelling mistake is named,
+/// a good filter is not, and the filter is echoed so a stale answer can be told
+/// from the current one.
+#[test]
+fn a_filter_check_answers_in_libpcaps_words() {
+    let Some(rig) = Rig::new() else { return };
+    let good = check_capture_filter(&rig.shared, "arp or udp port 53", &[FIXTURE_DEVICE.into()]);
+    assert_eq!(good, json!({ "type": "capture_filter_check", "filter": "arp or udp port 53", "error": null }));
+    let bad = check_capture_filter(&rig.shared, "udp prot 53", &[FIXTURE_DEVICE.into()]);
+    assert_eq!(bad["filter"], "udp prot 53");
+    assert!(bad["error"].as_str().unwrap().contains("syntax error"), "{bad}");
+    let blank = check_capture_filter(&rig.shared, "  ", &[]);
+    assert_eq!(blank["error"], Value::Null);
 }
 
 /// **The owner's pipe refusing a batch ends the capture - every adapter of it.**
@@ -588,7 +672,7 @@ fn the_owners_pipe_refusing_a_batch_stops_the_capture_and_every_sniffer() {
     let (_watcher, watched) = rig.connect("watcher");
 
     rig.command("owner", Command::SetInterfaces(vec![FIXTURE_DEVICE.into(), loopback]));
-    rig.command("owner", Command::StartCapture);
+    rig.command("owner", Command::StartCapture(CaptureOptions::default()));
 
     assert!(
         eventually(Duration::from_secs(10), || rig.shared.control.capture_state() == CaptureState::Idle),

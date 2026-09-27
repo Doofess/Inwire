@@ -33,6 +33,7 @@ fn main() {
             name: r"\Device\NPF_{28524299-03EF-4F59-A8D2-419D761418B7}".into(),
             label: "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)".into(),
             link_type: Some(1),
+            ts_precision: Some(9),
         },
         Interface {
             id: 1,
@@ -43,6 +44,7 @@ fn main() {
             // than a second 1.
             label: "Adapter for loopback traffic capture".into(),
             link_type: Some(0),
+            ts_precision: Some(9),
         },
     ];
 
@@ -276,6 +278,21 @@ fn main() {
     add(
         "error: restart_agent from a process that is not the Inwire service",
         control::restart_unavailable(inwire_agent::restart::NOT_THE_SERVICE),
+    );
+    add(
+        "error: a start_capture whose snaplen is not one - refused, never captured on defaults",
+        protocol::error(
+            "invalid_capture_options",
+            "start_capture's snaplen must be a whole number of bytes from 1 to 65535.",
+        ),
+    );
+    add(
+        "capture_filter_check: the filter compiles for every adapter named",
+        protocol::capture_filter_check("tcp port 443 or udp port 53", None),
+    );
+    add(
+        "capture_filter_check: it does not, in libpcap's words - the filter echoed so a stale answer is recognisable",
+        protocol::capture_filter_check("tcp prot 443", Some("can't parse filter expression: syntax error")),
     );
 
     println!(

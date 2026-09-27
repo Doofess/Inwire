@@ -17,7 +17,7 @@
  * Layout, little-endian, read with a DataView so nothing needs to be aligned:
  *
  *     magic    4 bytes   'IWP1'
- *     version  u8        2
+ *     version  u8        3
  *     flags    u8        reserved
  *     count    u16       records in this frame
  *
@@ -27,8 +27,16 @@
  *     iface      u16     index into the interface list in hello/state
  *     capLen     u16     bytes actually present
  *     origExtra  u16     wire length MINUS capLen; 0 unless truncated
- *     tsUs       f64     capture time, epoch microseconds
+ *     tsNs       u64     capture time, epoch nanoseconds
  *     bytes      capLen  the frame
+ *
+ * **`tsNs` was an f64 of microseconds until version 3**, which could not have
+ * carried what the driver measures: epoch nanoseconds are past 2^53, and even
+ * epoch microseconds are 0.25 us apart in a double. It is read here as two
+ * u32 halves and split into whole microseconds and a nanosecond remainder -
+ * exact for any stamp before the year 2255, and without a BigInt per frame on
+ * the path every captured frame takes. Which of those nanoseconds were
+ * measured is the adapter's `tsPrecision`, not this record's business.
  *
  * **The record is 18 bytes and was 24.** Two reserved bytes on a layout that
  * needs no alignment; a u32 for a `capLen` that cannot exceed a snaplen; and a
@@ -50,7 +58,7 @@
 
 /** 'IWP1', as the u32 a DataView reads at offset 0 in little-endian order. */
 const MAGIC_LE = 0x31_50_57_49;
-export const BATCH_VERSION = 2;
+export const BATCH_VERSION = 3;
 export const BATCH_HEADER_BYTES = 8;
 export const BATCH_RECORD_BYTES = 18;
 
@@ -59,8 +67,10 @@ export interface BinaryFrame {
   seq: number;
   /** Index into the interface list the agent sent in hello/state. */
   iface: number;
-  /** Capture time, epoch microseconds. */
+  /** Capture time, whole epoch microseconds. */
   tsUs: number;
+  /** The nanoseconds past `tsUs`, 0 to 999. */
+  tsNsRem: number;
   /** Length on the wire, which a snaplen may have truncated. */
   origLen: number;
   /**
@@ -160,13 +170,20 @@ export function decodePacketBatch(buffer: ArrayBuffer): BinaryFrame[] {
     // - nothing truncated - is two zero bytes rather than a second copy of the
     // number two fields up.
     const origLen = capLen + view.getUint16(offset + 8, true);
-    const tsUs = view.getFloat64(offset + 10, true);
+    // hi * 2^32 + lo nanoseconds, divided by 1000 without leaving integers:
+    // 2^32 is 4,294,967 thousands and 296 over, so the carry into the
+    // remainder is `hi * 296 + lo`, which stays well under 2^53.
+    const lo = view.getUint32(offset + 10, true);
+    const hi = view.getUint32(offset + 14, true);
+    const carry = hi * 296 + lo;
+    const tsUs = hi * 4_294_967 + Math.floor(carry / 1000);
+    const tsNsRem = carry % 1000;
     offset += BATCH_RECORD_BYTES;
     if (offset + capLen > buffer.byteLength) {
       throw new BinaryFrameError(`record ${i + 1} claims ${capLen} bytes, past the end of the batch`);
     }
     // A view, not a copy: this is the whole reason the bytes travel binary.
-    frames[i] = { seq, iface, tsUs, origLen, bytes: new Uint8Array(buffer, offset, capLen) };
+    frames[i] = { seq, iface, tsUs, tsNsRem, origLen, bytes: new Uint8Array(buffer, offset, capLen) };
     offset += capLen;
   }
   if (offset !== buffer.byteLength) {

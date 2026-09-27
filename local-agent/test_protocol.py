@@ -8,6 +8,7 @@ Run:  python local-agent/test_protocol.py
 """
 import asyncio
 import json
+import pathlib
 import logging
 import os
 import re
@@ -917,7 +918,7 @@ srv.loop = object()          # queue_packet only checks that a loop exists
 srv.capture_owner = object()
 srv.connections.add(srv.capture_owner)
 
-_rec = packet_batch.encode_record(0, 0, 1.0, 60, b"\x00" * 60)
+_rec = packet_batch.encode_record(0, 0, 1000, 60, b"\x00" * 60)
 for _ in range(agent.MAX_QUEUED_PACKETS):
     srv.queue_packet(_rec)
 check("the queue fills to the cap", len(srv._packet_queue), agent.MAX_QUEUED_PACKETS)
@@ -943,7 +944,7 @@ srv2.loop = object()
 srv2.capture_owner = object()
 srv2.connections.add(srv2.capture_owner)
 for seq in range(agent.MAX_QUEUED_PACKETS + 3):
-    srv2.queue_packet(packet_batch.encode_record(seq, 0, 1.0, 60, b"\x00" * 60))
+    srv2.queue_packet(packet_batch.encode_record(seq, 0, 1000, 60, b"\x00" * 60))
 _first = packet_batch.decode_batch(packet_batch.encode_batch([srv2._packet_queue[0]]))[0]
 check("the oldest queued frames are the ones dropped", _first["seq"], 3)
 
@@ -953,7 +954,7 @@ srv3.loop = object()
 srv3.capture_owner = object()
 srv3.connections.add(srv3.capture_owner)
 for seq in range(agent.MAX_BATCH_RECORDS + 10):
-    srv3.queue_packet(packet_batch.encode_record(seq, 0, 1.0, 60, b"\x00" * 60))
+    srv3.queue_packet(packet_batch.encode_record(seq, 0, 1000, 60, b"\x00" * 60))
 _batch, _more = srv3._drain_packets()
 check("a drain takes at most one batch", len(_batch), agent.MAX_BATCH_RECORDS)
 check("...and leaves the remainder queued", len(srv3._packet_queue), 10)
@@ -986,7 +987,7 @@ srv4.connections.add(srv4.capture_owner)
 # 1,100-byte frames: about the measured mean, and 256 kB of them is well under
 # 512 records.
 for seq in range(600):
-    srv4.queue_packet(packet_batch.encode_record(seq, 0, 1.0, 1100, b"\x00" * 1100))
+    srv4.queue_packet(packet_batch.encode_record(seq, 0, 1000, 1100, b"\x00" * 1100))
 _big, _big_more = srv4._drain_packets()
 check_true("a batch of real-sized frames stops on the byte bound, not the record bound",
            len(_big) < agent.MAX_BATCH_RECORDS)
@@ -1007,9 +1008,9 @@ check("...having delivered every frame", _drained + len(_big), 600)
 # The browser has its own decoder (src/services/agentBinary.ts). These assert
 # the bytes, not a description of them, so the two cannot drift apart silently.
 _records = [
-    packet_batch.encode_record(0, 0, 1788477971653284.0, 1514, bytes(range(64))),
-    packet_batch.encode_record(4294967295, 7, 1788477971653285.5, 60, b""),
-    packet_batch.encode_record(9, 1, 1.0, 9000, b"\xff" * 9000),
+    packet_batch.encode_record(0, 0, 1788477971653284300, 1514, bytes(range(64))),
+    packet_batch.encode_record(4294967295, 7, 1788477971653285501, 60, b""),
+    packet_batch.encode_record(9, 1, 1000, 9000, b"\xff" * 9000),
 ]
 _frame = packet_batch.encode_batch(_records)
 check("the batch is tagged so a decoder can refuse anything else", _frame[:4], b"IWP1")
@@ -1018,7 +1019,7 @@ check("...and its record count", int.from_bytes(_frame[6:8], "little"), 3)
 
 _decoded = packet_batch.decode_batch(_frame)
 check("every record comes back", len(_decoded), 3)
-check("the capture time survives to the microsecond", _decoded[0]["tsUs"], 1788477971653284.0)
+check("the capture time survives to the nanosecond", _decoded[1]["tsNs"], 1788477971653285501)
 check("a sequence number at the u32 ceiling round-trips", _decoded[1]["seq"], 4294967295)
 check("a zero-length capture is a record, not an error", _decoded[1]["data"], b"")
 check("the wire length is carried apart from the captured length", _decoded[2]["origLen"], 9000)
@@ -1031,7 +1032,7 @@ check("a record is eighteen bytes of framing", packet_batch.RECORD.size, 18)
 # A frame captured so short that the excess will not fit is clamped rather than
 # wrapped: an understated length is recoverable, a wrapped one is noise.
 _clamped = packet_batch.decode_batch(packet_batch.encode_batch(
-    [packet_batch.encode_record(0, 0, 1.0, 200000, bytes(4))]))[0]
+    [packet_batch.encode_record(0, 0, 1000, 200000, bytes(4))]))[0]
 check("an excess past the u16 ceiling clamps instead of wrapping",
       _clamped["origLen"], 4 + 0xFFFF)
 check("the frame bytes are exact", _decoded[0]["data"], bytes(range(64)))
@@ -1045,13 +1046,13 @@ check("the interface index is carried", _decoded[1]["iface"], 7)
 # anywhere. The `extra` field above may clamp because nothing indexes with it.
 _oversized = "no error"
 try:
-    packet_batch.encode_record(0, 0, 1.0, 70000, b"\x00" * 70000)
+    packet_batch.encode_record(0, 0, 1000, 70000, b"\x00" * 70000)
 except ValueError:
     _oversized = "ValueError"
 check("a frame too long for the length field is refused, not masked",
       _oversized, "ValueError")
 check_true("...and one that exactly fills it still encodes",
-           len(packet_batch.encode_record(0, 0, 1.0, 0xFFFF, b"\x00" * 0xFFFF))
+           len(packet_batch.encode_record(0, 0, 1000, 0xFFFF, b"\x00" * 0xFFFF))
            == packet_batch.RECORD.size + 0xFFFF)
 
 for _bad, _why in (
@@ -1434,7 +1435,8 @@ _rec = agent.packet_to_record(_frame, decimal.Decimal("1788477971.653284"), ifac
 _msg = packet_batch.decode_batch(packet_batch.encode_batch([_rec]))[0]
 check("packet carries its sequence number", _msg["seq"], 41)
 check("packet carries its interface id", _msg["iface"], 2)
-check("packet carries the capture time in microseconds", _msg["tsUs"], 1788477971653284)
+check("packet carries the capture time, as nanoseconds of a microsecond stamp",
+      _msg["tsNs"], 1788477971653284000)
 check("packet carries the wire length", _msg["origLen"], 1514)
 check("packet carries the frame itself", len(_msg["data"]), 1514)
 # The bytes go through untouched. Until 3.5.0 they made a round trip through a
@@ -1938,7 +1940,7 @@ _decoded = packet_batch.decode_batch(packet_batch.encode_batch(_queued))
 check("...carrying the frame's own bytes", [m["data"] for m in _decoded], [_A, _B])
 check("...its wire length", [m["origLen"] for m in _decoded], [64, 128])
 check("...and libpcap's timestamp, to the microsecond",
-      [m["tsUs"] for m in _decoded], [100000001, 100000002])
+      [m["tsNs"] for m in _decoded], [100000001000, 100000002000])
 check("...numbered in capture order", [m["seq"] for m in _decoded], [0, 1])
 check("...and tagged with the adapter", [m["iface"] for m in _decoded], [3, 3])
 # A None from recv_raw is the read timeout expiring. Treating it as a frame
@@ -2427,6 +2429,59 @@ check_true("a pipe connection is vouched for by the kernel",
            pipe_server.PipeConnection.kernel_authenticated)
 check_true("...and the agent reads it off the connection, not off the transport",
            'getattr(ws, "kernel_authenticated", False)' in inspect.getsource(agent.AgentServer.register))
+
+
+# --- a capture filter and a snaplen ------------------------------------------
+#
+# The Rust agent's rules and sentences: a start carries a filter and a snaplen,
+# blank is no filter, and anything that is not one is refused rather than
+# captured on defaults - a filter ignored is a capture of everything that its
+# owner believes is narrowed.
+check("a start with neither captures everything",
+      agent.parse_capture_options({"type": "start_capture"}), {"filter": None, "snaplen": 65535})
+check("a start carries its filter and snaplen",
+      agent.parse_capture_options({"type": "start_capture", "filter": "tcp port 443", "snaplen": 128}),
+      {"filter": "tcp port 443", "snaplen": 128})
+check("a blank filter is no filter",
+      agent.parse_capture_options({"type": "start_capture", "filter": "  "})["filter"], None)
+for _bad in ({"filter": 5}, {"snaplen": 0}, {"snaplen": 65536}, {"snaplen": 1.5}, {"snaplen": "128"},
+             {"snaplen": True}, {"filter": "a" * (agent.MAX_CAPTURE_FILTER_CHARS + 1)}):
+    _refused = None
+    try:
+        agent.parse_capture_options({"type": "start_capture", **_bad})
+    except agent.CaptureOptionsError as exc:
+        _refused = str(exc)
+    check_true(f"...and {_bad if 'filter' not in _bad or len(str(_bad)) < 40 else 'a filter too long'} is refused",
+               _refused is not None)
+check("the sentence is the Rust agent's",
+      _refused,
+      f"A capture filter is at most {agent.MAX_CAPTURE_FILTER_CHARS} characters long.")
+
+# Every command the app sends, from the shared fixture the Rust agent reads,
+# is one this agent can read - which is the check that was missing when the
+# selection was misread (scripts/agent/command-vectors.json).
+_commands = json.loads((pathlib.Path(__file__).resolve().parent.parent
+                        / "scripts" / "agent" / "command-vectors.json").read_text(encoding="utf-8"))["commands"]
+_start = next(json.loads(c) for c in _commands if '"start_capture"' in c)
+check("the app's own start_capture parses to its filter and snaplen",
+      agent.parse_capture_options(_start), {"filter": _start["filter"], "snaplen": _start["snaplen"]})
+
+# Over the real libpcap, where there is one: a spelling mistake is named in
+# libpcap's words, a good filter is not, and the filter is echoed.
+try:
+    import scapy.libs.winpcapy  # noqa: F401
+    _have_pcap = True
+except Exception:
+    _have_pcap = False
+if _have_pcap:
+    check("a good filter compiles",
+          agent.check_capture_filter("arp or udp port 53", []),
+          {"type": "capture_filter_check", "filter": "arp or udp port 53", "error": None})
+    _bad_check = agent.check_capture_filter("udp prot 53", [])
+    check("a bad one is echoed", _bad_check["filter"], "udp prot 53")
+    check_true("...with libpcap's reason", "syntax error" in (_bad_check["error"] or ""))
+else:
+    print("SKIP  no libpcap on this machine - the filter checks need one")
 
 
 # --- the summary, and the exit code ------------------------------------------

@@ -22,8 +22,8 @@ pub const CAPTURES: [&str; 2] = [
 /// One frame as the capture file recorded it.
 #[derive(Clone, Debug)]
 pub struct Frame {
-    /// The capture time, in epoch microseconds.
-    pub ts_us: f64,
+    /// The capture time, in epoch nanoseconds.
+    pub ts_ns: u64,
     /// The length on the wire.
     pub wire_len: u32,
     pub data: Vec<u8>,
@@ -67,17 +67,17 @@ fn parse(bytes: &[u8]) -> Option<Vec<Frame>> {
     let mut out = Vec::new();
     let mut at = 24;
     while at + 16 <= bytes.len() {
-        let seconds = u32_at(at) as f64;
-        let fraction = u32_at(at + 4) as f64;
+        let seconds = u64::from(u32_at(at));
+        let fraction = u64::from(u32_at(at + 4));
         let captured = u32_at(at + 8) as usize;
         let wire_len = u32_at(at + 12);
         at += 16;
         if at + captured > bytes.len() {
             break;
         }
-        let micros = if nanos { (fraction / 1000.0).floor() } else { fraction };
+        let nanos_part = if nanos { fraction } else { fraction * 1_000 };
         out.push(Frame {
-            ts_us: seconds * 1_000_000.0 + micros,
+            ts_ns: seconds * 1_000_000_000 + nanos_part,
             wire_len,
             data: bytes[at..at + captured].to_vec(),
         });

@@ -33,9 +33,16 @@
 //!   on an already-activated handle, which is what lets the buffer be raised
 //!   after the handle is open.
 //! - **A snaplen above 65535 is unrepresentable downstream.** The wire record's
-//!   captured-length field is 16 bits, so the capture is opened at 65535 and a
-//!   frame that cannot be encoded is made impossible here rather than refused
-//!   later.
+//!   captured-length field is 16 bits, so the capture is opened at 65535 at
+//!   most and a frame that cannot be encoded is made impossible here rather
+//!   than refused later. A client may ask for less (`OpenOptions::snaplen`).
+//! - **`pcap_create` and `pcap_activate`, not `pcap_open_live`.** The snaplen
+//!   and the timestamp precision can only be set between the two, and
+//!   `pcap_open_live` is both at once with no room between them. It is how
+//!   the capture gets nanoseconds: asked for before activation, Npcap stamps
+//!   in them, and the `tv_usec` field of every header then holds nanoseconds -
+//!   which is why a `Capture` remembers the precision it was given rather than
+//!   the one it asked for.
 
 use std::ffi::{c_char, c_int, c_uchar, c_uint, c_void, CStr, CString};
 use std::io;
@@ -62,6 +69,18 @@ const PCAP_ERRBUF_SIZE: usize = 256;
 /// The capture is opened at this and no higher: the wire record's captured
 /// length is a `u16`. See the module note.
 pub const SNAPLEN: c_int = 65535;
+
+/// `pcap_compile`'s netmask when it is not known, which only matters to the
+/// `ip broadcast` primitive - and that one then refuses to compile rather than
+/// matching the wrong addresses.
+const PCAP_NETMASK_UNKNOWN: u32 = 0xffff_ffff;
+
+/// `pcap_set_tstamp_precision`'s nanosecond answer; 0 is microseconds.
+const PCAP_TSTAMP_PRECISION_NANO: c_int = 1;
+
+/// `pcap_activate`'s plain failure, whose text is `pcap_geterr`'s. Every other
+/// negative status has its own name in `pcap_statustostr`.
+const PCAP_ERROR: c_int = -1;
 
 // --- the structs, laid out as the DLL sees them ------------------------------
 
@@ -103,9 +122,26 @@ struct PcapStat {
     _spare: [c_uint; 5],
 }
 
+/// A compiled filter. Owned by whoever compiled it, and freed with
+/// `pcap_freecode` once `pcap_setfilter` has taken its copy.
+#[repr(C)]
+struct BpfProgram {
+    bf_len: c_uint,
+    bf_insns: *mut c_void,
+}
+
 type PcapT = c_void;
 
-type FnOpenLive = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int, *mut c_char) -> *mut PcapT;
+type FnCreate = unsafe extern "C" fn(*const c_char, *mut c_char) -> *mut PcapT;
+type FnSetInt = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
+type FnActivate = unsafe extern "C" fn(*mut PcapT) -> c_int;
+type FnGetInt = unsafe extern "C" fn(*mut PcapT) -> c_int;
+type FnStatusToStr = unsafe extern "C" fn(c_int) -> *const c_char;
+type FnCompile =
+    unsafe extern "C" fn(*mut PcapT, *mut BpfProgram, *const c_char, c_int, u32) -> c_int;
+type FnSetFilter = unsafe extern "C" fn(*mut PcapT, *mut BpfProgram) -> c_int;
+type FnFreeCode = unsafe extern "C" fn(*mut BpfProgram);
+type FnOpenDead = unsafe extern "C" fn(c_int, c_int) -> *mut PcapT;
 type FnClose = unsafe extern "C" fn(*mut PcapT);
 type FnNextEx = unsafe extern "C" fn(*mut PcapT, *mut *mut PcapPktHdr, *mut *const c_uchar) -> c_int;
 type FnStats = unsafe extern "C" fn(*mut PcapT, *mut PcapStat) -> c_int;
@@ -116,11 +152,24 @@ type FnSetBuff = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
 type FnSetMinToCopy = unsafe extern "C" fn(*mut PcapT, c_int) -> c_int;
 type FnDatalink = unsafe extern "C" fn(*mut PcapT) -> c_int;
 #[cfg(test)]
-type FnOpenOffline = unsafe extern "C" fn(*const c_char, *mut c_char) -> *mut PcapT;
+type FnOpenOffline = unsafe extern "C" fn(*const c_char, c_int, *mut c_char) -> *mut PcapT;
 
 /// The loaded library and its entry points.
 pub struct Npcap {
-    open_live: FnOpenLive,
+    create: FnCreate,
+    set_snaplen: FnSetInt,
+    set_promisc: FnSetInt,
+    set_timeout: FnSetInt,
+    activate: FnActivate,
+    statustostr: FnStatusToStr,
+    /// Both `None` on a libpcap older than 1.5, where a capture is in
+    /// microseconds and says so (`Capture::nanoseconds`).
+    set_tstamp_precision: Option<FnSetInt>,
+    get_tstamp_precision: Option<FnGetInt>,
+    compile: FnCompile,
+    setfilter: FnSetFilter,
+    freecode: FnFreeCode,
+    open_dead: FnOpenDead,
     close: FnClose,
     next_ex: FnNextEx,
     stats: FnStats,
@@ -134,13 +183,22 @@ pub struct Npcap {
     /// Npcap's too, and absent for the same reason - see `set_min_to_copy`.
     setmintocopy: Option<FnSetMinToCopy>,
     datalink: FnDatalink,
-    /// `pcap_open_offline`, for the tests alone: it is how `runtime.rs`'s tests
-    /// drive the real sniffer, pump and reaper with the real frames of
-    /// `test/fixtures/*.pcap`, read through Npcap exactly as a live adapter's
-    /// are - including `pcap_next_ex`'s -2 at the end of the file, which is an
-    /// adapter "failing" the same way a removed one does.
+    /// `pcap_open_offline_with_tstamp_precision`, for the tests alone: it is
+    /// how `runtime.rs`'s tests drive the real sniffer, pump and reaper with
+    /// the real frames of `test/fixtures/*.pcap`, read through Npcap exactly as
+    /// a live adapter's are - in nanoseconds, as a live one is - including
+    /// `pcap_next_ex`'s -2 at the end of the file, which is an adapter
+    /// "failing" the same way a removed one does.
     #[cfg(test)]
     open_offline: FnOpenOffline,
+}
+
+/// How to open an adapter.
+#[derive(Clone, Copy, Debug)]
+pub struct OpenOptions {
+    pub promiscuous: bool,
+    /// The most of each frame to keep. At most `SNAPLEN`.
+    pub snaplen: u16,
 }
 
 #[derive(Debug)]
@@ -202,7 +260,24 @@ impl Npcap {
 
         unsafe {
             Ok(Npcap {
-                open_live: std::mem::transmute::<Farproc, FnOpenLive>(sym(module, "pcap_open_live")?),
+                create: std::mem::transmute::<Farproc, FnCreate>(sym(module, "pcap_create")?),
+                set_snaplen: std::mem::transmute::<Farproc, FnSetInt>(sym(module, "pcap_set_snaplen")?),
+                set_promisc: std::mem::transmute::<Farproc, FnSetInt>(sym(module, "pcap_set_promisc")?),
+                set_timeout: std::mem::transmute::<Farproc, FnSetInt>(sym(module, "pcap_set_timeout")?),
+                activate: std::mem::transmute::<Farproc, FnActivate>(sym(module, "pcap_activate")?),
+                statustostr: std::mem::transmute::<Farproc, FnStatusToStr>(
+                    sym(module, "pcap_statustostr")?,
+                ),
+                set_tstamp_precision: sym(module, "pcap_set_tstamp_precision")
+                    .ok()
+                    .map(|p| std::mem::transmute::<Farproc, FnSetInt>(p)),
+                get_tstamp_precision: sym(module, "pcap_get_tstamp_precision")
+                    .ok()
+                    .map(|p| std::mem::transmute::<Farproc, FnGetInt>(p)),
+                compile: std::mem::transmute::<Farproc, FnCompile>(sym(module, "pcap_compile")?),
+                setfilter: std::mem::transmute::<Farproc, FnSetFilter>(sym(module, "pcap_setfilter")?),
+                freecode: std::mem::transmute::<Farproc, FnFreeCode>(sym(module, "pcap_freecode")?),
+                open_dead: std::mem::transmute::<Farproc, FnOpenDead>(sym(module, "pcap_open_dead")?),
                 close: std::mem::transmute::<Farproc, FnClose>(sym(module, "pcap_close")?),
                 next_ex: std::mem::transmute::<Farproc, FnNextEx>(sym(module, "pcap_next_ex")?),
                 stats: std::mem::transmute::<Farproc, FnStats>(sym(module, "pcap_stats")?),
@@ -222,7 +297,7 @@ impl Npcap {
                 datalink: std::mem::transmute::<Farproc, FnDatalink>(sym(module, "pcap_datalink")?),
                 #[cfg(test)]
                 open_offline: std::mem::transmute::<Farproc, FnOpenOffline>(
-                    sym(module, "pcap_open_offline")?,
+                    sym(module, "pcap_open_offline_with_tstamp_precision")?,
                 ),
             })
         }
@@ -256,41 +331,86 @@ impl Npcap {
         Ok(out)
     }
 
-    /// Opens one device for capture.
-    ///
-    /// `to_ms` is 100 deliberately: the read returns on its own timeout, which
-    /// is how a stop is honoured promptly on an adapter with no traffic.
-    /// Opens a capture file as if it were an adapter. Tests only - see the
-    /// `open_offline` field.
+    /// Opens a capture file as if it were an adapter, in nanoseconds. Tests
+    /// only - see the `open_offline` field.
     #[cfg(test)]
     pub fn open_file(&self, path: &std::path::Path) -> io::Result<Capture<'_>> {
         let name = CString::new(path.to_string_lossy().as_bytes())
             .map_err(|_| io::Error::other("a path cannot contain a nul"))?;
         let mut errbuf = [0 as c_char; PCAP_ERRBUF_SIZE];
-        let handle = unsafe { (self.open_offline)(name.as_ptr(), errbuf.as_mut_ptr()) };
-        if handle.is_null() {
-            return Err(io::Error::other(unsafe { cstr(errbuf.as_ptr()) }));
-        }
-        Ok(Capture { npcap: self, handle })
-    }
-
-    pub fn open(&self, device: &str, promiscuous: bool) -> io::Result<Capture<'_>> {
-        let name = CString::new(device)
-            .map_err(|_| io::Error::other("a device name cannot contain a nul"))?;
-        let mut errbuf = [0 as c_char; PCAP_ERRBUF_SIZE];
         let handle = unsafe {
-            (self.open_live)(
-                name.as_ptr(),
-                SNAPLEN,
-                if promiscuous { 1 } else { 0 },
-                100,
-                errbuf.as_mut_ptr(),
-            )
+            (self.open_offline)(name.as_ptr(), PCAP_TSTAMP_PRECISION_NANO, errbuf.as_mut_ptr())
         };
         if handle.is_null() {
             return Err(io::Error::other(unsafe { cstr(errbuf.as_ptr()) }));
         }
-        Ok(Capture { npcap: self, handle })
+        Ok(Capture { npcap: self, handle, nanoseconds: true, keep: SNAPLEN as usize })
+    }
+
+    /// Opens one device for capture.
+    ///
+    /// `to_ms` is 100 deliberately: the read returns on its own timeout, which
+    /// is how a stop is honoured promptly on an adapter with no traffic.
+    ///
+    /// **Nanoseconds are asked for and not required.** A driver that refuses
+    /// them captures in microseconds, and the handle says which it got - a
+    /// precision is a fact about the frames, and the frames are no less worth
+    /// having for being stamped more coarsely.
+    pub fn open(&self, device: &str, options: OpenOptions) -> io::Result<Capture<'_>> {
+        let name = CString::new(device)
+            .map_err(|_| io::Error::other("a device name cannot contain a nul"))?;
+        let mut errbuf = [0 as c_char; PCAP_ERRBUF_SIZE];
+        let handle = unsafe { (self.create)(name.as_ptr(), errbuf.as_mut_ptr()) };
+        if handle.is_null() {
+            return Err(io::Error::other(unsafe { cstr(errbuf.as_ptr()) }));
+        }
+        // Owned from here, so every early return below closes it.
+        let mut capture = Capture { npcap: self, handle, nanoseconds: false, keep: SNAPLEN as usize };
+        let snaplen = c_int::from(options.snaplen).clamp(1, SNAPLEN);
+        capture.keep_at_most(options.snaplen);
+        unsafe {
+            (self.set_snaplen)(handle, snaplen);
+            (self.set_promisc)(handle, c_int::from(options.promiscuous));
+            (self.set_timeout)(handle, 100);
+            if let Some(set_precision) = self.set_tstamp_precision {
+                // Refused with PCAP_ERROR_TSTAMP_PRECISION_NOTSUP by a driver
+                // that stamps in microseconds only; asked below which it was.
+                set_precision(handle, PCAP_TSTAMP_PRECISION_NANO);
+            }
+        }
+        let status = unsafe { (self.activate)(handle) };
+        // A positive status is a warning - promiscuous mode not supported, a
+        // timestamp type refused - and the handle is live.
+        if status < 0 {
+            let text = capture.error();
+            let reason = if status == PCAP_ERROR || text != "no message" {
+                text
+            } else {
+                unsafe { cstr((self.statustostr)(status)) }
+            };
+            return Err(io::Error::other(reason));
+        }
+        capture.nanoseconds = self
+            .get_tstamp_precision
+            .map(|get| unsafe { get(handle) } == PCAP_TSTAMP_PRECISION_NANO)
+            .unwrap_or(false);
+        Ok(capture)
+    }
+
+    /// Whether `filter` compiles for an adapter of `link_type`, and libpcap's
+    /// own sentence when it does not.
+    ///
+    /// A filter is compiled against a link type, not a device: `ether host`
+    /// means nothing on Npcap's loopback adapter, which is `DLT_NULL`. So this
+    /// asks a dead handle of that type, which opens nothing and needs no
+    /// privilege - it is the question a filter box asks while somebody types.
+    pub fn check_filter(&self, link_type: i32, filter: &str) -> Result<(), String> {
+        let handle = unsafe { (self.open_dead)(link_type, SNAPLEN) };
+        if handle.is_null() {
+            return Err(format!("libpcap cannot compile for link type {link_type}"));
+        }
+        let dead = Capture { npcap: self, handle, nanoseconds: false, keep: 0 };
+        dead.compile(filter).map(|mut program| unsafe { (self.freecode)(&mut program) })
     }
 }
 
@@ -305,10 +425,11 @@ unsafe fn cstr(p: *const c_char) -> String {
 
 /// What one `pcap_next_ex` returned.
 pub enum Read<'a> {
-    /// A frame, its capture time in microseconds, and its length on the wire.
+    /// A frame, its capture time in epoch nanoseconds, and its length on the
+    /// wire.
     Frame {
         data: &'a [u8],
-        ts_us: f64,
+        ts_ns: u64,
         wire_len: u32,
     },
     /// The `to_ms` timeout expired with no frame. **Not an error**: it is how a
@@ -325,9 +446,65 @@ pub enum Read<'a> {
 pub struct Capture<'a> {
     npcap: &'a Npcap,
     handle: *mut PcapT,
+    /// What the driver stamps in, as it answered after activation.
+    nanoseconds: bool,
+    /// The most of any frame `next` hands out - see `keep_at_most`.
+    keep: usize,
 }
 
 impl Capture<'_> {
+    /// Whether this handle's timestamps are nanoseconds rather than
+    /// microseconds - the precision the frames actually carry, which is 9
+    /// decimals or 6 in the app's time column.
+    pub fn nanoseconds(&self) -> bool {
+        self.nanoseconds
+    }
+
+    /// Hands out at most `snaplen` bytes of any frame, whatever the driver
+    /// delivered, and reports the rest in the wire length as the driver does.
+    ///
+    /// **The driver already truncates at the snaplen it was opened with**, so
+    /// on a live adapter this never cuts anything. It is here so the snaplen a
+    /// capture asked for is a property of what this handle hands out rather
+    /// than a promise about every driver - and so it holds on a capture file,
+    /// which a snaplen given to libpcap does not touch, which is how the tests
+    /// read real frames through it.
+    pub fn keep_at_most(&mut self, snaplen: u16) {
+        self.keep = usize::from(snaplen.max(1));
+    }
+
+    /// Compiles `filter` for this handle, or says why not in libpcap's words.
+    fn compile(&self, filter: &str) -> Result<BpfProgram, String> {
+        let text =
+            CString::new(filter).map_err(|_| "a capture filter cannot contain a nul".to_string())?;
+        let mut program = BpfProgram { bf_len: 0, bf_insns: ptr::null_mut() };
+        let rc = unsafe {
+            (self.npcap.compile)(self.handle, &mut program, text.as_ptr(), 1, PCAP_NETMASK_UNKNOWN)
+        };
+        if rc != 0 {
+            return Err(self.error());
+        }
+        Ok(program)
+    }
+
+    /// Has the driver drop every frame `filter` does not match, before it is
+    /// copied anywhere.
+    ///
+    /// **In the kernel, which is the point.** A frame the filter refuses never
+    /// reaches the ring, so it cannot fill it: this is the one lever that makes
+    /// a burst of traffic nobody asked for cost nothing, where every other
+    /// stage only decides who pays.
+    pub fn set_filter(&self, filter: &str) -> Result<(), String> {
+        let mut program = self.compile(filter)?;
+        let rc = unsafe { (self.npcap.setfilter)(self.handle, &mut program) };
+        // libpcap keeps its own copy; ours is freed whether or not it took.
+        unsafe { (self.npcap.freecode)(&mut program) };
+        if rc != 0 {
+            return Err(self.error());
+        }
+        Ok(())
+    }
+
     /// Raises the driver's kernel buffer.
     ///
     /// Npcap's default on Windows is 1 MB, which at a ~1,100-byte mean frame is
@@ -417,11 +594,17 @@ impl Capture<'_> {
                 // buffer they describe is valid until the next call - which the
                 // returned lifetime ties to `&mut self`.
                 let h = unsafe { *header };
-                let caplen = h.caplen as usize;
+                let caplen = (h.caplen as usize).min(self.keep);
+                // The driver's own clock, as seconds and a fraction whose unit
+                // is the precision the handle was activated with. The seconds
+                // are an `i32` on Windows and read as unsigned, which carries
+                // them to 2106 rather than to 2038.
+                let fraction = u64::from(h.ts.tv_usec as u32);
+                let ts_ns = u64::from(h.ts.tv_sec as u32) * 1_000_000_000
+                    + if self.nanoseconds { fraction } else { fraction * 1_000 };
                 Ok(Read::Frame {
                     data: unsafe { std::slice::from_raw_parts(data, caplen) },
-                    // The driver's own clock, as seconds and microseconds.
-                    ts_us: h.ts.tv_sec as f64 * 1_000_000.0 + h.ts.tv_usec as f64,
+                    ts_ns,
                     wire_len: h.len,
                 })
             }
@@ -515,5 +698,28 @@ mod tests {
             npcap.setmintocopy.is_some(),
             "wpcap.dll exports no pcap_setmintocopy"
         );
+        // Optional in the type for an old libpcap, and required here: without
+        // them every capture on this machine is quietly microseconds.
+        assert!(npcap.set_tstamp_precision.is_some(), "wpcap.dll exports no pcap_set_tstamp_precision");
+        assert!(npcap.get_tstamp_precision.is_some(), "wpcap.dll exports no pcap_get_tstamp_precision");
+    }
+
+    /// **A filter is checked against a link type, in libpcap's own words.**
+    /// `ether host` compiles for Ethernet and not for Npcap's loopback, which
+    /// is `DLT_NULL` - the reason the check takes a link type at all.
+    #[test]
+    fn a_capture_filter_compiles_or_says_why() {
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        if !std::path::Path::new(&system).join(r"System32\Npcap\wpcap.dll").exists() {
+            eprintln!("SKIP  Npcap is not installed on this machine");
+            return;
+        }
+        let npcap = Npcap::load().expect("wpcap.dll is installed and loads");
+        assert_eq!(npcap.check_filter(1, "tcp port 443 or udp port 53"), Ok(()));
+        assert_eq!(npcap.check_filter(1, "ether host 00:11:22:33:44:55"), Ok(()));
+        let loopback = npcap.check_filter(0, "ether host 00:11:22:33:44:55");
+        assert!(loopback.is_err(), "ether host compiled for DLT_NULL");
+        let typo = npcap.check_filter(1, "tcp prot 443").unwrap_err();
+        assert!(typo.contains("syntax error"), "libpcap's reason is kept: {typo}");
     }
 }

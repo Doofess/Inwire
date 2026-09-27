@@ -37,8 +37,15 @@ field needs to be aligned):
     iface      u16       index into the interface list in hello/state
     capLen     u16       bytes actually present
     origExtra  u16       wire length MINUS capLen; 0 unless truncated
-    tsUs       f64       capture time, epoch microseconds
+    tsNs       u64       capture time, epoch nanoseconds
     bytes      capLen    the frame
+
+**`tsNs` was an f64 of microseconds until version 3.** Epoch nanoseconds are
+past 2^53, so no float could carry the precision Npcap gives when asked for
+it; the same eight bytes as an integer carry it exactly. This agent stamps in
+microseconds - scapy activates its handle before we could ask for more - and
+sends them as nanoseconds with three zeros, reporting `tsPrecision: 6` for
+each interface so the app knows those zeros were never measured.
 
 A record carries no source, destination, protocol or info. It never needed to:
 the browser dissects the bytes with the same code an imported pcap goes
@@ -63,7 +70,7 @@ a captured frame averaged 1,101 bytes and nothing about framing was ever going
 to matter beside the frame itself. On the 78,480 frames at or under 100 bytes
 it is 6% of each record, which is where it shows.
 
-**Six more bytes were available and deliberately left.** `seq` and `tsUs` are
+**Six more bytes were available and deliberately left.** `seq` and `tsNs` are
 largely redundant WITHIN a batch - a u16 delta and a u32 delta off a base in
 the header would carry both, taking the record to 12 bytes. That encoding
 cannot be produced by `encode_record`, because a record is encoded on the
@@ -78,19 +85,20 @@ Another 0.5% of this stream does not buy either of those.
 import struct
 
 MAGIC = b"IWP1"
-# 2 since the record shrank from 24 bytes to 18. The browser refuses a version
-# it does not know rather than reading the old layout at the new offsets, which
-# would produce plausible frames with wrong lengths instead of an error.
-VERSION = 2
+# 3 since the timestamp became integer nanoseconds; 2 since the record shrank
+# from 24 bytes to 18. The browser refuses a version it does not know rather
+# than reading the old layout at the new offsets, which would produce plausible
+# frames with wrong lengths instead of an error.
+VERSION = 3
 
 HEADER = struct.Struct("<4sBBH")
-RECORD = struct.Struct("<IHHHd")
+RECORD = struct.Struct("<IHHHQ")
 
 assert HEADER.size == 8
 assert RECORD.size == 18
 
 
-def encode_record(seq: int, iface: int, ts_us: float, orig_len: int, data: bytes) -> bytes:
+def encode_record(seq: int, iface: int, ts_ns: int, orig_len: int, data: bytes) -> bytes:
     """One record, ready to be concatenated into a batch.
 
     Encoded on the sniffer thread - it is a struct pack and a bytes() of a
@@ -129,7 +137,7 @@ def encode_record(seq: int, iface: int, ts_us: float, orig_len: int, data: bytes
             "desynchronise the decoder rather than truncate the frame"
         )
     return RECORD.pack(seq & 0xFFFFFFFF, iface & 0xFFFF,
-                       cap_len, extra, float(ts_us)) + data
+                       cap_len, extra, int(ts_ns)) + data
 
 
 def encode_batch(records) -> bytes:
@@ -178,14 +186,14 @@ def decode_batch(payload: bytes):
     for _ in range(count):
         if offset + RECORD.size > len(payload):
             raise ValueError("truncated record header")
-        seq, iface, cap_len, orig_extra, ts_us = RECORD.unpack_from(payload, offset)
+        seq, iface, cap_len, orig_extra, ts_ns = RECORD.unpack_from(payload, offset)
         offset += RECORD.size
         if offset + cap_len > len(payload):
             raise ValueError("truncated record payload")
         out.append({
             "seq": seq,
             "iface": iface,
-            "tsUs": ts_us,
+            "tsNs": ts_ns,
             # Reconstructed, not read: the wire length is sent as its excess
             # over what was captured. The browser's decoder does the same sum.
             "origLen": cap_len + orig_extra,

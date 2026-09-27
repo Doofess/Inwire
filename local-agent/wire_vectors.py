@@ -34,20 +34,30 @@ FIXTURE = (pathlib.Path(__file__).resolve().parent.parent
 
 #: Inputs chosen to pin the edges, not the middle.
 #:
-#: - a full-size frame with an ordinary sequence number and timestamp
-#: - `seq` at the u32 ceiling, an empty payload, and a fractional timestamp
-#:   (the .5 is exactly representable at that magnitude, so it survives JSON)
+#: - a full-size frame with an ordinary sequence number and a timestamp in
+#:   Npcap's 100 ns steps
+#: - `seq` at the u32 ceiling, an empty payload, and a timestamp whose last
+#:   digit is a single nanosecond - past 2^53, so a decoder that goes through a
+#:   float gets it wrong, which is the failure version 3 exists to prevent
 #: - a 9,000-byte jumbo whose wire length exceeds what was captured, which is
 #:   what exercises the `extra` field being a DIFFERENCE rather than a length
+#: - the last nanosecond whose microsecond count a double still holds exactly
+#:   (2^53 - 1 of them, then 999 ns): the app decodes a stamp as whole
+#:   microseconds plus a remainder without a BigInt, which is exact up to
+#:   here - the year 2255 - and a decoder that took a shortcut is not
+#:
+#: `tsNs` is written into the file as a decimal STRING: JSON numbers past 2^53
+#: are rounded by TypeScript's `JSON.parse` before any decoder sees them.
 RECORDS = [
-    {"seq": 0, "iface": 0, "tsUs": 1788477971653284.0, "origLen": 1514,
+    {"seq": 0, "iface": 0, "tsNs": 1788477971653284300, "origLen": 1514,
      "data": bytes(range(64))},
-    {"seq": 4294967295, "iface": 7, "tsUs": 1788477971653285.5, "origLen": 60,
+    {"seq": 4294967295, "iface": 7, "tsNs": 1788477971653285501, "origLen": 60,
      "data": b""},
-    {"seq": 9, "iface": 1, "tsUs": 1.0, "origLen": 9000, "data": b"\xff" * 9000},
+    {"seq": 9, "iface": 1, "tsNs": 1000, "origLen": 9000, "data": b"\xff" * 9000},
     # A truncated frame: captured short, wire length far larger. `extra` carries
     # the difference and the decoder reconstructs origLen by adding it back.
-    {"seq": 12345, "iface": 2, "tsUs": 2.5, "origLen": 65000, "data": b"\xab" * 128},
+    {"seq": 12345, "iface": 2, "tsNs": 9007199254740991999, "origLen": 65000,
+     "data": b"\xab" * 128},
 ]
 
 #: Control messages, for the framing layer.
@@ -63,16 +73,16 @@ def build() -> dict:
     records = []
     for r in RECORDS:
         encoded = packet_batch.encode_record(
-            r["seq"], r["iface"], r["tsUs"], r["origLen"], r["data"])
+            r["seq"], r["iface"], r["tsNs"], r["origLen"], r["data"])
         records.append({
-            "seq": r["seq"], "iface": r["iface"], "tsUs": r["tsUs"],
+            "seq": r["seq"], "iface": r["iface"], "tsNs": str(r["tsNs"]),
             "origLen": r["origLen"],
             "dataBase64": base64.b64encode(r["data"]).decode("ascii"),
             "encodedHex": encoded.hex(),
         })
 
     batch = packet_batch.encode_batch([
-        packet_batch.encode_record(r["seq"], r["iface"], r["tsUs"], r["origLen"], r["data"])
+        packet_batch.encode_record(r["seq"], r["iface"], r["tsNs"], r["origLen"], r["data"])
         for r in RECORDS
     ])
 

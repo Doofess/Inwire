@@ -56,7 +56,8 @@ interface Vectors {
     frameJson: number; frameBinary: number; maxFrameBytes: number;
   };
   records: {
-    seq: number; iface: number; tsUs: number; origLen: number;
+    /** Epoch nanoseconds, as a decimal string: past 2^53, a JSON number would round. */
+    seq: number; iface: number; tsNs: string; origLen: number;
     dataBase64: string; encodedHex: string;
   }[];
   batchHex: string;
@@ -99,7 +100,11 @@ console.log();
     const got = decoded[i];
     check(`record ${i}: seq`, got.seq, want.seq);
     check(`record ${i}: iface`, got.iface, want.iface);
-    check(`record ${i}: timestamp`, got.tsUs, want.tsUs);
+    // Split into whole microseconds and a remainder by the decoder; joined
+    // back here with a BigInt, which the decoder deliberately does not use.
+    const ns = BigInt(want.tsNs);
+    check(`record ${i}: timestamp, whole microseconds`, got.tsUs, Number(ns / 1000n));
+    check(`record ${i}: timestamp, the nanoseconds past them`, got.tsNsRem, Number(ns % 1000n));
     // The half a new decoder is most likely to get wrong: the wire length is
     // RECONSTRUCTED by adding `extra` back to the captured length, because it
     // is sent as the difference. Record 3 is captured short on purpose.

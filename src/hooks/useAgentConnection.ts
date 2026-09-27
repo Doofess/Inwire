@@ -489,6 +489,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
       // agent that said Ethernet are different facts, and only the first may
       // be overridden by a later answer.
       linkType: iface.linkType,
+      tsPrecision: iface.tsPrecision,
     })));
   }, [agentInterfaces]);
 

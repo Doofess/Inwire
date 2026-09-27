@@ -12,8 +12,15 @@
 //!   u16  iface     which adapter it came from, as a list position
 //!   u16  capLen    how many bytes follow this record
 //!   u16  extra     wire length MINUS capLen, so 0 on an untruncated frame
-//!   f64  tsUs      the driver's timestamp, microseconds
+//!   u64  tsNs      the driver's timestamp, epoch nanoseconds
 //! ```
+//!
+//! **`tsNs` was an `f64` of microseconds until version 3**, and could not have
+//! carried nanoseconds as one: epoch nanoseconds are past 2^53, and even epoch
+//! microseconds are only 0.25 us apart in an `f64` today. So the capture's own
+//! precision - which Npcap gives in nanoseconds when asked, in 100 ns steps on
+//! this machine - was thrown away at the last step before the pipe. The same
+//! eight bytes as an integer hold it exactly until 2554.
 //!
 //! `extra` is a difference rather than a second length because on every
 //! untruncated frame in existence it would otherwise repeat `capLen` exactly.
@@ -29,12 +36,13 @@
 /// `IWP1`, little-endian on the wire like everything else here.
 pub const MAGIC: [u8; 4] = *b"IWP1";
 
-/// 2 since the record shrank from 24 bytes to 18.
+/// 3 since the timestamp became integer nanoseconds; 2 since the record
+/// shrank from 24 bytes to 18.
 ///
 /// A decoder refuses a version it does not know rather than reading the old
 /// layout at the new offsets, which would produce plausible frames with wrong
 /// lengths instead of an error.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 
 pub const HEADER_BYTES: usize = 8;
 pub const RECORD_BYTES: usize = 18;
@@ -87,7 +95,7 @@ impl core::fmt::Display for WireError {
 pub fn encode_record(
     seq: u32,
     iface: u16,
-    ts_us: f64,
+    ts_ns: u64,
     orig_len: usize,
     data: &[u8],
 ) -> Result<Vec<u8>, WireError> {
@@ -102,7 +110,7 @@ pub fn encode_record(
     out.extend_from_slice(&iface.to_le_bytes());
     out.extend_from_slice(&(cap_len as u16).to_le_bytes());
     out.extend_from_slice(&extra.to_le_bytes());
-    out.extend_from_slice(&ts_us.to_le_bytes());
+    out.extend_from_slice(&ts_ns.to_le_bytes());
     out.extend_from_slice(data);
     Ok(out)
 }
@@ -131,7 +139,7 @@ pub fn encode_batch(records: &[Vec<u8>]) -> Result<Vec<u8>, WireError> {
 pub struct Record {
     pub seq: u32,
     pub iface: u16,
-    pub ts_us: f64,
+    pub ts_ns: u64,
     /// Reconstructed by adding `extra` back to `capLen`, never read directly.
     pub orig_len: u32,
     pub data: Vec<u8>,
@@ -163,7 +171,7 @@ pub fn decode_batch(payload: &[u8]) -> Result<Vec<Record>, WireError> {
         let iface = u16::from_le_bytes([payload[offset + 4], payload[offset + 5]]);
         let cap_len = u16::from_le_bytes([payload[offset + 6], payload[offset + 7]]) as usize;
         let extra = u16::from_le_bytes([payload[offset + 8], payload[offset + 9]]) as u32;
-        let ts_us = f64::from_le_bytes(payload[offset + 10..offset + 18].try_into().unwrap());
+        let ts_ns = u64::from_le_bytes(payload[offset + 10..offset + 18].try_into().unwrap());
         offset += RECORD_BYTES;
         if offset + cap_len > payload.len() {
             return Err(WireError::TruncatedPayload);
@@ -171,7 +179,7 @@ pub fn decode_batch(payload: &[u8]) -> Result<Vec<Record>, WireError> {
         out.push(Record {
             seq,
             iface,
-            ts_us,
+            ts_ns,
             orig_len: cap_len as u32 + extra,
             data: payload[offset..offset + cap_len].to_vec(),
         });

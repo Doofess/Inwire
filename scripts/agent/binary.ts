@@ -45,14 +45,14 @@ function checkThrows(name: string, fn: () => unknown) {
  * does. If the two implementations of that subtraction ever disagree, the
  * truncated case below is what says so.
  */
-function record(seq: number, iface: number, tsUs: number, origLen: number, data: Uint8Array): Uint8Array {
+function record(seq: number, iface: number, tsNs: bigint, origLen: number, data: Uint8Array): Uint8Array {
   const out = new Uint8Array(BATCH_RECORD_BYTES + data.length);
   const view = new DataView(out.buffer);
   view.setUint32(0, seq, true);
   view.setUint16(4, iface, true);
   view.setUint16(6, data.length, true);
   view.setUint16(8, Math.max(0, Math.min(0xffff, origLen - data.length)), true);
-  view.setFloat64(10, tsUs, true);
+  view.setBigUint64(10, tsNs, true);
   out.set(data, BATCH_RECORD_BYTES);
   return out;
 }
@@ -77,15 +77,18 @@ const jumbo = new Uint8Array(9000).fill(0xff);
 
 {
   const buffer = batch([
-    record(0, 0, 1788477971653284, 1514, sixtyFour),
-    record(4294967295, 7, 1788477971653285.5, 60, new Uint8Array(0)),
-    record(9, 1, 1, 9000, jumbo),
+    record(0, 0, 1788477971653284300n, 1514, sixtyFour),
+    record(4294967295, 7, 1788477971653285501n, 60, new Uint8Array(0)),
+    record(9, 1, 1000n, 9000, jumbo),
   ]);
 
   check('a batch is recognised before it is decoded', isPacketBatch(buffer), true);
   const frames = decodePacketBatch(buffer);
   check('every record comes back', frames.length, 3);
   check('the capture time survives to the microsecond', frames[0].tsUs, 1788477971653284);
+  check('...and past it, to the nanosecond', [frames[0].tsNsRem, frames[1].tsNsRem], [300, 501]);
+  check('...where a double of the whole stamp would have rounded it',
+    BigInt(Number(1788477971653285501n)) === 1788477971653285501n, false);
   check('a sequence number at the u32 ceiling round-trips', frames[1].seq, 4294967295);
   check('the interface index is carried', frames[1].iface, 7);
   check('a zero-length capture is a frame, not an error', frames[1].bytes.length, 0);
@@ -99,7 +102,7 @@ const jumbo = new Uint8Array(9000).fill(0xff);
   // because a record that grows silently is a wire break nothing would catch
   // until two builds disagreed in the field.
   check('a record is eighteen bytes of framing', BATCH_RECORD_BYTES, 18);
-  check('this build reads version 2', BATCH_VERSION, 2);
+  check('this build reads version 3', BATCH_VERSION, 3);
   check('the frame bytes are exact', Array.from(frames[0].bytes.slice(0, 5)), [0, 1, 2, 3, 4]);
 
   // The whole reason the bytes travel binary: nothing is copied between the
@@ -124,7 +127,7 @@ check('an empty batch decodes to no frames', decodePacketBatch(batch([])).length
 // --- refusals -----------------------------------------------------------------
 
 {
-  const good = batch([record(1, 0, 1, 60, sixtyFour)]);
+  const good = batch([record(1, 0, 1000n, 60, sixtyFour)]);
   const bytes = new Uint8Array(good);
 
   const notABatch = bytes.slice();

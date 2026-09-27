@@ -603,6 +603,118 @@ def datalink_of(device_name):
     return answer
 
 
+#: What the capture being started asked the driver for: a libpcap capture
+#: filter, and the most bytes of each frame to keep. Set by `start_capture`
+#: before its threads spawn, and read by each one as it opens its adapter.
+CAPTURE_OPTIONS = {"filter": None, "snaplen": 65535}
+
+#: The longest capture filter a client may send - the Rust agent's
+#: MAX_CAPTURE_FILTER_CHARS, with the same reason: the text reaches log lines.
+MAX_CAPTURE_FILTER_CHARS = 4096
+
+
+class CaptureOptionsError(ValueError):
+    """A filter or snaplen that is not one. The message is the reply's."""
+
+
+def _filter_of(message, command):
+    value = message.get("filter")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CaptureOptionsError(f"{command}'s filter must be text.")
+    if len(value) > MAX_CAPTURE_FILTER_CHARS:
+        raise CaptureOptionsError(
+            f"A capture filter is at most {MAX_CAPTURE_FILTER_CHARS} characters long.")
+    return value if value.strip() else None
+
+
+def parse_capture_options(message):
+    """`start_capture`'s filter and snaplen, or CaptureOptionsError.
+
+    **Refused, never defaulted.** A filter this agent could not read and
+    ignored would be a capture of everything that its owner believes is
+    narrowed - the same rule, and the same sentences, as the Rust agent's
+    `filter_of` and `snaplen_of`.
+    """
+    snaplen = message.get("snaplen")
+    if snaplen is None:
+        snaplen = 65535
+    elif isinstance(snaplen, bool) or not isinstance(snaplen, int) or not 1 <= snaplen <= 65535:
+        raise CaptureOptionsError(
+            "start_capture's snaplen must be a whole number of bytes from 1 to 65535.")
+    return {"filter": _filter_of(message, "start_capture"), "snaplen": snaplen}
+
+
+def _compile_error(handle, text):
+    """libpcap's reason `text` will not compile on `handle`, or None."""
+    from scapy.libs.winpcapy import bpf_program, pcap_compile, pcap_freecode  # noqa: PLC0415
+    program = bpf_program()
+    if pcap_compile(handle, byref(program), text.encode("utf-8"), 1, -1) != 0:
+        return _pcap_error_text(handle)
+    pcap_freecode(byref(program))
+    return None
+
+
+def apply_capture_filter(handle, text):
+    """Has the driver drop every frame `text` does not match, or raises.
+
+    On the raw handle rather than through scapy's `L2listen(filter=...)`,
+    because scapy's `setfilter` logs a compile failure and carries on - which
+    is a capture of everything, reported as a capture of what was asked.
+    """
+    from scapy.libs.winpcapy import bpf_program, pcap_compile, pcap_freecode, pcap_setfilter  # noqa: PLC0415
+    program = bpf_program()
+    if pcap_compile(handle, byref(program), text.encode("utf-8"), 1, -1) != 0:
+        raise OSError(f"the capture filter does not apply here: {_pcap_error_text(handle)}")
+    try:
+        if pcap_setfilter(handle, byref(program)) != 0:
+            raise OSError(f"the capture filter does not apply here: {_pcap_error_text(handle)}")
+    finally:
+        pcap_freecode(byref(program))
+
+
+def check_capture_filter(text, names):
+    """The `capture_filter_check` answer: whether `text` compiles for every
+    link type among the adapters `names`, in libpcap's words when it does not.
+
+    The Rust agent's `check_capture_filter`, rule for rule: per link type,
+    Ethernet for an adapter whose type is unknown and when none is named, and
+    the adapter's label on the reason only when the selection mixes types.
+    """
+    if not text.strip():
+        return {"type": "capture_filter_check", "filter": text, "error": None}
+    try:
+        from scapy.libs.winpcapy import pcap_close, pcap_open_dead  # noqa: PLC0415
+    except Exception:
+        return {"type": "capture_filter_check", "filter": text,
+                "error": "Npcap is not installed, so a capture filter cannot be checked"}
+    kinds = []
+    for name in names:
+        if name not in INTERFACE_LABELS:
+            continue
+        link_type = datalink_of(name)
+        link_type = 1 if link_type is None else link_type
+        if all(known != link_type for known, _ in kinds):
+            kinds.append((link_type, INTERFACE_LABELS[name]))
+    if not kinds:
+        kinds.append((1, None))
+    for link_type, label in kinds:
+        handle = pcap_open_dead(link_type, 65535)
+        if not handle:
+            reason = f"libpcap cannot compile for link type {link_type}"
+        else:
+            try:
+                reason = _compile_error(handle, text)
+            finally:
+                pcap_close(handle)
+        if reason is not None:
+            if label is not None and len(kinds) > 1:
+                reason = f"{label}: {reason}"
+            return {"type": "capture_filter_check", "filter": text, "error": reason}
+    return {"type": "capture_filter_check", "filter": text, "error": None}
+
+
 def interface_entries(interfaces) -> list:
     """The interface list as every message carries it.
 
@@ -615,6 +727,10 @@ def interface_entries(interfaces) -> list:
     field would be indistinguishable from having asked - and an agent too old
     to have looked would then be indistinguishable from one that looked and
     found Ethernet. See datalink_of.
+
+    `tsPrecision` is 6 wherever the link type could be read, because this agent
+    stamps in microseconds whatever the driver could do - see packet_to_record.
+    The Rust agent asks the driver for nanoseconds and says 9.
     """
     entries = []
     for i, (name, label) in enumerate(interfaces):
@@ -622,6 +738,7 @@ def interface_entries(interfaces) -> list:
         link_type = datalink_of(name)
         if link_type is not None:
             entry["linkType"] = link_type
+            entry["tsPrecision"] = 6
         entries.append(entry)
     return entries
 
@@ -747,8 +864,14 @@ def packet_to_record(raw, ts, iface_id=0, seq=0, wire_len=None) -> bytes:
     # and a truncated capture that reported the short number would be quietly
     # wrong about every frame it truncated. None means "the caller does not
     # know", which is every path that is not the libpcap fast one.
+    #
+    # The wire carries nanoseconds since version 3, and this agent has
+    # microseconds: scapy activates the handle before a precision could be
+    # asked for. So they are sent as nanoseconds with three zeros, and every
+    # interface says `tsPrecision: 6` (interface_entries) so the app knows the
+    # zeros were never measured.
     return packet_batch.encode_record(
-        seq, iface_id, capture_time_us(ts),
+        seq, iface_id, capture_time_us(ts) * 1000,
         len(raw) if wire_len is None else wire_len, raw,
     )
 
@@ -1219,6 +1342,30 @@ class AgentServer:
             }))
             return
 
+        # Before the ownership gate, as the Rust agent's parse is: options that
+        # are not options are refused whoever sent them, and a start that
+        # cannot be read must never become a capture on defaults.
+        options = None
+        if msg_type in ("start_capture", "check_capture_filter"):
+            try:
+                if msg_type == "start_capture":
+                    options = parse_capture_options(message)
+                else:
+                    text = _filter_of(message, "check_capture_filter") or ""
+                    names = message.get("interfaces")
+                    if names is None:
+                        names = []
+                    if not (isinstance(names, list) and all(isinstance(n, str) for n in names)):
+                        raise CaptureOptionsError(
+                            "check_capture_filter's interfaces must be a list of names.")
+                    await ws.send(json.dumps(check_capture_filter(text, names)))
+                    return
+            except CaptureOptionsError as exc:
+                await ws.send(json.dumps({
+                    "type": "error", "code": "invalid_capture_options", "message": str(exc),
+                }))
+                return
+
         if msg_type in ("start_capture", "stop_capture", "set_interfaces") and self.owned_by_other(ws):
             await ws.send(json.dumps({
                 "type": "error",
@@ -1229,6 +1376,14 @@ class AgentServer:
 
         if msg_type == "start_capture":
             log.info("start_capture requested on %d interface(s)", len(sniffer.selected_interfaces))
+            # A capture already running keeps its own: they were applied to
+            # handles that are still reading, as in the Rust agent.
+            if not sniffer.is_sniffing():
+                CAPTURE_OPTIONS.update(options)
+                if options["filter"] is not None:
+                    log.info("capture filter: %r", options["filter"])
+                if options["snaplen"] < 65535:
+                    log.info("snaplen: %d bytes", options["snaplen"])
             self.capture_owner = ws
             self.start_capture()
         elif msg_type == "stop_capture":
@@ -1942,6 +2097,15 @@ def sniff_callback(raw, ts, iface_id=0, wire_len=None, pcap_seconds=None,
         # capture drowned every genuine diagnostic in the viewer.
         log.info("%d packets captured so far", _captured_count)
 
+    # The snaplen, cut here: scapy opens its handle at its own fixed snaplen,
+    # so this agent truncates what it was handed rather than asking the driver
+    # to - the same frames on the wire, without the kernel-buffer saving the
+    # Rust agent's `pcap_set_snaplen` buys.
+    snaplen = CAPTURE_OPTIONS["snaplen"]
+    if len(raw) > snaplen:
+        if wire_len is None:
+            wire_len = len(raw)
+        raw = raw[:snaplen]
     seq = counters.next_seq(iface_id)
     try:
         record = packet_to_record(raw, ts, iface_id, seq, wire_len)
@@ -2109,6 +2273,24 @@ def sniff_on_interface(iface_name, iface_label, stop_event, iface_id=0):
         log.warning("capture failed on interface %r (%s): %s", iface_label, iface_name, exc)
         agent.report_capture_failure(iface_id, iface_name, iface_label, str(exc))
         return
+    # Before a frame is read, and a failure fails this adapter alone - the
+    # Rust agent's rule. A socket with no libpcap handle cannot be filtered
+    # here, and is refused rather than read unfiltered.
+    capture_filter = CAPTURE_OPTIONS["filter"]
+    if capture_filter is not None:
+        try:
+            handle_for_filter = pcap_handle(sock)
+            if not handle_for_filter:
+                raise OSError("the capture filter does not apply here: this socket has no libpcap handle")
+            apply_capture_filter(handle_for_filter, capture_filter)
+        except Exception as exc:
+            log.warning("capture failed on interface %r (%s): %s", iface_label, iface_name, exc)
+            agent.report_capture_failure(iface_id, iface_name, iface_label, str(exc))
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
     counters.register_socket(iface_id, sock)
     buffered = set_kernel_buffer(sock)
     log.info("%s: capture buffer %s", iface_label,

@@ -59,6 +59,13 @@ fn unb64(s: &str) -> Vec<u8> {
     out
 }
 
+/// A record's timestamp, which the file holds as a decimal STRING: epoch
+/// nanoseconds are past 2^53, and TypeScript's `JSON.parse` would round a
+/// number there before any decoder was asked about it.
+fn ts_ns(record: &serde_json::Value) -> u64 {
+    record["tsNs"].as_str().expect("tsNs is a string").parse().expect("tsNs is an integer")
+}
+
 #[test]
 fn constants_match_the_fixture() {
     let f = fixture();
@@ -83,7 +90,7 @@ fn each_record_encodes_to_the_golden_bytes() {
         let got = wire::encode_record(
             r["seq"].as_u64().unwrap() as u32,
             r["iface"].as_u64().unwrap() as u16,
-            r["tsUs"].as_f64().unwrap(),
+            ts_ns(r),
             r["origLen"].as_u64().unwrap() as usize,
             &data,
         )
@@ -108,7 +115,7 @@ fn the_batch_encodes_to_the_golden_bytes() {
             wire::encode_record(
                 r["seq"].as_u64().unwrap() as u32,
                 r["iface"].as_u64().unwrap() as u16,
-                r["tsUs"].as_f64().unwrap(),
+                ts_ns(r),
                 r["origLen"].as_u64().unwrap() as usize,
                 &data,
             )
@@ -130,7 +137,7 @@ fn the_batch_decodes_back_to_what_went_in() {
     for (got, want) in decoded.iter().zip(expected) {
         assert_eq!(got.seq, want["seq"].as_u64().unwrap() as u32);
         assert_eq!(got.iface, want["iface"].as_u64().unwrap() as u16);
-        assert_eq!(got.ts_us, want["tsUs"].as_f64().unwrap());
+        assert_eq!(got.ts_ns, ts_ns(want));
         // The wire length is RECONSTRUCTED from capLen + extra, which is the
         // half of this format most likely to be got wrong by a new decoder.
         assert_eq!(got.orig_len as u64, want["origLen"].as_u64().unwrap());
@@ -225,16 +232,16 @@ fn a_frame_too_long_for_the_length_field_is_refused_not_masked() {
     // frame. `extra` may clamp because nothing seeks by it; this may not.
     let long = vec![0u8; 0x10000];
     assert_eq!(
-        wire::encode_record(0, 0, 1.0, 0x10000, &long),
+        wire::encode_record(0, 0, 1, 0x10000, &long),
         Err(WireError::FrameTooLong(0x10000))
     );
     let exact = vec![0u8; 0xFFFF];
-    assert!(wire::encode_record(0, 0, 1.0, 0xFFFF, &exact).is_ok());
+    assert!(wire::encode_record(0, 0, 1, 0xFFFF, &exact).is_ok());
 }
 
 #[test]
 fn an_excess_past_the_u16_ceiling_clamps_instead_of_wrapping() {
-    let encoded = wire::encode_record(0, 0, 1.0, 200_000, &[0u8; 4]).unwrap();
+    let encoded = wire::encode_record(0, 0, 1, 200_000, &[0u8; 4]).unwrap();
     let batch = wire::encode_batch(&[encoded]).unwrap();
     let decoded = wire::decode_batch(&batch).unwrap();
     assert_eq!(decoded[0].orig_len, 4 + 0xFFFF);

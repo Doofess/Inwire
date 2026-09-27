@@ -66,6 +66,8 @@ const ORDERING_HOLD_MS = 100;
 const DETAIL_CACHE_FRAMES = 4000;
 
 interface LiveFrame extends Orderable {
+  /** Nanoseconds past `tsUs`; see `agentBinary.ts`. */
+  tsNsRem: number;
   bytes: Uint8Array;
   origLen: number;
   iface: number;
@@ -163,6 +165,14 @@ let nextId = 1;
 let arrivalSeq = 0;
 let captureStartUs: number | null = null;
 let lastPacketUs: number | null = null;
+/**
+ * The nanoseconds past each of those, so an adapter stamping in nanoseconds
+ * gets a relative-time column in nanoseconds. A restored session hands back
+ * microseconds only, and its remainders start at 0 - a sub-microsecond offset
+ * on a column that capture was already showing to six places.
+ */
+let captureStartNsRem = 0;
+let lastPacketNsRem = 0;
 
 let pendingPackets: Packet[] = [];
 let pendingIcmpReplies: { requestFrameId: number; replyId: number }[] = [];
@@ -218,6 +228,8 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   // it at zero underneath frames that are already numbered in the thousands.
   captureStartUs = startUs ?? null;
   lastPacketUs = lastUs ?? null;
+  captureStartNsRem = 0;
+  lastPacketNsRem = 0;
   arrivalSeq = 0;
   nextId = startId;
 }
@@ -259,6 +271,13 @@ let interfaceById = new Map<number, { name: string; label: string }>();
 let linkTypeById = new Map<number, number>();
 
 /**
+ * How many decimals of a second each adapter's stamps carry - 9 where the
+ * agent's driver gave nanoseconds, 6 where it gave microseconds. A miss is 6,
+ * which is what every live frame was until the agent could say.
+ */
+let tsPrecisionById = new Map<number, number>();
+
+/**
  * The same records, keyed by the label a frame carries - see
  * `interfacesByLabel`, which holds the `eth0` trap this must not walk into.
  */
@@ -276,6 +295,11 @@ function rebuildInterfaceIndex(): void {
   linkTypeById = new Map(
     interfaces
       .map((entry, index) => [entry.id ?? index, entry.linkType] as const)
+      .filter((pair): pair is readonly [number, number] => pair[1] !== undefined),
+  );
+  tsPrecisionById = new Map(
+    interfaces
+      .map((entry, index) => [entry.id ?? index, entry.tsPrecision] as const)
       .filter((pair): pair is readonly [number, number] => pair[1] !== undefined),
   );
   // Built from the same objects as `interfaceById`, so a replayed frame and a
@@ -316,13 +340,17 @@ function ingest(frame: LiveFrame, id: number): void {
   try {
     if (captureStartUs === null) {
       captureStartUs = frame.tsUs;
+      captureStartNsRem = frame.tsNsRem;
       lastPacketUs = null;
     }
-    const relativeTime = (frame.tsUs - captureStartUs) / 1_000_000;
+    // In nanoseconds, then seconds: a difference of two stamps is small enough
+    // that its nanosecond count is exact in a double where the stamps are not.
+    const relativeTime = ((frame.tsUs - captureStartUs) * 1000 + frame.tsNsRem - captureStartNsRem) / 1e9;
     const timeDelta = lastPacketUs !== null
-      ? Math.max(0, (frame.tsUs - lastPacketUs) / 1_000_000)
+      ? Math.max(0, ((frame.tsUs - lastPacketUs) * 1000 + frame.tsNsRem - lastPacketNsRem) / 1e9)
       : 0;
     lastPacketUs = frame.tsUs;
+    lastPacketNsRem = frame.tsNsRem;
 
     recorder.begin();
     const src = recorder.sources;
@@ -337,7 +365,11 @@ function ingest(frame: LiveFrame, id: number): void {
     const derived = recorder.endDerived();
     if (derived !== null) derivedStore.set(id, derived);
     const packet = decoded.packet;
-    packet.tsPrecision = 6;
+    const precision = tsPrecisionById.get(frame.iface) ?? 6;
+    packet.tsPrecision = precision;
+    // The exact stamp, as an import carries one, only where there is more of
+    // it than `tsUs` already says.
+    if (precision > 6) packet.tsNanos = BigInt(frame.tsUs) * 1000n + BigInt(frame.tsNsRem);
 
     // The tree stays here; only its bytes and its summary go up. Carrying it
     // would be 91% of the cost of crossing the boundary and 89% of the buffer's
@@ -640,6 +672,7 @@ function receiveBatch(bytes: Uint8Array): void {
     // batch, which one held frame would otherwise keep alive in full.
     ordering.push({
       tsUs: frame.tsUs,
+      tsNsRem: frame.tsNsRem,
       seq: frame.seq,
       arrivedAt,
       bytes: retain(frame),
@@ -681,6 +714,7 @@ function receiveControl(text: string): void {
   if (bytes) {
     ordering.push({
       tsUs,
+      tsNsRem: 0,
       seq: typeof raw.seq === 'number' ? raw.seq : arrivalSeq++,
       arrivedAt: performance.now(),
       bytes,

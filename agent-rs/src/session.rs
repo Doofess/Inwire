@@ -172,28 +172,28 @@ impl Default for FrameQueue {
     }
 }
 
-/// When a frame was captured, in epoch microseconds.
+/// When a frame was captured, in epoch nanoseconds.
 ///
 /// The driver's own stamp, except when the driver reported **none** - a stamp
-/// of exactly zero - which `agent.py`'s `capture_time_us` answers with the wall
+/// of exactly zero - which `agent.py`'s `capture_time_ns` answers with the wall
 /// clock (agent.py:715-716), and for its stated reason: "a frame with no time at
 /// all would break the browser's relative-time column outright, which is a
 /// worse outcome than one slightly-late timestamp." Only exact zero: a stamp
 /// that is merely old is a fact about the frame, not a missing one.
-pub fn capture_time_us(ts_us: f64, now_us: impl FnOnce() -> f64) -> f64 {
-    if ts_us == 0.0 {
-        now_us()
+pub fn capture_time_ns(ts_ns: u64, now_ns: impl FnOnce() -> u64) -> u64 {
+    if ts_ns == 0 {
+        now_ns()
     } else {
-        ts_us
+        ts_ns
     }
 }
 
-/// The wall clock in epoch microseconds, for `capture_time_us`'s fallback.
-pub fn wall_clock_us() -> f64 {
+/// The wall clock in epoch nanoseconds, for `capture_time_ns`'s fallback.
+pub fn wall_clock_ns() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_micros() as f64)
-        .unwrap_or(0.0)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 /// The log line owed after the `count`th frame this process has captured.
@@ -498,7 +498,7 @@ mod kernel_buffer_tests {
 ///
 /// **Real frames, not built ones**: every test here replays
 /// `test/fixtures/*.pcap` through the same calls the runtime's sniffer makes -
-/// `capture_time_us`, `wire::encode_record`, `FrameQueue::push_counting` and
+/// `capture_time_ns`, `wire::encode_record`, `FrameQueue::push_counting` and
 /// `ProcessCounts` - and holds the result to `agent.py`. The fixtures are
 /// untracked (ADR 0004), so each test prints `SKIP` and passes when they are
 /// absent rather than failing on a machine that never had them.
@@ -514,23 +514,23 @@ mod frame_accounting_tests {
     fn a_frame_keeps_its_driver_stamp_and_a_missing_one_gets_the_wall_clock() {
         let Some(frames) = fixture::any_capture() else { return };
         let frame = &frames[0];
-        assert!(frame.ts_us > 1.0e15, "the fixture's own stamp is a real epoch time");
+        assert!(frame.ts_ns > 1_000_000_000_000_000_000, "the fixture's own stamp is a real epoch time");
 
-        let stamped = capture_time_us(frame.ts_us, || panic!("a stamped frame never asks the clock"));
+        let stamped = capture_time_ns(frame.ts_ns, || panic!("a stamped frame never asks the clock"));
         let record = wire::encode_record(0, 0, stamped, frame.wire_len as usize, &frame.data).unwrap();
         let decoded = wire::decode_batch(&wire::encode_batch(&[record]).unwrap()).unwrap();
-        assert_eq!(decoded[0].ts_us, frame.ts_us);
+        assert_eq!(decoded[0].ts_ns, frame.ts_ns);
         assert_eq!(decoded[0].data, frame.data, "the bytes go through untouched");
 
         // The same real frame, as a driver that stamped nothing would hand it
         // over.
-        let before = wall_clock_us();
-        let unstamped = capture_time_us(0.0, wall_clock_us);
-        let after = wall_clock_us();
+        let before = wall_clock_ns();
+        let unstamped = capture_time_ns(0, wall_clock_ns);
+        let after = wall_clock_ns();
         assert!(before <= unstamped && unstamped <= after, "{before} <= {unstamped} <= {after}");
         let record = wire::encode_record(1, 0, unstamped, frame.wire_len as usize, &frame.data).unwrap();
         let decoded = wire::decode_batch(&wire::encode_batch(&[record]).unwrap()).unwrap();
-        assert_eq!(decoded[0].ts_us, unstamped);
+        assert_eq!(decoded[0].ts_ns, unstamped);
         assert_eq!(decoded[0].orig_len, frame.wire_len);
     }
 
@@ -553,7 +553,7 @@ mod frame_accounting_tests {
             if let Some(line) = counts.captured() {
                 milestones.push((n + 1, line));
             }
-            let ts = capture_time_us(frame.ts_us, wall_clock_us);
+            let ts = capture_time_ns(frame.ts_ns, wall_clock_ns);
             let record = wire::encode_record(n as u32, 0, ts, frame.wire_len as usize, &frame.data)
                 .expect("a captured frame encodes");
             if let Some(line) = counts.shed(queue.push_counting(record)) {

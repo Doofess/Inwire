@@ -51,7 +51,7 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
-use crate::protocol::{self, CaptureState, Command, Interface, ParseError};
+use crate::protocol::{self, CaptureOptions, CaptureState, Command, Interface, ParseError};
 
 /// A log line's level, spelled the way `agent_log` writes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,9 +98,11 @@ pub trait Driver {
     type Handle;
     /// A running capture - its sniffers, its pump, its queue.
     type Running;
-    /// Opens one adapter for capture. `Err` is the reason, as the sentence the
-    /// app will show after "Could not capture on {label}: ".
-    fn open(&self, iface: &Interface) -> Result<Self::Handle, String>;
+    /// Opens one adapter for capture, with the filter and snaplen its
+    /// `start_capture` asked for. `Err` is the reason, as the sentence the app
+    /// will show after "Could not capture on {label}: " - which for a filter
+    /// that will not compile for this adapter's link type is libpcap's own.
+    fn open(&self, iface: &Interface, options: &CaptureOptions) -> Result<Self::Handle, String>;
     /// Starts reading every opened adapter, for `owner`. `generation` travels
     /// with every report a sniffer makes back, so a late one can be told from
     /// a current one.
@@ -447,7 +449,7 @@ impl<R> Control<R> {
         command: &Command,
     ) -> bool {
         match command {
-            Command::StartCapture => self.start(env, driver, client),
+            Command::StartCapture(options) => self.start(env, driver, client, options),
             Command::StopCapture => self.stop(env, driver, client),
             Command::SetInterfaces(names) => self.set_interfaces(env, client, names),
             _ => return false,
@@ -456,7 +458,13 @@ impl<R> Control<R> {
     }
 
     /// agent.py:1230-1233, then 1385.
-    fn start<D: Driver<Running = R>>(&self, env: &(impl Env + ?Sized), driver: &D, client: &str) {
+    fn start<D: Driver<Running = R>>(
+        &self,
+        env: &(impl Env + ?Sized),
+        driver: &D,
+        client: &str,
+        options: &CaptureOptions,
+    ) {
         let _serial = self.commands.lock().unwrap();
         let wanted = {
             let mut st = self.state.lock().unwrap();
@@ -473,6 +481,14 @@ impl<R> Control<R> {
                 Level::Info,
                 &format!("start_capture requested on {} interface(s)", wanted.len()),
             );
+            // Said once, here, rather than per adapter: the same filter is
+            // applied to each, and a failure to compile names its adapter.
+            if let Some(filter) = &options.filter {
+                env.log(Level::Info, &format!("capture filter: {}", log_safe(filter)));
+            }
+            if options.snaplen < CaptureOptions::default().snaplen {
+                env.log(Level::Info, &format!("snaplen: {} bytes", options.snaplen));
+            }
             if let Some(active) = st.capture.as_mut() {
                 // **Already running: the asker becomes the owner and nothing
                 // restarts.** `agent.py` sets `capture_owner = ws` and its
@@ -485,6 +501,11 @@ impl<R> Control<R> {
                 // resets them before `start_threads` returns early
                 // (agent.py:1432-1436) - so a window that takes over a capture
                 // is not handed its predecessor's counts as its own.
+                //
+                // **The filter and snaplen are the running capture's**, not
+                // this request's: they were applied to handles that are still
+                // reading, and changing them would mean a restart this path
+                // exists to avoid.
                 active.owner = client.to_string();
                 driver.rebase(&active.running, client);
                 env.broadcast(&protocol::state(CaptureState::Sniffing, &interfaces, Some(client)));
@@ -492,7 +513,7 @@ impl<R> Control<R> {
             }
             wanted
         };
-        self.open_and_start(env, driver, client, &wanted);
+        self.open_and_start(env, driver, client, &wanted, options);
     }
 
     /// Opens what it can of `wanted`, starts on whatever opened, and says so.
@@ -515,6 +536,7 @@ impl<R> Control<R> {
         driver: &D,
         owner: &str,
         wanted: &[String],
+        options: &CaptureOptions,
     ) {
         let interfaces = env.interfaces();
         if wanted.is_empty() {
@@ -548,7 +570,7 @@ impl<R> Control<R> {
                 unlisted.push(name.as_str());
                 continue;
             };
-            match driver.open(iface) {
+            match driver.open(iface, options) {
                 Ok(handle) => {
                     members.push(Member {
                         iface: iface.id,
@@ -646,6 +668,12 @@ impl<R> Control<R> {
             ParseError::NotJson | ParseError::NotObject => {}
             ParseError::NoType => env.send_to(client, &unknown_command(crate::VERSION, "None")),
             ParseError::Unknown(what) => env.send_to(client, &unknown_command(crate::VERSION, what)),
+            // Refused whoever sent it: it changes nothing, so there is no
+            // ownership to consult, and a start the agent cannot read must
+            // never become a capture of everything.
+            ParseError::BadCaptureOptions(sentence) => {
+                env.send_to(client, &protocol::error("invalid_capture_options", sentence));
+            }
             ParseError::BadInterfaces
             | ParseError::EmptyInterfaces
             | ParseError::SelectionTooLarge => {
@@ -1006,6 +1034,8 @@ mod tests {
     struct FakeDriver {
         refuse: HashMap<String, String>,
         opened: Mutex<Vec<String>>,
+        /// What each open was asked to apply, in order.
+        options: Mutex<Vec<CaptureOptions>>,
         started: Mutex<Vec<(u64, Vec<String>)>>,
         stopped: Mutex<Vec<(FakeRunning, String)>>,
         rebased: Mutex<Vec<(u64, String)>>,
@@ -1023,8 +1053,9 @@ mod tests {
     impl Driver for FakeDriver {
         type Handle = String;
         type Running = FakeRunning;
-        fn open(&self, iface: &Interface) -> Result<String, String> {
+        fn open(&self, iface: &Interface, options: &CaptureOptions) -> Result<String, String> {
             self.opened.lock().unwrap().push(iface.name.clone());
+            self.options.lock().unwrap().push(options.clone());
             match self.refuse.get(&iface.name) {
                 Some(reason) => Err(reason.clone()),
                 None => Ok(iface.name.clone()),
@@ -1046,7 +1077,7 @@ mod tests {
     }
 
     fn iface(id: usize, name: &str, label: &str) -> Interface {
-        Interface { id, name: name.into(), label: label.into(), link_type: Some(1) }
+        Interface { id, name: name.into(), label: label.into(), link_type: Some(1), ts_precision: Some(9) }
     }
 
     /// Three adapters, named the way Npcap names them and labelled the way the
@@ -1062,6 +1093,11 @@ mod tests {
     const A: &str = r"\Device\NPF_{A}";
     const B: &str = r"\Device\NPF_{B}";
     const LO: &str = r"\Device\NPF_Loopback";
+
+    /// A plain `start_capture`: no filter, every byte.
+    fn start() -> Command {
+        Command::StartCapture(CaptureOptions::default())
+    }
 
     fn set(names: &[&str]) -> Command {
         Command::SetInterfaces(names.iter().map(|n| n.to_string()).collect())
@@ -1080,6 +1116,48 @@ mod tests {
 
     // --- start_capture -------------------------------------------------------
 
+    /// **The filter and the snaplen reach every adapter's open**, and a filter
+    /// that one adapter cannot compile - `ether host` on the loopback, which
+    /// is `DLT_NULL` - fails that adapter alone, in libpcap's words, while the
+    /// others capture. That is the per-adapter rule every other open failure
+    /// already follows.
+    #[test]
+    fn the_filter_and_snaplen_reach_each_open_and_a_refusal_is_that_adapters() {
+        let env = FakeEnv::with(&["a"], three());
+        let control = Control::new();
+        let driver = FakeDriver::refusing(&[(LO, "ether host 00:11:22:33:44:55: link layer applied in wrong context")]);
+        let options = CaptureOptions { filter: Some("ether host 00:11:22:33:44:55".into()), snaplen: 96 };
+        control.command(&env, &driver, "a", &set(&[A, LO]));
+        env.take();
+        assert!(control.command(&env, &driver, "a", &Command::StartCapture(options.clone())));
+        assert_eq!(*driver.options.lock().unwrap(), vec![options.clone(), options]);
+        assert_eq!(*driver.started.lock().unwrap(), vec![(1, vec![A.to_string()])]);
+        let sent = env.take();
+        let failed: Vec<&Value> = sent.iter().map(|(_, m)| m).filter(|m| m["code"] == "capture_failed").collect();
+        assert_eq!(failed.len(), 1, "{sent:?}");
+        assert_eq!(
+            failed[0]["message"],
+            "Could not capture on Adapter for loopback traffic capture: \
+             ether host 00:11:22:33:44:55: link layer applied in wrong context"
+        );
+        assert!(env.take_logs().contains(&(Level::Info, "capture filter: ether host 00:11:22:33:44:55".into())));
+    }
+
+    /// A start whose options could not be read is refused - never a capture of
+    /// everything that its owner believes was narrowed.
+    #[test]
+    fn a_start_with_unreadable_options_is_refused_and_starts_nothing() {
+        let env = FakeEnv::with(&["a"], three());
+        let control: Control<FakeRunning> = Control::new();
+        let driver = FakeDriver::default();
+        let error = protocol::parse_command(r#"{"type":"start_capture","snaplen":0}"#).unwrap_err();
+        control.parse_failed(&env, "a", &error);
+        let sent = env.take();
+        assert_eq!(errors(&sent).len(), 1, "{sent:?}");
+        assert_eq!(errors(&sent)[0].1["code"], "invalid_capture_options");
+        assert!(driver.opened.lock().unwrap().is_empty());
+    }
+
     /// agent.py:2364 builds the controller's selection from EVERY adapter, and
     /// agent.py:661 spawns a sniffer per selected name - so a `start_capture`
     /// with no `set_interfaces` before it captures on all of them. This used to
@@ -1089,7 +1167,7 @@ mod tests {
         let env = FakeEnv::with(&["a"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
-        assert!(control.command(&env, &driver, "a", &Command::StartCapture));
+        assert!(control.command(&env, &driver, "a", &start()));
 
         assert_eq!(*driver.started.lock().unwrap(), vec![(1, vec![A.into(), B.into(), LO.into()])]);
         let sent = env.take();
@@ -1115,7 +1193,7 @@ mod tests {
         control.command(&env, &driver, "a", &set(&[A, B]));
         env.take();
         env.take_logs();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
 
         let sent = env.take();
         assert_eq!(
@@ -1153,7 +1231,7 @@ mod tests {
         control.command(&env, &driver, "a", &set(&[A, B]));
         env.take();
         env.take_logs();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
 
         let sent = env.take();
         let failed: Vec<Value> = errors(&sent).into_iter().map(|(to, m)| {
@@ -1175,7 +1253,7 @@ mod tests {
 
         // Another window may start now: nothing is running (agent.py:1406).
         control.command(&env, &FakeDriver::default(), "b", &set(&[LO]));
-        control.command(&env, &FakeDriver::default(), "b", &Command::StartCapture);
+        control.command(&env, &FakeDriver::default(), "b", &start());
         assert_eq!(control.owner().as_deref(), Some("b"));
     }
 
@@ -1189,7 +1267,7 @@ mod tests {
         let control = Control::new();
         control.command(&env, &driver, "a", &set(&[r"\Device\NPF_{GONE}", A]));
         env.take();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
 
         let sent = env.take();
         let (to, message) = errors(&sent).remove(0);
@@ -1212,7 +1290,7 @@ mod tests {
         let env = FakeEnv::with(&["a", "b"], vec![]);
         let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
 
         let sent = env.take();
         assert_eq!(errors(&sent), vec![(To::One("a".into()), no_interfaces())]);
@@ -1230,9 +1308,9 @@ mod tests {
         let driver = FakeDriver::default();
         let control = Control::new();
         control.command(&env, &driver, "a", &set(&[A]));
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
 
         assert_eq!(driver.started.lock().unwrap().len(), 1, "not restarted");
         assert!(driver.stopped.lock().unwrap().is_empty());
@@ -1250,10 +1328,10 @@ mod tests {
         let env = FakeEnv::with(&["a", "b"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
 
-        for command in [Command::StartCapture, Command::StopCapture, set(&[LO])] {
+        for command in [start(), Command::StopCapture, set(&[LO])] {
             control.command(&env, &driver, "b", &command);
             assert_eq!(
                 env.take(),
@@ -1278,11 +1356,11 @@ mod tests {
         let env = FakeEnv::with(&["a", "b"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.drop_client("a");
         env.take();
 
-        control.command(&env, &driver, "b", &Command::StartCapture);
+        control.command(&env, &driver, "b", &start());
         let sent = env.take();
         assert!(errors(&sent).is_empty(), "no capture_busy for a stale owner");
         assert_eq!(states(&sent), vec![(To::All, "sniffing".into(), json!("b"))]);
@@ -1302,12 +1380,12 @@ mod tests {
         let driver = FakeDriver::default();
         let control = Control::new();
         control.command(&env, &driver, "a", &set(&[A]));
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         let dead = control.adapter_failed(&env, 1, 0, "pcap_next_ex failed (-1): device removed");
         assert!(dead.is_some());
         env.take();
 
-        control.command(&env, &driver, "b", &Command::StartCapture);
+        control.command(&env, &driver, "b", &start());
         assert!(errors(&env.take()).is_empty());
         assert_eq!(control.owner().as_deref(), Some("b"));
     }
@@ -1324,7 +1402,7 @@ mod tests {
         let driver = FakeDriver::default();
         let control = Control::new();
         control.command(&env, &driver, "a", &set(&[A]));
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
         env.take_logs();
 
@@ -1346,7 +1424,7 @@ mod tests {
         env.take();
         control.command(&env, &driver, "a", &set(&[B, LO]));
         assert_eq!(states(&env.take()), vec![(To::All, "idle".into(), Value::Null)]);
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         assert_eq!(
             driver.started.lock().unwrap().last(),
             Some(&(2, vec![B.to_string(), LO.to_string()]))
@@ -1361,7 +1439,7 @@ mod tests {
         let env = FakeEnv::with(&["a", "b"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
 
         control.command(&env, &driver, "b", &set(&[B]));
@@ -1381,7 +1459,7 @@ mod tests {
         control.command(&env, &driver, "a", &set(&[B]));
         assert_eq!(states(&env.take()), vec![(To::All, "idle".into(), Value::Null)]);
         assert!(driver.opened.lock().unwrap().is_empty(), "idle stays idle");
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         assert_eq!(*driver.started.lock().unwrap(), vec![(1, vec![B.to_string()])]);
     }
 
@@ -1413,7 +1491,7 @@ mod tests {
             "message": "At least one interface must be selected.",
         }))]);
 
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
         control.parse_failed(&env, "b", &empty);
         assert_eq!(env.take(), vec![(To::One("b".into()), capture_busy())]);
@@ -1428,7 +1506,7 @@ mod tests {
         let env = FakeEnv::with(&["a", "b"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
         env.take_logs();
         control.command(&env, &driver, "a", &Command::StopCapture);
@@ -1453,7 +1531,7 @@ mod tests {
         let env = FakeEnv::with(&["a", "b"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
         env.take_logs();
 
@@ -1475,7 +1553,7 @@ mod tests {
         let env = FakeEnv::with(&["a", "b"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
 
         env.drop_client("b");
@@ -1507,7 +1585,7 @@ mod tests {
         let driver = FakeDriver::default();
         let control = Control::new();
         control.command(&env, &driver, "a", &set(&[A, B]));
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
 
         assert!(control.adapter_failed(&env, 1, 1, "pcap_next_ex failed (-1): device removed").is_none());
@@ -1532,7 +1610,7 @@ mod tests {
         assert_eq!(control.owner_of(1), None, "the pump's signal to leave");
 
         // A start is taken, not ignored because a handle lingers.
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         assert_eq!(driver.started.lock().unwrap().len(), 2);
     }
 
@@ -1543,7 +1621,7 @@ mod tests {
         let env = FakeEnv::with(&["a", "b"], three());
         let driver = FakeDriver::default();
         let control = Control::new();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
         env.take();
 
         assert!(control.owner_gone(&env, 1, "b").is_none(), "not b's capture");
@@ -1674,7 +1752,7 @@ mod tests {
         let control = Control::new();
         control.command(&env, &FakeDriver::default(), "a", &set(&[forged, A]));
         env.take_logs();
-        control.command(&env, &FakeDriver::default(), "a", &Command::StartCapture);
+        control.command(&env, &FakeDriver::default(), "a", &start());
 
         let logs = env.take_logs();
         let line = &logs.iter().find(|(level, _)| *level == Level::Warning).expect("reported").1;
@@ -1703,7 +1781,7 @@ mod tests {
         control.command(&env, &driver, "a", &set(&selection));
         env.take();
         env.take_logs();
-        control.command(&env, &driver, "a", &Command::StartCapture);
+        control.command(&env, &driver, "a", &start());
 
         let sent = env.take();
         let failed = errors(&sent);

@@ -42,6 +42,8 @@ export interface PipelineInterface {
    * has: the Worker dissects and the main thread never does.
    */
   linkType?: number;
+  /** `AgentInterface.tsPrecision`, by the same route for the same reason. */
+  tsPrecision?: number;
 }
 
 // --- main thread -> worker ---------------------------------------------------

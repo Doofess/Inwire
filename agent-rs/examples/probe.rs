@@ -40,7 +40,7 @@ fn main() -> std::io::Result<()> {
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(6.0);
 
-    let mut cap = npcap.open(&device, true)?;
+    let mut cap = npcap.open(&device, inwire_agent::npcap::OpenOptions { promiscuous: true, snaplen: 65535 })?;
     let raised = cap.set_kernel_buffer(
         inwire_agent::session::kernel_buffer_bytes(inwire_agent::session::available_cores()) as i32,
     )?;
@@ -53,13 +53,13 @@ fn main() -> std::io::Result<()> {
     let mut largest = 0usize;
     // Kept so the wire format can be exercised on real frames below.
     // Bounded, because this is a diagnostic and not a capture buffer.
-    let mut captured: Vec<(Vec<u8>, f64, u32)> = Vec::new();
+    let mut captured: Vec<(Vec<u8>, u64, u32)> = Vec::new();
     const KEEP: usize = 2000;
     let start = Instant::now();
     while Instant::now() < deadline {
         match cap.next()? {
             Read::Timeout => timeouts += 1,
-            Read::Frame { data, ts_us, wire_len } => {
+            Read::Frame { data, ts_ns, wire_len } => {
                 // The copy is what the agent would do next, and is the half of
                 // the per-frame cost that is ours. Timed the same way the Python
                 // profile now does, so the two numbers are comparable.
@@ -73,11 +73,11 @@ fn main() -> std::io::Result<()> {
                 // The sanity check the FFI exists to pass: a wire length below
                 // what was captured means the header was read at wrong offsets.
                 if captured.len() < KEEP {
-                    captured.push((owned.clone(), ts_us, wire_len));
+                    captured.push((owned.clone(), ts_ns, wire_len));
                 }
                 if (wire_len as usize) < owned.len() {
                     eprintln!(
-                        "STRUCT LAYOUT IS WRONG: wire_len {wire_len} < caplen {} (ts {ts_us})",
+                        "STRUCT LAYOUT IS WRONG: wire_len {wire_len} < caplen {} (ts {ts_ns})",
                         owned.len()
                     );
                     std::process::exit(2);
@@ -96,17 +96,17 @@ fn main() -> std::io::Result<()> {
         let records: Vec<Vec<u8>> = captured
             .iter()
             .enumerate()
-            .map(|(i, (data, ts_us, wire_len))| {
-                wire::encode_record(i as u32, 0, *ts_us, *wire_len as usize, data)
+            .map(|(i, (data, ts_ns, wire_len))| {
+                wire::encode_record(i as u32, 0, *ts_ns, *wire_len as usize, data)
                     .expect("a frame captured at SNAPLEN always fits the length field")
             })
             .collect();
         let batch = wire::encode_batch(&records).expect("a non-empty batch encodes");
         let decoded = wire::decode_batch(&batch).expect("what we encoded decodes");
         assert_eq!(decoded.len(), captured.len());
-        for (got, (data, ts_us, wire_len)) in decoded.iter().zip(&captured) {
+        for (got, (data, ts_ns, wire_len)) in decoded.iter().zip(&captured) {
             assert_eq!(&got.data, data, "a frame did not survive the round trip");
-            assert_eq!(got.ts_us, *ts_us, "a timestamp did not survive");
+            assert_eq!(got.ts_ns, *ts_ns, "a timestamp did not survive");
             assert_eq!(got.orig_len, *wire_len, "a wire length did not survive");
         }
         println!(

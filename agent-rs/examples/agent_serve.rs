@@ -60,6 +60,7 @@ fn main() -> std::io::Result<()> {
         // twice. Saying nothing is the honest answer, and the app falls back
         // to Ethernet - which is what this harness has always captured.
         link_type: None,
+        ts_precision: None,
     }];
 
     let instance = Arc::new(pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES)?);
@@ -138,11 +139,11 @@ fn main() -> std::io::Result<()> {
         }
 
         match command {
-            Command::StartCapture if !running.load(Ordering::SeqCst) => {
+            Command::StartCapture(_) if !running.load(Ordering::SeqCst) => {
                 running.store(true, Ordering::SeqCst);
                 *owner.lock().unwrap() = Some("rs-1".into());
 
-                let mut cap = npcap.open(&device, true)?;
+                let mut cap = npcap.open(&device, inwire_agent::npcap::OpenOptions { promiscuous: true, snaplen: 65535 })?;
                 cap.set_kernel_buffer(
                     inwire_agent::session::kernel_buffer_bytes(
                         inwire_agent::session::available_cores(),
@@ -162,10 +163,10 @@ fn main() -> std::io::Result<()> {
                     while run.load(Ordering::SeqCst) {
                         match cap.next() {
                             Ok(Read::Timeout) => {}
-                            Ok(Read::Frame { data, ts_us, wire_len }) => {
+                            Ok(Read::Frame { data, ts_ns, wire_len }) => {
                                 let n = sq.fetch_add(1, Ordering::Relaxed);
                                 rx.fetch_add(1, Ordering::Relaxed);
-                                match wire::encode_record(n as u32, 0, ts_us, wire_len as usize, data) {
+                                match wire::encode_record(n as u32, 0, ts_ns, wire_len as usize, data) {
                                     Ok(record) => q.push(record),
                                     // A frame too long for the length field is
                                     // refused rather than masked; losing one is
