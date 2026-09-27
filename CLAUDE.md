@@ -1040,7 +1040,8 @@ by hand:
   the panel, waits for the installed agent's verdict (a typo must block Start in
   libpcap's words), sets a snaplen and captures real traffic. Every frame on
   disk must be one the filter admits - judged from its own headers, not by
-  asking libpcap again - no longer than the snaplen, marked where cut, and
+  asking libpcap again - no longer than the snaplen, marked where cut, never
+  "previous segment not captured" unless its headers show the hole, and
   stamped to the nanosecond (ADR 0050). Run after anything on the capture-start
   path or the agent's open; needs the 0.4.1 agent installed.
 - **`scripts/electron/revisit-drive.ts`** imports the real `inwire` capture,

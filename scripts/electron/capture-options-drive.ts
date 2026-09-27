@@ -18,7 +18,7 @@
  * refused before Start, with Start blocked.
  *
  * Not in `npm run check` (`check.ts`'s NOT_TESTS): it needs a build, the
- * installed 4.1.0 agent, Npcap, an Ethernet adapter and real traffic, which a
+ * installed 0.4.1 agent, Npcap, an Ethernet adapter and real traffic, which a
  * headless browser makes. Real capture only; no stub agent.
  */
 import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
@@ -85,6 +85,53 @@ function admitted(b: Uint8Array): boolean | null {
   return proto === 17 || src === 443 || dst === 443;
 }
 
+/**
+ * A TCP segment's place in its direction's sequence space, from its headers
+ * alone: the length comes from the IP header, never from what was kept, so a
+ * cut segment is as long here as it was on the wire. An IPv4 offload frame
+ * declares a length of 0 and is as long as the wire says. Null for anything
+ * else - including an IPv6 frame declaring 0, which the reference's defaults
+ * (`ipv6.tso_support: FALSE`, where IPv4's is TRUE) call malformed and never
+ * hand to TCP. Windows sends a large ClientHello over IPv6 exactly that way, so
+ * its conversation's next frames are "previous segment not captured" in
+ * Wireshark too, cut or whole.
+ */
+function tcpSegment(b: Uint8Array, wire: number): { key: string; seq: number; end: number } | null {
+  let at = 12;
+  let type = (b[at] << 8) | b[at + 1];
+  if (type === 0x8100) { at += 4; type = (b[at] << 8) | b[at + 1]; }
+  at += 2;
+  const l3 = at;
+  let payload: number;
+  let addresses: string;
+  if (type === 0x0800) {
+    if (b[at + 9] !== 6) return null;
+    const ihl = (b[at] & 0x0f) * 4;
+    const total = (b[at + 2] << 8) | b[at + 3];
+    payload = (total === 0 ? wire - l3 : total) - ihl;
+    addresses = Array.from(b.subarray(at + 12, at + 20)).join('.');
+    at += ihl;
+  } else if (type === 0x86dd) {
+    if (b[at + 6] !== 6) return null;
+    const declared = (b[at + 4] << 8) | b[at + 5];
+    if (declared === 0) return null;
+    payload = declared;
+    addresses = Array.from(b.subarray(at + 8, at + 40)).join('.');
+    at += 40;
+  } else {
+    return null;
+  }
+  if (at + 14 > b.length) return null;
+  const ports = `${(b[at] << 8) | b[at + 1]}>${(b[at + 2] << 8) | b[at + 3]}`;
+  const seq = ((b[at + 4] << 24) | (b[at + 5] << 16) | (b[at + 6] << 8) | b[at + 7]) >>> 0;
+  const flags = b[at + 13];
+  const len = payload - (b[at + 12] >> 4) * 4 + (flags & 0x02 ? 1 : 0) + (flags & 0x01 ? 1 : 0);
+  return { key: `${addresses}/${ports}`, seq, end: (seq + Math.max(0, len)) >>> 0 };
+}
+
+/** `a` is after `b` in sequence space, which wraps at 2^32. */
+const seqAfter = (a: number, b: number) => ((a - b) | 0) > 0;
+
 if (process.platform !== 'win32') skip('the desktop app and its agent are Windows-only');
 if (!existsSync(path.join('dist', 'index.html')) || !existsSync(path.join('dist-electron', 'main.cjs'))) {
   skip('no build to launch - run `npm run build` first');
@@ -145,7 +192,12 @@ try {
 
   await page.getByLabel('Start capture').click();
   console.log(`--- capturing "${FILTER}" at ${SNAPLEN} bytes through the installed agent ---\n`);
-  checkTrue('the options lock while the capture runs', await filter.isDisabled());
+  // The lock follows the agent's own word that the capture started, which is a
+  // round trip after the click - so it is waited for, not read at once.
+  checkTrue('the options lock while the capture runs', await page.waitForFunction(
+    () => (document.querySelector('#capture-filter') as HTMLInputElement | null)?.disabled === true,
+    undefined, { timeout: 30_000 },
+  ).then(() => true, () => false));
 
   browser = await playwright.chromium.launch({ channel: 'chrome', headless: true });
   const tab = await browser.newPage();
@@ -206,8 +258,24 @@ try {
     return bytesNotCaptured(own, l3, type, r.length) > 0 && !r.info.includes(SIZE_LIMITED);
   });
   check('every frame whose content was cut says so', unmarked.slice(0, 5).map((r) => `${r.id} ${r.info}`), []);
-  const lost = rows.filter((r) => (r.analysisFlags ?? []).includes('lost_segment')).length;
-  console.log(`      "previous segment not captured" on ${lost} frame(s) - a cut segment must not cause one`);
+  // "Previous segment not captured" is right only where the headers show a hole:
+  // a segment starting past everything its direction has carried so far. The
+  // snaplen's failure mode was exactly the other kind - a cut segment read as a
+  // short one, and the next as a hole behind it (ADR 0050).
+  const reach = new Map<string, number>();
+  const gapped = new Set<number>();
+  for (const r of rows) {
+    const segment = tcpSegment(bytes.get(r.id) ?? new Uint8Array(), r.length);
+    if (segment === null) continue;
+    const before = reach.get(segment.key);
+    if (before !== undefined && seqAfter(segment.seq, before)) gapped.add(r.id);
+    if (before === undefined || seqAfter(segment.end, before)) reach.set(segment.key, segment.end);
+  }
+  const lost = rows.filter((r) => (r.analysisFlags ?? []).includes('lost_segment'));
+  console.log(`      "previous segment not captured" on ${lost.length} frame(s), `
+    + `${gapped.size} with a hole in their headers' sequence space`);
+  check('...and never where the headers show no hole', lost.filter((r) => !gapped.has(r.id))
+    .slice(0, 5).map((r) => `${r.id} ${r.info}`), []);
 
   // Nanoseconds, all the way to disk.
   const precise = rows.filter((r) => r.tsPrecision === 9 && r.tsNanos !== undefined);
