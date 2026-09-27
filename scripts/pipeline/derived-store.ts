@@ -15,7 +15,10 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { keyLog } from '../../src/services/tls/keyLog';
-import { DerivedStore } from '../../src/services/pipeline/derivedStore';
+import {
+  DERIVED_BUDGET_BYTES, DerivedStore, derivedBudgetFor,
+} from '../../src/services/pipeline/derivedStore';
+import { BUDGET_FLOOR_BYTES } from '../../src/services/bufferBudget';
 import { FIXTURES, arrive } from './arrival';
 
 let failures = 0;
@@ -84,8 +87,27 @@ async function main() {
   small.set(otherId, other);
   check('setting a frame twice counts it once', small.bytes, other.length);
 
+  // Shrinking applies at once, oldest first - a smaller buffer budget chosen
+  // in Settings lets decrypted content go now, not on the next frame.
+  const resized = new DerivedStore(Number.MAX_SAFE_INTEGER);
+  for (const [id, d] of real) resized.set(id, d);
+  resized.resize(budget);
+  checkTrue('shrinking lets the oldest go at once', resized.bytes <= budget
+    && real.slice(0, half).every(([id]) => resized.get(id) === null)
+    && newest.every(([id]) => resized.get(id) !== null));
+
   all.clear();
   check('clear holds nothing', [all.size, all.bytes], [0, 0]);
+
+  // Sized from the packet buffer: a quarter, never below the old flat figure.
+  // At the buffer's floor, what this capture decrypted fits many times over;
+  // at the 2,096 MB 'auto' resolves to on a 32 GB machine, a quarter of it.
+  check('the least it is ever given is the old flat budget', derivedBudgetFor(0), DERIVED_BUDGET_BYTES);
+  check("...which is also what the buffer's floor gets", derivedBudgetFor(BUDGET_FLOOR_BYTES), DERIVED_BUDGET_BYTES);
+  check('a 2,096 MB buffer gives a quarter of it', derivedBudgetFor(2096 * 1024 * 1024), 524 * 1024 * 1024);
+  const minutes = (derivedBudgetFor(2096 * 1024 * 1024) / total) * 75 / 60;
+  console.log(`
+      at that budget, about ${minutes.toFixed(0)} minutes of decrypted traffic like this capture's`);
 }
 
 main().then(() => {

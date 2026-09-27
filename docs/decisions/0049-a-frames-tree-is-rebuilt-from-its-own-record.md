@@ -80,7 +80,7 @@ rebuilt from its bytes and its record, with no replay.**
   with a key-log key, a decrypting connection's HTTP state - is only marked in
   the record. The recorder writes the answer itself to a second log for that
   frame, which the pipeline Worker holds in a `DerivedStore`
-  (`services/pipeline/derivedStore.ts`): memory only, 64 MB, oldest out, and
+  (`services/pipeline/derivedStore.ts`): memory only, a quarter of the packet buffer's budget and never below 64 MB, oldest out, and
   emptied when the key log is cleared or the capture reset. A revisit given
   that log reads a marked answer from it; one without it - after a restart,
   past the budget, after a clear - misses, and the frame is replayed. That is
@@ -157,7 +157,12 @@ rebuilt from its bytes and its record, with no replay.**
 
 ## Open
 
-- **How far back the memory reaches.** The key-log capture's decrypted
-  answers are 8.2 MB for 75 seconds, ~590 B a frame; 64 MB holds about nine
-  minutes of browsing like that, and a decrypted frame older than that is
-  replayed. Sizing it the way the buffer is sized (ADR 0036) is the lever.
+- **How far back the memory reaches** is a quarter of the packet buffer's
+  budget, never below 64 MB (`derivedBudgetFor`). The key-log capture's
+  decrypted answers are 8.2 MB for 75 seconds, ~590 B a frame, so 64 MB flat
+  held about nine minutes of browsing like that; a quarter of the 2,096 MB
+  `'auto'` gives a 32 GB machine holds about 79. A decrypted frame older than
+  that is replayed. Tied to the buffer because it is the figure a person
+  already chose, or that was sized to the machine (ADR 0036), for how much of
+  a capture stays in reach - and because this is plaintext, holding it longer
+  than the frames it belongs to is not worth it.

@@ -137,6 +137,8 @@ export type ToPipeline =
    * lost them.
    */
   | { type: 'drain'; requestId: number }
+  /** How many bytes of decrypted answers to keep (`derivedBudgetFor`). */
+  | { type: 'derivedBudget'; bytes: number }
   /**
    * Who this machine is, for deciding which way each frame went.
    *

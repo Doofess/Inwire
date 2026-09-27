@@ -841,6 +841,10 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       for (const [id, bytes] of command.frames) derivedStore.set(id, bytes);
       break;
 
+    case 'derivedBudget':
+      derivedStore.resize(command.bytes);
+      break;
+
     case 'detail': {
       const layers = treeCache.get(command.id) ?? revisitedTrees.get(command.id);
       if (layers) {

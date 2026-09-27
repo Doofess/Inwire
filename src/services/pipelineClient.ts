@@ -347,6 +347,11 @@ export class PipelineClient {
     });
   }
 
+  /** How much decrypted content the Worker keeps. See `derivedBudgetFor`. */
+  setDerivedBudget(bytes: number) {
+    this.send({ type: 'derivedBudget', bytes });
+  }
+
   /** An import's decrypted answers, for the Worker to hold. See `derived` in the protocol. */
   keepDerived(frames: [number, Uint8Array][]) {
     if (frames.length === 0) return;
