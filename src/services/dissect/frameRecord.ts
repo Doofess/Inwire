@@ -58,6 +58,8 @@ import {
 import { HpackTable } from '../dissectors/hpack';
 import type { TlsConversationState, TlsRecordCursor } from '../tcpStreamTracker';
 import { RecordMiss } from './recordMiss';
+import { keyLabels } from '../tls/decrypt';
+import type { KeyLogWitness } from '../dissectors/quic';
 
 // Every HTTP/2-capable direction carries one, even on an HTTP/1 connection.
 registerRecordClass(HpackTable);
@@ -126,6 +128,14 @@ for (const [group, table] of Object.entries(GROUPS)) {
 const DECRYPT_CALL = NAMES.length;
 NAMES.push('quic:decrypt');
 KINDS.push('answer');
+/**
+ * A call that needed the key log and opened nothing: recorded with the
+ * connection's client random and the labels the log held for it, so a revisit
+ * whose log now holds different ones misses instead of leaving it shut.
+ */
+const DECRYPT_UNOPENED = NAMES.length;
+NAMES.push('quic:decrypt-unopened');
+KINDS.push('answer');
 /** An answer that carried decrypted content, which a record does not hold. */
 const DERIVED = NAMES.length;
 NAMES.push('(decrypted content)');
@@ -189,36 +199,42 @@ function snapshotConversation(conv: TlsConversationState): { state: unknown } | 
   if (conv.keys && (conv.appClient !== undefined || conv.appServer !== undefined)) return null;
   // Never the keys, nor the verdict and note that came with them - a revisit
   // asks the key log again. A key in a record would be key material on disk.
-  // What IS kept is whether there were keys, which is not key material: a
-  // revisit whose key log disagrees - keys that came later, or were cleared -
-  // misses rather than drawing a record opened, or left shut, differently
-  // from arrival (`ensureRevisitKeys` in tls.ts).
+  // What IS kept is which key log labels the keys came from, which is not key
+  // material: a revisit whose key log disagrees - keys that came later, or
+  // were cleared, or only some of them - misses rather than drawing a record
+  // opened, or left shut, differently from arrival (`ensureRevisitKeys`).
   // The note is kept: it is prose about the key log, not a key, and it is what
   // a rebuilt conversation's "[Not decrypted]" row must go on saying.
-  const { keys: _keys, keyGeneration: _generation, keysAtArrival: _had, ...rest } = conv;
+  const { keys: _keys, keyGeneration: _generation, keyLabelsAtArrival: _had, ...rest } = conv;
   // Emptied, not copied. It names the frames to relabel once the ServerHello
   // settles the version - patches to OTHER frames, which a revisit discards -
   // so no tree reads it. And on a connection first seen mid-stream the version
   // is never settled, so it grows by one id every frame for the life of the
   // connection: copied, it was half of every record on the bulk fixture.
-  return { state: { ...rest, pendingVersionFrames: [], keysAtArrival: Boolean(conv.keys) } };
+  return { state: { ...rest, pendingVersionFrames: [], keyLabelsAtArrival: keyLabels(conv.keys) } };
 }
 
 /**
  * A decrypting conversation, for the memory-only log: its HTTP state was read
  * out of plaintext, which is exactly why the record cannot hold it. Still no
  * keys - a revisit derives them from the key log as it does for any other
- * rebuilt conversation, and `keysAtArrival` says it must find them.
+ * rebuilt conversation, and `keyLabelsAtArrival` says which it must find.
  */
 function plaintextConversation(conv: TlsConversationState): unknown {
-  const { keys: _keys, keyGeneration: _generation, keysAtArrival: _had, ...rest } = conv;
-  return { ...rest, pendingVersionFrames: [], keysAtArrival: true };
+  const { keys: _keys, keyGeneration: _generation, keyLabelsAtArrival: _had, ...rest } = conv;
+  return { ...rest, pendingVersionFrames: [], keyLabelsAtArrival: keyLabels(conv.keys) };
 }
 
 /** What a `checked` answer is recorded as, and compared by: never the secrets themselves. */
 function projectChecked(method: string, value: unknown): unknown {
-  if (method === 'keyLogSecrets') return value !== undefined;
+  // The labels the log holds for the connection, never the secrets under them.
+  if (method === 'keyLogSecrets') return value === undefined ? null : [...(value as Map<string, unknown>).keys()].sort();
   return value;
+}
+
+/** The labels the live key log holds for a connection, as `projectChecked` would record them. */
+function liveLabels(clientRandom: Uint8Array | null): string[] | null {
+  return clientRandom === null ? null : projectChecked('keyLogSecrets', LIVE_ENV.keyLogSecrets(clientRandom)) as string[] | null;
 }
 
 /** What a peek records: only the part of the live object the dissector tests. */
@@ -335,10 +351,15 @@ export class FrameRecorder {
           out.byte(id);
           return (...call: unknown[]) => {
             const result = decrypt(...call);
+            const witness = (decrypt as { keyLogWitness?: () => KeyLogWitness }).keyLogWitness;
             if (decryptsWithKeyLog(call) && !carriesNothing(result)) {
               out.byte(DERIVED);
               this.derived += 1;
               this.keepDerived(result);
+            } else if (decryptsWithKeyLog(call) && witness !== undefined) {
+              const { random } = witness();
+              out.byte(DECRYPT_UNOPENED);
+              out.value({ random, labels: liveLabels(random) });
             } else {
               out.byte(DECRYPT_CALL);
               out.value(result);
@@ -475,6 +496,20 @@ export class FrameRevisit {
     return this.in;
   }
 
+  /** `expect`, for a question arrival may have answered in either of two ways. */
+  private expectEither(a: number, b: number): [number, ValueReader] {
+    if (this.in.done) throw new RecordMiss(`asked ${NAMES[a]} after the record ended`);
+    const got = this.in.byte();
+    if (got === DERIVED) {
+      if (this.side === null || this.side.done) {
+        throw new RecordMiss(`${NAMES[a]} answered with decrypted content, which is not held in memory`);
+      }
+      return [DERIVED, this.side];
+    }
+    if (got !== a && got !== b) throw new RecordMiss(`asked ${NAMES[a]} where arrival asked ${NAMES[got] ?? got}`);
+    return [got, this.in];
+  }
+
   /** A recorded TLS cursor, with its buffered body cut back out of its frames. */
   private hydrateCursor(state: Record<string, unknown>): unknown {
     const refs = state.bufferRefs as number[] | undefined;
@@ -528,7 +563,18 @@ export class FrameRevisit {
       case 'decryptor':
         return () => {
           this.expect(id);
-          return () => this.expect(DECRYPT_CALL).value();
+          return () => {
+            const [got, from] = this.expectEither(DECRYPT_CALL, DECRYPT_UNOPENED);
+            const value = from.value();
+            if (got !== DECRYPT_UNOPENED) return value;
+            // Normalised: the codec leaves a null field out of an object, so a
+            // connection with no ClientHello seen comes back with neither.
+            const { random, labels } = value as { random?: Uint8Array | null; labels?: string[] | null };
+            if (JSON.stringify(liveLabels(random ?? null)) !== JSON.stringify(labels ?? null)) {
+              throw new RecordMiss('the key log holds different secrets for this QUIC connection now');
+            }
+            return null;
+          };
         };
     }
   }

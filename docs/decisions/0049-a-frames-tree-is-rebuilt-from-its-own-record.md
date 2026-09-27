@@ -1,6 +1,6 @@
 # 0049 — A frame's tree is rebuilt from its own record
 
-**Status:** accepted 2026-09-26. Record version 3 (the key log checks); version 2 records miss and fall back to the replay. **Amends [0007](0007-what-crosses-the-worker-boundary.md)** on
+**Status:** accepted 2026-09-26. Record version 4 (the key log checks, by label); earlier records miss and fall back to the replay. **Amends [0007](0007-what-crosses-the-worker-boundary.md)** on
 how a tree that is not carried gets built: from the frame's record, not by
 replaying its conversation. **Touches [0038](0038-bytes-and-rows-are-two-arrivals.md)**:
 the pipeline Worker's store port now also carries records out and revisit
@@ -60,12 +60,18 @@ rebuilt from its bytes and its record, with no replay.**
   own bytes and a revisit that finds different bytes misses.
 - **The key log is asked again, and checked, never replayed.** A revisit
   derives a conversation's keys from the key log it holds now, the first time
-  a record needs them. What the record keeps is only whether arrival had keys
-  (`keysAtArrival`), and at a ServerHello whether the log had secrets for the
-  connection and whether any log was loaded - a `checked` env answer, recorded
-  as a yes or no and compared with the live log on revisit. A key log that
-  came later, or was cleared, makes the revisit miss rather than draw a
-  record opened, or shut, differently from arrival. The first run with a real
+  a record needs them. What the record keeps is only **which key log labels**
+  arrival's keys came from (`keyLabelsAtArrival`), and at a ServerHello which
+  labels the log held for the connection and whether any log was loaded - a
+  `checked` env answer, compared with the live log on revisit. A QUIC packet
+  that needed the key log and opened nothing keeps its connection's client
+  random, sent in the clear, and the labels the log held for it
+  (`quic:decrypt-unopened`). A key log that came later, was cleared, or holds
+  different secrets for a connection now makes the revisit miss rather than
+  draw a record opened, or shut, differently from arrival. Labels and not a
+  yes-or-no, because a browser writes a connection's handshake secrets a
+  moment before its traffic secrets, so a followed log is often caught
+  holding only some of them. The first run with a real
   key log found why this has to be explicit: keys were only ever derived when
   a ServerHello was parsed, so a revisit of any later frame silently drew its
   records undecrypted - 19 wrong trees, where the design promised none.
@@ -107,9 +113,9 @@ rebuilt from its bytes and its record, with no replay.**
   without its keys: zero misses, zero wrong (`scripts/pipeline/revisit.ts`,
   which fails on any miss). **With its keys and the Worker's memory, all
   14,615 frames revisit, zero misses** - the 7,276 decrypted ones read their
-  decrypted answers from memory. Without that memory, and with the key log
-  present at only one of the two passes, every frame is equal or misses. Zero
-  wrong in all eight runs. Through the store
+  decrypted answers from memory. Without that memory, with the key log
+  present at only one of the two passes, and with only the handshake secrets
+  at arrival, every frame is equal or misses. Zero wrong in all nine runs. Through the store
   and a v8 clone, every inwire frame rebuilds from its kit alone
   (`scripts/capture/records.ts`).
 - **In the built app**, `scripts/electron/revisit-drive.ts` imports the real
@@ -147,8 +153,3 @@ rebuilt from its bytes and its record, with no replay.**
   minutes of browsing like that, and a decrypted frame older than that is
   replayed. Sizing it the way the buffer is sized (ADR 0036) is the lever.
 - **The arrival cost on TLS-heavy traffic**, measured above.
-- **A QUIC packet arrival could not open stays unopened on revisit** when its
-  keys arrived later. That equals what arrival showed, so it is stale rather
-  than wrong; a replay with the fuller key log would open it. TLS misses in
-  that case, and QUIC does not yet, because its keys are derived inside the
-  tracker, whose calls a revisit does not repeat.

@@ -48,6 +48,17 @@ function expand(secret: Uint8Array, suite: CipherSuiteSpec, name: string): Direc
  * connection. Returns null when the log has nothing usable for it, which is
  * the ordinary case for a capture whose log covers only some connections.
  */
+/**
+ * Which key log labels a connection's keys were built from, sorted - what a
+ * frame record keeps instead of the keys (ADR 0049). Not key material, and it
+ * tells a log that had only a connection's handshake secrets from one that
+ * also had its traffic secrets, which a yes-or-no cannot: a browser writes the
+ * two moments apart, so a followed log is often caught between them.
+ */
+export function keyLabels(keys: TlsDecryptionKeys | null | undefined): string[] {
+  return keys ? [...keys.from].sort() : [];
+}
+
 export function deriveFromKeyLog(
   suite: CipherSuiteSpec,
   clientRandom: Uint8Array,

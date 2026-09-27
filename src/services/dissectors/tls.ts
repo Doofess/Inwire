@@ -47,7 +47,7 @@ import {
   isGrease, nameAlert, nameCipher, nameExtension, nameGroup, nameSignatureAlgorithm, nameVersion,
 } from './tlsTables';
 import { cipherSuiteSpec, undecryptableReason } from '../tls/cipherSuites';
-import { decryptRecord, deriveFromKeyLog } from '../tls/decrypt';
+import { decryptRecord, deriveFromKeyLog, keyLabels } from '../tls/decrypt';
 import { keyLog } from '../tls/keyLog';
 import { RecordMiss } from '../dissect/recordMiss';
 import { dissectAppStream, freshAppDirection, type AppStreamResult } from './appStream';
@@ -491,7 +491,7 @@ function parseCertificates13(body: Uint8Array): CertificateSummary[] {
  * dissect env, so a frame record notes whether the log had an answer and a
  * revisit whose log disagrees misses (ADR 0049). A rebuilt conversation's
  * later frame asks the log directly: arrival asked nothing in that frame, so
- * there is nothing to check against there but `keysAtArrival`.
+ * there is nothing to check against there but `keyLabelsAtArrival`.
  */
 interface KeySource {
   secrets(clientRandom: Uint8Array): Map<string, Uint8Array> | undefined;
@@ -553,18 +553,24 @@ function deriveConversationKeys(conv: TlsConversationState, source: KeySource = 
  * arrival found. Keys that arrived after the frame, or have been cleared since,
  * would open or shut records against a cursor that was advanced without them -
  * so the revisit misses, and the replay builds that tree under the key log as
- * it is. A record from before `keysAtArrival` existed is taken to have had
- * none, which can only turn a revisit into a miss.
+ * it is. Compared by the labels the keys came from, not by whether there were
+ * any: a followed log often holds a connection's handshake secrets a moment
+ * before its traffic secrets, and keys built from a fuller log would open
+ * records arrival could not.
  */
 function ensureRevisitKeys(conv: TlsConversationState): void {
   if (conv.keys !== undefined || conv.keyGeneration !== undefined || !conv.serverHelloSeen) return;
   // The note arrival wrote is the one to show; it is what the record kept.
   const note = conv.keyNote;
   deriveConversationKeys(conv, directKeys);
-  if (Boolean(conv.keys) !== (conv.keysAtArrival ?? false)) {
-    throw new RecordMiss(conv.keys
+  const now = keyLabels(conv.keys);
+  const then = conv.keyLabelsAtArrival ?? [];
+  if (JSON.stringify(now) !== JSON.stringify(then)) {
+    throw new RecordMiss(then.length === 0
       ? 'the key log opens this connection now, and did not when this frame arrived'
-      : 'the key log no longer opens this connection');
+      : now.length === 0
+        ? 'the key log no longer opens this connection'
+        : 'the key log holds different secrets for this connection now');
   }
   conv.keyNote = note;
 }

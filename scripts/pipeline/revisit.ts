@@ -47,7 +47,11 @@ import { FIXTURES, arrive, firstDifference, render, revisit } from './arrival';
  * the decrypted answers arrival kept in memory - which the app drops on a
  * restart and whenever the key log is cleared.
  */
-interface KeyPlan { label: string; arrival: boolean; revisit: boolean; derived: boolean; text: string }
+interface KeyPlan {
+  label: string; arrival: boolean; revisit: boolean; derived: boolean; text: string;
+  /** Only these lines at arrival: a followed log caught between a connection's two writes. */
+  arrivalLines?: (line: string) => boolean;
+}
 
 /** The store's chunk size and deflate level (chunkCodec.ts, captureWriter.ts). */
 const CHUNK_FRAMES = 4096;
@@ -70,7 +74,9 @@ function percentile(sorted: number[], p: number): number {
 
 async function runFixture(name: string, path: string, keys: KeyPlan | null = null) {
   keyLog.clear();
-  if (keys?.arrival) keyLog.add(keys.text);
+  if (keys?.arrival) {
+    keyLog.add(keys.arrivalLines === undefined ? keys.text : keys.text.split(/\r?\n/).filter(keys.arrivalLines).join('\n'));
+  }
   const { arrived, patchesFor, host, ms: arrivalMs } = await arrive(path);
   keyLog.clear();
   if (keys?.revisit) keyLog.add(keys.text);
@@ -161,6 +167,13 @@ async function runFixture(name: string, path: string, keys: KeyPlan | null = nul
   }
   if (!keys.arrival && keys.revisit) {
     checkTrue(`${name}: a key log that came later is noticed`, reasonCount('opens this connection now') > 0);
+    // QUIC's keys are the tracker's, not the conversation's; a packet it could
+    // not open must miss too, rather than come back shut.
+    checkTrue(`${name}: ...on QUIC as well as TLS`, reasonCount('for this QUIC connection now') > 0);
+  }
+  if (keys.arrivalLines !== undefined) {
+    checkTrue(`${name}: a log that had only some of a connection's secrets is noticed`,
+      reasonCount('different secrets') > 0);
   }
 }
 
@@ -184,6 +197,10 @@ async function main() {
         { label: 'with its keys, decrypted content dropped', arrival: true, revisit: true, derived: false },
         { label: 'keys only at the revisit', arrival: false, revisit: true, derived: false },
         { label: 'keys only at arrival', arrival: true, revisit: false, derived: false },
+        {
+          label: 'only handshake secrets at arrival', arrival: true, revisit: true, derived: false,
+          arrivalLines: (line: string) => !/^(CLIENT|SERVER)_TRAFFIC_SECRET_0 /.test(line),
+        },
       ]) await runFixture(name, path, { ...plan, text });
     }
   }

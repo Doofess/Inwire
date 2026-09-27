@@ -465,7 +465,7 @@ export class QuicFlowTracker {
     const flowKey = this.flowKey(srcIp, srcPort, dstIp, dstPort);
     const senderKey = `${flowKey}>${srcIp}:${srcPort}`;
 
-    return (packetStart, packetNumberOffset, packetEnd, version, destinationConnectionId, kind) => {
+    const decrypt: PacketDecryptor = (packetStart, packetNumberOffset, packetEnd, version, destinationConnectionId, kind) => {
       if (kind !== 'initial') {
         // Handshake, 0-RTT and 1-RTT packets are opened only from key log
         // secrets. Each packet-number space numbers its packets from zero
@@ -516,6 +516,8 @@ export class QuicFlowTracker {
       }
       return decrypted;
     };
+    decrypt.keyLogWitness = () => ({ random: this.sessions.get(flowKey)?.clientRandom ?? null });
+    return decrypt;
   }
 
   /**

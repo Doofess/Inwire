@@ -222,14 +222,25 @@ function summarizeFrames(payload: Uint8Array): {
 /** Which packet-number space and which keys a packet belongs to. */
 export type QuicPacketKind = 'initial' | '0rtt' | 'handshake' | '1rtt';
 
-export type PacketDecryptor = (
+export type PacketDecryptor = ((
   packetStart: number,
   packetNumberOffset: number,
   packetEnd: number,
   version: number,
   destinationConnectionId: Uint8Array,
   kind: QuicPacketKind
-) => { packetNumber: number; payload: Uint8Array; firstByte: number; packetNumberLength: number } | null;
+) => { packetNumber: number; payload: Uint8Array; firstByte: number; packetNumberLength: number } | null) & {
+  /**
+   * The connection's client random, when the ClientHello has been seen - for a
+   * frame record (ADR 0049), which keeps it beside a packet the key log could
+   * not open, so a revisit can ask the log again. Sent in the clear, so not
+   * key material. Never called by a dissector.
+   */
+  keyLogWitness?: () => KeyLogWitness;
+};
+
+/** See `PacketDecryptor.keyLogWitness`. */
+export interface KeyLogWitness { random: Uint8Array | null }
 
 /** One STREAM frame's contribution to a QUIC stream. */
 export interface StreamFragment {

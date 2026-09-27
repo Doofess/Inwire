@@ -119,12 +119,13 @@ export interface TlsConversationState {
   /** Why decryption is not happening, when there is a reason worth showing. */
   keyNote?: string;
   /**
-   * Set only on a conversation rebuilt from a frame record (ADR 0049): whether
-   * it had keys when that frame arrived. The record holds no keys, so a
-   * revisit derives them from the key log it has now, and misses if the answer
-   * differs. Never set on a live conversation.
+   * Set only on a conversation rebuilt from a frame record (ADR 0049): the key
+   * log labels its keys were built from when that frame arrived, empty for
+   * none (`keyLabels`). The record holds no keys, so a revisit derives them
+   * from the key log it has now, and misses unless they come from the same
+   * labels. Never set on a live conversation.
    */
-  keysAtArrival?: boolean;
+  keyLabelsAtArrival?: string[];
   /** The protocol ALPN settled on, which decides what the plaintext is read as. */
   alpn?: string;
   /** Application-layer state per direction, once there is plaintext to read. */
