@@ -27,7 +27,7 @@ import { pipeline } from '../services/pipelineClient';
 import {
   summarizeCaptureStats,
   type AgentCommand, type AgentInterface, type AgentAdapter, type AgentLogEntry,
-  type AgentMessage, type CaptureDropStats,
+  type AgentCaptureFilterCheckMessage, type AgentMessage, type CaptureDropStats,
 } from '../services/agentProtocol';
 import { filterCapturableInterfaces } from '../services/captureInterfaces';
 import { NO_RESYNC, planResync, readReply, type Resync } from '../services/captureResync';
@@ -62,6 +62,12 @@ export interface AgentConnectionHost {
   onSocketTable: (message: Extract<AgentMessage, { type: 'socket_table' }>) => void;
   onHostIdentity: (identity: HostIdentity) => void;
   onNetworkFacts: (facts: NetworkFacts) => void;
+  /**
+   * The `start_capture` this window's capture options make, for the reconnect
+   * resync to resume with. A function, read through the callbacks ref, so the
+   * resync always sends the options as they are - see `captureOptions.ts`.
+   */
+  startCommand: () => AgentCommand;
 }
 
 export function useAgentConnection(host: AgentConnectionHost) {
@@ -135,6 +141,12 @@ export function useAgentConnection(host: AgentConnectionHost) {
    * simply appear to do nothing - so the reason has to reach the panel.
    */
   const [agentError, setAgentError] = useState<string | null>(null);
+  /**
+   * The agent's last answer to `check_capture_filter`. Only an answer about
+   * the filter as it is now counts (`filterVerdict`); a reconnect forgets it,
+   * because the adapters it was checked against may have changed.
+   */
+  const [captureFilterCheck, setCaptureFilterCheck] = useState<AgentCaptureFilterCheckMessage | null>(null);
   // Recent packets/sec per interface, oldest first, for the picker's
   // sparklines. Only populated while the picker is open - the agent samples
   // nothing otherwise.
@@ -329,7 +341,9 @@ export function useAgentConnection(host: AgentConnectionHost) {
           ownedElsewhere,
           selected: selectedInterfacesRef.current,
           capturing: isCapturingRef.current,
+          start: callbacks.current.startCommand(),
         });
+        setCaptureFilterCheck(null);
         resync = plan.resync;
         for (const command of plan.commands) pipeline.command(command);
         // A log subscription lives on the agent's socket, so a reconnect
@@ -397,6 +411,11 @@ export function useAgentConnection(host: AgentConnectionHost) {
 
       if (message.type === 'capture_stats') {
         setCaptureStats(summarizeCaptureStats(message));
+        return;
+      }
+
+      if (message.type === 'capture_filter_check') {
+        setCaptureFilterCheck(message);
         return;
       }
 
@@ -572,7 +591,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
     agentHealth, startAgentService,
     agentVersion, agentNpcapAccess, agentIncompatible, agentInterfaces,
-    captureStats, adapters, agentLog, agentError, interfaceRates,
+    captureStats, adapters, agentLog, agentError, interfaceRates, captureFilterCheck,
     selectedInterfaces, setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
     clearAgentLog, clearInterfaceRates, clearCaptureStats, setInterfaceStatsSubscribed,

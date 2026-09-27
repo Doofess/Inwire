@@ -87,6 +87,9 @@ const SHB_USERAPPL = 4;
 const IF_NAME = 2;
 const IF_DESCRIPTION = 3;
 const IF_TSRESOL = 9;
+const IF_FILTER = 11;
+/** `if_filter`'s first byte: the rest is a libpcap filter string. */
+const IF_FILTER_LIBPCAP = 0;
 const ISB_STARTTIME = 2;
 const ISB_ENDTIME = 3;
 const ISB_IFRECV = 4;
@@ -114,6 +117,13 @@ export interface PcapngInterface {
   dropped?: number | null;
   /** `isb_osdrop`: dropped past the driver. Null or absent when not reported. */
   osDropped?: number | null;
+  /** The snaplen the capture kept each frame to; null or absent for whole frames. */
+  snaplen?: number | null;
+  /**
+   * `if_filter`: the libpcap capture filter the driver applied. Never written
+   * into an anonymised file - it names hosts - and absent when there was none.
+   */
+  filter?: string | null;
 }
 
 export interface PcapngOptions {
@@ -317,18 +327,26 @@ interface OpenInterface {
   given: PcapngInterface | undefined;
   firstUs: number;
   lastUs: number;
+  /** The file is anonymised, so nothing that names a host is written. */
+  anonymised: boolean;
 }
 
 function interfaceDescription(iface: OpenInterface): Uint8Array {
   const w = new Bytes();
   w.u16(iface.linkType);
   w.u16(0);            // reserved
-  w.u32(0);            // snaplen: 0 = no limit, which is what this app captures
+  // 0 is "no limit", which is what a capture with no snaplen kept.
+  w.u32(iface.given?.snaplen ?? 0);
   stringOption(w, IF_NAME, iface.label);
   stringOption(w, IF_DESCRIPTION, iface.description);
   // if_tsresol is one byte: a power of ten unless the high bit says power of
   // two. Writing it is what makes a nanosecond capture survive the round trip.
   option(w, IF_TSRESOL, Uint8Array.of(iface.precision));
+  const filter = iface.given?.filter;
+  if (typeof filter === 'string' && !iface.anonymised) {
+    const text = encoder.encode(filter);
+    option(w, IF_FILTER, Uint8Array.of(IF_FILTER_LIBPCAP, ...text));
+  }
   endOfOptions(w);
   return block(BLOCK_IDB, w.concat());
 }
@@ -604,6 +622,7 @@ export class PcapngWriter implements ExportWriter {
       given,
       firstUs: Number.POSITIVE_INFINITY,
       lastUs: Number.NEGATIVE_INFINITY,
+      anonymised: this.labels.anonymised,
     };
     this.open.set(`${linkType}|${name}`, iface);
     out.push(interfaceDescription(iface));

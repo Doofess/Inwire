@@ -122,10 +122,13 @@ or an LSO-coalesced segment above 64 KB is refused rather than truncated.
 captures on a 9 KB-MTU link with offload on.**
 
 Wireshark's guidance treats snaplen as the main high-rate lever (the Performance
-wiki's formula is `MTU + 18`). We do not offer one at all. That is a deliberate
-consequence of dissecting everything client-side — a truncated frame is a
-dissection that fails — but it means the one knob they reach for first is one we
-do not have.
+wiki's formula is `MTU + 18`). **We offer one now, and a capture filter beside
+it** ([ADR 0050](decisions/0050-a-capture-is-narrowed-by-the-driver.md)): both are
+applied by the driver, so a refused frame never reaches the kernel ring and a cut
+one takes a snaplen's worth of it. What stood in the way was never the agent. It
+was that a truncated frame was a dissection that failed - on the fixtures cut at
+64 bytes, TCP reported lost segments on a capture that lost none - and that is
+what 0050 fixed first, held to tshark by `scripts/parity/snaplen.ts`.
 
 **Ring buffers.** `-b filesize:` / `-b files:` bound disk use over an unbounded
 capture window. We have no rotation; the capture store grows and
@@ -153,8 +156,8 @@ and the answer must stay bounded.
 
 **Not changed, and why:**
 
-- **No snaplen option.** It would mean shipping frames the dissector cannot
-  parse. Revisit if a jumbo-frame capture is ever attempted.
+- ~~**No snaplen option.**~~ Offered since ADR 0050, with a capture filter, once
+  a cut frame stopped being a dissection that fails.
 - **No ring buffer.** `DISK_RESERVE_BYTES` already stops a capture before the
   disk fills, and keeping the whole capture is the point of the store.
 - **No "don't update in real time" switch.** The honest version of that is

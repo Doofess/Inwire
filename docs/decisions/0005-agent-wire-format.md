@@ -1,5 +1,11 @@
 # 0005 - Agent wire format: `seq`, `iface`, `ts_us`, `capture_stats`, ownership, token
 
+> **Amended by [0050](0050-a-capture-is-narrowed-by-the-driver.md).** The
+> record's timestamp is `tsNs`, a `u64` of epoch nanoseconds, since record
+> version 3 - an `f64` of microseconds could not carry what Npcap stamps when
+> asked. Each interface says how many of those digits were measured
+> (`tsPrecision`).
+
 > **Superseded in part by [0029](0029-the-app-and-the-agent-talk-over-a-named-pipe.md).**
 > Everything here about the *messages* still stands and is untouched by the move
 > off the WebSocket. Everything about **authentication** - the pairing token, the

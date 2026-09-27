@@ -570,7 +570,7 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
  * ordering is why unifying the two numbers moved the PRODUCT to 4.0.0 instead
  * of moving the agent down to 1.0.0.
  */
-export const REQUIRED_AGENT_VERSION = '4.0.0';
+export const REQUIRED_AGENT_VERSION = '4.1.0';
 
 /**
  * Simple major.minor.patch comparison - good enough for this agent's

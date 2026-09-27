@@ -24,8 +24,13 @@
  */
 
 export type CaptureSource =
-  /** Captured here, from these adapters (their display names). */
-  | { kind: 'live'; adapters: string[] }
+  /**
+   * Captured here, from these adapters (their display names), with the
+   * capture filter and snaplen the driver applied (`captureOptions.ts`) -
+   * null when the capture asked for none. Undefined for a capture that
+   * predates them, which is "not recorded" rather than "none".
+   */
+  | { kind: 'live'; adapters: string[]; filter?: string | null; snaplen?: number | null }
   /** Opened from a file. */
   | { kind: 'import'; fileName: string }
   /** Restored from a stored session, whose origin is no longer known. */
@@ -138,6 +143,18 @@ export function metaEntries(meta: CaptureMeta): MetaEntry[] {
     ['Operating system', meta.os ?? NOT_AVAILABLE],
     ['Generated', new Date(meta.generatedAt).toISOString()],
     ['Source', sourceText(meta.source)],
+    // How the capture was narrowed before a frame was kept. A filter decides
+    // which frames exist in the file at all and a snaplen how much of each,
+    // so a reader who does not know them will misread both the counts and
+    // the frames.
+    ...(meta.source.kind === 'live'
+      ? [
+        ['Capture filter', meta.source.filter === undefined ? NOT_AVAILABLE : (meta.source.filter ?? 'none')] as MetaEntry,
+        ['Snapshot length', meta.source.snaplen === undefined
+          ? NOT_AVAILABLE
+          : meta.source.snaplen === null ? 'whole frames' : `${meta.source.snaplen} bytes`] as MetaEntry,
+      ]
+      : []),
     ['First frame', meta.firstUs === null ? NOT_AVAILABLE : isoMicros(meta.firstUs)],
     ['Last frame', meta.lastUs === null ? NOT_AVAILABLE : isoMicros(meta.lastUs)],
     ['Duration', meta.firstUs === null || meta.lastUs === null

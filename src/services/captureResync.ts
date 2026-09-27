@@ -46,6 +46,13 @@ export interface ResyncInput {
   selected: readonly string[];
   /** Whether this window believes a capture is running. */
   capturing: boolean;
+  /**
+   * The `start_capture` that began it, filter and snaplen included - the
+   * agent stopped that capture when the pipe broke, and the one resumed in its
+   * place must narrow the same way (`captureOptions.ts`). A plain start when
+   * absent.
+   */
+  start?: AgentCommand;
 }
 
 /**
@@ -62,7 +69,7 @@ export function planResync(input: ResyncInput): { commands: AgentCommand[]; resy
   if (input.selected.length > 0) {
     commands.push({ type: 'set_interfaces', interfaces: [...input.selected] });
   }
-  if (input.capturing) commands.push({ type: 'start_capture' });
+  if (input.capturing) commands.push(input.start ?? { type: 'start_capture' });
   return {
     commands,
     // Only a resumed capture has anything to lose to the selection's answer.

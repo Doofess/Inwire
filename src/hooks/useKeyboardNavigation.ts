@@ -44,6 +44,12 @@ export interface KeyboardNavigationOptions {
   setIsCapturing: (capturing: boolean) => void;
   setSelectedPacket: (packet: Packet) => void;
   sendAgentCommand: (command: AgentCommand) => void;
+  /**
+   * The `start_capture` Space sends, carrying the capture filter and snaplen
+   * (`services/captureOptions.ts`) - or null when the agent has refused the
+   * filter, and Space then starts nothing.
+   */
+  startCaptureCommand: () => AgentCommand | null;
 }
 
 export function useKeyboardNavigation({
@@ -58,7 +64,11 @@ export function useKeyboardNavigation({
   setIsCapturing,
   setSelectedPacket,
   sendAgentCommand,
+  startCaptureCommand,
 }: KeyboardNavigationOptions): void {
+  // Through a ref, for the reason `toggleSideBarRef` gives below.
+  const startCommandRef = useRef(startCaptureCommand);
+  startCommandRef.current = startCaptureCommand;
   /**
    * `Ctrl+B`'s handler, held the way everything that changes is held here.
    *
@@ -157,10 +167,12 @@ export function useKeyboardNavigation({
         // Space would otherwise be one keystroke, with no undo, between a
         // finished capture and an empty list. Stopping stays unconditional.
         if (!wasCapturing && packetCountRef.current > 0) return;
+        const start = wasCapturing ? null : startCommandRef.current();
+        if (!wasCapturing && start === null) return;
         const next = canCapture ? !wasCapturing : false;
         setIsCapturing(next);
         if (next !== wasCapturing) {
-          sendAgentCommand(next ? { type: "start_capture" } : { type: "stop_capture" });
+          sendAgentCommand(next && start !== null ? start : { type: "stop_capture" });
         }
         return;
       }

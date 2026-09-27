@@ -411,6 +411,39 @@ async function edgeChecks(capture: RealCapture, allCaptures: RealCapture[], tool
       [ours.length, ours.filter((l, i) => l !== reference[i]).slice(0, 3)], [reference.length, []]);
   }
 
+  // A capture's filter and snaplen (ADR 0050): the IDB's own snaplen field
+  // and `if_filter`, read back by Wireshark's capinfos - and an anonymised
+  // file keeps the snaplen and never the filter, which names hosts.
+  {
+    const adapter = frames[0].interfaceName || 'unknown';
+    const given = { name: adapter, snaplen: 128, filter: 'tcp port 443 or host 10.0.0.4' };
+    const idbOf = (anonymised: boolean) => {
+      const meta = anonymised
+        ? { ...metaFor(capture, { kernel: null, agent: null, pipe: null }), flags: { anonymised: true, rawBytes: true, fields: false, secrets: false } }
+        : undefined;
+      const w = new PcapngWriter({ interfaces: [given], ...(meta ? { meta } : {}) });
+      const bytes = concatChunks([...w.write(frames.slice(0, 5)), ...w.finish()]);
+      const idb = walk(bytes).find((b) => b.type === IDB)!;
+      return { bytes, snaplen: new DataView(idb.body.buffer, idb.body.byteOffset).getUint32(4, true), opts: options(idb.body, 8) };
+    };
+    const plain = idbOf(false);
+    const filterOption = plain.opts.get(11)?.[0];
+    check('the IDB carries the capture\'s snaplen', plain.snaplen, 128);
+    check('...and its filter as if_filter, marked as a libpcap string',
+      filterOption === undefined ? null : [filterOption[0], text(filterOption.subarray(1))], [0, given.filter]);
+    const anonymised = idbOf(true);
+    check('an anonymised file keeps the snaplen and not the filter', [anonymised.snaplen, anonymised.opts.has(11)], [128, false]);
+    if (tools.capinfos !== null) {
+      const out = join(dir, 'narrowed.pcapng');
+      writeFileSync(out, plain.bytes);
+      const info = runTool(tools.capinfos, [out]);
+      checkTrue('capinfos reads the snaplen', /Capture length = 128/.test(info));
+      checkTrue('...and the filter', info.includes(`Filter string = ${given.filter}`));
+    } else {
+      console.log('SKIP  capinfos not found - the IDB was not read with Wireshark\'s reader');
+    }
+  }
+
   // Anonymised: the adapter is labelled as the metadata labels it, and a name
   // table or key log is refused rather than written.
   {

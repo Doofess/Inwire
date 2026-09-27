@@ -122,6 +122,10 @@ handle never lives in the process that parses hostile bytes. ADR 0033.
   cannot. Floors are **counts, not percentages**: the denominator of a coverage
   ratio is Wireshark's vocabulary, so a ratio would fail on a reference upgrade
   that changed nothing here.
+- `npx tsx scripts/parity/snaplen.ts` — the same questions of the fixtures cut
+  with `editcap -s 64` and `-s 128`, which is what a snaplen capture is (ADR
+  0050). Skips like tree-coverage, so it runs under `npm run check`.
+  `--write-floors` records a new measurement.
 - `pyinstaller local-agent/inwire_agent.spec` — builds the Python agent for
   Windows to `local-agent/dist/inwire-agent-windows/` (a **directory**; see
   `local-agent/CLAUDE.md`). **Not shipped any more**; the `-Python` switch of
@@ -204,12 +208,22 @@ processor and drops a frame when the segment for the *receiving* core is full �
 so a flat 32 MB was 32/N MB of real slack against a burst, which is 1 MB per
 core on a 32-core machine: Npcap's own default. 4 MB per core now, floored at
 the old 32 MB and capped at 256 MB because this is non-paged kernel memory.
-`docs/bursts-and-what-wireshark-does.md` is the whole comparison, including the
-one place we are behind: no snaplen lever, because the wire record's `capLen` is
-a `u16` and we dissect everything.
+`docs/bursts-and-what-wireshark-does.md` is the whole comparison.
 
-It carries the driver's timestamps, a per-capture sequence number, and the
-interface index. It does **not** dissect: a record has no source, destination,
+**The driver narrows the capture, when asked** (ADR 0050). `start_capture`
+carries a libpcap capture filter and a snaplen, and the agent applies both per
+adapter before a frame is read - so a frame the filter refuses never reaches the
+kernel ring, which is the one lever that makes a burst of unwanted traffic cost
+nothing. A start whose options it cannot read is refused
+(`invalid_capture_options`), never captured on defaults; a filter one adapter's
+link type will not compile fails that adapter alone, in libpcap's words.
+`check_capture_filter` asks the same question of a dead handle, for the panel's
+live verdict. The Rust agent opens with `pcap_create`/`pcap_activate` so the
+snaplen and **nanosecond** precision can be set between them.
+
+It carries the driver's timestamps - nanoseconds, with each interface saying how
+many digits were measured (`tsPrecision`) - a per-capture sequence number, and
+the interface index. It does **not** dissect: a record has no source, destination,
 protocol, ports or info, because the app dissects the bytes itself and always
 overwrote those anyway (ADR 0010).
 
@@ -433,7 +447,8 @@ allocating anything** — the agent is a privileged service and a five-byte
 header must never ask for four gigabytes.
 
 The 18-byte record in `local-agent/packet_batch.py` and
-`src/services/agentBinary.ts`, and every control message in
+`src/services/agentBinary.ts` - version 3, whose timestamp is a `u64` of epoch
+nanoseconds because no `f64` could carry them (ADR 0050) - and every control message in
 `src/services/agentProtocol.ts`, are transport-agnostic. Both ends assert the
 same hand-written byte vectors — `scripts/agent/binary.ts` and
 `scripts/agent/pipe-framing.ts` against `local-agent/test_protocol.py` — which
@@ -697,6 +712,19 @@ differently by design (`eth.src` resolved to a vendor, `tcp.seq` annotated
 "(relative sequence number)"), so the number moves on changes that improve the
 tree. A layer with no floor is named in `unimplemented` with a sentence, not
 floored at 0: a zero floor protects nothing and reads as measured-and-accepted.
+
+**And a cut frame is held to it as well** (ADR 0050). A snaplen hands every
+dissector frames that stop early, and the fixtures used to show what that cost:
+cut at 64 bytes, TCP read each cut segment as a short one and the next as a
+hole behind it, so a capture that lost nothing reported "previous segment not
+captured" on most of its frames. Lengths now come from headers, a cut TLS
+segment is a hole to the record cursor and named from what it kept, and
+`[Packet size limited during capture]` marks every frame whose content ran past
+the cut (`dissect/captureShort.ts` - a superset of Wireshark's marks, on
+purpose). `scripts/parity/snaplen.ts` holds `tcp.len` exactly, and the analysis,
+Protocol, Info and marks as floors in `acceptance.json`, beside a ceiling on the
+marks tshark makes that this build does not; `revisit.ts` rebuilds every frame
+of every cut from its record.
 
 ## 6. Gotchas found only by running the packaged app
 
@@ -998,7 +1026,7 @@ first version of that comparison passed with the offset arithmetic removed
 entirely. Still true: the file is read with one `arrayBuffer()`, and the
 dissection blocks the main thread.
 
-**Six drivers reach what plain `tsx` cannot.** All are in `NOT_TESTS` and run
+**Seven drivers reach what plain `tsx` cannot.** All are in `NOT_TESTS` and run
 by hand:
 
 - **`scripts/electron/live-revisit-drive.ts`** captures real traffic through
@@ -1009,6 +1037,13 @@ by hand:
   and the store's own counters must say every frame was sealed with its row
   and its record. Run after anything on the live frame path. About three
   minutes; needs Npcap, the service and an Ethernet adapter.
+- **`scripts/electron/capture-options-drive.ts`** types a capture filter into
+  the panel, waits for the installed agent's verdict (a typo must block Start in
+  libpcap's words), sets a snaplen and captures real traffic. Every frame on
+  disk must be one the filter admits - judged from its own headers, not by
+  asking libpcap again - no longer than the snaplen, marked where cut, and
+  stamped to the nanosecond (ADR 0050). Run after anything on the capture-start
+  path or the agent's open; needs the 4.1.0 agent installed.
 - **`scripts/electron/revisit-drive.ts`** imports the real `inwire` capture,
   and the key-log capture with its key log followed, and opens frames whose
   trees need the frames before them, or decrypted content (ADR 0049).

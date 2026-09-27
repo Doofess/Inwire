@@ -86,7 +86,7 @@
 ; `npm run check` and holds the anti-reset floor as numbers rather than as a
 ; string - "3.10.0" sorts before "3.9.0" lexically, and a string floor would
 ; reject every version past 3.9.
-#define MyAppVersion "4.0.0"
+#define MyAppVersion "4.1.0"
 
 #define AgentExeName "inwire-agent-windows.exe"
 #define ServiceName "InwireAgent"

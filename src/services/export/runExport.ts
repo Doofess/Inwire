@@ -390,8 +390,13 @@ async function writerFor(
     case 'pcap':
       return new PcapWriter();
     case 'pcapng': {
+      // The capture's filter and snaplen were applied to every adapter alike.
+      const live = request.source.kind === 'live' ? request.source : null;
       const interfaces: PcapngInterface[] = (survey?.adapters ?? [])
-        .map((name) => ({ name, description: 'Inwire capture' }));
+        .map((name) => ({
+          name, description: 'Inwire capture',
+          ...(live !== null ? { filter: live.filter ?? null, snaplen: live.snaplen ?? null } : {}),
+        }));
       return new PcapngWriter({
         interfaces,
         meta: meta ?? undefined,

@@ -23,4 +23,4 @@ dropping to 1.0.0: the unified number has to be at least the highest either half
 ever shipped, and the agent had shipped 3.9.0.
 """
 
-AGENT_VERSION = "4.0.0"
+AGENT_VERSION = "4.1.0"

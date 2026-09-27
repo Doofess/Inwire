@@ -90,11 +90,22 @@ function isAddress(value: string): boolean {
  * labels - is mapped or withheld; counts and times are kept, because they are
  * what the report is for and say nothing about who.
  */
+/** What an anonymised export says in place of the capture filter. */
+export const WITHHELD_CAPTURE_FILTER = '(withheld)';
+
 export function redactMeta(meta: CaptureMeta, anonymiser: Anonymiser): CaptureMeta {
   const source: CaptureMeta['source'] = meta.source.kind === 'import'
     ? { kind: 'import', fileName: WITHHELD_FILE_NAME }
     : meta.source.kind === 'live'
-      ? { kind: 'live', adapters: meta.source.adapters.map((_, i) => adapterLabel(i)) }
+      ? {
+        kind: 'live',
+        adapters: meta.source.adapters.map((_, i) => adapterLabel(i)),
+        // Withheld whole rather than mapped: a capture filter names hosts
+        // unquoted - `host example.com` - and address mapping would let every
+        // one of them through. That there was a filter is still said.
+        filter: typeof meta.source.filter === 'string' ? WITHHELD_CAPTURE_FILTER : meta.source.filter,
+        snaplen: meta.source.snaplen,
+      }
       : meta.source;
   return {
     ...meta,

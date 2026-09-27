@@ -330,6 +330,12 @@ const VIEW_ICONS: Record<AppView, React.ComponentType<{ className?: string }>> =
 export interface ActivityRailProps {
   /* --- capture ---------------------------------------------------------- */
   isCapturing: boolean;
+  /**
+   * Why Start must wait, in a sentence, or null: the agent has refused the
+   * capture filter (`services/captureOptions.ts`). Said in the button's own
+   * tooltip, because a disabled Start with no reason reads as a broken one.
+   */
+  startBlockedReason: string | null;
   onStartCapture: () => void;
   onStopCapture: () => void;
   /** Emptied before a restart, so every buffer is one continuous recording. */
@@ -445,7 +451,7 @@ export interface ActivityRailProps {
 }
 
 export const ActivityRail: React.FC<ActivityRailProps> = ({
-  isCapturing, onStartCapture, onStopCapture, onClearPackets,
+  isCapturing, startBlockedReason, onStartCapture, onStopCapture, onClearPackets,
   bufferedPackets, permissions, agentInterfaces, selectedInterfaces,
   captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
@@ -497,7 +503,8 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
    * in the file records.
    */
   const restartDiscards = !isCapturing && bufferedPackets > 0;
-  const startBlocked = !permissions.canCapture || selected === null || captureOwnedElsewhere;
+  const startBlocked = !permissions.canCapture || selected === null || captureOwnedElsewhere
+    || startBlockedReason !== null;
   const captureBlocked = captureOwnedElsewhere
     || (!isCapturing && (startBlocked || (restartDiscards && !permissions.canClearBuffer)));
 
@@ -620,7 +627,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
                 : isCapturing
                   ? 'Stop capture. A stopped capture cannot be resumed.'
                   : startBlocked
-                    ? 'Choose an interface first'
+                    ? startBlockedReason ?? 'Choose an interface first'
                     : restartDiscards
                       ? `Start a new capture - discards the ${bufferedPackets.toLocaleString()} packets in the buffer`
                       : 'Start capture'

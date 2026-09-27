@@ -25,6 +25,9 @@ import { useCaptureFilter, uncoveredRows } from "./lib/useCaptureFilter";
 import { matchesBeforeWindow } from "./lib/useCaptureRows";
 import { MAX_CUSTOM_COLUMNS } from "./lib/packetColumns";
 import { usePreferenceStore, usePreferenceValue } from "./services/preferenceStore";
+import {
+  captureOptionsStore, effectiveFilter, filterBlocksStart, filterVerdict, recordOf, startCaptureCommand,
+} from "./services/captureOptions";
 import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { publishPacketCounts } from "./services/packetCounts";
@@ -161,6 +164,15 @@ const SOCKET_RETRO_WINDOW_US = 3_000_000;
  * packet buffer is the only part of a session big enough to need IndexedDB.
  * Each validator is module scope so it keeps one identity across renders.
  */
+/**
+ * How long typing pauses before the agent is asked whether the capture filter
+ * compiles. Long enough that a filter typed at speed is asked about once;
+ * short enough that the answer is there by the time the eye leaves the field.
+ * A hostname in a filter is resolved by libpcap as it compiles, so this is
+ * also what keeps half-typed names from each costing a DNS lookup.
+ */
+const CAPTURE_FILTER_CHECK_DELAY_MS = 400;
+
 const DISPLAY_FILTER_KEY = "inwire.displayFilter";
 const SELECTED_PACKET_KEY = "inwire.selectedPacketId";
 // Preferences this build no longer reads are cleared here rather than left to
@@ -806,8 +818,20 @@ export default function App() {
    * the seam: everything the connection has to do to the *buffer* stays on
    * this side, because the buffer is this component's.
    */
+  /**
+   * What the next capture asks the driver for: a capture filter and a snaplen
+   * (`services/captureOptions.ts`, ADR 0050). Read through a ref by every way
+   * a capture starts - the rail, Space, a schedule, a reconnect's resync - so
+   * none of them can start one with options a render out of date.
+   */
+  const [captureOptions, patchCaptureOptions] = usePreferenceStore(captureOptionsStore);
+  usePreferenceSync(captureOptionsStore.key, captureOptionsStore.normalize, captureOptionsStore.accept);
+  const captureOptionsRef = useRef(captureOptions);
+  captureOptionsRef.current = captureOptions;
+
   const agent = useAgentConnection({
     canCapture: permissions.canCapture,
+    startCommand: () => startCaptureCommand(captureOptionsRef.current),
     isCapturingRef,
     onCaptureStopped: () => setIsCapturing(false),
     onFrames: queueFrames,
@@ -825,8 +849,27 @@ export default function App() {
     agentLog, agentError, interfaceRates, selectedInterfaces,
     setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
-    clearAgentLog, clearCaptureStats, setInterfaceStatsSubscribed,
+    clearAgentLog, clearCaptureStats, setInterfaceStatsSubscribed, captureFilterCheck,
   } = agent;
+
+  // Whether the agent compiles the typed filter for the chosen adapters. Asked
+  // on each pause in typing and on each change of adapters, because a filter
+  // compiles against link types - `ether host` means nothing on the loopback.
+  // The answer echoes the filter, so one that crossed a newer question is
+  // recognised as stale (`filterVerdict`).
+  const captureFilterVerdict = filterVerdict(captureOptions, captureFilterCheck);
+  const startBlockedByFilter = filterBlocksStart(captureFilterVerdict);
+  const startBlockedRef = useRef(startBlockedByFilter);
+  startBlockedRef.current = startBlockedByFilter;
+  const filterToCheck = effectiveFilter(captureOptions);
+  const adaptersToCheck = selectedInterfaces.join('\n');
+  useEffect(() => {
+    if (agentStatus !== 'connected' || filterToCheck === null) return;
+    const timer = setTimeout(() => pipeline.command({
+      type: 'check_capture_filter', filter: filterToCheck, interfaces: adaptersToCheck === '' ? [] : adaptersToCheck.split('\n'),
+    }), CAPTURE_FILTER_CHECK_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [agentStatus, filterToCheck, adaptersToCheck]);
   // The other half of auto-pause. The buffer hook owns the flag and cannot own
   // this, because stopping a capture needs the agent - and the agent needs the
   // buffer's `queueFrames`. Assigned every render, so it never goes stale.
@@ -2008,6 +2051,11 @@ export default function App() {
     setIsCapturing,
     setSelectedPacket,
     sendAgentCommand,
+    // Null while the agent refuses the filter, which leaves Space doing
+    // nothing - the rail says why, and a key cannot.
+    startCaptureCommand: () => (startBlockedRef.current !== null
+      ? null
+      : startCaptureCommand(captureOptionsRef.current)),
   });
 
   // Actions
@@ -2086,13 +2134,16 @@ export default function App() {
     captureStore.prune([captureIdRef.current]);
     // By label, which is what an export prints. Through the ref, because a
     // scheduled start calls this from a closure that may be renders old.
+    // With the filter and snaplen the driver is about to apply, which is what
+    // an export says about how the capture was narrowed.
     setCaptureSource({
       kind: 'live',
       adapters: selectedInterfacesRef.current.map(
         (name) => agentInterfaces.find((i) => i.name === name)?.label ?? name,
       ),
+      ...recordOf(captureOptionsRef.current),
     });
-    sendAgentCommand({ type: 'start_capture' });
+    sendAgentCommand(startCaptureCommand(captureOptionsRef.current));
     setIsCapturing(true);
   };
 
@@ -2617,6 +2668,7 @@ export default function App() {
           agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
           captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
+          startBlockedReason={startBlockedByFilter}
           agentHealth={agentHealth}
           view={view}
           onViewChange={handleViewChange}
@@ -2745,6 +2797,9 @@ export default function App() {
                 }
                 onOpenSettings={() => setSheet('settings')}
                 onSamplingChange={handleInterfaceSampling}
+                captureOptions={captureOptions}
+                onCaptureOptionsChange={patchCaptureOptions}
+                filterVerdict={captureFilterVerdict}
               />
             )}
             {sideBar === 'schedule' && (

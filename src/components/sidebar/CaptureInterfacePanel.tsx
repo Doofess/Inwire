@@ -7,6 +7,8 @@ import { useRovingFocus } from '../common/useRovingFocus';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import { agentNeedsAttention, agentStatusLabel, type AgentHealth } from '../../services/agentHealth';
 import type { AgentAdapter, AgentInterface } from '../../services/agentProtocol';
+import type { CaptureOptions, FilterVerdict } from '../../services/captureOptions';
+import { CaptureOptionsSection } from './CaptureOptionsSection';
 
 /**
  * The adapters, as a live monitor you also choose from.
@@ -98,6 +100,11 @@ export interface CaptureInterfacePanelProps {
    * while nothing is showing it" is a fact about the component tree.
    */
   onSamplingChange: (on: boolean) => void;
+  /** The capture filter and snaplen the next capture asks for. */
+  captureOptions: CaptureOptions;
+  onCaptureOptionsChange: (patch: Partial<CaptureOptions>) => void;
+  /** The agent's answer about the filter as typed (`filterVerdict`). */
+  filterVerdict: FilterVerdict;
 }
 
 /** The chart's own row, so the trace spans the column at whatever width it is. */
@@ -106,6 +113,7 @@ const CHART = 'w-full h-4 text-muted-foreground group-data-[state=checked]:text-
 export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
   interfaces, adapters, selectedInterfaces, onToggle, interfaceRates,
   agentHealth, isCapturing, captureOwnedElsewhere, onOpenSettings, onSamplingChange,
+  captureOptions, onCaptureOptionsChange, filterVerdict,
 }) => {
   /**
    * The ref indirection is load-bearing, not ceremony.
@@ -209,7 +217,7 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
         /* Why every row below has stopped answering. A disabled control with
            no reason beside it reads as a broken one. */
         <p className="px-3 py-2 text-[11px] leading-tight text-muted-foreground">
-          Capturing. Stop the capture to change adapters.
+          Capturing. Stop the capture to change adapters, the filter or the snaplen.
         </p>
       ) : selectedInterfaces.length === 0 ? (
         <p className="px-3 py-2 text-[11px] leading-tight text-muted-foreground">
@@ -334,6 +342,15 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
           );
         })}
       </div>
+
+      {/* Under the list they narrow, and locked by the same rule: chosen before
+          Start, fixed until Stop (ADR 0050). */}
+      <CaptureOptionsSection
+        options={captureOptions}
+        onChange={onCaptureOptionsChange}
+        verdict={filterVerdict}
+        locked={isCapturing || captureOwnedElsewhere}
+      />
 
       {/* **The one fact from the adapter that is nowhere else on screen.**
 
