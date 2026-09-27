@@ -588,7 +588,9 @@ export class QuicFlowTracker {
     if (facts.hello || facts.serverHello) {
       const session = this.session(flowKey);
       if (facts.hello) {
-        session.clientRandom = facts.hello.random;
+        // Copied, for the reason `tls.ts` copies its randoms: this outlives
+        // the packet, whose bytes a live capture moves once it is dissected.
+        session.clientRandom = facts.hello.random.slice();
         session.offeredCiphers = facts.hello.ciphers;
         if (facts.hello.alpn.length > 0) session.alpn = facts.hello.alpn[0];
       }

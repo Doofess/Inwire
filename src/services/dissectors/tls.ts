@@ -724,7 +724,13 @@ function describeRecord(
             conv.clientHelloSeen = true;
             conv.clientHelloVersion = hello.version;
             conv.sni = hello.echReal ? undefined : hello.sni ?? undefined;
-            conv.clientRandom = hello.random;
+            // Copied, not kept as a view. The random outlives this frame - the
+            // ServerHello's frame joins it against the key log - and a live
+            // capture MOVES each frame's bytes to the renderer once it is
+            // dissected. A view of a moved buffer reads as empty, so every
+            // connection whose hellos crossed a flush said "no key log entry"
+            // and stayed encrypted, with nothing to say why.
+            conv.clientRandom = hello.random.slice();
             cursor.role = 'client';
             parts.push(hello.sni ? `Client Hello (SNI=${hello.sni})` : 'Client Hello');
           } else parts.push('Client Hello');
@@ -735,7 +741,7 @@ function describeRecord(
             conv.serverHelloSeen = true;
             conv.negotiatedVersion = sh.selectedVersion ?? sh.version;
             if (conv.negotiatedVersion >= 0x0304) conv.encryptedHandshake = true;
-            conv.serverRandom = sh.random;
+            conv.serverRandom = sh.random.slice();
             conv.cipherSuite = sh.cipher;
             if (sh.alpn !== null) conv.alpn = sh.alpn;
             cursor.role = 'server';

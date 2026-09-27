@@ -842,6 +842,38 @@ to fold would have fixed nothing. **A message is a snapshot: it always copies.**
 `fieldAccess.ts` now throws a named error for a block with no methods, and
 `CaptureHost` logs the stack to stderr as well as the message to the app.
 
+**A transfer list into the store's utility process drops the message.** The
+pipeline Worker posted each flush's frame records to the store with their
+buffers in the transfer list, and not one arrived: no error in the Worker, none
+in the store, `recordsAttached` and `recordsMissed` both 0. The other end of
+that port is a `MessagePortMain`, and a message transferring an `ArrayBuffer`
+into it simply does not show up. Imports never showed it, because their records
+go through the renderer's port with no transfer list. So **nothing is ever
+transferred to the store**; it is copied. The one transfer that stays is the
+Worker's bytes to the renderer, which is a DOM port both ends.
+
+**And that transfer detaches every view of the moved bytes.** Once a flush is
+posted, each of its frames' buffers is gone from the Worker, and any tracker
+that kept a *view* of one now reads it as empty - no exception, just a
+different answer. A TLS conversation kept its client and server randoms that
+way, and the ServerHello's frame joins the client random against the key log,
+so on a live capture every connection whose two hellos crossed a flush said
+"no key log entry for this connection" and stayed encrypted. Anything a
+tracker keeps past its frame is copied (`.slice()`).
+`scripts/pipeline/moved-bytes.ts` dissects every real capture twice, once
+detaching each frame's buffer after it, and fails on any tree that changes;
+`scripts/pipeline/arrival.ts` detaches too, so every revisit gate runs under
+the live Worker's conditions.
+
+**Both surfaced only in a live capture**, which `scripts/electron/live-revisit-drive.ts`
+now takes through the installed agent - along with a third: Stop sent the
+store's `finish` straight away, ahead of the frames the Worker still held in
+its ordering window, so a stopped capture's tail sat staged, unwritten, until
+the store next closed. Stop now waits for the Worker's `drain` and flushes the
+last rows before it seals (`handlePauseCapture`). Worker failures reach only
+`console.warn`, which is why about 5% of live frames failing to dissect went
+unnoticed; the drive listens for them.
+
 ## 7. Testing
 
 Assertion scripts under `scripts/`, discovered by `scripts/check.ts` walking the
@@ -966,8 +998,20 @@ first version of that comparison passed with the offset arithmetic removed
 entirely. Still true: the file is read with one `arrayBuffer()`, and the
 dissection blocks the main thread.
 
-**Four drivers reach what plain `tsx` cannot.** All are in `NOT_TESTS` and run
+**Six drivers reach what plain `tsx` cannot.** All are in `NOT_TESTS` and run
 by hand:
+
+- **`scripts/electron/live-revisit-drive.ts`** captures real traffic through
+  the installed agent - a headless browser loading pages - then copies the
+  capture off disk, dissects it in order as its oracle, and opens frames old
+  enough to have left the Worker's tree cache. Each must be rebuilt from its
+  record (a spy on the Worker's `postMessage` sees `detail`, never `replay`),
+  and the store's own counters must say every frame was sealed with its row
+  and its record. Run after anything on the live frame path. About three
+  minutes; needs Npcap, the service and an Ethernet adapter.
+- **`scripts/electron/revisit-drive.ts`** imports the real `inwire` capture,
+  and the key-log capture with its key log followed, and opens frames whose
+  trees need the frames before them, or decrypted content (ADR 0049).
 
 - **`scripts/electron/gpu-restore-drive.ts`** loses a real WebGL context under
   the running map and restores it. Run after anything touching GeoMap's style or

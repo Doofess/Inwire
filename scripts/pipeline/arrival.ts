@@ -74,15 +74,21 @@ export async function arrive(path: string): Promise<Arrival> {
     const tsUs = Number(frame.tsNanos / 1000n);
     const id = arrived.length + 1;
 
+    // Dissected from a buffer of its own, which is detached once the frame is
+    // done - what the live Worker does when it moves a flush's bytes to the
+    // renderer. A tracker that kept a view of an earlier frame then reads
+    // empty here as it would there, and a recorder asked to write one throws.
+    const own = frame.rawBytes.slice();
     recorder.begin();
     const { packet, icmpMatchedRequestFrameId, infoPatches } = withDissectEnv(src.env, () =>
-      decodeRawEthernetPacket(frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
+      decodeRawEthernetPacket(own, id, tsUs, relativeTime, timeDelta, frame.origLen,
         src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host));
     packet.rawBytes = frame.rawBytes;
     arrived.push({
       packet, record: recorder.end(), derived: recorder.endDerived(),
       input: { bytes: frame.rawBytes, tsUs, relativeTime, timeDelta, origLen: frame.origLen, linktype: frame.linktype },
     });
+    structuredClone(own.buffer, { transfer: [own.buffer] });
     if (icmpMatchedRequestFrameId !== undefined) {
       arrived[icmpMatchedRequestFrameId - 1].packet.info += ` (reply in ${packet.id})`;
     }

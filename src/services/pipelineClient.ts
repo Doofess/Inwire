@@ -99,9 +99,16 @@ function requestPort(channel: string, ask: () => void, what: string): Promise<Me
   });
 }
 
+/** How long Stop waits for the Worker to let go of its tail before sealing without it. */
+const DRAIN_TIMEOUT_MS = 3000;
+
 export class PipelineClient {
   private worker: Worker | null = null;
   /** Detail requests waiting on the Worker, by frame number. */
+  /** Drains in flight, by request id. */
+  private pendingDrain = new Map<number, () => void>();
+  private nextDrain = 1;
+
   private pendingDetail = new Map<number, {
     resolve: (layers: ProtocolLayer[]) => void;
     replay: () => ReplayBundle | Promise<ReplayBundle>;
@@ -156,6 +163,12 @@ export class PipelineClient {
       case 'failure':
         this.onFailure(message.message);
         break;
+      case 'drained': {
+        const done = this.pendingDrain.get(message.requestId);
+        this.pendingDrain.delete(message.requestId);
+        done?.();
+        break;
+      }
       case 'networkFacts':
         this.onNetworkFacts(message.facts);
         break;
@@ -311,6 +324,27 @@ export class PipelineClient {
   /** Forget every secret the Worker holds. See `keylog-clear` in the protocol. */
   clearKeyLog() {
     this.send({ type: 'keylog-clear' });
+  }
+
+  /**
+   * Stop, and resolve once every frame the Worker held has been posted - its
+   * rows through `onFrames`, which has run by then. See `drain` in the
+   * protocol. Resolves anyway after `DRAIN_TIMEOUT_MS`: a Worker that never
+   * answers must not keep a capture from being sealed.
+   */
+  drain(): Promise<void> {
+    const requestId = this.nextDrain++;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingDrain.delete(requestId);
+        resolve();
+      }, DRAIN_TIMEOUT_MS);
+      this.pendingDrain.set(requestId, () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      this.send({ type: 'drain', requestId });
+    });
   }
 
   /** An import's decrypted answers, for the Worker to hold. See `derived` in the protocol. */

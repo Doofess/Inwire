@@ -107,6 +107,12 @@ let storePort: MessagePort | null = null;
  * shape this codebase has shipped before.
  */
 let bytesPostedWhileIdle = 0;
+/**
+ * Whether a capture has run since the last reset. Frames released after Stop
+ * are that capture's tail, going to a capture that is open - not frames that
+ * reached the store before one was, which is what the warning below is for.
+ */
+let capturedSinceReset = false;
 let interfaces: PipelineInterface[] = [];
 
 let tcpTracker = new TcpStreamTracker();
@@ -205,6 +211,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   pendingPackets = [];
   pendingIcmpReplies = [];
   pendingInfoPatches = [];
+  capturedSinceReset = false;
   pendingRecords = [];
   // A restored session hands back the capture it is continuing, so the frames
   // that arrive next carry on its relative-time column rather than restarting
@@ -472,7 +479,7 @@ function flush(): void {
   // gone - not counted anywhere, not on disk, not in the list.
   const assigned = ready.map((frame) => ({ frame, id: nextId++ }));
   if (storePort !== null && assigned.length > 0) {
-    if (!capturing && bytesPostedWhileIdle === 0) {
+    if (!capturing && !capturedSinceReset && bytesPostedWhileIdle === 0) {
       // Said once, and said at all. A counter nobody reads is the same silence
       // it was written to break; the store drops these, so if this ever fires
       // it is frames lost at the start of a capture and somebody has to know.
@@ -482,7 +489,7 @@ function flush(): void {
           + 'some may not have been written',
       });
     }
-    if (!capturing) bytesPostedWhileIdle += assigned.length;
+    if (!capturing && !capturedSinceReset) bytesPostedWhileIdle += assigned.length;
     storePort.postMessage({
       type: 'appendBytes',
       frames: assigned.map(({ frame, id }) => ({ id, tsUs: frame.tsUs, bytes: frame.bytes })),
@@ -492,13 +499,17 @@ function flush(): void {
   for (const { frame, id } of assigned) ingest(frame, id);
 
   // The group's records, after its bytes and in the same flush - so no chunk
-  // can seal between a frame's bytes and its record. Transferred: each record
-  // is a fresh buffer of its own, and nothing here reads it again.
+  // can seal between a frame's bytes and its record.
+  //
+  // **Copied, never transferred.** The other end of this port is a
+  // `MessagePortMain` in the store's utility process, and a message whose
+  // transfer list holds an ArrayBuffer does not arrive there - no error on
+  // either side, just nothing. That is how every live capture wrote zero
+  // records while every import, whose records go through the renderer's port
+  // without a transfer list, wrote all of them. A record is tens to hundreds of
+  // bytes; the copy costs nothing. `scripts/electron/live-revisit-drive.ts`.
   if (storePort !== null && pendingRecords.length > 0) {
-    storePort.postMessage(
-      { type: 'appendRecords', frames: pendingRecords },
-      pendingRecords.map((r) => r.record.buffer as ArrayBuffer),
-    );
+    storePort.postMessage({ type: 'appendRecords', frames: pendingRecords });
   }
   pendingRecords = [];
 
@@ -767,6 +778,16 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
 
     case 'capturing':
       capturing = command.capturing;
+      if (capturing) capturedSinceReset = true;
+      break;
+
+    case 'drain':
+      // Everything held goes now, in the order a flush sends it - bytes and
+      // records to the store, then the rows up - and only then the answer, so
+      // the app has the last rows in hand when it seals the capture.
+      capturing = false;
+      flush();
+      post({ type: 'drained', requestId: command.requestId });
       break;
 
     case 'interfaces':

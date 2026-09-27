@@ -380,7 +380,7 @@ export default function App() {
 
   const {
     packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
-    queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter,
+    queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
   } = usePacketBuffer({ packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued });
 
 
@@ -2092,10 +2092,17 @@ export default function App() {
     sendAgentCommand({ type: 'stop_capture' });
     setIsCapturing(false);
     captureStartedAtRef.current = null;
-    // Seals the staging ring and flushes. Pause is one of the two moments the
-    // whole capture is guaranteed to be on disk, and the user asked for that
-    // explicitly - the other is stop.
-    captureStore.finish();
+    // Seals the staging ring and flushes - but only once the Worker has let go
+    // of the frames it still held, and their rows are in the store. A finish
+    // sent straight away overtook that tail, which then sat staged until the
+    // store next closed: the one moment the whole capture is meant to be on
+    // disk, it was not. The drain puts the tail's bytes and records in the
+    // store and its rows in the queue; `flushNow` sends those rows on this same
+    // port, ahead of the finish.
+    void pipeline.drain().then(() => {
+      flushNow();
+      captureStore.finish();
+    });
   };
 
   /**

@@ -83,6 +83,8 @@ export interface PacketBuffer {
   /** Borrowed by the session restore - see the note above. */
   accountingRef: RefObject<BufferAccounting>;
   fieldWriter: RefObject<FieldBlockWriter>;
+  /** Commits what is queued now rather than on the next tick. For Stop. */
+  flushNow: () => void;
 }
 
 export function usePacketBuffer({
@@ -172,6 +174,9 @@ export function usePacketBuffer({
       for (const patch of infoPatches) pendingInfoPatchesRef.current.push(patch);
   }, []);
 
+  /** The flush below, for a caller that cannot wait for its next tick. */
+  const flushRef = useRef<() => void>(() => {});
+
   // Drains the ingest queue into state on a fixed cadence. Runs for the life
   // of the app rather than only while capturing, so packets queued in the
   // instant before a stop still land instead of being stranded.
@@ -241,9 +246,16 @@ export function usePacketBuffer({
         },
       ));
     };
+    flushRef.current = flush;
     const timer = window.setInterval(flush, PACKET_FLUSH_MS);
     return () => window.clearInterval(timer);
   }, []);
+
+  /**
+   * Commits whatever is queued now, rather than on the next tick - so Stop can
+   * put the capture's last rows in the store before it seals it.
+   */
+  const flushNow = useCallback(() => flushRef.current(), []);
 
   const adoptBuffer = useCallback((next: Packet[], persistedThroughId: number | null) => {
     // A fresh writer, because the blocks the old one handed out belong to
@@ -261,6 +273,6 @@ export function usePacketBuffer({
 
   return {
     packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
-    queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter,
+    queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
   };
 }

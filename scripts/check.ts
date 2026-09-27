@@ -47,6 +47,9 @@ const NOT_TESTS: Record<string, string> = {
   'electron/revisit-drive.ts':
     'launches the built app, imports the real inwire fixture and opens frames whose trees '
     + 'are rebuilt from their records (ADR 0049); needs a build and the fixture, run by hand',
+  'electron/live-revisit-drive.ts':
+    'captures live traffic through the installed agent and opens old frames rebuilt from '
+    + 'their records (ADR 0049); needs a build, the agent, Npcap and an Ethernet adapter, run by hand',
   'electron/gpu-restore-drive.ts':
     'loses and restores a real WebGL context in the running app; needs dist/ and a GPU, run by hand',
   'electron/serveStub.ts': 'tool; serves the stub agent until Ctrl+C, for driving the app by hand',

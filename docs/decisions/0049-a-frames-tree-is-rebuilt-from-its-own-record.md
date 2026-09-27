@@ -121,6 +121,14 @@ rebuilt from its bytes and its record, with no replay.**
   and the first run of the drive passed on correct trees while every click was
   replaying: the import never asked for records. `scripts/capture/records.ts`
   now drives an import through `importAnyFile` for exactly that reason.
+- **A live capture, through the installed agent** (`scripts/electron/live-revisit-drive.ts`):
+  about 17,000 frames of real browsing, every one sealed with its row and its
+  record, and old frames opened from their records. Its first runs found three
+  things no import could: records posted with a transfer list never reached
+  the store (zero records on every live capture), a TLS conversation kept
+  views of frames the Worker had already moved (so ~5% of live frames failed
+  to record, and live decryption failed across flushes), and Stop sealed ahead
+  of the Worker's tail. All three are fixed; CLAUDE.md §6 has them.
 - **Records cost ~58-64 B a frame on disk**, about 5% of a capture.
 - **Recording costs arrival time:** 8% of dissection on `inwire`, 24% (~5 us a
   frame) on `bulk`, whose TLS-continuation frames dissect in ~20 us and each

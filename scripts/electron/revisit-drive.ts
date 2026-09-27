@@ -273,8 +273,11 @@ async function drive(name: string, capture: string, keysPath: string | null, pic
       checkTrue(`frame ${id}'s tree was not rebuilt from part of its conversation`,
         !pane.includes('[Reassembly context]') && !pane.includes('Rebuilt from part of the conversation'));
     }
-    await page.evaluate(() => window.inwire?.setUnsavedCapture?.(false)).catch(() => {});
   } finally {
+    // In `finally`: with frames in the buffer, closing asks "Quit Inwire?" in a
+    // native box no test can answer, and a failed drive hung on it.
+    const page = app.windows()[0];
+    if (page !== undefined) await page.evaluate(() => window.inwire?.setUnsavedCapture?.(false)).catch(() => {});
     await app.close().catch(() => {});
     rmSync(profile, { recursive: true, force: true });
   }

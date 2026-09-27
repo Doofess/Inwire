@@ -129,6 +129,15 @@ export type ToPipeline =
    */
   | { type: 'derived'; frames: [number, Uint8Array][] }
   /**
+   * Stop, and let go of every frame still held: the ordering window's tail is
+   * dissected, its bytes and records posted to the store and its rows to the
+   * app, and then `drained` answers. Stop waits for it before it seals the
+   * capture, because a `finish` that overtook the tail sealed without it - the
+   * frames stayed staged until the store next closed, and a crash in between
+   * lost them.
+   */
+  | { type: 'drain'; requestId: number }
+  /**
    * Who this machine is, for deciding which way each frame went.
    *
    * Sent as plain arrays rather than as a `HostIdentity` because a `Set` does
@@ -238,5 +247,7 @@ export type FromPipeline =
    * does not.
    */
   | { type: 'needReplay'; id: number }
+  /** Every frame held at a `drain` has been posted, rows included. */
+  | { type: 'drained'; requestId: number }
   /** Something went wrong that the user should be told about, not swallowed. */
   | { type: 'failure'; message: string };
