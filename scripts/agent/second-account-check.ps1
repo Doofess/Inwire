@@ -175,8 +175,10 @@ if ($null -eq $hello) { Write-Host 'The agent did not say hello - is the Inwire 
 if ($hello.state -ne 'idle') { Write-Host 'A capture is running. Stop it in every Inwire window, then run this again.' -ForegroundColor Yellow; exit 2 }
 if ($Device) { $script:device = $Device }
 else {
-  $pick = $hello.interfaces | Where-Object { $_.label -match 'Ethernet|Wi-?Fi|Wireless' -and $_.label -notmatch 'Miniport|Loopback|Virtual|vEthernet' } |
-    Select-Object -First 1
+  # Wired first, as the live drives capture: Wi-Fi can be up with nothing on it.
+  # A label is the connection's name, then the device's.
+  $pick = @($hello.interfaces | Where-Object { $_.label -match '^Ethernet\b' }) +
+    @($hello.interfaces | Where-Object { $_.label -match '^Wi-?Fi\b' }) | Select-Object -First 1
   if ($null -eq $pick) { Write-Host 'No Ethernet or Wi-Fi adapter found; pass -Device.' -ForegroundColor Red; exit 2 }
   $script:device = $pick.name
   Note "capturing on $($pick.label)"

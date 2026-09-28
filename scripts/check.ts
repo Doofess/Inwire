@@ -38,6 +38,9 @@ const NOT_TESTS: Record<string, string> = {
     'build step; WRITES agent-rs/dist/inwire-agent-windows.exe from cargo\'s output. '
     + 'Run by `npm run build:agent`; `scripts/agent/built-version.ts` is the half that asserts',
   'electron/disk-drive.ts': 'drives a 180,000-frame capture to reach the disk path; ~2 minutes, run by hand',
+  'agent/two-client-drive.ts':
+    'two real connections to the installed agent, one capture on a real adapter: the second is refused '
+    + 'the first\'s capture and leaving ends neither; needs the service, Npcap and traffic, run by hand',
   'electron/agent-live-drive.ts':
     'drives the app against the REAL installed agent service and reads the SCM; '
     + 'needs dist/, the InwireAgent service, and Windows - run by hand',

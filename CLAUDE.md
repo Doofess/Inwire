@@ -1168,9 +1168,10 @@ this is a machine the author works on rather than a fleet they ship to.
 **A capture through the UI against it is done**: the three live drives in §7
 passed against the installed 0.5.0 agent on 2026-09-29 (ADR 0052), and so did
 the second-account check that it writes files as its client
-(`scripts/agent/second-account-check.ps1`). **Still owed on the agent:** the
-two-client item, and the pipe descriptor's remote-refusal item, in
-`docs/verification.md`.
+(`scripts/agent/second-account-check.ps1`), and the two-client item
+(`scripts/agent/two-client-drive.ts`). **Still owed on the agent:** the pipe
+descriptor's remote-refusal item in `docs/verification.md`, which needs a second
+machine.
 
 **The fuses are flipped**, which was the one item here that had to precede
 signing rather than follow it. `electron/afterPack.cjs` does it and

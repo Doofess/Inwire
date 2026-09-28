@@ -1408,15 +1408,25 @@ service.
 
 **What is left by hand.**
 
-- [ ] **Capture through the UI, against the installed agent.** Launch Inwire,
+- [x] **Capture through the UI, against the installed agent.** Launch Inwire,
       pick a real adapter, click Start, and confirm rows arrive and are
       dissected. The side-by-side parity run captured the real adapter, but
       through the pipe, not the UI. `smoke.ts` drives the UI against the stub.
       `filterCapturableInterfaces` removes loopback from the picker, so this
-      needs a real adapter.
-- [ ] **Two clients**, over Fast User Switching. One captures. The other is told
+      needs a real adapter. **Done by script since**: `capture-file-drive.ts`,
+      `capture-options-drive.ts` and `live-revisit-drive.ts` each do it, and
+      all three passed against the installed 0.5.0 agent on 2026-09-29.
+- [x] **Two clients**, over Fast User Switching. One captures. The other is told
       `capture_busy` rather than taking the capture over, and closing the second
-      does not stop the first's capture.
+      does not stop the first's capture. **`npx tsx
+      scripts/agent/two-client-drive.ts`** checks this over two real connections
+      on a real adapter. B's start, stop and `set_interfaces` are each answered
+      `capture_busy`. B leaving leaves frames reaching A. A leaving ends the
+      capture, tells every client `idle`, and frees the agent for another
+      client's capture. Both clients are one account there, because ownership
+      is per connection and never per account, so that is the logic Fast User
+      Switching reaches. That a second account's client can reach the pipe at
+      all is `second-account-check.ps1`. Both passed on 2026-09-29.
 
 **After a swap, put the shipped agent back** with `-Rust`, or by re-running the
 installer. What "restoring" means is recorded, not guessed: `sc qc`,
