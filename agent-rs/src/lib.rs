@@ -50,6 +50,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod framing;
 pub mod outbound;
+pub mod pcapng;
 pub mod protocol;
 pub mod session;
 pub mod wire;

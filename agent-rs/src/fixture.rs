@@ -29,6 +29,24 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
+/// The captures Wireshark's dumpcap wrote, which `pcapng.rs` is held to
+/// block for block.
+pub const DUMPCAP_CAPTURES: [&str; 2] = [
+    "keylog_capture_1790455330535.pcapng",
+    "icmp_errors_capture_1790359378632.pcapng",
+];
+
+/// A fixture's whole file, or `None` - with a `SKIP` line - when it is absent.
+pub fn file_bytes(file: &str) -> Option<Vec<u8>> {
+    match std::fs::read(path(file)) {
+        Ok(bytes) => Some(bytes),
+        Err(_) => {
+            eprintln!("SKIP  {file} not present (test/fixtures/README.md)");
+            None
+        }
+    }
+}
+
 fn path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("test").join("fixtures").join(file)
 }
