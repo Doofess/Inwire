@@ -37,6 +37,7 @@
 import { MessageChannelMain, type MessagePortMain, type WebContents } from 'electron';
 import { execFile } from 'node:child_process';
 import type { FromAgentLink, ToAgentLink } from '../src/services/agentLink';
+import { encodeCaptureRootCommand } from '../src/services/agentProtocol';
 import { readAgentService } from './agentService';
 import { classifyStart, MAX_AUTO_START_ATTEMPTS, worthStarting } from './serviceStart';
 import { AGENT_PIPE_PATH, PipeTransport } from './pipeTransport';
@@ -79,7 +80,12 @@ export class AgentPipeLink {
    */
   private autoStarts = 0;
 
-  constructor(pipePath: string = AGENT_PIPE_PATH) {
+  /**
+   * @param captureRoot Where this app's captures live, which the agent writes
+   *   a capture's pcapng under (ADR 0052). Main's to say, because main made
+   *   the folder; the renderer names a capture, never a path.
+   */
+  constructor(pipePath: string = AGENT_PIPE_PATH, captureRoot: string | null = null) {
     this.pipe = new PipeTransport({
       status: (status) => {
         this.tell({ type: 'status', status });
@@ -94,7 +100,7 @@ export class AgentPipeLink {
       // second is what the renderer's main thread staying out of the frame
       // path costs, and it is not the number worth optimising.
       binary: (bytes) => this.tell({ type: 'binary', bytes }),
-    }, pipePath);
+    }, pipePath, undefined, captureRoot === null ? null : encodeCaptureRootCommand(captureRoot));
   }
 
   /** Gives this renderer one end of a fresh channel and keeps the other. */

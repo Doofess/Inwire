@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Check, TriangleAlert } from 'lucide-react';
 import {
-  MAX_CAPTURE_FILTER_CHARS, MAX_SNAPLEN, MIN_SNAPLEN,
-  type CaptureOptions, type FilterVerdict,
+  MAX_CAPTURE_FILTER_CHARS, MAX_LIMIT, MAX_RING_FILES, MAX_SNAPLEN, MIN_RING_KEEP, MIN_SNAPLEN,
+  ringProblem, type CaptureOptions, type FilterVerdict,
 } from '../../services/captureOptions';
 
 /**
@@ -26,6 +26,8 @@ export interface CaptureOptionsSectionProps {
   verdict: FilterVerdict;
   /** A capture is running here or elsewhere: the options are fixed until it stops. */
   locked: boolean;
+  /** Why the last capture stopped itself, or null: said where its limits were set. */
+  stopNote?: string | null;
 }
 
 const LABEL = 'text-[10px] uppercase tracking-wider text-muted-foreground';
@@ -45,8 +47,51 @@ const keepKeys = (e: React.KeyboardEvent) => {
   }
 };
 
+/**
+ * A count the capture is limited by, blank for none. Committed only when it
+ * is one - a half-typed number is never sent, and never saved - and put back
+ * to the committed value on blur.
+ */
+const Count: React.FC<{
+  label: string;
+  unit: string;
+  value: number | null;
+  least: number;
+  most?: number;
+  disabled: boolean;
+  onChange: (value: number | null) => void;
+}> = ({ label, unit, value, least, most = MAX_LIMIT, disabled, onChange }) => {
+  const [draft, setDraft] = useState(value === null ? '' : String(value));
+  useEffect(() => { setDraft(value === null ? '' : String(value)); }, [value]);
+  const n = Number(draft);
+  const valid = draft === '' || (/^\d+$/.test(draft) && n >= least && n <= most);
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input
+        aria-label={label}
+        inputMode="numeric"
+        className={`${FIELD} w-14 text-center`}
+        value={draft}
+        placeholder="-"
+        disabled={disabled}
+        aria-invalid={!valid}
+        onChange={(e) => {
+          const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+          setDraft(digits);
+          const next = Number(digits);
+          if (digits === '') onChange(null);
+          else if (next >= least && next <= most) onChange(next);
+        }}
+        onBlur={() => setDraft(value === null ? '' : String(value))}
+        onKeyDown={keepKeys}
+      />
+      <span className="text-muted-foreground">{unit}</span>
+    </span>
+  );
+};
+
 export const CaptureOptionsSection: React.FC<CaptureOptionsSectionProps> = ({
-  options, onChange, verdict, locked,
+  options, onChange, verdict, locked, stopNote = null,
 }) => {
   // The snaplen as typed. Committed only when it is a length the agent takes,
   // so a half-typed "1" on the way to "128" is never sent, and never saved.
@@ -118,7 +163,7 @@ export const CaptureOptionsSection: React.FC<CaptureOptionsSectionProps> = ({
             disabled={locked || !options.limitBytes}
             aria-invalid={!draftValid}
             onChange={(e) => {
-              const digits = e.target.value.replace(/\D/g, '').slice(0, 5);
+              const digits = e.target.value.replace(/\D/g, '').slice(0, 6);
               setDraft(digits);
               const n = Number(digits);
               if (digits !== '' && n >= MIN_SNAPLEN && n <= MAX_SNAPLEN) onChange({ snaplen: n });
@@ -137,6 +182,73 @@ export const CaptureOptionsSection: React.FC<CaptureOptionsSectionProps> = ({
             : 'Every packet is captured whole.'}
         </p>
       </div>
+
+      <div className="space-y-1">
+        <label className={`flex items-center gap-2 text-xs ${locked ? 'opacity-50' : 'cursor-pointer'}`}>
+          <input
+            type="checkbox"
+            className="accent-primary"
+            checked={options.ringOn}
+            disabled={locked}
+            onChange={(e) => onChange({ ringOn: e.target.checked })}
+            onKeyDown={keepKeys}
+          />
+          <span>Multiple files</span>
+        </label>
+        {options.ringOn && (
+          <div className="pl-5 space-y-1 text-xs">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span>New file every</span>
+              <Count label="Megabytes a file" unit="MB" value={options.ringMegabytes} least={1}
+                disabled={locked} onChange={(v) => onChange({ ringMegabytes: v })} />
+              <Count label="Seconds a file" unit="s" value={options.ringSeconds} least={1}
+                disabled={locked} onChange={(v) => onChange({ ringSeconds: v })} />
+              <Count label="Packets a file" unit="packets" value={options.ringPackets} least={1}
+                disabled={locked} onChange={(v) => onChange({ ringPackets: v })} />
+            </div>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span>Keep the newest</span>
+              <Count label="Files kept" unit="files" value={options.ringKeep} least={MIN_RING_KEEP}
+                most={MAX_RING_FILES} disabled={locked} onChange={(v) => onChange({ ringKeep: v })} />
+            </div>
+            {/* The deletion said beside the setting that causes it: a ring is
+                the one place this app deletes frames without being asked
+                each time (ADR 0052). */}
+            <p className={`${NOTE} text-muted-foreground`}>
+              {options.ringKeep === null
+                ? 'Every file is kept.'
+                : 'Older files are deleted as new ones fill, and their packets leave the list.'}
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        <span className={LABEL}>Stop after</span>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+          <Count label="Stop after packets" unit="packets" value={options.stopPackets} least={1}
+            disabled={locked} onChange={(v) => onChange({ stopPackets: v })} />
+          <Count label="Stop after megabytes" unit="MB" value={options.stopMegabytes} least={1}
+            disabled={locked} onChange={(v) => onChange({ stopMegabytes: v })} />
+          <Count label="Stop after seconds" unit="s" value={options.stopSeconds} least={1}
+            disabled={locked} onChange={(v) => onChange({ stopSeconds: v })} />
+          {options.ringOn && (
+            <Count label="Stop after files" unit="files" value={options.stopFiles} least={1}
+              most={MAX_RING_FILES} disabled={locked} onChange={(v) => onChange({ stopFiles: v })} />
+          )}
+        </div>
+      </div>
+
+      {stopNote !== null && (
+        <p className={`${NOTE} text-muted-foreground`} role="status">{stopNote}</p>
+      )}
+
+      {ringProblem(options) !== null && (
+        <p className={`${NOTE} text-danger flex items-start gap-1`} role="alert">
+          <TriangleAlert className="w-3 h-3 shrink-0 mt-0.5" />
+          <span className="break-words min-w-0">{ringProblem(options)}</span>
+        </p>
+      )}
     </div>
   );
 };

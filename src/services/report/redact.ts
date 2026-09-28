@@ -105,6 +105,9 @@ export function redactMeta(meta: CaptureMeta, anonymiser: Anonymiser): CaptureMe
         // one of them through. That there was a filter is still said.
         filter: typeof meta.source.filter === 'string' ? WITHHELD_CAPTURE_FILTER : meta.source.filter,
         snaplen: meta.source.snaplen,
+        // Sizes, durations and counts, naming no host: kept as they are.
+        ring: meta.source.ring,
+        autostop: meta.source.autostop,
       }
       : meta.source;
   return {

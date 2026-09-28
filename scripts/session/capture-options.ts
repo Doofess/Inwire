@@ -17,7 +17,7 @@
 import {
   DEFAULT_CAPTURE_OPTIONS, MAX_CAPTURE_FILTER_CHARS, MAX_SNAPLEN, SUGGESTED_SNAPLEN,
   effectiveFilter, filterBlocksStart, filterVerdict, normalizeCaptureOptions, recordOf,
-  startCaptureCommand, type CaptureOptions,
+  ringProblem, startCaptureCommand, type CaptureOptions,
 } from '../../src/services/captureOptions';
 import { planResync } from '../../src/services/captureResync';
 import { metaEntries, type CaptureMeta } from '../../src/services/export/captureMeta';
@@ -81,8 +81,47 @@ check('a snaplen outside what the agent takes falls back to the suggestion', [
 ], [SUGGESTED_SNAPLEN, SUGGESTED_SNAPLEN, SUGGESTED_SNAPLEN]);
 check('a stored filter is bounded as the agent bounds it',
   normalizeCaptureOptions({ filter: 'a'.repeat(MAX_CAPTURE_FILTER_CHARS + 50) })?.filter.length, MAX_CAPTURE_FILTER_CHARS);
+const snaplenOf = (o: CaptureOptions | null) => o && { limitBytes: o.limitBytes, snaplen: o.snaplen };
 check('the snaplen is kept while switched off, so switching it on restores it',
-  normalizeCaptureOptions({ limitBytes: false, snaplen: 200 }), { filter: '', limitBytes: false, snaplen: 200 });
+  snaplenOf(normalizeCaptureOptions({ limitBytes: false, snaplen: 200 })), { limitBytes: false, snaplen: 200 });
+
+console.log('\n--- the capture\'s own files (ADR 0052) ---\n');
+
+const ID = 'cap-20260928-120000-0af3';
+check('a start names its capture, which is what makes the agent write its pcapng',
+  startCaptureCommand(DEFAULT_CAPTURE_OPTIONS, ID), { type: 'start_capture', captureId: ID });
+check('a ring travels in bytes, with what it keeps',
+  startCaptureCommand(opts({ ringOn: true, ringMegabytes: 2, ringKeep: 3 }), ID),
+  { type: 'start_capture', captureId: ID, ring: { fileBytes: 2 * 1024 * 1024, keep: 3 } });
+check('...by duration and packets too, and keeping every file sends no keep',
+  startCaptureCommand(opts({ ringOn: true, ringMegabytes: null, ringSeconds: 60, ringPackets: 1000, ringKeep: null }), ID),
+  { type: 'start_capture', captureId: ID, ring: { fileSeconds: 60, filePackets: 1000 } });
+check('a ring switched off is not sent, whatever it was set to',
+  startCaptureCommand(opts({ ringOn: false, ringMegabytes: 2 }), ID), { type: 'start_capture', captureId: ID });
+check('an autostop travels, megabytes as bytes',
+  startCaptureCommand(opts({ stopPackets: 5000, stopMegabytes: 5, stopSeconds: 10 }), ID),
+  { type: 'start_capture', captureId: ID, autostop: { packets: 5000, bytes: 5 * 1024 * 1024, seconds: 10 } });
+check('...and a file count only with a ring',
+  [startCaptureCommand(opts({ stopFiles: 3 }), ID),
+    startCaptureCommand(opts({ ringOn: true, stopFiles: 3 }), ID)],
+  [{ type: 'start_capture', captureId: ID },
+    { type: 'start_capture', captureId: ID, ring: { fileBytes: 100 * 1024 * 1024, keep: 10 }, autostop: { files: 3 } }]);
+check('without a capture to write, neither is sent - the agent would refuse them',
+  startCaptureCommand(opts({ ringOn: true, stopPackets: 10 })), { type: 'start_capture' });
+check('a ring with nothing to rotate at blocks Start, with the reason',
+  ringProblem(opts({ ringOn: true, ringMegabytes: null })),
+  'Multiple files needs a size, a duration or a packet count to start a new file at.');
+check('...and a file count without a ring', ringProblem(opts({ stopFiles: 3 })),
+  'Stopping after a number of files needs multiple files: one file never becomes two.');
+check('the defaults start', ringProblem(DEFAULT_CAPTURE_OPTIONS), null);
+check('options stored before rings existed get the defaults, so a ring switched on has a size',
+  (({ ringOn, ringMegabytes, ringKeep, stopPackets }) => ({ ringOn, ringMegabytes, ringKeep, stopPackets }))(
+    normalizeCaptureOptions({ filter: 'arp', limitBytes: false, snaplen: 128 })!),
+  { ringOn: false, ringMegabytes: 100, ringKeep: 10, stopPackets: null });
+check('a ring keeping fewer than two, or a limit that is not a count, is not stored',
+  (({ ringKeep, stopPackets }) => ({ ringKeep, stopPackets }))(
+    normalizeCaptureOptions({ ringKeep: 1, stopPackets: -5 })!),
+  { ringKeep: null, stopPackets: null });
 
 console.log('\n--- a reconnect resumes the same capture ---\n');
 
@@ -96,12 +135,13 @@ check('...and a plain start when none is given, as before',
 console.log('\n--- what an export says about it ---\n');
 
 const meta = (source: CaptureMeta['source']): CaptureMeta => ({
-  app: 'Inwire', version: '0.4.1', os: null, generatedAt: 0, source, firstUs: null, lastUs: null,
+  app: 'Inwire', version: '0.5.0', os: null, generatedAt: 0, source, firstUs: null, lastUs: null,
   scope: 'capture', filter: '', frames: { exported: 0, inCapture: 0, unreadable: 0 },
   drops: { kernel: null, agent: null, pipe: null },
   flags: { anonymised: false, rawBytes: true, fields: false, secrets: false },
 });
 const rows = (m: CaptureMeta) => Object.fromEntries(metaEntries(m).filter(([k]) => k === 'Capture filter' || k === 'Snapshot length'));
+const fileRows = (m: CaptureMeta) => Object.fromEntries(metaEntries(m).filter(([k]) => k === 'Capture files' || k === 'Autostop'));
 const record = recordOf(opts({ filter: 'host 10.0.0.4 and tcp', limitBytes: true, snaplen: 128 }));
 check('a narrowed capture names its filter and snaplen', rows(meta({ kind: 'live', adapters: ['Ethernet'], ...record })),
   { 'Capture filter': 'host 10.0.0.4 and tcp', 'Snapshot length': '128 bytes' });
@@ -112,6 +152,17 @@ check('a capture from before either existed is not recorded, which is not "none"
   rows(meta({ kind: 'live', adapters: ['Ethernet'] })),
   { 'Capture filter': 'not available', 'Snapshot length': 'not available' });
 check('an import has neither row: nobody here chose them', rows(meta({ kind: 'import', fileName: 'x.pcap' })), {});
+check('a ring and an autostop are said in words',
+  fileRows(meta({ kind: 'live', adapters: ['Ethernet'],
+    ...recordOf(opts({ ringOn: true, ringMegabytes: 100, ringSeconds: 60, ringKeep: 3, stopPackets: 5000 })) })),
+  { 'Capture files': 'a new file every 100 MB or 60 s, newest 3 kept', Autostop: '5,000 packets' });
+check('...one file and no autostop are said too, not left out',
+  fileRows(meta({ kind: 'live', adapters: ['Ethernet'], ...recordOf(DEFAULT_CAPTURE_OPTIONS) })),
+  { 'Capture files': 'one file', Autostop: 'none' });
+check('...and survive anonymising: they name no host',
+  fileRows(redactMeta(meta({ kind: 'live', adapters: ['Ethernet'],
+    ...recordOf(opts({ ringOn: true, ringKeep: 3 })) }), new Anonymiser())),
+  { 'Capture files': 'a new file every 100 MB, newest 3 kept', Autostop: 'none' });
 check('the filter as sent is the one recorded', effectiveFilter(opts({ filter: ' arp ' })), 'arp');
 
 const redacted = redactMeta(meta({ kind: 'live', adapters: ['Ethernet'], ...record }), new Anonymiser());

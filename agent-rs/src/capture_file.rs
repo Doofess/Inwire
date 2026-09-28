@@ -453,15 +453,34 @@ fn file_name(ring: &Ring, index: u32) -> String {
     }
 }
 
+/// `capture.pcapng`, or `capture-2.pcapng` and on when that name is taken.
+fn candidate(name: &str, attempt: u32) -> String {
+    match (attempt, name.rsplit_once('.')) {
+        (1, _) | (_, None) => name.to_string(),
+        (n, Some((stem, extension))) => format!("{stem}-{n}.{extension}"),
+    }
+}
+
 fn open(setup: &WriterSetup, index: u32, header: &[u8]) -> Result<OpenFile, String> {
-    let name = file_name(&setup.ring, index);
-    let path = setup.dir.join(&name);
-    let file = as_client(setup, || {
-        fs::create_dir_all(&setup.dir)?;
-        // `create_new`: a capture never writes over a file it did not make.
-        File::options().write(true).create_new(true).open(&path)
-    })
-    .map_err(|error| format!("could not create {}: {error}", show(&path)))?;
+    let wanted = file_name(&setup.ring, index);
+    // **`create_new`: a capture never writes over a file it did not make.** A
+    // name already taken is the capture resuming - the app's reconnect names
+    // the same capture again after the agent restarted - so the next free name
+    // is taken rather than the start refused.
+    let mut attempt = 1;
+    let (name, path, file) = loop {
+        let name = candidate(&wanted, attempt);
+        let path = setup.dir.join(&name);
+        let opened = as_client(setup, || {
+            fs::create_dir_all(&setup.dir)?;
+            File::options().write(true).create_new(true).open(&path)
+        });
+        match opened {
+            Ok(file) => break (name, path, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempt < 100 => attempt += 1,
+            Err(error) => return Err(format!("could not create {}: {error}", show(&path))),
+        }
+    };
     let mut out = BufWriter::with_capacity(1 << 20, file);
     out.write_all(header).map_err(|error| format!("could not write {name}: {error}"))?;
     Ok(OpenFile {
@@ -717,6 +736,13 @@ mod tests {
         assert_eq!(taken.iter().map(|j| j.seq).collect::<Vec<_>>(), [0, 2], "what was accepted is kept, in order");
         q.close();
         assert!(q.take(Duration::from_millis(1)).is_none());
+    }
+
+    #[test]
+    fn a_name_already_taken_is_followed_by_the_next_free_one() {
+        assert_eq!(candidate("capture.pcapng", 1), "capture.pcapng");
+        assert_eq!(candidate("capture.pcapng", 2), "capture-2.pcapng");
+        assert_eq!(candidate("capture_00001_20260928120000.pcapng", 3), "capture_00001_20260928120000-3.pcapng");
     }
 
     #[test]

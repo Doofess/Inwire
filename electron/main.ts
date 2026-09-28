@@ -173,7 +173,7 @@ const store = new CaptureStoreHost(captureDirectory());
  * is exactly what it did. It follows the four existing `INWIRE_*` variables and
  * is read once here rather than baked into a build.
  */
-const agent = new AgentPipeLink(process.env.INWIRE_AGENT_PIPE || undefined);
+const agent = new AgentPipeLink(process.env.INWIRE_AGENT_PIPE || undefined, captureDirectory());
 
 /**
  * Everything that updates, in one place.

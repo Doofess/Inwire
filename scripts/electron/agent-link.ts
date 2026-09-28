@@ -193,6 +193,40 @@ async function main(): Promise<void> {
     (await nth(0)).destroy();
   }
 
+  {
+    // The greeting (ADR 0052): main says where its captures live first, on
+    // every connection - a reconnect is a new client to the agent, which has
+    // forgotten the last one's root - and before anything else can be sent.
+    const pipePath = testPipePath('greet');
+    const received: string[] = [];
+    const { server, nth } = await serve(pipePath, (socket, read) => {
+      socket.on('data', (chunk: Buffer) => {
+        const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        for (const frame of read.push(bytes)) {
+          if (frame.kind === FRAME_JSON) received.push(frameText(frame));
+        }
+      });
+    });
+    const greeting = '{"type":"set_capture_root","dir":"C:\\\\captures"}';
+    const seen = recorder();
+    const pipe = new PipeTransport(seen.events, pipePath, 50, greeting);
+    pipe.open();
+    await until(() => seen.statuses.includes('connected'));
+    pipe.send('{"type":"start_capture"}');
+    await until(() => received.length === 2);
+    check('the greeting is the first thing the agent hears',
+      received, [greeting, '{"type":"start_capture"}']);
+
+    (await nth(0)).destroy();
+    await until(() => received.length === 3);
+    check('...and it is said again on the reconnect, to the new client',
+      received[2], greeting);
+
+    pipe.close();
+    server.close();
+    (await nth(1)).destroy();
+  }
+
   console.log('\n--- when the agent is not there ---\n');
 
   {

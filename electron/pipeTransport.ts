@@ -105,10 +105,18 @@ export class PipeTransport {
    */
   private attempt = 0;
 
+  /**
+   * @param greeting What main says first on every connection, before anyone
+   *   is told it is up: `set_capture_root` (ADR 0052), so the agent knows
+   *   where this app's captures live before any `start_capture` can name one.
+   *   On every connection because the agent forgets a client's root when its
+   *   pipe closes, and a reconnect is a new client.
+   */
   constructor(
     private readonly events: PipeEvents,
     private readonly pipePath: string = AGENT_PIPE_PATH,
     private readonly reconnectMs: number = RECONNECT_MS,
+    private readonly greeting: string | null = null,
   ) {}
 
   /** Connect, and keep reconnecting until `close`. */
@@ -170,6 +178,7 @@ export class PipeTransport {
     socket.on('connect', () => {
       this.opening = false;
       this.connectedAt = Date.now();
+      if (this.greeting !== null) socket.write(encodeFrame(FRAME_JSON, encoder.encode(this.greeting)));
       this.events.status('connected');
     });
 

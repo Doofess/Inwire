@@ -1027,7 +1027,7 @@ first version of that comparison passed with the offset arithmetic removed
 entirely. Still true: the file is read with one `arrayBuffer()`, and the
 dissection blocks the main thread.
 
-**Seven drivers reach what plain `tsx` cannot.** All are in `NOT_TESTS` and run
+**Eight drivers reach what plain `tsx` cannot.** All are in `NOT_TESTS` and run
 by hand:
 
 - **`scripts/electron/live-revisit-drive.ts`** captures real traffic through
@@ -1046,6 +1046,13 @@ by hand:
   "previous segment not captured" unless its headers show the hole, and
   stamped to the nanosecond (ADR 0050). Run after anything on the capture-start
   path or the agent's open; needs the 0.5.0 agent installed.
+- **`scripts/electron/capture-file-drive.ts`** captures real traffic until an
+  autostop the panel set, then reads the pcapng the installed agent wrote into
+  the capture's folder (ADR 0052): laid out as dumpcap's, exactly the limit's
+  frames, the same frames the store holds, and **owned by this user, not
+  SYSTEM**. A raw pipe client naming a folder this user cannot write must be
+  refused with nothing created - the check that the agent writes as the
+  client. Run after anything on the agent's writer or the capture-start path.
 - **`scripts/electron/revisit-drive.ts`** imports the real `inwire` capture,
   and the key-log capture with its key log followed, and opens frames whose
   trees need the frames before them, or decrypted content (ADR 0049).

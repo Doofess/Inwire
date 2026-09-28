@@ -27,8 +27,10 @@ import { pipeline } from '../services/pipelineClient';
 import {
   summarizeCaptureStats,
   type AgentCommand, type AgentInterface, type AgentAdapter, type AgentLogEntry,
-  type AgentCaptureFilterCheckMessage, type AgentMessage, type CaptureDropStats,
+  type AgentCaptureFilterCheckMessage, type AgentCaptureStoppedMessage, type AgentMessage,
+  type CaptureDropStats,
 } from '../services/agentProtocol';
+import { applyCaptureFile, type CaptureFile } from '../services/captureFiles';
 import { filterCapturableInterfaces } from '../services/captureInterfaces';
 import { NO_RESYNC, planResync, readReply, type Resync } from '../services/captureResync';
 import { diagnoseAgent, type AgentServiceFacts } from '../services/agentHealth';
@@ -147,6 +149,10 @@ export function useAgentConnection(host: AgentConnectionHost) {
    * because the adapters it was checked against may have changed.
    */
   const [captureFilterCheck, setCaptureFilterCheck] = useState<AgentCaptureFilterCheckMessage | null>(null);
+  /** The capture's own pcapng files, as the agent reports them (ADR 0052). */
+  const [captureFiles, setCaptureFiles] = useState<CaptureFile[]>([]);
+  /** Why the agent stopped the capture itself, or null. */
+  const [captureStopReason, setCaptureStopReason] = useState<AgentCaptureStoppedMessage['reason'] | null>(null);
   // Recent packets/sec per interface, oldest first, for the picker's
   // sparklines. Only populated while the picker is open - the agent samples
   // nothing otherwise.
@@ -419,6 +425,18 @@ export function useAgentConnection(host: AgentConnectionHost) {
         return;
       }
 
+      if (message.type === 'capture_file') {
+        setCaptureFiles((files) => applyCaptureFile(files, message));
+        return;
+      }
+
+      if (message.type === 'capture_stopped') {
+        // The `idle` that follows ends the capture here, through the same
+        // seal as Stop; this only says why.
+        setCaptureStopReason(message.reason);
+        return;
+      }
+
       if (message.type === 'adapter_config') {
         setAdapters(message.adapters);
         // The one fact the packet list needs from this: which MACs and
@@ -585,13 +603,19 @@ export function useAgentConnection(host: AgentConnectionHost) {
    * `start_capture` and the first tick replaces this within a second, but a
    * stale "dropped" chip for that second would be a lie.
    */
-  const clearCaptureStats = useCallback(() => setCaptureStats(null), []);
+  // What a capture reported about itself, forgotten when the next one starts.
+  const clearCaptureStats = useCallback(() => {
+    setCaptureStats(null);
+    setCaptureFiles([]);
+    setCaptureStopReason(null);
+  }, []);
 
   return {
     agentStatus, agentCaptureState, agentClientId, captureOwner,
     agentHealth, startAgentService,
     agentVersion, agentNpcapAccess, agentIncompatible, agentInterfaces,
     captureStats, adapters, agentLog, agentError, interfaceRates, captureFilterCheck,
+    captureFiles, captureStopReason,
     selectedInterfaces, setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
     clearAgentLog, clearInterfaceRates, clearCaptureStats, setInterfaceStatsSubscribed,

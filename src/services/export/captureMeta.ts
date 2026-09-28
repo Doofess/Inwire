@@ -28,9 +28,14 @@ export type CaptureSource =
    * Captured here, from these adapters (their display names), with the
    * capture filter and snaplen the driver applied (`captureOptions.ts`) -
    * null when the capture asked for none. Undefined for a capture that
-   * predates them, which is "not recorded" rather than "none".
+   * predates them, which is "not recorded" rather than "none". `ring` and
+   * `autostop` are how the agent rotated the capture's files and when it was
+   * set to stop itself (ADR 0052), in words.
    */
-  | { kind: 'live'; adapters: string[]; filter?: string | null; snaplen?: number | null }
+  | {
+    kind: 'live'; adapters: string[]; filter?: string | null; snaplen?: number | null;
+    ring?: string | null; autostop?: string | null;
+  }
   /** Opened from a file. */
   | { kind: 'import'; fileName: string }
   /** Restored from a stored session, whose origin is no longer known. */
@@ -153,6 +158,16 @@ export function metaEntries(meta: CaptureMeta): MetaEntry[] {
         ['Snapshot length', meta.source.snaplen === undefined
           ? NOT_AVAILABLE
           : meta.source.snaplen === null ? 'whole frames' : `${meta.source.snaplen} bytes`] as MetaEntry,
+        // A ring deletes its oldest files, so a capture that rotated holds
+        // only its end - which is the fact a reader needs before trusting a
+        // count that starts at the first frame kept rather than the first
+        // frame captured.
+        ['Capture files', meta.source.ring === undefined
+          ? NOT_AVAILABLE
+          : meta.source.ring ?? 'one file'] as MetaEntry,
+        ['Autostop', meta.source.autostop === undefined
+          ? NOT_AVAILABLE
+          : meta.source.autostop ?? 'none'] as MetaEntry,
       ]
       : []),
     ['First frame', meta.firstUs === null ? NOT_AVAILABLE : isoMicros(meta.firstUs)],

@@ -105,6 +105,8 @@ export interface CaptureInterfacePanelProps {
   onCaptureOptionsChange: (patch: Partial<CaptureOptions>) => void;
   /** The agent's answer about the filter as typed (`filterVerdict`). */
   filterVerdict: FilterVerdict;
+  /** Why the last capture stopped itself, as a sentence, or null. */
+  stopNote?: string | null;
 }
 
 /** The chart's own row, so the trace spans the column at whatever width it is. */
@@ -113,7 +115,7 @@ const CHART = 'w-full h-4 text-muted-foreground group-data-[state=checked]:text-
 export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
   interfaces, adapters, selectedInterfaces, onToggle, interfaceRates,
   agentHealth, isCapturing, captureOwnedElsewhere, onOpenSettings, onSamplingChange,
-  captureOptions, onCaptureOptionsChange, filterVerdict,
+  captureOptions, onCaptureOptionsChange, filterVerdict, stopNote = null,
 }) => {
   /**
    * The ref indirection is load-bearing, not ceremony.
@@ -350,6 +352,7 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
         onChange={onCaptureOptionsChange}
         verdict={filterVerdict}
         locked={isCapturing || captureOwnedElsewhere}
+        stopNote={isCapturing ? null : stopNote}
       />
 
       {/* **The one fact from the adapter that is nowhere else on screen.**

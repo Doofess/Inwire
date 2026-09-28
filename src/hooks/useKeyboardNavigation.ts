@@ -1,7 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react';
 
 import type { Packet } from '../types/packet';
-import type { AgentCommand } from '../services/agentProtocol';
 import { APP_VIEWS, type AppView } from '../services/viewPrefs';
 
 /**
@@ -41,15 +40,20 @@ export interface KeyboardNavigationOptions {
   packetCountRef: RefObject<number>;
   /** Space can only resume on an adapter already chosen; it cannot ask. */
   selectedInterfacesRef: RefObject<string[]>;
-  setIsCapturing: (capturing: boolean) => void;
   setSelectedPacket: (packet: Packet) => void;
-  sendAgentCommand: (command: AgentCommand) => void;
   /**
-   * The `start_capture` Space sends, carrying the capture filter and snaplen
-   * (`services/captureOptions.ts`) - or null when the agent has refused the
-   * filter, and Space then starts nothing.
+   * Whether Start must wait - a filter the agent refused, or ring settings it
+   * would. Space then starts nothing: the rail says why, and a key cannot.
    */
-  startCaptureCommand: () => AgentCommand | null;
+  startBlocked: () => boolean;
+  /**
+   * The rail's own start and stop. **Space used to send its own
+   * `start_capture`**, which started a capture with no id and no store of its
+   * own - and so, once the agent wrote each capture's files (ADR 0052), with
+   * nowhere to write them. One start, one stop, whatever pressed them.
+   */
+  onStartCapture: () => void;
+  onStopCapture: () => void;
 }
 
 export function useKeyboardNavigation({
@@ -61,14 +65,14 @@ export function useKeyboardNavigation({
   isCapturingRef,
   packetCountRef,
   selectedInterfacesRef,
-  setIsCapturing,
   setSelectedPacket,
-  sendAgentCommand,
-  startCaptureCommand,
+  startBlocked,
+  onStartCapture,
+  onStopCapture,
 }: KeyboardNavigationOptions): void {
   // Through a ref, for the reason `toggleSideBarRef` gives below.
-  const startCommandRef = useRef(startCaptureCommand);
-  startCommandRef.current = startCaptureCommand;
+  const captureRef = useRef({ startBlocked, onStartCapture, onStopCapture });
+  captureRef.current = { startBlocked, onStartCapture, onStopCapture };
   /**
    * `Ctrl+B`'s handler, held the way everything that changes is held here.
    *
@@ -167,13 +171,12 @@ export function useKeyboardNavigation({
         // Space would otherwise be one keystroke, with no undo, between a
         // finished capture and an empty list. Stopping stays unconditional.
         if (!wasCapturing && packetCountRef.current > 0) return;
-        const start = wasCapturing ? null : startCommandRef.current();
-        if (!wasCapturing && start === null) return;
-        const next = canCapture ? !wasCapturing : false;
-        setIsCapturing(next);
-        if (next !== wasCapturing) {
-          sendAgentCommand(next && start !== null ? start : { type: "stop_capture" });
+        if (wasCapturing) {
+          captureRef.current.onStopCapture();
+          return;
         }
+        if (!canCapture || captureRef.current.startBlocked()) return;
+        captureRef.current.onStartCapture();
         return;
       }
 

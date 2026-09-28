@@ -26,8 +26,9 @@ import { matchesBeforeWindow } from "./lib/useCaptureRows";
 import { MAX_CUSTOM_COLUMNS } from "./lib/packetColumns";
 import { usePreferenceStore, usePreferenceValue } from "./services/preferenceStore";
 import {
-  captureOptionsStore, effectiveFilter, filterBlocksStart, filterVerdict, recordOf, startCaptureCommand,
+  captureOptionsStore, effectiveFilter, filterBlocksStart, filterVerdict, recordOf, ringProblem, startCaptureCommand,
 } from "./services/captureOptions";
+import { stopReasonText } from "./services/captureFiles";
 import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { publishPacketCounts } from "./services/packetCounts";
@@ -829,11 +830,18 @@ export default function App() {
   const captureOptionsRef = useRef(captureOptions);
   captureOptionsRef.current = captureOptions;
 
+  // `stopCaptureAndSeal`, which needs the agent this hook returns - so the
+  // hook is handed a ref to it, assigned below every render.
+  const stopCaptureRef = useRef<(tellAgent: boolean) => void>(() => {});
   const agent = useAgentConnection({
     canCapture: permissions.canCapture,
-    startCommand: () => startCaptureCommand(captureOptionsRef.current),
+    // The reconnect's resync resumes the SAME capture, so it names the same
+    // capture id; the agent writes its files beside the ones already there.
+    startCommand: () => startCaptureCommand(captureOptionsRef.current, captureIdRef.current),
     isCapturingRef,
-    onCaptureStopped: () => setIsCapturing(false),
+    // The agent ended it - an autostop, every adapter failing, another window
+    // stopping it - and this window seals it exactly as its own Stop would.
+    onCaptureStopped: () => stopCaptureRef.current(false),
     onFrames: queueFrames,
     onSocketTable: applySocketTable,
     onHostIdentity: (identity) => {
@@ -850,6 +858,7 @@ export default function App() {
     setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
     clearAgentLog, clearCaptureStats, setInterfaceStatsSubscribed, captureFilterCheck,
+    captureStopReason,
   } = agent;
 
   // Whether the agent compiles the typed filter for the chosen adapters. Asked
@@ -858,9 +867,12 @@ export default function App() {
   // The answer echoes the filter, so one that crossed a newer question is
   // recognised as stale (`filterVerdict`).
   const captureFilterVerdict = filterVerdict(captureOptions, captureFilterCheck);
-  const startBlockedByFilter = filterBlocksStart(captureFilterVerdict);
-  const startBlockedRef = useRef(startBlockedByFilter);
-  startBlockedRef.current = startBlockedByFilter;
+  // Why Start must wait, or null: a filter the agent refused, or ring and stop
+  // settings it would refuse - said here, with the reason, rather than by a
+  // refusal after the click.
+  const startBlockedReason = filterBlocksStart(captureFilterVerdict) ?? ringProblem(captureOptions);
+  const startBlockedRef = useRef(startBlockedReason);
+  startBlockedRef.current = startBlockedReason;
   const filterToCheck = effectiveFilter(captureOptions);
   const adaptersToCheck = selectedInterfaces.join('\n');
   useEffect(() => {
@@ -873,10 +885,43 @@ export default function App() {
   // The other half of auto-pause. The buffer hook owns the flag and cannot own
   // this, because stopping a capture needs the agent - and the agent needs the
   // buffer's `queueFrames`. Assigned every render, so it never goes stale.
-  autoPauseRef.current = () => {
+  /**
+   * **Every way a capture ends goes through here**: the Stop button, Space,
+   * the schedule, the buffer's disk reserve, the heap guard, and the agent
+   * ending it itself - an autostop (ADR 0052), every adapter failing, another
+   * window stopping it.
+   *
+   * Stop, then let the Worker release the frames it still holds, then flush
+   * their rows, then seal the store. The auto-pause used to only send the stop,
+   * and an agent that stopped by itself only flipped the button - so a capture
+   * ended either way never had its tail written or its last chunk sealed, the
+   * one moment it is meant to be whole on disk.
+   *
+   * `tellAgent` is false when the agent has already stopped. **Once per
+   * capture**: Stop is answered by the agent's own `idle`, which arrives here
+   * too, and a second seal would be a second `finish` racing the first.
+   */
+  const sealedCaptureRef = useRef<string | null>(null);
+  const stopCaptureAndSeal = (tellAgent: boolean) => {
+    if (tellAgent) sendAgentCommand({ type: 'stop_capture' });
+    isCapturingRef.current = false;
     setIsCapturing(false);
-    sendAgentCommand({ type: 'stop_capture' });
+    captureStartedAtRef.current = null;
+    const id = captureIdRef.current;
+    if (id !== null && sealedCaptureRef.current === id) return;
+    sealedCaptureRef.current = id;
+    // A finish sent straight away overtook the tail the Worker still held in
+    // its ordering window, which then sat staged until the store next closed.
+    // The drain puts the tail's bytes and records in the store and its rows in
+    // the queue; `flushNow` sends those rows on this same port, ahead of the
+    // finish.
+    void pipeline.drain().then(() => {
+      flushNow();
+      captureStore.finish();
+    });
   };
+  stopCaptureRef.current = stopCaptureAndSeal;
+  autoPauseRef.current = () => stopCaptureAndSeal(true);
   /**
    * An import replaces the capture, so a live one has to actually stop - not
    * only read as stopped. Setting `isCapturing` alone left the agent sniffing,
@@ -2048,14 +2093,12 @@ export default function App() {
     isCapturingRef,
     packetCountRef,
     selectedInterfacesRef,
-    setIsCapturing,
     setSelectedPacket,
-    sendAgentCommand,
-    // Null while the agent refuses the filter, which leaves Space doing
-    // nothing - the rail says why, and a key cannot.
-    startCaptureCommand: () => (startBlockedRef.current !== null
-      ? null
-      : startCaptureCommand(captureOptionsRef.current)),
+    // The same start and stop as the rail's button: a capture Space starts is
+    // a capture with an id, a store and its own files like any other.
+    startBlocked: () => startBlockedRef.current !== null,
+    onStartCapture: () => { void handleStartCapture(); },
+    onStopCapture: () => handlePauseCapture(),
   });
 
   // Actions
@@ -2143,26 +2186,13 @@ export default function App() {
       ),
       ...recordOf(captureOptionsRef.current),
     });
-    sendAgentCommand(startCaptureCommand(captureOptionsRef.current));
+    // Named by its id, which is what has the agent write the capture's own
+    // pcapng into this capture's folder (ADR 0052).
+    sendAgentCommand(startCaptureCommand(captureOptionsRef.current, captureIdRef.current));
     setIsCapturing(true);
   };
 
-  const handlePauseCapture = () => {
-    sendAgentCommand({ type: 'stop_capture' });
-    setIsCapturing(false);
-    captureStartedAtRef.current = null;
-    // Seals the staging ring and flushes - but only once the Worker has let go
-    // of the frames it still held, and their rows are in the store. A finish
-    // sent straight away overtook that tail, which then sat staged until the
-    // store next closed: the one moment the whole capture is meant to be on
-    // disk, it was not. The drain puts the tail's bytes and records in the
-    // store and its rows in the queue; `flushNow` sends those rows on this same
-    // port, ahead of the finish.
-    void pipeline.drain().then(() => {
-      flushNow();
-      captureStore.finish();
-    });
-  };
+  const handlePauseCapture = () => stopCaptureAndSeal(true);
 
   /**
    * The program behind a frame's Source column, or null.
@@ -2668,7 +2698,7 @@ export default function App() {
           agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
           captureOwnedElsewhere={captureOwner !== null && captureOwner !== agentClientId}
-          startBlockedReason={startBlockedByFilter}
+          startBlockedReason={startBlockedReason}
           agentHealth={agentHealth}
           view={view}
           onViewChange={handleViewChange}
@@ -2800,6 +2830,9 @@ export default function App() {
                 captureOptions={captureOptions}
                 onCaptureOptionsChange={patchCaptureOptions}
                 filterVerdict={captureFilterVerdict}
+                stopNote={captureStopReason === null
+                  ? null
+                  : `The last capture stopped itself: ${stopReasonText(captureStopReason)}.`}
               />
             )}
             {sideBar === 'schedule' && (

@@ -54,6 +54,10 @@ const NOT_TESTS: Record<string, string> = {
     'captures through the installed agent with a capture filter and a snaplen, and checks '
     + 'every frame on disk against both (ADR 0050); needs a build, the 0.5.0 agent, Npcap and '
     + 'an Ethernet adapter, run by hand',
+  'electron/capture-file-drive.ts':
+    'captures through the installed agent until its autostop and checks the file it wrote as '
+    + 'this user against the store, and that a folder this user cannot write is refused (ADR 0052); '
+    + 'needs a build, the 0.5.0 agent, Npcap and an Ethernet adapter, run by hand',
   'electron/gpu-restore-drive.ts':
     'loses and restores a real WebGL context in the running app; needs dist/ and a GPU, run by hand',
   'electron/serveStub.ts': 'tool; serves the stub agent until Ctrl+C, for driving the app by hand',
