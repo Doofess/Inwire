@@ -1,11 +1,13 @@
 # 0052 — The agent is its own dumpcap
 
-**Status:** accepted 2026-09-28, landing in phases (below). **Amends
+**Status:** accepted 2026-09-28; phases 1-6 landed (below), and the live
+drives wait on the owner's install of the 0.5.0 build. **Amends
 [0005](0005-agent-wire-format.md)** (the wire record is version 4, with 32-bit
-lengths) and **[0050](0050-a-capture-is-narrowed-by-the-driver.md)** (the
-snaplen's ceiling is dumpcap's 262,144). The ring buffer will amend
-[0012](0012-stored-captures-persist.md) and
-[0025](0025-the-capture-lives-on-disk.md) narrowly when it lands.
+lengths), **[0050](0050-a-capture-is-narrowed-by-the-driver.md)** (the
+snaplen's ceiling is dumpcap's 262,144), and narrowly
+**[0012](0012-stored-captures-persist.md)** and
+**[0025](0025-the-capture-lives-on-disk.md)**: a capture that follows a ring
+loses the frames of each file the agent deletes, and nothing else.
 
 ## Context
 
@@ -75,6 +77,57 @@ code, because no frame can be refused now. `origLen` replaced the 16-bit
 - The app's list follows the ring. When the agent deletes a file, the store
   evicts the frames that file held.
 
+**How the store follows the ring.** A capture's data is in segments - segment
+0 is the four files beside the index, as before, and segment *n* is
+`seg-NNNNNN/` - and index version 3 records each chunk's segment and, in its
+header, the **floor**: the first chunk still held.
+- **The agent says where each file begins** (`capture_boundary {index,
+  firstSeq}`), under the lock that hands out sequence numbers and before the
+  file's first frame is queued. One pipe is first in, first out, so the
+  pipeline Worker always has a file's threshold before any frame past it, and
+  files every frame by its sequence number (`pipeline/ringFiling.ts`). The
+  writer thread's own `capture_file` reports could land on either side of the
+  frames they name, which is why they are not what files a frame.
+- **The store starts a segment per ring file**, and when the agent deletes a
+  file it deletes the segments holding only frames at or below that file's
+  last sequence number - **floor first**, so a crash between the two leaves a
+  directory nothing reads, which recovery removes. `segments.ts` is the rule
+  and `scripts/capture/segment-guard.ts` holds each refusal in it: never
+  segment 0, never the segment being written or one with a frame still
+  staged, never one holding a frame filed under another run of the agent or
+  under none, oldest first. **By sequence number rather than by file**,
+  because a boundary the pipe shed would file a whole ring file under the one
+  before it; by file, deleting that one would take frames the agent still
+  has, where by sequence number the segment waits one file longer.
+- **Ordinals never move.** Lookups answer below the floor as a hole, and the
+  list, a filter's bitmap, an export and the RAM window all start at the
+  floor rather than renumbering - so a cached row, a scan and a selection stay
+  right as the front leaves. `scripts/capture/segments.ts` drives all of it
+  through the real host over the real `inwire` capture.
+- **Two adapters' frames cross in the ordering window**, so a frame of file
+  *k* can reach the store after file *k+1*'s segment began. It joins the later
+  segment and is kept one file longer than its file. With one adapter the
+  list's first frame is the oldest kept file's first frame exactly.
+
+**"Save as captured" copies the agent's files** out of the capture's folder,
+byte for byte (`electron/capturedFiles.ts`): the renderer sends a capture id,
+main copies only names the agent gives, one file through a save dialog and a
+ring's into a new folder of its own. An export still rebuilds a file from the
+store, and is what a filter or anonymising uses.
+
+**An import keeps what a capture file says about itself**
+(`captureFileFacts.ts`): each IDB's name, description, filter and snaplen, the
+last ISB's received and dropped, and the SHB's application. The metadata
+states them, and a pcapng export of the imported capture carries the filter,
+snaplen and counts back out, so a dumpcap or agent file round-trips with them
+(`scripts/export/import-facts.ts`, with `capinfos` as the oracle).
+
+**Not done, on purpose:** a filtered or anonymised export does not copy the
+agent file's IDB and ISB blocks. The export already writes the capture's
+filter, snaplen and drops from the capture's own options; what copying would
+add is the adapter's model and the OS, and an anonymised file must not carry
+those anyway.
+
 ## Phases
 
 1. `pcapng.rs`. **Landed.**
@@ -86,9 +139,17 @@ code, because no frame can be refused now. `origLen` replaced the 16-bit
    of them; a ring keeps exactly its newest files; an autostop is exact in the
    file and in the stream.
 4. The app: `set_capture_root`, the options, and a single stop path.
-5. The store follows the ring.
-6. Save-as-captured, and import reading IDB and ISB options.
-7. Docs.
+   **Landed.**
+5. The store follows the ring. **Landed.**
+6. Save-as-captured, and import reading IDB and ISB options. **Landed.**
+7. Docs. **This record, CLAUDE.md and `docs/verification.md`.**
+
+**Still owed, and needing the owner:** the 0.5.0 build installed elevated,
+then `scripts/electron/capture-file-drive.ts` (autostop, owner, the refused
+root, and a ring of ten 1 MB files keeping three), `capture-options-drive.ts`
+and `live-revisit-drive.ts` against it. And the second-account check in
+`docs/verification.md`: that the agent refuses to write into a folder the
+client's account cannot.
 
 ## The Python agent's deviations
 

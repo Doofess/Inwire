@@ -540,7 +540,10 @@ Each with what enforces it. "Unenforced" means exactly that.
 directories matching `CAPTURE_ID_PATTERN` and never anything else in the
 folder — on OPFS an empty keep-list was harmless, on `%LOCALAPPDATA%` it is a
 recursive delete of a directory a person can drop files into. Enforced by
-`scripts/capture/prune-guard.ts`.
+`scripts/capture/prune-guard.ts`. **One exception, which the user asks for by
+setting it** (ADR 0052): a capture following the agent's ring loses a segment
+when the agent deletes the file it held - `segments.ts`, enforced by
+`scripts/capture/segment-guard.ts`.
 
 **No captured frame crosses the renderer's main thread.** ADR 0007. Main pumps
 the pipe into a port the renderer transfers into the Worker without reading.

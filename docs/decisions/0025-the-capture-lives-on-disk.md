@@ -1,5 +1,11 @@
 # 0025 — The capture lives on disk, and the disk stops deleting
 
+> **Narrowed by [0052](0052-the-agent-is-its-own-dumpcap.md): "the disk stops
+> deleting" has one exception.** A capture that follows the agent's ring keeps
+> its data in segments and deletes one when the agent deletes the ring file it
+> held - floor first, so ordinals never move and every lookup answers below the
+> floor as a hole.
+
 > **Decision 1's mechanism is superseded by**
 > **[0027](0027-the-app-is-a-desktop-app.md)** - the app is an Electron app, so
 > the capture is in real files rather than the browser storage this file reasons

@@ -1045,6 +1045,28 @@ account, and it is the reason this file exists.
 - [ ] Kill the app while capturing. The capture stops when the last client
       disconnects — and so, now, does the **service** (see below).
 
+### The agent writes a capture's file as its client, never as itself
+
+ADR 0052. The agent is LocalSystem and writes each capture's pcapng into the
+capture's folder **impersonating the client that started it**, so a client can
+only make the service write where that client could write itself.
+`scripts/electron/capture-file-drive.ts` shows the file is owned by this user
+and that `C:\Windows` is refused - but both ends there are one account, so it
+cannot show that one user's client is refused **another user's** folder, which
+is the case impersonation exists for.
+
+- [ ] As user **A**, note A's capture folder,
+      `C:\Users\A\AppData\Local\Inwire\captures`.
+- [ ] As a **standard** user **B**, with A's folder not shared, connect a
+      client to `\\.\pipe\inwire-agent` (the raw client in
+      `capture-file-drive.ts`, run as B) and send `set_capture_root` naming A's
+      folder, then `start_capture` with a capture id. **The agent answers
+      `capture_failed` and nothing appears in A's folder.** A file there, owned
+      by `SYSTEM`, means the writer ran with the service's own rights - the
+      failure this whole arrangement is built to make impossible.
+- [ ] As B, start a capture from the app normally. The file lands in **B's**
+      folder, owned by **B**.
+
 ### The agent's lifetime is the app's
 
 ADR 0035. **Most of this is a script now** - `npx tsx

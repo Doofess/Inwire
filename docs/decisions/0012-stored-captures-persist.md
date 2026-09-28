@@ -1,5 +1,12 @@
 # 0012 - A stored capture is discarded only when the user asks
 
+> **Narrowed by [0052](0052-the-agent-is-its-own-dumpcap.md), in one case only.**
+> A capture whose agent writes a ring of files the user asked for follows the
+> ring: when the agent deletes a file, the frames it held leave the capture too.
+> The user asked for that when they set the ring, and nothing else is ever
+> deleted without being asked - `segments.ts` is the rule and
+> `scripts/capture/segment-guard.ts` holds it.
+
 > **Mechanism superseded by [0025](0025-the-capture-lives-on-disk.md)**, and 0025
 > by [0027](0027-the-app-is-a-desktop-app.md) in turn. **The rule below survives
 > intact and is the invariant the app still holds** - a capture is deleted only

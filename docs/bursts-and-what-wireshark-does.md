@@ -127,11 +127,21 @@ was that a truncated frame was a dissection that failed - on the fixtures cut at
 what 0050 fixed first, held to tshark by `scripts/parity/snaplen.ts`.
 
 **Ring buffers.** `-b filesize:` / `-b files:` bound disk use over an unbounded
-capture window. We have no rotation; the capture store grows and
-`DISK_RESERVE_BYTES` stops the capture before the disk fills. Different answer
-to the same problem, and ours keeps the whole capture rather than the last N
-files — which is the right trade for an analyzer you scroll back through, and
-the wrong one for unattended monitoring, which ADR 0035 has now retired anyway.
+capture window. **We have them now, as dumpcap has them** (ADR 0052): the agent
+writes the capture's own pcapng and rotates it by size, frame-time duration or
+packets, keeping the newest N, and the app's capture follows the ring - the
+frames of a deleted file leave the list too, so both copies stay bounded.
+Without a ring the store still keeps the whole capture and `DISK_RESERVE_BYTES`
+stops it before the disk fills, which remains the right default for an
+analyzer you scroll back through.
+
+**A fourth place a frame can be lost: the file.** The agent's writer has a
+queue of its own (64 MB) that **never sheds for the app's sake** - the live
+queue to the app drops its oldest frames when the pipe is slow, and the file
+must not lose a frame because a window was busy. A frame that finds the
+writer's queue full is the disk falling behind, not the app; it is counted
+against its interface, written into that file's ISB as `isb_ifdrop` beside the
+driver's drops, and reported as `capture_stats.droppedWriter` - never silent.
 
 **Turning the UI off.** Wireshark's first piece of high-rate advice is *don't
 capture with the GUI*, and its second is *turn off "Update list of packets in
@@ -154,8 +164,9 @@ and the answer must stay bounded.
 
 - ~~**No snaplen option.**~~ Offered since ADR 0050, with a capture filter, once
   a cut frame stopped being a dissection that fails.
-- **No ring buffer.** `DISK_RESERVE_BYTES` already stops a capture before the
-  disk fills, and keeping the whole capture is the point of the store.
+- ~~**No ring buffer.**~~ Offered since ADR 0052, as dumpcap's `-b`, with the
+  capture following it. Off by default: keeping the whole capture is still the
+  point of the store.
 - **No "don't update in real time" switch.** The honest version of that is
   dissection off the capture path, not a checkbox that makes the packet list
   stop updating.
