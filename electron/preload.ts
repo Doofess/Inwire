@@ -23,7 +23,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   AGENT_PORT_CHANNEL, AGENT_PORT_REQUEST, SAVE_FILE_CHANNEL,
-  SAVE_STREAM_CLOSE_CHANNEL, SAVE_STREAM_OPEN_CHANNEL, SAVE_STREAM_WRITE_CHANNEL,
+  SAVE_STREAM_CLOSE_CHANNEL, SAVE_STREAM_OPEN_CHANNEL, SAVE_STREAM_WRITE_CHANNEL, SAVE_CAPTURED_CHANNEL,
   KEYLOG_ATTACH_CHANNEL, KEYLOG_CHOOSE_CHANNEL, KEYLOG_FOLLOW_SUGGESTED_CHANNEL,
   KEYLOG_FORGET_CHANNEL, KEYLOG_STATUS_CHANNEL, KEYLOG_TEXT_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_INGEST_PORT_REQUEST,
@@ -215,6 +215,14 @@ const api = {
   },
   closeSaveStream(token: string, commit: boolean): Promise<unknown> {
     return ipcRenderer.invoke(SAVE_STREAM_CLOSE_CHANNEL, token, commit === true);
+  },
+
+  /**
+   * Copies a capture's own pcapng files - the agent's, as captured - where
+   * the person picks. A capture id, never a path (ADR 0052).
+   */
+  saveCaptured(captureId: string): Promise<unknown> {
+    return ipcRenderer.invoke(SAVE_CAPTURED_CHANNEL, String(captureId));
   },
 
   /** The Update Center's state right now, for a panel that has just mounted. */

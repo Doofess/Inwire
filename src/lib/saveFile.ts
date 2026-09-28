@@ -83,6 +83,18 @@ export function dialogRequestFor(suggestedName: string): {
   };
 }
 
+/**
+ * "Save as captured": the capture's own pcapng files, as the agent wrote them
+ * (ADR 0052), copied by main where the person picks. The capture's id is all
+ * that crosses; the answer is the same three outcomes, the path being the file
+ * or - for a ring - the folder its files went into.
+ */
+export async function saveCaptured(captureId: string): Promise<SaveOutcome> {
+  const save = window.inwire?.saveCaptured;
+  if (!save) return { saved: false, canceled: false, error: 'no desktop bridge to save through' };
+  return narrowSaveResult(await save(captureId));
+}
+
 /** Convenience for the callers that still hold a `Blob`. */
 export async function saveGeneratedBlob(blob: Blob, suggestedName: string): Promise<SaveOutcome> {
   return saveGeneratedFile(new Uint8Array(await blob.arrayBuffer()), suggestedName);

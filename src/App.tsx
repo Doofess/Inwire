@@ -28,7 +28,7 @@ import { usePreferenceStore, usePreferenceValue } from "./services/preferenceSto
 import {
   captureOptionsStore, effectiveFilter, filterBlocksStart, filterVerdict, recordOf, ringProblem, startCaptureCommand,
 } from "./services/captureOptions";
-import { stopReasonText } from "./services/captureFiles";
+import { keptFiles, stopReasonText } from "./services/captureFiles";
 import { packetColorSetStore } from "./services/themePrefs";
 import { resetGeoSession } from "./components/analytics/geoSession";
 import { publishPacketCounts } from "./services/packetCounts";
@@ -859,7 +859,7 @@ export default function App() {
     setSelectedInterfaces, selectedInterfacesRef,
     sendAgentCommand, subscribeAgentLog, unsubscribeAgentLog,
     clearAgentLog, clearCaptureStats, setInterfaceStatsSubscribed, captureFilterCheck,
-    captureStopReason,
+    captureStopReason, captureFiles,
   } = agent;
 
   // Whether the agent compiles the typed filter for the chosen adapters. Asked
@@ -2894,6 +2894,9 @@ export default function App() {
                 captureSource={captureSource}
                 onImportPackets={handleImportPackets}
                 onImportBatch={handleImportBatch}
+                captureId={captureStorage.captureId}
+                capturedFileCount={keptFiles(captureFiles).length}
+                capturing={isCapturing}
               />
             )}
           </SideBar>

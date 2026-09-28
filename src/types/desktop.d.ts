@@ -118,6 +118,13 @@ declare global {
       writeSaveStream?(token: string, bytes: Uint8Array): Promise<unknown>;
       closeSaveStream?(token: string, commit: boolean): Promise<unknown>;
       /**
+       * "Save as captured": main copies the capture's own pcapng files, the
+       * ones the agent wrote (ADR 0052), where the person picks - one file
+       * through a save dialog, a ring's into a new folder. Answers like
+       * `saveFile`, plus how many files; narrowed by `src/lib/saveFile.ts`.
+       */
+      saveCaptured?(captureId: string): Promise<unknown>;
+      /**
        * The Update Center's state, for a panel that has just mounted.
        *
        * `unknown` like `saveFile`, and narrowed by

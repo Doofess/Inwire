@@ -38,6 +38,7 @@ import {
 } from './channels';
 import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
 import { registerSaveStream } from './saveStream';
+import { registerSaveCaptured } from './saveCaptured';
 import { KeyLogFollower } from './keyLogFollower';
 import { AgentPipeLink } from './agentPipe';
 import { isComponentId } from './updateCenter/components';
@@ -265,6 +266,7 @@ async function start(): Promise<void> {
   ipcMain.handle(SAVE_FILE_CHANNEL, (event, request: SaveFileRequest) =>
     saveGeneratedFile(event, request));
   registerSaveStream(ipcMain);
+  registerSaveCaptured(ipcMain, captureDirectory());
   ipcMain.handle(UPDATE_STATE_REQUEST, () => updates.snapshot());
   ipcMain.handle(UPDATE_CHECK_CHANNEL, () => updates.check());
   ipcMain.handle(UPDATE_APPLY_CHANNEL, (_event, id: unknown) => {

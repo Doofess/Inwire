@@ -68,6 +68,14 @@ export const SAVE_FILE_CHANNEL = 'inwire:save-file';
  * `electron/saveSession.ts`.
  */
 export const SAVE_STREAM_OPEN_CHANNEL = 'inwire:save-stream-open';
+
+/**
+ * Renderer -> main: "save as captured" - copy a capture's own pcapng files,
+ * the ones the agent wrote as it captured (ADR 0052), where the person picks.
+ * The renderer sends a capture id and nothing else; see
+ * `electron/capturedFiles.ts`.
+ */
+export const SAVE_CAPTURED_CHANNEL = 'inwire:save-captured';
 export const SAVE_STREAM_WRITE_CHANNEL = 'inwire:save-stream-write';
 export const SAVE_STREAM_CLOSE_CHANNEL = 'inwire:save-stream-close';
 

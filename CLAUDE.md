@@ -278,6 +278,14 @@ token belongs to the webContents that opened it, and a window that goes away or
 a quit deletes its partials. `saveSession.ts` holds every rule; `saveStream.ts`
 is the Electron adapter.
 
+**"Save as captured" is a copy, not an export** (ADR 0052): `inwire:save-captured`
+takes a capture id - never a path - and main copies the agent's own pcapng
+files out of that capture's folder, byte for byte, one through a save dialog
+and a ring's into a new folder of their own, each through a `.partial`, and a
+set whole or not at all. `capturedFiles.ts` holds the rules and
+`scripts/electron/captured-files.ts` drives them; `saveCaptured.ts` is the
+adapter.
+
 **The window is frameless and draws its own controls.** `frame: false`, and a
 32px title row carrying the app's own minimize / maximize / close. What is lost
 and accepted: **Snap Layouts** (the flyout on a maximise-button hover — it needs

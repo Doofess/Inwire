@@ -12,6 +12,7 @@ import { useRovingFocus } from '../common/useRovingFocus';
 import { FilterEngine } from '../../services/filterEngine';
 import { keyLog } from '../../services/tls/keyLog';
 import { captureStore } from '../../services/capture/captureClient';
+import { saveCaptured, type SaveOutcome } from '../../lib/saveFile';
 import {
   beginExportJob, cancelExportJob, dismissExportJob, type ExportFormat, type ExportJobState, type ExportPhase,
 } from '../../services/export/exportJob';
@@ -96,6 +97,12 @@ export interface TransferPanelProps {
   captureSource: CaptureSource;
   onImportPackets: (packets: Packet[], info: { filename: string }) => void;
   onImportBatch?: ImportBatchSink;
+  /** The capture on disk, whose own files "As captured" copies. */
+  captureId: string | null;
+  /** How many pcapng files the agent wrote for it and still keeps. 0 hides the row. */
+  capturedFileCount: number;
+  /** A capture running: its files are still being written. */
+  capturing: boolean;
 }
 
 type Scope = 'capture' | 'filter';
@@ -152,6 +159,7 @@ const PHASE_LABEL: Record<ExportPhase, string> = {
 export const TransferPanel: React.FC<TransferPanelProps> = ({
   packets, appliedFilter, permissions, captureStats, belowWindow, captureRowCount, filteredRowCount,
   filterScan, filterUncovered, onRescan, agentInterfaces, captureSource, onImportPackets, onImportBatch,
+  captureId, capturedFileCount, capturing,
 }) => {
   const [scope, setScope] = useState<Scope>('capture');
   const [includeRawBytes, setIncludeRawBytes] = useState(true);
@@ -171,6 +179,12 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
   const [rejected, setRejected] = useState<{ filename: string; failure: ImportFailure } | null>(null);
   const [retryToken, setRetryToken] = useState(0);
   const onKeyDown = useRovingFocus('vertical');
+  /** What the last "As captured" save came to, said under its row. */
+  const [captured, setCaptured] = useState<SaveOutcome | null>(null);
+  const saveAsCaptured = async () => {
+    if (captureId === null) return;
+    setCaptured(await saveCaptured(captureId));
+  };
 
   const hasFilter = appliedFilter.trim().length > 0;
   /**
@@ -446,6 +460,38 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
       {/* pcapng leads, and the ordering is the argument: a column can rank
           where a three-column grid made six formats equal siblings. */}
       <Section title="Capture formats">
+        {/* The agent's own file, first: the capture as captured, block for
+            block as dumpcap would have written it, copied rather than rebuilt
+            (ADR 0052). The whole capture only - a filter or anonymising is an
+            export's to do, and the rows below do it. */}
+        {captureId !== null && capturedFileCount > 0 && (
+          <>
+            <button
+              type="button"
+              onClick={() => { void saveAsCaptured(); }}
+              disabled={capturing}
+              className={`${ROW} hover:bg-accent`}
+            >
+              <span className="flex items-center gap-2">
+                <span className="shrink-0 text-muted-foreground"><Download className="w-3.5 h-3.5" /></span>
+                <span className="text-xs font-semibold">pcapng, as captured</span>
+              </span>
+              <span className="mt-0.5 block text-[10px] leading-tight text-muted-foreground">
+                {capturing
+                  ? 'Available once the capture stops.'
+                  : capturedFileCount === 1
+                    ? 'The agent\'s own file, copied as written.'
+                    : `The ${capturedFileCount} files the ring kept, copied as written into a new folder.`}
+              </span>
+            </button>
+            {captured !== null && !(captured.saved === false && captured.canceled) && (
+              <p className={`px-3 pb-2 text-[10px] leading-tight ${captured.saved ? 'text-muted-foreground' : 'text-destructive'}`}
+                role="status">
+                {captured.saved ? `Saved to ${captured.path}` : captured.error}
+              </p>
+            )}
+          </>
+        )}
         {formats.filter((f) => f.group === 'capture').map(formatRow)}
       </Section>
 
