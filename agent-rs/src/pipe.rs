@@ -122,7 +122,33 @@ extern "system" {
         descriptor: *mut *mut c_void,
         size: *mut u32,
     ) -> i32;
+    fn ImpersonateNamedPipeClient(pipe: Handle) -> i32;
+    fn RevertToSelf() -> i32;
+    fn OpenThreadToken(thread: Handle, access: u32, open_as_self: i32, token: *mut Handle) -> i32;
+    fn DuplicateTokenEx(
+        existing: Handle,
+        access: u32,
+        attributes: *mut c_void,
+        level: u32,
+        token_type: u32,
+        token: *mut Handle,
+    ) -> i32;
+    fn SetThreadToken(thread: *mut Handle, token: Handle) -> i32;
 }
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentThread() -> Handle;
+}
+
+const TOKEN_DUPLICATE: u32 = 0x0002;
+const TOKEN_IMPERSONATE: u32 = 0x0004;
+const TOKEN_QUERY: u32 = 0x0008;
+/// `SECURITY_IMPERSONATION_LEVEL::SecurityImpersonation`: the service may act
+/// as the client on this machine, and only on this machine.
+const SECURITY_IMPERSONATION: u32 = 2;
+/// `TOKEN_TYPE::TokenImpersonation`.
+const TOKEN_IMPERSONATION: u32 = 2;
 
 const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
@@ -484,6 +510,98 @@ pub fn poke(name: &str) -> io::Result<()> {
     }
     unsafe { CloseHandle(handle) };
     Ok(())
+}
+
+/// The identity of the client at the other end of a pipe, to act as.
+///
+/// **The agent never writes a file with its own rights** (ADR 0052). It runs as
+/// LocalSystem, which can write anywhere, and the capture files go where a
+/// client says - so a client that could name a folder and have SYSTEM write
+/// there would be a privilege escalation any local account could use. Every
+/// file the agent creates or deletes for a capture is done *as the client that
+/// started it*: `ImpersonateNamedPipeClient`, then a duplicate of that thread
+/// token kept for the capture's writer thread, which puts it on around each
+/// file operation (`act`). The kernel then checks the client's rights, and a
+/// client can make the service write only where it could have written itself.
+///
+/// Impersonation level only - the token works on this machine and cannot be
+/// carried to another. Closed on drop.
+pub struct ClientToken(Handle);
+
+// A token handle is an ordinary kernel handle: usable from any thread, and the
+// writer thread is the one that uses it.
+unsafe impl Send for ClientToken {}
+unsafe impl Sync for ClientToken {}
+
+impl Drop for ClientToken {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+/// Puts the calling thread back in the service's own identity when dropped,
+/// however the work in between ended.
+struct Revert;
+
+impl Drop for Revert {
+    fn drop(&mut self) {
+        unsafe {
+            RevertToSelf();
+        }
+    }
+}
+
+/// The identity of `instance`'s client, for acting as it later.
+///
+/// Must be called on a thread that has read from the pipe - the kernel refuses
+/// impersonation before the client has sent anything - which the read loop
+/// has, by the time a command asks for it. The calling thread is back in its
+/// own identity when this returns, whatever happened.
+pub fn client_token(instance: &PipeInstance) -> io::Result<ClientToken> {
+    if unsafe { ImpersonateNamedPipeClient(instance.handle) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _revert = Revert;
+    let mut thread_token: Handle = ptr::null_mut();
+    // Opened "as self": the access check on the thread's own token object is
+    // the service's, so a client with an unusual DACL on its token cannot make
+    // this fail.
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_DUPLICATE | TOKEN_QUERY, 1, &mut thread_token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut duplicate: Handle = ptr::null_mut();
+    let ok = unsafe {
+        DuplicateTokenEx(
+            thread_token,
+            TOKEN_IMPERSONATE | TOKEN_QUERY,
+            ptr::null_mut(),
+            SECURITY_IMPERSONATION,
+            TOKEN_IMPERSONATION,
+            &mut duplicate,
+        )
+    };
+    let error = io::Error::last_os_error();
+    unsafe {
+        CloseHandle(thread_token);
+    }
+    if ok == 0 {
+        return Err(error);
+    }
+    Ok(ClientToken(duplicate))
+}
+
+impl ClientToken {
+    /// Runs `work` as the client, and is back in the service's own identity
+    /// afterwards - on the way out of a panic too.
+    pub fn act<T>(&self, work: impl FnOnce() -> T) -> io::Result<T> {
+        if unsafe { SetThreadToken(ptr::null_mut(), self.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _revert = Revert;
+        Ok(work())
+    }
 }
 
 /// One connected client, as the rest of the agent sees it.

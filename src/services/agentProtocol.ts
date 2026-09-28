@@ -229,6 +229,12 @@ export interface AgentCaptureStatsMessage {
    * is the distinction `droppedKernel` already draws with `null`.
    */
   droppedPipe?: number;
+  /**
+   * Frames the capture's own pcapng refused because the disk fell behind
+   * (ADR 0052). Present only for a capture that writes a file; the list
+   * still has them, the file does not.
+   */
+  droppedWriter?: number;
   interfaces: AgentCaptureInterfaceStats[];
 }
 
@@ -400,7 +406,33 @@ export interface AgentCaptureFilterCheckMessage {
   error: string | null;
 }
 
+/**
+ * One of the capture's pcapng files, as the agent opened, closed or deleted it
+ * (ADR 0052). `firstSeq`/`lastSeq` are the sequence numbers of the frames it
+ * holds - what the store evicts by when a ring deletes the file - and null
+ * until it holds one. A name, never a path: the app knows where its captures
+ * live.
+ */
+export interface AgentCaptureFileMessage {
+  type: 'capture_file';
+  index: number;
+  name: string;
+  state: 'open' | 'closed' | 'deleted';
+  firstSeq: number | null;
+  lastSeq: number | null;
+  frames: number;
+  bytes: number;
+}
+
+/** The agent stopped the capture itself: an autostop limit was met. */
+export interface AgentCaptureStoppedMessage {
+  type: 'capture_stopped';
+  reason: 'packets' | 'bytes' | 'seconds' | 'files';
+}
+
 export type AgentMessage =
+  | AgentCaptureFileMessage
+  | AgentCaptureStoppedMessage
   | AgentCaptureFilterCheckMessage
   | AgentHelloMessage
   | AgentStateMessage
@@ -547,6 +579,17 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
     case 'capture_filter_check':
       if (typeof msg.filter !== 'string' || !(msg.error === null || typeof msg.error === 'string')) return null;
       return msg as unknown as AgentCaptureFilterCheckMessage;
+    case 'capture_file': {
+      const seqOrNull = (v: unknown) => v === null || (typeof v === 'number' && Number.isInteger(v) && v >= 0);
+      if (typeof msg.index !== 'number' || typeof msg.name !== 'string'
+        || !['open', 'closed', 'deleted'].includes(msg.state as string)
+        || !seqOrNull(msg.firstSeq) || !seqOrNull(msg.lastSeq)
+        || typeof msg.frames !== 'number' || typeof msg.bytes !== 'number') return null;
+      return msg as unknown as AgentCaptureFileMessage;
+    }
+    case 'capture_stopped':
+      if (!['packets', 'bytes', 'seconds', 'files'].includes(msg.reason as string)) return null;
+      return msg as unknown as AgentCaptureStoppedMessage;
     default:
       return null;
   }
@@ -595,7 +638,19 @@ export type AgentCommand =
    * - no filter, every byte - so a plain start is the same message it always
    * was.
    */
-  | { type: 'start_capture'; filter?: string; snaplen?: number }
+  | {
+    type: 'start_capture'; filter?: string; snaplen?: number;
+    /**
+     * The capture's id, which makes the agent write its pcapng into that
+     * capture's folder (ADR 0052) - under the root main told it with
+     * `set_capture_root`, so this names a capture and never a path.
+     */
+    captureId?: string;
+    /** Wireshark's ring buffer: a new file at any limit, the newest `keep` kept. */
+    ring?: { fileBytes?: number; fileSeconds?: number; filePackets?: number; keep?: number };
+    /** When the agent stops the capture itself. */
+    autostop?: { packets?: number; bytes?: number; seconds?: number; files?: number };
+  }
   /**
    * Would this filter compile for these adapters? Asks nothing of the
    * capture, and is answered with `capture_filter_check`.
@@ -642,4 +697,18 @@ export type AgentCommand =
 
 export function encodeAgentCommand(command: AgentCommand): string {
   return JSON.stringify(command);
+}
+
+/**
+ * `set_capture_root`: where this app's captures live, which the agent writes
+ * a capture's pcapng under (ADR 0052).
+ *
+ * **Main's to send, and deliberately not an `AgentCommand`.** The renderer
+ * sends every command in that union, and the renderer never names a path - a
+ * page that could name the folder a LocalSystem service writes into is the
+ * door ADR 0052's impersonation exists to shut twice. Main knows the folder
+ * because it made it (`electron/store/host.ts`), and sends this once per pipe.
+ */
+export function encodeCaptureRootCommand(dir: string): string {
+  return JSON.stringify({ type: 'set_capture_root', dir });
 }

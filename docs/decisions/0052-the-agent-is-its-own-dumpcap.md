@@ -81,7 +81,10 @@ code, because no frame can be refused now. `origLen` replaced the 16-bit
 2. Wire version 4, snaplen up to 262,144, product 0.5.0. **Landed with this
    ADR.**
 3. The writer thread, the sequencer, impersonation, ring files, autostop, and
-   Stop draining instead of discarding.
+   Stop draining instead of discarding. **Landed**: over the real pipe, a
+   capture's file holds every frame of the fixture though its client read none
+   of them; a ring keeps exactly its newest files; an autostop is exact in the
+   file and in the stream.
 4. The app: `set_capture_root`, the options, and a single stop path.
 5. The store follows the ring.
 6. Save-as-captured, and import reading IDB and ISB options.

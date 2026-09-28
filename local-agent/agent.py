@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -618,6 +619,11 @@ MAX_SNAPLEN = 262144
 MAX_CAPTURE_FILTER_CHARS = 4096
 
 
+#: The app's capture ids, `cap-YYYYMMDD-HHMMSS-xxxx` - the Rust agent's
+#: `is_capture_id`.
+CAPTURE_ID_PATTERN = re.compile(r"cap-\d{8}-\d{6}-[0-9a-f]{4}")
+
+
 class CaptureOptionsError(ValueError):
     """A filter or snaplen that is not one. The message is the reply's."""
 
@@ -648,6 +654,20 @@ def parse_capture_options(message):
     elif isinstance(snaplen, bool) or not isinstance(snaplen, int) or not 1 <= snaplen <= MAX_SNAPLEN:
         raise CaptureOptionsError(
             "start_capture's snaplen must be a whole number of bytes from 1 to 262144.")
+    # **This agent writes no capture files** (ADR 0052: the Rust agent does,
+    # this one has no desktop app on its platforms to ask it to). A capture id
+    # is checked with the Rust agent's sentence and then set aside - the
+    # capture goes ahead, and the app offers no as-captured file for it. A
+    # ring or an autostop is refused rather than ignored: one ignored is a
+    # disk its owner believes is bounded, or a capture that never stops.
+    capture_id = message.get("captureId")
+    if capture_id is not None and not (isinstance(capture_id, str) and CAPTURE_ID_PATTERN.fullmatch(capture_id)):
+        raise CaptureOptionsError(
+            "start_capture's captureId must name a capture, cap-YYYYMMDD-HHMMSS-xxxx.")
+    for key in ("ring", "autostop"):
+        if message.get(key) is not None:
+            raise CaptureOptionsError(
+                f"This agent writes no capture files, so start_capture's {key} cannot be honoured.")
     return {"filter": _filter_of(message, "start_capture"), "snaplen": snaplen}
 
 
@@ -1509,6 +1529,11 @@ class AgentServer:
             snapshot = await asyncio.to_thread(_reread)
             await ws.send(json.dumps(snapshot))
             self._ensure_adapter_task()
+            return
+        elif msg_type == "set_capture_root":
+            # Where the app's captures live, for the capture files this agent
+            # does not write (see `parse_capture_options`). Understood, so a
+            # current app is not told it spoke a language this agent lacks.
             return
         elif msg_type == "restart_agent":
             if not RESTART_SUPPORTED:

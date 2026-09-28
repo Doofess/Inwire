@@ -34,6 +34,8 @@ fn main() {
             label: "Ethernet 2 (Intel(R) Ethernet Controller (3) I225-V #2)".into(),
             link_type: Some(1),
             ts_precision: Some(9),
+            connection: None,
+            hardware: None,
         },
         Interface {
             id: 1,
@@ -45,6 +47,8 @@ fn main() {
             label: "Adapter for loopback traffic capture".into(),
             link_type: Some(0),
             ts_precision: Some(9),
+            connection: None,
+            hardware: None,
         },
     ];
 
@@ -122,6 +126,36 @@ fn main() {
             Some(3),
             &[InterfaceStats { iface: 0, received: 4000, kernel: Some((4100, 100)) }],
         ),
+    );
+    add(
+        "capture_stats from a capture writing its own pcapng - droppedWriter is what the disk refused",
+        {
+            let mut stats = protocol::capture_stats(
+                1000,
+                4096,
+                12,
+                Some(3),
+                &[InterfaceStats { iface: 0, received: 4000, kernel: Some((4100, 100)) }],
+            );
+            stats.as_object_mut().unwrap().insert("droppedWriter".into(), serde_json::json!(0));
+            stats
+        },
+    );
+    add(
+        "capture_file: a ring file opened, before it holds a frame",
+        protocol::capture_file(4, "capture_00004_20260928120000.pcapng", "open", None, None, 0, 432),
+    );
+    add(
+        "capture_file: a file closed, with the sequence numbers of the frames it holds",
+        protocol::capture_file(1, "capture.pcapng", "closed", Some(0), Some(14781), 14782, 11_978_048),
+    );
+    add(
+        "capture_file: a ring deleted its oldest file",
+        protocol::capture_file(1, "capture_00001_20260928120000.pcapng", "deleted", Some(0), Some(999), 1000, 2_097_356),
+    );
+    add(
+        "capture_stopped: an autostop limit was met",
+        protocol::capture_stopped("packets"),
     );
     add(
         "capture_stats where one interface's driver counters could not be read - null, never 0",

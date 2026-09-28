@@ -482,6 +482,16 @@ pub fn adapter_facts() -> HashMap<String, AdapterFacts> {
 /// `Adapter for loopback traffic capture`, which is the clearer of the two.
 /// This is the one label that stays different from the Python agent's, and it
 /// is a choice rather than an omission.
+/// Windows' own name for the connection behind a device, when it has one -
+/// the first half of `label_for`'s label, on its own.
+pub fn connection_name(device_name: &str, facts: &HashMap<String, AdapterFacts>) -> Option<String> {
+    guid_of(device_name)
+        .and_then(|guid| facts.get(&guid))
+        .and_then(|f| f.friendly_name.clone())
+        .map(|n| strip_rtl_marks(&n))
+        .filter(|n| !n.is_empty())
+}
+
 pub fn label_for(
     device_name: &str,
     description: Option<&str>,

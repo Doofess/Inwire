@@ -39,7 +39,7 @@
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { encodeAgentCommand, type AgentCommand } from '../../src/services/agentProtocol';
+import { encodeAgentCommand, encodeCaptureRootCommand, type AgentCommand } from '../../src/services/agentProtocol';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -67,7 +67,12 @@ const SAMPLES: Record<AgentCommand['type'], AgentCommand> = {
   // filter it ignored would be a capture of everything its owner believes is
   // narrowed. The plain `{"type":"start_capture"}` is the same command with
   // both left out, and both agents' unit tests hold that one.
-  start_capture: { type: 'start_capture', filter: 'tcp port 443 or udp port 53', snaplen: 128 },
+  start_capture: {
+    type: 'start_capture', filter: 'tcp port 443 or udp port 53', snaplen: 128,
+    captureId: 'cap-20260928-101530-0af3',
+    ring: { fileBytes: 2097152, keep: 3 },
+    autostop: { packets: 5000, seconds: 600 },
+  },
   check_capture_filter: {
     type: 'check_capture_filter', filter: 'not arp', interfaces: ['\\Device\\NPF_{A}'],
   },
@@ -84,11 +89,20 @@ const SAMPLES: Record<AgentCommand['type'], AgentCommand> = {
   refresh_adapters: { type: 'refresh_adapters' },
 };
 
+/**
+ * What main sends itself, beside the renderer's commands. `set_capture_root`
+ * is not an `AgentCommand` - the renderer never names a path - so it has its
+ * own encoder, and a real capture folder as its sample, backslashes and all.
+ */
+const MAIN_COMMANDS = [
+  encodeCaptureRootCommand('C:\\Users\\name\\AppData\\Local\\Inwire\\captures'),
+];
+
 const VECTORS = path.join('scripts', 'agent', 'command-vectors.json');
 
 console.log('--- the app\'s commands, as they go on the wire ---\n');
 
-const encoded = Object.values(SAMPLES).map(encodeAgentCommand);
+const encoded = [...Object.values(SAMPLES).map(encodeAgentCommand), ...MAIN_COMMANDS];
 const file = JSON.parse(readFileSync(VECTORS, 'utf8')) as { commands: string[]; note?: string };
 
 check('every command in the union has a vector', file.commands.length, encoded.length);

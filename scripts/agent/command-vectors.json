@@ -1,7 +1,7 @@
 {
   "note": "Commands the app sends, encoded by encodeAgentCommand in src/services/agentProtocol.ts. Held to the app by scripts/agent/command-vectors.ts and to the Rust agent by its command_vectors test. Do not hand-edit: command-vectors.ts prints the replacement when the union changes.",
   "commands": [
-    "{\"type\":\"start_capture\",\"filter\":\"tcp port 443 or udp port 53\",\"snaplen\":128}",
+    "{\"type\":\"start_capture\",\"filter\":\"tcp port 443 or udp port 53\",\"snaplen\":128,\"captureId\":\"cap-20260928-101530-0af3\",\"ring\":{\"fileBytes\":2097152,\"keep\":3},\"autostop\":{\"packets\":5000,\"seconds\":600}}",
     "{\"type\":\"check_capture_filter\",\"filter\":\"not arp\",\"interfaces\":[\"\\\\Device\\\\NPF_{A}\"]}",
     "{\"type\":\"stop_capture\"}",
     "{\"type\":\"set_interfaces\",\"interfaces\":[\"\\\\Device\\\\NPF_{A}\"]}",
@@ -13,6 +13,7 @@
     "{\"type\":\"unsubscribe_sockets\"}",
     "{\"type\":\"subscribe_adapters\"}",
     "{\"type\":\"unsubscribe_adapters\"}",
-    "{\"type\":\"refresh_adapters\"}"
+    "{\"type\":\"refresh_adapters\"}",
+    "{\"type\":\"set_capture_root\",\"dir\":\"C:\\\\Users\\\\name\\\\AppData\\\\Local\\\\Inwire\\\\captures\"}"
   ]
 }

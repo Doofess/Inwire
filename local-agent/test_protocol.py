@@ -2451,8 +2451,29 @@ check("the sentence is the Rust agent's",
 _commands = json.loads((pathlib.Path(__file__).resolve().parent.parent
                         / "scripts" / "agent" / "command-vectors.json").read_text(encoding="utf-8"))["commands"]
 _start = next(json.loads(c) for c in _commands if '"start_capture"' in c)
-check("the app's own start_capture parses to its filter and snaplen",
-      agent.parse_capture_options(_start), {"filter": _start["filter"], "snaplen": _start["snaplen"]})
+# The app's own start asks for a ring, and this agent writes no files (ADR
+# 0052): refused in a sentence, never captured without the ring it asked for.
+_ring_refused = None
+try:
+    agent.parse_capture_options(_start)
+except agent.CaptureOptionsError as exc:
+    _ring_refused = str(exc)
+check("the app's own start_capture, with a ring, is refused by an agent that writes no files",
+      _ring_refused, "This agent writes no capture files, so start_capture's ring cannot be honoured.")
+_plain = {k: v for k, v in _start.items() if k not in ("ring", "autostop")}
+check("...and without one parses to its filter and snaplen, its capture id set aside",
+      agent.parse_capture_options(_plain), {"filter": _start["filter"], "snaplen": _start["snaplen"]})
+_bad_id = None
+try:
+    agent.parse_capture_options({"type": "start_capture", "captureId": "..\\..\\Windows"})
+except agent.CaptureOptionsError as exc:
+    _bad_id = str(exc)
+check("a capture id that is not one is refused in the Rust agent's words",
+      _bad_id, "start_capture's captureId must name a capture, cap-YYYYMMDD-HHMMSS-xxxx.")
+_root = next(json.loads(c) for c in _commands if '"set_capture_root"' in c)
+check_true("main's set_capture_root is a command this agent understands",
+           'msg_type == "set_capture_root"' in inspect.getsource(agent.AgentServer))
+check("...and it carries a folder", isinstance(_root.get("dir"), str), True)
 
 # Over the real libpcap, where there is one: a spelling mistake is named in
 # libpcap's words, a good filter is not, and the filter is echoed.

@@ -351,6 +351,8 @@ fn fixture_devices(npcap: &Npcap) -> io::Result<Vec<Interface>> {
         label: FIXTURE_LABEL.into(),
         link_type: Some(1),
         ts_precision: Some(9),
+        connection: None,
+        hardware: None,
     }];
     if let Some(loopback) =
         npcap.devices()?.into_iter().find(|d| d.name.to_ascii_lowercase().contains("loopback"))
@@ -361,6 +363,8 @@ fn fixture_devices(npcap: &Npcap) -> io::Result<Vec<Interface>> {
             label: "Adapter for loopback traffic capture".into(),
             link_type: None,
             ts_precision: None,
+            connection: None,
+            hardware: None,
         });
     }
     Ok(list)
@@ -593,7 +597,7 @@ fn a_filter_and_a_snaplen_narrow_what_the_open_hands_out() {
     assert!(arp.len() > 10, "the fixture has ARP frames to find ({})", arp.len());
 
     let fixture = rig.shared.interfaces.lock().unwrap()[0].clone();
-    let options = CaptureOptions { filter: Some("arp".into()), snaplen: 32 };
+    let options = CaptureOptions { filter: Some("arp".into()), snaplen: 32, file: None };
     let mut capture = Live { shared: &rig.shared }.open(&fixture, &options).expect("the fixture opens");
     let mut read = Vec::new();
     loop {
@@ -623,6 +627,12 @@ fn a_filter_that_does_not_compile_fails_the_adapter_and_says_why() {
     rig.command("owner", Command::StartCapture(options));
 
     assert_eq!(rig.shared.control.capture_state(), CaptureState::Idle);
+    // The owner's queue is drained on a thread of its own, so the refusal is
+    // waited for rather than read the instant the command returns - which
+    // raced that thread once the suite ran heavier tests beside this one.
+    assert!(eventually(Duration::from_secs(5), || {
+        delivered.lock().unwrap().control.iter().any(|m| m["code"] == "capture_failed")
+    }));
     let got = delivered.lock().unwrap();
     assert!(got.frames.is_empty());
     let failed: Vec<&Value> = got.control.iter().filter(|m| m["code"] == "capture_failed").collect();
@@ -808,4 +818,302 @@ fn behind_means_below_the_agents_own_count() {
     assert!(!kernel_behind(&entry(100, Some((100, 0)))));
     assert!(!kernel_behind(&entry(100, None)), "unreadable is not behind");
     assert!(!kernel_behind(&entry(u64::from(u32::MAX) + 5, Some((3, 0)))), "wrapped, not behind");
+}
+
+// --- the capture's own pcapng (ADR 0052) -----------------------------------------
+
+/// A capture id, as the app names one.
+const CAPTURE_ID: &str = "cap-20260928-120000-0af3";
+
+/// A folder of this test's own, emptied first.
+fn scratch_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("inwire-capture-files-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// One EPB, read back.
+struct Epb {
+    interface: u32,
+    ts: u64,
+    orig: u32,
+    data: Vec<u8>,
+}
+
+/// A written file, read back block by block - strictly: a torn or trailing
+/// block fails the test.
+#[derive(Default)]
+struct Written {
+    shb_application: String,
+    idb_names: Vec<String>,
+    idb_snaplens: Vec<u32>,
+    packets: Vec<Epb>,
+    /// `isb_ifrecv` of each ISB, in order.
+    isb_received: Vec<Option<u64>>,
+    /// Block types in file order, EPBs collapsed to one entry.
+    shape: Vec<u32>,
+}
+
+fn read_written(path: &std::path::Path) -> Written {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let options = |from: usize, to: usize| {
+        let mut out = Vec::new();
+        let mut at = from;
+        while at + 4 <= to {
+            let code = u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+            let len = u16::from_le_bytes([bytes[at + 2], bytes[at + 3]]) as usize;
+            if code == 0 {
+                break;
+            }
+            out.push((code, bytes[at + 4..at + 4 + len].to_vec()));
+            at += 4 + len.next_multiple_of(4);
+        }
+        out
+    };
+    let mut w = Written::default();
+    let mut at = 0;
+    while at < bytes.len() {
+        let (kind, len) = (u32_at(at), u32_at(at + 4) as usize);
+        assert!(len >= 12 && len % 4 == 0 && at + len <= bytes.len(), "{}: a torn block at {at}", path.display());
+        assert_eq!(u32_at(at + len - 4) as usize, len, "{}: a block's lengths disagree", path.display());
+        if w.shape.last() != Some(&kind) || kind != pcapng::EPB {
+            w.shape.push(kind);
+        }
+        match kind {
+            pcapng::SHB => {
+                let o = options(at + 24, at + len - 4);
+                w.shb_application = o.iter().find(|(c, _)| *c == 4).map(|(_, v)| String::from_utf8_lossy(v).into()).unwrap_or_default();
+            }
+            pcapng::IDB => {
+                w.idb_snaplens.push(u32_at(at + 12));
+                let o = options(at + 16, at + len - 4);
+                w.idb_names.push(o.iter().find(|(c, _)| *c == 2).map(|(_, v)| String::from_utf8_lossy(v).into()).unwrap_or_default());
+            }
+            pcapng::EPB => {
+                let caplen = u32_at(at + 20) as usize;
+                w.packets.push(Epb {
+                    interface: u32_at(at + 8),
+                    ts: ((u32_at(at + 12) as u64) << 32) | u32_at(at + 16) as u64,
+                    orig: u32_at(at + 24),
+                    data: bytes[at + 28..at + 28 + caplen].to_vec(),
+                });
+            }
+            pcapng::ISB => {
+                let o = options(at + 20, at + len - 4);
+                w.isb_received.push(o.iter().find(|(c, _)| *c == 4).map(|(_, v)| u64::from_le_bytes(v[..8].try_into().unwrap())));
+            }
+            other => panic!("{}: a block of type {other:#x}", path.display()),
+        }
+        at += len;
+    }
+    w
+}
+
+/// The files in `dir`, by name.
+fn files_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// Every EPB of `written` is the fixture's frame `first + i`: bytes, wire
+/// length and nanosecond stamp.
+fn holds_the_fixture_from(written: &Written, frames: &[fixture::Frame], first: usize) {
+    for (i, epb) in written.packets.iter().enumerate() {
+        let original = &frames[first + i];
+        assert_eq!(epb.interface, 0);
+        assert_eq!(epb.data, original.data, "frame {}'s bytes", first + i);
+        assert_eq!(epb.orig, original.wire_len, "frame {}'s wire length", first + i);
+        assert_eq!(epb.ts, original.ts_ns, "frame {}'s stamp", first + i);
+    }
+}
+
+/// **The agent writes the capture's pcapng as the client that started it, over
+/// the real pipe.** A real `set_capture_root`, a real `start_capture` naming the
+/// capture, and the read loop's real `ImpersonateNamedPipeClient` - the whole
+/// path the app takes, with the fixture as the adapter.
+///
+/// **The file holds every frame, though the client read none of them.** This
+/// client reads only control messages, so the pipe to it sheds frames the way
+/// a busy window's would; the file must not, and it is the fixture, frame for
+/// frame, closed with an ISB counting them all. (Both ends run as the same
+/// user here: SYSTEM against a user is the live drive's to show.)
+#[test]
+fn the_capture_file_is_written_as_the_client_and_misses_nothing() {
+    let _serial = CAPTURING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if fixture_file().is_none() {
+        eprintln!("SKIP  {} not present (test/fixtures/README.md)", fixture::CAPTURES[0]);
+        return;
+    }
+    if Npcap::load().is_err() {
+        eprintln!("SKIP  Npcap is not installed on this machine");
+        return;
+    }
+    let frames = fixture::frames(fixture::CAPTURES[0]).unwrap();
+    let name = private_pipe("files");
+    let (shutdown, server) = serve_in_background(
+        &name,
+        Hardware { devices: fixture_devices, open: fixture_open, ..Hardware::NPCAP },
+    );
+    let Some(mut client) = Client::connect(&name) else {
+        stop(shutdown, server);
+        return;
+    };
+    assert_eq!(client.next()["type"], "hello");
+
+    // Before a root is set there is nowhere to write, and the start says so
+    // rather than capturing without the file it was asked for.
+    client.send(&json!({"type": "start_capture", "captureId": CAPTURE_ID}).to_string());
+    let refused = client.next();
+    assert_eq!(refused["code"], "invalid_capture_options", "{refused}");
+
+    let root = scratch_dir("pipe");
+    client.send(&json!({"type": "set_capture_root", "dir": root.to_str().unwrap()}).to_string());
+    client.send(&json!({"type": "set_interfaces", "interfaces": [FIXTURE_DEVICE]}).to_string());
+    client.send(&json!({"type": "start_capture", "captureId": CAPTURE_ID}).to_string());
+
+    // Until the file says it is closed: the fixture's end fails its only
+    // adapter, the capture is reaped, and the writer closes the file after.
+    let mut closed = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while closed.is_none() && Instant::now() < deadline {
+        if let Some(message) = client.next_within(Duration::from_secs(1)) {
+            if message["type"] == "capture_file" && message["state"] == "closed" {
+                closed = Some(message);
+            }
+        }
+    }
+    let closed = closed.expect("the file was reported closed");
+    let path = root.join(CAPTURE_ID).join("pcapng").join("capture.pcapng");
+    assert_eq!(closed["name"], "capture.pcapng");
+    assert_eq!(closed["frames"], frames.len() as u64);
+    assert_eq!(closed["firstSeq"], 0);
+    assert_eq!(closed["lastSeq"], frames.len() as u64 - 1);
+    assert_eq!(closed["bytes"], std::fs::metadata(&path).unwrap().len(), "the size reported is the file's");
+
+    let written = read_written(&path);
+    assert_eq!(written.shape, [pcapng::SHB, pcapng::IDB, pcapng::EPB, pcapng::ISB]);
+    assert_eq!(written.shb_application, format!("Inwire {}", crate::VERSION));
+    assert_eq!(written.idb_names, [FIXTURE_DEVICE]);
+    assert_eq!(written.idb_snaplens, [protocol::MAX_SNAPLEN]);
+    assert_eq!(written.packets.len(), frames.len(), "every frame the adapter gave is in the file");
+    holds_the_fixture_from(&written, &frames, 0);
+    assert_eq!(written.isb_received, [Some(frames.len() as u64)]);
+    eprintln!("{} frames written to {}", written.packets.len(), path.display());
+
+    drop(client);
+    stop(shutdown, server);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A ring keeps its newest files, and says which it deleted.** 1,000 frames
+/// a file and three kept, over the fixture's real frames: exactly three files
+/// are left, named as Wireshark names ring files, each opening with the SHB
+/// and IDB and closing with an ISB, and together the last frames of the
+/// capture, in order. Every file deleted was reported, oldest first.
+#[test]
+fn a_ring_keeps_its_newest_files_and_says_which_it_deleted() {
+    let Some(rig) = Rig::new() else { return };
+    let (_owner, delivered) = rig.connect("owner");
+    let root = scratch_dir("ring");
+    let dir = root.join(CAPTURE_ID).join("pcapng");
+    rig.shared
+        .pending_output
+        .lock()
+        .unwrap()
+        .insert("owner".into(), PendingOutput { dir: dir.clone(), token: None });
+    rig.command("owner", Command::SetInterfaces(vec![FIXTURE_DEVICE.into()]));
+    let file = protocol::FileOptions {
+        capture_id: CAPTURE_ID.into(),
+        ring: protocol::Ring { file_packets: Some(1_000), keep: Some(3), ..Default::default() },
+        autostop: protocol::Autostop::default(),
+    };
+    rig.command("owner", Command::StartCapture(CaptureOptions { file: Some(file), ..CaptureOptions::default() }));
+
+    let n = rig.frames.len();
+    let total = n.div_ceil(1_000);
+    let closed_count = || {
+        delivered.lock().unwrap().control.iter().filter(|m| m["type"] == "capture_file" && m["state"] == "closed").count()
+    };
+    assert!(
+        eventually(Duration::from_secs(20), || closed_count() == total),
+        "{} of {total} files were reported closed",
+        closed_count()
+    );
+
+    let names = files_in(&dir);
+    assert_eq!(names.len(), 3, "{names:?}");
+    for (name, index) in names.iter().zip(total - 2..=total) {
+        let prefix = format!("capture_{index:05}_");
+        assert!(name.starts_with(&prefix) && name.ends_with(".pcapng") && name.len() == prefix.len() + 14 + 7, "{name}");
+    }
+    let deleted: Vec<u64> = delivered
+        .lock()
+        .unwrap()
+        .control
+        .iter()
+        .filter(|m| m["type"] == "capture_file" && m["state"] == "deleted")
+        .map(|m| m["index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(deleted, (1..=(total - 3) as u64).collect::<Vec<_>>(), "the deleted files, oldest first");
+
+    let mut next = (total - 3) * 1_000;
+    for name in &names {
+        let written = read_written(&dir.join(name));
+        assert_eq!(written.shape, [pcapng::SHB, pcapng::IDB, pcapng::EPB, pcapng::ISB], "{name}");
+        holds_the_fixture_from(&written, &rig.frames, next);
+        next += written.packets.len();
+    }
+    assert_eq!(next, n, "the kept files end at the capture's last frame");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **An autostop is exact, and the file and the list agree about it.** At
+/// 5,000 packets the capture stops itself: the file holds the fixture's first
+/// 5,000 frames, the owner was delivered the same 5,000 - the stop delivers
+/// what it had queued rather than throwing it away - and was told why.
+#[test]
+fn an_autostop_is_exact_in_the_file_and_in_the_stream() {
+    let Some(rig) = Rig::new() else { return };
+    assert!(rig.frames.len() > 5_000, "the fixture is longer than the limit");
+    let (_owner, delivered) = rig.connect("owner");
+    let root = scratch_dir("autostop");
+    let dir = root.join(CAPTURE_ID).join("pcapng");
+    rig.shared
+        .pending_output
+        .lock()
+        .unwrap()
+        .insert("owner".into(), PendingOutput { dir: dir.clone(), token: None });
+    rig.command("owner", Command::SetInterfaces(vec![FIXTURE_DEVICE.into()]));
+    let file = protocol::FileOptions {
+        capture_id: CAPTURE_ID.into(),
+        ring: protocol::Ring::default(),
+        autostop: protocol::Autostop { packets: Some(5_000), ..Default::default() },
+    };
+    rig.command("owner", Command::StartCapture(CaptureOptions { file: Some(file), ..CaptureOptions::default() }));
+
+    let stopped = || {
+        delivered.lock().unwrap().control.iter().any(|m| m["type"] == "capture_stopped" && m["reason"] == "packets")
+    };
+    assert!(eventually(Duration::from_secs(20), stopped), "the owner was told the capture stopped at its limit");
+    assert!(eventually(Duration::from_secs(5), || rig.threads() == 0), "the capture's threads ended");
+    assert!(eventually(Duration::from_secs(5), || {
+        delivered.lock().unwrap().control.iter().any(|m| m["type"] == "capture_file" && m["state"] == "closed")
+    }));
+
+    let written = read_written(&dir.join("capture.pcapng"));
+    assert_eq!(written.packets.len(), 5_000, "the file stops at the limit exactly");
+    holds_the_fixture_from(&written, &rig.frames, 0);
+    let got = delivered.lock().unwrap();
+    assert_eq!(got.frames.len(), 5_000, "the owner was delivered exactly the frames the file holds");
+    for (n, record) in got.frames.iter().enumerate() {
+        assert_eq!(record.seq as usize, n);
+        assert_eq!(record.data, rig.frames[n].data);
+    }
+    drop(got);
+    let _ = std::fs::remove_dir_all(&root);
 }

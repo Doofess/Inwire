@@ -61,6 +61,13 @@ pub struct Interface {
     /// ends in `000` because it was never finer. `None`, and omitted, when the
     /// device could not be opened to ask.
     pub ts_precision: Option<u8>,
+    /// Windows' name for the connection - "Ethernet", "Wi-Fi" - which the
+    /// capture file's IDB carries as `if_description`, as dumpcap's does.
+    /// Not sent: the app has `label`, which already says it.
+    pub connection: Option<String>,
+    /// Npcap's description of the adapter - its model - which the IDB carries
+    /// as `if_hardware`. Not sent, for the same reason.
+    pub hardware: Option<String>,
 }
 
 impl Interface {
@@ -385,6 +392,38 @@ pub fn capture_stats(
     Value::Object(message)
 }
 
+/// One of the capture's pcapng files, as the agent opened, closed or deleted
+/// it. `firstSeq`/`lastSeq` are the sequence numbers of the frames in it - what
+/// the app's store evicts by when the ring deletes the file. Named, not
+/// pathed: the app knows where its captures live.
+#[allow(clippy::too_many_arguments)]
+pub fn capture_file(
+    index: u32,
+    name: &str,
+    state: &str,
+    first_seq: Option<u64>,
+    last_seq: Option<u64>,
+    frames: u64,
+    bytes: u64,
+) -> Value {
+    json!({
+        "type": "capture_file",
+        "index": index,
+        "name": name,
+        "state": state,
+        "firstSeq": first_seq,
+        "lastSeq": last_seq,
+        "frames": frames,
+        "bytes": bytes,
+    })
+}
+
+/// The agent stopped the capture itself, because an autostop limit was met.
+/// `reason` is which: `packets`, `bytes`, `seconds` or `files`.
+pub fn capture_stopped(reason: &str) -> Value {
+    json!({ "type": "capture_stopped", "reason": reason })
+}
+
 pub fn error(code: &str, message: &str) -> Value {
     json!({ "type": "error", "code": code, "message": message })
 }
@@ -415,13 +454,72 @@ pub struct CaptureOptions {
     /// The most bytes of each frame to keep; the rest is counted in the
     /// frame's wire length and not captured. `MAX_SNAPLEN` keeps everything.
     pub snaplen: u32,
+    /// The capture's own pcapng, written by the agent (ADR 0052). `None`
+    /// writes no file - what the Python agent does, and a start from an app
+    /// that names no capture.
+    pub file: Option<FileOptions>,
 }
 
 impl Default for CaptureOptions {
     fn default() -> Self {
-        CaptureOptions { filter: None, snaplen: MAX_SNAPLEN }
+        CaptureOptions { filter: None, snaplen: MAX_SNAPLEN, file: None }
     }
 }
+
+/// Where a capture's pcapng goes, how it rotates and when the capture stops.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileOptions {
+    /// The app's name for the capture, `cap-YYYYMMDD-HHMMSS-xxxx`. The files
+    /// go in `<capture root>\<capture_id>\pcapng\`; the root is what this
+    /// client's `set_capture_root` said.
+    pub capture_id: String,
+    /// All `None`: one file for the whole capture.
+    pub ring: Ring,
+    pub autostop: Autostop,
+}
+
+/// Wireshark's ring buffer: a new file when any limit is reached, keeping
+/// the newest `keep`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ring {
+    pub file_bytes: Option<u64>,
+    /// Measured on the frames' own capture times, not on the wall clock: a
+    /// file boundary is then a fact about the capture, the same however late
+    /// the frames were read.
+    pub file_seconds: Option<u64>,
+    pub file_packets: Option<u64>,
+    /// `None` keeps every file.
+    pub keep: Option<u32>,
+}
+
+impl Ring {
+    /// Whether this ring rotates at all.
+    pub fn rotates(&self) -> bool {
+        self.file_bytes.is_some() || self.file_seconds.is_some() || self.file_packets.is_some()
+    }
+}
+
+/// When the agent stops the capture itself, like dumpcap's `-a`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Autostop {
+    pub packets: Option<u64>,
+    /// Bytes written, across every file.
+    pub bytes: Option<u64>,
+    /// Wall-clock seconds since the start: a capture on a silent link still
+    /// stops.
+    pub seconds: Option<u64>,
+    pub files: Option<u32>,
+}
+
+/// The least a ring file may be: a few frames past its own headers. A
+/// smaller one rotates on every frame and fills a folder with files.
+pub const MIN_RING_FILE_BYTES: u64 = 65_536;
+
+/// The most ring files kept - Wireshark's own ceiling.
+pub const MAX_RING_FILES: u32 = 100_000;
+
+/// The longest capture root a client may name.
+pub const MAX_CAPTURE_ROOT_CHARS: usize = 1024;
 
 /// The largest snaplen, and what none means: dumpcap's default, 262,144.
 /// It was 65,535 while the wire record's lengths were 16 bits; they are 32
@@ -437,6 +535,10 @@ pub const MAX_CAPTURE_FILTER_CHARS: usize = 4096;
 pub enum Command {
     StartCapture(CaptureOptions),
     StopCapture,
+    /// The folder this client's captures live in, which a `start_capture`'s
+    /// `captureId` is found under. Sent by the app's main process, which knows
+    /// the folder; the page that sends `start_capture` never names a path.
+    SetCaptureRoot(String),
     /// Would `filter` compile for these adapters? Asks nothing of the capture,
     /// so any client may, and answered with `capture_filter_check`.
     CheckCaptureFilter { filter: String, interfaces: Vec<String> },
@@ -543,7 +645,9 @@ pub fn parse_command(text: &str) -> Result<Command, ParseError> {
         "start_capture" => Ok(Command::StartCapture(CaptureOptions {
             filter: filter_of(&value, "start_capture")?,
             snaplen: snaplen_of(&value)?,
+            file: file_of(&value)?,
         })),
+        "set_capture_root" => Ok(Command::SetCaptureRoot(capture_root_of(&value)?)),
         "check_capture_filter" => {
             let filter = filter_of(&value, "check_capture_filter")?.unwrap_or_default();
             // The adapters are optional and only choose which link types the
@@ -625,6 +729,138 @@ fn filter_of(value: &Value, command: &str) -> Result<Option<String>, ParseError>
     }
 }
 
+/// Whether `text` names a capture as the app names them:
+/// `cap-YYYYMMDD-HHMMSS-xxxx`, lower-case hex. The app's own
+/// `CAPTURE_ID_PATTERN`, held here too because the name becomes a folder.
+pub fn is_capture_id(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() == 24
+        && text.starts_with("cap-")
+        && b[4..12].iter().all(u8::is_ascii_digit)
+        && b[12] == b'-'
+        && b[13..19].iter().all(u8::is_ascii_digit)
+        && b[19] == b'-'
+        && b[20..24].iter().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+}
+
+/// Whether `dir` is a folder the agent will write under: an absolute local
+/// path, `C:\...`. Refused: a UNC path (the service would authenticate to
+/// whatever server it named), a device path (`\\?\`, `\\.\`), a relative one,
+/// `..` anywhere, and a colon past the drive's (an alternate data stream).
+/// This is defence in depth - every write is also made as the client, so a
+/// folder the client could not write is refused by the kernel anyway.
+pub fn is_capture_root(dir: &str) -> bool {
+    let b = dir.as_bytes();
+    dir.chars().count() <= MAX_CAPTURE_ROOT_CHARS
+        && b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && b[2] == b'\\'
+        && !dir[2..].contains(':')
+        && !dir.contains('/')
+        && !dir.chars().any(char::is_control)
+        && !dir.split('\\').any(|part| part == ".." || part == ".")
+}
+
+fn capture_root_of(value: &Value) -> Result<String, ParseError> {
+    match value.get("dir") {
+        Some(Value::String(dir)) if is_capture_root(dir) => Ok(dir.trim_end_matches('\\').to_string()),
+        _ => Err(ParseError::BadCaptureOptions(
+            "set_capture_root's dir must be an absolute local folder, like C:\\Users\\name\\AppData\\Local\\Inwire\\captures."
+                .into(),
+        )),
+    }
+}
+
+/// A positive whole number at `key` of `object`, or the sentence that says
+/// which option was not one.
+fn count_of(object: &Map<String, Value>, key: &str, name: &str, least: u64) -> Result<Option<u64>, ParseError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(n) => n.as_u64().filter(|n| *n >= least).map(Some).ok_or_else(|| {
+            ParseError::BadCaptureOptions(format!(
+                "start_capture's {name}.{key} must be a whole number, at least {least}."
+            ))
+        }),
+    }
+}
+
+/// `start_capture`'s `captureId`, `ring` and `autostop`.
+///
+/// **Refused rather than ignored, like the filter**: a ring the agent could
+/// not read and ignored would fill a disk its owner believes is bounded.
+fn file_of(value: &Value) -> Result<Option<FileOptions>, ParseError> {
+    let capture_id = match value.get("captureId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if is_capture_id(id) => Some(id.clone()),
+        Some(_) => {
+            return Err(ParseError::BadCaptureOptions(
+                "start_capture's captureId must name a capture, cap-YYYYMMDD-HHMMSS-xxxx.".into(),
+            ))
+        }
+    };
+    let object_at = |key: &str| -> Result<Option<&Map<String, Value>>, ParseError> {
+        match value.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Object(object)) => Ok(Some(object)),
+            Some(_) => Err(ParseError::BadCaptureOptions(format!("start_capture's {key} must be an object."))),
+        }
+    };
+    let ring = match object_at("ring")? {
+        None => Ring::default(),
+        Some(o) => {
+            let keep = count_of(o, "keep", "ring", 2)?;
+            if keep.is_some_and(|k| k > u64::from(MAX_RING_FILES)) {
+                return Err(ParseError::BadCaptureOptions(format!(
+                    "start_capture's ring.keep is at most {MAX_RING_FILES} files."
+                )));
+            }
+            let ring = Ring {
+                file_bytes: count_of(o, "fileBytes", "ring", MIN_RING_FILE_BYTES)?,
+                file_seconds: count_of(o, "fileSeconds", "ring", 1)?,
+                file_packets: count_of(o, "filePackets", "ring", 1)?,
+                keep: keep.map(|k| k as u32),
+            };
+            if !ring.rotates() {
+                return Err(ParseError::BadCaptureOptions(
+                    "start_capture's ring needs a size, a duration or a packet count to start a new file at."
+                        .into(),
+                ));
+            }
+            ring
+        }
+    };
+    let autostop = match object_at("autostop")? {
+        None => Autostop::default(),
+        Some(o) => {
+            let files = count_of(o, "files", "autostop", 1)?;
+            if files.is_some_and(|f| f > u64::from(MAX_RING_FILES)) {
+                return Err(ParseError::BadCaptureOptions(format!(
+                    "start_capture's autostop.files is at most {MAX_RING_FILES}."
+                )));
+            }
+            Autostop {
+                packets: count_of(o, "packets", "autostop", 1)?,
+                bytes: count_of(o, "bytes", "autostop", 1)?,
+                seconds: count_of(o, "seconds", "autostop", 1)?,
+                files: files.map(|f| f as u32),
+            }
+        }
+    };
+    if autostop.files.is_some() && !ring.rotates() {
+        return Err(ParseError::BadCaptureOptions(
+            "start_capture's autostop.files needs a ring: one file never becomes two.".into(),
+        ));
+    }
+    match capture_id {
+        Some(capture_id) => Ok(Some(FileOptions { capture_id, ring, autostop })),
+        None if ring == Ring::default() && autostop == Autostop::default() => Ok(None),
+        None => Err(ParseError::BadCaptureOptions(
+            "start_capture's ring and autostop need a captureId: they are about its files.".into(),
+        )),
+    }
+}
+
 /// `start_capture`'s `snaplen`: absent or `null` keeps every byte.
 fn snaplen_of(value: &Value) -> Result<u32, ParseError> {
     match value.get("snaplen") {
@@ -691,6 +927,8 @@ mod tests {
                 label: "Ethernet".into(),
                 link_type: Some(1),
                 ts_precision: Some(9),
+                connection: None,
+                hardware: None,
             },
             Interface {
                 id: 1,
@@ -698,6 +936,8 @@ mod tests {
                 label: "Wi-Fi".into(),
                 link_type: None,
                 ts_precision: None,
+                connection: None,
+                hardware: None,
             },
         ]
     }
@@ -823,6 +1063,7 @@ mod tests {
             Ok(Command::StartCapture(CaptureOptions {
                 filter: Some("tcp port 443".into()),
                 snaplen: 128,
+                file: None,
             }))
         );
         assert_eq!(
@@ -989,6 +1230,101 @@ mod command_vectors {
                     "the backslashes must survive, and the entry is a NAME");
             }
             other => panic!("the app's set_interfaces parsed as {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod file_option_tests {
+    //! `start_capture`'s file options and `set_capture_root` (ADR 0052): what
+    //! the agent will write, and where, refused with a sentence rather than
+    //! guessed at - a ring ignored is a disk its owner believes is bounded.
+    use super::*;
+
+    fn refused(text: &str) -> bool {
+        matches!(parse_command(text), Err(ParseError::BadCaptureOptions(_)))
+    }
+
+    #[test]
+    fn a_start_names_its_capture_its_ring_and_when_it_stops() {
+        let parsed = parse_command(
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3",
+                "ring":{"fileBytes":2097152,"keep":3},
+                "autostop":{"packets":5000,"seconds":10,"files":8}}"#,
+        );
+        assert_eq!(
+            parsed,
+            Ok(Command::StartCapture(CaptureOptions {
+                filter: None,
+                snaplen: MAX_SNAPLEN,
+                file: Some(FileOptions {
+                    capture_id: "cap-20260928-101530-0af3".into(),
+                    ring: Ring { file_bytes: Some(2_097_152), file_seconds: None, file_packets: None, keep: Some(3) },
+                    autostop: Autostop { packets: Some(5000), bytes: None, seconds: Some(10), files: Some(8) },
+                }),
+            }))
+        );
+        // A capture id alone is one file for the whole capture.
+        let Ok(Command::StartCapture(one)) =
+            parse_command(r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3"}"#)
+        else {
+            panic!("a start naming only its capture did not parse")
+        };
+        assert_eq!(one.file.map(|f| f.ring.rotates()), Some(false));
+    }
+
+    #[test]
+    fn file_options_that_are_not_ones_are_refused() {
+        for bad in [
+            r#"{"type":"start_capture","captureId":"..\\..\\Windows"}"#,
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0AF3"}"#,
+            r#"{"type":"start_capture","captureId":5}"#,
+            // A ring or an autostop with no capture to write.
+            r#"{"type":"start_capture","ring":{"fileBytes":2097152}}"#,
+            r#"{"type":"start_capture","autostop":{"packets":10}}"#,
+            // A ring that never rotates, a file too small, one file kept.
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3","ring":{"keep":3}}"#,
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3","ring":{"fileBytes":1024}}"#,
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3","ring":{"fileBytes":2097152,"keep":1}}"#,
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3","ring":{"filePackets":0}}"#,
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3","ring":5}"#,
+            // Stopping after N files of a capture that only ever has one.
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3","autostop":{"files":3}}"#,
+            r#"{"type":"start_capture","captureId":"cap-20260928-101530-0af3","autostop":{"packets":-1}}"#,
+        ] {
+            assert!(refused(bad), "{bad} was not refused");
+        }
+    }
+
+    #[test]
+    fn a_capture_root_is_an_absolute_local_folder_and_nothing_else() {
+        assert_eq!(
+            parse_command(r#"{"type":"set_capture_root","dir":"C:\\Users\\me\\AppData\\Local\\Inwire\\captures\\"}"#),
+            Ok(Command::SetCaptureRoot(r"C:\Users\me\AppData\Local\Inwire\captures".into()))
+        );
+        for bad in [
+            r"\\server\share\captures",
+            r"\\?\C:\captures",
+            r"\\.\pipe\x",
+            r"captures",
+            r"C:captures",
+            r"C:\captures\..\Windows",
+            r"C:\captures\.\x",
+            r"C:\captures:stream",
+            "C:/captures",
+            "",
+        ] {
+            assert!(!is_capture_root(bad), "{bad:?} was accepted");
+        }
+        assert!(refused(r#"{"type":"set_capture_root"}"#));
+        assert!(refused(r#"{"type":"set_capture_root","dir":5}"#));
+    }
+
+    #[test]
+    fn a_capture_id_is_the_apps_pattern_exactly() {
+        assert!(is_capture_id("cap-20260928-101530-0af3"));
+        for bad in ["cap-20260928-101530-0af", "cap-2026092-101530-0af3", "cap-20260928-101530-0afg", "x", ""] {
+            assert!(!is_capture_id(bad), "{bad} was accepted");
         }
     }
 }

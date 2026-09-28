@@ -67,6 +67,8 @@ pub mod agent_log;
 // adapter dying - behind two traits, so they can be tested without Npcap or a
 // pipe. `runtime.rs` is the real implementation of both.
 #[cfg(windows)]
+pub mod capture_file;
+#[cfg(windows)]
 pub mod control;
 // The subscriptions that report on the machine rather than on a capture -
 // `interface_stats` and `adapter_config` - and their timers.

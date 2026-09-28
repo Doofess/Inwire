@@ -61,6 +61,8 @@ fn main() -> std::io::Result<()> {
         // to Ethernet - which is what this harness has always captured.
         link_type: None,
         ts_precision: None,
+        connection: None,
+        hardware: None,
     }];
 
     let instance = Arc::new(pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES)?);

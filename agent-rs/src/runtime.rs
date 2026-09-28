@@ -41,12 +41,14 @@ use serde_json::Value;
 
 use crate::adapters;
 use crate::agent_log;
+use crate::capture_file::{self, Admit, FileEvent, FileInterface, FileReport, FrameJob, Sequencer, StopReason, Writer, WriterSetup};
 use crate::control::{self, Control, Driver, Env, Lazy, Level, RestartSupport};
 use crate::framing::{FRAME_BINARY, FRAME_JSON};
 use crate::host_feeds::{self, HostFeeds, Outlet};
 use crate::npcap_access;
 use crate::npcap::{self, Capture, Npcap, OpenOptions, Read};
-use crate::pipe::{self, Connection, PipeInstance};
+use crate::pcapng;
+use crate::pipe::{self, ClientToken, Connection, PipeInstance};
 use crate::protocol::{self, CaptureOptions, CaptureState, Command, Interface, InterfaceStats};
 use crate::restart;
 use crate::session::{
@@ -272,7 +274,40 @@ struct Shared {
     /// in its backlog, and a client that subscribes an hour late starts from
     /// its own backlog rather than from wherever the other one had reached.
     log_watchers: Mutex<HashMap<String, u64>>,
+    /// Each client's capture root, from its `set_capture_root` - sent by the
+    /// app's main process, which knows where its captures live. A
+    /// `start_capture` names only a capture id under it (ADR 0052).
+    capture_roots: Mutex<HashMap<String, String>>,
+    /// A `start_capture`'s file output, between the read loop that resolved it
+    /// - and took the client's identity to write it as - and the `start` that
+    /// uses it. Whatever the start did not take is discarded after it.
+    pending_output: Mutex<HashMap<String, PendingOutput>>,
     shutdown: Arc<Shutdown>,
+}
+
+/// Where a capture's files go, and who they are written as.
+struct PendingOutput {
+    dir: std::path::PathBuf,
+    /// `None` only in the capture harness, which has no pipe to take one from
+    /// and writes as itself.
+    token: Option<ClientToken>,
+}
+
+/// A running capture's own pcapng (ADR 0052): the sequencer every frame passes
+/// through, and the thread that writes what it decides.
+struct Output {
+    /// Held while a frame takes its sequence number and is handed to the
+    /// writer, so the file's order is the sequence's.
+    sequencer: Mutex<Sequencer>,
+    writer: Writer,
+    /// Who hears about the files - the capture's owner, which a second window
+    /// can become.
+    owner: Arc<Mutex<String>>,
+    autostop_seconds: Option<u64>,
+    started: Instant,
+    /// Whether the capture's end has already been asked for, so a limit met by
+    /// several threads at once ends it once.
+    ending: AtomicBool,
 }
 
 /// One selected adapter, inside a running capture.
@@ -463,7 +498,13 @@ struct CaptureHandles {
     /// normally 0, and moved by a `start_capture` that arrives while already
     /// capturing, which begins the figures again (agent.py:1434).
     dropped_base: Arc<AtomicU64>,
-    workers: Vec<thread::JoinHandle<()>>,
+    /// One per adapter, stopped first.
+    sniffers: Vec<thread::JoinHandle<()>>,
+    /// Stopped once every sniffer has, so nothing a sniffer read is behind it.
+    pump: Option<thread::JoinHandle<()>>,
+    pump_running: Arc<AtomicBool>,
+    /// The capture's files, when it writes them. Finished last.
+    output: Option<Arc<Output>>,
 }
 
 impl CaptureHandles {
@@ -574,24 +615,60 @@ fn dropped_pipe(shared: &Shared, base: &Mutex<(String, u64)>, owner: &str) -> Op
     Some(now.saturating_sub(held.1))
 }
 
-/// Stops a capture's threads and discards what it still had queued, and
-/// answers how many frames that was.
+/// Stops a capture's threads in order, and answers what the writer refused.
 ///
-/// **The workers are joined before a single counter is read**, and the queue is
-/// not discarded until its depth has been taken. Every figure read afterwards
-/// is then final rather than a snapshot taken while threads were still moving
-/// it - a sniffer could otherwise push after the depth was read, and the
-/// driver's own counters are sampled on a timer, so the last sample belongs to
-/// the sniffer's exit. The cost is up to one `to_ms` (100 ms), on a path that
-/// is already stopping.
-fn halt(handles: &mut CaptureHandles) -> usize {
+/// **Sniffers, then the pump, then the writer**, each joined before the next
+/// is stopped: every frame a sniffer read is then in the queues before either
+/// consumer is told there will be no more, and the file closes - its ISBs
+/// written - with nothing still on the way to it. **The workers are joined
+/// before a single counter is read**, so every figure read afterwards is final
+/// rather than a snapshot taken while threads were still moving it. The cost
+/// is up to one `to_ms` (100 ms), on a path that is already stopping.
+///
+/// The live queue is left as it is: `stop` delivers what is in it, `reap`
+/// throws it away.
+fn halt(handles: &mut CaptureHandles) -> Option<u64> {
     handles.running.store(false, Ordering::SeqCst);
-    for worker in std::mem::take(&mut handles.workers) {
-        let _ = worker.join();
+    for sniffer in std::mem::take(&mut handles.sniffers) {
+        let _ = sniffer.join();
     }
-    let (queued, _) = handles.queue.depth();
-    handles.queue.discard();
-    queued
+    handles.pump_running.store(false, Ordering::SeqCst);
+    if let Some(pump) = handles.pump.take() {
+        let _ = pump.join();
+    }
+    // Read before the writer finishes: nothing pushes to it any more.
+    let dropped = handles.output.as_ref().map(|o| o.writer.dropped());
+    // The last reference: dropping it finishes the writer, which writes what
+    // it holds and closes the file with its ISBs.
+    handles.output.take();
+    dropped
+}
+
+/// Sends what the live queue still holds to `owner`, and answers how many
+/// frames could not be.
+///
+/// **Delivered, not discarded.** A stop used to throw these away and report
+/// them as `queuedAtStop`: frames captured and never shown. The capture's file
+/// has every one of them now, and the list should too - a stop that dropped
+/// its tail would leave the file and the list disagreeing about how the
+/// capture ended.
+fn deliver_rest(shared: &Shared, queue: &FrameQueue, owner: &str) -> usize {
+    let connection = shared.clients.lock().unwrap().get(owner).cloned();
+    if let Some(connection) = connection {
+        loop {
+            let (batch, _) = queue.drain();
+            if batch.is_empty() {
+                break;
+            }
+            let Ok(payload) = wire::encode_batch(&batch) else { break };
+            if connection.send(FRAME_BINARY, &payload, batch.len() as u64).is_err() {
+                break;
+            }
+        }
+    }
+    let (left, _) = queue.depth();
+    queue.discard();
+    left
 }
 
 /// Stops a capture that ended itself - its last adapter died, or its owner's
@@ -604,7 +681,38 @@ fn halt(handles: &mut CaptureHandles) -> usize {
 fn reap(mut handles: CaptureHandles) {
     thread::spawn(move || {
         halt(&mut handles);
+        handles.queue.discard();
     });
+}
+
+/// Ends the capture itself, once, on a thread of its own - the thread that
+/// met the limit is one the stop joins.
+fn end_capture(shared: &Arc<Shared>, generation: u64, why: Value, to_everyone: bool) {
+    let shared = Arc::clone(shared);
+    thread::spawn(move || {
+        shared.control.end_itself(&*shared, &Live { shared: &shared }, generation, &why, to_everyone);
+    });
+}
+
+/// An autostop limit was met: the capture ends, and its owner is told which.
+fn autostop(shared: &Arc<Shared>, output: &Output, generation: u64, reason: StopReason) {
+    if !output.ending.swap(true, Ordering::SeqCst) {
+        crate::log_info!("autostop: {} limit reached - stopping the capture", reason.as_str());
+        end_capture(shared, generation, protocol::capture_stopped(reason.as_str()), false);
+    }
+}
+
+/// A file as `capture_file` reports it.
+fn file_message(report: &FileReport, state: &str) -> Value {
+    protocol::capture_file(
+        report.index,
+        &report.name,
+        state,
+        report.first_seq,
+        report.last_seq,
+        report.frames,
+        report.bytes,
+    )
 }
 
 /// `control::Driver` over Npcap and this file's threads.
@@ -666,8 +774,9 @@ impl Driver for Live<'_> {
         generation: u64,
         owner: &str,
         opened: Vec<(Interface, Capture<'static>)>,
+        options: &CaptureOptions,
     ) -> CaptureHandles {
-        start_capture(self.shared, generation, owner, opened)
+        start_capture(self.shared, generation, owner, opened, options)
     }
 
     /// agent.py:1432-1436: a `start_capture` while already capturing begins
@@ -677,6 +786,9 @@ impl Driver for Live<'_> {
     /// tie-break when two frames share a capture time (`orderingWindow.ts`),
     /// and a stored frame's identity is the id the Worker gives it.
     fn rebase(&self, handles: &CaptureHandles, owner: &str) {
+        if let Some(output) = &handles.output {
+            *output.owner.lock().unwrap() = owner.to_string();
+        }
         handles.seq.store(0, Ordering::SeqCst);
         for per in handles.interfaces.iter() {
             per.received.store(0, Ordering::SeqCst);
@@ -700,7 +812,8 @@ impl Driver for Live<'_> {
     /// that last second is invisible otherwise, which is exactly when somebody
     /// looks.
     fn stop(&self, mut handles: CaptureHandles, owner: &str) -> Option<Value> {
-        let queued = halt(&mut handles);
+        let dropped_writer = halt(&mut handles);
+        let queued = deliver_rest(self.shared, &handles.queue, owner);
         // **The owner's pipe drops, not `None`.** Passing None here made the
         // LAST message the app ever sees report `droppedPipe` as unknown, for a
         // stage that had been reported every second up to that point - found
@@ -714,13 +827,16 @@ impl Driver for Live<'_> {
             dropped_pipe,
             &interface_stats(&handles.interfaces),
         );
-        // `queuedAtStop` is what the stop threw away. Those frames were
-        // captured and never delivered, and they were not lost to pressure -
-        // counting them as a drop would report a loss nobody suffered, and
-        // leaving them out makes the figures fail to add up, which is how
-        // somebody concludes the counters are wrong.
+        // `queuedAtStop` is what the stop could not deliver - 0 unless the
+        // owner's pipe went while it was sending. Those frames were captured
+        // and not lost to pressure: counting them as a drop would report a
+        // loss nobody suffered, and leaving them out makes the figures fail to
+        // add up, which is how somebody concludes the counters are wrong.
         if let Some(object) = stats.as_object_mut() {
             object.insert("queuedAtStop".into(), serde_json::json!(queued));
+            if let Some(dropped) = dropped_writer {
+                object.insert("droppedWriter".into(), serde_json::json!(dropped));
+            }
         }
         Some(stats)
     }
@@ -793,6 +909,8 @@ fn read_interfaces(npcap: &Npcap) -> io::Result<Vec<Interface>> {
                 label: adapters::label_for(&device.name, device.description.as_deref(), &friendly),
                 link_type: probe.link_type,
                 ts_precision: probe.ts_precision,
+                connection: adapters::connection_name(&device.name, &friendly),
+                hardware: device.description.clone(),
                 name: device.name,
             }
         })
@@ -942,8 +1060,10 @@ fn start_capture(
     generation: u64,
     owner: &str,
     opened: Vec<(Interface, Capture<'static>)>,
+    options: &CaptureOptions,
 ) -> CaptureHandles {
     let running = Arc::new(AtomicBool::new(true));
+    let pump_running = Arc::new(AtomicBool::new(true));
     let queue = Arc::new(FrameQueue::with_defaults());
     let seq = Arc::new(AtomicU64::new(0));
     let roster: Arc<Vec<Arc<CaptureInterface>>> = Arc::new(
@@ -969,7 +1089,8 @@ fn start_capture(
         .unwrap_or(0);
     let pipe_base = Arc::new(Mutex::new((owner.to_string(), base)));
     let dropped_base = Arc::new(AtomicU64::new(0));
-    let mut workers = Vec::new();
+    let output = start_output(shared, generation, owner, &opened, &roster, options);
+    let mut sniffers = Vec::new();
 
     // A sniffer per adapter. Encodes on its own thread, so the pump sees
     // finished bytes rather than live driver buffers - which is also what keeps
@@ -980,8 +1101,9 @@ fn start_capture(
     // `agent.py`, and it is what the wire format asks for: `seq` orders the
     // capture, `iface` says where a frame came from, and `capture_stats` reports
     // "received" per interface.
-    for ((interface, mut capture), per) in opened.into_iter().zip(roster.iter()) {
+    for (position, ((interface, mut capture), per)) in opened.into_iter().zip(roster.iter()).enumerate() {
         let iface = interface.id;
+        let out = output.clone();
         let (run, q, sq, shutdown) = (
             Arc::clone(&running),
             Arc::clone(&queue),
@@ -991,7 +1113,7 @@ fn start_capture(
         let (rx, kn) = (Arc::clone(&per.received), Arc::clone(&per.kernel));
         let sh = Arc::clone(shared);
         let alive = Alive::new();
-        workers.push(thread::spawn(move || {
+        sniffers.push(thread::spawn(move || {
             let _alive = alive;
             let mut answered = 0u64;
             while run.load(Ordering::SeqCst) && !shutdown.requested() {
@@ -1005,10 +1127,46 @@ fn start_capture(
                         if let Some(line) = COUNTS.captured() {
                             crate::log_info!("{line}");
                         }
-                        let n = sq.fetch_add(1, Ordering::Relaxed);
                         // agent.py:715-716: a driver that stamped nothing gets
                         // the wall clock rather than a frame at 1970.
                         let ts_ns = capture_time_ns(ts_ns, wall_clock_ns);
+                        let n = match &out {
+                            None => sq.fetch_add(1, Ordering::Relaxed),
+                            // **The sequence number and the file are decided
+                            // under one lock**, and the frame is in the
+                            // writer's queue before the lock is let go - so
+                            // the file's order is the sequence's across every
+                            // adapter, and a frame is in the file exactly when
+                            // it is in the stream.
+                            Some(o) => {
+                                let mut sequencer = o.sequencer.lock().unwrap();
+                                match sequencer.admit(pcapng::enhanced_packet_len(data.len()) as u64, ts_ns) {
+                                    Admit::Write { file } => {
+                                        let n = sq.fetch_add(1, Ordering::Relaxed);
+                                        o.writer.push(FrameJob {
+                                            seq: n,
+                                            file,
+                                            interface: position as u32,
+                                            ts_ns,
+                                            wire_len,
+                                            data: data.to_vec(),
+                                        });
+                                        n
+                                    }
+                                    // **The capture has met its limit, so this
+                                    // sniffer stops reading.** Reading on would
+                                    // only discard frames - and could reach an
+                                    // adapter's end first, whose report would
+                                    // end the capture as a failure and throw
+                                    // away what the owner is still owed.
+                                    Admit::Stop(reason) => {
+                                        drop(sequencer);
+                                        autostop(&sh, o, generation, reason);
+                                        break;
+                                    }
+                                }
+                            }
+                        };
                         match wire::encode_record(n as u32, iface as u16, ts_ns, wire_len as usize, data) {
                             Ok(record) => {
                                 let shed = q.push_counting(record);
@@ -1071,17 +1229,18 @@ fn start_capture(
     // The pump. **It sleeps on `Drained` and on nothing else**, which is the
     // whole point of `drain` reporting why it stopped - the Python agent slept
     // on a full queue and capped itself at 16.5 MB/s.
-    {
+    let pump = {
         let (run, q, sq, shared) = (
-            Arc::clone(&running),
+            Arc::clone(&pump_running),
             Arc::clone(&queue),
             Arc::clone(&seq),
             Arc::clone(shared),
         );
         let (all, base) = (Arc::clone(&roster), Arc::clone(&pipe_base));
         let shed_base = Arc::clone(&dropped_base);
+        let out = output.clone();
         let alive = Alive::new();
-        workers.push(thread::spawn(move || {
+        thread::spawn(move || {
             let _alive = alive;
             let mut last_stats = Instant::now();
             let mut tick: Option<StatsTick> = None;
@@ -1092,6 +1251,14 @@ fn start_capture(
                 // and a capture that has been stopped or replaced has no owner
                 // at all - which is this thread's signal to leave.
                 let Some(owner) = shared.control.owner_of(generation) else { return };
+                // The wall-clock autostop: a capture on a silent link still
+                // stops, which a limit counted in frames never would.
+                if let Some(o) = &out {
+                    if o.autostop_seconds.is_some_and(|s| o.started.elapsed() >= Duration::from_secs(s)) {
+                        o.sequencer.lock().unwrap().stop_now(StopReason::Seconds);
+                        autostop(&shared, o, generation, StopReason::Seconds);
+                    }
+                }
                 let target = shared.clients.lock().unwrap().get(&owner).cloned();
                 let Some(connection) = target else {
                     // The owner's pipe is being torn down. Its disconnect stops
@@ -1152,21 +1319,26 @@ fn start_capture(
                             );
                         }
                     }
-                    let stats = protocol::capture_stats(
+                    let mut stats = protocol::capture_stats(
                         STATS_INTERVAL.as_millis() as u32,
                         pending.seq_high,
                         pending.dropped_agent,
                         dropped_pipe(&shared, &base, &owner),
                         &entries,
                     );
+                    // Frames the file refused because the disk fell behind.
+                    // Present only for a capture that writes a file.
+                    if let (Some(o), Some(object)) = (&out, stats.as_object_mut()) {
+                        object.insert("droppedWriter".into(), serde_json::json!(o.writer.dropped()));
+                    }
                     let _ = connection.send(FRAME_JSON, stats.to_string().as_bytes(), 0);
                 }
                 if state == Drain::Drained {
                     thread::sleep(Duration::from_millis(BATCH_INTERVAL_MS));
                 }
             }
-        }));
-    }
+        })
+    };
 
     CaptureHandles {
         running,
@@ -1175,8 +1347,86 @@ fn start_capture(
         interfaces: roster,
         pipe_base,
         dropped_base,
-        workers,
+        sniffers,
+        pump: Some(pump),
+        pump_running,
+        output,
     }
+}
+
+/// The capture's own pcapng, when its `start_capture` asked for one and the
+/// read loop resolved where and as whom (`PendingOutput`).
+///
+/// One IDB per adapter, in the order they opened - the order the sniffers'
+/// `position` indexes, which is what every EPB's interface id is.
+fn start_output(
+    shared: &Arc<Shared>,
+    generation: u64,
+    owner: &str,
+    opened: &[(Interface, Capture<'static>)],
+    roster: &Arc<Vec<Arc<CaptureInterface>>>,
+    options: &CaptureOptions,
+) -> Option<Arc<Output>> {
+    let file = options.file.as_ref()?;
+    let pending = shared.pending_output.lock().unwrap().remove(owner)?;
+    let interfaces: Vec<FileInterface> = opened
+        .iter()
+        .map(|(interface, capture)| FileInterface {
+            name: interface.name.clone(),
+            connection: interface.connection.clone(),
+            hardware: interface.hardware.clone(),
+            link_type: interface.link_type.and_then(|t| u16::try_from(t).ok()).unwrap_or(1),
+            ts_resolution: if capture.nanoseconds() { 9 } else { 6 },
+        })
+        .collect();
+    let header = capture_file::file_header(&interfaces, options.snaplen, options.filter.as_deref());
+    let sequencer = Sequencer::new(file.ring, file.autostop, header.len() as u64);
+    let owner_cell = Arc::new(Mutex::new(owner.to_string()));
+
+    let counters_roster = Arc::clone(roster);
+    let counters = Arc::new(move |i: usize| {
+        let per = &counters_roster[i];
+        (per.received.load(Ordering::Relaxed), per.kernel.latest().map(|(_, dropped)| u64::from(dropped)))
+    });
+    // Weak: the writer lives inside the capture, which lives inside `Shared`.
+    let (weak, who) = (Arc::downgrade(shared), Arc::clone(&owner_cell));
+    let events = Box::new(move |event: FileEvent| {
+        let Some(shared) = weak.upgrade() else { return };
+        let owner = who.lock().unwrap().clone();
+        match event {
+            FileEvent::Opened(report) => shared.send_to(&owner, &file_message(&report, "open")),
+            FileEvent::Closed(report) => shared.send_to(&owner, &file_message(&report, "closed")),
+            FileEvent::Deleted(report) => shared.send_to(&owner, &file_message(&report, "deleted")),
+            FileEvent::Failed(reason) => {
+                crate::log_warn!("capture file: {reason} - stopping the capture");
+                end_capture(
+                    &shared,
+                    generation,
+                    protocol::error("capture_failed", &format!("The capture stopped: {reason}")),
+                    true,
+                );
+            }
+        }
+    });
+    crate::log_info!("capture files: {}", pending.dir.display());
+    let writer = Writer::start(WriterSetup {
+        dir: pending.dir,
+        ring: file.ring,
+        token: pending.token,
+        interfaces,
+        header,
+        started_ns: wall_clock_ns(),
+        counters,
+        events,
+    });
+    Some(Arc::new(Output {
+        sequencer: Mutex::new(sequencer),
+        writer,
+        owner: owner_cell,
+        autostop_seconds: file.autostop.seconds,
+        started: Instant::now(),
+        ending: AtomicBool::new(false),
+    }))
 }
 
 /// Serves one connected client until its pipe closes.
@@ -1243,10 +1493,46 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
             }
         };
 
+        // Where this client's captures live - main's to say, once per pipe.
+        if let Command::SetCaptureRoot(dir) = &command {
+            shared.capture_roots.lock().unwrap().insert(client.clone(), dir.clone());
+            return Ok(());
+        }
+        // **A capture's files are written as the client that started it**
+        // (ADR 0052), so its identity is taken here, on the thread that read
+        // its command - the only one the kernel will let impersonate it.
+        if let Command::StartCapture(CaptureOptions { file: Some(file), .. }) = &command {
+            let root = shared.capture_roots.lock().unwrap().get(&client).cloned();
+            let Some(root) = root else {
+                shared.send_to(&client, &protocol::error(
+                    "invalid_capture_options",
+                    "start_capture's captureId needs a set_capture_root first: the agent does not know where this client's captures live.",
+                ));
+                return Ok(());
+            };
+            match pipe::client_token(&instance) {
+                Ok(token) => {
+                    let dir = std::path::Path::new(&root).join(&file.capture_id).join("pcapng");
+                    shared.pending_output.lock().unwrap().insert(client.clone(), PendingOutput { dir, token: Some(token) });
+                }
+                Err(error) => {
+                    shared.send_to(&client, &protocol::error(
+                        "capture_failed",
+                        &format!("The capture's files cannot be written as this client: {error}"),
+                    ));
+                    return Ok(());
+                }
+            }
+        }
+
         // Start, stop and re-point are the lifecycle's, including who may send
         // them: a capture belongs to the client that started it, and Fast User
         // Switching is real, so the agent is the only thing that can arbitrate.
-        if shared.control.command(&*shared, &Live { shared: &shared }, &client, &command) {
+        let handled = shared.control.command(&*shared, &Live { shared: &shared }, &client, &command);
+        // A start that did not happen - busy, or joining a running capture -
+        // leaves its output unused, and its identity is let go here.
+        shared.pending_output.lock().unwrap().remove(&client);
+        if handled {
             return Ok(());
         }
 
@@ -1356,6 +1642,7 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
     // sampling.
     shared.host.client_gone(&client);
     shared.log_watchers.lock().unwrap().remove(&client);
+    shared.capture_roots.lock().unwrap().remove(&client);
     {
         let mut watchers = shared.socket_watchers.lock().unwrap();
         watchers.remove(&client);
@@ -1639,6 +1926,8 @@ fn new_shared(shutdown: &Arc<Shutdown>, hardware: Hardware, restart: RestartSupp
         socket_watchers: Mutex::new(std::collections::HashSet::new()),
         sockets: Mutex::new(sockets::SocketTracker::new()),
         log_watchers: Mutex::new(HashMap::new()),
+        capture_roots: Mutex::new(HashMap::new()),
+        pending_output: Mutex::new(HashMap::new()),
         shutdown: Arc::clone(shutdown),
     })
 }

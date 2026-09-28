@@ -115,6 +115,7 @@ pub trait Driver {
         generation: u64,
         owner: &str,
         opened: Vec<(Interface, Self::Handle)>,
+        options: &CaptureOptions,
     ) -> Self::Running;
     /// Stops and joins, and answers the final figures for `owner`, if any.
     fn stop(&self, running: Self::Running, owner: &str) -> Option<Value>;
@@ -595,7 +596,7 @@ impl<R> Control<R> {
         let mut st = self.state.lock().unwrap();
         st.generation += 1;
         let generation = st.generation;
-        let running = driver.start(generation, owner, opened);
+        let running = driver.start(generation, owner, opened, options);
         st.capture = Some(Active { generation, owner: owner.to_string(), members, running });
         env.broadcast(&protocol::state(CaptureState::Sniffing, &interfaces, Some(owner)));
     }
@@ -766,6 +767,44 @@ impl<R> Control<R> {
         let dead = st.capture.take()?;
         env.broadcast(&idle(env));
         Some((dead.running, dead.owner))
+    }
+
+    /// The capture ended itself - an autostop limit was met, or its file could
+    /// not be written (ADR 0052) - and is stopped as the owner's Stop would
+    /// stop it: the final figures go to the owner, `why` goes to the owner or
+    /// to everyone, and every client is told it is idle.
+    ///
+    /// On a thread of its own, like `reap`: the thread that noticed is one of
+    /// those the stop joins. A report from a capture that has since been
+    /// stopped or replaced does nothing.
+    pub fn end_itself<D: Driver<Running = R>>(
+        &self,
+        env: &(impl Env + ?Sized),
+        driver: &D,
+        generation: u64,
+        why: &Value,
+        to_everyone: bool,
+    ) {
+        let _serial = self.commands.lock().unwrap();
+        let taken = {
+            let mut st = self.state.lock().unwrap();
+            if st.capture.as_ref().is_some_and(|a| a.generation == generation) {
+                st.capture.take()
+            } else {
+                None
+            }
+        };
+        let Some(active) = taken else { return };
+        env.log(Level::Info, &format!("the capture ended itself: {why}"));
+        if let Some(stats) = driver.stop(active.running, &active.owner) {
+            env.send_to(&active.owner, &stats);
+        }
+        if to_everyone {
+            env.broadcast(why);
+        } else {
+            env.send_to(&active.owner, why);
+        }
+        env.broadcast(&idle(env));
     }
 
     /// The owner's pipe refused a batch: there is nowhere left to deliver.
@@ -1061,7 +1100,13 @@ mod tests {
                 None => Ok(iface.name.clone()),
             }
         }
-        fn start(&self, generation: u64, _owner: &str, opened: Vec<(Interface, String)>) -> FakeRunning {
+        fn start(
+            &self,
+            generation: u64,
+            _owner: &str,
+            opened: Vec<(Interface, String)>,
+            _options: &CaptureOptions,
+        ) -> FakeRunning {
             let names: Vec<String> = opened.into_iter().map(|(_, h)| h).collect();
             self.started.lock().unwrap().push((generation, names.clone()));
             FakeRunning { generation, names }
@@ -1077,7 +1122,15 @@ mod tests {
     }
 
     fn iface(id: usize, name: &str, label: &str) -> Interface {
-        Interface { id, name: name.into(), label: label.into(), link_type: Some(1), ts_precision: Some(9) }
+        Interface {
+            id,
+            name: name.into(),
+            label: label.into(),
+            link_type: Some(1),
+            ts_precision: Some(9),
+            connection: None,
+            hardware: None,
+        }
     }
 
     /// Three adapters, named the way Npcap names them and labelled the way the
@@ -1126,7 +1179,7 @@ mod tests {
         let env = FakeEnv::with(&["a"], three());
         let control = Control::new();
         let driver = FakeDriver::refusing(&[(LO, "ether host 00:11:22:33:44:55: link layer applied in wrong context")]);
-        let options = CaptureOptions { filter: Some("ether host 00:11:22:33:44:55".into()), snaplen: 96 };
+        let options = CaptureOptions { filter: Some("ether host 00:11:22:33:44:55".into()), snaplen: 96, file: None };
         control.command(&env, &driver, "a", &set(&[A, LO]));
         env.take();
         assert!(control.command(&env, &driver, "a", &Command::StartCapture(options.clone())));

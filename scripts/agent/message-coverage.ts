@@ -100,8 +100,9 @@ const appReads = [...protocol.matchAll(/^\s{2}type: '([a-z_]+)';$/gm)]
   .sort();
 
 check('the app declares the messages this build expects', appReads, [
-  'adapter_config', 'capture_filter_check', 'capture_stats', 'error', 'hello',
-  'interface_stats', 'log', 'packet', 'socket_table', 'state',
+  'adapter_config', 'capture_file', 'capture_filter_check', 'capture_stats',
+  'capture_stopped', 'error', 'hello', 'interface_stats', 'log', 'packet',
+  'socket_table', 'state',
 ]);
 
 // --- what the Rust agent can write -------------------------------------------
@@ -186,6 +187,10 @@ const parser = text('agent-rs/src/protocol.rs');
 for (const wire of appSends) {
   check(`the Rust agent parses ${wire}`, parser.includes(`"${wire}"`), true);
 }
+// Main's own, which is not an `AgentCommand` because the renderer never names
+// a path (`encodeCaptureRootCommand`, ADR 0052) - so the union above cannot
+// list it, and it is named here instead.
+check('the Rust agent parses set_capture_root', parser.includes('"set_capture_root"'), true);
 
 console.log();
 if (failures) {

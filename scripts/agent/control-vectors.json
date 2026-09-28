@@ -170,6 +170,71 @@
     },
     {
       "message": {
+        "droppedAgent": 12,
+        "droppedPipe": 3,
+        "droppedWriter": 0,
+        "interfaces": [
+          {
+            "droppedKernel": 100,
+            "iface": 0,
+            "kernelReceived": 4100,
+            "received": 4000
+          }
+        ],
+        "intervalMs": 1000,
+        "seqHigh": 4096,
+        "type": "capture_stats"
+      },
+      "note": "capture_stats from a capture writing its own pcapng - droppedWriter is what the disk refused"
+    },
+    {
+      "message": {
+        "bytes": 432,
+        "firstSeq": null,
+        "frames": 0,
+        "index": 4,
+        "lastSeq": null,
+        "name": "capture_00004_20260928120000.pcapng",
+        "state": "open",
+        "type": "capture_file"
+      },
+      "note": "capture_file: a ring file opened, before it holds a frame"
+    },
+    {
+      "message": {
+        "bytes": 11978048,
+        "firstSeq": 0,
+        "frames": 14782,
+        "index": 1,
+        "lastSeq": 14781,
+        "name": "capture.pcapng",
+        "state": "closed",
+        "type": "capture_file"
+      },
+      "note": "capture_file: a file closed, with the sequence numbers of the frames it holds"
+    },
+    {
+      "message": {
+        "bytes": 2097356,
+        "firstSeq": 0,
+        "frames": 1000,
+        "index": 1,
+        "lastSeq": 999,
+        "name": "capture_00001_20260928120000.pcapng",
+        "state": "deleted",
+        "type": "capture_file"
+      },
+      "note": "capture_file: a ring deleted its oldest file"
+    },
+    {
+      "message": {
+        "reason": "packets",
+        "type": "capture_stopped"
+      },
+      "note": "capture_stopped: an autostop limit was met"
+    },
+    {
+      "message": {
         "droppedAgent": 0,
         "droppedPipe": 0,
         "interfaces": [
