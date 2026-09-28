@@ -418,6 +418,18 @@ pub fn capture_file(
     })
 }
 
+/// Where a ring file begins: frames from `firstSeq` on are in file `index`.
+///
+/// Sent to the owner under the lock that hands out sequence numbers, before
+/// the first of those frames is queued - and one pipe is first in, first out -
+/// so the app always holds a file's threshold before it holds a frame past
+/// it. That is what lets the capture on disk follow the ring (ADR 0052): the
+/// app files each frame by its sequence number, where a `capture_file` report
+/// from the writer thread could arrive on either side of the frames it names.
+pub fn capture_boundary(index: u32, first_seq: u64) -> Value {
+    json!({ "type": "capture_boundary", "index": index, "firstSeq": first_seq })
+}
+
 /// The agent stopped the capture itself, because an autostop limit was met.
 /// `reason` is which: `packets`, `bytes`, `seconds` or `files`.
 pub fn capture_stopped(reason: &str) -> Value {

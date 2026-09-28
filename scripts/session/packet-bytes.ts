@@ -38,7 +38,7 @@ function chunk(firstId: number, lastId: number, ordinal = 0): ChunkRecord {
   return {
     firstId, lastId, frameCount: lastId - firstId + 1, firstOrdinal: ordinal,
     pfxOffset: 0, pfxLength: 0, sumOffset: 0, sumLength: 0,
-    bytOffset: 0, bytLength: 0, firstTsUs: 0, recOffset: 0, recLength: 0,
+    bytOffset: 0, bytLength: 0, firstTsUs: 0, recOffset: 0, recLength: 0, segment: 0,
   };
 }
 const range = (...records: ChunkRecord[]) => new CaptureIndex(records).idRange();

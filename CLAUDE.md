@@ -417,9 +417,22 @@ A capture is a directory named `cap-YYYYMMDD-HHMMSS-xxxx` holding five files:
 `index.iwidx`, `prefix.iwpfx`, `summary.iwsum`, `frames.iwbyt` and
 `records.iwrec` — the last one deflated block of frame records per chunk (ADR
 0049), written before the chunk's index record so recovery covers it unchanged.
-The index is **version 2**, an 80-byte stride carrying the records' extent; a
-version 1 capture (64 bytes, no records) still opens, is continued as version
-1, and its trees fall back to the replay. Written by
+The index is **version 3**, an 80-byte stride carrying the records' extent and
+each chunk's **segment**; version 2 (no segments) and version 1 (64 bytes, no
+records) still open and are continued as themselves, and a version 1 capture's
+trees fall back to the replay.
+
+**A capture follows the agent's ring** (ADR 0052). Its data is in segments -
+segment 0 is the four files beside the index, segment *n* a `seg-NNNNNN`
+directory - a segment per ring file, filed by the agent's `capture_boundary`
+messages
+(`pipeline/ringFiling.ts`). When the agent deletes a file the store deletes
+the segments holding only frames at or below that file's last sequence
+number, **floor first**: the header records the first chunk still held, every
+lookup answers below it as a hole, and ordinals never move, so the list, a
+filter's bitmap and an export start at the floor rather than renumbering.
+`segments.ts` is the rule and `scripts/capture/segment-guard.ts` holds each
+refusal in it; it narrows ADR 0012 to exactly this delete. Written by
 `captureWriter.ts` through `chunkCodec.ts`, read back by `captureReader.ts`,
 addressed by `captureIndex.ts`, searched by `captureScan.ts` and `matchSet.ts`.
 

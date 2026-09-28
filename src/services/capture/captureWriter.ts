@@ -52,14 +52,15 @@ import type { InfoPatch } from '../dissect/types';
 import { applyInfoPatch } from '../dissect/infoPatch';
 import { encodeChunk, CHUNK_FRAMES } from './chunkCodec';
 import {
-  encodeChunkRecord, writeIndexHeader, indexVersionOf, CaptureIndex, INDEX_HEADER_BYTES,
-  INDEX_VERSION, type ChunkRecord,
+  encodeChunkRecord, writeIndexHeader, indexVersionOf, encodeIndexFloor, CaptureIndex,
+  INDEX_HEADER_BYTES, INDEX_FLOOR_OFFSET, INDEX_VERSION, type ChunkRecord,
 } from './captureIndex';
 import { encodeRecordBlock } from './recordBlock';
 import { append, type BlockFile } from './blockFile';
+import { planSegmentEviction, type RingPart, type SegmentMeta } from './segments';
 
-export interface CaptureFiles {
-  index: BlockFile;
+/** One segment's four data files. Segment 0's are `CaptureFiles`' own. */
+export interface DataFiles {
   /** Fixed-width filter records, deflated per chunk. */
   pfx: BlockFile;
   /** Interned summaries, deflated per chunk. */
@@ -72,6 +73,37 @@ export interface CaptureFiles {
    * again from that frame alone. Empty for a version 1 capture.
    */
   rec: BlockFile;
+}
+
+/**
+ * A capture's segments past the first (`segments.ts`): `seg-NNNNNN/`, beside
+ * the index. The volume owns the handles; asking twice answers the same ones.
+ */
+export interface SegmentFiles {
+  /** Segment `n`'s files, created when absent. */
+  open(n: number): DataFiles;
+  /** Segment `n`'s files if it exists, or null - one removed, or never made. */
+  find(n: number): DataFiles | null;
+  /** Closes segment `n`'s files and deletes its directory. */
+  remove(n: number): void;
+  /** The segments on disk, by number. */
+  list(): number[];
+}
+
+/**
+ * A capture: its index, the four data files beside it (segment 0), and - where
+ * the volume can hold them - its other segments.
+ */
+export interface CaptureFiles extends DataFiles {
+  index: BlockFile;
+  /** Absent where a volume has no segments, which then follow no ring. */
+  segments?: SegmentFiles;
+}
+
+/** A segment's files: 0's are the capture's own; null when it does not exist. */
+export function dataFilesOf(files: CaptureFiles, segment: number): DataFiles | null {
+  if (segment === 0) return files;
+  return files.segments?.find(segment) ?? null;
 }
 
 export interface WriterOptions {
@@ -115,6 +147,8 @@ export interface WriterOptions {
    * discovered here.
    */
   resumeFrom?: readonly ChunkRecord[];
+  /** The first of those chunks still held - the index's floor. */
+  floorChunk?: number;
 }
 
 const DEFAULT_HORIZON_US = 2_000_000;
@@ -166,6 +200,8 @@ interface Staged {
   /** Where this frame's bytes already are. Written before the row waits. */
   bytOffset: number;
   bytLength: number;
+  /** Which segment's `frames.iwbyt` that offset is in. */
+  segment: number;
 }
 
 /** What a revisit of one frame needs, while that frame is still staged. */
@@ -185,6 +221,11 @@ export interface RawFrame {
   id: number;
   tsUs: number;
   bytes: Uint8Array;
+  /**
+   * The agent's ring file this frame is in, when the agent writes a ring
+   * (`segments.ts`). What the capture's segments follow; absent otherwise.
+   */
+  ring?: RingPart;
 }
 
 /**
@@ -255,6 +296,10 @@ export interface WriterStats {
    * Nothing is lost with them - the frame's tree is rebuilt another way.
    */
   recordsMissed: number;
+  /** Segments deleted because the agent's ring deleted the file they held. */
+  segmentsEvicted: number;
+  /** The frames those segments held. They left the capture with the ring. */
+  framesEvicted: number;
 }
 
 export class CaptureWriter {
@@ -290,6 +335,22 @@ export class CaptureWriter {
   private ordinal = 0;
   private chunksSinceFlush = 0;
 
+  /** The segment new bytes go to, and its files. */
+  private segment = 0;
+  private data: DataFiles;
+  /** Whether that segment holds a frame yet. An empty one is not left for another. */
+  private segmentUsed = false;
+  /** The number the next segment takes. */
+  private nextSegment = 1;
+  /** The ring file the current segment follows, when it follows one. */
+  private ringKey: { epoch: number; file: number } | null = null;
+  /** What this run knows of each segment it wrote. `segments.ts`. */
+  private readonly segmentMeta = new Map<number, SegmentMeta>();
+  /** Data files written since the last flush. */
+  private readonly dirty = new Set<DataFiles>();
+  /** The newest file the agent's ring has deleted, until its segments have gone. */
+  private deleted: { epoch: number; lastSeq: number } | null = null;
+
   /**
    * A bounded sample of the patches that arrived after their target was sealed.
    *
@@ -316,7 +377,7 @@ export class CaptureWriter {
     framesStaged: 0, framesWritten: 0, chunksWritten: 0, bytesWritten: 0,
     patchesApplied: 0, patchesMissed: 0, flushes: 0,
     rowsAttached: 0, rowsMissed: 0, framesSealedWithoutRow: 0,
-    recordsAttached: 0, recordsMissed: 0,
+    recordsAttached: 0, recordsMissed: 0, segmentsEvicted: 0, framesEvicted: 0,
   };
 
   /**
@@ -347,18 +408,33 @@ export class CaptureWriter {
       headerPresent = header.some((b) => b !== 0);
       if (headerPresent) version = indexVersionOf(header);
     }
-    this.index = new CaptureIndex(options.resumeFrom ?? [], version);
+    const resumed = options.resumeFrom ?? [];
+    this.index = new CaptureIndex(resumed, version, options.floorChunk ?? 0);
     this.ordinal = this.index.frameCount;
     // Seeded from what survived, not started at zero. These counters are what
     // the panel reports as "N frames stored on disk", and a reopened capture
     // that said 1 while holding 9,001 would be the storage layer lying about
     // the one number a reader uses to decide whether it is working.
-    this.counters.framesWritten = this.index.frameCount;
-    this.counters.chunksWritten = this.index.chunkCount;
-    if (this.index.chunkCount > 0) {
-      const last = this.index.record(this.index.chunkCount - 1);
-      this.counters.bytesWritten = last.bytOffset + last.bytLength;
+    this.counters.framesWritten = this.index.frameCount - this.index.floorOrdinal;
+    this.counters.chunksWritten = this.index.chunkCount - this.index.floorChunk;
+    for (let chunk = this.index.floorChunk; chunk < this.index.chunkCount; chunk++) {
+      this.counters.bytesWritten += this.index.record(chunk).bytLength;
     }
+
+    // Where the next bytes go. On into the last chunk's segment when it is
+    // still held; past every segment the index names when it is not - its
+    // directory was deleted on purpose, and recovery deletes what is left of
+    // one below the floor.
+    let highest = 0;
+    for (const r of resumed) highest = Math.max(highest, r.segment);
+    if (this.index.chunkCount > this.index.floorChunk) {
+      this.segment = this.index.segmentOf(this.index.chunkCount - 1);
+      this.segmentUsed = true;
+    } else if (this.index.chunkCount > 0 && this.canSegment) {
+      this.segment = highest + 1;
+    }
+    this.nextSegment = Math.max(highest, this.segment) + 1;
+    this.data = this.openSegment(this.segment);
     if (!headerPresent) {
       const header = new Uint8Array(INDEX_HEADER_BYTES);
       writeIndexHeader(header, version);
@@ -367,6 +443,109 @@ export class CaptureWriter {
   }
 
   get stats(): Readonly<WriterStats> { return this.counters; }
+
+  /** Whether this capture can put data in a segment of its own. */
+  private get canSegment(): boolean {
+    return this.index.segmented && this.files.segments !== undefined;
+  }
+
+  private openSegment(segment: number): DataFiles {
+    return segment === 0 ? this.files : this.files.segments!.open(segment);
+  }
+
+  /** A segment written earlier in this run, whose files are still open. */
+  private segmentFiles(segment: number): DataFiles {
+    if (segment === this.segment) return this.data;
+    const files = segment === 0 ? this.files : this.files.segments?.find(segment) ?? null;
+    if (files === null) throw new Error(`captureWriter: segment ${segment} is gone while it still has frames staged`);
+    return files;
+  }
+
+  /**
+   * Starts a new segment when a frame opens a newer ring file than the one
+   * the current segment follows, and keeps the current one's facts.
+   *
+   * Newer only: a frame filed under an older file - one adapter's frame that
+   * the ordering window put behind another's - joins the segment it arrives
+   * in, which is later than its file, so it can only be kept longer than its
+   * file, never deleted early.
+   */
+  private follow(ring: RingPart | undefined): void {
+    if (!this.canSegment) return;
+    if (ring === undefined) {
+      // A frame no ring describes, in a segment that follows one: that
+      // segment can no longer be deleted by the ring's word alone.
+      const meta = this.segmentMeta.get(this.segment);
+      if (meta !== undefined) meta.mixed = true;
+      return;
+    }
+    const key = this.ringKey;
+    const newer = key === null || ring.epoch > key.epoch || (ring.epoch === key.epoch && ring.file > key.file);
+    if (newer) {
+      // Never segment 0, which follows nothing, and never a segment that
+      // already holds another file's frames.
+      if (this.segment === 0 || this.segmentUsed) {
+        this.segment = this.nextSegment++;
+        this.data = this.openSegment(this.segment);
+        this.segmentUsed = false;
+      }
+      this.ringKey = { epoch: ring.epoch, file: ring.file };
+      if (!this.segmentMeta.has(this.segment)) {
+        this.segmentMeta.set(this.segment, { epoch: ring.epoch, maxSeq: ring.seq, mixed: false });
+      }
+    }
+    const meta = this.segmentMeta.get(this.segment);
+    if (meta === undefined) return;
+    if (ring.epoch !== meta.epoch) meta.mixed = true;
+    else if (ring.seq > meta.maxSeq) meta.maxSeq = ring.seq;
+  }
+
+  /**
+   * The agent's ring deleted a file: the segments holding only its frames,
+   * and older ones, may now go. Kept until they can - a segment still being
+   * written or still staged goes when it seals.
+   */
+  ringDeleted(epoch: number, lastSeq: number): void {
+    const held = this.deleted;
+    if (held === null || epoch > held.epoch || (epoch === held.epoch && lastSeq > held.lastSeq)) {
+      this.deleted = { epoch, lastSeq };
+    }
+    this.evictReady();
+  }
+
+  /**
+   * Deletes what `planSegmentEviction` allows, **the floor first**: the header
+   * says the chunks have gone before their files go, so a crash between the
+   * two leaves a directory nothing reads rather than a record naming data that
+   * is not there.
+   */
+  private evictReady(): void {
+    if (this.deleted === null || !this.canSegment) return;
+    const plan = planSegmentEviction({
+      chunkCount: this.index.chunkCount,
+      floorChunk: this.index.floorChunk,
+      segmentOf: (chunk) => this.index.segmentOf(chunk),
+      current: this.segment,
+      oldestStaged: this.stagedCount > 0 ? this.staged[this.drained].segment : null,
+      meta: this.segmentMeta,
+      deleted: this.deleted,
+    });
+    if (plan.remove.length === 0) return;
+    const floorBefore = this.index.floorOrdinal;
+    this.files.index.write(INDEX_FLOOR_OFFSET, encodeIndexFloor(plan.floorChunk));
+    this.files.index.flush();
+    this.index.setFloor(plan.floorChunk);
+    for (const segment of plan.remove) {
+      const files = this.files.segments!.find(segment);
+      if (files !== null) this.dirty.delete(files);
+      this.segmentMeta.delete(segment);
+      this.files.segments!.remove(segment);
+    }
+    const frames = this.index.floorOrdinal - floorBefore;
+    this.counters.segmentsEvicted += plan.remove.length;
+    this.counters.framesEvicted += frames;
+    this.counters.framesWritten -= frames;
+  }
   /** Rows waiting for the horizon. Bounded by `horizonFrames`. */
   get stagedCount(): number { return this.staged.length - this.drained; }
 
@@ -437,7 +616,10 @@ export class CaptureWriter {
   /** Writes the bytes and opens a slot for each, without sealing anything. */
   private stageBytes(frames: readonly RawFrame[]): void {
     for (const frame of frames) {
-      const at = append(this.files.byt, frame.bytes);
+      this.follow(frame.ring);
+      const at = append(this.data.byt, frame.bytes);
+      this.dirty.add(this.data);
+      this.segmentUsed = true;
       this.counters.bytesWritten += frame.bytes.length;
       this.stagedAt.set(frame.id, this.staged.length);
       // A row that overtook its bytes is already waiting. Claimed here rather
@@ -457,6 +639,7 @@ export class CaptureWriter {
         record: earlyRecord,
         bytOffset: at,
         bytLength: frame.bytes.length,
+        segment: this.segment,
       });
       this.counters.framesStaged += 1;
       if (frame.tsUs > this.newestTsUs) this.newestTsUs = frame.tsUs;
@@ -547,10 +730,11 @@ export class CaptureWriter {
     const index = this.stagedAt.get(id);
     if (index === undefined || index < this.drained) return null;
     const entry = this.staged[index];
+    const byt = this.segmentFiles(entry.segment).byt;
     let bytes: Uint8Array | null = null;
-    if (entry.bytLength > 0 && entry.bytOffset + entry.bytLength <= this.files.byt.size()) {
+    if (entry.bytLength > 0 && entry.bytOffset + entry.bytLength <= byt.size()) {
       bytes = new Uint8Array(entry.bytLength);
-      this.files.byt.read(entry.bytOffset, bytes);
+      byt.read(entry.bytOffset, bytes);
     }
     return { record: entry.record, packet: entry.packet, bytes };
   }
@@ -603,25 +787,45 @@ export class CaptureWriter {
   private drainReady(): void {
     for (;;) {
       const available = this.staged.length - this.drained;
-      if (available < CHUNK_FRAMES) return;
+      // A whole chunk, or the last frames of a segment whose successor has
+      // started: a chunk never spans two segments, because its byte extent is
+      // one offset into one file.
+      const run = this.runLength(CHUNK_FRAMES);
+      if (run < CHUNK_FRAMES && run >= available) break;
       // The chunk's newest frame decides. Sealing on the OLDEST would let a
       // chunk go out while its last frames are still inside the horizon.
-      const newestInChunk = this.staged[this.drained + CHUNK_FRAMES - 1];
+      const newestInChunk = this.staged[this.drained + run - 1];
       // The SLOT's timestamp, not its packet's. A slot may have no packet yet,
       // and a horizon that depended on a row arriving would never age out
       // while the dissector was behind - which is the stall this split removes.
       const agedOut = this.newestTsUs - newestInChunk.tsUs >= this.horizonUs;
       const tooMany = available > this.horizonFrames;
-      if (!agedOut && !tooMany) return;
-      this.sealChunk(CHUNK_FRAMES);
+      if (!agedOut && !tooMany) break;
+      this.sealChunk(run);
     }
+    this.evictReady();
+  }
+
+  /**
+   * How many staged frames from the front are in one segment, up to `most`.
+   * Zero when nothing is staged.
+   */
+  private runLength(most: number): number {
+    const available = this.staged.length - this.drained;
+    if (available === 0) return 0;
+    const segment = this.staged[this.drained].segment;
+    const limit = Math.min(most, available);
+    let run = 1;
+    while (run < limit && this.staged[this.drained + run].segment === segment) run++;
+    return run;
   }
 
   /** Writes everything still staged, however new. For pause and for stop. */
   finish(): void {
     while (this.staged.length - this.drained > 0) {
-      this.sealChunk(Math.min(CHUNK_FRAMES, this.staged.length - this.drained));
+      this.sealChunk(this.runLength(CHUNK_FRAMES));
     }
+    this.evictReady();
     this.flushAll();
     // The ring is empty, so the id map describes nothing. Released here rather
     // than left to grow for the life of a capture.
@@ -648,10 +852,15 @@ export class CaptureWriter {
     // still staged if the horizon ever outgrows the resident window.
     const encoded = encodeChunk(packets, entries.map((e) => e.bytLength));
 
+    // The segment its bytes went to; `runLength` never hands over a chunk that
+    // spans two.
+    const segment = entries[0].segment;
+    const data = this.segmentFiles(segment);
+    this.dirty.add(data);
     const pfxBytes = this.deflate(encoded.prefix);
     const sumBytes = this.deflate(encoded.summary);
-    const pfxOffset = append(this.files.pfx, pfxBytes);
-    const sumOffset = append(this.files.sum, sumBytes);
+    const pfxOffset = append(data.pfx, pfxBytes);
+    const sumOffset = append(data.sum, sumBytes);
     // The chunk's records, after its other blocks and before its index record,
     // so the recovery rule covers them unchanged: a crash leaves records with no
     // index record describing them, never an index record pointing past them.
@@ -659,7 +868,7 @@ export class CaptureWriter {
     let recLength = 0;
     if (this.index.storesRecords && entries.some((e) => e.record !== null)) {
       const recBytes = this.deflate(encodeRecordBlock(entries.map((e) => e.record)));
-      recOffset = append(this.files.rec, recBytes);
+      recOffset = append(data.rec, recBytes);
       recLength = recBytes.length;
     }
 
@@ -693,6 +902,7 @@ export class CaptureWriter {
       firstTsUs: encoded.firstTsUs,
       recOffset,
       recLength,
+      segment,
     };
 
     // Data first, then flush, THEN the index record. The recovery rule rests
@@ -728,10 +938,15 @@ export class CaptureWriter {
   }
 
   private flushData(): void {
-    this.files.byt.flush();
-    this.files.pfx.flush();
-    this.files.sum.flush();
-    this.files.rec.flush();
+    // Every segment written since the last flush: a chunk sealed into an older
+    // segment after the next one began must be as durable as its record.
+    for (const data of this.dirty) {
+      data.byt.flush();
+      data.pfx.flush();
+      data.sum.flush();
+      data.rec.flush();
+    }
+    this.dirty.clear();
     this.chunksSinceFlush = 0;
     this.counters.flushes += 1;
   }

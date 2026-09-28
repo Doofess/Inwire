@@ -51,12 +51,30 @@
  * records, which is what `recLength === 0` means - and a writer continuing one
  * keeps writing version 1, because a file's stride is set by its header and
  * cannot change half way down it.
+ *
+ * ## Version 3: segments, and a floor
+ *
+ * A capture whose agent writes a ring of pcapng files follows the ring
+ * (ADR 0052): when the agent deletes a file, the frames it held leave the
+ * capture too. Deleting the front of four append-only files is not something a
+ * file system offers, so version 3 puts a capture's data in **segments** -
+ * segment 0 is the four files beside the index, as it always was, and segment
+ * *n* is `seg-NNNNNN/` holding four more - and each chunk says which segment it
+ * is in, in the four bytes version 2 reserved at 76. The index stays one file.
+ *
+ * What left is recorded as a **floor**: the first chunk still held, in the
+ * header's reserved eight bytes. Chunks below it keep their index records -
+ * the file is append-only and their ordinals stay what they were - and every
+ * lookup here answers as if they were not there. The floor is written before a
+ * segment is deleted, so a crash between the two leaves a segment nothing
+ * reads rather than a chunk whose data is gone. `segments.ts` is what decides
+ * a segment may go.
  */
 import type { BlockFile } from './blockFile';
 
 export const INDEX_MAGIC = 0x31584449;          // 'IDX1'
-/** The version this build writes. It reads 1 and 2. */
-export const INDEX_VERSION = 2;
+/** The version this build writes. It reads 1, 2 and 3. */
+export const INDEX_VERSION = 3;
 /** A fixed header so a reader can refuse a file it does not understand. */
 export const INDEX_HEADER_BYTES = 16;
 /** One record per chunk. See the module header for why 80 B is cheap. */
@@ -67,7 +85,7 @@ export const INDEX_RECORD_BYTES_V1 = 64;
 /** The stride of each version this build reads. */
 export function strideOf(version: number): number {
   if (version === 1) return INDEX_RECORD_BYTES_V1;
-  if (version === 2) return INDEX_RECORD_BYTES;
+  if (version === 2 || version === 3) return INDEX_RECORD_BYTES;
   throw new Error(`captureIndex: version ${version} is not one this build reads`);
 }
 
@@ -87,7 +105,10 @@ const OFF_FIRST_TS = 56;       // f64 - only the low half fits; see below
 // capture's end, which meta already carries. Eight bytes a chunk is nothing,
 // but a field that can disagree with its neighbour is worth not having.
 const OFF_REC_OFFSET = 64;     // f64 - version 2
-const OFF_REC_LENGTH = 72;     // u32 - version 2; 76..79 reserved
+const OFF_REC_LENGTH = 72;     // u32 - version 2
+const OFF_SEGMENT = 76;        // u32 - version 3; reserved (zero) in version 2
+/** Where version 3's header keeps the floor: the first chunk still held. */
+const OFF_HEADER_FLOOR = 8;    // f64
 
 export interface ChunkRecord {
   firstId: number;
@@ -108,6 +129,11 @@ export interface ChunkRecord {
    */
   recOffset: number;
   recLength: number;
+  /**
+   * Which segment holds the chunk's data (version 3): 0 is the files beside
+   * the index, *n* is `seg-NNNNNN/`. Always 0 before version 3.
+   */
+  segment: number;
 }
 
 export function encodeChunkRecord(
@@ -128,6 +154,7 @@ export function encodeChunkRecord(
   if (stride >= INDEX_RECORD_BYTES) {
     view.setFloat64(OFF_REC_OFFSET, record.recOffset, true);
     view.setUint32(OFF_REC_LENGTH, record.recLength >>> 0, true);
+    view.setUint32(OFF_SEGMENT, record.segment >>> 0, true);
   }
 }
 
@@ -150,6 +177,7 @@ export function decodeChunkRecord(
     firstTsUs: view.getFloat64(OFF_FIRST_TS, true),
     recOffset: records ? view.getFloat64(OFF_REC_OFFSET, true) : 0,
     recLength: records ? view.getUint32(OFF_REC_LENGTH, true) : 0,
+    segment: records ? view.getUint32(OFF_SEGMENT, true) : 0,
   };
 }
 
@@ -158,7 +186,28 @@ export function writeIndexHeader(into: Uint8Array, version = INDEX_VERSION): voi
   view.setUint32(0, INDEX_MAGIC, true);
   view.setUint16(4, version, true);
   view.setUint16(6, strideOf(version), true);
-  view.setFloat64(8, 0, true);                   // reserved: v2's segment ordinal
+  view.setFloat64(OFF_HEADER_FLOOR, 0, true);    // v3's floor; reserved before
+}
+
+/** Version 3's floor as it sits in the header: the first chunk still held. */
+export function encodeIndexFloor(floorChunk: number): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setFloat64(0, floorChunk, true);
+  return bytes;
+}
+
+/** Where `encodeIndexFloor`'s bytes go in the index file. */
+export const INDEX_FLOOR_OFFSET = OFF_HEADER_FLOOR;
+
+/**
+ * The floor a header records, or 0 before version 3 - whose header held zeros
+ * there, and whose chunks are all still held.
+ */
+export function indexFloorOf(header: Uint8Array): number {
+  if (header.length < INDEX_HEADER_BYTES || indexVersionOf(header) < 3) return 0;
+  const floor = new DataView(header.buffer, header.byteOffset, header.byteLength)
+    .getFloat64(OFF_HEADER_FLOOR, true);
+  return Number.isInteger(floor) && floor >= 0 ? floor : 0;
 }
 
 /** How many whole records a file of this size holds after its header. */
@@ -206,9 +255,12 @@ export class CaptureIndex {
   private firstTs: Float64Array;
   private recOffset: Float64Array;
   private recLength: Uint32Array;
+  private segments: Uint32Array;
 
   private n = 0;
   private frames = 0;
+  /** The first chunk still held. See "Version 3" in the module header. */
+  private floor = 0;
 
   /**
    * The index **grows**, because a running capture is the main thing that
@@ -224,6 +276,8 @@ export class CaptureIndex {
     records: readonly ChunkRecord[] = [],
     /** The index file's version, which decides its stride and whether chunks have records. */
     readonly version: number = INDEX_VERSION,
+    /** The first chunk still held - version 3's floor. */
+    floorChunk = 0,
   ) {
     const capacity = Math.max(64, records.length);
     this.firstId = new Uint32Array(capacity);
@@ -239,7 +293,9 @@ export class CaptureIndex {
     this.firstTs = new Float64Array(capacity);
     this.recOffset = new Float64Array(capacity);
     this.recLength = new Uint32Array(capacity);
+    this.segments = new Uint32Array(capacity);
     for (const r of records) this.append(r);
+    this.floor = Math.min(floorChunk, this.n);
   }
 
   get chunkCount(): number { return this.n; }
@@ -247,7 +303,30 @@ export class CaptureIndex {
   get storesRecords(): boolean { return this.version >= 2; }
   /** Bytes each record takes in the file. */
   get stride(): number { return strideOf(this.version); }
+  /**
+   * The end of the capture's ordinal space: one past its newest frame. Not how
+   * many frames it holds - a floor above 0 means the first `floorOrdinal` of
+   * them have gone - and never reduced, because ordinals never move.
+   */
   get frameCount(): number { return this.frames; }
+  /** Whether chunks may live outside the files beside the index. */
+  get segmented(): boolean { return this.version >= 3; }
+  /** The first chunk still held. */
+  get floorChunk(): number { return this.floor; }
+  /** The ordinal of the first frame still held; `frameCount` when none is. */
+  get floorOrdinal(): number {
+    return this.floor < this.n ? this.firstOrdinal[this.floor] : this.frames;
+  }
+  /** Which segment holds a chunk's data. */
+  segmentOf(chunk: number): number { return this.segments[chunk]; }
+
+  /**
+   * Raises the floor: every chunk below `chunk` has gone. It never falls - a
+   * chunk that has left cannot come back.
+   */
+  setFloor(chunk: number): void {
+    this.floor = Math.max(this.floor, Math.min(chunk, this.n));
+  }
 
   /** Adds a sealed chunk. Records arrive in order and are never revised. */
   append(r: ChunkRecord): void {
@@ -266,6 +345,7 @@ export class CaptureIndex {
     this.firstTs[i] = r.firstTsUs;
     this.recOffset[i] = r.recOffset;
     this.recLength[i] = r.recLength;
+    this.segments[i] = r.segment;
     this.n += 1;
     this.frames += r.frameCount;
   }
@@ -281,6 +361,7 @@ export class CaptureIndex {
     this.sumLength = u32(this.sumLength);
     this.bytLength = u32(this.bytLength);
     this.recLength = u32(this.recLength);
+    this.segments = u32(this.segments);
     this.firstOrdinal = f64(this.firstOrdinal);
     this.pfxOffset = f64(this.pfxOffset);
     this.sumOffset = f64(this.sumOffset);
@@ -299,7 +380,7 @@ export class CaptureIndex {
     for (let i = 0; i < count; i++) {
       records[i] = decodeChunkRecord(bytes, INDEX_HEADER_BYTES + i * stride, stride);
     }
-    return new CaptureIndex(records, version);
+    return new CaptureIndex(records, version, indexFloorOf(bytes));
   }
 
   record(chunk: number): ChunkRecord {
@@ -318,6 +399,7 @@ export class CaptureIndex {
       firstTsUs: this.firstTs[chunk],
       recOffset: this.recOffset[chunk],
       recLength: this.recLength[chunk],
+      segment: this.segments[chunk],
     };
   }
 
@@ -330,7 +412,7 @@ export class CaptureIndex {
    * The guess is checked and falls back to a search.
    */
   chunkForOrdinal(ordinal: number): number {
-    if (this.chunkCount === 0 || ordinal < 0 || ordinal >= this.frameCount) return -1;
+    if (this.chunkCount === 0 || ordinal < this.floorOrdinal || ordinal >= this.frameCount) return -1;
     const guess = Math.min(this.chunkCount - 1, Math.floor(ordinal / this.counts[0]));
     if (this.holdsOrdinal(guess, ordinal)) return guess;
     let lo = 0, hi = this.chunkCount - 1;
@@ -358,7 +440,9 @@ export class CaptureIndex {
    * same answer.
    */
   chunkForId(id: number): number {
-    let lo = 0, hi = this.chunkCount - 1;
+    // Below the floor is gone, and answered as a hole rather than as a chunk
+    // whose data is not there.
+    let lo = this.floor, hi = this.chunkCount - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
       if (id < this.firstId[mid]) hi = mid - 1;
@@ -376,7 +460,7 @@ export class CaptureIndex {
    * "statistics over this window" cheap on a capture too large to scan.
    */
   chunkForTime(tsUs: number): number {
-    if (this.chunkCount === 0) return -1;
+    if (this.chunkCount <= this.floor) return -1;
     // The LAST chunk that starts at or before the target. Phrased this way
     // round on purpose: the first-at-or-after form needs a `- 1` to step back
     // into the chunk that straddles the target, and that `- 1` is wrong on the
@@ -385,7 +469,7 @@ export class CaptureIndex {
     //
     // Capture time is monotonic per interface but not across two of them, so
     // the chunk is a starting point and the frames inside it are the answer.
-    let lo = 0, hi = this.chunkCount - 1, answer = 0;
+    let lo = this.floor, hi = this.chunkCount - 1, answer = this.floor;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
       if (this.firstTs[mid] <= tsUs) { answer = mid; lo = mid + 1; } else hi = mid - 1;
@@ -402,8 +486,8 @@ export class CaptureIndex {
    * sites. That module's header promised this day would need no changes to it.
    */
   idRange(): { first: number; last: number } | null {
-    if (this.chunkCount === 0) return null;
-    return { first: this.firstId[0], last: this.lastId[this.chunkCount - 1] };
+    if (this.chunkCount <= this.floor) return null;
+    return { first: this.firstId[this.floor], last: this.lastId[this.chunkCount - 1] };
   }
 }
 
@@ -446,12 +530,78 @@ export function planRecovery(
   recSize = 0,
   stride = INDEX_RECORD_BYTES,
 ): RecoveryPlan {
-  let keep = 0;
-  for (const r of records) {
-    const complete = r.pfxOffset + r.pfxLength <= pfxSize
-      && r.sumOffset + r.sumLength <= sumSize
-      && r.bytOffset + r.bytLength <= bytSize
-      && (r.recLength === 0 || r.recOffset + r.recLength <= recSize);
+  // One segment, the files beside the index, and no floor: every capture
+  // before version 3, and every version 3 capture that never followed a ring.
+  const sizes = { pfx: pfxSize, sum: sumSize, byt: bytSize, rec: recSize };
+  const plan = planSegmentedRecovery(records, 0, (segment) => (segment === 0 ? sizes : null), stride);
+  const kept = plan.truncate.get(0) ?? NOTHING;
+  return {
+    keepRecords: plan.keepRecords,
+    pfxLength: kept.pfx,
+    sumLength: kept.sum,
+    bytLength: kept.byt,
+    recLength: kept.rec,
+    indexLength: plan.indexLength,
+    framesLost: plan.framesLost,
+  };
+}
+
+/** Four data files' lengths - one segment's. */
+export interface SegmentSizes {
+  pfx: number;
+  sum: number;
+  byt: number;
+  rec: number;
+}
+
+const NOTHING: SegmentSizes = { pfx: 0, sum: 0, byt: 0, rec: 0 };
+
+export interface SegmentedRecoveryPlan {
+  /** How many index records to keep: those below the floor, and the whole chunks above it. */
+  keepRecords: number;
+  /** The floor the header records, clamped to the records there are. */
+  floorChunk: number;
+  indexLength: number;
+  framesLost: number;
+  /**
+   * Each segment still holding a kept chunk, and the lengths to cut its four
+   * files back to - with segment 0 always among them. **A segment not named
+   * here is removed**: it holds only chunks below the floor, or only data no
+   * kept record describes.
+   */
+  truncate: Map<number, SegmentSizes>;
+}
+
+/**
+ * `planRecovery` for a capture in segments (version 3), above a floor.
+ *
+ * The same one-directional rule, per segment: a chunk is kept while its
+ * segment exists and holds every byte its record names, and the walk stops at
+ * the first that does not. Chunks below the floor are not walked - their
+ * segments were deleted on purpose, after the floor that says so was written -
+ * and they cost nothing: their records stay, so ordinals never move.
+ *
+ * Each kept segment is cut back to the end of its last kept chunk, which is
+ * the torn tail in the last one and a no-op in every one before it. Segment 0
+ * is named even when it holds nothing, and cut to nothing, as the files beside
+ * the index always were.
+ */
+export function planSegmentedRecovery(
+  records: readonly ChunkRecord[],
+  floorChunk: number,
+  sizesOf: (segment: number) => SegmentSizes | null,
+  stride = INDEX_RECORD_BYTES,
+): SegmentedRecoveryPlan {
+  const floor = Math.min(Math.max(0, floorChunk), records.length);
+  let keep = floor;
+  for (let i = floor; i < records.length; i++) {
+    const r = records[i];
+    const sizes = sizesOf(r.segment);
+    const complete = sizes !== null
+      && r.pfxOffset + r.pfxLength <= sizes.pfx
+      && r.sumOffset + r.sumLength <= sizes.sum
+      && r.bytOffset + r.bytLength <= sizes.byt
+      && (r.recLength === 0 || r.recOffset + r.recLength <= sizes.rec);
     if (!complete) break;
     keep += 1;
   }
@@ -459,28 +609,29 @@ export function planRecovery(
   let framesLost = 0;
   for (let i = keep; i < records.length; i++) framesLost += records[i].frameCount;
 
-  const last = keep > 0 ? records[keep - 1] : null;
-  // The records file ends where the last kept chunk that HAS records ends: a
-  // chunk sealed without them writes nothing there.
-  let recLength = 0;
-  for (let i = keep - 1; i >= 0; i--) {
-    if (records[i].recLength > 0) {
-      recLength = records[i].recOffset + records[i].recLength;
-      break;
-    }
+  // Truncate each segment's data back to the end of the last chunk an index
+  // record describes. Bytes past it were written by a chunk whose record never
+  // landed, so nothing can find them and leaving them would make every
+  // subsequent offset in that segment wrong. Records within a segment are in
+  // write order, so the last kept one ends furthest - except in the records
+  // file, which ends where the last kept chunk that HAS records ends: a chunk
+  // sealed without them writes nothing there.
+  const truncate = new Map<number, SegmentSizes>([[0, { ...NOTHING }]]);
+  for (let i = floor; i < keep; i++) {
+    const r = records[i];
+    const ends = truncate.get(r.segment) ?? { ...NOTHING };
+    ends.pfx = r.pfxOffset + r.pfxLength;
+    ends.sum = r.sumOffset + r.sumLength;
+    ends.byt = r.bytOffset + r.bytLength;
+    if (r.recLength > 0) ends.rec = r.recOffset + r.recLength;
+    truncate.set(r.segment, ends);
   }
   return {
     keepRecords: keep,
-    // Truncate the data back to the end of the last chunk an index record
-    // describes. Bytes past it were written by a chunk whose record never
-    // landed, so nothing can find them and leaving them would make every
-    // subsequent offset wrong.
-    pfxLength: last === null ? 0 : last.pfxOffset + last.pfxLength,
-    sumLength: last === null ? 0 : last.sumOffset + last.sumLength,
-    bytLength: last === null ? 0 : last.bytOffset + last.bytLength,
-    recLength,
+    floorChunk: floor,
     indexLength: INDEX_HEADER_BYTES + keep * stride,
     framesLost,
+    truncate,
   };
 }
 
@@ -503,6 +654,50 @@ export function recoverIndex(
   return {
     records,
     plan: planRecovery(records, pfx.size(), sum.size(), byt.size(), rec?.size() ?? 0, stride),
+    version,
+  };
+}
+
+/** One segment's four files, as `recoverCapture` measures them. */
+export interface SegmentFileSizes {
+  pfx: BlockFile;
+  sum: BlockFile;
+  byt: BlockFile;
+  rec: BlockFile;
+}
+
+/**
+ * Reads an index file, its floor and every segment it names, and plans its
+ * recovery - `recoverIndex` for a capture that may be in segments.
+ *
+ * `segment(n)` is segment *n*'s files when they exist, and null when they do
+ * not; 0 is the files beside the index.
+ */
+export function recoverCapture(
+  index: BlockFile,
+  segment: (n: number) => SegmentFileSizes | null,
+): { records: ChunkRecord[]; plan: SegmentedRecoveryPlan; version: number } {
+  const size = index.size();
+  const header = new Uint8Array(Math.min(size, INDEX_HEADER_BYTES));
+  if (header.length > 0) index.read(0, header);
+  const version = indexVersionOf(header);
+  const stride = strideOf(version);
+  const count = recordsIn(size, stride);
+  const bytes = new Uint8Array(INDEX_HEADER_BYTES + count * stride);
+  if (count > 0) index.read(0, bytes);
+  const records: ChunkRecord[] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    records[i] = decodeChunkRecord(bytes, INDEX_HEADER_BYTES + i * stride, stride);
+  }
+  const sizesOf = (n: number): SegmentSizes | null => {
+    const files = segment(n);
+    return files === null
+      ? null
+      : { pfx: files.pfx.size(), sum: files.sum.size(), byt: files.byt.size(), rec: files.rec.size() };
+  };
+  return {
+    records,
+    plan: planSegmentedRecovery(records, indexFloorOf(header), sizesOf, stride),
     version,
   };
 }

@@ -395,6 +395,9 @@ fn fixture_open(
 #[derive(Default)]
 struct Received {
     control: Vec<Value>,
+    /// How many frames had arrived when each of `control` did, so a test can
+    /// ask what a message overtook.
+    frames_before: Vec<usize>,
     frames: Vec<crate::wire::Record>,
 }
 
@@ -450,7 +453,9 @@ impl Rig {
                 for frame in FrameReader::new().push(&bytes).expect("the agent frames what it sends") {
                     let mut held = into.lock().unwrap();
                     if frame.kind == FRAME_JSON {
+                        let before = held.frames.len();
                         held.control.push(serde_json::from_slice(&frame.payload).unwrap());
+                        held.frames_before.push(before);
                     } else {
                         held.frames.extend(crate::wire::decode_batch(&frame.payload).unwrap());
                     }
@@ -1060,6 +1065,27 @@ fn a_ring_keeps_its_newest_files_and_says_which_it_deleted() {
         .map(|m| m["index"].as_u64().unwrap())
         .collect();
     assert_eq!(deleted, (1..=(total - 3) as u64).collect::<Vec<_>>(), "the deleted files, oldest first");
+
+    // Each file's boundary, and each ahead of every frame in its file - which
+    // is what lets the app file a frame by its sequence number.
+    let got = delivered.lock().unwrap();
+    let boundaries: Vec<(u64, u64, usize)> = got
+        .control
+        .iter()
+        .zip(&got.frames_before)
+        .filter(|(m, _)| m["type"] == "capture_boundary")
+        .map(|(m, &before)| (m["index"].as_u64().unwrap(), m["firstSeq"].as_u64().unwrap(), before))
+        .collect();
+    assert_eq!(
+        boundaries.iter().map(|&(index, first, _)| (index, first)).collect::<Vec<_>>(),
+        (1..=total as u64).map(|index| (index, (index - 1) * 1_000)).collect::<Vec<_>>(),
+        "a boundary per file, at the file's first frame"
+    );
+    for &(index, first, before) in &boundaries {
+        let overtaken = got.frames[..before].iter().map(|r| r.seq as u64).max();
+        assert!(overtaken.is_none_or(|seq| seq < first), "file {index}'s boundary came after frame {overtaken:?}");
+    }
+    drop(got);
 
     let mut next = (total - 3) * 1_000;
     for name in &names {

@@ -54,10 +54,12 @@ export interface BufferAccounting {
   droppedHeadId: number;
   /** The newest frame id already written to the session store. */
   persistedThroughId: number;
+  /** The buffer's head id after the last drop below the floor - that drop's own guard. */
+  floorHeadId: number;
 }
 
 export function freshAccounting(): BufferAccounting {
-  return { residentBytes: 0, droppedTotal: 0, droppedHeadId: -1, persistedThroughId: -1 };
+  return { residentBytes: 0, droppedTotal: 0, droppedHeadId: -1, persistedThroughId: -1, floorHeadId: -1 };
 }
 
 export interface PrepareEffects {
@@ -115,6 +117,38 @@ export function adoptAccounting(
   // figure in Driver Info still reported the previous capture's.
   accounting.droppedTotal = 0;
   accounting.droppedHeadId = -1;
+  accounting.floorHeadId = -1;
+}
+
+/**
+ * The buffer without the frames the capture no longer holds: every id below
+ * `floorId` left with the agent's ring (ADR 0052), and the list follows the
+ * ring, so the RAM window does too. Frames arrive in id order, so they are a
+ * prefix.
+ *
+ * **Safe to call twice with the same `prev`**, like `commitBatch`, and for the
+ * same reason: it is a state updater. The bytes it frees are subtracted once,
+ * behind the head id it leaves - its own, because the budget trim's guard
+ * means something else. Not counted in `droppedTotal`, which is the frames the
+ * window let go of while the capture still held them.
+ */
+export function dropBelowFloor(
+  prev: Packet[], floorId: number, accounting: BufferAccounting,
+): Packet[] {
+  if (prev.length === 0 || prev[0].id >= floorId) return prev;
+  let lo = 0, hi = prev.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (prev[mid].id < floorId) lo = mid + 1; else hi = mid;
+  }
+  const kept = prev.slice(lo);
+  // Negative when nothing is left, so it cannot equal a head a later drop leaves.
+  const head = kept.length > 0 ? kept[0].id : -floorId - 1;
+  if (head !== accounting.floorHeadId) {
+    accounting.floorHeadId = head;
+    for (let i = 0; i < lo; i++) accounting.residentBytes -= estimateSummaryBytes(prev[i]);
+  }
+  return kept;
 }
 
 export interface CommitEffects {

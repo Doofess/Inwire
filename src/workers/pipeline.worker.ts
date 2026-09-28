@@ -45,6 +45,8 @@ import { DerivedStore } from '../services/pipeline/derivedStore';
 import { withDissectEnv } from '../services/dissect/dissectEnv';
 import { applyInfoPatch } from '../services/dissect/infoPatch';
 import type { FromCapture } from '../services/capture/captureProtocol';
+import type { RingPart } from '../services/capture/segments';
+import { RingFiling } from '../services/pipeline/ringFiling';
 import type { ProcessInfo } from '../services/flowAnnotations';
 import type {
   FromPipeline, PipelineInterface, ToPipeline,
@@ -71,6 +73,8 @@ interface LiveFrame extends Orderable {
   bytes: Uint8Array;
   origLen: number;
   iface: number;
+  /** The agent's ring file it is in, filed as it arrived (`ringFiling.ts`). */
+  ring?: RingPart;
 }
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -161,6 +165,12 @@ const ordering = new OrderingWindow<LiveFrame>(ORDERING_HOLD_MS);
 
 /** Ids are assigned here now: the frame is numbered where it is dissected. */
 let nextId = 1;
+/**
+ * Which ring file each frame is in, from the agent's `capture_boundary`
+ * messages. Never reset: an epoch is a run of the agent's capture, and one
+ * that outlived a Clear is still the run it was.
+ */
+const ringFiling = new RingFiling();
 /** Stand-in sequence number for an agent that sends none. */
 let arrivalSeq = 0;
 let captureStartUs: number | null = null;
@@ -524,7 +534,9 @@ function flush(): void {
     if (!capturing && !capturedSinceReset) bytesPostedWhileIdle += assigned.length;
     storePort.postMessage({
       type: 'appendBytes',
-      frames: assigned.map(({ frame, id }) => ({ id, tsUs: frame.tsUs, bytes: frame.bytes })),
+      frames: assigned.map(({ frame, id }) => (frame.ring === undefined
+        ? { id, tsUs: frame.tsUs, bytes: frame.bytes }
+        : { id, tsUs: frame.tsUs, bytes: frame.bytes, ring: frame.ring })),
     });
   }
 
@@ -678,6 +690,7 @@ function receiveBatch(bytes: Uint8Array): void {
       bytes: retain(frame),
       origLen: frame.origLen,
       iface: frame.iface,
+      ring: ringFiling.partOf(frame.seq),
     });
   }
 }
@@ -695,6 +708,13 @@ function receiveControl(text: string): void {
     flowAnnotations.apply(message, Date.now() * 1000);
     post({ type: 'agent', message });
     return;
+  }
+
+  // The ring's two facts the store needs, taken here because here is where
+  // frames are filed (ADR 0052). Both are passed on to the app as well.
+  if (message.type === 'capture_boundary') ringFiling.boundary(message.index, message.firstSeq);
+  if (message.type === 'capture_file' && message.state === 'deleted' && message.lastSeq !== null) {
+    storePort?.postMessage({ type: 'ringDeleted', epoch: ringFiling.epoch, lastSeq: message.lastSeq });
   }
 
   if (message.type !== 'packet') {

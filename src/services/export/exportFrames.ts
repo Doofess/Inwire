@@ -91,7 +91,7 @@
  */
 import { FilterEngine } from '../filterEngine';
 import { LINKTYPE } from '../dissect/types';
-import { matchesBeforeWindow } from '../../lib/captureRowSpace';
+import { matchesOnDisk } from '../../lib/captureRowSpace';
 import { CHUNK_FRAMES } from '../capture/chunkCodec';
 import { packetsBytes, type ByteSource } from '../packetBytes';
 import type { MatchSet } from '../capture/matchSet';
@@ -106,6 +106,11 @@ export interface CaptureRowReader extends ByteSource {
   readRowsAt(from: number, to: number): Promise<RowBlock[]>;
   /** Where a frame sits in the capture, or -1 - `CaptureClient.ordinalOf`. */
   ordinalOf(id: number): Promise<number>;
+  /**
+   * The capture's first ordinal still held - `CaptureClient.captureFloor`.
+   * Above 0 once the agent's ring has deleted files (ADR 0052); absent is 0.
+   */
+  captureFloor?(): number;
 }
 
 /** Which frames an export reads. */
@@ -273,7 +278,8 @@ export async function windowOrdinal(
   let ordinal = await reader.ordinalOf(id);
   if (ordinal >= 0) return ordinal;
 
-  const sealed = await reader.readRowsAt(0, 1);
+  const floor = reader.captureFloor?.() ?? 0;
+  const sealed = await reader.readRowsAt(floor, floor + 1);
   if (sealed.length === 0) return 0;
 
   for (let attempt = 1; attempt < retry.attempts && ordinal < 0; attempt++) {
@@ -287,7 +293,7 @@ export async function windowOrdinal(
   );
 }
 
-/** Disk ordinals the scope reads, `[0, limit)`. See `matchesBeforeWindow`. */
+/** Where the scope's disk half ends: it reads `[floor, limit)`. See `matchesOnDisk`. */
 function diskLimit(scope: FrameScope, below: number): number {
   const matches = scope.filter?.matches;
   // A scan covers the frames that existed when it started. One that stopped
@@ -355,15 +361,18 @@ export function guardedReader(reader: CaptureRowReader, identity: () => unknown)
       check();
       return ordinal;
     },
+    captureFloor() {
+      return reader.captureFloor?.() ?? 0;
+    },
   };
 }
 
-function totalFor(scope: FrameScope, below: number): number {
-  if (scope.filter === null) return below + scope.window.length;
+function totalFor(scope: FrameScope, below: number, floor: number): number {
+  if (scope.filter === null) return Math.max(0, below - floor) + scope.window.length;
   const { expression, matches } = scope.filter;
-  if (matches === null && below > 0) throw noScanYet();
+  if (matches === null && below > floor) throw noScanYet();
   if (matches !== null && matches.frameCount < below) throw new ScanBehindError(below - matches.frameCount);
-  const fromDisk = matches === null ? 0 : matchesBeforeWindow(matches, below);
+  const fromDisk = matches === null ? 0 : matchesOnDisk(matches, below, floor);
   return fromDisk + windowMatches(scope.window, expression).length;
 }
 
@@ -381,7 +390,8 @@ export async function exportTotal(
   reader: CaptureRowReader,
   retry?: LocateRetry,
 ): Promise<number> {
-  return totalFor(scope, await windowOrdinal(scope.window, reader, retry));
+  const below = await windowOrdinal(scope.window, reader, retry);
+  return totalFor(scope, below, reader.captureFloor?.() ?? 0);
 }
 
 /**
@@ -398,7 +408,11 @@ export async function* exportFrames(
 ): AsyncGenerator<ExportPage> {
   const pageSize = Math.max(1, Math.floor(options.pageSize ?? EXPORT_PAGE_FRAMES));
   const below = await windowOrdinal(scope.window, reader, options.locate);
-  const total = totalFor(scope, below);
+  // Where the capture starts now: below it, a ring has taken the frames
+  // (ADR 0052). Read once - a floor that rises during the export turns the
+  // frames it passes into a gap, counted like any unreadable span.
+  const floor = reader.captureFloor?.() ?? 0;
+  const total = totalFor(scope, below, floor);
   const matches = scope.filter?.matches ?? null;
   const limit = diskLimit(scope, below);
   let done = 0;
@@ -479,8 +493,8 @@ export async function* exportFrames(
     return take(await reader.readRowsAt(probe, probeTo), at, rows);
   };
 
-  // ---- the disk half: ordinals [0, limit) --------------------------------
-  let at = 0;
+  // ---- the disk half: ordinals [floor, limit) ----------------------------
+  let at = floor;
   while (at < limit) {
     options.signal?.throwIfAborted();
 

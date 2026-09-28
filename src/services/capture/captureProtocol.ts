@@ -94,6 +94,12 @@ export type ToCapture =
   | { type: 'revisitKit'; requestId: number; id: number }
   /** Patches produced by this flush, for rows that are still staged. */
   | { type: 'patches'; patches: InfoPatch[] }
+  /**
+   * The agent's ring deleted a file (ADR 0052): the segments holding only
+   * frames up to `lastSeq` of run `epoch` may go, and do once they can -
+   * `segments.ts` decides. From the pipeline Worker, which files every frame.
+   */
+  | { type: 'ringDeleted'; epoch: number; lastSeq: number }
   /** Seals the staging ring and flushes. Pause, stop, and page hide. */
   | { type: 'finish' }
   /** Deletes the capture's directory outright. */
@@ -150,9 +156,18 @@ export type FromCapture =
       freeBytes: number | null;
       /** Where the captures are, so the panel can show it and open it. */
       captureDir: string;
-      /** What was already on disk: zero for a capture that has just started. */
+      /**
+       * The end of the capture's ordinal space: zero for a capture that has
+       * just started. Not how many frames it holds - see `floorOrdinal`.
+       */
       frameCount: number;
       chunkCount: number;
+      /** The ordinal of its first frame still held; above 0 once a ring has deleted some. */
+      floorOrdinal: number;
+      /** Every frame id below this has gone; 0 when none has. */
+      floorId: number;
+      /** The ids it can supply, or null - as `stats` carries them. */
+      storedRange: { first: number; last: number } | null;
       /** The highest id stored, so numbering resumes past it. Zero when empty. */
       lastId: number;
       requestId?: number;
@@ -177,6 +192,18 @@ export type FromCapture =
        * - it is asked while rendering, and an async answer would mean a frame
        * with no bytes could not say WHY until a promise settled.
        */
+      storedRange: { first: number; last: number } | null;
+    }
+  /**
+   * The capture's floor moved: a ring deleted a file, and the frames below
+   * `floorOrdinal` left the capture with it (ADR 0052). Every position below
+   * it now answers as a hole, and the list starts there.
+   */
+  | {
+      type: 'floor';
+      floorOrdinal: number;
+      /** Every frame id below this has gone. See `CaptureStorageState.floorId`. */
+      floorId: number;
       storedRange: { first: number; last: number } | null;
     }
   /** Frames asked for by a `read`. Absent ids are frames the capture lacks. */
@@ -264,6 +291,19 @@ export interface CaptureStorageState {
   patchesMissed: number;
   /** The span of frame ids whose bytes are readable, or null. */
   storedRange: { first: number; last: number } | null;
+  /**
+   * The ordinal of the capture's first frame still held. Zero unless the
+   * capture follows a ring that has deleted files (ADR 0052), and then every
+   * position below it has gone.
+   */
+  floorOrdinal: number;
+  /**
+   * Every frame id below this has gone with the ring - one past the newest id
+   * the deleted segments held, and 0 when none has. What the RAM window drops
+   * by, because a frame still staged behind the patch horizon is in no range
+   * the store can state yet and must not be taken for one that has gone.
+   */
+  floorId: number;
   /** Free space where the captures live. Null when it cannot be read. */
   freeBytes: number | null;
   /** The capture directory, shown in Settings and openable from there. */
@@ -274,7 +314,7 @@ export interface CaptureStorageState {
 export function freshCaptureStorageState(): CaptureStorageState {
   return {
     captureId: null, framesWritten: 0, bytesOnDisk: 0, stagedCount: 0,
-    patchesMissed: 0, storedRange: null, freeBytes: null, captureDir: '',
+    patchesMissed: 0, storedRange: null, floorOrdinal: 0, floorId: 0, freeBytes: null, captureDir: '',
     error: null,
   };
 }

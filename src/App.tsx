@@ -22,7 +22,7 @@ import { ExpertLog, expertSnapshot } from "./services/expertInfo";
 import { useIncrementalAggregate } from "./lib/useIncrementalAggregate";
 import { useWindowOrdinal } from "./lib/useWindowOrdinal";
 import { useCaptureFilter, uncoveredRows } from "./lib/useCaptureFilter";
-import { matchesBeforeWindow } from "./lib/useCaptureRows";
+import { matchesOnDisk } from "./lib/captureRowSpace";
 import { MAX_CUSTOM_COLUMNS } from "./lib/packetColumns";
 import { usePreferenceStore, usePreferenceValue } from "./services/preferenceStore";
 import {
@@ -402,6 +402,7 @@ export default function App() {
   const {
     packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
     queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
+    dropBelow,
   } = usePacketBuffer({ packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued });
 
 
@@ -1740,11 +1741,23 @@ export default function App() {
    * hooks asking the store the same question could disagree for a frame.
    */
   const belowWindow = useWindowOrdinal(packets);
+  /**
+   * The capture's first ordinal still held. Zero unless the agent writes a
+   * ring and has deleted files, whose frames then left the capture with them
+   * (ADR 0052): the list, its counts and a filter's all start here.
+   */
+  const captureFloor = captureStorage.floorOrdinal;
+  // The RAM window follows the floor as the list does: what the ring took is
+  // not a frame the buffer keeps showing.
+  const captureFloorId = captureStorage.floorId;
+  useEffect(() => {
+    if (captureFloorId > 0) dropBelow(captureFloorId);
+  }, [captureFloorId, dropBelow]);
   // Gated on there being disk under the window at all. Every capture that fits
   // in memory - which is up to ~700k frames - is answered completely by
   // `filteredPackets` above, and a scan would be a pass over frames this
   // process is already holding.
-  const captureFilter = useCaptureFilter(appliedFilter, belowWindow > 0);
+  const captureFilter = useCaptureFilter(appliedFilter, belowWindow > captureFloor);
   const filterUncovered = uncoveredRows(captureFilter.state, belowWindow);
 
   /**
@@ -1760,9 +1773,9 @@ export default function App() {
    * Unchanged for every capture that fits in memory, because `belowWindow` is
    * then zero and both terms collapse to what they were.
    */
-  const captureRowCount = belowWindow + packets.length;
+  const captureRowCount = Math.max(0, belowWindow - captureFloor) + packets.length;
   const shownRowCount = (captureFilter.state.status === 'ready'
-    ? matchesBeforeWindow(captureFilter.state.matches, belowWindow)
+    ? matchesOnDisk(captureFilter.state.matches, belowWindow, captureFloor)
     : 0) + filteredPackets.length;
 
   /**
@@ -2871,7 +2884,7 @@ export default function App() {
                 // a value that changes only when its subject does - `rescan`
                 // is stable - so none of them adds a render or a computation
                 // this component was not already doing.
-                belowWindow={belowWindow}
+                belowWindow={Math.max(0, belowWindow - captureFloor)}
                 captureRowCount={captureRowCount}
                 filteredRowCount={shownRowCount}
                 filterScan={captureFilter.state}
@@ -3072,6 +3085,7 @@ export default function App() {
                   // the same check the selection-visibility effect above uses.
                   allPackets={packets}
                   below={belowWindow}
+                  floor={captureFloor}
                   filterScan={captureFilter.state}
                   themeKey={resolvedTheme}
                   selectedPacket={selectedPacket}

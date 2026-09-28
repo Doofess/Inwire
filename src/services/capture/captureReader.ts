@@ -39,7 +39,7 @@
 import { ChunkDirectory, applyPrefixes, chunkStoresLinkType, decodeChunk, prefixBlockBytes } from './chunkCodec';
 import type { CaptureIndex } from './captureIndex';
 import { readExact, type BlockFile } from './blockFile';
-import type { CaptureFiles } from './captureWriter';
+import { dataFilesOf, type CaptureFiles, type DataFiles } from './captureWriter';
 import type { Packet } from '../../types/packet';
 import { decodeRecordBlock } from './recordBlock';
 
@@ -101,6 +101,16 @@ export class CaptureReader {
   }
 
   /**
+   * The files holding a chunk's data, or null for a chunk that has gone - below
+   * the floor, or in a segment that is no longer there (ADR 0052). A chunk that
+   * has gone answers like a torn tail: absent, never an error.
+   */
+  private dataOf(chunk: number): DataFiles | null {
+    if (chunk < this.index.floorChunk || chunk >= this.index.chunkCount) return null;
+    return dataFilesOf(this.files, this.index.segmentOf(chunk));
+  }
+
+  /**
    * One frame's record (ADR 0049), or null when it has none: a chunk sealed
    * without one, a capture written before records existed, or an id this
    * capture does not hold.
@@ -117,7 +127,9 @@ export class CaptureReader {
 
     let block = this.recordBlocks.get(chunk);
     if (block === undefined) {
-      const packed = this.readClamped(this.files.rec, record.recOffset, record.recLength);
+      const data = this.dataOf(chunk);
+      if (data === null) return null;
+      const packed = this.readClamped(data.rec, record.recOffset, record.recLength);
       if (packed === null) return null;
       block = decodeRecordBlock(this.inflate(packed));
       this.recordBlocks.set(chunk, block);
@@ -161,10 +173,11 @@ export class CaptureReader {
    * rows' absent `linkType` means "not recorded" rather than Ethernet.
    */
   private readChunkRows(chunk: number): { packets: Packet[]; linkTypesStored: boolean } {
-    if (chunk < 0 || chunk >= this.index.chunkCount) return { packets: [], linkTypesStored: false };
+    const data = this.dataOf(chunk);
+    if (data === null) return { packets: [], linkTypesStored: false };
     const record = this.index.record(chunk);
-    const summaryRaw = this.readClamped(this.files.sum, record.sumOffset, record.sumLength);
-    const prefixRaw = this.readClamped(this.files.pfx, record.pfxOffset, record.pfxLength);
+    const summaryRaw = this.readClamped(data.sum, record.sumOffset, record.sumLength);
+    const prefixRaw = this.readClamped(data.pfx, record.pfxOffset, record.pfxLength);
     if (summaryRaw === null || prefixRaw === null) return { packets: [], linkTypesStored: false };
     const summary = this.inflate(summaryRaw);
     const packets = decodeChunk(summary);
@@ -288,7 +301,8 @@ export class CaptureReader {
 
   private readFromChunk(chunk: number, wanted: number[], out: Map<number, Uint8Array>): void {
     const directory = this.directory(chunk);
-    if (directory === null) return;
+    const data = this.dataOf(chunk);
+    if (directory === null || data === null) return;
     const record = this.index.record(chunk);
 
     // Positions first: an id in a hole between two frames has no position, and
@@ -309,7 +323,7 @@ export class CaptureReader {
     const to = found[found.length - 1].at + found[found.length - 1].length;
 
     if (to - from <= MAX_SPAN) {
-      const span = this.readClamped(this.files.byt, record.bytOffset + from, to - from);
+      const span = this.readClamped(data.byt, record.bytOffset + from, to - from);
       if (span === null) return;
       for (const f of found) {
         const start = f.at - from;
@@ -323,7 +337,7 @@ export class CaptureReader {
     }
 
     for (const f of found) {
-      const bytes = this.readClamped(this.files.byt, record.bytOffset + f.at, f.length);
+      const bytes = this.readClamped(data.byt, record.bytOffset + f.at, f.length);
       if (bytes !== null) out.set(f.id, bytes);
     }
   }
@@ -344,6 +358,8 @@ export class CaptureReader {
 
   /** The chunk's byte directory, inflated and cached, or null if unreadable. */
   private directory(chunk: number): ChunkDirectory | null {
+    const data = this.dataOf(chunk);
+    if (data === null) return null;
     const cached = this.directories.get(chunk);
     if (cached !== undefined) {
       // Re-inserted so the eviction below is least-recently-used rather than
@@ -354,7 +370,7 @@ export class CaptureReader {
     }
 
     const record = this.index.record(chunk);
-    const packed = this.readClamped(this.files.pfx, record.pfxOffset, record.pfxLength);
+    const packed = this.readClamped(data.pfx, record.pfxOffset, record.pfxLength);
     if (packed === null) return null;
     const block = this.inflate(packed);
     if (block.length !== prefixBlockBytes(record.frameCount)) return null;

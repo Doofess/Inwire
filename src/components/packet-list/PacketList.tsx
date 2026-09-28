@@ -109,6 +109,11 @@ interface PacketListProps {
    */
   below: number;
   /**
+   * The capture's first ordinal still held: above 0 once the agent's ring has
+   * deleted files, and the list starts there (ADR 0052).
+   */
+  floor?: number;
+  /**
    * The display filter run over the whole capture, or `off`.
    *
    * Only `ready` lets the list address the disk while a filter is applied.
@@ -275,6 +280,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   packets,
   allPackets,
   below,
+  floor = 0,
   filterScan,
   selectedPacket,
   onSelectPacket,
@@ -662,7 +668,7 @@ export const PacketList: React.FC<PacketListProps> = ({
     [unfiltered, filterScan, packets],
   );
   const addressingCapture = capturedInOrder && (unfiltered || filterView !== null);
-  const captureRows = useCaptureRows(allPackets, below, addressingCapture, filterView);
+  const captureRows = useCaptureRows(allPackets, below, addressingCapture, filterView, floor);
   const windowSource = React.useMemo(() => arrayRowSource(sortedPackets), [sortedPackets]);
   const rowSource = addressingCapture ? captureRows.source : windowSource;
   const totalRows = rowSource.count;
@@ -1258,7 +1264,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     {allPackets.length > 0 && filterView !== null && (
                       <span className="text-[11px] font-mono text-muted-foreground mt-0.5">
                         Searched the whole stored capture —{' '}
-                        {(below + allPackets.length).toLocaleString()} frames.
+                        {(Math.max(0, below - floor) + allPackets.length).toLocaleString()} frames.
                       </span>
                     )}
                     {allPackets.length > 0 && filterView === null && droppedBuffer > 0 && (

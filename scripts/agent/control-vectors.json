@@ -228,6 +228,14 @@
     },
     {
       "message": {
+        "firstSeq": 1000,
+        "index": 2,
+        "type": "capture_boundary"
+      },
+      "note": "capture_boundary: frames from this sequence number on are in this ring file"
+    },
+    {
+      "message": {
         "reason": "packets",
         "type": "capture_stopped"
       },

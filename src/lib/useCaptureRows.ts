@@ -109,12 +109,16 @@ interface CaptureRows {
  *                 put unsorted rows in a sorted list. A display filter is no
  *                 longer one of these; that is what `filter` is for.
  * @param filter   The scan's answer, or null to address the capture whole.
+ * @param floor    The capture's first ordinal still held - above 0 once the
+ *                 agent's ring has deleted files (ADR 0052). The list starts
+ *                 there; see `captureRowSpace.ts`.
  */
 export function useCaptureRows(
   packets: readonly Packet[],
   below: number,
   enabled: boolean,
   filter: CaptureFilterView | null = null,
+  floor = 0,
 ): CaptureRows {
   /** Bumped when a fetch lands, to re-render the rows that were loading. */
   const [version, setVersion] = useState(0);
@@ -182,7 +186,7 @@ export function useCaptureRows(
     // Nothing below the window, or the list is not addressing the capture:
     // the window IS the answer, and this is the path every capture that fits
     // in memory takes.
-    if (!enabled || below === 0) {
+    if (!enabled || below <= floor) {
       return { source: windowSource, leadingRows: 0, unaddressable: 0 };
     }
 
@@ -190,7 +194,7 @@ export function useCaptureRows(
     // has no React in it - `captureRowSpace.ts`. What is left here is the
     // cache, the fetching and the three-state answer.
     const matches = filter === null ? null : filter.matches;
-    const space = rowSpace(below, inWindow.length, matches);
+    const space = rowSpace(below, inWindow.length, matches, floor);
 
     return {
       leadingRows: space.fromDisk - space.skipped,
@@ -235,12 +239,13 @@ export function useCaptureRows(
           if (start >= end) return;
 
           if (matches === null) {
+            // Rows to ordinals: the same run, `base` further on.
             let missing = -1;
             for (let row = start; row < end; row++) {
-              if (!cache.has(row)) { missing = row; break; }
+              if (!cache.has(space.base + row)) { missing = space.base + row; break; }
             }
             if (missing < 0) return;
-            fetchRange(missing, end);
+            fetchRange(missing, space.base + end);
             return;
           }
 
@@ -249,7 +254,7 @@ export function useCaptureRows(
           // sparse filter are not rows this list has.
           const wanted: number[] = [];
           for (let row = start; row < end; row++) {
-            const ordinal = matches.ordinalAt(row);
+            const ordinal = matches.ordinalAt(space.base + row);
             if (ordinal >= 0 && !cache.has(ordinal)) wanted.push(ordinal);
           }
           fetchOrdinals(wanted);
@@ -257,7 +262,7 @@ export function useCaptureRows(
       },
     };
   }, [
-    enabled, below, packets, filter, windowSource,
+    enabled, below, floor, packets, filter, windowSource,
     cache, fetchRange, fetchOrdinals, version,
   ]);
 }

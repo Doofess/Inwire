@@ -154,6 +154,10 @@ fn main() {
         protocol::capture_file(1, "capture_00001_20260928120000.pcapng", "deleted", Some(0), Some(999), 1000, 2_097_356),
     );
     add(
+        "capture_boundary: frames from this sequence number on are in this ring file",
+        protocol::capture_boundary(2, 1000),
+    );
+    add(
         "capture_stopped: an autostop limit was met",
         protocol::capture_stopped("packets"),
     );

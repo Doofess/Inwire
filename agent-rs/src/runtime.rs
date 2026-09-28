@@ -1141,8 +1141,16 @@ fn start_capture(
                             Some(o) => {
                                 let mut sequencer = o.sequencer.lock().unwrap();
                                 match sequencer.admit(pcapng::enhanced_packet_len(data.len()) as u64, ts_ns) {
-                                    Admit::Write { file } => {
+                                    Admit::Write { file, first } => {
                                         let n = sq.fetch_add(1, Ordering::Relaxed);
+                                        // Still under the lock, and before
+                                        // this frame is in the live queue: the
+                                        // owner hears where the file begins
+                                        // ahead of any frame in it.
+                                        if first {
+                                            let owner = o.owner.lock().unwrap().clone();
+                                            sh.send_to(&owner, &protocol::capture_boundary(file, n));
+                                        }
                                         o.writer.push(FrameJob {
                                             seq: n,
                                             file,

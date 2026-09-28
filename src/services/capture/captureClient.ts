@@ -232,6 +232,9 @@ class CaptureClient {
           captureId: message.captureId,
           freeBytes: message.freeBytes,
           captureDir: message.captureDir,
+          floorOrdinal: message.floorOrdinal,
+          floorId: message.floorId,
+          storedRange: message.storedRange,
           error: null,
         });
         if (message.requestId !== undefined) {
@@ -254,6 +257,11 @@ class CaptureClient {
           stagedCount: message.stagedCount,
           freeBytes: message.freeBytes,
           storedRange: message.storedRange,
+        });
+        break;
+      case 'floor':
+        this.update({
+          floorOrdinal: message.floorOrdinal, floorId: message.floorId, storedRange: message.storedRange,
         });
         break;
       case 'bytes': {
@@ -453,6 +461,14 @@ class CaptureClient {
    * couple of seconds, and no frame is ever dropped before it is readable.
    */
   get storedRange(): { first: number; last: number } | null { return this.state.storedRange; }
+
+  /**
+   * The ordinal of the capture's first frame still held - 0 unless a ring has
+   * deleted some (ADR 0052). The last the store said, like `storedRange`: a
+   * position below it is a hole, and one that has just become one reads as a
+   * hole from the store before this catches up.
+   */
+  captureFloor(): number { return this.state.floorOrdinal; }
 
   /**
    * Opens a capture that already exists and says what is in it.

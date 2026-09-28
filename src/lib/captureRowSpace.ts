@@ -24,6 +24,17 @@
  *   rows fromDisk .. total   the filtered window, at window[i - fromDisk]
  * ```
  *
+ * ## Above a floor
+ *
+ * A capture that follows the agent's ring loses its oldest frames when the
+ * agent deletes the file that held them (ADR 0052), and `floor` is the ordinal
+ * of the first one left. The list starts there: row 0 is ordinal `floor`
+ * unfiltered, and the first match at or above it filtered. **Ordinals never
+ * move** - a floor rising is rows leaving the front, not every row renumbered
+ * - so a cached row, a scan's bitmap and a selected frame's ordinal all stay
+ * right, and only the offset between a row and an ordinal changes. That offset
+ * is `base`. With no floor it is 0 and everything above is unchanged.
+ *
  * `fromDisk` is `rank(below)` - the matches strictly before the window - and
  * the boundary is at `below` rather than at the end of the scan **because the
  * window's frames are on disk as well**. A scan covers them; the window
@@ -65,6 +76,13 @@ export const MAX_ADDRESSABLE_ROWS = 1_500_000;
 export interface RowSpace {
   /** Rows the list may scroll through, after the canvas clamp. */
   count: number;
+  /** The capture's floor: the first ordinal still held. */
+  floor: number;
+  /**
+   * What disk row 0 is: ordinal `floor` unfiltered, and filtered the rank of
+   * the first match at or above it.
+   */
+  base: number;
   /** Rows dropped off the front by that clamp. Zero almost always. */
   skipped: number;
   /** Rows answered from disk, before the window's. `below`, or its matches. */
@@ -83,18 +101,34 @@ export function matchesBeforeWindow(matches: MatchSet, below: number): number {
   return matches.rank(Math.min(below, matches.frameCount));
 }
 
+/** Matches below the floor: the filtered list's `base`. */
+export function matchesBelowFloor(matches: MatchSet, floor: number): number {
+  return floor <= 0 ? 0 : matches.rank(Math.min(floor, matches.frameCount));
+}
+
 /**
- * @param below       Capture rows beneath the RAM window.
+ * Matches held on disk before the window: from the floor to `below`. What the
+ * filter bar counts, and what a filtered list's disk half holds.
+ */
+export function matchesOnDisk(matches: MatchSet, below: number, floor = 0): number {
+  return Math.max(0, matchesBeforeWindow(matches, below) - matchesBelowFloor(matches, floor));
+}
+
+/**
+ * @param below       The RAM window's first ordinal: capture rows beneath it.
  * @param windowRows  Rows the window supplies - filtered, when filtering.
  * @param matches     The scan's bitmap, or null to address the capture whole.
+ * @param floor       The capture's first ordinal still held. 0 unless a ring
+ *                    has deleted some.
  */
 export function rowSpace(
-  below: number, windowRows: number, matches: MatchSet | null,
+  below: number, windowRows: number, matches: MatchSet | null, floor = 0,
 ): RowSpace {
-  const fromDisk = matches === null ? below : matchesBeforeWindow(matches, below);
+  const base = matches === null ? floor : matchesBelowFloor(matches, floor);
+  const fromDisk = matches === null ? Math.max(0, below - floor) : matchesOnDisk(matches, below, floor);
   const total = fromDisk + windowRows;
   const count = Math.min(total, MAX_ADDRESSABLE_ROWS);
-  return { count, skipped: total - count, fromDisk, total };
+  return { count, floor, base, skipped: total - count, fromDisk, total };
 }
 
 export type RowAddress =
@@ -120,8 +154,8 @@ export function addressRow(
   const row = index + space.skipped;
   if (row < 0 || row >= space.total) return NOWHERE;
   if (row >= space.fromDisk) return { where: 'window', at: row - space.fromDisk };
-  if (matches === null) return { where: 'disk', ordinal: row };
-  const ordinal = matches.ordinalAt(row);
+  if (matches === null) return { where: 'disk', ordinal: space.base + row };
+  const ordinal = matches.ordinalAt(space.base + row);
   return ordinal < 0 ? NOWHERE : { where: 'disk', ordinal };
 }
 
@@ -135,8 +169,8 @@ export function addressRow(
 export function rowOfOrdinal(
   space: RowSpace, matches: MatchSet | null, ordinal: number,
 ): number {
-  if (ordinal < 0) return -1;
-  const row = matches === null ? ordinal : matches.rank(ordinal);
+  if (ordinal < space.floor) return -1;
+  const row = (matches === null ? ordinal : matches.rank(ordinal)) - space.base;
   if (row < space.skipped || row >= space.fromDisk) return -1;
   return row - space.skipped;
 }

@@ -57,8 +57,10 @@ impl StopReason {
 /// What the sequencer says about one frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Admit {
-    /// Write it, into this file (1-based, Wireshark's `_00001`).
-    Write { file: u32 },
+    /// Write it, into this file (1-based, Wireshark's `_00001`). `first` when
+    /// it is the file's first frame, which is when the owner is told where the
+    /// file begins (`protocol::capture_boundary`).
+    Write { file: u32, first: bool },
     /// The capture has met a limit. This frame and every one after it are
     /// neither written nor sent.
     Stop(StopReason),
@@ -130,7 +132,7 @@ impl Sequencer {
         self.total_frames += 1;
         self.total_bytes += epb_len;
         self.file_first_ns.get_or_insert(ts_ns);
-        Admit::Write { file: self.file }
+        Admit::Write { file: self.file, first: self.file_frames == 1 }
     }
 
     /// Stops the capture for a reason decided outside - the wall clock.
@@ -660,7 +662,7 @@ mod tests {
     fn one_file_holds_everything_when_nothing_rotates() {
         let mut s = Sequencer::new(Ring::default(), Autostop::default(), 400);
         for i in 0..10_000u64 {
-            assert_eq!(s.admit(1_532, i), Admit::Write { file: 1 });
+            assert_eq!(s.admit(1_532, i), Admit::Write { file: 1, first: i == 0 });
         }
     }
 
@@ -671,7 +673,7 @@ mod tests {
         // never more than one frame over.
         let mut s = Sequencer::new(ring(Some(1_000), None, None, None), Autostop::default(), 400);
         let files: Vec<u32> = (0..14).map(|i| match s.admit(100, i) {
-            Admit::Write { file } => file,
+            Admit::Write { file, .. } => file,
             other => panic!("{other:?}"),
         }).collect();
         assert_eq!(files, [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3]);
@@ -681,7 +683,7 @@ mod tests {
     fn a_file_rotates_by_packets_and_by_capture_time() {
         let mut by_packets = Sequencer::new(ring(None, None, Some(3), None), Autostop::default(), 0);
         let files: Vec<u32> = (0..7).map(|i| match by_packets.admit(64, i) {
-            Admit::Write { file } => file,
+            Admit::Write { file, .. } => file,
             other => panic!("{other:?}"),
         }).collect();
         assert_eq!(files, [1, 1, 1, 2, 2, 2, 3]);
@@ -690,7 +692,7 @@ mod tests {
         let mut by_time = Sequencer::new(ring(None, Some(2), None, None), Autostop::default(), 0);
         let stamps = [0u64, 1_000_000_000, 1_999_999_999, 2_000_000_000, 3_500_000_000, 4_000_000_001];
         let files: Vec<u32> = stamps.iter().map(|&t| match by_time.admit(64, t) {
-            Admit::Write { file } => file,
+            Admit::Write { file, .. } => file,
             other => panic!("{other:?}"),
         }).collect();
         assert_eq!(files, [1, 1, 1, 2, 2, 3]);
@@ -701,7 +703,7 @@ mod tests {
         let stop = Autostop { packets: Some(5), ..Autostop::default() };
         let mut s = Sequencer::new(Ring::default(), stop, 0);
         for i in 0..5 {
-            assert_eq!(s.admit(64, i), Admit::Write { file: 1 });
+            assert_eq!(s.admit(64, i), Admit::Write { file: 1, first: i == 0 });
         }
         assert_eq!(s.admit(64, 5), Admit::Stop(StopReason::Packets));
         assert_eq!(s.admit(64, 6), Admit::Stop(StopReason::Packets), "a stop stays a stop");
@@ -710,7 +712,8 @@ mod tests {
         let stop = Autostop { files: Some(3), ..Autostop::default() };
         let mut s = Sequencer::new(ring(None, None, Some(2), None), stop, 0);
         let answers: Vec<Admit> = (0..7).map(|i| s.admit(64, i)).collect();
-        assert_eq!(answers[5], Admit::Write { file: 3 });
+        assert_eq!(answers[4], Admit::Write { file: 3, first: true });
+        assert_eq!(answers[5], Admit::Write { file: 3, first: false });
         assert_eq!(answers[6], Admit::Stop(StopReason::Files));
 
         // Bytes: across every file, headers included.

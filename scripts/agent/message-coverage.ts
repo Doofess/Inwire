@@ -100,7 +100,7 @@ const appReads = [...protocol.matchAll(/^\s{2}type: '([a-z_]+)';$/gm)]
   .sort();
 
 check('the app declares the messages this build expects', appReads, [
-  'adapter_config', 'capture_file', 'capture_filter_check', 'capture_stats',
+  'adapter_config', 'capture_boundary', 'capture_file', 'capture_filter_check', 'capture_stats',
   'capture_stopped', 'error', 'hello', 'interface_stats', 'log', 'packet',
   'socket_table', 'state',
 ]);

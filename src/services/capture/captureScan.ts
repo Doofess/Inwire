@@ -99,6 +99,11 @@ export class CaptureScan {
     this.chunkCount = index.chunkCount;
     this.frameCount = index.frameCount;
     this.set = new MatchSet(this.frameCount);
+    // From the floor: what a ring has deleted is not scanned, and counts as
+    // done, so the bar measures the capture that is left (ADR 0052). A chunk
+    // the floor passes while the scan runs reads as nothing, like a torn tail.
+    this.chunk = index.floorChunk;
+    this.framesDone = index.floorOrdinal;
   }
 
   /** Stops at the end of the current chunk. The partial result is discarded. */

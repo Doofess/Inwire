@@ -6,7 +6,7 @@ import type { FrameBatch } from '../services/pipelineClient';
 import { FieldBlockWriter } from '../services/dissect/fieldSplit';
 import { captureStore } from '../services/capture/captureClient';
 import {
-  adoptAccounting, commitBatch, prepareBatch, freshAccounting, type BufferAccounting,
+  adoptAccounting, commitBatch, prepareBatch, freshAccounting, dropBelowFloor, type BufferAccounting,
 } from '../services/packetBuffer';
 
 /** How often the ingest queue is drained into React state. */
@@ -85,6 +85,12 @@ export interface PacketBuffer {
   fieldWriter: RefObject<FieldBlockWriter>;
   /** Commits what is queued now rather than on the next tick. For Stop. */
   flushNow: () => void;
+  /**
+   * Lets go of every frame whose id is below `floorId`: the capture no longer
+   * holds them, because the agent's ring deleted the file they were in
+   * (ADR 0052), and the list follows the ring.
+   */
+  dropBelow: (floorId: number) => void;
 }
 
 export function usePacketBuffer({
@@ -270,9 +276,13 @@ export function usePacketBuffer({
 
   const residentBytes = useCallback(() => accountingRef.current.residentBytes, []);
   const budgetBytes = useCallback(() => packetBufferBytesRef.current, []);
+  const dropBelow = useCallback((floorId: number) => {
+    setPackets((prev) => dropBelowFloor(prev, floorId, accountingRef.current));
+  }, []);
 
   return {
     packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
     queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
+    dropBelow,
   };
 }

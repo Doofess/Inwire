@@ -219,6 +219,51 @@ console.log('\n--- addressRow and rowOfOrdinal are inverses ---\n');
   check('every disk row round-trips through its ordinal', mismatched, 0);
 }
 
+console.log('\n--- above a floor: a ring took the front (ADR 0052) ---\n');
+
+{
+  // 4,000 frames gone, 6,000 on disk below a 50-frame window.
+  const space = rowSpace(10_000, 50, null, 4_000);
+  check('the list holds what is left, and no more', [space.count, space.fromDisk], [6_050, 6_000]);
+  check('row 0 is the first frame still held',
+    [addressRow(space, null, 0), addressRow(space, null, 5_999), addressRow(space, null, 6_000)],
+    [{ where: 'disk', ordinal: 4_000 }, { where: 'disk', ordinal: 9_999 }, { where: 'window', at: 0 }]);
+  check('a frame the ring took has no row, and the floor has row 0',
+    [rowOfOrdinal(space, null, 3_999), rowOfOrdinal(space, null, 4_000)], [-1, 0]);
+}
+
+{
+  // Filtered, the same property as above: the list has exactly as many rows
+  // as the filter has matches over what is left of the capture.
+  const matches = (o: number) => o % 3 === 0 || o % 17 === 0;
+  const captured = 12_000;
+  const set = bitmap(captured, matches);
+  const floor = 4_000;
+  const below = 10_000;
+  let windowMatches = 0;
+  for (let o = below; o < captured; o++) if (matches(o)) windowMatches++;
+  let left = 0;
+  for (let o = floor; o < captured; o++) if (matches(o)) left++;
+  const space = rowSpace(below, windowMatches, set, floor);
+  check('filtered, the rows are the matches of what is left', space.count, left);
+  const first = addressRow(space, set, 0);
+  let firstLeft = floor;
+  while (!matches(firstLeft)) firstLeft++;
+  check('...row 0 is the first match at or above the floor', first, { where: 'disk', ordinal: firstLeft });
+  let mismatched = 0;
+  for (let row = 0; row < space.fromDisk; row++) {
+    const at = addressRow(space, set, row);
+    if (at.where !== 'disk' || at.ordinal < floor || !matches(at.ordinal)) { mismatched++; continue; }
+    if (rowOfOrdinal(space, set, at.ordinal) !== row) mismatched++;
+  }
+  check('...and every disk row is a match above the floor that round-trips', mismatched, 0);
+}
+
+{
+  const unfloored = rowSpace(10_000, 50, null);
+  check('with no floor nothing moves', [unfloored.floor, unfloored.base, unfloored.fromDisk], [0, 0, 10_000]);
+}
+
 /** Which capture ordinal the window's n-th matching frame is. The oracle. */
 function windowOrdinal(
   matches: (ordinal: number) => boolean, below: number, captured: number, n: number,

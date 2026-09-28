@@ -424,6 +424,18 @@ export interface AgentCaptureFileMessage {
   bytes: number;
 }
 
+/**
+ * Where a ring file begins: frames from `firstSeq` on are in file `index`
+ * (ADR 0052). Sent before any frame in the file, so the pipeline Worker files
+ * every frame by its sequence number - which is what the capture on disk
+ * follows the ring by.
+ */
+export interface AgentCaptureBoundaryMessage {
+  type: 'capture_boundary';
+  index: number;
+  firstSeq: number;
+}
+
 /** The agent stopped the capture itself: an autostop limit was met. */
 export interface AgentCaptureStoppedMessage {
   type: 'capture_stopped';
@@ -431,6 +443,7 @@ export interface AgentCaptureStoppedMessage {
 }
 
 export type AgentMessage =
+  | AgentCaptureBoundaryMessage
   | AgentCaptureFileMessage
   | AgentCaptureStoppedMessage
   | AgentCaptureFilterCheckMessage
@@ -587,6 +600,9 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
         || typeof msg.frames !== 'number' || typeof msg.bytes !== 'number') return null;
       return msg as unknown as AgentCaptureFileMessage;
     }
+    case 'capture_boundary':
+      if (!isCount(msg.index) || (msg.index as number) < 1 || !isCount(msg.firstSeq)) return null;
+      return msg as unknown as AgentCaptureBoundaryMessage;
     case 'capture_stopped':
       if (!['packets', 'bytes', 'seconds', 'files'].includes(msg.reason as string)) return null;
       return msg as unknown as AgentCaptureStoppedMessage;

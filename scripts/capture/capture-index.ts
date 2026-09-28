@@ -82,7 +82,7 @@ function chain(
       sumOffset: sum, sumLength: s.frameCount * 40,
       bytOffset: byt, bytLength: s.frameCount * 1100,
       firstTsUs: s.firstTsUs ?? 1_000_000 + i * 1_000_000,
-      recOffset: 0, recLength: 0,
+      recOffset: 0, recLength: 0, segment: 0,
     };
     ordinal += s.frameCount;
     pfx += record.pfxLength;
@@ -101,7 +101,7 @@ console.log('--- the record ---\n');
     sumOffset: 900_000_000, sumLength: 163_840,
     bytOffset: 40_000_000_000, bytLength: 4_505_600,
     firstTsUs: 1_788_477_971_653_284,
-    recOffset: 7_000_000_000, recLength: 151_552,
+    recOffset: 7_000_000_000, recLength: 151_552, segment: 0,
   };
   const buf = new Uint8Array(INDEX_RECORD_BYTES);
   encodeChunkRecord(record, buf, 0);
@@ -281,7 +281,7 @@ console.log('\n--- against a real file, through the seam ---\n');
       sumOffset: append(sum, sumBytes), sumLength: sumBytes.length,
       bytOffset: append(byt, bytBytes), bytLength: bytBytes.length,
       firstTsUs: 1_000_000 * (c + 1),
-      recOffset: 0, recLength: 0,
+      recOffset: 0, recLength: 0, segment: 0,
     };
     // Data first, flush, THEN the index record. The whole recovery rule rests
     // on this order, so the test writes in it too.

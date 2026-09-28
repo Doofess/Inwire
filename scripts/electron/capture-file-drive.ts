@@ -18,6 +18,10 @@
  * - **The file is laid out as dumpcap's**: SHB, one IDB for the adapter, the
  *   EPBs, an ISB - and `capinfos` reads it.
  * - **The file's owner is this user, not SYSTEM.**
+ * - **A ring follows through**: 1 MB files, three kept, stopping after ten.
+ *   Exactly the newest three files are left, and the app's own capture kept
+ *   a segment for each of them and none for the seven the agent deleted - its
+ *   first frame is the oldest kept file's first frame (ADR 0052).
  * - **A root this user cannot write is refused**: a hand-made pipe client, a
  *   real connection, names `C:\Windows` and gets `capture_failed`, and nothing
  *   is created there. Skipped when this process is elevated - elevated, it
@@ -34,7 +38,8 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { inflateSync } from 'fflate';
 import { captureVolume } from '../../electron/store/volume';
-import { CaptureIndex, recoverIndex } from '../../src/services/capture/captureIndex';
+import { CaptureIndex, recoverCapture } from '../../src/services/capture/captureIndex';
+import { dataFilesOf } from '../../src/services/capture/captureWriter';
 import { CaptureReader } from '../../src/services/capture/captureReader';
 import { FRAME_JSON, FrameReader, encodeFrame } from '../../src/services/agentFraming';
 import { findWiresharkTool } from '../export/realCaptures';
@@ -110,6 +115,55 @@ function readPcapng(file: string): Written {
 
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 
+/**
+ * What the app's own store holds of a capture, read from a copy of its folder
+ * the way the store reads it: from the floor, through every segment.
+ */
+function storedFrames(copyRoot: string, captureId: string) {
+  const volume = captureVolume(copyRoot).open(captureId);
+  const { records, plan, version } = recoverCapture(volume.index, (n) => dataFilesOf(volume, n));
+  const index = new CaptureIndex(records.slice(0, plan.keepRecords), version, plan.floorChunk);
+  const reader = new CaptureReader(volume, index, inflateSync);
+  const ids: number[] = [];
+  for (let at = index.floorOrdinal; at < index.frameCount;) {
+    const chunks = reader.readRowsAt(at, index.frameCount);
+    if (chunks.length === 0) break;
+    for (const chunk of chunks) ids.push(...chunk.packets.map((p) => p.id));
+    const last = chunks[chunks.length - 1];
+    at = last.firstOrdinal + last.packets.length;
+  }
+  const bytes = reader.readBytes(ids);
+  const frames = ids.map((id) => bytes.get(id) ?? new Uint8Array());
+  const segments = volume.segments?.list() ?? [];
+  volume.close();
+  return { frames, floorOrdinal: index.floorOrdinal, segments };
+}
+
+/** The newest capture folder under `captures`. */
+function newestCapture(captures: string): string {
+  return readdirSync(captures)
+    .filter((d) => d.startsWith('cap-'))
+    .sort((a, b) => statSync(path.join(captures, b)).mtimeMs - statSync(path.join(captures, a)).mtimeMs)[0];
+}
+
+/** Browses until `done` answers true or the deadline passes. */
+async function browseUntil(done: () => Promise<boolean>, ms: number): Promise<void> {
+  const browser = await playwright.chromium.launch({ channel: 'chrome', headless: true });
+  try {
+    const tab = await browser.newPage();
+    const sites = [
+      'https://en.wikipedia.org/wiki/Pcapng', 'https://www.cloudflare.com/', 'https://github.com/',
+      'https://developer.mozilla.org/en-US/docs/Web/HTTP', 'https://news.ycombinator.com/', 'https://www.youtube.com/',
+    ];
+    const deadline = Date.now() + ms;
+    for (let i = 0; Date.now() < deadline && !(await done()); i++) {
+      await tab.goto(sites[i % sites.length], { waitUntil: 'load', timeout: 15_000 }).catch(() => {});
+    }
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 /** Whether this process holds an elevated token: `net session` answers only then. */
 function elevated(): boolean {
   return spawnSync('net', ['session'], { stdio: 'ignore' }).status === 0;
@@ -162,7 +216,6 @@ const app = await playwright._electron.launch({
   args: ['.'],
   env: { ...process.env, INWIRE_USER_DATA: profile } as Record<string, string>,
 });
-let browser: Awaited<ReturnType<typeof playwright.chromium.launch>> | null = null;
 let page: Awaited<ReturnType<typeof app.firstWindow>> | undefined;
 try {
   page = await app.firstWindow();
@@ -183,29 +236,16 @@ try {
   // --- the capture stops itself, and says why ----------------------------------
   await page.getByLabel('Start capture').click();
   console.log(`--- capturing until the agent stops at ${PACKETS.toLocaleString()} packets ---\n`);
-  browser = await playwright.chromium.launch({ channel: 'chrome', headless: true });
-  const tab = await browser.newPage();
-  const sites = [
-    'https://en.wikipedia.org/wiki/Pcapng', 'https://www.cloudflare.com/', 'https://github.com/',
-    'https://developer.mozilla.org/en-US/docs/Web/HTTP', 'https://news.ycombinator.com/', 'https://www.youtube.com/',
-  ];
   const stopped = () => page!.getByText('The last capture stopped itself: it reached its packet limit.')
     .isVisible().catch(() => false);
-  const deadline = Date.now() + 180_000;
-  for (let i = 0; Date.now() < deadline && !(await stopped()); i++) {
-    await tab.goto(sites[i % sites.length], { waitUntil: 'load', timeout: 15_000 }).catch(() => {});
-  }
-  await browser.close();
-  browser = null;
+  await browseUntil(stopped, 180_000);
   checkTrue('the capture stopped itself at its limit, and the panel says why', await stopped());
   checkTrue('...and Start is offered again', await page.getByLabel('Start capture').isVisible());
   await sleep(4000);
 
   // --- the agent's file ----------------------------------------------------------
   const captures = path.join(profile, 'captures');
-  const newest = readdirSync(captures)
-    .filter((d) => d.startsWith('cap-'))
-    .sort((a, b) => statSync(path.join(captures, b)).mtimeMs - statSync(path.join(captures, a)).mtimeMs)[0];
+  const newest = newestCapture(captures);
   const pcapngPath = path.join(captures, newest, 'pcapng', 'capture.pcapng');
   checkTrue('the agent wrote the capture\'s file into the capture\'s own folder', existsSync(pcapngPath));
   const owner = execFileSync('powershell', ['-NoProfile', '-Command', `(Get-Acl -LiteralPath '${pcapngPath}').Owner`],
@@ -228,27 +268,49 @@ try {
 
   // --- the same frames as the app's own store ------------------------------------
   cpSync(path.join(captures, newest), path.join(copyRoot, newest), { recursive: true });
-  const volume = captureVolume(copyRoot).open(newest);
-  const { records, plan, version } = recoverIndex(volume.index, volume.pfx, volume.sum, volume.byt, volume.rec);
-  const index = new CaptureIndex(records.slice(0, plan.keepRecords), version);
-  const reader = new CaptureReader(volume, index, inflateSync);
-  const ids: number[] = [];
-  for (let at = 0; at < index.frameCount;) {
-    const chunks = reader.readRowsAt(at, index.frameCount);
-    if (chunks.length === 0) break;
-    for (const chunk of chunks) ids.push(...chunk.packets.map((p) => p.id));
-    const last = chunks[chunks.length - 1];
-    at = last.firstOrdinal + last.packets.length;
-  }
-  const bytes = reader.readBytes(ids);
-  check('the store holds the same number of frames as the file', ids.length, PACKETS);
+  const store = storedFrames(copyRoot, newest);
+  check('the store holds the same number of frames as the file', store.frames.length, PACKETS);
   // As multisets: the store is in capture-time order and the file in the
   // agent's sequence, which one adapter makes the same order - but the check
   // is about which frames, and a sort cannot pass on a missing one.
-  const stored = ids.map((id) => hex(bytes.get(id) ?? new Uint8Array())).sort();
+  const stored = store.frames.map(hex).sort();
   const filed = written.packets.map(hex).sort();
   check('...and the same frames, byte for byte',
     stored.findIndex((h, i) => h !== filed[i]), -1);
+
+  // --- a ring, and the capture following it ---------------------------------------
+  await page.getByLabel('Stop after packets').fill('');
+  await page.getByLabel('Multiple files').check();
+  await page.getByLabel('Megabytes a file').fill('1');
+  await page.getByLabel('Files kept').fill('3');
+  await page.getByLabel('Stop after files').fill('10');
+  await page.getByLabel('Start capture').click();
+  console.log('\n--- capturing a ring of 1 MB files, three kept, until the tenth fills ---\n');
+  const ringDone = () => page!.getByText('The last capture stopped itself: it reached its file limit.')
+    .isVisible().catch(() => false);
+  await browseUntil(ringDone, 300_000);
+  checkTrue('the ring ran through its ten files and stopped itself', await ringDone());
+  await sleep(4000);
+
+  const ringCapture = newestCapture(captures);
+  const ringDir = path.join(captures, ringCapture, 'pcapng');
+  const ringFiles = readdirSync(ringDir).sort();
+  check('exactly the newest three files are left',
+    ringFiles.map((name) => /^capture_(\d{5})_\d{14}\.pcapng$/.exec(name)?.[1] ?? name),
+    ['00008', '00009', '00010']);
+  cpSync(path.join(captures, ringCapture), path.join(copyRoot, ringCapture), { recursive: true });
+  const ring = storedFrames(copyRoot, ringCapture);
+  console.log(`      the store holds ${ring.frames.length} frames from ordinal ${ring.floorOrdinal}, `
+    + `in segments ${ring.segments.join(', ')}`);
+  check('the capture kept a segment for each kept file, and none for the seven deleted',
+    ring.segments, [8, 9, 10]);
+  checkTrue('...so it starts later than it began', ring.floorOrdinal > 0);
+  const oldest = readPcapng(path.join(ringDir, ringFiles[0]));
+  check('the capture\'s first frame is the oldest kept file\'s first frame',
+    ring.frames.length > 0 && oldest.packets.length > 0 ? hex(ring.frames[0]) === hex(oldest.packets[0]) : null, true);
+  const kept = new Set(ringFiles.flatMap((name) => readPcapng(path.join(ringDir, name)).packets.map(hex)));
+  check('...and it holds no frame the kept files do not',
+    ring.frames.filter((f) => !kept.has(hex(f))).length, 0);
 
   // --- a folder this user cannot write is refused ---------------------------------
   if (elevated()) {
@@ -269,7 +331,6 @@ try {
       !existsSync(path.join(forbidden, id)));
   }
 } finally {
-  if (browser !== null) await browser.close().catch(() => {});
   if (page !== undefined) await page.evaluate(() => window.inwire?.setUnsavedCapture?.(false)).catch(() => {});
   await app.close().catch(() => {});
   rmSync(profile, { recursive: true, force: true });

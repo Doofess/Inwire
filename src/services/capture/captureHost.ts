@@ -42,9 +42,9 @@
  * every handler *remaining* synchronous for ever. It costs one promise per
  * message and it is the difference between an ordering rule and a habit.
  */
-import { CaptureWriter, type CaptureFiles } from './captureWriter';
+import { CaptureWriter, dataFilesOf, type CaptureFiles } from './captureWriter';
 import { CaptureReader } from './captureReader';
-import { recoverIndex } from './captureIndex';
+import { recoverCapture, type CaptureIndex } from './captureIndex';
 import { planPrune } from './captureDirectory';
 import { serialQueue } from './serialQueue';
 import { CaptureScan, DEFAULT_SLICE_MS } from './captureScan';
@@ -54,8 +54,9 @@ import type { FromCapture, ToCapture } from './captureProtocol';
 import type { Packet } from '../../types/packet';
 import { recordRefs } from '../dissect/recordHeader';
 
-/** A capture's four files, and the handles behind them. */
+/** A capture's files - its index, its data, its segments - and the handles behind them. */
 export interface OpenVolume extends CaptureFiles {
+  /** Closes every handle, the segments' included. */
   close(): void;
 }
 
@@ -84,6 +85,8 @@ interface OpenCapture {
   volume: OpenVolume;
   writer: CaptureWriter;
   reader: CaptureReader;
+  /** The floor the app was last told of. */
+  floorChunk: number;
 }
 
 /**
@@ -145,7 +148,29 @@ export class CaptureHost {
    * the channel the app watches for them.
    */
   receive(message: ToCapture, reply?: (message: FromCapture) => void): void {
-    this.queue.run(() => this.handle(message, reply ?? this.post));
+    this.queue.run(() => {
+      this.handle(message, reply ?? this.post);
+      this.reportFloor();
+    });
+  }
+
+  /**
+   * Tells the app the capture's floor moved - a ring deleted a file and the
+   * segments holding its frames went with it (ADR 0052). Asked after every
+   * message rather than only after `ringDeleted`, because a segment waiting
+   * for its last chunk to seal goes when that chunk does, on whichever message
+   * sealed it.
+   */
+  private reportFloor(): void {
+    const open = this.open;
+    if (open === null || open.writer.index.floorChunk === open.floorChunk) return;
+    open.floorChunk = open.writer.index.floorChunk;
+    this.post({
+      type: 'floor',
+      floorOrdinal: open.writer.index.floorOrdinal,
+      floorId: floorIdOf(open.writer.index),
+      storedRange: open.writer.index.idRange(),
+    });
   }
 
   /** Resolves once every queued message has been handled. For tests. */
@@ -177,8 +202,13 @@ export class CaptureHost {
   }
 
   private bytesOnDisk(capture: OpenCapture): number {
-    return capture.volume.index.size() + capture.volume.pfx.size()
-      + capture.volume.sum.size() + capture.volume.byt.size() + capture.volume.rec.size();
+    const { volume } = capture;
+    let total = volume.index.size();
+    for (const segment of [0, ...(volume.segments?.list() ?? [])]) {
+      const data = dataFilesOf(volume, segment);
+      if (data !== null) total += data.pfx.size() + data.sum.size() + data.byt.size() + data.rec.size();
+    }
+    return total;
   }
 
   private reportStats(): void {
@@ -206,6 +236,10 @@ export class CaptureHost {
         case 'revisitKit': return this.onRevisitKit(message, reply);
         case 'patches': {
           this.open?.writer.applyPatches(message.patches);
+          return;
+        }
+        case 'ringDeleted': {
+          this.open?.writer.ringDeleted(message.epoch, message.lastSeq);
           return;
         }
         case 'finish': {
@@ -246,18 +280,30 @@ export class CaptureHost {
     // Recovery before the writer, not after. A crash can leave data past the
     // last index record, and a writer that appended to it would put its chunk
     // where nothing can find it and every offset after it wrong.
-    const { records, plan } = recoverIndex(volume.index, volume.pfx, volume.sum, volume.byt, volume.rec);
-    volume.pfx.truncate(plan.pfxLength);
-    volume.sum.truncate(plan.sumLength);
-    volume.byt.truncate(plan.bytLength);
-    volume.rec.truncate(plan.recLength);
+    const { records, plan } = recoverCapture(volume.index, (n) => dataFilesOf(volume, n));
+    for (const [segment, sizes] of plan.truncate) {
+      const data = dataFilesOf(volume, segment);
+      if (data === null) continue;
+      data.pfx.truncate(sizes.pfx);
+      data.sum.truncate(sizes.sum);
+      data.byt.truncate(sizes.byt);
+      data.rec.truncate(sizes.rec);
+    }
+    // A segment no kept chunk is in: below the floor, which a crash kept from
+    // being deleted after the floor was written, or past the torn tail.
+    for (const segment of volume.segments?.list() ?? []) {
+      if (!plan.truncate.has(segment)) volume.segments!.remove(segment);
+    }
     volume.index.truncate(plan.indexLength);
 
-    const writer = new CaptureWriter(volume, { resumeFrom: records.slice(0, plan.keepRecords) });
+    const writer = new CaptureWriter(volume, {
+      resumeFrom: records.slice(0, plan.keepRecords),
+      floorChunk: plan.floorChunk,
+    });
     // The reader shares the writer's index, so a chunk is readable the moment
     // its record is appended rather than only after the file is re-read.
     const reader = new CaptureReader(volume, writer.index, inflateSync);
-    this.open = { id: message.captureId, volume, writer, reader };
+    this.open = { id: message.captureId, volume, writer, reader, floorChunk: writer.index.floorChunk };
 
     if (plan.framesLost > 0) {
       this.fail(`${plan.framesLost} frames were lost to a torn tail and have been discarded`, false);
@@ -271,7 +317,12 @@ export class CaptureHost {
       captureDir: this.volume.directory,
       frameCount: writer.index.frameCount,
       chunkCount: writer.index.chunkCount,
-      lastId: range === null ? 0 : range.last,
+      floorOrdinal: writer.index.floorOrdinal,
+      floorId: floorIdOf(writer.index),
+      storedRange: range,
+      // The newest chunk's, held or not: numbering resumes past every id the
+      // capture ever used, even when a ring has taken all of them.
+      lastId: writer.index.chunkCount === 0 ? 0 : writer.index.record(writer.index.chunkCount - 1).lastId,
       ...(message.requestId === undefined ? {} : { requestId: message.requestId }),
     });
   }
@@ -570,6 +621,11 @@ export class CaptureHost {
     if (this.open?.id === message.captureId) this.closeOpen();
     this.volume.remove(message.captureId);
   }
+}
+
+/** One past the newest id below the floor: every id under it has gone. 0 when none has. */
+function floorIdOf(index: CaptureIndex): number {
+  return index.floorChunk === 0 ? 0 : index.record(index.floorChunk - 1).lastId + 1;
 }
 
 function describe(error: unknown): string {
