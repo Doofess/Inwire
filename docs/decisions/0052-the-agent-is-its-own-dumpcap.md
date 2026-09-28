@@ -162,9 +162,13 @@ the first `capture_boundary` opens a segment. A reader that only knows
 segment 0 (`recoverIndex`) sees such a capture as empty, so every reader of a
 live capture uses `recoverCapture`.
 
-**Still owed, and needing a person:** the second-account check in
-`docs/verification.md`, that the agent refuses to write into a folder the
-client's account cannot.
+**The second-account check passed, 2026-09-29**
+(`scripts/agent/second-account-check.ps1`, run as a throwaway standard
+account). Pointed at the owner's own `captures` folder, the agent refused with
+"Access is denied", and nothing appeared there. The account's own capture was
+owned by that account. A client connected at the Identification or Anonymous
+level, which leaves no identity to act as, was refused too, and nothing was
+written. Nothing on this record is owed.
 
 ## The Python agent's deviations
 

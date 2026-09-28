@@ -1060,7 +1060,7 @@ Windows PowerShell so an account that has never run npm can run it (a
 standard user can read `C:\dev\Inwire`). No Inwire window may be capturing,
 and the shell must not be elevated.
 
-- [ ] As a **standard** user **B**:
+- [x] As a **standard** user **B**:
       `powershell -ExecutionPolicy Bypass -File C:\dev\Inwire\scripts\agent\second-account-check.ps1 -Target 'C:\Users\A\AppData\Local\Inwire\captures'`.
       It first proves B cannot write that folder itself, then asks the agent
       to. **The agent answers `capture_failed`.** It also captures into B's
@@ -1068,15 +1068,33 @@ and the shell must not be elevated.
       it connects at the Identification and Anonymous impersonation levels,
       which give the agent no identity to act as, and each must be refused
       with nothing written.
-- [ ] Back as **A**, run the command it prints (`-VerifyCaptureId`). It checks
+- [x] Back as **A**, run the command it prints (`-VerifyCaptureId`). It checks
       that nothing appeared in A's folder, which B cannot look into. A file
       there, owned by `SYSTEM`, means the writer ran with the service's own
       rights - the failure this whole arrangement is built to make impossible.
 
-Run as the owner alone on 2026-09-29, against `C:\Windows` as the folder:
-every case passed. The Identification level was refused with os error 1346
-and the Anonymous level with 1347. What only a second account adds is the
-first case with a real other user's folder.
+**Passed on 2026-09-29, both halves.** B was a throwaway standard account,
+`inwire-test` (member of `Users` only), created, used and deleted by one
+elevated script. The script started the check as B with `Start-Process
+-Credential`, an interactive logon, so B carried `IU` exactly as a person
+signed in would. Results:
+- Pointed at the owner's real `captures` folder, the agent answered "could not
+  create ... Access is denied. (os error 5)", and the owner's half found
+  nothing there.
+- B's own capture was owned by `ROTEMSDESKTOP\inwire-test`.
+- The Identification level was refused with os error 1346 and the Anonymous
+  level with 1347.
+
+Two things worth keeping if this is repeated that way:
+- `CreateProcessWithLogonW` refuses a command line past 1,024 characters as
+  "The parameter is incorrect", so the inner script goes in a file, not
+  `-EncodedCommand`.
+- Windows PowerShell started from PowerShell 7 inherits a `PSModulePath` that
+  breaks module autoloading (`Get-Acl` cannot load), so it is reset first.
+
+The same run is a first answer to the descriptor's first item above: a standard
+interactive account opened the pipe, was told the adapters and captured. It
+did so as a pipe client, not through the app.
 
 ### The agent's lifetime is the app's
 
