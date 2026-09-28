@@ -29,6 +29,7 @@
  * Driven by the two real fixtures (ADR 0004) and never by frames built here.
  * Skips cleanly without them.
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { spawnSync } from 'node:child_process';
 import { CaptureAnalyzer, analyseCapture, type CaptureAnalysis } from '../../src/services/report/analysis';
 import { redactAnalysis } from '../../src/services/report/redact';
@@ -66,6 +67,7 @@ const TSHARK_CANDIDATES = [
 ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
 function findTshark(): string | null {
+  useRepositoryWiresharkProfile();
   for (const candidate of TSHARK_CANDIDATES) {
     const probe = spawnSync(candidate, ['-v'], { encoding: 'utf8', shell: false });
     if (probe.status === 0) return candidate;

@@ -19,6 +19,7 @@
  * counters are the exceptions and are literal inputs, because no capture on
  * disk can be empty and a fixture file carries no drop counters at all.
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { spawnSync } from 'node:child_process';
 import { Anonymiser } from '../../src/services/anonymise';
 import { redactAnalysis } from '../../src/services/report/redact';
@@ -149,6 +150,7 @@ const TSHARK_CANDIDATES = [
 ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
 function findTshark(): string | null {
+  useRepositoryWiresharkProfile();
   for (const candidate of TSHARK_CANDIDATES) {
     if (spawnSync(candidate, ['-v'], { encoding: 'utf8', shell: false }).status === 0) return candidate;
   }

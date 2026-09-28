@@ -8,6 +8,7 @@
  * present and is expected to SKIP cleanly when that is none, the way
  * `parity/tree-coverage.ts` does, so `npm run check` stays runnable on CI.
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
@@ -78,6 +79,7 @@ export async function loadRealCaptures(optional: readonly string[] = []): Promis
  * that gets null prints SKIP for the cross-check and runs the rest.
  */
 export function findWiresharkTool(tool: 'tshark' | 'capinfos' | 'editcap' | 'mergecap'): string | null {
+  useRepositoryWiresharkProfile();
   const exe = process.platform === 'win32' ? `${tool}.exe` : tool;
   const candidates = [
     process.env.TSHARK ? join(dirname(process.env.TSHARK), exe) : undefined,

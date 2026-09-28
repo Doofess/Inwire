@@ -23,6 +23,7 @@
  * explicit: an exemption is a claim that no reference name exists, and it
  * should be as visible as the fields it covers.
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { FIELDS } from '../../src/services/dissect/fieldRegistry';
@@ -43,6 +44,7 @@ const TSHARK_CANDIDATES = [
 ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
 function findTshark(): string | null {
+  useRepositoryWiresharkProfile();
   for (const candidate of TSHARK_CANDIDATES) {
     if (existsSync(candidate)) return candidate;
     try {

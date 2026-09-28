@@ -30,6 +30,7 @@
  * the cases their author thought of. Skips cleanly without the fixtures, and
  * skips the tshark comparisons cleanly without tshark.
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { spawnSync } from 'node:child_process';
 import {
   ConversationTable, EndpointTable, HierarchyFold,
@@ -94,6 +95,7 @@ const TSHARK_CANDIDATES = [
 ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
 function findTshark(): string | null {
+  useRepositoryWiresharkProfile();
   for (const candidate of TSHARK_CANDIDATES) {
     const probe = spawnSync(candidate, ['-v'], { encoding: 'utf8', shell: false });
     if (probe.status === 0) return candidate;

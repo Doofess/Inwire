@@ -24,6 +24,7 @@
  * outer one and the recursion could be deleted entirely without moving a
  * single number. The assertions below name the layers.
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -335,6 +336,7 @@ const TSHARK_CANDIDATES = [
 ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
 function findTshark(): string | null {
+  useRepositoryWiresharkProfile();
   for (const candidate of TSHARK_CANDIDATES) {
     if (existsSync(candidate)) return candidate;
     try {

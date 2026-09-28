@@ -71,6 +71,7 @@
  * where `parity-check.ts` cannot: that one fails on a missing fixture, by
  * design (ADR 0004).
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -103,6 +104,7 @@ const TSHARK_CANDIDATES = [
 ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
 function findTshark(): string | null {
+  useRepositoryWiresharkProfile();
   for (const candidate of TSHARK_CANDIDATES) {
     const probe = spawnSync(candidate, ['-v'], { encoding: 'utf8', shell: false });
     if (probe.status === 0) return candidate;

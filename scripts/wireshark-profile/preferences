@@ -1,0 +1,11 @@
+# The Wireshark configuration every assertion script runs tshark under
+# (scripts/wiresharkProfile.ts sets WIRESHARK_CONFIG_DIR to this folder).
+#
+# It exists so the reference is Wireshark's defaults, not whatever the GUI on
+# the machine running the suite was last set to - tshark reads the personal
+# preferences file otherwise. The one setting stated here is the one that
+# mattered: with "Resolve network (IP) addresses" on, every tshark pass over a
+# fixture sent a DNS PTR query for every address in it, through the machine's
+# resolver - the fixtures' private contents, leaving the machine, and a
+# reference answer that depended on the network.
+nameres.network_name: FALSE

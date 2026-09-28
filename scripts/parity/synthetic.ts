@@ -23,6 +23,7 @@
  * Skips cleanly - it does not fail - when tshark is not installed, because it
  * is the one assertion script in the repo with an external dependency.
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -43,6 +44,7 @@ const TSHARK_CANDIDATES = [
 ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
 function findTshark(): string | null {
+  useRepositoryWiresharkProfile();
   for (const candidate of TSHARK_CANDIDATES) {
     const probe = spawnSync(candidate, ['-v'], { encoding: 'utf8', shell: false });
     if (probe.status === 0) return candidate;

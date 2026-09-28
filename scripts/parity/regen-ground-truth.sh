@@ -44,6 +44,12 @@ if ! command -v "$TSHARK" >/dev/null 2>&1 && [ ! -x "$TSHARK" ]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The repository's Wireshark profile, not the personal one - see
+# scripts/wiresharkProfile.ts. The ground truth is Wireshark's defaults, and a
+# GUI left resolving IP addresses would otherwise write hostnames into the
+# Source and Destination columns, one PTR query per address.
+export WIRESHARK_CONFIG_DIR="$HERE/../wireshark-profile"
 FIXTURES="$HERE/../../test/fixtures"
 ACCEPT="$FIXTURES/acceptance.json"
 

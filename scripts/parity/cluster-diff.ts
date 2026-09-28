@@ -40,6 +40,7 @@
  * Not a test: it measures one cluster the caller names, and has no pass mark of
  * its own. `scripts/check.ts` lists it as skipped.
  */
+import { useRepositoryWiresharkProfile } from '../wiresharkProfile';
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readFileSync } from 'node:fs';
@@ -63,6 +64,7 @@ if (pcapPath === undefined || prefix === undefined) {
 
 // Probed rather than tested for existence: the bare name is first so a PATH
 // install wins, and only actually running it proves the name resolves.
+useRepositoryWiresharkProfile();
 const tshark = TSHARK_CANDIDATES.find((c) => spawnSync(c, ['-v'], { shell: false }).status === 0);
 if (tshark === undefined) {
   console.log('tshark not found; set one of the paths in TSHARK_CANDIDATES.');
