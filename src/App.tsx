@@ -127,6 +127,7 @@ import { captureStore, newCaptureId } from './services/capture/captureClient';
 import { freshCaptureStorageState, type CaptureStorageState } from './services/capture/captureProtocol';
 import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
 import type { CaptureSource } from './services/export/captureMeta';
+import type { CaptureFileFacts } from './services/captureFileFacts';
 import { cancelExportForChange, cancelExportJob } from './services/export/exportJob';
 
 /**
@@ -2452,10 +2453,12 @@ export default function App() {
     captureStore.append(batch);
   }, []);
 
-  const handleImportPackets = (imported: Packet[], info?: { filename: string }) => {
+  const handleImportPackets = (imported: Packet[], info?: { filename: string; facts?: CaptureFileFacts }) => {
     stopCaptureForImportRef.current();
     setIsCapturing(false);
-    setCaptureSource(info ? { kind: 'import', fileName: info.filename } : { kind: 'session' });
+    setCaptureSource(info
+      ? { kind: 'import', fileName: info.filename, ...(info.facts === undefined ? {} : { facts: info.facts }) }
+      : { kind: 'session' });
     // The live capture's drop counters describe frames that are no longer in
     // the buffer. Left in place, every export of the imported file reported it
     // as a live capture that lost the previous capture's frames.

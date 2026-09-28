@@ -2,6 +2,7 @@ import { Packet } from '../types/packet';
 import { DnsTracker } from './dnsTracker';
 import { ImportFailure, rowsToFrames } from './exportSchema';
 import { PcapService, type FrameRecordEntry } from './pcapParser';
+import type { CaptureFileFacts } from './captureFileFacts';
 import { applyIcmpReplies, restoreBatch } from './sessionRestore';
 import { extensionOf, readTabularFile, TABULAR_EXTENSIONS } from './tabularReaders';
 import { IcmpEchoTracker } from './icmpEchoTracker';
@@ -24,6 +25,12 @@ export interface ImportSuccess {
   packets: Packet[];
   /** Things the user should know about what was lost. Never fatal. */
   notes: string[];
+  /**
+   * What a capture file said about how it was taken - its interfaces'
+   * filters, snaplens and counters (`captureFileFacts.ts`). Absent for
+   * anything that is not a capture file.
+   */
+  facts?: CaptureFileFacts;
 }
 
 export type ImportOutcome = ImportSuccess | { ok: false; failure: ImportFailure };
@@ -246,7 +253,7 @@ async function importCapture(
 ): Promise<ImportOutcome> {
   try {
     const notes: string[] = [];
-    const { packets, totalFrames, stored } = onBatch === undefined
+    const { packets, totalFrames, stored, facts } = onBatch === undefined
       ? await readWholeCapture(file, maxFrames)
       : await readStreamedCapture(file, maxFrames, onBatch);
 
@@ -276,7 +283,7 @@ async function importCapture(
         },
       };
     }
-    return { ok: true, packets, notes };
+    return { ok: true, packets, notes, facts };
   } catch (err) {
     return {
       ok: false,
@@ -295,12 +302,13 @@ interface CaptureRead {
   totalFrames: number;
   /** Frames handed to the sink, or null when there was none. */
   stored: number | null;
+  facts: CaptureFileFacts;
 }
 
 /** The old route: everything in one array, capped at the buffer's size. */
 async function readWholeCapture(file: File, maxFrames: number): Promise<CaptureRead> {
-  const { packets, totalFrames } = await PcapService.parseCaptureFile(file, maxFrames);
-  return { packets, totalFrames, stored: null };
+  const { packets, totalFrames, facts } = await PcapService.parseCaptureFile(file, maxFrames);
+  return { packets, totalFrames, stored: null, facts };
 }
 
 /**
@@ -325,7 +333,7 @@ async function readStreamedCapture(
     // the last slab off it is the memory this route exists to avoid.
     if (tail.length > maxFrames) tail.splice(0, tail.length - maxFrames);
   }, { record: true });
-  return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built };
+  return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built, facts: outcome.facts };
 }
 
 /**

@@ -16,6 +16,7 @@ import {
 import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { decodeNetworkLayer } from './dissectors/networkLayer';
 import { keyLog } from './tls/keyLog';
+import { snaplenOrWhole, type CaptureFileFacts, type FileInterfaceFacts } from './captureFileFacts';
 import { DSB_SECRETS_TYPE_TLS_KEY_LOG, LINKTYPE, type InfoPatch } from './dissect/types';
 // Re-exported because it was declared here for a long time and four modules
 // import it from this path; it now lives with the rest of the contract.
@@ -138,13 +139,14 @@ export class PcapService {
     file: File,
     maxFrames: number = Number.POSITIVE_INFINITY,
     keepTrees = false,
-  ): Promise<{ packets: Packet[]; totalFrames: number }> {
+  ): Promise<{ packets: Packet[]; totalFrames: number; facts: CaptureFileFacts }> {
     const extracted = await PcapService.extractFrames(file, maxFrames);
     return {
       packets: PcapService.buildPacketsFromFrames(
         extracted.frames, keepTrees, PcapService.inferHostFromFrames(extracted.frames),
       ),
       totalFrames: extracted.totalFrames,
+      facts: extracted.facts,
     };
   }
 
@@ -235,7 +237,7 @@ export class PcapService {
        */
       record?: boolean;
     } = {},
-  ): Promise<{ totalFrames: number; built: number; missedPatches: number }> {
+  ): Promise<{ totalFrames: number; built: number; missedPatches: number; facts: CaptureFileFacts }> {
     // No cap: the point is the frames the cap used to throw away. What bounds
     // this is the patch window above, and whatever the caller does with each
     // batch.
@@ -255,7 +257,7 @@ export class PcapService {
       // records, and it is already waiting on a file read.
       options.record === true ? (await import('./dissect/frameRecord')).FrameRecorder : null,
     );
-    return { totalFrames: extracted.totalFrames, built, missedPatches };
+    return { totalFrames: extracted.totalFrames, built, missedPatches, facts: extracted.facts };
   }
 
   /** Every frame in the file, as a plain array. */
@@ -271,7 +273,7 @@ export class PcapService {
   public static async extractFrames(
     file: File,
     maxFrames: number,
-  ): Promise<{ frames: ExtractedFrame[]; totalFrames: number }> {
+  ): Promise<{ frames: ExtractedFrame[]; totalFrames: number; facts: CaptureFileFacts }> {
     const arrayBuffer = await file.arrayBuffer();
 
     if (arrayBuffer.byteLength < 8) {
@@ -319,7 +321,22 @@ export class PcapService {
     // shares. It has always been parsed by the comment at the top of this file
     // and by nothing else.
     const linktype = new DataView(arrayBuffer).getUint32(20, isLittleEndian);
-    return PcapService.extractClassicPcapFrames(arrayBuffer, isLittleEndian, subSecondIsNanos, maxFrames, linktype);
+    // The snaplen is the header's field before it: all a classic file says
+    // about how it was taken.
+    const snaplen = new DataView(arrayBuffer).getUint32(16, isLittleEndian);
+    const extracted = PcapService.extractClassicPcapFrames(
+      arrayBuffer, isLittleEndian, subSecondIsNanos, maxFrames, linktype,
+    );
+    return {
+      ...extracted,
+      facts: {
+        application: null,
+        interfaces: [{
+          linkType: linktype, name: null, description: null, filter: null,
+          snaplen: snaplenOrWhole(snaplen), received: null, dropped: null,
+        }],
+      },
+    };
   }
 
   /**
@@ -385,12 +402,35 @@ export class PcapService {
   private static extractPcapNgFrames(
     buffer: ArrayBuffer,
     maxFrames: number,
-  ): { frames: ExtractedFrame[]; totalFrames: number } {
+  ): { frames: ExtractedFrame[]; totalFrames: number; facts: CaptureFileFacts } {
     const view = new DataView(buffer);
     const frames: ExtractedFrame[] = [];
     let totalFrames = 0;
     let offset = 0;
     let isLittleEndian = true;
+    // What the file says about how it was taken (`captureFileFacts.ts`),
+    // gathered on this walk because it already visits every block. Interfaces
+    // from every section, in order; an ISB's interface id is within its own
+    // section, so `sectionBase` places it.
+    const facts: CaptureFileFacts = { application: null, interfaces: [] };
+    let sectionBase = 0;
+    const text = (at: number, length: number): string =>
+      utf8Decoder.decode(new Uint8Array(buffer, at, length)).replace(/\0+$/, '');
+    const u64 = (at: number): number => {
+      const high = view.getUint32(at + (isLittleEndian ? 4 : 0), isLittleEndian);
+      const low = view.getUint32(at + (isLittleEndian ? 0 : 4), isLittleEndian);
+      return high * 2 ** 32 + low;
+    };
+    /** Each option of a block's options area, as code, value offset and length. */
+    const eachOption = (from: number, to: number, visit: (code: number, at: number, length: number) => void) => {
+      for (let at = from; at + 4 <= to;) {
+        const code = view.getUint16(at, isLittleEndian);
+        const length = view.getUint16(at + 2, isLittleEndian);
+        if (code === 0 || at + 4 + length > to) break;
+        visit(code, at + 4, length);
+        at += 4 + length + ((4 - (length % 4)) % 4);
+      }
+    };
     // Per-interface timestamp resolution (seconds per tick), indexed by
     // declaration order within the current section - this is exactly what
     // an Enhanced Packet Block's Interface ID field refers to.
@@ -415,6 +455,10 @@ export class PcapService {
         isLittleEndian = boMagicAsLE === 0x1a2b3c4d;
         interfaceResolutions = [];
         interfaceLinkTypes = [];
+        sectionBase = facts.interfaces.length;
+        eachOption(offset + 24, offset + blockLen - 4, (code, at, length) => {
+          if (code === 4) facts.application = text(at, length);   // shb_userappl
+        });
       } else if (blockType === 0x00000001) {
         // Interface Description Block: LinkType(2) Reserved(2) SnapLen(4), then options.
         const ifLinkType = view.getUint16(offset + 8, isLittleEndian);
@@ -435,6 +479,31 @@ export class PcapService {
         }
         interfaceResolutions.push(tsresol);
         interfaceLinkTypes.push(ifLinkType);
+        const described: FileInterfaceFacts = {
+          linkType: ifLinkType, name: null, description: null, filter: null,
+          snaplen: snaplenOrWhole(view.getUint32(offset + 12, isLittleEndian)), received: null, dropped: null,
+        };
+        eachOption(offset + 16, offset + blockLen - 4, (code, at, length) => {
+          if (code === 2) described.name = text(at, length);                  // if_name
+          if (code === 3) described.description = text(at, length);           // if_description
+          // if_filter: a type byte, then the filter; 0 is a libpcap string.
+          if (code === 11 && length >= 1 && view.getUint8(at) === 0) {
+            const expression = text(at + 1, length - 1);
+            described.filter = expression.length > 0 ? expression : null;
+          }
+        });
+        facts.interfaces.push(described);
+      } else if (blockType === 0x00000005) {
+        // Interface Statistics Block: InterfaceID(4) TsHigh(4) TsLow(4), then
+        // options. The newest for an interface is its answer: dumpcap writes
+        // one at the end, and the agent one per file.
+        const described = facts.interfaces[sectionBase + view.getUint32(offset + 8, isLittleEndian)];
+        if (described !== undefined) {
+          eachOption(offset + 20, offset + blockLen - 4, (code, at, length) => {
+            if (code === 4 && length === 8) described.received = u64(at);   // isb_ifrecv
+            if (code === 5 && length === 8) described.dropped = u64(at);    // isb_ifdrop
+          });
+        }
       } else if (blockType === 0x0000000a) {
         // Decryption Secrets Block: SecretsType(4) SecretsLength(4), then the
         // secrets. Read here rather than in a pass of its own because a DSB is
@@ -483,7 +552,7 @@ export class PcapService {
       offset += blockLen;
     }
 
-    return { frames, totalFrames };
+    return { frames, totalFrames, facts };
   }
 
   /**

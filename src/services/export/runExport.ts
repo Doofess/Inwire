@@ -78,6 +78,7 @@ import { CsvWriter } from './writers/csv';
 import { JsonWriter } from './writers/json';
 import { createXlsxWriter, xlsxRefusal, type XlsxBudget } from './writers/xlsx';
 import { redactMeta } from '../report/redact';
+import { wholeCaptureFacts } from '../captureFileFacts';
 
 export interface ExportRequest {
   format: ExportFormat;
@@ -161,6 +162,17 @@ function messageOf(error: unknown): string {
  * Runs one export. Never throws: every ending is an `ExportResult`, and every
  * ending other than `saved` has left no file behind.
  */
+/**
+ * What the capture dropped, as the metadata and an ISB report it: the live
+ * capture's counts as the agent gave them, or an imported file's own - the
+ * `isb_ifdrop` its ISBs carry, which is the driver's. A file that states none
+ * reports none, never zero.
+ */
+function dropsOf(request: ExportRequest): DropCounts {
+  if (request.source.kind !== 'import' || request.source.facts === undefined) return request.drops;
+  return { kernel: wholeCaptureFacts(request.source.facts).dropped, agent: null, pipe: null };
+}
+
 export async function runExport(request: ExportRequest, runtime: ExportRuntime = {}): Promise<ExportResult> {
   const { format, scope } = request;
   const reader = request.captureIdentity
@@ -213,7 +225,7 @@ export async function runExport(request: ExportRequest, runtime: ExportRuntime =
         firstUs,
         lastUs,
         frames: { exported: frames, inCapture, unreadable },
-        drops: request.drops,
+        drops: dropsOf(request),
         scope: scope.filter === null ? 'capture' : 'filtered',
         filter: scope.filter?.expression ?? '',
         flags: {
@@ -391,11 +403,18 @@ async function writerFor(
       return new PcapWriter();
     case 'pcapng': {
       // The capture's filter and snaplen were applied to every adapter alike.
+      // An imported file's are its own IDBs' - carried back out when they agree,
+      // so a file round-trips with the filter and snaplen it came in with.
       const live = request.source.kind === 'live' ? request.source : null;
+      const imported = request.source.kind === 'import' && request.source.facts !== undefined
+        ? wholeCaptureFacts(request.source.facts)
+        : null;
       const interfaces: PcapngInterface[] = (survey?.adapters ?? [])
         .map((name) => ({
           name, description: 'Inwire capture',
           ...(live !== null ? { filter: live.filter ?? null, snaplen: live.snaplen ?? null } : {}),
+          ...(imported !== null && imported.filter !== undefined ? { filter: imported.filter } : {}),
+          ...(imported !== null && imported.snaplen !== undefined ? { snaplen: imported.snaplen } : {}),
         }));
       return new PcapngWriter({
         interfaces,
@@ -410,7 +429,9 @@ async function writerFor(
         // them only when the file holds exactly one adapter.
         statistics: request.source.kind === 'live'
           ? { received: request.received, drops: request.drops }
-          : undefined,
+          : imported !== null
+            ? { received: imported.received, drops: dropsOf(request) }
+            : undefined,
         // Never alongside anonymisation: the secrets would open the payload
         // that was just removed.
         secrets: anonymised ? undefined : request.secrets,

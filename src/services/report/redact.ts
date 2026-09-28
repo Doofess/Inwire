@@ -95,7 +95,21 @@ export const WITHHELD_CAPTURE_FILTER = '(withheld)';
 
 export function redactMeta(meta: CaptureMeta, anonymiser: Anonymiser): CaptureMeta {
   const source: CaptureMeta['source'] = meta.source.kind === 'import'
-    ? { kind: 'import', fileName: WITHHELD_FILE_NAME }
+    ? {
+      kind: 'import',
+      fileName: WITHHELD_FILE_NAME,
+      // The file's own account, with what names a machine or a host taken
+      // out: its interfaces' names and descriptions, and a filter - withheld
+      // as a live one is. Counts, snaplens and link types say nothing of who.
+      ...(meta.source.facts === undefined ? {} : {
+        facts: {
+          application: meta.source.facts.application,
+          interfaces: meta.source.facts.interfaces.map((f) => ({
+            ...f, name: null, description: null, filter: f.filter === null ? null : WITHHELD_CAPTURE_FILTER,
+          })),
+        },
+      }),
+    }
     : meta.source.kind === 'live'
       ? {
         kind: 'live',

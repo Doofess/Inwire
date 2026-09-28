@@ -22,6 +22,7 @@ import type { AgentInterface, CaptureDropStats } from '../../services/agentProto
 import type { Capabilities, Packet } from '../../types/packet';
 import type { ImportFailure } from '../../services/exportSchema';
 import type { CaptureSource } from '../../services/export/captureMeta';
+import type { CaptureFileFacts } from '../../services/captureFileFacts';
 import type { ImportBatchSink } from '../../services/tabularImport';
 
 /**
@@ -95,7 +96,7 @@ export interface TransferPanelProps {
   agentInterfaces: AgentInterface[];
   /** Where these frames came from, for the metadata every format prints. */
   captureSource: CaptureSource;
-  onImportPackets: (packets: Packet[], info: { filename: string }) => void;
+  onImportPackets: (packets: Packet[], info: { filename: string; facts?: CaptureFileFacts }) => void;
   onImportBatch?: ImportBatchSink;
   /** The capture on disk, whose own files "As captured" copies. */
   captureId: string | null;

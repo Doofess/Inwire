@@ -7,6 +7,7 @@ import { importAnyFile, IMPORT_ACCEPT, type ImportBatchSink } from '../../servic
 import { performanceStore } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
+import type { CaptureFileFacts } from '../../services/captureFileFacts';
 
 /**
  * The Import half of the Import/Export centre.
@@ -22,7 +23,7 @@ interface ImportPanelProps {
    * The frames to put in the buffer: everything for a small file, the newest
    * `maxFrames` when the import streamed to disk.
    */
-  onImportPackets: (packets: Packet[], info: { filename: string }) => void;
+  onImportPackets: (packets: Packet[], info: { filename: string; facts?: CaptureFileFacts }) => void;
   /**
    * Where every frame goes as it is dissected, if anywhere.
    *
@@ -88,7 +89,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
       }
       // The name travels with the frames: it is the capture's source in
       // everything exported from them.
-      onImportPackets(outcome.packets, { filename: file.name });
+      onImportPackets(outcome.packets, { filename: file.name, facts: outcome.facts });
       setStatus(`Imported ${outcome.packets.length.toLocaleString()} packets from ${file.name}`);
       setNotes(outcome.notes);
     } catch (err) {

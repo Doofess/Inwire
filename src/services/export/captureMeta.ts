@@ -22,6 +22,7 @@
  * foreign everywhere. It also makes the output deterministic, which is what
  * lets a test compare it.
  */
+import { wholeCaptureFacts, type CaptureFileFacts } from '../captureFileFacts';
 
 export type CaptureSource =
   /**
@@ -36,8 +37,11 @@ export type CaptureSource =
     kind: 'live'; adapters: string[]; filter?: string | null; snaplen?: number | null;
     ring?: string | null; autostop?: string | null;
   }
-  /** Opened from a file. */
-  | { kind: 'import'; fileName: string }
+  /**
+   * Opened from a file, with what the file said about how it was taken - its
+   * interfaces' filters, snaplens and counters - when it is a capture file.
+   */
+  | { kind: 'import'; fileName: string; facts?: CaptureFileFacts }
   /** Restored from a stored session, whose origin is no longer known. */
   | { kind: 'session' };
 
@@ -141,6 +145,19 @@ function sourceText(source: CaptureSource): string {
   }
 }
 
+/** An imported file's own account of its capture, as metadata rows. */
+function importedEntries(facts: CaptureFileFacts): MetaEntry[] {
+  const whole = wholeCaptureFacts(facts);
+  return [
+    ['Captured by', facts.application ?? NOT_AVAILABLE],
+    ['Capture filter', whole.filter === undefined ? NOT_AVAILABLE : (whole.filter ?? 'none')],
+    ['Snapshot length', whole.snaplen === undefined
+      ? NOT_AVAILABLE
+      : whole.snaplen === null ? 'whole frames' : `${whole.snaplen} bytes`],
+    ['Received by the driver', count(whole.received)],
+  ];
+}
+
 /** The metadata as ordered key/value text, the one form every format prints. */
 export function metaEntries(meta: CaptureMeta): MetaEntry[] {
   const entries: MetaEntry[] = [
@@ -169,6 +186,12 @@ export function metaEntries(meta: CaptureMeta): MetaEntry[] {
           ? NOT_AVAILABLE
           : meta.source.autostop ?? 'none'] as MetaEntry,
       ]
+      : []),
+    // What an imported capture file says it was taken with. Only what the file
+    // states: a filter the interfaces disagree on, or one no IDB gave, is not
+    // available rather than "none".
+    ...(meta.source.kind === 'import' && meta.source.facts !== undefined
+      ? importedEntries(meta.source.facts)
       : []),
     ['First frame', meta.firstUs === null ? NOT_AVAILABLE : isoMicros(meta.firstUs)],
     ['Last frame', meta.lastUs === null ? NOT_AVAILABLE : isoMicros(meta.lastUs)],
