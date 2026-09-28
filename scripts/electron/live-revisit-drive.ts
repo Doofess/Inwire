@@ -32,7 +32,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { inflateSync } from 'fflate';
 import { captureVolume } from '../../electron/store/volume';
-import { CaptureIndex, recoverIndex } from '../../src/services/capture/captureIndex';
+import { CaptureIndex, recoverCapture } from '../../src/services/capture/captureIndex';
+import { dataFilesOf } from '../../src/services/capture/captureWriter';
 import { CaptureReader } from '../../src/services/capture/captureReader';
 import { decodeRawEthernetPacket } from '../../src/services/pcapParser';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
@@ -224,13 +225,15 @@ try {
     .sort((a, b) => statSync(path.join(captures, b)).mtimeMs - statSync(path.join(captures, a)).mtimeMs)[0];
   cpSync(path.join(captures, newest), path.join(copyRoot, newest), { recursive: true });
   const volume = captureVolume(copyRoot).open(newest);
-  const { records, plan, version } = recoverIndex(volume.index, volume.pfx, volume.sum, volume.byt, volume.rec);
-  const index = new CaptureIndex(records.slice(0, plan.keepRecords), version);
+  // Through every segment, as the store reads it: a capture the agent writes
+  // a file for is filed from segment 1, even with no ring (ADR 0052).
+  const { records, plan, version } = recoverCapture(volume.index, (n) => dataFilesOf(volume, n));
+  const index = new CaptureIndex(records.slice(0, plan.keepRecords), version, plan.floorChunk);
   const reader = new CaptureReader(volume, index, inflateSync);
-  checkTrue('the capture on disk is version 2, with records', index.storesRecords);
+  checkTrue('the capture on disk stores its records (version 2 or later)', index.storesRecords);
   const rows: Packet[] = [];
   // A few chunks a call (`MAX_ROW_CHUNKS`), so paged to the end.
-  for (let at = 0; at < index.frameCount;) {
+  for (let at = index.floorOrdinal; at < index.frameCount;) {
     const chunks = reader.readRowsAt(at, index.frameCount);
     if (chunks.length === 0) break;
     for (const chunk of chunks) rows.push(...chunk.packets);
@@ -330,8 +333,12 @@ try {
     const flat = pane.replace(/\s+/g, '');
     for (const [abbrev, line] of expect) checkTrue(`frame ${id} shows its ${abbrev} row: ${line}`, flat.includes(line));
     const sent = (await sentToWorker()).slice(before);
-    checkTrue(`frame ${id}'s tree was asked for, and came from its record rather than a replay`,
-      sent.includes('detail') && !sent.includes('replay'));
+    const fromRecord = sent.includes('detail') && !sent.includes('replay');
+    checkTrue(`frame ${id}'s tree was asked for, and came from its record rather than a replay`, fromRecord);
+    if (!fromRecord || !expect.every(([, line]) => flat.includes(line))) {
+      console.log(`        sent to the Worker: ${JSON.stringify(sent)}`);
+      console.log(`        the pane: ${JSON.stringify(pane.slice(0, 600))}`);
+    }
   }
   volume.close();
 } finally {

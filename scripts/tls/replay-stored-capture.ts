@@ -28,11 +28,11 @@
 import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { deflateRawSync, inflateRawSync } from 'node:zlib';
-import { CaptureWriter } from '../../src/services/capture/captureWriter';
+import { inflateRawSync } from 'node:zlib';
+import { dataFilesOf } from '../../src/services/capture/captureWriter';
 import { CaptureReader } from '../../src/services/capture/captureReader';
-import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
-import { recoverIndex } from '../../src/services/capture/captureIndex';
+import { CaptureIndex, recoverCapture } from '../../src/services/capture/captureIndex';
+import { captureVolume } from '../../electron/store/volume';
 import { PcapService } from '../../src/services/pcapParser';
 import { generatePcapBinary } from '../../src/services/export/oneShot';
 import { keyLog } from '../../src/services/tls/keyLog';
@@ -51,25 +51,21 @@ const isOpened = (p: Packet) => /PKN/.test(p.info);
 async function main(): Promise<void> {
   const work = mkdtempSync(path.join(tmpdir(), 'inwire-replay-'));
   try {
-    cpSync(captureDir, work, { recursive: true });
-    const files = {
-      index: NodeBlockFile.open(path.join(work, 'index.iwidx')),
-      pfx: NodeBlockFile.open(path.join(work, 'prefix.iwpfx')),
-      sum: NodeBlockFile.open(path.join(work, 'summary.iwsum')),
-      byt: NodeBlockFile.open(path.join(work, 'frames.iwbyt')),
-      rec: NodeBlockFile.open(path.join(work, 'records.iwrec')),
-    };
+    const id = path.basename(path.resolve(captureDir));
+    cpSync(captureDir, path.join(work, id), { recursive: true });
+    const files = captureVolume(work).open(id);
     const inflate = (b: Uint8Array) => new Uint8Array(inflateRawSync(b));
-    const deflate = (b: Uint8Array) => new Uint8Array(deflateRawSync(b));
-    const { records, plan } = recoverIndex(files.index, files.pfx, files.sum, files.byt, files.rec);
-    const index = new CaptureWriter(files, { deflate, resumeFrom: records.slice(0, plan.keepRecords) }).index;
+    // Through every segment and from the floor, as the store reads it: a
+    // capture the agent wrote a file for is filed from segment 1 (ADR 0052).
+    const { records, plan, version } = recoverCapture(files.index, (n) => dataFilesOf(files, n));
+    const index = new CaptureIndex(records.slice(0, plan.keepRecords), version, plan.floorChunk);
     const reader = new CaptureReader(files, index, inflate);
 
     const live: Packet[] = [];
-    for (let chunk = 0; chunk < index.chunkCount; chunk++) live.push(...reader.readRows(chunk));
+    for (let chunk = index.floorChunk; chunk < index.chunkCount; chunk++) live.push(...reader.readRows(chunk));
     const bytes = reader.readBytes(live.map((p) => p.id));
     const withBytes = live.map((p) => ({ ...p, rawBytes: bytes.get(p.id) ?? new Uint8Array(0) }) as Packet);
-    for (const file of Object.values(files)) file.close();
+    files.close();
 
     keyLog.add(readFileSync(keyLogFile, 'latin1'));
     const pcap = generatePcapBinary(withBytes);

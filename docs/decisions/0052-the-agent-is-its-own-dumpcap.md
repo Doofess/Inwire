@@ -1,7 +1,7 @@
 # 0052 — The agent is its own dumpcap
 
-**Status:** accepted 2026-09-28; phases 1-6 landed (below), and the live
-drives wait on the owner's install of the 0.5.0 build. **Amends
+**Status:** accepted 2026-09-28; phases 1-7 landed (below), and the 0.5.0
+build passed the three live drives installed on 2026-09-29. **Amends
 [0005](0005-agent-wire-format.md)** (the wire record is version 4, with 32-bit
 lengths), **[0050](0050-a-capture-is-narrowed-by-the-driver.md)** (the
 snaplen's ceiling is dumpcap's 262,144), and narrowly
@@ -144,11 +144,26 @@ those anyway.
 6. Save-as-captured, and import reading IDB and ISB options. **Landed.**
 7. Docs. **This record, CLAUDE.md and `docs/verification.md`.**
 
-**Still owed, and needing the owner:** the 0.5.0 build installed elevated,
-then `scripts/electron/capture-file-drive.ts` (autostop, owner, the refused
-root, and a ring of ten 1 MB files keeping three), `capture-options-drive.ts`
-and `live-revisit-drive.ts` against it. And the second-account check in
-`docs/verification.md`: that the agent refuses to write into a folder the
+**Driven live, 2026-09-29**, against the 0.5.0 build installed elevated:
+- `scripts/electron/capture-file-drive.ts`: an autostop at exactly 5,000
+  packets, whose file is owned by the user rather than SYSTEM and holds the
+  store's frames byte for byte; a ring of ten 1 MB files keeping three, which
+  left files 8-10 and segments 8-10 with the list starting at file 8's first
+  frame; and a root the user cannot write, which was refused with nothing
+  created.
+- `capture-options-drive.ts` and `live-revisit-drive.ts`: both pass. The
+  revisit drive failed once on its last case, a UDP frame whose tree was not on
+  screen within 15 seconds, and then passed twice. It now prints what went to
+  the Worker when a case fails.
+
+**One thing the drives found about the drives, not the app:** a capture the
+agent writes a file for is filed from segment 1 even without a ring, because
+the first `capture_boundary` opens a segment. A reader that only knows
+segment 0 (`recoverIndex`) sees such a capture as empty, so every reader of a
+live capture uses `recoverCapture`.
+
+**Still owed, and needing a person:** the second-account check in
+`docs/verification.md`, that the agent refuses to write into a folder the
 client's account cannot.
 
 ## The Python agent's deviations

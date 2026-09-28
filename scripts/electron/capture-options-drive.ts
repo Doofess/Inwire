@@ -27,7 +27,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { inflateSync } from 'fflate';
 import { captureVolume } from '../../electron/store/volume';
-import { CaptureIndex, recoverIndex } from '../../src/services/capture/captureIndex';
+import { CaptureIndex, recoverCapture } from '../../src/services/capture/captureIndex';
+import { dataFilesOf } from '../../src/services/capture/captureWriter';
 import { CaptureReader } from '../../src/services/capture/captureReader';
 import { SIZE_LIMITED, bytesNotCaptured } from '../../src/services/dissect/captureShort';
 import type { Packet } from '../../src/types/packet';
@@ -221,11 +222,13 @@ try {
     .sort((a, b) => statSync(path.join(captures, b)).mtimeMs - statSync(path.join(captures, a)).mtimeMs)[0];
   cpSync(path.join(captures, newest), path.join(copyRoot, newest), { recursive: true });
   const volume = captureVolume(copyRoot).open(newest);
-  const { records, plan, version } = recoverIndex(volume.index, volume.pfx, volume.sum, volume.byt, volume.rec);
-  const index = new CaptureIndex(records.slice(0, plan.keepRecords), version);
+  // Through every segment, as the store reads it: a capture the agent writes
+  // a file for is filed from segment 1, even with no ring (ADR 0052).
+  const { records, plan, version } = recoverCapture(volume.index, (n) => dataFilesOf(volume, n));
+  const index = new CaptureIndex(records.slice(0, plan.keepRecords), version, plan.floorChunk);
   const reader = new CaptureReader(volume, index, inflateSync);
   const rows: Packet[] = [];
-  for (let at = 0; at < index.frameCount;) {
+  for (let at = index.floorOrdinal; at < index.frameCount;) {
     const chunks = reader.readRowsAt(at, index.frameCount);
     if (chunks.length === 0) break;
     for (const chunk of chunks) rows.push(...chunk.packets);

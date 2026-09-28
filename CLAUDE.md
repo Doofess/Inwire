@@ -1165,10 +1165,10 @@ on a publicly trusted certificate, which is a thumbprint change here. That was
 set aside deliberately, with the VM matrix and the Npcap OEM licence, because
 this is a machine the author works on rather than a fleet they ship to.
 
-**Still owed on the agent:**
-
-- a capture through the UI against it
-- the two-client and second-account items in `docs/verification.md`
+**A capture through the UI against it is done**: the three live drives in §7
+passed against the installed 0.5.0 agent on 2026-09-29 (ADR 0052). **Still
+owed on the agent:** the two-client and second-account items in
+`docs/verification.md`.
 
 **The fuses are flipped**, which was the one item here that had to precede
 signing rather than follow it. `electron/afterPack.cjs` does it and

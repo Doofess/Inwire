@@ -240,7 +240,10 @@ try {
     .isVisible().catch(() => false);
   await browseUntil(stopped, 180_000);
   checkTrue('the capture stopped itself at its limit, and the panel says why', await stopped());
-  checkTrue('...and Start is offered again', await page.getByLabel('Start capture').isVisible());
+  // With the capture's frames still buffered, Start is the one that discards
+  // them first, and says so in its label.
+  const restart = page.getByLabel('Start a new capture, discarding the current one');
+  checkTrue('...and Start is offered again', await restart.isEnabled().catch(() => false));
   await sleep(4000);
 
   // --- the agent's file ----------------------------------------------------------
@@ -248,8 +251,11 @@ try {
   const newest = newestCapture(captures);
   const pcapngPath = path.join(captures, newest, 'pcapng', 'capture.pcapng');
   checkTrue('the agent wrote the capture\'s file into the capture\'s own folder', existsSync(pcapngPath));
+  // Windows PowerShell, without the PSModulePath a PowerShell 7 parent hands
+  // down: inherited, it points 5.1 at 7's modules and `Get-Acl` cannot load.
+  const shellEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
   const owner = execFileSync('powershell', ['-NoProfile', '-Command', `(Get-Acl -LiteralPath '${pcapngPath}').Owner`],
-    { encoding: 'utf8' }).trim();
+    { encoding: 'utf8', env: shellEnv }).trim();
   const me = execFileSync('whoami', { encoding: 'utf8' }).trim();
   console.log(`      owner ${owner}, this user ${me}`);
   check('the file is this user\'s, not SYSTEM\'s: written as the client', owner.toLowerCase(), me.toLowerCase());
@@ -284,7 +290,10 @@ try {
   await page.getByLabel('Megabytes a file').fill('1');
   await page.getByLabel('Files kept').fill('3');
   await page.getByLabel('Stop after files').fill('10');
-  await page.getByLabel('Start capture').click();
+  // The first capture is on disk in `copyRoot` already; starting again
+  // discards the app's copy, through the rail's own prompt.
+  await restart.click();
+  await page.getByRole('button', { name: 'Discard and start' }).click();
   console.log('\n--- capturing a ring of 1 MB files, three kept, until the tenth fills ---\n');
   const ringDone = () => page!.getByText('The last capture stopped itself: it reached its file limit.')
     .isVisible().catch(() => false);
