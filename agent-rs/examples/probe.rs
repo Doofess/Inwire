@@ -40,7 +40,7 @@ fn main() -> std::io::Result<()> {
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(6.0);
 
-    let mut cap = npcap.open(&device, inwire_agent::npcap::OpenOptions { promiscuous: true, snaplen: 65535 })?;
+    let mut cap = npcap.open(&device, inwire_agent::npcap::OpenOptions { promiscuous: true, snaplen: inwire_agent::protocol::MAX_SNAPLEN })?;
     let raised = cap.set_kernel_buffer(
         inwire_agent::session::kernel_buffer_bytes(inwire_agent::session::available_cores()) as i32,
     )?;

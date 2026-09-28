@@ -1017,37 +1017,31 @@ check("the capture time survives to the nanosecond", _decoded[1]["tsNs"], 178847
 check("a sequence number at the u32 ceiling round-trips", _decoded[1]["seq"], 4294967295)
 check("a zero-length capture is a record, not an error", _decoded[1]["data"], b"")
 check("the wire length is carried apart from the captured length", _decoded[2]["origLen"], 9000)
-# The wire length is sent as an EXCESS over the captured length since the
-# record shrank to 18 bytes, so the truncated frame is the one that proves the
-# sum: 64 bytes present, 1514 on the wire.
 check("a truncated frame still reports its length on the wire",
       (_decoded[0]["origLen"], len(_decoded[0]["data"])), (1514, 64))
-check("a record is eighteen bytes of framing", packet_batch.RECORD.size, 18)
-# A frame captured so short that the excess will not fit is clamped rather than
-# wrapped: an understated length is recoverable, a wrapped one is noise.
-_clamped = packet_batch.decode_batch(packet_batch.encode_batch(
+check("a record is twenty-two bytes of framing", packet_batch.RECORD.size, 22)
+# A wire length no 16-bit field holds: version 3 clamped its excess at 65,535,
+# version 4 carries it whole.
+_long_wire = packet_batch.decode_batch(packet_batch.encode_batch(
     [packet_batch.encode_record(0, 0, 1000, 200000, bytes(4))]))[0]
-check("an excess past the u16 ceiling clamps instead of wrapping",
-      _clamped["origLen"], 4 + 0xFFFF)
+check("a wire length past the u16 ceiling is carried, not clamped",
+      _long_wire["origLen"], 200000)
 check("the frame bytes are exact", _decoded[0]["data"], bytes(range(64)))
 check("the interface index is carried", _decoded[1]["iface"], 7)
 
-# **A captured length is a length the reader SEEKS BY, so it is refused rather
-# than masked.** `cap_len & 0xFFFF` was here while the payload was appended in
-# full, so a 70,000-byte frame declared 4,464 and the decoder took its next
-# record 65,536 bytes early - reading a plausible record out of the middle of a
-# frame and discarding the rest of the batch, up to 512 frames, with no error
-# anywhere. The `extra` field above may clamp because nothing indexes with it.
-_oversized = "no error"
-try:
-    packet_batch.encode_record(0, 0, 1000, 70000, b"\x00" * 70000)
-except ValueError:
-    _oversized = "ValueError"
-check("a frame too long for the length field is refused, not masked",
-      _oversized, "ValueError")
-check_true("...and one that exactly fills it still encodes",
-           len(packet_batch.encode_record(0, 0, 1000, 0xFFFF, b"\x00" * 0xFFFF))
-           == packet_batch.RECORD.size + 0xFFFF)
+# **A frame past the old 16-bit ceiling now goes through whole** (version 4).
+# Version 3 refused it: a captured length is one the reader SEEKS BY, so masking
+# it would have the decoder take its next record from inside a frame. At 32
+# bits a frame captured at dumpcap's snaplen - longer than 65,535 bytes when a
+# send was offloaded - arrives with its length.
+_long = bytes(range(256)) * 280
+_round = packet_batch.decode_batch(packet_batch.encode_batch(
+    [packet_batch.encode_record(0, 0, 1000, len(_long), _long)]))
+check("a frame past the old 16-bit ceiling arrives whole", _round[0]["data"], _long)
+check("...with its wire length", _round[0]["origLen"], len(_long))
+check("a wire length is never sent below what was captured",
+      packet_batch.decode_batch(packet_batch.encode_batch(
+          [packet_batch.encode_record(0, 0, 1000, 2, b"\x00" * 4)]))[0]["origLen"], 4)
 
 for _bad, _why in (
     (b"NOPE" + _frame[4:], "refuses a frame that is not a batch"),
@@ -2432,13 +2426,13 @@ check_true("...and the agent reads it off the connection, not off the transport"
 # captured on defaults - a filter ignored is a capture of everything that its
 # owner believes is narrowed.
 check("a start with neither captures everything",
-      agent.parse_capture_options({"type": "start_capture"}), {"filter": None, "snaplen": 65535})
+      agent.parse_capture_options({"type": "start_capture"}), {"filter": None, "snaplen": 262144})
 check("a start carries its filter and snaplen",
       agent.parse_capture_options({"type": "start_capture", "filter": "tcp port 443", "snaplen": 128}),
       {"filter": "tcp port 443", "snaplen": 128})
 check("a blank filter is no filter",
       agent.parse_capture_options({"type": "start_capture", "filter": "  "})["filter"], None)
-for _bad in ({"filter": 5}, {"snaplen": 0}, {"snaplen": 65536}, {"snaplen": 1.5}, {"snaplen": "128"},
+for _bad in ({"filter": 5}, {"snaplen": 0}, {"snaplen": 262145}, {"snaplen": 1.5}, {"snaplen": "128"},
              {"snaplen": True}, {"filter": "a" * (agent.MAX_CAPTURE_FILTER_CHARS + 1)}):
     _refused = None
     try:

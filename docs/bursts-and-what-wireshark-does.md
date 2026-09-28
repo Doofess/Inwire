@@ -112,14 +112,10 @@ batch in the pump, which is the arrangement that page wishes for.
 ## Where they are ahead, or where we simply differ
 
 **Snaplen.** dumpcap's default is **262,144 bytes** — effectively no truncation;
-the 68-byte folklore is long gone. Ours is 65,535, and it is a *format*
-constraint rather than a choice: the wire record's `capLen` is a `u16`, so
-65,535 is the largest frame the batch format can describe. `packet_batch.py`
-refuses a longer one rather than masking it, which is right — a masked length
-desynchronises the decoder and costs a whole batch — but it means a jumbo frame
-or an LSO-coalesced segment above 64 KB is refused rather than truncated.
-**Not currently a defect on any tested machine, and worth knowing before someone
-captures on a 9 KB-MTU link with offload on.**
+the 68-byte folklore is long gone. **Ours is the same since wire version 4**
+(ADR 0052). It was 65,535, a *format* constraint rather than a choice: the wire
+record's `capLen` was a `u16`, so a jumbo frame or an LSO-coalesced segment
+above 64 KB was refused rather than truncated. Both lengths are `u32` now.
 
 Wireshark's guidance treats snaplen as the main high-rate lever (the Performance
 wiki's formula is `MTU + 18`). **We offer one now, and a capture filter beside

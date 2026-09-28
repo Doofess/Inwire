@@ -138,8 +138,6 @@ fn the_batch_decodes_back_to_what_went_in() {
         assert_eq!(got.seq, want["seq"].as_u64().unwrap() as u32);
         assert_eq!(got.iface, want["iface"].as_u64().unwrap() as u16);
         assert_eq!(got.ts_ns, ts_ns(want));
-        // The wire length is RECONSTRUCTED from capLen + extra, which is the
-        // half of this format most likely to be got wrong by a new decoder.
         assert_eq!(got.orig_len as u64, want["origLen"].as_u64().unwrap());
         assert_eq!(got.data, unb64(want["dataBase64"].as_str().unwrap()));
     }
@@ -226,25 +224,25 @@ fn an_unknown_kind_is_refused_rather_than_guessed() {
 }
 
 #[test]
-fn a_frame_too_long_for_the_length_field_is_refused_not_masked() {
-    // The Python side's post-mortem: `cap_len & 0xFFFF` while the payload is
-    // appended in full makes the decoder take its next record from inside a
-    // frame. `extra` may clamp because nothing seeks by it; this may not.
-    let long = vec![0u8; 0x10000];
-    assert_eq!(
-        wire::encode_record(0, 0, 1, 0x10000, &long),
-        Err(WireError::FrameTooLong(0x10000))
-    );
-    let exact = vec![0u8; 0xFFFF];
-    assert!(wire::encode_record(0, 0, 1, 0xFFFF, &exact).is_ok());
+fn a_frame_past_the_old_16_bit_ceiling_goes_through_whole() {
+    // Version 3 refused this frame: its lengths were 16 bits, and masking one
+    // makes the decoder take its next record from inside a frame. Version 4's
+    // are 32 bits, so a frame captured at dumpcap's snaplen - longer than
+    // 65,535 bytes when a send was offloaded - arrives whole, with its length.
+    let long: Vec<u8> = (0..0x1_0004u32).map(|i| i as u8).collect();
+    let encoded = wire::encode_record(7, 1, 1, 0x1_0004, &long).unwrap();
+    let decoded = wire::decode_batch(&wire::encode_batch(&[encoded]).unwrap()).unwrap();
+    assert_eq!(decoded[0].data, long);
+    assert_eq!(decoded[0].orig_len, 0x1_0004);
 }
 
 #[test]
-fn an_excess_past_the_u16_ceiling_clamps_instead_of_wrapping() {
-    let encoded = wire::encode_record(0, 0, 1, 200_000, &[0u8; 4]).unwrap();
-    let batch = wire::encode_batch(&[encoded]).unwrap();
-    let decoded = wire::decode_batch(&batch).unwrap();
-    assert_eq!(decoded[0].orig_len, 4 + 0xFFFF);
+fn a_wire_length_is_never_sent_below_what_was_captured() {
+    // A wire length shorter than the frame's own bytes would be nonsense; the
+    // encoder raises it to the captured length rather than sending it.
+    let encoded = wire::encode_record(0, 0, 1, 2, &[0u8; 4]).unwrap();
+    let decoded = wire::decode_batch(&wire::encode_batch(&[encoded]).unwrap()).unwrap();
+    assert_eq!(decoded[0].orig_len, 4);
 }
 
 #[test]

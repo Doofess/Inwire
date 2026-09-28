@@ -76,7 +76,7 @@ console.log('\n--- what is remembered ---\n');
 check('a stored value that is not options is refused', normalizeCaptureOptions('tcp'), null);
 check('a snaplen outside what the agent takes falls back to the suggestion', [
   normalizeCaptureOptions({ filter: 'arp', limitBytes: true, snaplen: 0 })?.snaplen,
-  normalizeCaptureOptions({ filter: 'arp', limitBytes: true, snaplen: 70000 })?.snaplen,
+  normalizeCaptureOptions({ filter: 'arp', limitBytes: true, snaplen: 262145 })?.snaplen,
   normalizeCaptureOptions({ filter: 'arp', limitBytes: true, snaplen: 1.5 })?.snaplen,
 ], [SUGGESTED_SNAPLEN, SUGGESTED_SNAPLEN, SUGGESTED_SNAPLEN]);
 check('a stored filter is bounded as the agent bounds it',

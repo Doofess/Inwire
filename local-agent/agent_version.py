@@ -20,4 +20,4 @@ is one a different install left behind. That is what let the number go down to
 0.x, where an ordering had held it at 4.x.
 """
 
-AGENT_VERSION = "0.4.1"
+AGENT_VERSION = "0.5.0"

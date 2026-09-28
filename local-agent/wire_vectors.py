@@ -39,8 +39,7 @@ FIXTURE = (pathlib.Path(__file__).resolve().parent.parent
 #: - `seq` at the u32 ceiling, an empty payload, and a timestamp whose last
 #:   digit is a single nanosecond - past 2^53, so a decoder that goes through a
 #:   float gets it wrong, which is the failure version 3 exists to prevent
-#: - a 9,000-byte jumbo whose wire length exceeds what was captured, which is
-#:   what exercises the `extra` field being a DIFFERENCE rather than a length
+#: - a 9,000-byte jumbo, whose lengths need more than a byte each
 #: - the last nanosecond whose microsecond count a double still holds exactly
 #:   (2^53 - 1 of them, then 999 ns): the app decodes a stamp as whole
 #:   microseconds plus a remainder without a BigInt, which is exact up to
@@ -54,9 +53,10 @@ RECORDS = [
     {"seq": 4294967295, "iface": 7, "tsNs": 1788477971653285501, "origLen": 60,
      "data": b""},
     {"seq": 9, "iface": 1, "tsNs": 1000, "origLen": 9000, "data": b"\xff" * 9000},
-    # A truncated frame: captured short, wire length far larger. `extra` carries
-    # the difference and the decoder reconstructs origLen by adding it back.
-    {"seq": 12345, "iface": 2, "tsNs": 9007199254740991999, "origLen": 65000,
+    # A truncated frame: captured at 128 bytes of a 200,000-byte send - a wire
+    # length no 16-bit field holds, so a decoder still reading version 3's
+    # layout, or truncating origLen to 16 bits, gets it wrong.
+    {"seq": 12345, "iface": 2, "tsNs": 9007199254740991999, "origLen": 200000,
      "data": b"\xab" * 128},
 ]
 

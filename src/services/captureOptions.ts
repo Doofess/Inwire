@@ -30,11 +30,12 @@ export interface CaptureOptions {
 
 /**
  * The least a snaplen may be, and the most. The agent's own bounds: libpcap
- * takes any positive length, and the wire record's captured length is a
- * `u16`, so 65535 is keeping everything.
+ * takes any positive length, and the most is dumpcap's default, 262,144 -
+ * keeping everything. It was 65,535 while the wire record's lengths were 16
+ * bits; they are 32 since version 4.
  */
 export const MIN_SNAPLEN = 1;
-export const MAX_SNAPLEN = 65535;
+export const MAX_SNAPLEN = 262144;
 
 /**
  * What the snaplen field offers first. Enough for an Ethernet, IPv6 and TCP

@@ -17,7 +17,7 @@
  * Layout, little-endian, read with a DataView so nothing needs to be aligned:
  *
  *     magic    4 bytes   'IWP1'
- *     version  u8        3
+ *     version  u8        4
  *     flags    u8        reserved
  *     count    u16       records in this frame
  *
@@ -25,10 +25,15 @@
  *
  *     seq        u32     per-capture sequence number (docs/decisions/0005)
  *     iface      u16     index into the interface list in hello/state
- *     capLen     u16     bytes actually present
- *     origExtra  u16     wire length MINUS capLen; 0 unless truncated
+ *     capLen     u32     bytes actually present
+ *     origLen    u32     length on the wire
  *     tsNs       u64     capture time, epoch nanoseconds
  *     bytes      capLen  the frame
+ *
+ * **Both lengths are 32 bits since version 4** (ADR 0052), and the record is
+ * 22 bytes. The agent captures at dumpcap's 262,144-byte snaplen and writes the
+ * same frames into its own pcapng, so the wire carries a frame longer than
+ * 65,535 bytes - an offloaded send can be - where version 3 refused one.
  *
  * **`tsNs` was an f64 of microseconds until version 3**, which could not have
  * carried what the driver measures: epoch nanoseconds are past 2^53, and even
@@ -38,7 +43,7 @@
  * the path every captured frame takes. Which of those nanoseconds were
  * measured is the adapter's `tsPrecision`, not this record's business.
  *
- * **The record is 18 bytes and was 24.** Two reserved bytes on a layout that
+ * **The record was 18 bytes in versions 2 and 3, and 24 before.** Two reserved bytes on a layout that
  * needs no alignment; a u32 for a `capLen` that cannot exceed a snaplen; and a
  * second u32 repeating, on every untruncated frame there is, what `capLen`
  * already said. Measured on a real 300,228-frame capture that is 7.21 MB of
@@ -58,9 +63,9 @@
 
 /** 'IWP1', as the u32 a DataView reads at offset 0 in little-endian order. */
 const MAGIC_LE = 0x31_50_57_49;
-export const BATCH_VERSION = 3;
+export const BATCH_VERSION = 4;
 export const BATCH_HEADER_BYTES = 8;
-export const BATCH_RECORD_BYTES = 18;
+export const BATCH_RECORD_BYTES = 22;
 
 export interface BinaryFrame {
   /** Per-capture sequence number; ties on `tsUs` resolve by it. */
@@ -165,16 +170,13 @@ export function decodePacketBatch(buffer: ArrayBuffer): BinaryFrame[] {
     }
     const seq = view.getUint32(offset, true);
     const iface = view.getUint16(offset + 4, true);
-    const capLen = view.getUint16(offset + 6, true);
-    // The wire length as its excess over what was captured, so the common case
-    // - nothing truncated - is two zero bytes rather than a second copy of the
-    // number two fields up.
-    const origLen = capLen + view.getUint16(offset + 8, true);
+    const capLen = view.getUint32(offset + 6, true);
+    const origLen = view.getUint32(offset + 10, true);
     // hi * 2^32 + lo nanoseconds, divided by 1000 without leaving integers:
     // 2^32 is 4,294,967 thousands and 296 over, so the carry into the
     // remainder is `hi * 296 + lo`, which stays well under 2^53.
-    const lo = view.getUint32(offset + 10, true);
-    const hi = view.getUint32(offset + 14, true);
+    const lo = view.getUint32(offset + 14, true);
+    const hi = view.getUint32(offset + 18, true);
     const carry = hi * 296 + lo;
     const tsUs = hi * 4_294_967 + Math.floor(carry / 1000);
     const tsNsRem = carry % 1000;

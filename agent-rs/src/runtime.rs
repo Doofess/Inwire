@@ -387,16 +387,15 @@ struct StatsTick {
     asked_at: Instant,
     seq_high: u64,
     dropped_agent: u64,
-    oversize: u64,
     received: Vec<u64>,
     requests: Vec<u64>,
 }
 
 impl StatsTick {
-    fn begin(roster: &[Arc<CaptureInterface>], seq_high: u64, dropped_agent: u64, oversize: u64) -> Self {
+    fn begin(roster: &[Arc<CaptureInterface>], seq_high: u64, dropped_agent: u64) -> Self {
         let received = roster.iter().map(|per| per.received.load(Ordering::SeqCst)).collect();
         let requests = roster.iter().map(|per| per.kernel.ask()).collect();
-        Self { asked_at: Instant::now(), seq_high, dropped_agent, oversize, received, requests }
+        Self { asked_at: Instant::now(), seq_high, dropped_agent, received, requests }
     }
 
     /// The per-adapter figures once every sniffer has answered - or, past
@@ -445,12 +444,6 @@ struct CaptureHandles {
     seq: Arc<AtomicU64>,
     /// One entry per selected adapter that opened, in selection order.
     interfaces: Arc<Vec<Arc<CaptureInterface>>>,
-    /// Frames the driver handed over and the wire format could not describe -
-    /// a fifth loss stage, beside the kernel, the sniffer queue and the pipe.
-    /// Its own counter rather than folded into `droppedAgent`: a frame shed
-    /// under pressure and a frame too long to encode want opposite responses,
-    /// and this file has a comment about exactly that conflation elsewhere.
-    oversize: Arc<AtomicU64>,
     /// Whose pipe `droppedPipe` is measured against, and what that pipe had
     /// already shed when it became the owner's.
     ///
@@ -689,7 +682,6 @@ impl Driver for Live<'_> {
             per.received.store(0, Ordering::SeqCst);
         }
         handles.dropped_base.store(handles.queue.dropped(), Ordering::SeqCst);
-        handles.oversize.store(0, Ordering::SeqCst);
         let shed = self
             .shared
             .clients
@@ -720,7 +712,6 @@ impl Driver for Live<'_> {
             handles.seq.load(Ordering::Relaxed),
             handles.dropped_agent(),
             dropped_pipe,
-            handles.oversize.load(Ordering::Relaxed),
             &interface_stats(&handles.interfaces),
         );
         // `queuedAtStop` is what the stop threw away. Those frames were
@@ -843,7 +834,7 @@ fn probe(npcap: &Npcap, device: &str) -> Probe {
     if let Some(known) = cache.get(device) {
         return *known;
     }
-    let question = OpenOptions { promiscuous: false, snaplen: npcap::SNAPLEN as u16 };
+    let question = OpenOptions { promiscuous: false, snaplen: npcap::SNAPLEN as u32 };
     let answer = match npcap.open(device, question) {
         Ok(handle) => Probe {
             link_type: Some(handle.datalink()),
@@ -955,7 +946,6 @@ fn start_capture(
     let running = Arc::new(AtomicBool::new(true));
     let queue = Arc::new(FrameQueue::with_defaults());
     let seq = Arc::new(AtomicU64::new(0));
-    let oversize = Arc::new(AtomicU64::new(0));
     let roster: Arc<Vec<Arc<CaptureInterface>>> = Arc::new(
         opened
             .iter()
@@ -999,7 +989,7 @@ fn start_capture(
             Arc::clone(&shared.shutdown),
         );
         let (rx, kn) = (Arc::clone(&per.received), Arc::clone(&per.kernel));
-        let (ov, sh) = (Arc::clone(&oversize), Arc::clone(shared));
+        let sh = Arc::clone(shared);
         let alive = Alive::new();
         workers.push(thread::spawn(move || {
             let _alive = alive;
@@ -1015,21 +1005,6 @@ fn start_capture(
                         if let Some(line) = COUNTS.captured() {
                             crate::log_info!("{line}");
                         }
-                        // **Checked before a sequence number is taken.** The
-                        // encoder refuses a frame past 0xFFFF - rightly, since
-                        // a masked length desynchronises the decoder - but
-                        // taking the number first left a hole in the sequence
-                        // for a frame that was never sent, on top of counting
-                        // it as received and in no drop counter at all.
-                        if data.len() > 0xFFFF {
-                            let seen = ov.fetch_add(1, Ordering::Relaxed);
-                            if seen == 0 {
-                                if let Some(owner) = sh.control.owner_of(generation) {
-                                    sh.send_to(&owner, &protocol::frame_too_long(iface, data.len()));
-                                }
-                            }
-                            continue;
-                        }
                         let n = sq.fetch_add(1, Ordering::Relaxed);
                         // agent.py:715-716: a driver that stamped nothing gets
                         // the wall clock rather than a frame at 1970.
@@ -1044,12 +1019,10 @@ fn start_capture(
                                     }
                                 }
                             }
-                            // Unreachable while the length check above is the
-                            // encoder's only failure, and counted rather than
-                            // printed so it cannot become invisible if that
-                            // ever stops being true.
+                            // Unreachable: the encoder refuses only a frame past
+                            // 4 GB, and the snaplen caps one at 262,144 bytes.
+                            // Logged rather than silent if that ever changes.
                             Err(error) => {
-                                ov.fetch_add(1, Ordering::Relaxed);
                                 crate::log_warn!("dropping a frame: {error}");
                             }
                         }
@@ -1105,7 +1078,7 @@ fn start_capture(
             Arc::clone(&seq),
             Arc::clone(shared),
         );
-        let (all, ov, base) = (Arc::clone(&roster), Arc::clone(&oversize), Arc::clone(&pipe_base));
+        let (all, base) = (Arc::clone(&roster), Arc::clone(&pipe_base));
         let shed_base = Arc::clone(&dropped_base);
         let alive = Alive::new();
         workers.push(thread::spawn(move || {
@@ -1161,7 +1134,6 @@ fn start_capture(
                         &all,
                         sq.load(Ordering::SeqCst),
                         dropped_since(&q, &shed_base),
-                        ov.load(Ordering::SeqCst),
                     ));
                 }
                 if let Some(entries) = tick.as_ref().and_then(|t| t.ready(&all)) {
@@ -1185,7 +1157,6 @@ fn start_capture(
                         pending.seq_high,
                         pending.dropped_agent,
                         dropped_pipe(&shared, &base, &owner),
-                        pending.oversize,
                         &entries,
                     );
                     let _ = connection.send(FRAME_JSON, stats.to_string().as_bytes(), 0);
@@ -1202,7 +1173,6 @@ fn start_capture(
         queue,
         seq,
         interfaces: roster,
-        oversize,
         pipe_base,
         dropped_base,
         workers,

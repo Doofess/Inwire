@@ -143,7 +143,7 @@ fn main() -> std::io::Result<()> {
                 running.store(true, Ordering::SeqCst);
                 *owner.lock().unwrap() = Some("rs-1".into());
 
-                let mut cap = npcap.open(&device, inwire_agent::npcap::OpenOptions { promiscuous: true, snaplen: 65535 })?;
+                let mut cap = npcap.open(&device, inwire_agent::npcap::OpenOptions { promiscuous: true, snaplen: inwire_agent::protocol::MAX_SNAPLEN })?;
                 cap.set_kernel_buffer(
                     inwire_agent::session::kernel_buffer_bytes(
                         inwire_agent::session::available_cores(),
@@ -214,10 +214,6 @@ fn main() -> std::io::Result<()> {
                                 sq.load(Ordering::Relaxed),
                                 q.dropped(),
                                 Some(conn2.outbound.dropped()),
-                                // This harness pre-dates the oversize counter
-                                // and cannot produce one: it reports 0 rather
-                                // than carrying a fifth stage it never measures.
-                                0,
                                 &[InterfaceStats {
                                     iface: 0,
                                     received: rx.load(Ordering::Relaxed),
@@ -254,7 +250,6 @@ fn main() -> std::io::Result<()> {
                     seq.load(Ordering::Relaxed),
                     queue.dropped(),
                     Some(conn.outbound.dropped()),
-                    0,
                     &[InterfaceStats {
                         iface: 0,
                         received: received.load(Ordering::Relaxed),

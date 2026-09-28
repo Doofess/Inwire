@@ -132,25 +132,6 @@ pub fn capture_failed(iface: Option<usize>, label: &str, reason: &str) -> Value 
     Value::Object(message)
 }
 
-/// A frame the driver delivered and the wire format cannot describe.
-///
-/// Sent as well as counted, because a counter the app does not render is a
-/// loss nobody sees - and this file's own header is about exactly that: *"the
-/// agent logged 260,000 dropped frames in one afternoon and the app showed a
-/// clean, complete-looking list."* One message per capture, not one per frame.
-pub fn frame_too_long(iface: usize, bytes: usize) -> Value {
-    json!({
-        "type": "error",
-        "code": "frame_too_long",
-        "iface": iface,
-        "message": format!(
-            "A {bytes}-byte frame cannot be framed - the record's length field is 16 bits. \
-             Receive offload is coalescing past 64 KB; further frames of this size are counted \
-             but not reported again."
-        ),
-    })
-}
-
 /// The adapter report: how this machine was *told* to behave.
 ///
 /// **The app cannot decide a frame's direction without this**, and the cost of
@@ -376,10 +357,6 @@ pub fn capture_stats(
     seq_high: u64,
     dropped_agent: u64,
     dropped_pipe: Option<u64>,
-    // Frames the driver delivered that the wire format could not describe.
-    // Its own figure rather than folded into `dropped_agent`: a frame shed
-    // under pressure and a frame too long to encode want opposite responses.
-    dropped_oversize: u64,
     interfaces: &[InterfaceStats],
 ) -> Value {
     let entries: Vec<Value> = interfaces
@@ -403,11 +380,6 @@ pub fn capture_stats(
     // third case by a validator that already has one.
     if let Some(n) = dropped_pipe {
         message.insert("droppedPipe".into(), json!(n));
-    }
-    // Omitted when zero, which is the ordinary case, so the field's presence
-    // is itself the signal that receive offload is coalescing past 64 KB.
-    if dropped_oversize > 0 {
-        message.insert("droppedOversize".into(), json!(dropped_oversize));
     }
     message.insert("interfaces".into(), Value::Array(entries));
     Value::Object(message)
@@ -441,15 +413,20 @@ pub struct CaptureOptions {
     /// adapter against its own link type. `None` captures everything.
     pub filter: Option<String>,
     /// The most bytes of each frame to keep; the rest is counted in the
-    /// frame's wire length and not captured. 65535 keeps everything.
-    pub snaplen: u16,
+    /// frame's wire length and not captured. `MAX_SNAPLEN` keeps everything.
+    pub snaplen: u32,
 }
 
 impl Default for CaptureOptions {
     fn default() -> Self {
-        CaptureOptions { filter: None, snaplen: 65535 }
+        CaptureOptions { filter: None, snaplen: MAX_SNAPLEN }
     }
 }
+
+/// The largest snaplen, and what none means: dumpcap's default, 262,144.
+/// It was 65,535 while the wire record's lengths were 16 bits; they are 32
+/// since version 4, so nothing downstream caps it lower (`wire.rs`).
+pub const MAX_SNAPLEN: u32 = 262_144;
 
 /// The longest capture filter a client may send. A long host list is a few
 /// thousand characters; the text reaches log lines and error messages, so it
@@ -649,16 +626,16 @@ fn filter_of(value: &Value, command: &str) -> Result<Option<String>, ParseError>
 }
 
 /// `start_capture`'s `snaplen`: absent or `null` keeps every byte.
-fn snaplen_of(value: &Value) -> Result<u16, ParseError> {
+fn snaplen_of(value: &Value) -> Result<u32, ParseError> {
     match value.get("snaplen") {
         None | Some(Value::Null) => Ok(CaptureOptions::default().snaplen),
         Some(n) => n
             .as_u64()
-            .filter(|n| (1..=65535).contains(n))
-            .map(|n| n as u16)
+            .filter(|n| (1..=u64::from(MAX_SNAPLEN)).contains(n))
+            .map(|n| n as u32)
             .ok_or_else(|| {
                 ParseError::BadCaptureOptions(
-                    "start_capture's snaplen must be a whole number of bytes from 1 to 65535."
+                    "start_capture's snaplen must be a whole number of bytes from 1 to 262144."
                         .into(),
                 )
             }),
@@ -765,7 +742,6 @@ mod tests {
             42,
             3,
             None,
-            0,
             &[
                 InterfaceStats { iface: 0, received: 10, kernel: Some((12, 2)) },
                 InterfaceStats { iface: 1, received: 5, kernel: None },
@@ -780,16 +756,8 @@ mod tests {
             stats.get("droppedPipe").is_none(),
             "a counter with nothing to report is omitted, not sent as 0"
         );
-        assert_eq!(capture_stats(1000, 0, 0, Some(7), 0, &[])["droppedPipe"], 7);
-        assert_eq!(capture_stats(1000, 0, 0, Some(0), 0, &[])["droppedPipe"], 0);
-
-        // The oversize stage follows the same rule as the pipe one: omitted
-        // when there is nothing to report, so its presence is the signal.
-        assert!(
-            capture_stats(1000, 0, 0, None, 0, &[]).get("droppedOversize").is_none(),
-            "a stage with nothing to report is omitted, not sent as 0"
-        );
-        assert_eq!(capture_stats(1000, 0, 0, None, 5, &[])["droppedOversize"], 5);
+        assert_eq!(capture_stats(1000, 0, 0, Some(7), &[])["droppedPipe"], 7);
+        assert_eq!(capture_stats(1000, 0, 0, Some(0), &[])["droppedPipe"], 0);
     }
 
     /// **`set_interfaces` carries device NAMES, and this agent read indices.**
@@ -864,7 +832,7 @@ mod tests {
         for bad in [
             r#"{"type":"start_capture","filter":5}"#,
             r#"{"type":"start_capture","snaplen":0}"#,
-            r#"{"type":"start_capture","snaplen":65536}"#,
+            r#"{"type":"start_capture","snaplen":262145}"#,
             r#"{"type":"start_capture","snaplen":1.5}"#,
             r#"{"type":"start_capture","snaplen":"128"}"#,
         ] {

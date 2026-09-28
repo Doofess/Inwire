@@ -82,7 +82,7 @@
 ; the Rust agent compiles in, and its VERSIONINFO is stamped from) and to
 ; REQUIRED_AGENT_VERSION by scripts/agent/version.ts, which runs on every
 ; `npm run check`.
-#define MyAppVersion "0.4.1"
+#define MyAppVersion "0.5.0"
 
 #define AgentExeName "inwire-agent-windows.exe"
 #define ServiceName "InwireAgent"

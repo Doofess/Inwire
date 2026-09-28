@@ -446,9 +446,11 @@ Both ends refuse a declared length past `MAX_FRAME_BYTES` (8 MB) **before
 allocating anything** — the agent is a privileged service and a five-byte
 header must never ask for four gigabytes.
 
-The 18-byte record in `local-agent/packet_batch.py` and
-`src/services/agentBinary.ts` - version 3, whose timestamp is a `u64` of epoch
-nanoseconds because no `f64` could carry them (ADR 0050) - and every control message in
+The 22-byte record in `local-agent/packet_batch.py` and
+`src/services/agentBinary.ts` - version 4, whose lengths are `u32` so a frame
+past 64 KB is carried rather than refused (ADR 0052), and whose timestamp is a
+`u64` of epoch nanoseconds because no `f64` could carry them (ADR 0050) - and
+every control message in
 `src/services/agentProtocol.ts`, are transport-agnostic. Both ends assert the
 same hand-written byte vectors — `scripts/agent/binary.ts` and
 `scripts/agent/pipe-framing.ts` against `local-agent/test_protocol.py` — which
@@ -1043,7 +1045,7 @@ by hand:
   asking libpcap again - no longer than the snaplen, marked where cut, never
   "previous segment not captured" unless its headers show the hole, and
   stamped to the nanosecond (ADR 0050). Run after anything on the capture-start
-  path or the agent's open; needs the 0.4.1 agent installed.
+  path or the agent's open; needs the 0.5.0 agent installed.
 - **`scripts/electron/revisit-drive.ts`** imports the real `inwire` capture,
   and the key-log capture with its key log followed, and opens frames whose
   trees need the frames before them, or decrypted content (ADR 0049).

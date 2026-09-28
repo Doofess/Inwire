@@ -619,7 +619,7 @@ fn a_filter_that_does_not_compile_fails_the_adapter_and_says_why() {
     let Some(rig) = Rig::new() else { return };
     let (_owner, delivered) = rig.connect("owner");
     rig.command("owner", Command::SetInterfaces(vec![FIXTURE_DEVICE.into()]));
-    let options = CaptureOptions { filter: Some("tcp prot 443".into()), snaplen: 65535 };
+    let options = CaptureOptions { filter: Some("tcp prot 443".into()), ..CaptureOptions::default() };
     rig.command("owner", Command::StartCapture(options));
 
     assert_eq!(rig.shared.control.capture_state(), CaptureState::Idle);
@@ -753,7 +753,7 @@ fn a_ticks_driver_figure_is_read_after_its_own_count() {
         })
     };
     for tick in 0..200 {
-        let pending = StatsTick::begin(&roster, 0, 0, 0);
+        let pending = StatsTick::begin(&roster, 0, 0);
         let entries = loop {
             if let Some(entries) = pending.ready(&roster) {
                 break entries;
@@ -779,7 +779,7 @@ fn a_stopped_sniffer_is_not_waited_on_and_a_slow_one_not_for_long() {
     roster[1].kernel.answer(0, Some((5, 0)));
     roster[1].received.store(3, Ordering::SeqCst);
 
-    let pending = StatsTick::begin(&roster, 0, 0, 0);
+    let pending = StatsTick::begin(&roster, 0, 0);
     assert!(pending.ready(&roster).is_none(), "adapter 1 has not answered yet");
     let waited = Instant::now();
     let entries = loop {
@@ -794,7 +794,7 @@ fn a_stopped_sniffer_is_not_waited_on_and_a_slow_one_not_for_long() {
     assert_eq!(entries[1].received, 3);
 
     // Answered, the tick is ready at once.
-    let next = StatsTick::begin(&roster, 0, 0, 0);
+    let next = StatsTick::begin(&roster, 0, 0);
     roster[1].kernel.answer(roster[1].kernel.pending(0).unwrap(), Some((9, 0)));
     assert_eq!(next.ready(&roster).unwrap()[1].kernel, Some((9, 0)));
 }

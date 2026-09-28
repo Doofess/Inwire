@@ -32,10 +32,11 @@
 //!   `pcap_set_buffer_size`, which must precede `pcap_activate`; this one works
 //!   on an already-activated handle, which is what lets the buffer be raised
 //!   after the handle is open.
-//! - **A snaplen above 65535 is unrepresentable downstream.** The wire record's
-//!   captured-length field is 16 bits, so the capture is opened at 65535 at
-//!   most and a frame that cannot be encoded is made impossible here rather
-//!   than refused later. A client may ask for less (`OpenOptions::snaplen`).
+//! - **The snaplen is dumpcap's, 262,144, at most.** It was 65,535 while the
+//!   wire record's lengths were 16 bits, and a frame the record could not
+//!   describe was made impossible here rather than refused later; the lengths
+//!   are 32 bits since version 4. A client may ask for less
+//!   (`OpenOptions::snaplen`).
 //! - **`pcap_create` and `pcap_activate`, not `pcap_open_live`.** The snaplen
 //!   and the timestamp precision can only be set between the two, and
 //!   `pcap_open_live` is both at once with no room between them. It is how
@@ -66,9 +67,9 @@ const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
 /// libpcap's error buffer size. Every call that takes one expects this much.
 const PCAP_ERRBUF_SIZE: usize = 256;
 
-/// The capture is opened at this and no higher: the wire record's captured
-/// length is a `u16`. See the module note.
-pub const SNAPLEN: c_int = 65535;
+/// The capture is opened at this and no higher: dumpcap's default. See the
+/// module note.
+pub const SNAPLEN: c_int = crate::protocol::MAX_SNAPLEN as c_int;
 
 /// `pcap_compile`'s netmask when it is not known, which only matters to the
 /// `ip broadcast` primitive - and that one then refuses to compile rather than
@@ -198,7 +199,7 @@ pub struct Npcap {
 pub struct OpenOptions {
     pub promiscuous: bool,
     /// The most of each frame to keep. At most `SNAPLEN`.
-    pub snaplen: u16,
+    pub snaplen: u32,
 }
 
 #[derive(Debug)]
@@ -366,7 +367,7 @@ impl Npcap {
         }
         // Owned from here, so every early return below closes it.
         let mut capture = Capture { npcap: self, handle, nanoseconds: false, keep: SNAPLEN as usize };
-        let snaplen = c_int::from(options.snaplen).clamp(1, SNAPLEN);
+        let snaplen = c_int::try_from(options.snaplen).unwrap_or(SNAPLEN).clamp(1, SNAPLEN);
         capture.keep_at_most(options.snaplen);
         unsafe {
             (self.set_snaplen)(handle, snaplen);
@@ -469,8 +470,8 @@ impl Capture<'_> {
     /// than a promise about every driver - and so it holds on a capture file,
     /// which a snaplen given to libpcap does not touch, which is how the tests
     /// read real frames through it.
-    pub fn keep_at_most(&mut self, snaplen: u16) {
-        self.keep = usize::from(snaplen.max(1));
+    pub fn keep_at_most(&mut self, snaplen: u32) {
+        self.keep = snaplen.max(1) as usize;
     }
 
     /// Compiles `filter` for this handle, or says why not in libpcap's words.

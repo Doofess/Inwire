@@ -27,7 +27,7 @@ Layout (little-endian throughout; the browser reads it with a DataView, so no
 field needs to be aligned):
 
     magic    4 bytes   'IWP1'
-    version  u8        1
+    version  u8        4
     flags    u8        reserved, 0
     count    u16       records in this frame
 
@@ -35,10 +35,17 @@ field needs to be aligned):
 
     seq        u32       per-capture sequence number (docs/decisions/0005)
     iface      u16       index into the interface list in hello/state
-    capLen     u16       bytes actually present
-    origExtra  u16       wire length MINUS capLen; 0 unless truncated
+    capLen     u32       bytes actually present
+    origLen    u32       length on the wire
     tsNs       u64       capture time, epoch nanoseconds
     bytes      capLen    the frame
+
+**Both lengths are 32 bits since version 4** (ADR 0052), and the record is 22
+bytes. The Rust agent captures at dumpcap's 262,144-byte snaplen and writes the
+same frames into its own pcapng, so the wire has to carry a frame longer than
+65,535 bytes - an offloaded send can be - where version 3 refused one. The
+history below is why the record was 18; the four bytes it gave back are the
+price of not refusing frames.
 
 **`tsNs` was an f64 of microseconds until version 3.** Epoch nanoseconds are
 past 2^53, so no float could carry the precision Npcap gives when asked for
@@ -85,17 +92,18 @@ Another 0.5% of this stream does not buy either of those.
 import struct
 
 MAGIC = b"IWP1"
-# 3 since the timestamp became integer nanoseconds; 2 since the record shrank
-# from 24 bytes to 18. The browser refuses a version it does not know rather
-# than reading the old layout at the new offsets, which would produce plausible
-# frames with wrong lengths instead of an error.
-VERSION = 3
+# 4 since both lengths became 32 bits; 3 since the timestamp became integer
+# nanoseconds; 2 since the record shrank from 24 bytes to 18. The browser
+# refuses a version it does not know rather than reading the old layout at the
+# new offsets, which would produce plausible frames with wrong lengths instead
+# of an error.
+VERSION = 4
 
 HEADER = struct.Struct("<4sBBH")
-RECORD = struct.Struct("<IHHHQ")
+RECORD = struct.Struct("<IHIIQ")
 
 assert HEADER.size == 8
-assert RECORD.size == 18
+assert RECORD.size == 22
 
 
 def encode_record(seq: int, iface: int, ts_ns: int, orig_len: int, data: bytes) -> bytes:
@@ -108,36 +116,24 @@ def encode_record(seq: int, iface: int, ts_ns: int, orig_len: int, data: bytes) 
     the record is self-contained rather than relative to its batch; see the
     module docstring.
 
-    `orig_len` is the length on the wire and is sent as its EXCESS over what
-    was captured, which is zero unless a snaplen truncated the frame. Clamped
-    rather than wrapped: a frame captured 70 kB short would otherwise report a
-    wire length smaller than its own bytes, and a length that is merely
-    understated is recoverable where one that is nonsense is not.
+    `orig_len` is the length on the wire. It is never sent as less than what
+    was captured - a wire length below the frame's own bytes would be nonsense -
+    so it is raised to `cap_len` instead.
     """
     cap_len = len(data)
-    extra = orig_len - cap_len
-    if extra < 0:
-        extra = 0
-    elif extra > 0xFFFF:
-        extra = 0xFFFF
-    # **Refused, not masked.** `cap_len & 0xFFFF` was here, and the payload is
-    # appended in FULL - so a frame of 70,000 captured bytes would declare
-    # 4,464 and the decoder would take its next record from 65,536 bytes too
-    # early. It does not fail: it reads a plausible record out of the middle of
-    # a frame and then discards the rest of the batch, up to 512 frames, with
-    # no error anywhere. Clamping `extra` above is safe because that field is a
-    # difference nobody indexes with; this one is a length the reader seeks by.
-    #
-    # Unreachable today only by coincidence - scapy opens with snaplen 0xffff -
-    # and one LRO-coalesced segment is all it would take.
-    if cap_len > 0xFFFF:
+    # **Refused, not masked.** The payload is appended in FULL, so a masked
+    # length would have the decoder take its next record from inside a frame -
+    # a plausible record read out of the middle of one, and the rest of the
+    # batch discarded with no error anywhere. At 32 bits it takes a 4 GB frame.
+    if cap_len > 0xFFFFFFFF:
         raise ValueError(
             f"a captured frame of {cap_len} bytes cannot be framed: "
-            "the record's length field is 16 bits, and masking it would "
+            "the record's length field is 32 bits, and masking it would "
             "desynchronise the decoder rather than truncate the frame"
         )
+    orig = min(max(orig_len, cap_len), 0xFFFFFFFF)
     return RECORD.pack(seq & 0xFFFFFFFF, iface & 0xFFFF,
-                       cap_len, extra, int(ts_ns)) + data
+                       cap_len, orig, int(ts_ns)) + data
 
 
 def encode_batch(records) -> bytes:
@@ -186,7 +182,7 @@ def decode_batch(payload: bytes):
     for _ in range(count):
         if offset + RECORD.size > len(payload):
             raise ValueError("truncated record header")
-        seq, iface, cap_len, orig_extra, ts_ns = RECORD.unpack_from(payload, offset)
+        seq, iface, cap_len, orig_len, ts_ns = RECORD.unpack_from(payload, offset)
         offset += RECORD.size
         if offset + cap_len > len(payload):
             raise ValueError("truncated record payload")
@@ -194,9 +190,7 @@ def decode_batch(payload: bytes):
             "seq": seq,
             "iface": iface,
             "tsNs": ts_ns,
-            # Reconstructed, not read: the wire length is sent as its excess
-            # over what was captured. The browser's decoder does the same sum.
-            "origLen": cap_len + orig_extra,
+            "origLen": orig_len,
             "data": payload[offset:offset + cap_len],
         })
         offset += cap_len

@@ -152,34 +152,6 @@
     },
     {
       "message": {
-        "code": "frame_too_long",
-        "iface": 0,
-        "message": "A 71680-byte frame cannot be framed - the record's length field is 16 bits. Receive offload is coalescing past 64 KB; further frames of this size are counted but not reported again.",
-        "type": "error"
-      },
-      "note": "a frame the wire format cannot describe - receive offload past 64 KB"
-    },
-    {
-      "message": {
-        "droppedAgent": 12,
-        "droppedOversize": 7,
-        "droppedPipe": 3,
-        "interfaces": [
-          {
-            "droppedKernel": 100,
-            "iface": 0,
-            "kernelReceived": 4100,
-            "received": 4000
-          }
-        ],
-        "intervalMs": 1000,
-        "seqHigh": 4096,
-        "type": "capture_stats"
-      },
-      "note": "capture_stats carrying the oversize stage"
-    },
-    {
-      "message": {
         "droppedAgent": 12,
         "droppedPipe": 3,
         "interfaces": [
@@ -521,7 +493,7 @@
     {
       "message": {
         "code": "unknown_command",
-        "message": "This agent (4.0.0) does not understand 'fly'.",
+        "message": "This agent (0.5.0) does not understand 'fly'.",
         "type": "error"
       },
       "note": "error: a command this build does not know, named so the app can say which"
@@ -569,7 +541,7 @@
     {
       "message": {
         "code": "invalid_capture_options",
-        "message": "start_capture's snaplen must be a whole number of bytes from 1 to 65535.",
+        "message": "start_capture's snaplen must be a whole number of bytes from 1 to 262144.",
         "type": "error"
       },
       "note": "error: a start_capture whose snaplen is not one - refused, never captured on defaults"

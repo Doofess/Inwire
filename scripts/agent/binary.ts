@@ -39,20 +39,17 @@ function checkThrows(name: string, fn: () => unknown) {
 /**
  * The Python encoder, written out here so both ends are asserted, not shared.
  *
- * `origLen` goes on the wire as its EXCESS over the captured length, which is
- * zero on every frame nothing truncated - so this helper takes the wire length
- * a caller thinks in and does the subtraction, exactly as `encode_record`
- * does. If the two implementations of that subtraction ever disagree, the
- * truncated case below is what says so.
+ * Version 4: both lengths are u32, and the wire length is never sent below the
+ * captured one - `encode_record` raises it, and so does this.
  */
 function record(seq: number, iface: number, tsNs: bigint, origLen: number, data: Uint8Array): Uint8Array {
   const out = new Uint8Array(BATCH_RECORD_BYTES + data.length);
   const view = new DataView(out.buffer);
   view.setUint32(0, seq, true);
   view.setUint16(4, iface, true);
-  view.setUint16(6, data.length, true);
-  view.setUint16(8, Math.max(0, Math.min(0xffff, origLen - data.length)), true);
-  view.setBigUint64(10, tsNs, true);
+  view.setUint32(6, data.length, true);
+  view.setUint32(10, Math.max(origLen, data.length), true);
+  view.setBigUint64(14, tsNs, true);
   out.set(data, BATCH_RECORD_BYTES);
   return out;
 }
@@ -72,6 +69,9 @@ function batch(records: Uint8Array[]): ArrayBuffer {
 
 const sixtyFour = new Uint8Array(64).map((_, i) => i);
 const jumbo = new Uint8Array(9000).fill(0xff);
+// Past version 3's 16-bit ceiling: an offloaded send captured at dumpcap's
+// snaplen. Version 3 refused it; version 4 carries it.
+const offloaded = new Uint8Array(0x1_0004).map((_, i) => i & 0xff);
 
 // --- the happy path ----------------------------------------------------------
 
@@ -80,11 +80,12 @@ const jumbo = new Uint8Array(9000).fill(0xff);
     record(0, 0, 1788477971653284300n, 1514, sixtyFour),
     record(4294967295, 7, 1788477971653285501n, 60, new Uint8Array(0)),
     record(9, 1, 1000n, 9000, jumbo),
+    record(10, 0, 2000n, 0x1_0004, offloaded),
   ]);
 
   check('a batch is recognised before it is decoded', isPacketBatch(buffer), true);
   const frames = decodePacketBatch(buffer);
-  check('every record comes back', frames.length, 3);
+  check('every record comes back', frames.length, 4);
   check('the capture time survives to the microsecond', frames[0].tsUs, 1788477971653284);
   check('...and past it, to the nanosecond', [frames[0].tsNsRem, frames[1].tsNsRem], [300, 501]);
   check('...where a double of the whole stamp would have rounded it',
@@ -94,15 +95,15 @@ const jumbo = new Uint8Array(9000).fill(0xff);
   check('a zero-length capture is a frame, not an error', frames[1].bytes.length, 0);
   check('the wire length is carried apart from the captured length',
     [frames[2].origLen, frames[2].bytes.length], [9000, 9000]);
-  // The reason the field is an excess rather than a length: on the frame that
-  // WAS truncated it has to reconstruct a number larger than the bytes present.
   check('a truncated frame still reports its length on the wire',
     [frames[0].origLen, frames[0].bytes.length], [1514, 64]);
-  // 18 bytes, and it was 24. Asserted as a number rather than left implicit,
-  // because a record that grows silently is a wire break nothing would catch
-  // until two builds disagreed in the field.
-  check('a record is eighteen bytes of framing', BATCH_RECORD_BYTES, 18);
-  check('this build reads version 3', BATCH_VERSION, 3);
+  check('a frame past the old 16-bit ceiling arrives whole, with its length',
+    [frames[3].bytes.length, frames[3].origLen, frames[3].bytes[0x1_0003]], [0x1_0004, 0x1_0004, 0x03]);
+  // 22 bytes: 18 in versions 2 and 3, 24 before. Asserted as a number rather
+  // than left implicit, because a record that grows silently is a wire break
+  // nothing would catch until two builds disagreed in the field.
+  check('a record is twenty-two bytes of framing', BATCH_RECORD_BYTES, 22);
+  check('this build reads version 4', BATCH_VERSION, 4);
   check('the frame bytes are exact', Array.from(frames[0].bytes.slice(0, 5)), [0, 1, 2, 3, 4]);
 
   // The whole reason the bytes travel binary: nothing is copied between the

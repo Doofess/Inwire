@@ -87,7 +87,13 @@ export function dnsQuery(txid: number): Uint8Array {
   return new Uint8Array([...eth, ...ip, ...udp]);
 }
 
-/** The 18-byte record plus its bytes; see `agentBinary.ts` for the layout. */
+/**
+ * The 22-byte record plus its bytes; see `agentBinary.ts` for the layout.
+ *
+ * It still wrote version 2's float of microseconds after version 3 made the
+ * stamp a u64 of nanoseconds - nothing that runs it asserted a timestamp, so
+ * the stale layout decoded to frames stamped nowhere near now.
+ */
 function encodeBatch(frames: { seq: number; tsUs: number; bytes: Uint8Array }[]): Uint8Array {
   const body = frames.reduce((n, f) => n + BATCH_RECORD_BYTES + f.bytes.length, 0);
   const out = new Uint8Array(BATCH_HEADER_BYTES + body);
@@ -100,9 +106,9 @@ function encodeBatch(frames: { seq: number; tsUs: number; bytes: Uint8Array }[])
   for (const frame of frames) {
     view.setUint32(offset, frame.seq, true);
     view.setUint16(offset + 4, 0, true);          // iface
-    view.setUint16(offset + 6, frame.bytes.length, true);
-    view.setUint16(offset + 8, 0, true);          // wire length excess: nothing truncated
-    view.setFloat64(offset + 10, frame.tsUs, true);
+    view.setUint32(offset + 6, frame.bytes.length, true);
+    view.setUint32(offset + 10, frame.bytes.length, true); // wire length: nothing truncated
+    view.setBigUint64(offset + 14, BigInt(Math.round(frame.tsUs)) * 1000n, true);
     out.set(frame.bytes, offset + BATCH_RECORD_BYTES);
     offset += BATCH_RECORD_BYTES + frame.bytes.length;
   }

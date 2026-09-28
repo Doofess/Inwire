@@ -18,7 +18,7 @@
  * refused before Start, with Start blocked.
  *
  * Not in `npm run check` (`check.ts`'s NOT_TESTS): it needs a build, the
- * installed 0.4.1 agent, Npcap, an Ethernet adapter and real traffic, which a
+ * installed 0.5.0 agent, Npcap, an Ethernet adapter and real traffic, which a
  * headless browser makes. Real capture only; no stub agent.
  */
 import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';

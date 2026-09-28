@@ -110,12 +110,11 @@ export type AgentErrorCode =
   // one then, so this answers some other client, or a bug.
   | 'capture_running'
   | 'unknown_command'
-  // The Rust agent's two. `no_interfaces`: a start with no adapter to capture
-  // on at all - a machine without Npcap - which the Python agent answers by
-  // reporting `sniffing` on nothing. `frame_too_long`: a frame receive offload
-  // coalesced past the record's 16-bit length, counted in `droppedOversize`.
+  // The Rust agent's. `no_interfaces`: a start with no adapter to capture on
+  // at all - a machine without Npcap - which the Python agent answers by
+  // reporting `sniffing` on nothing. (`frame_too_long` was its second, and went
+  // with version 4's 32-bit lengths: no frame is too long to describe now.)
   | 'no_interfaces'
-  | 'frame_too_long'
   // A `start_capture` or `check_capture_filter` whose filter or snaplen was
   // not one. Refused rather than started on defaults, which would be a capture
   // of everything its owner believes is narrowed.
@@ -570,7 +569,7 @@ export function parseAgentMessage(raw: string): AgentMessage | null {
  * what this used to be, and it made the number unable to go down: an agent from
  * a higher-numbered build read as newer than required, and passed.
  */
-export const REQUIRED_AGENT_VERSION = '0.4.1';
+export const REQUIRED_AGENT_VERSION = '0.5.0';
 
 /**
  * Is the running agent from a different build than this app?

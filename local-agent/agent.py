@@ -606,7 +606,12 @@ def datalink_of(device_name):
 #: What the capture being started asked the driver for: a libpcap capture
 #: filter, and the most bytes of each frame to keep. Set by `start_capture`
 #: before its threads spawn, and read by each one as it opens its adapter.
-CAPTURE_OPTIONS = {"filter": None, "snaplen": 65535}
+CAPTURE_OPTIONS = {"filter": None, "snaplen": 262144}
+
+#: The largest snaplen a client may ask for, and what no snaplen means:
+#: dumpcap's default, and the Rust agent's `npcap::SNAPLEN`. The wire carries
+#: 32-bit lengths since version 4, so nothing downstream caps it lower.
+MAX_SNAPLEN = 262144
 
 #: The longest capture filter a client may send - the Rust agent's
 #: MAX_CAPTURE_FILTER_CHARS, with the same reason: the text reaches log lines.
@@ -639,10 +644,10 @@ def parse_capture_options(message):
     """
     snaplen = message.get("snaplen")
     if snaplen is None:
-        snaplen = 65535
-    elif isinstance(snaplen, bool) or not isinstance(snaplen, int) or not 1 <= snaplen <= 65535:
+        snaplen = MAX_SNAPLEN
+    elif isinstance(snaplen, bool) or not isinstance(snaplen, int) or not 1 <= snaplen <= MAX_SNAPLEN:
         raise CaptureOptionsError(
-            "start_capture's snaplen must be a whole number of bytes from 1 to 65535.")
+            "start_capture's snaplen must be a whole number of bytes from 1 to 262144.")
     return {"filter": _filter_of(message, "start_capture"), "snaplen": snaplen}
 
 
@@ -700,7 +705,7 @@ def check_capture_filter(text, names):
     if not kinds:
         kinds.append((1, None))
     for link_type, label in kinds:
-        handle = pcap_open_dead(link_type, 65535)
+        handle = pcap_open_dead(link_type, MAX_SNAPLEN)
         if not handle:
             reason = f"libpcap cannot compile for link type {link_type}"
         else:
@@ -1382,7 +1387,7 @@ class AgentServer:
                 CAPTURE_OPTIONS.update(options)
                 if options["filter"] is not None:
                     log.info("capture filter: %r", options["filter"])
-                if options["snaplen"] < 65535:
+                if options["snaplen"] < MAX_SNAPLEN:
                     log.info("snaplen: %d bytes", options["snaplen"])
             self.capture_owner = ws
             self.start_capture()
