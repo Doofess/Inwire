@@ -314,7 +314,11 @@ try {
     const before = (await sentToWorker()).length;
     await filter.fill(`frame.number == ${id}`);
     await filter.press('Enter');
-    const row = page.locator('[role="grid"] [role="row"]').first();
+    // The frame's own row, not the list's first: the filter is answered by a
+    // scan in the store, and until it lands the first row is still the last
+    // case's frame - already selected, so clicking it asks for nothing and the
+    // pane keeps the last tree. That is how frame 19 once "took" 15 seconds.
+    const row = page.locator(`#packet-row-${id}`);
     await row.waitFor();
     await sleep(400);
     const t0 = Date.now();

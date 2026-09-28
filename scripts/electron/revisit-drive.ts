@@ -246,7 +246,10 @@ async function drive(name: string, capture: string, keysPath: string | null, pic
       const before = (await sentToWorker()).length;
       await filter.fill(`frame.number == ${id}`);
       await filter.press('Enter');
-      const row = page.locator('[role="grid"] [role="row"]').first();
+      // The frame's own row, not the list's first: until the store's scan
+      // answers the filter, the first row is still the last case's frame,
+      // already selected, and clicking it asks the Worker for nothing.
+      const row = page.locator(`#packet-row-${id}`);
       await row.waitFor();
       await sleep(400);
       const t0 = Date.now();

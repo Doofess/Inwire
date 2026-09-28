@@ -153,8 +153,11 @@ those anyway.
   created.
 - `capture-options-drive.ts` and `live-revisit-drive.ts`: both pass. The
   revisit drive failed once on its last case, a UDP frame whose tree was not on
-  screen within 15 seconds, and then passed twice. It now prints what went to
-  the Worker when a case fails.
+  screen within 15 seconds. The drive, not the app: it clicked the list's first
+  row 400 ms after applying `frame.number == N`, and until the store's scan
+  answers, that row is the previous case's frame, already selected, so the
+  click asked the Worker for nothing. It clicks `#packet-row-N` now, as
+  `revisit-drive.ts` does too, and passed four runs since.
 
 **One thing the drives found about the drives, not the app:** a capture the
 agent writes a file for is filed from segment 1 even without a ring, because
