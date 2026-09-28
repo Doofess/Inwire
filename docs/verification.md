@@ -1055,17 +1055,28 @@ and that `C:\Windows` is refused - but both ends there are one account, so it
 cannot show that one user's client is refused **another user's** folder, which
 is the case impersonation exists for.
 
-- [ ] As user **A**, note A's capture folder,
-      `C:\Users\A\AppData\Local\Inwire\captures`.
-- [ ] As a **standard** user **B**, with A's folder not shared, connect a
-      client to `\\.\pipe\inwire-agent` (the raw client in
-      `capture-file-drive.ts`, run as B) and send `set_capture_root` naming A's
-      folder, then `start_capture` with a capture id. **The agent answers
-      `capture_failed` and nothing appears in A's folder.** A file there, owned
-      by `SYSTEM`, means the writer ran with the service's own rights - the
-      failure this whole arrangement is built to make impossible.
-- [ ] As B, start a capture from the app normally. The file lands in **B's**
-      folder, owned by **B**.
+**`scripts/agent/second-account-check.ps1` is the whole of it**, in plain
+Windows PowerShell so an account that has never run npm can run it (a
+standard user can read `C:\dev\Inwire`). No Inwire window may be capturing,
+and the shell must not be elevated.
+
+- [ ] As a **standard** user **B**:
+      `powershell -ExecutionPolicy Bypass -File C:\dev\Inwire\scripts\agent\second-account-check.ps1 -Target 'C:\Users\A\AppData\Local\Inwire\captures'`.
+      It first proves B cannot write that folder itself, then asks the agent
+      to. **The agent answers `capture_failed`.** It also captures into B's
+      own folder, and the file must be owned by **B**, not by `SYSTEM`. Finally
+      it connects at the Identification and Anonymous impersonation levels,
+      which give the agent no identity to act as, and each must be refused
+      with nothing written.
+- [ ] Back as **A**, run the command it prints (`-VerifyCaptureId`). It checks
+      that nothing appeared in A's folder, which B cannot look into. A file
+      there, owned by `SYSTEM`, means the writer ran with the service's own
+      rights - the failure this whole arrangement is built to make impossible.
+
+Run as the owner alone on 2026-09-29, against `C:\Windows` as the folder:
+every case passed. The Identification level was refused with os error 1346
+and the Anonymous level with 1347. What only a second account adds is the
+first case with a real other user's folder.
 
 ### The agent's lifetime is the app's
 
