@@ -133,22 +133,25 @@ function ipStreamRow(
 }
 
 /**
- * UDP's conversation index and its two clocks, plus the `[Timestamps]` subtree
- * every other transport still gets.
+ * UDP's conversation index and its two clocks, and nothing for any other
+ * transport.
  *
  * The two timestamp rows were frame-relative for every protocol, under labels
  * the reference uses for **stream**-relative numbers. TCP has had the real
  * thing since it gained `tcp.time_relative` and `tcp.time_delta`, computed
  * from per-connection clocks in `tcpStreamTracker.ts`; UDP had the labels and
  * not the numbers. It has both now, from the same conversation record that
- * answers `udp.stream`, and everything else keeps the frame-relative pair it
- * always had rather than gaining a wrong stream-relative one.
+ * answers `udp.stream`.
+ *
+ * **Every other transport used to keep the frame-relative pair**, and that was
+ * a second clock where the reference draws none: ICMP has no `[Timestamps]`
+ * at all, and on TCP it sat beside the stream-relative pair with the same
+ * labels and different numbers. The frame's own times are the Frame layer's.
  */
 function udpConversationRows(
   context: NetworkContext, ipProtocolNum: number, src: string, dst: string,
   transport: { layer: ProtocolLayer; srcPort?: number; dstPort?: number },
   filterFields: Record<string, string | number>,
-  relativeTime: number, timeDelta: number,
 ): ProtocolField[] {
   const facts = !context.quoted
     && ipProtocolNum === 17
@@ -157,18 +160,7 @@ function udpConversationRows(
     && transport.dstPort !== undefined
     ? context.l3Tracker.udpStream(src, transport.srcPort, dst, transport.dstPort, context.tsUs)
     : undefined;
-
-  if (facts === undefined) {
-    return [{
-      name: '[Timestamps]',
-      value: '',
-      generated: true,
-      children: [
-        { name: '[Time since first frame]', value: `${relativeTime.toFixed(9)} seconds`, generated: true },
-        { name: '[Time since previous frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
-      ],
-    }];
-  }
+  if (facts === undefined) return [];
 
   filterFields['udp.stream'] = facts.index;
   return [
@@ -689,10 +681,10 @@ export function decodeNetworkLayer(
       }
       transportLayerIndex = layers.length;
       layers.push(transport.layer);
-      // Timing lives here, not in the transport decoder, so the [Timestamps]
-      // subtree the reference analyzer nests under UDP/TCP is attached from this side.
+      // UDP's conversation rows live here, not in its decoder, because the
+      // conversation record is keyed on the addresses this layer holds.
       transport.layer.fields.push(...udpConversationRows(
-        context, ipProtocolNum, srcIp, dstIp, transport, filterFields, relativeTime, timeDelta,
+        context, ipProtocolNum, srcIp, dstIp, transport, filterFields,
       ));
       if (transport.extraLayers) layers.push(...transport.extraLayers);
       if (transport.embeddedNetwork) decodeQuotedDatagram(transport.embeddedNetwork);
@@ -937,10 +929,10 @@ export function decodeNetworkLayer(
       }
       transportLayerIndex = layers.length;
       layers.push(transport.layer);
-      // Timing lives here, not in the transport decoder, so the [Timestamps]
-      // subtree the reference analyzer nests under UDP/TCP is attached from this side.
+      // UDP's conversation rows live here, not in its decoder, because the
+      // conversation record is keyed on the addresses this layer holds.
       transport.layer.fields.push(...udpConversationRows(
-        context, effectiveNextHeader, srcIp, dstIp, transport, filterFields, relativeTime, timeDelta,
+        context, effectiveNextHeader, srcIp, dstIp, transport, filterFields,
       ));
       if (transport.extraLayers) layers.push(...transport.extraLayers);
       if (transport.embeddedNetwork) decodeQuotedDatagram(transport.embeddedNetwork);

@@ -334,7 +334,6 @@ function dissectEthernet(rawBytes: Uint8Array, encapsulation: string): LinkLayer
         // resolved to nothing on all 105 802.3 frames here.
         ? { name: 'Length', value: etherType, abbrev: 'eth.len', rawBytesRange: [12, 13] }
         : { name: 'Type', value: `0x${etherType.toString(16).padStart(4, '0')} (${describeEtherType(etherType)})`, abbrev: 'eth.type', rawBytesRange: [12, 13] },
-      { name: '[Stream index]', value: 0, generated: true },
     ],
   }];
 

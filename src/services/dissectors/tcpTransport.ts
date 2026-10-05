@@ -755,6 +755,10 @@ export function dissectTcpTransport(
       ...(analysis?.initialRttUs !== undefined ? { 'tcp.analysis.initial_rtt': analysis.initialRttUs / 1e6 } : {}),
       ...(analysis?.bytesInFlight !== undefined ? { 'tcp.analysis.bytes_in_flight': analysis.bytesInFlight } : {}),
       ...(analysis?.dupAckNum !== undefined ? { 'tcp.analysis.duplicate_ack_num': analysis.dupAckNum, 'tcp.analysis.duplicate_ack_frame': analysis.dupAckFrame ?? 0 } : {}),
+      // Registered as filterable time fields and drawn in the tree, but never
+      // given a value here - so `tcp.time_relative > 1` matched nothing.
+      ...(sinceStreamStart !== undefined ? { 'tcp.time_relative': sinceStreamStart } : {}),
+      ...(sincePreviousInStream !== undefined ? { 'tcp.time_delta': sincePreviousInStream } : {}),
     },
     status: status ?? (analysisFlags.length > 0 && !isKeepAlive && !isKeepAliveAck ? 'warning' : undefined),
     analysisFlags,
@@ -849,20 +853,33 @@ export function dissectTcpTransport(
         ...(streamPacketNumber !== undefined
           ? [{ name: '[Stream Packet Number]', value: streamPacketNumber, generated: true, abbrev: 'tcp.stream.pnum' }]
           : []),
-        ...(sinceStreamStart !== undefined
+        // Nested, as the reference nests them, and the only timing this layer
+        // carries: the frame-relative pair every transport used to get beside
+        // it read as a second, contradictory clock. Those times are the Frame
+        // layer's.
+        ...(sinceStreamStart !== undefined || sincePreviousInStream !== undefined
           ? [{
-            name: '[Time since first frame in this TCP stream]',
-            value: sinceStreamStart.toFixed(9),
+            name: '[Timestamps]',
+            value: '',
             generated: true,
-            abbrev: 'tcp.time_relative',
-          }]
-          : []),
-        ...(sincePreviousInStream !== undefined
-          ? [{
-            name: '[Time since previous frame in this TCP stream]',
-            value: sincePreviousInStream.toFixed(9),
-            generated: true,
-            abbrev: 'tcp.time_delta',
+            children: [
+              ...(sinceStreamStart !== undefined
+                ? [{
+                  name: '[Time since first frame in this TCP stream]',
+                  value: `${sinceStreamStart.toFixed(9)} seconds`,
+                  generated: true,
+                  abbrev: 'tcp.time_relative',
+                }]
+                : []),
+              ...(sincePreviousInStream !== undefined
+                ? [{
+                  name: '[Time since previous frame in this TCP stream]',
+                  value: `${sincePreviousInStream.toFixed(9)} seconds`,
+                  generated: true,
+                  abbrev: 'tcp.time_delta',
+                }]
+                : []),
+            ],
           }]
           : []),
         ...(conversationCompleteness !== undefined
