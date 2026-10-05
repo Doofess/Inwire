@@ -727,6 +727,9 @@ export const FIELDS: readonly FieldDef[] = [
   { abbrev: 'arp.src.proto_ipv4', label: 'Sender IP address', type: 'ipv4', layer: 'arp' },
   { abbrev: 'arp.dst.hw_mac', label: 'Target MAC address', type: 'mac', layer: 'arp' },
   { abbrev: 'arp.dst.proto_ipv4', label: 'Target IP address', type: 'ipv4', layer: 'arp' },
+  { abbrev: 'arp.isgratuitous', label: 'Is gratuitous', type: 'bool', layer: 'arp', generated: true },
+  { abbrev: 'arp.isprobe', label: 'Is probe', type: 'bool', layer: 'arp', generated: true },
+  { abbrev: 'arp.isannouncement', label: 'Is announcement', type: 'bool', layer: 'arp', generated: true },
 
   // --- STP -------------------------------------------------------------------
   uint('stp.type', 'BPDU Type', 'stp'),

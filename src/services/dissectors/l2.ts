@@ -41,12 +41,22 @@ export function dissectArp(rawBytes: Uint8Array, l3Offset: number): L2DissectorR
 
   // A host announcing its own address - sender and target IP equal - is a
   // gratuitous ARP, and the reference analyzer says so rather than asking "who has" an
-  // address the sender already owns.
+  // address the sender already owns. RFC 5227 names two more shapes, which
+  // are how a host claims an address at all: a PROBE asks for one from
+  // 0.0.0.0 before using it, and an ANNOUNCEMENT is the gratuitous request
+  // that follows, its target MAC left zero. `packet-arp.c` decides all three
+  // exactly so.
   const isGratuitous = senderIp === targetIp && (opcode === 1 || opcode === 2);
+  const isAnnouncement = isGratuitous && opcode === 1 && targetMac === '00:00:00:00:00:00';
+  const isProbe = !isGratuitous && opcode === 1 && senderIp === '0.0.0.0';
 
   let info: string;
-  if (isGratuitous) {
+  if (isAnnouncement) {
+    info = `ARP Announcement for ${targetIp}`;
+  } else if (isGratuitous) {
     info = `Gratuitous ARP for ${senderIp} (${opcode === 1 ? 'Request' : 'Reply'})`;
+  } else if (isProbe) {
+    info = `Who has ${targetIp}? (ARP Probe)`;
   } else if (opcode === 1) {
     info = `Who has ${targetIp}? Tell ${senderIp}`;
   } else if (opcode === 2) {
@@ -64,10 +74,17 @@ export function dissectArp(rawBytes: Uint8Array, l3Offset: number): L2DissectorR
       'arp.dst.proto_ipv4': targetIp,
       'arp.src.hw_mac': senderMac,
       'arp.dst.hw_mac': targetMac,
+      ...(isGratuitous ? { 'arp.isgratuitous': 1 } : {}),
+      ...(isProbe ? { 'arp.isprobe': 1 } : {}),
+      ...(isAnnouncement ? { 'arp.isannouncement': 1 } : {}),
     },
     layer: {
       name: 'Address Resolution Protocol',
-      summary: `Address Resolution Protocol (${opcodeName})`,
+      summary: `Address Resolution Protocol (${
+        isAnnouncement ? 'ARP Announcement'
+        : isProbe ? 'ARP Probe'
+        : isGratuitous ? `${opcodeName}/gratuitous ARP`
+        : opcodeName})`,
       rawBytesRange: [l3Offset, l3Offset + 27],
       fields: [
         // The four fixed header fields, which were drawn from the first
@@ -81,6 +98,9 @@ export function dissectArp(rawBytes: Uint8Array, l3Offset: number): L2DissectorR
         { name: 'Hardware size', value: rawBytes[l3Offset + 4], abbrev: 'arp.hw.size', rawBytesRange: [l3Offset + 4, l3Offset + 4] },
         { name: 'Protocol size', value: rawBytes[l3Offset + 5], abbrev: 'arp.proto.size', rawBytesRange: [l3Offset + 5, l3Offset + 5] },
         { name: 'Opcode', value: `${opcodeName} (${opcode})`, abbrev: 'arp.opcode', rawBytesRange: [l3Offset + 6, l3Offset + 7] },
+        ...(isGratuitous ? [{ name: '[Is gratuitous]', value: 'True', generated: true, abbrev: 'arp.isgratuitous' }] : []),
+        ...(isProbe ? [{ name: '[Is probe]', value: 'True', generated: true, abbrev: 'arp.isprobe' }] : []),
+        ...(isAnnouncement ? [{ name: '[Is announcement]', value: 'True', generated: true, abbrev: 'arp.isannouncement' }] : []),
         { name: 'Sender MAC address', value: senderMac, abbrev: 'arp.src.hw_mac', rawBytesRange: [l3Offset + 8, l3Offset + 13] },
         { name: 'Sender IP address', value: senderIp, abbrev: 'arp.src.proto_ipv4', rawBytesRange: [l3Offset + 14, l3Offset + 17] },
         { name: 'Target MAC address', value: targetMac, abbrev: 'arp.dst.hw_mac', rawBytesRange: [l3Offset + 18, l3Offset + 23] },
