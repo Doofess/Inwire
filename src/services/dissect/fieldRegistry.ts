@@ -99,7 +99,7 @@ export const LAYERS = [
   // end reads as an application protocol however low in the stack it sits.
   // `cdp` belongs beside `lldp` for that reason, and `vrrp`/`ospf` beside
   // `igmp` - all three sit directly on their lower layer with no ports.
-  'frame', 'eth', 'vlan', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905', 'cdp',
+  'frame', 'eth', 'vlan', 'ieee8021ad', 'ieee8021ah', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905', 'cdp',
   'ip', 'ipv6', 'gre', 'vxlan', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
   // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
@@ -184,6 +184,16 @@ export const FIELDS: readonly FieldDef[] = [
   uint('eth.ig', 'IG bit', 'eth'),
   uint('eth.type', 'Type', 'eth'),
   uint('vlan.id', 'VLAN ID', 'vlan', { label: 'VLAN', align: 'right' }),
+  treeOnly(uint('vlan.priority', 'Priority', 'vlan')),
+  treeOnly(bool('vlan.dei', 'DEI', 'vlan')),
+  treeOnly(uint('vlan.etype', 'Type', 'vlan')),
+  // An 802.1ad service tag, which the reference dissects apart from 802.1Q.
+  treeOnly(uint('ieee8021ad.priority', 'Priority', 'ieee8021ad')),
+  treeOnly(uint('ieee8021ad.dei', 'DEI', 'ieee8021ad')),
+  uint('ieee8021ad.id', 'ID', 'ieee8021ad'),
+  uint('ieee8021ad.svid', 'S-VID', 'ieee8021ad'),
+  uint('ieee8021ad.cvid', 'C-VID', 'ieee8021ad'),
+  treeOnly(uint('ieee8021ah.etype', 'Type', 'ieee8021ah')),
 
   // --- 802.2 LLC / SNAP ------------------------------------------------------
   // An 802.3 frame's type/length field is a length, and what follows is an LLC

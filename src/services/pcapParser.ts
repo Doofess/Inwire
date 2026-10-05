@@ -823,6 +823,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'HyperText Transfer Protocol Version 3': 'http3',
   'Ethernet II': 'eth',
   '802.1Q Virtual LAN': 'vlan',
+  'IEEE 802.1ad': 'ieee8021ad',
   // The link layers a capture file may declare instead of Ethernet
   // (services/dissectors/linkLayer.ts). Without these the underscore rule
   // would name them `linux_cooked_capture_v1` and `null/loopback`, neither of

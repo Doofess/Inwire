@@ -360,6 +360,38 @@ function dissectEthernet(rawBytes: Uint8Array, encapsulation: string): LinkLayer
   return result;
 }
 
+/** Priority Code Point names, IEEE 802.1Q-2014 Table I-2 - the reference's default table. */
+const VLAN_PRIORITIES = [
+  'Best Effort (default)', 'Background', 'Excellent Effort', 'Critical Applications',
+  'Video, < 100ms latency and jitter', 'Voice, < 10ms latency and jitter', 'Internetwork Control', 'Network Control',
+];
+
+/** A 16-bit TCI's three parts as bitfield rows: priority, drop eligibility, VLAN id. */
+function tciRows(
+  tci: number, at: number,
+  names: { priority: string; dei: string; id: string },
+  values: { priority: string | number; dei: string | number },
+  idLabel = 'ID',
+): ProtocolField[] {
+  const range: [number, number] = [at, at + 1];
+  return [
+    { name: 'Priority', value: values.priority, abbrev: names.priority, rawBytesRange: range, bitfield: { bitOffset: 0, bitLength: 3, totalBits: 16 } },
+    { name: 'DEI', value: values.dei, abbrev: names.dei, rawBytesRange: range, bitfield: { bitOffset: 3, bitLength: 1, totalBits: 16 } },
+    { name: idLabel, value: tci & 0x0fff, abbrev: names.id, rawBytesRange: range, bitfield: { bitOffset: 4, bitLength: 12, totalBits: 16 } },
+  ];
+}
+
+/**
+ * Every VLAN tag in front of the real EtherType, as the reference draws it.
+ *
+ * Two dissectors there, so two layers here. 0x8100 is an 802.1Q customer
+ * tag (packet-vlan.c). 0x88a8 is an 802.1ad service tag, which the reference
+ * hands to its own dissector (packet-ieee8021ah.c) with its own field names -
+ * and which reads an 802.1ad tag followed directly by a second one as one
+ * S-VID/C-VID pair, while the usual QinQ shape, 0x88a8 then 0x8100, is a
+ * service tag and then an ordinary 802.1Q one. Both used to be drawn as
+ * "802.1Q Virtual LAN" with three unnamed numbers.
+ */
 function stripVlanTags(rawBytes: Uint8Array, out: LinkLayerResult): void {
   let depth = 0;
   while (
@@ -371,22 +403,47 @@ function stripVlanTags(rawBytes: Uint8Array, out: LinkLayerResult): void {
     const priority = (tci >> 13) & 0x7;
     const dei = (tci >> 12) & 0x1;
     const vlanId = tci & 0x0fff;
-    const inner = (rawBytes[at + 2] << 8) | rawBytes[at + 3];
+    let inner = (rawBytes[at + 2] << 8) | rawBytes[at + 3];
+    let tagEnd = at + 4;
 
-    out.layers.push({
-      name: '802.1Q Virtual LAN',
-      summary: `802.1Q Virtual LAN, PRI: ${priority}, DEI: ${dei}, ID: ${vlanId}`,
-      rawBytesRange: [at, at + 3],
-      fields: [
-        { name: 'Priority', value: priority, rawBytesRange: [at, at] },
-        { name: 'Drop Eligible Indicator (DEI)', value: dei, rawBytesRange: [at, at] },
-        { name: 'VLAN ID', value: vlanId, abbrev: 'vlan.id', rawBytesRange: [at, at + 1] },
-        { name: 'Type', value: `0x${inner.toString(16).padStart(4, '0')} (${describeEtherType(inner)})`, rawBytesRange: [at + 2, at + 3] },
-      ],
-    });
-    out.fields['vlan.id'] = vlanId;
+    if (out.etherType === 0x8100) {
+      out.layers.push({
+        name: '802.1Q Virtual LAN',
+        summary: `802.1Q Virtual LAN, PRI: ${priority}, DEI: ${dei}, ID: ${vlanId}`,
+        rawBytesRange: [at, at + 3],
+        fields: [
+          ...tciRows(tci, at, { priority: 'vlan.priority', dei: 'vlan.dei', id: 'vlan.id' },
+            { priority: `${VLAN_PRIORITIES[priority]} (${priority})`, dei: dei ? 'Eligible' : 'Ineligible' }),
+          { name: 'Type', value: `0x${inner.toString(16).padStart(4, '0')} (${describeEtherType(inner)})`, abbrev: 'vlan.etype', rawBytesRange: [at + 2, at + 3] },
+        ],
+      });
+      out.fields['vlan.id'] = vlanId;
+    } else {
+      const names = { priority: 'ieee8021ad.priority', dei: 'ieee8021ad.dei', id: 'ieee8021ad.id' };
+      const doubled = inner === 0x88a8 && rawBytes.length >= at + 8;
+      const fields: ProtocolField[] = [];
+      let summary: string;
+      if (doubled) {
+        const ctci = (rawBytes[at + 4] << 8) | rawBytes[at + 5];
+        fields.push(
+          ...tciRows(tci, at, { ...names, id: 'ieee8021ad.svid' }, { priority, dei }),
+          ...tciRows(ctci, at + 4, { ...names, id: 'ieee8021ad.cvid' }, { priority: (ctci >> 13) & 0x7, dei: (ctci >> 12) & 0x1 }),
+        );
+        summary = `IEEE 802.1ad, S-VID: ${vlanId}, C-VID: ${ctci & 0x0fff}`;
+        out.fields['ieee8021ad.svid'] = vlanId;
+        out.fields['ieee8021ad.cvid'] = ctci & 0x0fff;
+        inner = (rawBytes[at + 6] << 8) | rawBytes[at + 7];
+        tagEnd = at + 8;
+      } else {
+        fields.push(...tciRows(tci, at, names, { priority, dei }));
+        summary = `IEEE 802.1ad, ID: ${vlanId}`;
+        out.fields['ieee8021ad.id'] = vlanId;
+      }
+      fields.push({ name: 'Type', value: `0x${inner.toString(16).padStart(4, '0')} (${describeEtherType(inner)})`, abbrev: 'ieee8021ah.etype', rawBytesRange: [tagEnd - 2, tagEnd - 1] });
+      out.layers.push({ name: 'IEEE 802.1ad', summary, rawBytesRange: [at, tagEnd - 1], fields });
+    }
     out.etherType = inner;
-    out.l3Offset = at + 4;
+    out.l3Offset = tagEnd;
     depth++;
   }
 }
