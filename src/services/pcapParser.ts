@@ -40,6 +40,7 @@ export interface FrameRecordEntry { id: number; record: Uint8Array; derived?: Ui
 import { poolExpert, poolTokens } from './dissect/tokenPool';
 import { SIZE_LIMITED, bytesNotCaptured } from './dissect/captureShort';
 import { FieldBlockWriter } from './dissect/fieldSplit';
+import { protocolsInFrame } from './dissect/protocolsInFrame';
 
 /**
  * Frames handed over at a time while an import streams.
@@ -687,19 +688,20 @@ export class PcapService {
       const tsUs = Number(frame.tsNanos / 1000n);
 
       const id = packetIndex++;
+      const frameFacts = { nanosRemainder: frame.tsPrecision > 6 ? Number(frame.tsNanos % 1000n) : undefined };
       let decoded: ReturnType<typeof decodeRawEthernetPacket>;
       if (recorder === null) {
         decoded = decodeRawEthernetPacket(
           frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
           tcpTracker, icmpTracker, quicTracker, dnsTracker, undefined, frame.linktype, l3Tracker,
-          host,
+          host, frameFacts,
         );
       } else {
         recorder.begin();
         const src = recorder.sources;
         decoded = withDissectEnv(src.env, () => decodeRawEthernetPacket(
           frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
-          src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host,
+          src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host, frameFacts,
         ));
         records.set(id, { record: recorder.end(), derived: recorder.endDerived() });
       }
@@ -911,6 +913,16 @@ export function decodeRawEthernetPacket(
    * `services/direction.ts`.
    */
   host?: HostIdentity,
+  /**
+   * What the frame's capture knew about it beyond `tsUs`. `nanosRemainder` is
+   * the timestamp's digits past the microsecond (0-999), present only when the
+   * driver or the file measured them (ADR 0050) - so the Frame layer's arrival
+   * times carry the nanoseconds the meta rail already shows, and a microsecond
+   * capture still reads `...000` as the reference reads it.
+   *
+   * Appended last, like `l3Tracker` and `host`, so no positional call site moves.
+   */
+  frameFacts?: { nanosRemainder?: number },
 ): {
   packet: Packet;
   icmpMatchedRequestFrameId?: number;
@@ -918,6 +930,7 @@ export function decodeRawEthernetPacket(
   /** name -> addresses this frame taught, for the passive resolution map. */
   resolvedNames?: { name: string; addresses: string[] }[];
 } {
+  const nanosRemainder = frameFacts?.nanosRemainder ?? 0;
   const interfaceName = captureInterface?.name ?? 'unknown';
   const interfaceDescription = captureInterface?.label ?? 'Imported capture';
   // hexDump/asciiDump are deliberately NOT built here. They are display
@@ -1021,31 +1034,55 @@ export function decodeRawEthernetPacket(
       summary: `Frame ${id}: ${origLen || rawBytes.length} bytes on wire (${(origLen || rawBytes.length) * 8} bits), ${rawBytes.length} bytes captured (${rawBytes.length * 8} bits)`,
       rawBytesRange: [0, rawBytes.length - 1],
       // Ordered as the reference analyzer orders it: identity, then encapsulation, then the
-      // three clocks, then the generated deltas, then the frame's own numbers.
+      // three clocks, then the generated deltas, then the frame's own numbers. Every
+      // row carries the reference's name, so it can be copied, made a column, or -
+      // where `filter/fields.ts` can answer it from the frame - applied as a filter;
+      // `tree-coverage.ts` holds the layer to tshark's like any other.
       fields: [
-        { name: 'Section number', value: 1, generated: true },
+        { name: 'Section number', value: 1, generated: true, abbrev: 'frame.section_number' },
         {
           name: 'Interface id',
           value: `0 (${interfaceName})`,
           generated: true,
+          abbrev: 'frame.interface_id',
           children: [
-            { name: 'Interface name', value: interfaceName, generated: true },
-            { name: 'Interface description', value: interfaceDescription, generated: true },
+            { name: 'Interface name', value: interfaceName, generated: true, abbrev: 'frame.interface_name' },
+            {
+              name: 'Interface description', value: interfaceDescription, generated: true,
+              abbrev: 'frame.interface_description',
+            },
           ],
         },
-        { name: 'Encapsulation type', value: link.encapsulation },
-        { name: 'Arrival Time', value: formatArrivalTime(tsUs) },
-        { name: 'UTC Arrival Time', value: formatArrivalTime(tsUs, true) },
-        { name: 'Epoch Arrival Time', value: `${Math.floor(tsUs / 1_000_000)}.${String(tsUs % 1_000_000).padStart(6, '0')}000` },
-        { name: '[Time shift for this packet]', value: '0.000000000 seconds', generated: true },
-        { name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
-        { name: '[Time delta from previous displayed frame]', value: `${timeDelta.toFixed(9)} seconds`, generated: true },
-        { name: '[Time since reference or first frame]', value: `${relativeTime.toFixed(9)} seconds`, generated: true },
-        { name: 'Frame Number', value: id },
-        { name: 'Frame Length', value: `${origLen || rawBytes.length} bytes (${(origLen || rawBytes.length) * 8} bits)` },
-        { name: 'Capture Length', value: `${rawBytes.length} bytes (${rawBytes.length * 8} bits)` },
-        { name: '[Frame is marked]', value: 'False', generated: true },
-        { name: '[Frame is ignored]', value: 'False', generated: true },
+        { name: 'Encapsulation type', value: link.encapsulation, abbrev: 'frame.encap_type' },
+        { name: 'Arrival Time', value: formatArrivalTime(tsUs, false, nanosRemainder), abbrev: 'frame.time' },
+        { name: 'UTC Arrival Time', value: formatArrivalTime(tsUs, true, nanosRemainder), abbrev: 'frame.time_utc' },
+        {
+          name: 'Epoch Arrival Time',
+          value: `${Math.floor(tsUs / 1_000_000)}.${String((tsUs % 1_000_000) * 1000 + nanosRemainder).padStart(9, '0')}`,
+          abbrev: 'frame.time_epoch',
+        },
+        { name: '[Time shift for this packet]', value: '0.000000000 seconds', generated: true, abbrev: 'frame.offset_shift' },
+        // No delta on a capture's first frame, which has nothing before it - the
+        // reference draws none. And no "delta from previous DISPLAYED frame":
+        // which frames are displayed is the list's filter, decided after this
+        // tree is built, so the row could only ever repeat the captured delta
+        // under a label that claims otherwise.
+        ...(id > 1 ? [{
+          name: '[Time delta from previous captured frame]', value: `${timeDelta.toFixed(9)} seconds`,
+          generated: true, abbrev: 'frame.time_delta',
+        }] : []),
+        {
+          name: '[Time since reference or first frame]', value: `${relativeTime.toFixed(9)} seconds`,
+          generated: true, abbrev: 'frame.time_relative',
+        },
+        { name: 'Frame Number', value: id, abbrev: 'frame.number' },
+        {
+          name: 'Frame Length', value: `${origLen || rawBytes.length} bytes (${(origLen || rawBytes.length) * 8} bits)`,
+          abbrev: 'frame.len',
+        },
+        { name: 'Capture Length', value: `${rawBytes.length} bytes (${rawBytes.length * 8} bits)`, abbrev: 'frame.cap_len' },
+        { name: '[Frame is marked]', value: 'False', generated: true, abbrev: 'frame.marked' },
+        { name: '[Frame is ignored]', value: 'False', generated: true, abbrev: 'frame.ignored' },
         // A frame longer than the Ethernet MTU was never on the wire in this
         // shape: the adapter's segmentation offload split it, and the capture
         // was taken before that happened. It is why the checksum in it is
@@ -1245,8 +1282,8 @@ export function decodeRawEthernetPacket(
   // come from the walker, which knows which header each one was.
   for (const token of extensionTokens) if (!frameProtocols.includes(token)) frameProtocols.push(token);
   layers[0].fields.push(
-    { name: '[Protocols in frame]', value: frameProtocols.join(':'), generated: true },
-    { name: 'Character encoding', value: 'ASCII (0)' },
+    { name: '[Protocols in frame]', value: protocolsInFrame(frameProtocols), generated: true, abbrev: 'frame.protocols' },
+    { name: 'Character encoding', value: 'ASCII (0)', abbrev: 'frame.encoding' },
   );
 
   return {
@@ -1467,15 +1504,23 @@ function arrivalSecond(tsUs: number, utc: boolean): ArrivalSecond {
   const fresh: ArrivalSecond = {
     second,
     head: `${month} ${day}, ${year} ${hour}:${minute}:${sec}`,
-    zone,
+    // The reference writes the local zone out in full and UTC as `UTC`, which
+    // Intl would spell "Coordinated Universal Time".
+    zone: utc ? 'UTC' : zone,
   };
   if (utc) utcArrivalSecond = fresh; else localArrivalSecond = fresh;
   return fresh;
 }
 
-function formatArrivalTime(tsUs: number, utc = false): string {
+/**
+ * The reference's arrival-time format: `Aug 25, 2026 20:16:40.351587600
+ * Jerusalem Daylight Time`, the zone spelled out by Intl because that is what
+ * the reference prints. The digits past the microsecond are the capture's own
+ * when it measured them, and zeros when it did not - unknown, not invented.
+ */
+function formatArrivalTime(tsUs: number, utc = false, nanosRemainder = 0): string {
   const { head, zone } = arrivalSecond(tsUs, utc);
-  const fractional = String((tsUs % 1_000_000) * 1000).padStart(9, '0');
+  const fractional = String((tsUs % 1_000_000) * 1000 + nanosRemainder).padStart(9, '0');
   return `${head}.${fractional} ${zone}`;
 }
 

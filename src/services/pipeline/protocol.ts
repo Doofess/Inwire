@@ -186,6 +186,8 @@ export interface ReplayFrame {
    * adapter sends nothing extra.
    */
   linkType?: number;
+  /** The exact stamp, when the capture measured more of it than `tsUs` says. */
+  tsNanos?: bigint;
   /**
    * The adapter this frame came off, as the frame itself recorded it.
    *

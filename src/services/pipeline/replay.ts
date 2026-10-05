@@ -216,6 +216,7 @@ export function dissectReplay(
       frame.origLen, tcp, icmp, quic, dns,
       frame.interfaceName !== undefined ? resolveInterface?.(frame.interfaceName) : undefined,
       frame.linkType, l3, host,
+      { nanosRemainder: frame.tsNanos !== undefined ? Number(frame.tsNanos % 1000n) : undefined },
     );
     // Only the last frame's tree is kept. The rest are dissected for their
     // effect on the trackers and thrown away, which is the whole mechanism.

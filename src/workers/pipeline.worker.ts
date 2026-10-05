@@ -362,12 +362,14 @@ function ingest(frame: LiveFrame, id: number): void {
     lastPacketUs = frame.tsUs;
     lastPacketNsRem = frame.tsNsRem;
 
+    const precision = tsPrecisionById.get(frame.iface) ?? 6;
     recorder.begin();
     const src = recorder.sources;
     const decoded = withDissectEnv(src.env, () => decodeRawEthernetPacket(
       frame.bytes, id, frame.tsUs, relativeTime, timeDelta, frame.origLen,
       src.tcp, src.icmp, src.quic, src.dns, interfaceFor(frame.iface),
       linkTypeFor(frame.iface), src.l3, host,
+      { nanosRemainder: precision > 6 ? frame.tsNsRem : undefined },
     ));
     // Only for a frame that dissected: one that threw has no record to trust,
     // and its tree is built the old way.
@@ -375,7 +377,6 @@ function ingest(frame: LiveFrame, id: number): void {
     const derived = recorder.endDerived();
     if (derived !== null) derivedStore.set(id, derived);
     const packet = decoded.packet;
-    const precision = tsPrecisionById.get(frame.iface) ?? 6;
     packet.tsPrecision = precision;
     // The exact stamp, as an import carries one, only where there is more of
     // it than `tsUs` already says.
@@ -480,6 +481,9 @@ async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
       own, id, row.tsUs, row.relativeTime, row.timeDelta, row.length,
       rs.tcp, rs.icmp, rs.quic, rs.dns, interfaceByFrameLabel(row.interfaceName),
       row.linkType ?? LINKTYPE.ETHERNET, rs.l3, host,
+      // The stored row keeps the nanoseconds (`chunkCodec.ts`), so a revisit
+      // draws the same arrival times arrival did.
+      { nanosRemainder: row.tsNanos !== undefined ? Number(row.tsNanos % 1000n) : undefined },
     ));
     again.finish();
     // The one thing a LATER frame writes into a tree, carried on the row.

@@ -116,17 +116,20 @@ function findTshark(): string | null {
  * Names the reference emits that this build has no business emitting, so they
  * do not sit at the top of the gap list for ever.
  *
- * Each is a fact about the *file* or about tshark's own bookkeeping rather
- * than about the packet: `geninfo` is a proto PDML invents, `frame.*` is the
- * pcap record header (answered here by the synthetic readers in
- * `filter/fields.ts` rather than by a dissector), and `_ws.*` is the
- * reference's internal namespace.
+ * Each is a fact about tshark's own bookkeeping rather than about the packet:
+ * `geninfo` is a proto PDML invents, and `_ws.*` is the reference's internal
+ * namespace.
+ *
+ * **`frame.*` used to be here too**, on the argument that it is the pcap record
+ * header and the readers in `filter/fields.ts` answer it. That held the Frame
+ * layer of the tree to nothing at all: its rows carried no names, its arrival
+ * times dropped the nanoseconds the capture measured, and no number here could
+ * move. It is measured like every other layer now.
  *
  * Deliberately short. Anything else added here needs the kind of argument
  * `wireshark-abbrevs.ts`'s exemption list demands.
  */
 const NOT_OURS = [
-  /^frame(\.|$)/,
   /^_ws\./,
   /^fake-field-wrapper$/,
   // `data` used to be exempt here, on the argument that it marks *the absence

@@ -67,6 +67,9 @@ export async function replayBundleFor(
     // lives in the Worker and a frame scrolled back to may predate the list
     // the Worker holds now.
     interfaceName: p.interfaceName,
+    // The digits past the microsecond, when the capture measured them, so a
+    // replayed Frame layer reads the same arrival times as one built at arrival.
+    tsNanos: p.tsNanos,
   }));
 
   // Said rather than guessed at, because a reader cannot tell a tree rebuilt

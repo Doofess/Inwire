@@ -21,6 +21,7 @@ import { Packet } from '../../types/packet';
 import { DIRECTION_NAMES, directionOf, isDuplicate } from '../direction';
 import { FIELDS, FIELD_BY_ABBREV, FieldDef, FieldType, LAYERS } from '../dissect/fieldRegistry';
 import { fieldReader } from '../dissect/fieldAccess';
+import { protocolsInFrame } from '../dissect/protocolsInFrame';
 
 export type Scalar = string | number;
 
@@ -117,7 +118,9 @@ const ALIASES: Record<string, AliasDef> = {
   'frame.time_relative': { type: 'time', read: (p) => [p.relativeTime] },
   'frame.time_delta': { type: 'time', read: (p) => [p.timeDelta] },
   'frame.time_epoch': { type: 'time', read: (p) => [p.tsUs / 1_000_000] },
-  'frame.protocols': { type: 'string', read: (p) => [(p.frameProtocols ?? []).join(':')] },
+  // Spelled as the reference spells it (`eth:ethertype:ip:tcp`), so a filter
+  // copied out of Wireshark matches here too.
+  'frame.protocols': { type: 'string', read: (p) => [protocolsInFrame(p.frameProtocols ?? [])] },
   'frame.interface_name': { type: 'string', read: (p) => [p.interfaceName] },
   // Which way the frame went, relative to the capturing host. Two spellings
   // each, and the aliasing needs no new machinery: a reader may return several
