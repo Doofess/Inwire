@@ -516,6 +516,8 @@ export const FIELDS: readonly FieldDef[] = [
   { abbrev: 'tcp.analysis.duplicate_ack_num', label: 'Duplicate ACK #', type: 'uint', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.duplicate_ack_frame', label: 'Duplicate to the ACK in frame', type: 'uint', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.acks_frame', label: 'This is an ACK to the segment in frame', type: 'uint', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.analysis.partial_ack', label: 'Partial Acknowledgement of a segment', type: 'bool', layer: 'tcp', generated: true },
+  { abbrev: 'tcp.analysis.ambiguous_ack', label: "Ambiguous ACK following Karn's definition", type: 'bool', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.rto', label: 'The RTO for this segment was', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.rto_frame', label: 'RTO based on delta from frame', type: 'uint', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.push_bytes_sent', label: 'Bytes sent since last PSH flag', type: 'uint', layer: 'tcp', generated: true },

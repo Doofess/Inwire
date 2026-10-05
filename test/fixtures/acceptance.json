@@ -60,7 +60,7 @@
           "dns": 48,
           "eth": 11,
           "frame": 14,
-          "icmp": 11,
+          "icmp": 12,
           "icmpv6": 50,
           "ieee1905": 97,
           "igmp": 14,
@@ -71,7 +71,7 @@
           "quic": 24,
           "ssdp": 13,
           "stp": 18,
-          "tcp": 90,
+          "tcp": 93,
           "tls": 114,
           "udp": 11
         },
@@ -80,7 +80,7 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 119,
+          "absentDistinct": 115,
           "valueMismatches": 299
         },
         "unimplemented": {
@@ -153,7 +153,7 @@
           "dns": 48,
           "eth": 11,
           "frame": 14,
-          "icmp": 11,
+          "icmp": 12,
           "icmpv6": 44,
           "ieee1905": 75,
           "ip": 23,
@@ -162,7 +162,7 @@
           "quic": 24,
           "ssdp": 7,
           "stp": 18,
-          "tcp": 89,
+          "tcp": 91,
           "tls": 108,
           "udp": 11
         },
@@ -171,7 +171,7 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 86,
+          "absentDistinct": 83,
           "valueMismatches": 213
         },
         "unimplemented": {}

@@ -754,6 +754,8 @@ export function dissectTcpTransport(
       ...(analysis?.ackRttUs !== undefined ? { 'tcp.analysis.ack_rtt': analysis.ackRttUs / 1e6 } : {}),
       ...(analysis?.initialRttUs !== undefined ? { 'tcp.analysis.initial_rtt': analysis.initialRttUs / 1e6 } : {}),
       ...(analysis?.bytesInFlight !== undefined ? { 'tcp.analysis.bytes_in_flight': analysis.bytesInFlight } : {}),
+      ...(analysis?.ackOfFrame !== undefined && analysis.partialAck ? { 'tcp.analysis.partial_ack': 1 } : {}),
+      ...(analysis?.ackOfFrame !== undefined && analysis.ambiguousAck ? { 'tcp.analysis.ambiguous_ack': 1 } : {}),
       ...(analysis?.dupAckNum !== undefined ? { 'tcp.analysis.duplicate_ack_num': analysis.dupAckNum, 'tcp.analysis.duplicate_ack_frame': analysis.dupAckFrame ?? 0 } : {}),
       // Registered as filterable time fields and drawn in the tree, but never
       // given a value here - so `tcp.time_relative > 1` matched nothing.
@@ -1171,7 +1173,18 @@ function parseTcpOptions(
 function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
   const children: ProtocolField[] = [];
   if (a.ackOfFrame !== undefined) {
-    children.push({ name: '[This is an ACK to the segment in frame]', value: a.ackOfFrame, generated: true, linkToFrame: a.ackOfFrame, abbrev: 'tcp.analysis.acks_frame' });
+    // The reference hangs two verdicts on this row. Both are Notes there and
+    // are drawn here without joining the frame's findings: a receiver that
+    // coalesces segments (GRO, LRO) acknowledges part of one as routine - 841
+    // frames of the inwire fixture - and the Note band would paint every one.
+    const verdicts: ProtocolField[] = [
+      ...(a.partialAck ? [{ name: '[Partial Acknowledgement of a segment]', value: '', generated: true, abbrev: 'tcp.analysis.partial_ack' }] : []),
+      ...(a.ambiguousAck ? [{ name: "[Ambiguous ACK following Karn's definition]", value: '', generated: true, abbrev: 'tcp.analysis.ambiguous_ack' }] : []),
+    ];
+    children.push({
+      name: '[This is an ACK to the segment in frame]', value: a.ackOfFrame, generated: true, linkToFrame: a.ackOfFrame, abbrev: 'tcp.analysis.acks_frame',
+      ...(verdicts.length > 0 ? { children: verdicts } : {}),
+    });
     children.push({ name: '[The RTT to ACK the segment was]', value: `${((a.ackRttUs ?? 0) / 1e6).toFixed(9)} seconds`, generated: true, abbrev: 'tcp.analysis.ack_rtt' });
   }
   if (a.initialRttUs !== undefined) {
@@ -1200,10 +1213,16 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
       CATEGORY_BY_FLAG[flag as keyof typeof CATEGORY_BY_FLAG] ?? 'Note';
     children.push({
       name: '[TCP Analysis Flags]', value: '', generated: true, abbrev: 'tcp.analysis.flags',
-      children: a.tags.map((tag, i) => {
+      children: a.tags.flatMap((tag, i) => {
         const flag = a.flags[i] ?? '';
         const category = categoryOf(flag);
-        return {
+        // Which ACK this one repeats, and how many times: what turns "Dup ACK"
+        // into a count of a fast-retransmit's three, and the frame to go back to.
+        const dupAck: ProtocolField[] = flag === 'duplicate_ack' && a.dupAckNum !== undefined ? [
+          { name: '[Duplicate ACK #]', value: a.dupAckNum, generated: true, abbrev: 'tcp.analysis.duplicate_ack_num' },
+          ...(a.dupAckFrame ? [{ name: '[Duplicate to the ACK in frame]', value: a.dupAckFrame, generated: true, linkToFrame: a.dupAckFrame, abbrev: 'tcp.analysis.duplicate_ack_frame' }] : []),
+        ] : [];
+        return [...dupAck, {
           name: `[Expert Info (${category})]`,
           value: tag.replace(/^\[TCP |\]$/g, ''), generated: true,
           // **The verdict's own name.** These fifteen were computed check for
@@ -1215,7 +1234,7 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
             ? { abbrev: ABBREV_BY_FLAG[flag as TcpAnalysisFlag] }
             : {}),
           expertInfo: { category, message: tag },
-        };
+        }];
       }),
     });
   }

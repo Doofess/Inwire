@@ -28,6 +28,12 @@ export interface UnackedSegment {
   nextSeq: number;
   frame: number;
   timeUs: number;
+  /**
+   * Karn's rule: this segment's bytes were sent more than once - it is a
+   * retransmission, or a later one re-sent what it carried - so an ACK of it
+   * cannot say which copy it answers, and its RTT is ambiguous.
+   */
+  karn: boolean;
 }
 
 export interface TcpDirectionState {
@@ -137,6 +143,8 @@ export interface TcpAnalysis {
   ackOfFrame?: number;
   ackRttUs?: number;
   partialAck?: boolean;
+  /** The segment acknowledged had been sent more than once (`UnackedSegment.karn`). */
+  ambiguousAck?: boolean;
   initialRttUs?: number;
   bytesInFlight?: number;
   /** Bytes sent since the previous PSH, on the segment that carries one. */
@@ -390,7 +398,11 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
       if (!decided) {
         const oooThreshold = conn.initialRttUs ?? OUT_OF_ORDER_THRESHOLD_US;
         const segEnd = add(seq, seglen);
-        const alreadySeen = fwd.segments.some((u) => ge(seq, u.seq) && le(segEnd, u.nextSeq));
+        // The reference marks the segment it finds as well as answering: its
+        // bytes have now been sent twice, so an ACK of it is ambiguous.
+        const seen = fwd.segments.find((u) => ge(seq, u.seq) && le(segEnd, u.nextSeq));
+        if (seen !== undefined) seen.karn = true;
+        const alreadySeen = seen !== undefined;
         if (t < oooThreshold && !alreadySeen) {
           if (fwd.nextSeq !== add(segEnd, synOrFin ? 1 : 0)) {
             flags.add('out_of_order');
@@ -424,7 +436,7 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   const retransmitted = flags.has('retransmission') || flags.has('fast_retransmission') || flags.has('spurious_retransmission');
   if ((seglen > 0 || synOrFin) && fwd.segments.length < MAX_UNACKED_SEGMENTS) {
     if (synOrFin) nextSeq = add(nextSeq, 1);
-    fwd.segments.unshift({ seq, nextSeq, frame: s.frame, timeUs: s.timeUs });
+    fwd.segments.unshift({ seq, nextSeq, frame: s.frame, timeUs: s.timeUs, karn: retransmitted });
   } else if (synOrFin) {
     nextSeq = add(nextSeq, 1);
   }
@@ -480,11 +492,13 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
         out.ackOfFrame = u.frame;
         out.ackRttUs = s.timeUs - u.timeUs;
         out.partialAck = false;
+        out.ambiguousAck = u.karn;
       } else if (gt(ack, u.seq) && le(ack, u.nextSeq)) {
         u.seq = ack;
         out.ackOfFrame = u.frame;
         out.ackRttUs = s.timeUs - u.timeUs;
         out.partialAck = true;
+        out.ambiguousAck = u.karn;
         remaining.push(u);
         continue;
       } else if (gt(u.nextSeq, ack)) {
