@@ -207,12 +207,6 @@ export function dissectTcpTransport(
   const tcpOptions = tcpHeaderLen > 20
     ? parseTcpOptions(rawBytes, transportOffset + 20, Math.min(rawBytes.length, transportOffset + tcpHeaderLen), ackNum)
     : null;
-  // Handshake-only options. SACK blocks are handled further down, once the
-  // stream tracker is available, because their edges display relative to the
-  // peer's sequence space just like Ack= does.
-  // In wire order, as Wireshark prints them: "MSS=1344 SACK_PERM WS=128"
-  // and "MSS=1428 WS=256 SACK_PERM" are different stacks' SYNs.
-  const handshakeOptionParts: string[] = tcpOptions && syn ? tcpOptions.infoParts : [];
 
   const tcpPayloadStart = transportOffset + tcpHeaderLen;
   // Prefer the network layer's declared segment length over the raw frame
@@ -287,14 +281,26 @@ export function dissectTcpTransport(
   // exactly like Ack= does. Printing them raw shows 10-digit absolute
   // sequence numbers next to a single-digit Seq=/Ack= pair.
   const sackParts: string[] = [];
+  const sackRelative = new Map<number, number>();
   if (tcpOptions && !syn) {
     for (const block of tcpOptions.sackBlocks) {
       const left = tcpTracker ? tcpTracker.getRelativeSeq(dstIp, dstPort, srcIp, srcPort, block.leftEdge) : block.leftEdge;
       const right = tcpTracker ? tcpTracker.getRelativeSeq(dstIp, dstPort, srcIp, srcPort, block.rightEdge) : block.rightEdge;
       sackParts.push(`SLE=${left} SRE=${right}`);
+      sackRelative.set(block.leftEdge, left).set(block.rightEdge, right);
     }
   }
-  const optionsSummary = [...handshakeOptionParts, ...sackParts].join(' ');
+  // The tree's edges, from the same answers the Info column just got - no
+  // second question to the tracker, so a revisit asks exactly what arrival did.
+  if (tcpOptions && tcpTracker && sackRelative.size > 0) {
+    relativeSackRows(tcpOptions.fields, (edge) => sackRelative.get(edge) ?? edge);
+  }
+  // Every option's contribution in wire order, as Wireshark prints them:
+  // "MSS=1344 SACK_PERM WS=128" and "MSS=1428 WS=256 SACK_PERM" are
+  // different stacks' SYNs, and a timestamped ACK ends "TSval=101 TSecr=900".
+  const optionsSummary = (tcpOptions?.infoParts ?? []).map((part) => (typeof part === 'string'
+    ? part
+    : sackParts.slice(part.sackFrom, part.sackFrom + part.count).join(' '))).filter(Boolean).join(' ');
 
   // This segment's *own* next sequence number - deliberately independent of
   // the tracker's per-direction high-water mark, which would report the
@@ -920,8 +926,11 @@ export function dissectTcpTransport(
         // where the fixed header ended and the variable part began.
         ...(tcpOptions && tcpOptions.fields.length > 0
           ? [{
-            name: `Options: (${tcpHeaderLen - 20} bytes)`,
-            value: '',
+            // The reference names every option after the count, in wire order.
+            name: 'Options',
+            value: [`(${tcpHeaderLen - 20} bytes)`, ...tcpOptions.fields.map((o) => (o.abbrev === 'tcp.options.unknown'
+              ? `Unknown (0x${rawBytes[o.rawBytesRange?.[0] ?? 0].toString(16)})`
+              : o.abbrev === 'tcp.options.sack' ? 'SACK' : o.name.replace(/^TCP Option - /, '')))].join(', '),
             abbrev: 'tcp.options',
             rawBytesRange: [transportOffset + 20, transportOffset + tcpHeaderLen - 1] as [number, number],
             children: tcpOptions.fields,
@@ -974,8 +983,12 @@ function parseTcpOptions(
   windowScale?: number;
   sackPermitted: boolean;
   sackBlocks: { leftEdge: number; rightEdge: number }[];
-  /** The SYN's option summary, in wire order. */
-  infoParts: string[];
+  /**
+   * What each option adds to the Info column, in wire order - on every
+   * segment, as the reference appends them. A SACK's edges are a reference
+   * to its blocks, written once they can be made relative.
+   */
+  infoParts: (string | { sackFrom: number; count: number })[];
   tsval?: number;
   tsecr?: number;
 } {
@@ -989,7 +1002,7 @@ function parseTcpOptions(
    * the single-byte options have no length byte and must not claim one.
    */
   const optionHeader = (at: number, kind: number, length?: number): ProtocolField[] => [
-    { name: 'Kind', value: kind, abbrev: 'tcp.option_kind', rawBytesRange: [at, at] },
+    { name: 'Kind', value: `${TCP_OPTION_KINDS[kind] ?? 'Unknown'} (${kind})`, abbrev: 'tcp.option_kind', rawBytesRange: [at, at] },
     ...(length === undefined
       ? []
       : [{ name: 'Length', value: length, abbrev: 'tcp.option_len', rawBytesRange: [at + 1, at + 1] as [number, number] }]),
@@ -998,7 +1011,7 @@ function parseTcpOptions(
   let windowScale: number | undefined;
   let sackPermitted = false;
   const sackBlocks: { leftEdge: number; rightEdge: number }[] = [];
-  const infoParts: string[] = [];
+  const infoParts: (string | { sackFrom: number; count: number })[] = [];
   let tsval: number | undefined;
   let tsecr: number | undefined;
 
@@ -1006,22 +1019,24 @@ function parseTcpOptions(
   while (offset < optionsEnd && offset < rawBytes.length) {
     const kind = rawBytes[offset];
     if (kind === 0) {
-      // **Drawn, then stop.** The list really does end here, but the byte is
-      // an option like any other and the reference shows it - breaking without
-      // a row lost the one option that says where the options stopped.
+      // **Drawn, every byte of it.** The list ends here, and what follows is
+      // padding - which the reference draws as further EOLs, one per byte,
+      // rather than stopping: a row per byte is what says where the header's
+      // length went.
       fields.push({
         name: 'TCP Option - End of Option List (EOL)',
-        value: 'EOL',
+        value: '',
         abbrev: 'tcp.options.eol',
         rawBytesRange: [offset, offset],
         children: optionHeader(offset, kind),
       });
-      break;
+      offset += 1;
+      continue;
     }
     if (kind === 1) {
       fields.push({
         name: 'TCP Option - No-Operation (NOP)',
-        value: 'NOP',
+        value: '',
         abbrev: 'tcp.options.nop',
         rawBytesRange: [offset, offset],
         children: optionHeader(offset, kind),
@@ -1044,8 +1059,8 @@ function parseTcpOptions(
       // clicking the value highlights the two bytes rather than the whole
       // option. Same for the two below.
       fields.push({
-        name: 'TCP Option - Maximum Segment Size',
-        value: `MSS: ${mss}`,
+        name: 'TCP Option - Maximum segment size',
+        value: `${mss} bytes`,
         rawBytesRange: [offset, offset + length - 1],
         abbrev: 'tcp.options.mss',
         children: [
@@ -1057,7 +1072,7 @@ function parseTcpOptions(
       windowScale = rawBytes[offset + 2];
       infoParts.push(`WS=${2 ** windowScale}`);
       fields.push({
-        name: 'TCP Option - Window Scale',
+        name: 'TCP Option - Window scale',
         value: `${windowScale} (multiply by ${2 ** windowScale})`,
         rawBytesRange: [offset, offset + length - 1],
         abbrev: 'tcp.options.wscale',
@@ -1074,92 +1089,137 @@ function parseTcpOptions(
       sackPermitted = true;
       infoParts.push('SACK_PERM');
       fields.push({
-        name: 'TCP Option - SACK Permitted',
-        value: 'True',
+        name: 'TCP Option - SACK permitted',
+        value: '',
         rawBytesRange: [offset, offset + length - 1],
         abbrev: 'tcp.options.sack_perm',
         children: optionHeader(offset, kind, length),
       });
     } else if (kind === 5) {
+      // Drawn as the reference draws it: the edges flat under the option, the
+      // count after them, and a D-SACK's edges again after that. Their values
+      // are absolute here; `relativeSackRows` makes them relative to the
+      // peer's base once the tracker is in scope, as Ack= is.
       const blockCount = Math.floor((length - 2) / 8);
-      const blockRows: ProtocolField[] = [];
+      const edgeRows: ProtocolField[] = [];
       for (let i = 0; i < blockCount; i++) {
         const blockOffset = offset + 2 + i * 8;
         const leftEdge = ((rawBytes[blockOffset] << 24) | (rawBytes[blockOffset + 1] << 16) | (rawBytes[blockOffset + 2] << 8) | rawBytes[blockOffset + 3]) >>> 0;
         const rightEdge = ((rawBytes[blockOffset + 4] << 24) | (rawBytes[blockOffset + 5] << 16) | (rawBytes[blockOffset + 6] << 8) | rawBytes[blockOffset + 7]) >>> 0;
         sackBlocks.push({ leftEdge, rightEdge });
-        // **RFC 2883 D-SACK: the FIRST block only, and only when it reports
-        // data the receiver has already acknowledged.** Either it sits at or
-        // below the cumulative ACK - "I got that again" - or it is contained
-        // within the second block, which is how a D-SACK is reported when
-        // there is also a genuine hole. Both tests are on the raw sequence
-        // space, which is what the option carries.
-        //
-        // It says something no other field does: the sender retransmitted
-        // something that had already arrived, so the loss it reacted to was
-        // not loss. That is a spurious retransmission, and it is the
-        // difference between a lossy path and an impatient timer.
-        const isDsack = i === 0 && (
-          seqLessOrEqual(rightEdge, ackNumber)
-          || (blockCount > 1 && isContainedInSecondBlock(rawBytes, offset, leftEdge, rightEdge))
+        edgeRows.push(
+          { name: 'left edge', value: leftEdge, abbrev: 'tcp.options.sack_le', rawBytesRange: [blockOffset, blockOffset + 3] },
+          { name: 'right edge', value: rightEdge, abbrev: 'tcp.options.sack_re', rawBytesRange: [blockOffset + 4, blockOffset + 7] },
         );
-        blockRows.push({
-          name: isDsack ? 'D-SACK Sequence' : `TCP SACK Block ${i + 1}`,
-          value: `${leftEdge}-${rightEdge}`,
-          abbrev: isDsack ? 'tcp.options.sack.dsack' : undefined,
-          rawBytesRange: [blockOffset, blockOffset + 7],
-          children: [
-            // **Named, and absolute.** The Info column maps these to relative
-            // numbers against the peer's base sequence; the tree cannot,
-            // because the option is parsed before the base is in scope here.
-            // Absolute-and-named beats relative-and-unnameable: a filter can
-            // reach them now, and the Info line still reads as Wireshark's.
-            {
-              name: isDsack ? 'D-SACK left edge' : 'left edge', value: leftEdge,
-              abbrev: isDsack ? 'tcp.options.sack.dsack_le' : 'tcp.options.sack_le',
-              rawBytesRange: [blockOffset, blockOffset + 3],
-            },
-            {
-              name: isDsack ? 'D-SACK right edge' : 'right edge', value: rightEdge,
-              abbrev: isDsack ? 'tcp.options.sack.dsack_re' : 'tcp.options.sack_re',
-              rawBytesRange: [blockOffset + 4, blockOffset + 7],
-            },
-          ],
-        });
       }
+      // **RFC 2883 D-SACK, by the reference's own test:** the first block at
+      // or below the cumulative ACK - "I got that again" - or ending inside
+      // the second block. Either way the sender retransmitted something that
+      // had already arrived, so the loss it reacted to was not loss: the
+      // difference between a lossy path and an impatient timer.
+      const [first, second] = sackBlocks;
+      const isDsack = first !== undefined && (
+        seqLessOrEqual(first.rightEdge, ackNumber)
+        || (second !== undefined && seqLessThan(second.leftEdge, first.rightEdge) && seqLessOrEqual(first.rightEdge, second.rightEdge))
+      );
+      const dsackRows: ProtocolField[] = isDsack ? [
+        { name: 'D-SACK Left Edge', value: first.leftEdge, generated: true, abbrev: 'tcp.options.sack.dsack_le', rawBytesRange: [offset + 2, offset + 5] },
+        { name: 'D-SACK Right Edge', value: first.rightEdge, generated: true, abbrev: 'tcp.options.sack.dsack_re', rawBytesRange: [offset + 6, offset + 9] },
+        { name: '[D-SACK Sequence]', value: '', generated: true, abbrev: 'tcp.options.sack.dsack', rawBytesRange: [offset + 2, offset + 9] },
+      ] : [];
+      // The reference appends the blocks to the row's own label, not a value.
+      infoParts.push({ sackFrom: sackBlocks.length - blockCount, count: blockCount });
       fields.push({
-        name: 'TCP Option - SACK',
-        value: blockRows.map((row) => row.value).join(' '),
+        name: `TCP Option - SACK ${sackBlocks.slice(sackBlocks.length - blockCount).map((b) => `${b.leftEdge}-${b.rightEdge}`).join(' ')}`.trimEnd(),
+        value: '',
         abbrev: 'tcp.options.sack',
         rawBytesRange: [offset, offset + length - 1],
         children: [
           ...optionHeader(offset, kind, length),
+          ...edgeRows,
           { name: 'TCP SACK Count', value: blockCount, generated: true, abbrev: 'tcp.options.sack.count' },
-          ...blockRows,
+          ...dsackRows,
         ],
       });
     } else if (kind === 8 && length === 10) {
       tsval = ((rawBytes[offset + 2] << 24) | (rawBytes[offset + 3] << 16) | (rawBytes[offset + 4] << 8) | rawBytes[offset + 5]) >>> 0;
       tsecr = ((rawBytes[offset + 6] << 24) | (rawBytes[offset + 7] << 16) | (rawBytes[offset + 8] << 8) | rawBytes[offset + 9]) >>> 0;
+      infoParts.push(`TSval=${tsval} TSecr=${tsecr}`);
+      // The option is `tcp.options.timestamp` and its two numbers are its
+      // children - the row had been claiming TSval's name for itself, so the
+      // option could not be filtered on and TSval had no row of its own.
       fields.push({
         name: 'TCP Option - Timestamps',
         value: `TSval ${tsval}, TSecr ${tsecr}`,
         rawBytesRange: [offset, offset + length - 1],
-        abbrev: 'tcp.options.timestamp.tsval',
+        abbrev: 'tcp.options.timestamp',
         children: [
           ...optionHeader(offset, kind, length),
-          // **TSecr had no field of its own.** It was decoded, rendered into
-          // the string above, returned from here, and consumed by nothing -
-          // which is also why the RTT it gives away for free was never taken.
+          { name: 'Timestamp value', value: tsval, abbrev: 'tcp.options.timestamp.tsval', rawBytesRange: [offset + 2, offset + 5] },
           { name: 'Timestamp echo reply', value: tsecr, abbrev: 'tcp.options.timestamp.tsecr', rawBytesRange: [offset + 6, offset + 9] },
         ],
       });
-    } else {
+    } else if (kind === 34) {
+      // TCP Fast Open (RFC 7413): an empty option asks for a cookie, a full
+      // one presents it - and a SYN presenting one may carry data that the
+      // server accepts before the handshake completes.
+      const cookie = Array.from(rawBytes.subarray(offset + 2, offset + length), (b) => b.toString(16).padStart(2, '0')).join('');
+      infoParts.push(length === 2 ? 'TFO=R' : 'TFO=C');
       fields.push({
-        name: `TCP Option - Unknown (Kind ${kind})`,
-        value: `${length} bytes`,
+        name: 'TCP Option - TCP Fast Open',
+        value: '',
+        abbrev: 'tcp.options.tfo',
         rawBytesRange: [offset, offset + length - 1],
-        children: optionHeader(offset, kind, length),
+        children: [
+          ...optionHeader(offset, kind, length),
+          length === 2
+            ? { name: 'Fast Open Cookie Request', value: '', abbrev: 'tcp.options.tfo.request', rawBytesRange: [offset, offset + 1] }
+            : { name: 'Fast Open Cookie', value: cookie, abbrev: 'tcp.options.tfo.cookie', rawBytesRange: [offset + 2, offset + length - 1] },
+        ],
+      });
+    } else if (kind === 28 && length === 4) {
+      // User Timeout (RFC 5482): how long the sender will wait on unacknowledged
+      // data before dropping the connection, in seconds or minutes.
+      const word = (rawBytes[offset + 2] << 8) | rawBytes[offset + 3];
+      infoParts.push(`USER_TO=${word & 0x7fff}`);
+      fields.push({
+        name: 'TCP Option - User Timeout',
+        value: '',
+        abbrev: 'tcp.options.user_to',
+        rawBytesRange: [offset, offset + length - 1],
+        children: [
+          ...optionHeader(offset, kind, length),
+          { name: 'Granularity', value: word & 0x8000 ? 'Minutes' : 'Seconds', abbrev: 'tcp.options.user_to_granularity', rawBytesRange: [offset + 2, offset + 3], bitfield: { bitOffset: 0, bitLength: 1, totalBits: 16 } },
+          { name: 'User Timeout', value: word & 0x7fff, abbrev: 'tcp.options.user_to_val', rawBytesRange: [offset + 2, offset + 3], bitfield: { bitOffset: 1, bitLength: 15, totalBits: 16 } },
+        ],
+      });
+    } else if (kind === 19 && length === 18) {
+      // TCP MD5 Signature (RFC 2385): what BGP sessions are protected with.
+      infoParts.push('MD5');
+      const digest = Array.from(rawBytes.subarray(offset + 2, offset + 18), (b) => b.toString(16).padStart(2, '0')).join('');
+      fields.push({
+        name: 'TCP Option - TCP MD5 signature',
+        value: '',
+        abbrev: 'tcp.options.md5',
+        rawBytesRange: [offset, offset + length - 1],
+        children: [
+          ...optionHeader(offset, kind, length),
+          { name: 'MD5 digest', value: digest, abbrev: 'tcp.options.md5.digest', rawBytesRange: [offset + 2, offset + 17] },
+        ],
+      });
+    } else {
+      // A kind the reference names but this build does not read, or one
+      // nobody names: the reference's own fallback, Kind, Length and the bytes.
+      const payload = Array.from(rawBytes.subarray(offset + 2, offset + length), (b) => b.toString(16).padStart(2, '0')).join('');
+      fields.push({
+        name: 'TCP Option - Unknown',
+        value: '',
+        abbrev: 'tcp.options.unknown',
+        rawBytesRange: [offset, offset + length - 1],
+        children: [
+          ...optionHeader(offset, kind, length),
+          ...(length > 2 ? [{ name: 'Payload', value: payload, abbrev: 'tcp.options.unknown.payload', rawBytesRange: [offset + 2, offset + length - 1] as [number, number] }] : []),
+        ],
       });
     }
 
@@ -1287,22 +1347,49 @@ function seqLessOrEqual(a: number, b: number): boolean {
   return ((a - b) | 0) <= 0;
 }
 
+/** What the Kind row calls each option kind - the reference's `tcp_option_kind_vs`. */
+const TCP_OPTION_KINDS: Record<number, string> = {
+  0: 'End of Option List', 1: 'No-Operation', 2: 'Maximum Segment Size', 3: 'Window Scale',
+  4: 'SACK Permitted', 5: 'SACK', 6: 'Echo', 7: 'Echo Reply', 8: 'Time Stamp Option',
+  9: 'Partial Order Connection Permitted', 10: 'Partial Order Service Profile', 11: 'CC', 12: 'CC.NEW',
+  13: 'CC.ECHO', 14: 'TCP Alternate Checksum Request', 15: 'TCP Alternate Checksum Data', 16: 'Skeeter',
+  17: 'Bubba', 18: 'Trailer Checksum Option', 19: 'MD5 Signature Option', 20: 'SCPS Capabilities',
+  21: 'Selective Negative Acknowledgements', 22: 'Record Boundaries', 23: 'Corruption experienced',
+  24: 'SNAP', 25: 'Unassigned', 26: 'TCP Compression Filter', 27: 'Quick-Start Response',
+  28: 'User Timeout Option', 29: 'The TCP Authentication Option', 30: 'Multipath TCP',
+  34: 'TCP Fast Open Cookie', 76: 'Riverbed Probe', 78: 'Riverbed Transparency',
+  0xac: 'Accurate ECN Order 0', 0xae: 'Accurate ECN Order 1',
+  0xfd: 'RFC3692-style Experiment 1', 0xfe: 'RFC3692-style Experiment 2',
+};
+
+/** `a < b` in the same wrapping space. */
+function seqLessThan(a: number, b: number): boolean {
+  return ((a - b) | 0) < 0;
+}
+
 /**
- * Whether the first SACK block sits inside the second.
+ * The SACK option's edges made relative to the peer's base, as Ack= is.
  *
- * RFC 2883's other D-SACK form: when there is also a genuine hole, the
- * duplicate is reported as a first block contained within the second, which
- * is otherwise a nonsense ordering - SACK blocks are not required to be
- * sorted, but a block inside another says something no ordinary SACK does.
+ * The option is parsed before the tracker is in scope, so its rows are
+ * written absolute and rewritten here once `relative` - the peer direction's
+ * mapping - can be asked. Without a tracker the edges stay absolute and say
+ * nothing about it, as the reference's do with relative numbers off.
  */
-function isContainedInSecondBlock(
-  rawBytes: Uint8Array, optionOffset: number, leftEdge: number, rightEdge: number,
-): boolean {
-  const at = optionOffset + 10;
-  if (at + 7 >= rawBytes.length) return false;
-  const secondLeft = ((rawBytes[at] << 24) | (rawBytes[at + 1] << 16) | (rawBytes[at + 2] << 8) | rawBytes[at + 3]) >>> 0;
-  const secondRight = ((rawBytes[at + 4] << 24) | (rawBytes[at + 5] << 16) | (rawBytes[at + 6] << 8) | rawBytes[at + 7]) >>> 0;
-  return seqLessOrEqual(secondLeft, leftEdge) && seqLessOrEqual(rightEdge, secondRight);
+function relativeSackRows(options: readonly ProtocolField[], relative: ((edge: number) => number) | undefined): void {
+  if (relative === undefined) return;
+  for (const option of options) {
+    if (option.abbrev !== 'tcp.options.sack') continue;
+    const blocks: string[] = [];
+    let left: number | undefined;
+    for (const row of option.children ?? []) {
+      if (typeof row.value !== 'number' || !/^tcp\.options\.sack(\.dsack)?_(le|re)$/.test(row.abbrev ?? '')) continue;
+      const edge = relative(row.value);
+      row.value = `${edge} (relative)`;
+      if (row.abbrev === 'tcp.options.sack_le') left = edge;
+      if (row.abbrev === 'tcp.options.sack_re') blocks.push(`${left}-${edge}`);
+    }
+    option.name = `TCP Option - SACK ${blocks.join(' ')}`.trimEnd();
+  }
 }
 
 /**
