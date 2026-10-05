@@ -43,7 +43,7 @@ import { dissectReplay, interfacesByLabel } from '../services/pipeline/replay';
 import { FrameRecorder, FrameRevisit, RecordMiss } from '../services/dissect/frameRecord';
 import { DerivedStore } from '../services/pipeline/derivedStore';
 import { withDissectEnv } from '../services/dissect/dissectEnv';
-import { applyInfoPatch } from '../services/dissect/infoPatch';
+import { applyInfoPatch, treeLinksOf } from '../services/dissect/infoPatch';
 import type { FromCapture } from '../services/capture/captureProtocol';
 import type { RingPart } from '../services/capture/segments';
 import { RingFiling } from '../services/pipeline/ringFiling';
@@ -413,7 +413,18 @@ function ingest(frame: LiveFrame, id: number): void {
     if (decoded.icmpMatchedRequestFrameId !== undefined) {
       pendingIcmpReplies.push({ requestFrameId: decoded.icmpMatchedRequestFrameId, replyId: id });
     }
-    if (decoded.infoPatches) pendingInfoPatches.push(...decoded.infoPatches);
+    if (decoded.infoPatches) {
+      pendingInfoPatches.push(...decoded.infoPatches);
+      // A tree still cached here was built before this frame knew anything, so
+      // it gains the same rows the stored row does - or a frame opened soon
+      // after its answer would lack the link it gains once it leaves the cache.
+      for (const patch of decoded.infoPatches) {
+        const cached = treeCache.get(patch.frameId);
+        if (cached !== undefined && (patch.links !== undefined || patch.responseInFrame !== undefined)) {
+          applyInfoPatch({ layers: cached, info: '', fields: {} } as unknown as Packet, { ...patch, suffix: undefined });
+        }
+      }
+    }
   } catch (err) {
     post({ type: 'failure', message: `failed to dissect a captured frame: ${String(err)}` });
   }
@@ -486,9 +497,9 @@ async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
       { nanosRemainder: row.tsNanos !== undefined ? Number(row.tsNanos % 1000n) : undefined },
     ));
     again.finish();
-    // The one thing a LATER frame writes into a tree, carried on the row.
-    const responseIn = row.fields?.['dns.response_in'];
-    if (typeof responseIn === 'number') applyInfoPatch(packet, { frameId: id, responseInFrame: responseIn });
+    // What LATER frames wrote into this one's tree, carried on the row.
+    const links = treeLinksOf((abbrev) => row.fields?.[abbrev]);
+    if (links !== undefined) applyInfoPatch(packet, { frameId: id, links });
     addProcessRow(packet.layers, processOfRow(row));
     revisitedTrees.set(id, packet.layers);
     while (revisitedTrees.size > REVISITED_TREES) {

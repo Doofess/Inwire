@@ -20,6 +20,7 @@ import { MAX_REPLAY_FRAMES, seedsFor } from '../services/pipeline/replay';
 import { streamPackets, targetForPacket } from '../services/followStream';
 import { bytesAreRecoverable, hasBytes, packetBytes, packetsBytes } from '../services/packetBytes';
 import { fieldValue } from '../services/dissect/fieldAccess';
+import { treeLinksOf } from '../services/dissect/infoPatch';
 import type { Packet } from '../types/packet';
 
 /**
@@ -93,13 +94,13 @@ export async function replayBundleFor(
     || (target?.kind === 'tcp' && bufferTrimmed && first !== undefined
       && fieldValue(first, 'tcp.flags.syn') !== 1);
 
-  // `[Response In: N]` on a DNS query is written by the frame that answers it,
-  // which sits after the target and so is not replayed. The frame recorded the
-  // fact when it first learned it; the rebuilt tree is handed it back.
-  const responseIn = fieldValue(packet, 'dns.response_in');
-  const retroactive = typeof responseIn === 'number'
-    ? { frameId: packet.id, responseInFrame: responseIn }
-    : undefined;
+  // The links a LATER frame wrote onto this one - `[Response In: N]` on a DNS
+  // query, `[Reassembled PDU in frame: N]` on a segment, `[Response frame: N]`
+  // on a ping - sit after the target and so are not replayed. The frame
+  // recorded each fact when it first learned it; the rebuilt tree is handed
+  // them back.
+  const links = treeLinksOf((abbrev) => fieldValue(packet, abbrev));
+  const retroactive = links !== undefined ? { frameId: packet.id, links } : undefined;
 
   // Read back off the frame rather than looked up again. The store that knew
   // this lives in the Worker and the answer is time-dependent, so asking it a

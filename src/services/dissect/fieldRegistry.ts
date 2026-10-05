@@ -395,7 +395,10 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(uint('quic.packet_length', 'Packet Length', 'quic')),
   treeOnly(str('quic.frame', 'Frame', 'quic')),
   treeOnly(str('ip.reassembled', 'Reassembled IPv4 fragments', 'ip')),
+  // Written onto each earlier fragment by the one that completed the datagram.
+  { abbrev: 'ip.reassembled_in', label: 'Reassembled IPv4 in frame', type: 'uint', layer: 'ip', generated: true },
   uint('ipv6.reassembled', 'Reassembled IPv6 fragments', 'ipv6'),
+  { abbrev: 'ipv6.reassembled.in', label: 'Reassembled IPv6 in frame', type: 'uint', layer: 'ipv6', generated: true },
 
   // --- NTP / STUN ------------------------------------------------------------
   // Dispatched by content as well as by port: STUN runs on whichever port an
@@ -505,6 +508,8 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(uint('tcp.segment', 'TCP Segment', 'tcp')),
   treeOnly(uint('tcp.segment.count', 'Segment count', 'tcp')),
   treeOnly(uint('tcp.reassembled.length', 'Reassembled TCP length', 'tcp')),
+  // Written onto each segment of a multi-segment PDU by the one that completed it.
+  { abbrev: 'tcp.reassembled_in', label: 'Reassembled PDU in frame', type: 'uint', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.ack_rtt', label: 'The RTT to ACK the segment was', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.initial_rtt', label: 'iRTT', type: 'time', layer: 'tcp', generated: true },
   { abbrev: 'tcp.analysis.bytes_in_flight', label: 'Bytes in flight', type: 'uint', layer: 'tcp', generated: true },
@@ -589,6 +594,8 @@ export const FIELDS: readonly FieldDef[] = [
   uint('icmp.seq', 'Sequence Number (BE)', 'icmp'),
   uint('icmp.seq_le', 'Sequence Number (LE)', 'icmp'),
   { abbrev: 'icmp.resp_to', label: 'Request frame', type: 'uint', layer: 'icmp', generated: true },
+  // Written onto the request by the reply that answered it.
+  { abbrev: 'icmp.resp_in', label: 'Response frame', type: 'uint', layer: 'icmp', generated: true },
   { abbrev: 'icmp.resptime', label: 'Response time', type: 'uint', layer: 'icmp', generated: true },
   // The echo payload. Tree-only deliberately: a ping may carry 65,500 bytes,
   // and hex of that in the per-frame bag is 131 kB a frame against a tree that
@@ -611,6 +618,8 @@ export const FIELDS: readonly FieldDef[] = [
   str('icmpv6.checksum.status', 'Checksum Status', 'icmpv6'),
   uint('icmpv6.echo.identifier', 'Identifier', 'icmpv6'),
   uint('icmpv6.echo.sequence_number', 'Sequence', 'icmpv6'),
+  // Written onto the request by the reply that answered it.
+  { abbrev: 'icmpv6.resp_in', label: 'Response In', type: 'uint', layer: 'icmpv6', generated: true },
   treeOnly(str('icmpv6.data', 'Data', 'icmpv6')),
   treeOnly(str('icmpv6.reserved', 'Reserved', 'icmpv6')),
   uint('icmpv6.mtu', 'MTU', 'icmpv6'),
@@ -1630,6 +1639,30 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(uint('ipv6.fraghdr.offset', 'Fragment Offset', 'ipv6')),
   treeOnly(bool('ipv6.fraghdr.more', 'More Fragments', 'ipv6')),
   treeOnly(str('ipv6.opt.router_alert', 'Router Alert', 'ipv6')),
+
+  // --- Frame -------------------------------------------------------------------
+  // The Frame layer's rows, as `pcapParser.ts` draws them. None is in the bag:
+  // eight are properties of the `Packet` that `filter/fields.ts` answers as
+  // aliases (which it consults first), and the rest are what the tree shows and
+  // a filter here cannot read yet - registered so a row's name is a real one.
+  treeOnly(uint('frame.section_number', 'Section number', 'frame')),
+  treeOnly(uint('frame.interface_id', 'Interface id', 'frame')),
+  treeOnly(str('frame.interface_name', 'Interface name', 'frame')),
+  treeOnly(str('frame.interface_description', 'Interface description', 'frame')),
+  treeOnly({ abbrev: 'frame.encap_type', label: 'Encapsulation type', type: 'int', layer: 'frame' }),
+  treeOnly({ abbrev: 'frame.time', label: 'Arrival Time', type: 'time', layer: 'frame' }),
+  treeOnly({ abbrev: 'frame.time_utc', label: 'UTC Arrival Time', type: 'time', layer: 'frame' }),
+  treeOnly({ abbrev: 'frame.time_epoch', label: 'Epoch Arrival Time', type: 'time', layer: 'frame' }),
+  treeOnly({ abbrev: 'frame.offset_shift', label: 'Time shift for this packet', type: 'time', layer: 'frame' }),
+  treeOnly({ abbrev: 'frame.time_delta', label: 'Time delta from previous captured frame', type: 'time', layer: 'frame', generated: true }),
+  treeOnly({ abbrev: 'frame.time_relative', label: 'Time since reference or first frame', type: 'time', layer: 'frame', generated: true }),
+  treeOnly(uint('frame.number', 'Frame Number', 'frame')),
+  treeOnly(uint('frame.len', 'Frame Length', 'frame')),
+  treeOnly(uint('frame.cap_len', 'Capture Length', 'frame')),
+  treeOnly(bool('frame.marked', 'Frame is marked', 'frame')),
+  treeOnly(bool('frame.ignored', 'Frame is ignored', 'frame')),
+  treeOnly({ ...str('frame.protocols', 'Protocols in frame', 'frame'), generated: true }),
+  treeOnly(uint('frame.encoding', 'Character encoding', 'frame')),
 
   // --- Inwire's own ----------------------------------------------------------
   // Wireshark has no single field for "the worst thing any dissector said about

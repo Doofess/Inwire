@@ -235,6 +235,12 @@ const ENGINE_ALIASES = new Set([
   // any of them fired. Second kind, like `tcp.stream` - the value was never
   // in the bag, so routing it through one would write a second copy.
   'tcp.analysis.flags',
+  // The Frame layer's rows that are properties of the `Packet` itself - its
+  // id, lengths, clock, layer list and adapter. Second kind again: registered,
+  // as `treeOnly`, so the tree's row carries a real name, and answered by the
+  // engine because no dissector writes them into the bag.
+  'frame.number', 'frame.len', 'frame.cap_len', 'frame.time_relative', 'frame.time_delta',
+  'frame.time_epoch', 'frame.protocols', 'frame.interface_name',
 ]);
 check('...and no longer hand-lists a dissector field',
   [...FIELD_ABBREVS]

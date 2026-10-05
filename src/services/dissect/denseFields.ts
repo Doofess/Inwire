@@ -1,4 +1,5 @@
 import type { DenseKey } from './fieldBlock';
+import { TREE_LINKS } from './infoPatch';
 
 /**
  * The fields most frames carry, which are therefore worth a column.
@@ -97,6 +98,9 @@ export const DENSE_FIELDS: readonly DenseKey[] = [
   { abbrev: 'tcp.ack_raw', width: 'u32' },
   { abbrev: 'tcp.analysis.bytes_in_flight', width: 'u32' },
   { abbrev: 'tcp.analysis.ack_rtt', width: 'f64' },
+  // The stream-relative clocks, on every TCP frame with a stream, in seconds.
+  { abbrev: 'tcp.time_relative', width: 'f64' },
+  { abbrev: 'tcp.time_delta', width: 'f64' },
 
   // Published per frame so a colour rule and a display filter can ask about
   // severity without walking a tree; see `services/expertInfo.ts`.
@@ -122,4 +126,9 @@ export const POST_DISSECTION_KEYS: readonly string[] = [
   'inwire.process.pid',
   'inwire.process.path',
   'inwire.process.ja4_match',
+  // A later frame's link onto this one - `tcp.reassembled_in` on each segment
+  // of a reassembled PDU, `icmp.resp_in` on an answered request - arrives as a
+  // patch, after this frame's row was filled. Dense on a long transfer (half
+  // of `bulk`'s frames carry `tcp.reassembled_in`) and never a column for it.
+  ...Object.keys(TREE_LINKS),
 ];

@@ -137,4 +137,13 @@ export interface InfoPatch {
    * row's Info stays as it was.
    */
   responseInFrame?: number;
+  /**
+   * Links to a later frame that the earlier frame's TREE gains:
+   * `{ 'tcp.reassembled_in': 12 }` on each segment frame 12 completed,
+   * `{ 'icmp.resp_in': 42 }` on the request reply 42 answered. Written as
+   * fields too, so they filter and are stored with the row; `TREE_LINKS` in
+   * `infoPatch.ts` says which layer each is drawn under, and the revisit and
+   * replay paths hand them back to a rebuilt tree.
+   */
+  links?: Record<string, number>;
 }

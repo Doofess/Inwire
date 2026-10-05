@@ -50,6 +50,7 @@ import { FieldSurvey, orderedFieldEntries } from '../../src/services/export/fiel
 import { metaEntries, type CaptureMeta } from '../../src/services/export/captureMeta';
 import { fieldEntries, fieldValue } from '../../src/services/dissect/fieldAccess';
 import { Anonymiser } from '../../src/services/anonymise';
+import { TREE_LINKS } from '../../src/services/dissect/infoPatch';
 import { adapterLabel } from '../../src/services/report/redact';
 import { findWiresharkTool, loadRealCaptures, runTool, type RealCapture } from './realCaptures';
 import type { Packet } from '../../src/types/packet';
@@ -317,12 +318,13 @@ async function captureChecks(capture: RealCapture, tshark: string | null): Promi
       //   *.stream           conversation indexes, which the capture-file
       //                      importer assigns and the row importer's restore
       //                      path does not
-      //   dns.response_in    a forward reference the capture importer patches
-      //                      back onto the query once the answer is seen
+      //   TREE_LINKS         forward references the capture importer patches
+      //                      back onto an earlier frame once a later one is
+      //                      seen (dns.response_in, tcp.reassembled_in, ...)
       //   *.checksum.status  "Unverified" on frames this machine sent, which
       //                      needs the host identity the capture importer
       //                      infers from the whole file and a row import has not
-      const routeDependent = (k: string) => k.endsWith('.stream') || k === 'dns.response_in' || k.endsWith('.checksum.status');
+      const routeDependent = (k: string) => k.endsWith('.stream') || k in TREE_LINKS || k.endsWith('.checksum.status');
       const fieldsOf = (p: Packet) => orderedFieldEntries(p).filter(([k]) => !routeDependent(k));
       const differing = back.filter((p, i) => JSON.stringify(fieldsOf(p)) !== JSON.stringify(fieldsOf(packets[i])));
       check(`${name}: ...and to the same fields on every frame`, differing.slice(0, 5).map((p) => p.id), []);

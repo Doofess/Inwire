@@ -34,7 +34,7 @@ import { RecordMiss } from '../../src/services/dissect/frameRecord';
 import { importAnyFile } from '../../src/services/tabularImport';
 import { LINKTYPE } from '../../src/services/dissect/types';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
-import type { InfoPatch } from '../../src/services/dissect/types';
+import { treeLinksOf } from '../../src/services/dissect/infoPatch';
 import type { Packet } from '../../src/types/packet';
 import { FIXTURES, arrive, firstDifference, render, revisit, type Arrival } from '../pipeline/arrival';
 
@@ -72,7 +72,7 @@ type Kit = Extract<FromCapture, { type: 'revisitKit' }>;
 /**
  * A frame's tree from a kit alone, the way the Worker will build it: the row
  * supplies the timing and link type, the kit the bytes, and the row's own
- * `dns.response_in` the one patch a later frame writes into a tree.
+ * tree links (`TREE_LINKS`) the one patch later frames write into a tree.
  */
 function treeFromKit(kit: Kit, id: number, arrival: Arrival): string {
   if (kit.record === null || kit.row === null) throw new RecordMiss('the kit has no record');
@@ -80,14 +80,13 @@ function treeFromKit(kit: Kit, id: number, arrival: Arrival): string {
   const own = bytes.get(id);
   if (own === undefined) throw new RecordMiss('the kit has no bytes for the frame itself');
   const row = kit.row;
-  const responseIn = row.fields?.['dns.response_in'];
-  const patches: InfoPatch[] = typeof responseIn === 'number' ? [{ frameId: id, responseInFrame: responseIn }] : [];
+  const links = treeLinksOf((abbrev) => row.fields?.[abbrev]);
   const layers = revisit(
     {
       bytes: own, tsUs: row.tsUs, relativeTime: row.relativeTime, timeDelta: row.timeDelta,
       origLen: row.length, linktype: row.linkType ?? LINKTYPE.ETHERNET,
     },
-    id, kit.record, arrival.host, patches, (frame) => bytes.get(frame),
+    id, kit.record, arrival.host, links ? [{ frameId: id, links }] : [], (frame) => bytes.get(frame),
   );
   return render(layers);
 }

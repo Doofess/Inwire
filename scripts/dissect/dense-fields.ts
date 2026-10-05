@@ -94,11 +94,13 @@ const DENSE_THRESHOLD = 0.2;
     }
 
     const declared = new Set(DENSE_FIELDS.map((k) => k.abbrev));
+    // A key written after dissection can never be a column, however dense.
+    const afterwards = new Set(POST_DISSECTION_KEYS);
 
     // The expensive mistake, and so the failure: a key on a fifth of every
     // capture, still paying a property slot on every frame that carries it.
     const missed = [...counts.entries()]
-      .filter(([key, n]) => n / frames >= DENSE_THRESHOLD && !declared.has(key))
+      .filter(([key, n]) => n / frames >= DENSE_THRESHOLD && !declared.has(key) && !afterwards.has(key))
       .map(([key]) => key)
       .sort();
     check('no key is dense in the fixtures but undeclared', missed, []);

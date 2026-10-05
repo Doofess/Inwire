@@ -33,6 +33,7 @@ import {
 import { inferHostIdentity } from '../../src/services/hostIdentity';
 import { streamPackets, targetForPacket } from '../../src/services/followStream';
 import { fieldValue } from '../../src/services/dissect/fieldAccess';
+import { treeLinksOf } from '../../src/services/dissect/infoPatch';
 import type { ReplayFrame } from '../../src/services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../../src/types/packet';
 
@@ -143,10 +144,8 @@ async function main() {
     const frames = bundleFor(packet, buffer);
     // What a later frame told this one about itself, handed back rather than
     // re-derived - see `dissectReplay`'s `retroactive`.
-    const responseIn = packet.fields?.['dns.response_in'];
-    const retroactive = typeof responseIn === 'number'
-      ? { frameId: packet.id, responseInFrame: responseIn }
-      : undefined;
+    const links = treeLinksOf((abbrev) => fieldValue(packet, abbrev));
+    const retroactive = links ? { frameId: packet.id, links } : undefined;
     const { layers } = dissectReplay(frames, false, packet.streamId, retroactive, host, seedsFor(packet));
     check(`${label} (frame ${packet.id}, ${frames.length} replayed) rebuilds identically`,
       render(layers), render(packet.layers));

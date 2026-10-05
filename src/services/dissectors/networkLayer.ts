@@ -619,7 +619,7 @@ export function decodeNetworkLayer(
         // now, the same way a reassembled TLS record's segments do.
         infoPatches = (infoPatches ?? []).concat(
           datagram.frames.filter((frameId) => frameId !== id).map((frameId) => ({
-            frameId, suffix: ` [Reassembled in ${id}]`,
+            frameId, suffix: ` [Reassembled in ${id}]`, links: { 'ip.reassembled_in': id },
           })),
         );
         l3Tracker?.forgetFragments(srcIp, dstIp, identification, ipProtocolNum);
@@ -696,7 +696,7 @@ export function decodeNetworkLayer(
       // written `[Reassembled in N]` onto this datagram's earlier fragments,
       // and this is the frame that completed it - so both sets of patches
       // belong to it.
-      const fromTransport = transportPatches(transport, id);
+      const fromTransport = transportPatches(transport, id, 'icmp.resp_in');
       if (fromTransport) infoPatches = (infoPatches ?? []).concat(fromTransport);
       resolvedNames = transport.resolvedNames;
       // **`[Stream index]` is the TCP layer's row and is drawn there now.**
@@ -882,7 +882,7 @@ export function decodeNetworkLayer(
       if (v6Reassembled && v6Datagram) {
         infoPatches = (infoPatches ?? []).concat(
           v6Datagram.frames.filter((frameId) => frameId !== id).map((frameId) => ({
-            frameId, suffix: ` [Reassembled in ${id}]`,
+            frameId, suffix: ` [Reassembled in ${id}]`, links: { 'ipv6.reassembled.in': id },
           })),
         );
         l3Tracker?.forgetFragments(srcIp, dstIp, chain!.fragmentId!, IPV6_FRAGMENT_KEY);
@@ -944,7 +944,7 @@ export function decodeNetworkLayer(
       // the fragment block above may already have written `[Reassembled in N]`
       // onto this datagram's earlier fragments, and this is the frame that
       // completed it.
-      const fromTransport = transportPatches(transport, id);
+      const fromTransport = transportPatches(transport, id, 'icmpv6.resp_in');
       if (fromTransport) infoPatches = (infoPatches ?? []).concat(fromTransport);
       resolvedNames = transport.resolvedNames;
       // **`[Stream index]` is the TCP layer's row and is drawn there now.**
@@ -1232,11 +1232,22 @@ function transportPatches(
     reassembledFrom?: number[];
     labelPatches?: { frameId: number; protocolLabel: string }[];
     dnsMatchedQueryFrameId?: number;
+    icmpMatchedRequestFrameId?: number;
   },
   completedIn: number,
+  /** Which ICMP's `resp_in` a matched request gains - the family this frame is. */
+  icmpResponseIn: 'icmp.resp_in' | 'icmpv6.resp_in',
 ): InfoPatch[] | undefined {
   const out: InfoPatch[] = [];
-  for (const frameId of transport.reassembledFrom ?? []) out.push({ frameId, suffix: ` [TCP PDU reassembled in ${completedIn}]` });
+  // The request learns its answer only now. Its `(reply in N)` Info suffix
+  // travels as the batch's `icmpReplies`; the tree link travels here, so it
+  // reaches the stored row and a tree rebuilt from it.
+  if (transport.icmpMatchedRequestFrameId !== undefined) {
+    out.push({ frameId: transport.icmpMatchedRequestFrameId, links: { [icmpResponseIn]: completedIn } });
+  }
+  for (const frameId of transport.reassembledFrom ?? []) {
+    out.push({ frameId, suffix: ` [TCP PDU reassembled in ${completedIn}]`, links: { 'tcp.reassembled_in': completedIn } });
+  }
   for (const patch of transport.labelPatches ?? []) out.push(patch);
   // The query frame learns which frame answered it only now.
   if (transport.dnsMatchedQueryFrameId !== undefined) {

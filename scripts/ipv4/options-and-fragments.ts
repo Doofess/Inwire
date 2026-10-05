@@ -240,7 +240,7 @@ const UDP_DATAGRAM = [
   // over one pass of the buffer, not by reaching back into a packet here.
   check('the earlier fragment is told which frame finished the job',
     completing.infoPatches?.filter((p) => p.frameId === headFrame),
-    [{ frameId: headFrame, suffix: ` [Reassembled in ${headFrame + 1}]` }]);
+    [{ frameId: headFrame, suffix: ` [Reassembled in ${headFrame + 1}]`, links: { 'ip.reassembled_in': headFrame + 1 } }]);
 
   // A row describing bytes that are not in this frame must not point the hex
   // view at this frame's offsets - the rule TLS reassembly already follows.
@@ -454,7 +454,7 @@ function ipv6FragmentLayer(packet: Packet) {
     reasm?.name, '[2 Reassembled IPv6 fragments (37 bytes)]');
   check('the earlier fragment is told which frame finished the job',
     completing.infoPatches?.filter((p) => p.frameId === headFrame),
-    [{ frameId: headFrame, suffix: ` [Reassembled in ${headFrame + 1}]` }]);
+    [{ frameId: headFrame, suffix: ` [Reassembled in ${headFrame + 1}]`, links: { 'ipv6.reassembled.in': headFrame + 1 } }]);
 
   const udp = b.layers.find((l) => l.name === 'User Datagram Protocol')!;
   checkTrue('the reassembled transport layer claims no bytes of this frame',
