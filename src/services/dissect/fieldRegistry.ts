@@ -265,6 +265,7 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(str('ipv6.dst_addr_space', 'Destination Address Space', 'ipv6')),
   // What the address is (dissectors/ipv6Address.ts): one set per side and
   // the reference's either-end twin, which it hides and a filter reads.
+  treeOnly(bool('ipv6.plen_zero', 'IPv6 payload length equals 0', 'ipv6')),
   treeOnly(str('ipv6.addr_space', 'Address Space', 'ipv6')),
   treeOnly(uint('ipv6.src_multicast_flags', 'Multicast Flags', 'ipv6')),
   treeOnly(uint('ipv6.src_multicast_flags.reserved', 'Reserved', 'ipv6')),

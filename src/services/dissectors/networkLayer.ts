@@ -761,7 +761,20 @@ export function decodeNetworkLayer(
           rawBytesRange: [l3Offset + 1, l3Offset + 3],
           bitfield: { bitOffset: 4, bitLength: 20, totalBits: 24 },
         },
-        { name: 'Payload Length', value: ipv6PayloadLen, abbrev: 'ipv6.plen', rawBytesRange: [l3Offset + 4, l3Offset + 5] },
+        {
+          name: 'Payload Length', value: ipv6PayloadLen, abbrev: 'ipv6.plen', rawBytesRange: [l3Offset + 4, l3Offset + 5],
+          // Zero is legal only for a jumbogram, which a Hop-by-Hop header
+          // carries, or with nothing following; anything else is almost always
+          // a NIC that coalesced segments (TSO/LRO) before the sniffer saw them.
+          // The reference says so on the row - a note, not a finding: the
+          // frame is already reported malformed below.
+          ...(ipv6PayloadLen === 0 && nextHeader !== 0 && nextHeader !== 59 ? {
+            children: [{
+              name: '[IPv6 payload length equals 0 (maybe because of "TCP segmentation offload" (TSO))]',
+              value: '', generated: true, abbrev: 'ipv6.plen_zero',
+            }],
+          } : {}),
+        },
         { name: 'Next Header', value: describeIpProtocol(nextHeader), abbrev: 'ipv6.nxt', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
         { name: 'Hop Limit', value: hopLimit, abbrev: 'ipv6.hlim', rawBytesRange: [l3Offset + 7, l3Offset + 7] },
         {

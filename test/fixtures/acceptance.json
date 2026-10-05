@@ -65,7 +65,7 @@
           "ieee1905": 97,
           "igmp": 14,
           "ip": 24,
-          "ipv6": 52,
+          "ipv6": 53,
           "llc": 8,
           "lldp": 56,
           "quic": 24,
@@ -80,7 +80,7 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 81,
+          "absentDistinct": 80,
           "valueMismatches": 303
         },
         "unimplemented": {
@@ -157,7 +157,7 @@
           "icmpv6": 44,
           "ieee1905": 75,
           "ip": 23,
-          "ipv6": 51,
+          "ipv6": 52,
           "llc": 8,
           "quic": 24,
           "ssdp": 7,
@@ -171,7 +171,7 @@
           "filterableNotInTree": 0
         },
         "counts": {
-          "absentDistinct": 49,
+          "absentDistinct": 48,
           "valueMismatches": 217
         },
         "unimplemented": {}
