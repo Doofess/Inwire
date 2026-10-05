@@ -140,9 +140,9 @@ check('a TTL of 0 is not a distance', inferTtl(0), null);
   }));
   const options = findField(ipLayer(packet)!.fields, 'Options');
   check('the option is read rather than skipped over', options?.children?.length, 1);
-  check('...and named', options?.children?.[0].name, 'Router Alert (4 bytes)');
+  check('...and named', options?.children?.[0].name, 'IP Option - Router Alert (4 bytes)');
   check('...and what it asks for is spelled out',
-    options?.children?.[0].value, 'Router shall examine packet');
+    options?.children?.[0].value, 'Router shall examine packet (0)');
   check('the transport header is still found past the options',
     packet.protocolLabel ?? packet.protocol, 'IGMPv2');
 }
@@ -166,9 +166,9 @@ check('a TTL of 0 is not a distance', inferTtl(0), null);
   check('Record Route lists the hops it collected',
     options?.children?.[0].value, '10.0.0.1, 10.0.0.254');
   check('...and shows the slot nobody has filled yet',
-    options?.children?.[0].children?.filter((c) => c.name === 'Empty slot').length, 1);
+    options?.children?.[0].children?.filter((c) => c.abbrev === 'ip.empty_rt').length, 1);
   check('the End of Option List padding is listed too, not silently eaten',
-    options?.children?.[1].name, 'End of Option List (EOL) (0)');
+    options?.children?.[1].name, 'IP Option - End of Options List (EOL)');
 }
 
 {

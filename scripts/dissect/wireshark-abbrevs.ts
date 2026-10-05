@@ -101,22 +101,6 @@ const DERIVED: [string, string][] = [
   // naming it differently.
   ['snmp.value', 'one generic value; Wireshark splits by ASN.1 type '
     + '(`snmp.value.int`, `.octets`, `.oid`, ...)'],
-  ['tcp.options.sack_perm', 'the option\'s presence; Wireshark has '
-    + '`.present`/`.absent` as separate booleans'],
-  ['tcp.options.nop', 'the option\'s presence; Wireshark registers this name as '
-    + 'a sub-PROTOCOL rather than a field, so it is absent from `-G fields` '
-    + 'while still being a name a user can type'],
-  // The same argument as `tcp.options.nop` directly above, and checked the
-  // same way: `tshark -G protocols` lists all four - "TCP Option - Maximum
-  // segment size", "TCP Option - Window Scale", "TCP Option - SACK", "TCP
-  // Option - End of Option List (EOL)" - so each is a name a user can type
-  // and a name `-G fields` will never contain. They name the OPTION; the
-  // numbers inside them (`tcp.options.mss_val`, `tcp.options.wscale.shift`,
-  // `tcp.options.sack_le`) are ordinary fields and are not exempted.
-  ['tcp.options.mss', 'the option itself; a sub-PROTOCOL in Wireshark, as `tcp.options.nop` is'],
-  ['tcp.options.wscale', 'the option itself; a sub-PROTOCOL in Wireshark, as `tcp.options.nop` is'],
-  ['tcp.options.sack', 'the option itself; a sub-PROTOCOL in Wireshark, as `tcp.options.nop` is'],
-  ['tcp.options.eol', 'the option itself; a sub-PROTOCOL in Wireshark, as `tcp.options.nop` is'],
   ['tls.handshake.extensions_ech', 'the ECH extension\'s presence; Wireshark '
     + 'names only its inner parts'],
   ['tls.x509.subject_cn', 'read from the certificate inline; Wireshark reaches '
@@ -144,6 +128,23 @@ for (const line of dump.split('\n')) {
   if (columns[2]) reference.add(columns[2]);
 }
 console.log(`The reference analyzer defines ${reference.size} fields.\n`);
+
+// **A sub-protocol's filter name is a name a user can type, too.** Wireshark
+// registers each TCP and IP option as a protocol of its own - "TCP Option -
+// No-Operation (NOP)" is `tcp.options.nop`, "IP Option - Router Alert" is
+// `ip.options.routeralert` - so `-G fields` never lists them while a filter
+// for any of them works. They are read from `-G protocols` (column 3 is the
+// filter name) rather than exempted one by one, which is what this list did
+// for five TCP options and would have had to do again for seventeen IP ones.
+// Only dotted names count: a bare `tcp` is a layer, and the registry's own
+// rules decide what a layer is.
+const protocolDump = execFileSync(tshark, ['-G', 'protocols'], {
+  encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+});
+for (const line of protocolDump.split('\n')) {
+  const filterName = line.split('\t')[2]?.trim();
+  if (filterName && filterName.includes('.')) reference.add(filterName);
+}
 
 const DERIVED_SET = new Map(DERIVED);
 

@@ -522,9 +522,13 @@ export function decodeNetworkLayer(
     if (ipHeaderLen > 20) {
       const options = dissectIpv4Options(rawBytes, l3Offset + 20, l3Offset + ipHeaderLen);
       if (options.length > 0) {
+        // The reference names every option it has a dissector for after the
+        // byte count: "Options: (4 bytes), Router Alert".
+        const named = options.map((o) => /^IP Option - (.*) \(\d+ bytes?\)$/.exec(o.name)?.[1])
+          .filter((n): n is string => n !== undefined && !/\((EOL|NOP)\)$/.test(n));
         ipLayer.fields.push({
           name: 'Options',
-          value: `(${ipHeaderLen - 20} bytes)`,
+          value: `(${ipHeaderLen - 20} bytes)${named.map((n) => `, ${n}`).join('')}`,
           rawBytesRange: [l3Offset + 20, l3Offset + ipHeaderLen - 1],
           children: options,
         });
