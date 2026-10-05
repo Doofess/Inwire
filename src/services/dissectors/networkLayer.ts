@@ -29,7 +29,8 @@ import type { InfoPatch } from '../dissect/types';
 import { formatIpv6Address } from '../addressFormat';
 import { ETHERNET_MAX_FRAME } from '../direction';
 import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './ipv4';
-import { IPV6_EXT_HEADERS, NO_NEXT_HEADER, walkIpv6Extensions } from './ipv6Ext';
+import { NO_NEXT_HEADER, walkIpv6Extensions } from './ipv6Ext';
+import { describeIpProtocol } from '../dissect/ipProtocolNames';
 import { dissectPortless, isPortlessProtocol } from './portless';
 import { GRE_PROTOCOL, encapsulatedInfo, innerNetworkStart, readGreHeader } from './gre';
 import {
@@ -472,7 +473,7 @@ export function decodeNetworkLayer(
             { name: '[Hops away]', value: ttlGuess.hops, generated: true },
           ] : undefined,
         },
-        { name: 'Protocol', value: ipProtocolNum === 6 ? 'TCP (6)' : ipProtocolNum === 17 ? 'UDP (17)' : `${ipProtocolNum}`, abbrev: 'ip.proto', rawBytesRange: [l3Offset + 9, l3Offset + 9] },
+        { name: 'Protocol', value: describeIpProtocol(ipProtocolNum), abbrev: 'ip.proto', rawBytesRange: [l3Offset + 9, l3Offset + 9] },
         {
           name: 'Header Checksum',
           value: `0x${headerChecksumActual.toString(16).padStart(4, '0')} [${checksumCorrect ? 'correct' : 'incorrect'}]`,
@@ -752,7 +753,7 @@ export function decodeNetworkLayer(
           bitfield: { bitOffset: 4, bitLength: 20, totalBits: 24 },
         },
         { name: 'Payload Length', value: ipv6PayloadLen, abbrev: 'ipv6.plen', rawBytesRange: [l3Offset + 4, l3Offset + 5] },
-        { name: 'Next Header', value: describeIpv6NextHeader(nextHeader), abbrev: 'ipv6.nxt', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
+        { name: 'Next Header', value: describeIpProtocol(nextHeader), abbrev: 'ipv6.nxt', rawBytesRange: [l3Offset + 6, l3Offset + 6] },
         { name: 'Hop Limit', value: hopLimit, abbrev: 'ipv6.hlim', rawBytesRange: [l3Offset + 7, l3Offset + 7] },
         {
           name: 'Source Address', value: srcIp, abbrev: 'ipv6.src', rawBytesRange: [l3Offset + 8, l3Offset + 23],
@@ -1090,24 +1091,6 @@ function computeIpHeaderChecksum(rawBytes: Uint8Array, l3Offset: number, ipHeade
     sum = (sum & 0xffff) + (sum >> 16);
   }
   return (~sum) & 0xffff;
-}
-
-/**
- * The reference analyzer's arrival-time format: `Aug 25, 2026 20:16:40.351587600 Jerusalem
- * Daylight Time`. The spelled-out zone name comes from Intl rather than an
- * offset, because that is what the reference analyzer prints and an offset would not match.
- *
- * Sub-millisecond digits are zero-padded rather than invented: the agent
- * timestamps to microsecond resolution, so the last three digits of the
- * nanosecond field are genuinely unknown, not measured.
- */
-/** The reference analyzer's [Address Space] classification for an IPv6 address. */
-function describeIpv6NextHeader(n: number): string {
-  const ext = IPV6_EXT_HEADERS[n];
-  if (ext) return `IPv6 ${ext} (${n})`;
-  if (n === NO_NEXT_HEADER) return 'No Next Header (59)';
-  const name = IP_PROTOCOL_NAMES[n];
-  return name ? `${name} (${n})` : String(n);
 }
 
 /**

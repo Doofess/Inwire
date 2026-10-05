@@ -39,6 +39,7 @@ import { dataLayer } from './mediaType';
 // `undefined` and a thrown `TypeError`, not a short read. The shared one
 // clamps both ends, and is 4.7x faster for the same string (`hexBytes.ts`).
 import { hexColons } from '../dissect/hexBytes';
+import { icmpCodeValue, icmpTypeValue } from './icmpNames';
 
 /** Everything the decode needs that is neither the bytes nor the offset. */
 export interface IcmpContext {
@@ -397,8 +398,8 @@ export function dissectIcmp(
   }
 
   const fields: ProtocolField[] = [
-    { name: 'Type', value: icmpType, abbrev: names.type, rawBytesRange: [transportOffset, transportOffset] },
-    { name: 'Code', value: icmpCode, abbrev: names.code, rawBytesRange: [transportOffset + 1, transportOffset + 1] },
+    { name: 'Type', value: icmpTypeValue(isIcmpv6, icmpType), abbrev: names.type, rawBytesRange: [transportOffset, transportOffset] },
+    { name: 'Code', value: icmpCodeValue(isIcmpv6, icmpType, icmpCode), abbrev: names.code, rawBytesRange: [transportOffset + 1, transportOffset + 1] },
   ];
   const checksum = checksumRows(rawBytes, transportOffset, transportOffset + 2, names, ctx);
   if (checksum) fields.push(...checksum.rows);

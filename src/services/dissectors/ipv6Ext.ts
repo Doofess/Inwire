@@ -14,6 +14,7 @@
  * `(len + 2) * 4`, and the Fragment header is a fixed 8 bytes.
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
+import { describeIpProtocol } from '../dissect/ipProtocolNames';
 
 export const IPV6_EXT_HEADERS: Record<number, string> = {
   0: 'Hop-by-Hop Options',
@@ -99,7 +100,7 @@ export function walkIpv6Extensions(
     if (p + length > end) break;
 
     const fields: ProtocolField[] = [
-      { name: 'Next Header', value: `${headerName(following)} (${following})`, rawBytesRange: [p, p] },
+      { name: 'Next Header', value: describeIpProtocol(following), rawBytesRange: [p, p] },
     ];
     if (nextHeader !== 44) {
       fields.push({ name: 'Length', value: `${lenField} (${length} bytes)`, rawBytesRange: [p + 1, p + 1] });
@@ -157,11 +158,6 @@ export function walkIpv6Extensions(
     }
   }
   return out;
-}
-
-function headerName(n: number): string {
-  if (n === NO_NEXT_HEADER) return 'No Next Header';
-  return IPV6_EXT_HEADERS[n] ?? (n === 6 ? 'TCP' : n === 17 ? 'UDP' : n === 58 ? 'ICMPv6' : 'Unknown');
 }
 
 function tokenFor(n: number): string {
