@@ -41,6 +41,7 @@ import { resolveMacName } from '../macVendors';
 import { dissectTcpTransport } from './tcpTransport';
 import { dissectUdpTransport } from './udpTransport';
 import { dissectIcmp } from './icmp';
+import { ipv6AddressDetail, ipv6EmbeddedRows } from './ipv6Address';
 
 /**
  * The caller state the network layer decides.
@@ -109,6 +110,22 @@ function hostAliasRows(
     { name: 'Source or Destination Address', value: address, abbrev: names.addr, rawBytesRange: at },
     { name: `${side} Host`, value: address, abbrev: names.own, rawBytesRange: at },
     { name: 'Source or Destination Host', value: address, abbrev: names.shared, rawBytesRange: at },
+  ];
+}
+
+/**
+ * Under an IPv6 address: what kind of address it is (`ipv6Address.ts`), then
+ * the either-end names, with the same detail again beneath `ipv6.addr` - which
+ * is where the reference hangs its `ipv6.addr_*` twins.
+ */
+function ipv6AddressChildren(
+  rawBytes: Uint8Array, at: number, address: string, side: 'Source' | 'Destination',
+): ProtocolField[] {
+  return [
+    ...ipv6AddressDetail(rawBytes, at, side),
+    ...hostAliasRows('ipv6', address, [at, at + 15], side).map((row) => (row.abbrev === 'ipv6.addr'
+      ? { ...row, children: ipv6AddressDetail(rawBytes, at, 'Either') }
+      : row)),
   ];
 }
 
@@ -749,18 +766,13 @@ export function decodeNetworkLayer(
         { name: 'Hop Limit', value: hopLimit, abbrev: 'ipv6.hlim', rawBytesRange: [l3Offset + 7, l3Offset + 7] },
         {
           name: 'Source Address', value: srcIp, abbrev: 'ipv6.src', rawBytesRange: [l3Offset + 8, l3Offset + 23],
-          children: [
-            ...hostAliasRows('ipv6', srcIp, [l3Offset + 8, l3Offset + 23], 'Source'),
-            { name: '[Address Space]', value: ipv6AddressSpace(srcIp), abbrev: 'ipv6.src_addr_space', generated: true },
-          ],
+          children: ipv6AddressChildren(rawBytes, l3Offset + 8, srcIp, 'Source'),
         },
         {
           name: 'Destination Address', value: dstIp, abbrev: 'ipv6.dst', rawBytesRange: [l3Offset + 24, l3Offset + 39],
-          children: [
-            ...hostAliasRows('ipv6', dstIp, [l3Offset + 24, l3Offset + 39], 'Destination'),
-            { name: '[Address Space]', value: ipv6AddressSpace(dstIp), abbrev: 'ipv6.dst_addr_space', generated: true },
-          ],
+          children: ipv6AddressChildren(rawBytes, l3Offset + 24, dstIp, 'Destination'),
         },
+        ...ipv6EmbeddedRows(rawBytes, l3Offset + 8, l3Offset + 24),
       ],
     };
     ipv6Layer.fields.push(...ipStreamRow(context, 'ipv6', srcIp, dstIp, filterFields));
@@ -1136,16 +1148,6 @@ function ipv4PseudoHeader(rawBytes: Uint8Array, l3Offset: number, protocol: numb
   ph[9] = protocol;
   ph[10] = transportLen >> 8; ph[11] = transportLen & 0xff;
   return ph;
-}
-
-function ipv6AddressSpace(address: string): string {
-  const a = address.toLowerCase();
-  if (a === '::1') return 'Loopback';
-  if (a === '::') return 'Unspecified';
-  if (a.startsWith('ff')) return 'Multicast';
-  if (a.startsWith('fe8') || a.startsWith('fe9') || a.startsWith('fea') || a.startsWith('feb')) return 'Link-Local Unicast';
-  if (a.startsWith('fc') || a.startsWith('fd')) return 'Unique Local Unicast';
-  return 'Global Unicast';
 }
 
 /** The IPv6 pseudo-header (RFC 8200 §8.1): src, dst, 32-bit length, zeros, next header. */
