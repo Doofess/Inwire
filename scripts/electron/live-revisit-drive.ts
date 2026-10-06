@@ -43,6 +43,7 @@ import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
 import { LINKTYPE } from '../../src/services/dissect/types';
 import type { Packet, ProtocolField, ProtocolLayer } from '../../src/types/packet';
+import { installWorkerSpy, openFrames, workerFailures, type FrameCase } from './openFrame';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -120,30 +121,9 @@ let browser: Awaited<ReturnType<typeof playwright.chromium.launch>> | null = nul
 try {
   const page = await app.firstWindow();
   page.setDefaultTimeout(30_000);
-  await page.addInitScript(() => {
-    const sent: string[] = [];
-    (window as unknown as { __sentToWorker: string[] }).__sentToWorker = sent;
-    const original = Worker.prototype.postMessage;
-    Worker.prototype.postMessage = function (this: Worker, message: unknown, ...rest: never[]) {
-      const type = (message as { type?: unknown } | null)?.type;
-      if (typeof type === 'string') sent.push(type);
-      // And what the Worker says back that is a complaint: a failure it posts
-      // is the only word from inside it that a person would otherwise miss.
-      // One list for every Worker: MapLibre starts Workers of its own, and a
-      // list per Worker let the last one started hide the pipeline's.
-      const self = this as Worker & { __heard?: boolean };
-      if (!self.__heard) {
-        self.__heard = true;
-        const shared = window as unknown as { __workerFailures?: string[] };
-        const heard = (shared.__workerFailures ??= []);
-        self.addEventListener('message', (event) => {
-          const data = (event as MessageEvent).data as { type?: string; message?: string } | null;
-          if (data?.type === 'failure') heard.push(String(data.message));
-        });
-      }
-      return (original as (...args: unknown[]) => void).call(this, message, ...rest);
-    } as Worker['postMessage'];
-  });
+  // Every command sent to a Worker, and every failure one posts back - the only
+  // word from inside it that a person would otherwise miss.
+  await installWorkerSpy(page);
   // The store's own counters, as it reports them to the renderer: whether it
   // attached each record, or missed it. Heard by wrapping the port's handler,
   // which `captureClient.ts` assigns once.
@@ -162,7 +142,6 @@ try {
     });
   });
   const storeStats = () => page.evaluate(() => (window as unknown as { __storeStats?: Record<string, number> }).__storeStats ?? null);
-  const sentToWorker = () => page.evaluate(() => [...(window as unknown as { __sentToWorker?: string[] }).__sentToWorker ?? []]);
   await page.waitForLoadState('domcontentloaded');
   await page.evaluate(() => localStorage.setItem('inwire.tour', JSON.stringify({ completed: true })));
   await page.reload();
@@ -282,8 +261,12 @@ try {
 
   // --- what to open: old frames whose rows need the frames before them ------
   const oldest = rows.filter((r) => r.id <= total - OUT_OF_CACHE && trees.has(r.id));
-  const cases: { label: string; id: number; expect: [string, string][] }[] = [];
+  const cases: FrameCase[] = [];
+  // Once per frame: a QUIC packet is a UDP datagram too, and two picks landing
+  // on one frame would open it twice.
+  const untaken = (r: Packet) => !cases.some((c) => c.id === r.id);
   const push = (label: string, id: number, abbrevs: string[]) => {
+    if (cases.some((c) => c.id === id)) return;
     const layers = trees.get(id)!;
     const expect = abbrevs.map((a) => lineOf(layers, a)).filter((l): l is [string, string] => l !== null);
     if (expect.length > 0) cases.push({ label, id, expect });
@@ -297,53 +280,18 @@ try {
     const r = tcpDeep[Math.floor(at * (tcpDeep.length - 1))];
     if (r) push('a TCP segment deep in its stream', r.id, ['tcp.seq', 'tcp.stream']);
   }
-  const tlsDeep = oldest.find((r) => valueOf(trees.get(r.id)!, 'tls.record.length') !== undefined
+  const tlsDeep = oldest.find((r) => untaken(r) && valueOf(trees.get(r.id)!, 'tls.record.length') !== undefined
     && numberOf(valueOf(trees.get(r.id)!, 'tcp.seq')) > 20_000);
   if (tlsDeep) push('a TLS record deep in its stream', tlsDeep.id, ['tls.record.length', 'tcp.seq']);
-  const quicLater = oldest.find((r) => numberOf(valueOf(trees.get(r.id)!, 'quic.connection.number')) > 1);
+  const quicLater = oldest.find((r) => untaken(r) && numberOf(valueOf(trees.get(r.id)!, 'quic.connection.number')) > 1);
   if (quicLater) push('a QUIC packet on a later connection', quicLater.id, ['quic.connection.number']);
-  const udpStream = oldest.find((r) => numberOf(valueOf(trees.get(r.id)!, 'udp.stream')) > 5);
+  const udpStream = oldest.find((r) => untaken(r) && numberOf(valueOf(trees.get(r.id)!, 'udp.stream')) > 5);
   if (udpStream) push('a UDP datagram on a later conversation', udpStream.id, ['udp.stream']);
   checkTrue('there are old frames to open', cases.length >= 3);
-  const complaints = await page.evaluate(() => (window as unknown as { __workerFailures?: string[] }).__workerFailures ?? []);
-  check('the Worker reported no failure during the capture', complaints, []);
+  check('the Worker reported no failure during the capture', await workerFailures(page), []);
 
   // --- open them in the app -------------------------------------------------
-  const filter = page.getByPlaceholder('e.g. tcp.port == 443');
-  for (const { label, id, expect } of cases) {
-    const before = (await sentToWorker()).length;
-    await filter.fill(`frame.number == ${id}`);
-    await filter.press('Enter');
-    // The frame's own row, not the list's first: the filter is answered by a
-    // scan in the store, and until it lands the first row is still the last
-    // case's frame - already selected, so clicking it asks for nothing and the
-    // pane keeps the last tree. That is how frame 19 once "took" 15 seconds.
-    const row = page.locator(`#packet-row-${id}`);
-    await row.waitFor();
-    await sleep(400);
-    const t0 = Date.now();
-    await row.click();
-    let pane = '';
-    while (Date.now() - t0 < 15_000) {
-      pane = await page.evaluate(() => {
-        const panes = [...document.querySelectorAll('div')]
-          .filter((d) => d.className.includes('custom-scrollbar') && (d.textContent ?? '').includes('Frame'));
-        return panes.map((d) => (d as HTMLElement).innerText).join('\n');
-      });
-      if (expect.every(([, line]) => pane.replace(/\s+/g, '').includes(line))) break;
-      await sleep(100);
-    }
-    console.log(`\n      frame ${id} of ${total.toLocaleString()}: ${label} - tree on screen in ${Date.now() - t0} ms`);
-    const flat = pane.replace(/\s+/g, '');
-    for (const [abbrev, line] of expect) checkTrue(`frame ${id} shows its ${abbrev} row: ${line}`, flat.includes(line));
-    const sent = (await sentToWorker()).slice(before);
-    const fromRecord = sent.includes('detail') && !sent.includes('replay');
-    checkTrue(`frame ${id}'s tree was asked for, and came from its record rather than a replay`, fromRecord);
-    if (!fromRecord || !expect.every(([, line]) => flat.includes(line))) {
-      console.log(`        sent to the Worker: ${JSON.stringify(sent)}`);
-      console.log(`        the pane: ${JSON.stringify(pane.slice(0, 600))}`);
-    }
-  }
+  await openFrames(page, cases, checkTrue, ` of ${total.toLocaleString()}`);
   volume.close();
 } finally {
   if (browser !== null) await browser.close().catch(() => {});

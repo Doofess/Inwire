@@ -36,6 +36,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { arrive, FIXTURES, type Arrived } from '../pipeline/arrival';
 import { keyLog } from '../../src/services/tls/keyLog';
+import { installWorkerSpy, openFrames, sentToWorker, type FrameCase } from './openFrame';
 import type { ProtocolField, ProtocolLayer } from '../../src/types/packet';
 
 let failures = 0;
@@ -95,8 +96,9 @@ try {
   skip('playwright is not installed');
 }
 
-type Case = { label: string; id: number; expect: [string, string][] };
-const casePusher = (cases: Case[]) => (label: string, layers: ProtocolLayer[], id: number, abbrevs: string[]) => {
+/** Adds a case, once per frame: two picks landing on one frame would open it twice. */
+const casePusher = (cases: FrameCase[]) => (label: string, layers: ProtocolLayer[], id: number, abbrevs: string[]) => {
+  if (cases.some((c) => c.id === id)) return;
   const expect = abbrevs.map((a) => lineOf(layers, a)).filter((l): l is [string, string] => l !== null);
   if (expect.length > 0) cases.push({ label, id, expect });
 };
@@ -118,9 +120,10 @@ function firstAbbrev(layers: ProtocolLayer[], prefix: string): string | undefine
 }
 
 /** Frames whose tree needs the frames before them: deep TCP and TLS, DNS, QUIC. */
-function contextCases(arrived: Arrived[]): Case[] {
-  const cases: Case[] = [];
+function contextCases(arrived: Arrived[]): FrameCase[] {
+  const cases: FrameCase[] = [];
   const push = casePusher(cases);
+  const untaken = (a: Arrived) => !cases.some((c) => c.id === a.packet.id);
   // TCP segments where the relative sequence number is not the raw one, spread
   // through the capture - early, middle and late.
   const tcpDeep = arrived.filter((a) => {
@@ -136,12 +139,12 @@ function contextCases(arrived: Arrived[]): Case[] {
       a.packet.layers, a.packet.id, ['tcp.seq', 'tcp.stream']);
   }
   // A TLS record deep in its stream: the record cursor is state from before it.
-  const tls = arrived.find((a) => valueOf(a.packet.layers, 'tls.record.length') !== undefined
+  const tls = arrived.find((a) => untaken(a) && valueOf(a.packet.layers, 'tls.record.length') !== undefined
     && numberOf(valueOf(a.packet.layers, 'tcp.seq')) > 100_000);
   if (tls) push('a TLS record deep in its stream', tls.packet.layers, tls.packet.id, ['tls.record.length', 'tcp.seq']);
-  const dns = arrived.find((a) => valueOf(a.packet.layers, 'dns.response_in') !== undefined);
+  const dns = arrived.find((a) => untaken(a) && valueOf(a.packet.layers, 'dns.response_in') !== undefined);
   if (dns) push('a DNS query, whose answer is a later frame', dns.packet.layers, dns.packet.id, ['dns.response_in']);
-  const quic = arrived.find((a) => numberOf(valueOf(a.packet.layers, 'quic.connection.number')) > 3);
+  const quic = arrived.find((a) => untaken(a) && numberOf(valueOf(a.packet.layers, 'quic.connection.number')) > 3);
   if (quic) push('a QUIC packet on a later connection', quic.packet.layers, quic.packet.id, ['quic.connection.number']);
   return cases;
 }
@@ -150,8 +153,8 @@ function contextCases(arrived: Arrived[]): Case[] {
  * Frames whose tree is decrypted content: HTTP/3 out of 1-RTT QUIC and HTTP/2
  * out of TLS. Their records hold none of it; the Worker's memory does.
  */
-function decryptedCases(arrived: Arrived[]): Case[] {
-  const cases: Case[] = [];
+function decryptedCases(arrived: Arrived[]): FrameCase[] {
+  const cases: FrameCase[] = [];
   const push = casePusher(cases);
   const kinds = [['http3.', 'HTTP/3 out of a 1-RTT QUIC packet'], ['http2.', 'HTTP/2 out of a TLS record']] as const;
   for (const [prefix, what] of kinds) {
@@ -168,7 +171,7 @@ function decryptedCases(arrived: Arrived[]): Case[] {
 }
 
 /** Imports one real capture into the built app and opens each case's frame. */
-async function drive(name: string, capture: string, keysPath: string | null, pick: (arrived: Arrived[]) => Case[]) {
+async function drive(name: string, capture: string, keysPath: string | null, pick: (arrived: Arrived[]) => FrameCase[]) {
   keyLog.clear();
   if (keysPath !== null) keyLog.add(readFileSync(keysPath, 'utf8'));
   const { arrived } = await arrive(capture);
@@ -188,19 +191,10 @@ async function drive(name: string, capture: string, keysPath: string | null, pic
   try {
     const page = await app.firstWindow();
     page.setDefaultTimeout(30_000);
-    // Every command the renderer sends a Worker, by type - installed before the
-    // reload below, so it is in place before the app creates its pipeline Worker.
-    await page.addInitScript(() => {
-      const sent: string[] = [];
-      (window as unknown as { __sentToWorker: string[] }).__sentToWorker = sent;
-      const original = Worker.prototype.postMessage;
-      Worker.prototype.postMessage = function (this: Worker, message: unknown, ...rest: never[]) {
-        const type = (message as { type?: unknown } | null)?.type;
-        if (typeof type === 'string') sent.push(type);
-        return (original as (...args: unknown[]) => void).call(this, message, ...rest);
-      } as Worker['postMessage'];
-    });
-    const sentToWorker = () => page.evaluate(() => [...(window as unknown as { __sentToWorker?: string[] }).__sentToWorker ?? []]);
+    // Every command the renderer sends a Worker - installed before the reload
+    // below, so it is in place before the app creates its pipeline Worker.
+    await installWorkerSpy(page);
+    const sentTypes = async () => (await sentToWorker(page)).map((s) => s.type);
     await page.waitForLoadState('domcontentloaded');
     await page.evaluate(() => localStorage.setItem('inwire.tour', JSON.stringify({ completed: true })));
     await page.reload();
@@ -210,8 +204,8 @@ async function drive(name: string, capture: string, keysPath: string | null, pic
     if (keysPath !== null) {
       await page.evaluate(() => window.inwire?.followSuggestedKeyLog?.());
       const until = Date.now() + 15_000;
-      while (Date.now() < until && !(await sentToWorker()).includes('keylog')) await sleep(200);
-      checkTrue(`${name}: the key log reached the Worker before the import`, (await sentToWorker()).includes('keylog'));
+      while (Date.now() < until && !(await sentTypes()).includes('keylog')) await sleep(200);
+      checkTrue(`${name}: the key log reached the Worker before the import`, (await sentTypes()).includes('keylog'));
     }
 
     const counts = () => page.evaluate(() => {
@@ -237,45 +231,10 @@ async function drive(name: string, capture: string, keysPath: string | null, pic
     await page.keyboard.press('Escape');
     await sleep(2500);
     if (keysPath !== null) {
-      checkTrue(`${name}: the import handed its decrypted answers to the Worker`, (await sentToWorker()).includes('derived'));
+      checkTrue(`${name}: the import handed its decrypted answers to the Worker`, (await sentTypes()).includes('derived'));
     }
 
-    const filter = page.getByPlaceholder('e.g. tcp.port == 443');
-    for (const { label, id, expect } of cases) {
-      // Taken before the filter: the list may select its one row itself.
-      const before = (await sentToWorker()).length;
-      await filter.fill(`frame.number == ${id}`);
-      await filter.press('Enter');
-      // The frame's own row, not the list's first: until the store's scan
-      // answers the filter, the first row is still the last case's frame,
-      // already selected, and clicking it asks the Worker for nothing.
-      const row = page.locator(`#packet-row-${id}`);
-      await row.waitFor();
-      await sleep(400);
-      const t0 = Date.now();
-      await row.click();
-      let pane = '';
-      while (Date.now() - t0 < 15_000) {
-        pane = await page.evaluate(() => {
-          const trees = [...document.querySelectorAll('div')]
-            .filter((d) => d.className.includes('custom-scrollbar') && (d.textContent ?? '').includes('Frame'));
-          return trees.map((d) => (d as HTMLElement).innerText).join('\n');
-        });
-        if (expect.every(([, line]) => pane.replace(/\s+/g, '').includes(line))) break;
-        await sleep(100);
-      }
-      const ms = Date.now() - t0;
-      console.log(`\n      frame ${id}: ${label} - tree on screen in ${ms} ms`);
-      const flat = pane.replace(/\s+/g, '');
-      for (const [abbrev, line] of expect) {
-        checkTrue(`frame ${id} shows its ${abbrev} row: ${line}`, flat.includes(line));
-      }
-      const sent = (await sentToWorker()).slice(before);
-      checkTrue(`frame ${id}'s tree was asked for, and came from its record rather than a replay`,
-        sent.includes('detail') && !sent.includes('replay'));
-      checkTrue(`frame ${id}'s tree was not rebuilt from part of its conversation`,
-        !pane.includes('[Reassembly context]') && !pane.includes('Rebuilt from part of the conversation'));
-    }
+    await openFrames(page, cases, checkTrue);
   } finally {
     // In `finally`: with frames in the buffer, closing asks "Quit Inwire?" in a
     // native box no test can answer, and a failed drive hung on it.
