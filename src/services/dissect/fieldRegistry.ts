@@ -100,6 +100,11 @@ export const LAYERS = [
   // `cdp` belongs beside `lldp` for that reason, and `vrrp`/`ospf` beside
   // `igmp` - all three sit directly on their lower layer with no ports.
   'frame', 'eth', 'vlan', 'ieee8021ad', 'ieee8021ah', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905', 'cdp',
+  // 802.1X. `wlan_rsna_eapol` is the reference's name for the key descriptor's
+  // own rows; it is a protocol there that never appears in a frame's chain,
+  // so the bareword matches nothing in either - it is a token here only so
+  // its fields have a layer to belong to.
+  'eapol', 'eap', 'wlan_rsna_eapol',
   'ip', 'ipv6', 'gre', 'vxlan', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
   // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
@@ -172,6 +177,61 @@ export const FIELDS: readonly FieldDef[] = [
   str('kerberos.crealm', 'Client Realm', 'kerberos'),
   str('kerberos.cname_string', 'Client Name', 'kerberos'),
   str('kerberos.sname_string', 'Server Name', 'kerberos'),
+  // --- 802.1X: EAPOL and EAP -------------------------------------------------
+  // `msgnr` is which message of the four-way handshake a key frame is, worked
+  // out from its Key Information bits - so `wlan_rsna_eapol.keydes.msgnr == 3`
+  // finds the frame that installs the key, as it does in the reference.
+  uint('eapol.version', 'Version', 'eapol'),
+  uint('eapol.type', 'Type', 'eapol'),
+  uint('eapol.len', 'Length', 'eapol'),
+  uint('eapol.keydes.type', 'Key Descriptor Type', 'eapol'),
+  treeOnly(uint('eapol.keydes.key_len', 'Key Length', 'eapol')),
+  treeOnly(uint('eapol.keydes.replay_counter', 'Replay Counter', 'eapol')),
+  treeOnly(str('eapol.keydes.key_iv', 'Key IV', 'eapol')),
+  { ...uint('wlan_rsna_eapol.keydes.msgnr', 'Message number', 'wlan_rsna_eapol'), generated: true },
+  uint('wlan_rsna_eapol.keydes.key_info', 'Key Information', 'wlan_rsna_eapol'),
+  treeOnly(uint('wlan_rsna_eapol.keydes.key_info.keydes_version', 'Key Descriptor Version', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.key_type', 'Key Type', 'wlan_rsna_eapol')),
+  treeOnly(uint('wlan_rsna_eapol.keydes.key_info.key_index', 'Key Index', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.install', 'Install', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.key_ack', 'Key ACK', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.key_mic', 'Key MIC', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.secure', 'Secure', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.error', 'Error', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.request', 'Request', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.encrypted_key_data', 'Encrypted Key Data', 'wlan_rsna_eapol')),
+  treeOnly(bool('wlan_rsna_eapol.keydes.key_info.smk_message', 'SMK Message', 'wlan_rsna_eapol')),
+  treeOnly(str('wlan_rsna_eapol.keydes.nonce', 'WPA Key Nonce', 'wlan_rsna_eapol')),
+  treeOnly(str('wlan_rsna_eapol.keydes.rsc', 'WPA Key RSC', 'wlan_rsna_eapol')),
+  treeOnly(str('wlan_rsna_eapol.keydes.id', 'WPA Key ID', 'wlan_rsna_eapol')),
+  treeOnly(str('wlan_rsna_eapol.keydes.mic', 'WPA Key MIC', 'wlan_rsna_eapol')),
+  treeOnly(uint('wlan_rsna_eapol.keydes.data_len', 'WPA Key Data Length', 'wlan_rsna_eapol')),
+  treeOnly(str('wlan_rsna_eapol.keydes.data', 'WPA Key Data', 'wlan_rsna_eapol')),
+  uint('eap.code', 'Code', 'eap'),
+  uint('eap.id', 'Id', 'eap'),
+  uint('eap.len', 'Length', 'eap'),
+  uint('eap.type', 'Type', 'eap'),
+  str('eap.identity', 'Identity', 'eap'),
+  treeOnly(str('eap.notification', 'Notification', 'eap')),
+  treeOnly(uint('eap.desired_type', 'Desired Auth Type', 'eap')),
+  treeOnly(uint('eap.md5.value_size', 'EAP-MD5 Value-Size', 'eap')),
+  treeOnly(str('eap.md5.value', 'EAP-MD5 Value', 'eap')),
+  treeOnly(str('eap.md5.extra_data', 'EAP-MD5 Extra Data', 'eap')),
+  treeOnly(uint('eap.tls.flags', 'EAP-TLS Flags', 'eap')),
+  treeOnly(bool('eap.tls.flags.len_included', 'Length Included', 'eap')),
+  treeOnly(bool('eap.tls.flags.more_fragments', 'More Fragments', 'eap')),
+  treeOnly(bool('eap.tls.flags.start', 'Start', 'eap')),
+  treeOnly(uint('eap.tls.flags.version', 'Version', 'eap')),
+  treeOnly(uint('eap.tls.len', 'EAP-TLS Length', 'eap')),
+  treeOnly(str('eap.mitm_attacks', 'Vulnerable to MITM attacks', 'eap')),
+  treeOnly(str('eap.dictionary_attacks', 'Vulnerable to dictionary attacks', 'eap')),
+  treeOnly(uint('eap.leap.version', 'EAP-LEAP Version', 'eap')),
+  treeOnly(uint('eap.leap.reserved', 'EAP-LEAP Reserved', 'eap')),
+  treeOnly(uint('eap.leap.count', 'EAP-LEAP Count', 'eap')),
+  treeOnly(str('eap.leap.peer_challenge', 'EAP-LEAP Peer Challenge', 'eap')),
+  treeOnly(str('eap.leap.peer_response', 'EAP-LEAP Peer Response', 'eap')),
+  treeOnly(str('eap.leap.name', 'EAP-LEAP Name', 'eap')),
+  treeOnly(str('eap.data', 'EAP Data', 'eap')),
   // --- Ethernet --------------------------------------------------------------
   { abbrev: 'eth.src', label: 'Source', type: 'mac', layer: 'eth' },
   { abbrev: 'eth.dst', label: 'Destination', type: 'mac', layer: 'eth' },

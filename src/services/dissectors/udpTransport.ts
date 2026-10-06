@@ -134,7 +134,7 @@ export function dissectUdpTransport(
     if (read) {
       protocolLabel = read.protocolLabel;
       info = read.info;
-      extraLayers.push(read.layer);
+      extraLayers.push(read.layer, ...(read.innerLayers ?? []));
       protocolTokens.push(subdissector.token);
       Object.assign(appFields, read.fields);
     }

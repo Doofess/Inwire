@@ -75,6 +75,7 @@ import { dissectPtp } from './ptp';
 import { dissectHsrp, HSRP_V1_GROUP, HSRP_V2_GROUP } from './hsrp';
 import { dissectRip, dissectRipng } from './rip';
 import { dissectKerberosDatagram, KERBEROS_PORT } from './kerberos';
+import { dissectEapol } from './eapol';
 
 /** The three things this build dispatches on by value. */
 export type DispatchTableName = 'ethertype' | 'ip.proto' | 'udp.port';
@@ -91,6 +92,11 @@ export interface LeafResult {
   info: string;
   layer: ProtocolLayer;
   fields?: Record<string, string | number>;
+  /**
+   * Protocols carried inside this one, each its own layer after `layer` - EAP
+   * inside EAPOL, which the reference draws as a protocol of its own.
+   */
+  innerLayers?: ProtocolLayer[];
 }
 
 /** What an entry may look at beyond the bytes, for the one case that needs it. */
@@ -192,6 +198,7 @@ const DISPATCH_TABLE: readonly DispatchEntry[] = [
   { table: 'ethertype', values: on(0x0806), token: 'arp', dissect: (b, s) => dissectArp(b, s) },
   { table: 'ethertype', values: on(0x893a), token: 'ieee1905', dissect: (b, s) => dissectIeee1905(b, s) },
   { table: 'ethertype', values: on(0x88cc), token: 'lldp', dissect: (b, s) => dissectLldp(b, s) },
+  { table: 'ethertype', values: on(0x888e), token: 'eapol', dissect: dissectEapol },
 
   // --- ip.proto: the three that sit on IP with no ports at all --------------
   { table: 'ip.proto', values: on(2), token: 'igmp', dissect: (b, s, e) => dissectIgmp(b, s, e - s) },

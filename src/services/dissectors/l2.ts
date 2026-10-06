@@ -11,6 +11,8 @@ export interface L2DissectorResult {
   layer: ProtocolLayer;
   /** Dissected values under their conventional field names, for display filters. */
   fields?: Record<string, string | number>;
+  /** Protocols carried inside this one, each its own layer - EAP inside EAPOL. */
+  innerLayers?: ProtocolLayer[];
 }
 
 /**

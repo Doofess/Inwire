@@ -858,6 +858,8 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Routing Information Protocol': 'rip',
   'RIPng': 'ripng',
   'Cisco Discovery Protocol': 'cdp',
+  '802.1X Authentication': 'eapol',
+  'Extensible Authentication Protocol': 'eap',
   // The IPv6 extension headers. Without these the layer names fall through to
   // the underscore rule and the protocol hierarchy reads
   // `ipv6_hop-by-hop_options` where Wireshark reads `ipv6.hopopts` - and the
@@ -1200,7 +1202,7 @@ export function decodeRawEthernetPacket(
     protocolLabel = l2Result.protocolLabel;
     proto = l2Result.protocolLabel === 'ARP' ? 'ARP' : 'TCP';
     info = l2Result.info;
-    layers.push(l2Result.layer);
+    layers.push(l2Result.layer, ...(l2Result.innerLayers ?? []));
   } else if (currentEtherType !== 0x0800 && currentEtherType !== 0x86dd) {
     // Not dissected, but still nameable from the ethertype - better an honest
     // "ieee1905" than an inherited default of "TCP".

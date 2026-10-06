@@ -51,5 +51,6 @@ export function dissectPortless(
     info: read.info,
     fields: read.fields,
     layer: read.layer,
+    ...(read.innerLayers !== undefined && read.innerLayers.length > 0 ? { extraLayers: read.innerLayers } : {}),
   };
 }
