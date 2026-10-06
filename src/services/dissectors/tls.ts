@@ -947,6 +947,20 @@ function concat(chunks: Uint8Array[], total: number): Uint8Array {
   return out;
 }
 
+/**
+ * How many bytes `frame` - the segment just read - left in a record that is
+ * not complete yet: the trailing part of a segment that begins one, or the
+ * whole of one that only continues it. That is the reference's
+ * `tcp.segment_data`: a segment of a PDU its desegmentation is still
+ * building, known the moment the bytes are held, whether or not the PDU
+ * ever completes. Zero when the segment left nothing pending.
+ */
+export function pendingSegmentBytes(cursor: TlsRecordCursor, frame: number): number {
+  if (cursor.remaining <= 0 && cursor.headerPartial.length === 0) return 0;
+  const last = cursor.contributions[cursor.contributions.length - 1];
+  return last !== undefined && last.frame === frame ? last.bytes : 0;
+}
+
 export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number, ctx: TlsSegmentContext): TlsSegmentOutcome {
   if (end - start <= 0) return { kind: 'none' };
   // An out-of-order segment is read against a throwaway copy so the real
@@ -1006,7 +1020,7 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
    * adding a row. Drawing it on the wrong 1,337 frames is worse than not
    * drawing it: an abbrev is a filter somebody will write.
    */
-  const startSpanning = (h: RecordHeader, bodyStart: number): void => {
+  const startSpanning = (h: RecordHeader, bodyStart: number, headerBytesHere = TLS_HEADER_BYTES): void => {
     const avail = end - bodyStart;
     cursor.contentType = h.contentType; cursor.version = h.version; cursor.recordLength = h.length;
     cursor.remaining = h.length - avail;
@@ -1018,7 +1032,7 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     // holding the header contributed five bytes more than its body share.
     // Without this every reassembly reported itself five bytes short, which
     // is exactly what the reference's own totals caught.
-    cursor.contributions = [{ frame, bytes: avail + TLS_HEADER_BYTES }];
+    cursor.contributions = [{ frame, bytes: avail + headerBytesHere }];
     cursor.contributors = [];
     // A new record inherits nothing from the one that went before it.
     cursor.holed = false;
@@ -1059,12 +1073,15 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
       completed.push({
         contentType: h.contentType, version: h.version, length: h.length,
         body: bytes.subarray(p, p + h.length), reassembledFrom: [...carriedFrames],
-        contributions: [...carried, { frame, bytes: h.length }], description: '',
+        // This frame carried the header's last `take` bytes as well as the body.
+        contributions: [...carried, { frame, bytes: take + h.length }], description: '',
       });
       cursor.contributions = []; cursor.contributors = [];
       p += h.length;
     } else {
-      startSpanning(h, p);
+      // Only the header bytes this frame carried are its own; the rest are
+      // already among `carried`.
+      startSpanning(h, p, take);
       cursor.contributions.unshift(...carried);
       cursor.contributors.unshift(...carriedFrames);
       p = end;

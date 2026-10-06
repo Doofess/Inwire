@@ -113,6 +113,38 @@ function hostAliasRows(
   ];
 }
 
+/**
+ * The layers an ICMP error quoted, until `nestQuotedLayers` folds them into
+ * the error's own layer. A set beside the layers rather than a flag on them,
+ * because it is a fact about one dissection pass and not part of the tree.
+ */
+const QUOTED_LAYERS = new WeakSet<ProtocolLayer>();
+
+/**
+ * Moves each run of quoted layers inside the layer before it - the ICMP or
+ * ICMPv6 error that quoted them - as the reference draws an error: the
+ * offending datagram's IP header and transport header are part of the error,
+ * not two more layers of this frame.
+ *
+ * Done after the frame's protocol list is taken from the layers, because that
+ * list does name them, as the reference's does: `eth:ethertype:ip:icmp:ip:udp`.
+ */
+export function nestQuotedLayers(layers: ProtocolLayer[]): void {
+  for (let i = 1; i < layers.length; i++) {
+    if (!QUOTED_LAYERS.has(layers[i]) || QUOTED_LAYERS.has(layers[i - 1])) continue;
+    let end = i;
+    while (end < layers.length && QUOTED_LAYERS.has(layers[end])) end++;
+    const host = layers[i - 1];
+    for (const quoted of layers.splice(i, end - i)) {
+      host.fields.push({
+        name: quoted.summary || quoted.name, value: '',
+        ...(quoted.rawBytesRange ? { rawBytesRange: quoted.rawBytesRange } : {}),
+        children: quoted.fields,
+      });
+    }
+  }
+}
+
 /** A row's children, or none - an empty list would draw an expander over nothing. */
 const nonEmpty = (rows: ProtocolField[]): ProtocolField[] | undefined => (rows.length > 0 ? rows : undefined);
 
@@ -230,6 +262,8 @@ function udpConversationRows(
 export interface NetworkContext {
   id: number;
   tsUs: number;
+  /** Nanoseconds past `tsUs` a nanosecond capture measured, 0-999. */
+  nanosRemainder?: number;
   relativeTime: number;
   timeDelta: number;
   origLen: number;
@@ -276,7 +310,7 @@ export function decodeNetworkLayer(
   } = state;
   const {
     id, tsUs, relativeTime, timeDelta, origLen, tcpTracker, icmpTracker, quicTracker,
-    dnsTracker, l3Tracker, sentByUs,
+    dnsTracker, l3Tracker, sentByUs, nanosRemainder,
   } = context;
   // What the capture did not keep of this frame: a snaplen. The transport
   // then reads its lengths from its headers rather than from what was kept
@@ -348,6 +382,7 @@ export function decodeNetworkLayer(
     if (context.quoted) return;
     const quotedBytes = rawBytes.subarray(0, Math.min(embedded.end, rawBytes.length));
     if (embedded.offset >= quotedBytes.length) return;
+    const before = layers.length;
     decodeNetworkLayer(
       quotedBytes, embedded.offset, embedded.etherType, layers, {},
       {
@@ -360,6 +395,7 @@ export function decodeNetworkLayer(
         id, tsUs, relativeTime, timeDelta, origLen,
         sentByUs: undefined, quoted: true,
       });
+    for (const layer of layers.slice(before)) QUOTED_LAYERS.add(layer);
   };
 
   /**
@@ -699,11 +735,11 @@ export function decodeNetworkLayer(
       // real length, so the transport checksum is verified against what was
       // actually sent rather than against one fragment of it.
       ? decodeTransportLayer(reassembled, 0, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, reassembled.length, quicTracker, tsUs, dnsTracker,
-        ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, reassembled.length), sentByUs)
+        ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, reassembled.length), sentByUs, 0, nanosRemainder)
       : isFragment
         ? null
         : decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen, quicTracker, tsUs, dnsTracker,
-          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen), sentByUs, captureShort);
+          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen), sentByUs, captureShort, nanosRemainder);
 
     if (isFragment && !reassembled) {
       // Wireshark's own wording for a fragment it cannot yet reassemble.
@@ -966,10 +1002,10 @@ export function decodeNetworkLayer(
     const transport = isMalformedJumbo
       ? null
       : v6Reassembled
-        ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset), sentByUs)
+        ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset), sentByUs, 0, nanosRemainder)
         : (chain?.stopsHere ?? false)
           ? null
-          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen), sentByUs, captureShort);
+          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen), sentByUs, captureShort, nanosRemainder);
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
@@ -1074,12 +1110,14 @@ function decodeTransportLayer(
   sentByUs?: boolean,
   /** How many bytes of the frame the capture did not keep - a snaplen. */
   notCaptured = 0,
+  /** Nanoseconds past `tsUs` a nanosecond capture measured, 0-999. */
+  nanosRemainder?: number,
 ): TransportResult | null {
   // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {
     // TCP - see dissectors/tcpTransport.ts.
     const read = dissectTcpTransport(rawBytes, transportOffset, {
-      srcIp, dstIp, frameId, tsUs, tcpTracker, l4SegmentLen, pseudoHeader, sentByUs, notCaptured,
+      srcIp, dstIp, frameId, tsUs, nanosRemainder, tcpTracker, l4SegmentLen, pseudoHeader, sentByUs, notCaptured,
     });
     if (read) return read;
   } else if (ipProtocolNum === 6 && notCaptured > 0 && rawBytes.length >= transportOffset + 4) {

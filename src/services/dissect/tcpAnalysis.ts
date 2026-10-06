@@ -61,6 +61,12 @@ export interface TcpDirectionState {
    * ACK from the other side, cleared by a gap in this one (`valid_bif`).
    */
   validBif: boolean;
+  /**
+   * The runs of sequence space this direction has been seen to send, sorted
+   * and disjoint - packet-tcp.c's `contiguous_ranges`. One run means nothing
+   * this side sent is missing from the capture; each gap adds one.
+   */
+  contiguous: [number, number][];
   /** Raw window this direction last advertised. */
   window: number;
   /**
@@ -94,24 +100,38 @@ export interface TcpConnectionState {
   b: TcpDirectionState;
   /** Initial RTT (SYN to the ACK of the SYN-ACK), microseconds, once known. */
   initialRttUs: number | null;
+  /**
+   * The epoch microsecond the analysis measures this connection from. Every
+   * time the analysis keeps is relative to it, in microseconds with a
+   * fraction: an epoch count of microseconds already fills a double's 53
+   * bits, so the nanoseconds a capture measured have room only once the
+   * numbers are small.
+   */
+  originUs: number | null;
 }
 
 function freshDirection(): TcpDirectionState {
   return {
     nextSeq: 0, nextSeqTimeUs: 0, nextSeqFrame: 0, maxSeqToBeAcked: 0, lastAck: 0, lastAckTimeUs: 0, lastAckLen: 0,
-    pushBytes: 0, pushSetLast: false, validBif: false,
+    pushBytes: 0, pushSetLast: false, validBif: false, contiguous: [],
     window: 0, windowSeen: false, winScale: -1, dupAckNum: 0, lastNonDupAckFrame: 0, lastWasKeepAlive: false, lastWasZeroWindowProbe: false,
     sackRanges: [], segments: [], synTimeUs: null, synSeen: false,
   };
 }
 
 export function freshConnection(): TcpConnectionState {
-  return { a: freshDirection(), b: freshDirection(), initialRttUs: null };
+  return { a: freshDirection(), b: freshDirection(), initialRttUs: null, originUs: null };
 }
 
 export interface TcpSegment {
   frame: number;
   timeUs: number;
+  /**
+   * The nanoseconds past `timeUs` a nanosecond capture measured, 0-999. RTTs
+   * and RTOs are drawn to the nanosecond, as the reference draws them, so the
+   * analysis keeps them.
+   */
+  nsRemainder?: number;
   seq: number;
   ack: number;
   /** Raw (unscaled) window. */
@@ -149,6 +169,15 @@ export interface TcpAnalysis {
   partialAck?: boolean;
   /** The segment acknowledged had been sent more than once (`UnackedSegment.karn`). */
   ambiguousAck?: boolean;
+  /**
+   * How many runs of sequence space each side has been seen to send so far
+   * (`tcp.stream.client/server.contiguity_count`). The reference never marks
+   * which side is the client, so "server" is always the side that sent this
+   * segment and "client" the other - kept exactly, since a filter on either
+   * means what it means there.
+   */
+  contiguityServer?: number;
+  contiguityClient?: number;
   /**
    * Whether the reference holds analysis for this frame at all (its `ta`):
    * a verdict, an acknowledged segment, or a bytes-in-flight measurement. It
@@ -271,12 +300,50 @@ export const CATEGORY_BY_FLAG: Record<TcpAnalysisFlag, ExpertCategory> = {
   reused_ports: 'Reset',
 };
 
+/** packet-tcp.c's cap on the runs it keeps per direction. */
+const MAX_CONTIGUOUS_SEQUENCES = 100;
+
+/**
+ * `tcp_track_contiguity`: adds a segment's `[seq, nextSeq)` to a direction's
+ * runs - extending the run it starts in, or inserting a new one - and merges
+ * every run the segment now reaches. A segment that adds no sequence space
+ * (a bare ACK) or lies wholly inside a run changes nothing.
+ */
+function trackContiguity(ranges: [number, number][], seq: number, nextSeq: number): void {
+  if (((nextSeq - seq) >>> 0) === 0) return;
+  const crlen = ranges.length;
+  let dst = 0;
+  let extended = false;
+  while (dst < crlen && ge(seq, ranges[dst][0])) {
+    if (le(seq, ranges[dst][1])) {
+      if (!gt(nextSeq, ranges[dst][1])) return; // already held: a retransmission
+      ranges[dst][1] = nextSeq;
+      extended = true;
+      break;
+    }
+    dst++;
+  }
+  if (!extended) {
+    if (crlen >= MAX_CONTIGUOUS_SEQUENCES) return;
+    ranges.splice(dst, 0, [seq, nextSeq]);
+  }
+  let merge = 0;
+  for (let j = dst + 1; j < ranges.length && ge(nextSeq, ranges[j][0]); j++) {
+    if (gt(ranges[j][1], nextSeq)) ranges[dst][1] = ranges[j][1];
+    merge++;
+  }
+  ranges.splice(dst + 1, merge);
+}
+
 export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b', s: TcpSegment): TcpAnalysis {
   const fwd = direction === 'a' ? conn.a : conn.b;
   const rev = direction === 'a' ? conn.b : conn.a;
   const flags = new Set<TcpAnalysisFlag>();
   const out: TcpAnalysis = { flags: [], tags: [], nextSeq: 0 };
   const { seq, ack, segLen: seglen, window } = s;
+  conn.originUs ??= s.timeUs;
+  /** This segment's time on the connection's clock - microseconds, with the nanoseconds as a fraction. */
+  const now = (s.timeUs - conn.originUs) + (s.nsRemainder ?? 0) / 1000;
   const plain = !s.syn && !s.fin && !s.rst;
   const synOrFin = s.syn || s.fin;
 
@@ -286,7 +353,7 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   if (s.syn) {
     if (!s.ack_ && fwd.synSeen && fwd.nextSeq !== 0 && seq !== add(fwd.nextSeq, -1)) flags.add('reused_ports');
     fwd.synSeen = true;
-    if (!s.ack_) fwd.synTimeUs = s.timeUs;
+    if (!s.ack_) fwd.synTimeUs = now;
   }
 
   // The forward checks, in the source's order. `finishedFwd` is its
@@ -395,7 +462,7 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
     }
     if (!decided && !seqNotAdvanced) decided = true;
     if (!decided) {
-      const t = Math.max(0, s.timeUs - rev.lastAckTimeUs);
+      const t = Math.max(0, now - rev.lastAckTimeUs);
       // Fast retransmission has precedence by default.
       if (t < FAST_RETRANSMISSION_WINDOW_US && rev.dupAckNum >= 2 && rev.lastAck === seq) {
         flags.add('fast_retransmission');
@@ -431,10 +498,10 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
       }
       if (!decided) {
         flags.add('retransmission');
-        out.rtoUs = s.timeUs - fwd.nextSeqTimeUs;
+        out.rtoUs = now - fwd.nextSeqTimeUs;
         out.rtoFrame = fwd.nextSeqFrame;
         for (const u of fwd.segments) {
-          if (ge(u.seq, seq)) { out.rtoUs = s.timeUs - u.timeUs; out.rtoFrame = u.frame; }
+          if (ge(u.seq, seq)) { out.rtoUs = now - u.timeUs; out.rtoFrame = u.frame; }
         }
       }
     }
@@ -443,7 +510,7 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   // Initial RTT: the handshake's third segment acknowledges the SYN-ACK.
   if (conn.initialRttUs === null && s.ack_ && !s.syn && fwd.synTimeUs !== null && rev.synSeen
     && fwd.nextSeq !== 0 && seq === fwd.nextSeq && ack === rev.nextSeq) {
-    conn.initialRttUs = s.timeUs - fwd.synTimeUs;
+    conn.initialRttUs = now - fwd.synTimeUs;
     out.initialRttUs = conn.initialRttUs;
   }
 
@@ -452,7 +519,7 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   const retransmitted = flags.has('retransmission') || flags.has('fast_retransmission') || flags.has('spurious_retransmission');
   if ((seglen > 0 || synOrFin) && fwd.segments.length < MAX_UNACKED_SEGMENTS) {
     if (synOrFin) nextSeq = add(nextSeq, 1);
-    fwd.segments.unshift({ seq, nextSeq, frame: s.frame, timeUs: s.timeUs, karn: retransmitted });
+    fwd.segments.unshift({ seq, nextSeq, frame: s.frame, timeUs: now, karn: retransmitted });
   } else if (synOrFin) {
     nextSeq = add(nextSeq, 1);
   }
@@ -486,7 +553,7 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
     if (!flags.has('zero_window_probe')) {
       fwd.nextSeq = nextSeq;
       fwd.nextSeqFrame = s.frame;
-      fwd.nextSeqTimeUs = s.timeUs;
+      fwd.nextSeqTimeUs = now;
     }
   }
   if (seq === fwd.maxSeqToBeAcked || fwd.maxSeqToBeAcked === 0) {
@@ -495,7 +562,7 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   fwd.window = window;
   fwd.windowSeen = true;
   fwd.lastAck = ack;
-  fwd.lastAckTimeUs = s.timeUs;
+  fwd.lastAckTimeUs = now;
   fwd.sackRanges = s.sackBlocks ?? [];
   fwd.lastWasKeepAlive = flags.has('keep_alive');
   fwd.lastWasZeroWindowProbe = flags.has('zero_window_probe');
@@ -506,13 +573,13 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
     for (const u of rev.segments) {
       if (ack === u.nextSeq) {
         out.ackOfFrame = u.frame;
-        out.ackRttUs = s.timeUs - u.timeUs;
+        out.ackRttUs = now - u.timeUs;
         out.partialAck = false;
         out.ambiguousAck = u.karn;
       } else if (gt(ack, u.seq) && le(ack, u.nextSeq)) {
         u.seq = ack;
         out.ackOfFrame = u.frame;
-        out.ackRttUs = s.timeUs - u.timeUs;
+        out.ackRttUs = now - u.timeUs;
         out.partialAck = true;
         out.ambiguousAck = u.karn;
         remaining.push(u);
@@ -571,6 +638,10 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
     out.analyzed = true;
     if (conn.initialRttUs !== null) out.initialRttUs = conn.initialRttUs;
   }
+
+  trackContiguity(fwd.contiguous, seq, nextSeq);
+  out.contiguityServer = fwd.contiguous.length;
+  out.contiguityClient = rev.contiguous.length;
 
   out.nextSeq = fwd.nextSeq;
   out.flags = [...flags];

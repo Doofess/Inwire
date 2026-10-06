@@ -201,6 +201,14 @@ const valueOf = (packet: Packet, abbrev: string): unknown =>
 const allValuesOf = (packet: Packet, abbrev: string): unknown[] =>
   rows(packet).filter((row) => row.abbrev === abbrev).map((row) => row.value);
 const layerNames = (packet: Packet): string[] => (packet.layers ?? []).map((l) => l.name);
+/**
+ * The protocols an error quotes, as rows inside its ICMP layer - where the
+ * reference draws them - named as their layers would be.
+ */
+const quotedNames = (packet: Packet): string[] =>
+  (packet.layers ?? []).find((l) => l.name.startsWith('Internet Control Message Protocol'))?.fields
+    .filter((f) => f.children !== undefined && /^(Internet Protocol|User Datagram|Transmission Control)/.test(f.name))
+    .map((f) => f.name.split(',')[0]) ?? [];
 
 const at = (name: string): Packet => {
   const index = FRAMES.findIndex((f) => f.name === name);
@@ -240,10 +248,12 @@ console.log('\n--- the datagram the error is about ---');
   // The quote is a whole IPv4 header and a whole UDP header, so both dissect
   // and both appear UNDER the ICMP layer rather than replacing anything above
   // it. This is the assertion the coverage tool structurally cannot make.
-  check('the quoted IPv4 and UDP headers become layers of their own',
-    layerNames(unreachable),
-    ['Frame', 'Ethernet II', 'Internet Protocol Version 4', 'Internet Control Message Protocol',
-      'Internet Protocol Version 4', 'User Datagram Protocol']);
+  check('the quoted IPv4 and UDP headers are drawn inside the error, not beside it',
+    [layerNames(unreachable), quotedNames(unreachable)],
+    [['Frame', 'Ethernet II', 'Internet Protocol Version 4', 'Internet Control Message Protocol'],
+      ['Internet Protocol Version 4', 'User Datagram Protocol']]);
+  check('...and the frame still lists them among its protocols, as the reference does',
+    unreachable.frameProtocols, ['frame', 'eth', 'ip', 'icmp', 'ip', 'udp']);
   check('the quoted addresses are the original datagram\'s',
     allValuesOf(unreachable, 'ip.src'), ['192.0.2.9', '192.0.2.1']);
   check('...and so are the ports', allValuesOf(unreachable, 'udp.srcport'), [51234]);
@@ -273,9 +283,7 @@ console.log('\n--- the datagram the error is about ---');
   // would report a window size and an ack number that were never quoted.
   const needed = at('fragmentation needed');
   check('a quote too short for a TCP header grows no TCP layer',
-    layerNames(needed),
-    ['Frame', 'Ethernet II', 'Internet Protocol Version 4', 'Internet Control Message Protocol',
-      'Internet Protocol Version 4']);
+    quotedNames(needed), ['Internet Protocol Version 4']);
   check('the MTU that would have fitted', valueOf(needed, 'icmp.mtu'), 1400);
   check('...and it is filterable', fieldValue(needed, 'icmp.mtu'), 1400);
   check('the quoted header still names the destination that could not be reached',
@@ -286,7 +294,7 @@ console.log('\n--- the datagram the error is about ---');
   const redirect = at('redirect');
   check('the gateway to use instead', valueOf(redirect, 'icmp.redir_gw'), '192.0.2.254');
   check('a redirect quotes the datagram too',
-    layerNames(redirect).slice(4), ['Internet Protocol Version 4', 'User Datagram Protocol']);
+    quotedNames(redirect), ['Internet Protocol Version 4', 'User Datagram Protocol']);
 }
 
 {
@@ -296,7 +304,7 @@ console.log('\n--- the datagram the error is about ---');
 
 {
   const exceeded = at('time exceeded');
-  check('time exceeded quotes the datagram', layerNames(exceeded).length, 6);
+  check('time exceeded quotes the datagram', quotedNames(exceeded).length, 2);
   check('...and says so in the Info column', exceeded.info,
     'Time-to-live exceeded (Time to live exceeded in transit)');
 }
@@ -304,9 +312,7 @@ console.log('\n--- the datagram the error is about ---');
 {
   const tooBig = at('packet too big');
   check('an ICMPv6 error quotes an IPv6 datagram',
-    layerNames(tooBig),
-    ['Frame', 'Ethernet II', 'Internet Protocol Version 6', 'Internet Control Message Protocol v6',
-      'Internet Protocol Version 6']);
+    quotedNames(tooBig), ['Internet Protocol Version 6']);
   check('the MTU the path would accept', valueOf(tooBig, 'icmpv6.mtu'), 1280);
   check('the ICMPv6 checksum covers the pseudo-header',
     valueOf(tooBig, 'icmpv6.checksum.status'), 'Good');

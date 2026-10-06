@@ -28,7 +28,7 @@ import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2
 import { dataLayer } from './mediaType';
 import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
 import type { TcpReassembly } from './tls';
-import { describeCutSegment, dissectTlsSegment, looksLikeTlsRecord, type TlsSegmentResult } from './tls';
+import { describeCutSegment, dissectTlsSegment, looksLikeTlsRecord, pendingSegmentBytes, type TlsSegmentResult } from './tls';
 
 /**
  * The ports the cleartext HTTP family is dispatched on. 443 is not here: that
@@ -129,6 +129,8 @@ export interface TcpContext {
   frameId?: number;
   /** Capture time, epoch microseconds - the analysis flags compare timings. */
   tsUs?: number;
+  /** Nanoseconds past `tsUs` a nanosecond capture measured, 0-999. */
+  nanosRemainder?: number;
   tcpTracker?: TcpTrackerApi;
   /** Transport header + payload as the network layer declared it, not as the
    *  frame was padded. */
@@ -338,7 +340,7 @@ export function dissectTcpTransport(
     // where the stream stood when this segment arrived.
     tlsInOrder = tcpTracker.isAtOrPastExpected(srcIp, srcPort, dstIp, dstPort, seqNum);
     analysis = tcpTracker.analyze(srcIp, srcPort, dstIp, dstPort, {
-      frame: frameId ?? 0, timeUs: tsUs ?? 0, seq: seqNum, ack: ackNum, window: rawWindow,
+      frame: frameId ?? 0, timeUs: tsUs ?? 0, nsRemainder: context.nanosRemainder, seq: seqNum, ack: ackNum, window: rawWindow,
       segLen: payloadLength, syn, ack_: ack, fin, rst, psh, windowScaleOption: tcpOptions?.windowScale,
       sackBlocks: tcpOptions?.sackBlocks.map((b) => ({ left: b.leftEdge, right: b.rightEdge })),
     });
@@ -380,6 +382,8 @@ export function dissectTcpTransport(
   // direction that already has a cursor, or a plausible record header.
   let reassembledFrom: number[] | undefined;
   let reassemblies: TcpReassembly[] | undefined;
+  /** Bytes of this segment held for a record that is not complete yet. */
+  let segmentDataBytes = 0;
   let labelPatches: { frameId: number; protocolLabel: string }[] | undefined;
   // A segment out of order is still dissected - Wireshark reassembles it and
   // labels it with what it carries - but a retransmission is not: its bytes
@@ -511,6 +515,9 @@ export function dissectTcpTransport(
         // Whichever end is the TLS port; the other is an ephemeral client one.
         serverPort: dstPort === 443 ? dstPort : srcPort === 443 ? srcPort : dstPort,
       });
+      // An out-of-order segment was read against a copy, so it left nothing
+      // pending in the real cursor; only an in-order one can.
+      if (tlsInOrder) segmentDataBytes = pendingSegmentBytes(cursor, frameId ?? 0);
       if (outcome.kind === 'tls') {
         tlsResult = outcome.result;
         reassembledFrom = outcome.result.reassembledFrom;
@@ -936,6 +943,10 @@ export function dissectTcpTransport(
           }]
           : []),
         ...(analysis ? tcpAnalysisFields(analysis) : []),
+        ...(analysis?.contiguityServer !== undefined ? [
+          { name: '[Client Contiguous Streams]', value: analysis.contiguityClient ?? 0, generated: true, abbrev: 'tcp.stream.client.contiguity_count' },
+          { name: '[Server Contiguous Streams]', value: analysis.contiguityServer, generated: true, abbrev: 'tcp.stream.server.contiguity_count' },
+        ] : []),
         // The payload itself, which had no row at all - so a segment whose
         // payload no sub-dissector claimed showed a header and then nothing,
         // with no way to tell an empty ACK from 1,440 unread bytes.
@@ -950,6 +961,10 @@ export function dissectTcpTransport(
             ] as [number, number],
           }]
           : []),
+        ...segmentDataRows(
+          frameId ?? 0, reassemblies, segmentDataBytes,
+          transportOffset + tcpHeaderLen, Math.min(rawBytes.length, transportOffset + tcpHeaderLen + payloadLength),
+        ),
       ],
     },
   };
@@ -1424,6 +1439,33 @@ function connectionRows(
     }
   }
   if (rst) rows.push({ name: '[Connection reset (RST)]', value: true, generated: true, abbrev: 'tcp.connection.rst' });
+  return rows;
+}
+
+/**
+ * The reference's `tcp.segment_data` rows: this segment's share of every PDU
+ * its desegmentation handles here - the bytes that finish a PDU completed in
+ * this frame, which lead the payload, and then the trailing bytes of one it
+ * is still building. A segment that only continues a PDU is all one row.
+ */
+function segmentDataRows(
+  frame: number, reassemblies: TcpReassembly[] | undefined, pending: number, payloadStart: number, payloadEnd: number,
+): ProtocolField[] {
+  const row = (bytes: number, from: number): ProtocolField => ({
+    name: `TCP segment data (${bytes} byte${bytes === 1 ? '' : 's'})`,
+    value: '',
+    abbrev: 'tcp.segment_data',
+    rawBytesRange: [from, Math.min(payloadEnd, from + bytes) - 1],
+  });
+  const rows: ProtocolField[] = [];
+  let at = payloadStart;
+  for (const pdu of reassemblies ?? []) {
+    const own = pdu.contributions[pdu.contributions.length - 1];
+    if (own === undefined || own.frame !== frame) continue;
+    rows.push(row(own.bytes, at));
+    at += own.bytes;
+  }
+  if (pending > 0) rows.push(row(pending, payloadEnd - pending));
   return rows;
 }
 

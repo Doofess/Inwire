@@ -14,7 +14,7 @@ import {
 } from './direction';
 
 import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
-import { decodeNetworkLayer } from './dissectors/networkLayer';
+import { decodeNetworkLayer, nestQuotedLayers } from './dissectors/networkLayer';
 import { keyLog } from './tls/keyLog';
 import { snaplenOrWhole, type CaptureFileFacts, type FileInterfaceFacts } from './captureFileFacts';
 import { DSB_SECRETS_TYPE_TLS_KEY_LOG, LINKTYPE, type InfoPatch } from './dissect/types';
@@ -1235,7 +1235,7 @@ export function decodeRawEthernetPacket(
     srcIp, dstIp, proto, protocolLabel, info, status, analysisFlags, srcPort, dstPort,
     streamId, icmpMatchedRequestFrameId, infoPatches, resolvedNames, transportLayerIndex,
     extensionTokens, transportTokens,
-  }, { id, tsUs, relativeTime, timeDelta, origLen, tcpTracker, icmpTracker, quicTracker,
+  }, { id, tsUs, nanosRemainder, relativeTime, timeDelta, origLen, tcpTracker, icmpTracker, quicTracker,
        dnsTracker, l3Tracker, sentByUs }));
 
   // The worst finding anywhere in this frame's tree, as one field. A colour
@@ -1282,6 +1282,7 @@ export function decodeRawEthernetPacket(
   // Extension headers are layers with generated names; their filter tokens
   // come from the walker, which knows which header each one was.
   for (const token of extensionTokens) if (!frameProtocols.includes(token)) frameProtocols.push(token);
+  nestQuotedLayers(layers);
   layers[0].fields.push(
     { name: '[Protocols in frame]', value: protocolsInFrame(frameProtocols), generated: true, abbrev: 'frame.protocols' },
     { name: 'Character encoding', value: 'ASCII (0)', abbrev: 'frame.encoding' },

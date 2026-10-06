@@ -253,7 +253,7 @@ function ndpOptionRows(rawBytes: Uint8Array, optionsStart: number, end: number):
     } else if (type === 25 && at + 8 <= optionEnd) {
       children.push(
         { name: 'Reserved', value: '', abbrev: 'icmpv6.opt.reserved', rawBytesRange: [at + 2, at + 3] },
-        { name: 'Lifetime', value: u32(rawBytes, at + 4), abbrev: 'icmpv6.opt.rdnss.lifetime', rawBytesRange: [at + 4, at + 7] },
+        { name: 'Lifetime', value: lifetimeText(u32(rawBytes, at + 4)), abbrev: 'icmpv6.opt.rdnss.lifetime', rawBytesRange: [at + 4, at + 7] },
       );
       const servers: string[] = [];
       for (let server = at + 8; server + 16 <= optionEnd; server += 16) {
@@ -263,6 +263,89 @@ function ndpOptionRows(rawBytes: Uint8Array, optionsStart: number, end: number):
         children.push({ name: 'Recursive DNS Servers', value: address, abbrev: 'icmpv6.opt.rdnss', rawBytesRange: [server, server + 15] });
       }
       if (servers.length > 0) summary = `Recursive DNS Server ${servers.join(' ')}`;
+    } else if (type === 4 && at + 8 <= optionEnd) {
+      // Redirected Header: the start of the packet that was redirected. The
+      // reference also dissects the quoted packet inside it; its bytes are
+      // what is drawn here.
+      children.push({ name: 'Reserved', value: '', abbrev: 'icmpv6.opt.reserved', rawBytesRange: [at + 2, at + 7] });
+      if (optionEnd > at + 8) {
+        children.push({ name: 'Redirected Packet', value: '', abbrev: 'icmpv6.opt.redirected_packet', rawBytesRange: [at + 8, optionEnd - 1] });
+      }
+    } else if (type === 24 && at + 8 <= optionEnd) {
+      // Route Information (RFC 4191): a more specific route, with a preference.
+      const prefixLength = rawBytes[at + 2];
+      const flags = rawBytes[at + 3];
+      const preference = ROUTER_PREFERENCE[(flags >> 3) & 0x03] ?? 'Reserved';
+      const lifetime = u32(rawBytes, at + 4);
+      children.push(
+        { name: 'Prefix Length', value: prefixLength, abbrev: 'icmpv6.opt.prefix.length', rawBytesRange: [at + 2, at + 2] },
+        {
+          // A bitmask row names its parts after the value, as the reference's does.
+          name: 'Flag', value: `0x${flags.toString(16).padStart(2, '0')}, Route Preference: ${preference}`, abbrev: 'icmpv6.opt.route_info.flag', rawBytesRange: [at + 3, at + 3],
+          children: [
+            { name: 'Route Preference', value: `${preference} (${(flags >> 3) & 0x03})`, abbrev: 'icmpv6.opt.route_info.flag.route_preference', rawBytesRange: [at + 3, at + 3], bitfield: { bitOffset: 3, bitLength: 2, totalBits: 8 } },
+            { name: 'Reserved', value: flags & 0xe7, abbrev: 'icmpv6.opt.route_info.flag.reserved', rawBytesRange: [at + 3, at + 3] },
+          ],
+        },
+        { name: 'Route Lifetime', value: lifetimeText(lifetime), abbrev: 'icmpv6.opt.route_lifetime', rawBytesRange: [at + 4, at + 7] },
+      );
+      summary += ` : ${preference}`;
+      const prefixBytes = lengthUnits === 2 ? 8 : lengthUnits === 3 ? 16 : 0;
+      if (prefixBytes > 0 && at + 8 + prefixBytes <= optionEnd) {
+        const full = new Uint8Array(16);
+        full.set(rawBytes.subarray(at + 8, at + 8 + prefixBytes));
+        const prefix = formatIpv6Address(full, 0);
+        children.push({ name: 'Prefix', value: prefix, abbrev: 'icmpv6.opt.prefix', rawBytesRange: [at + 8, at + 8 + prefixBytes - 1] });
+        summary += ` ${prefix}/${prefixLength}`;
+      } else if (lengthUnits === 1) {
+        summary += ` ::/${prefixLength}`;
+      }
+    } else if (type === 31 && at + 8 <= optionEnd) {
+      // DNS Search List (RFC 8106): the domains a host appends to bare names.
+      const lifetime = u32(rawBytes, at + 4);
+      children.push(
+        { name: 'Reserved', value: '', abbrev: 'icmpv6.opt.reserved', rawBytesRange: [at + 2, at + 3] },
+        { name: 'Lifetime', value: lifetime === 0 ? 'DNSSL domain name MUST no longer be used' : lifetimeText(lifetime), abbrev: 'icmpv6.opt.dnssl.lifetime', rawBytesRange: [at + 4, at + 7] },
+      );
+      let p = at + 8;
+      while (p < optionEnd) {
+        if (rawBytes[p] === 0) {
+          children.push({ name: 'Padding', value: '', abbrev: 'icmpv6.opt.padding', rawBytesRange: [p, optionEnd - 1] });
+          break;
+        }
+        const labels: string[] = [];
+        let q = p;
+        while (q < optionEnd && rawBytes[q] !== 0) {
+          const n = rawBytes[q];
+          labels.push(String.fromCharCode(...rawBytes.subarray(q + 1, Math.min(q + 1 + n, optionEnd))));
+          q += 1 + n;
+        }
+        q += 1; // the root label
+        const name = labels.join('.');
+        children.push({ name: 'Domain Names', value: name, abbrev: 'icmpv6.opt.dnssl', rawBytesRange: [p, Math.min(q, optionEnd) - 1] });
+        summary += ` ${name}`;
+        p = q;
+      }
+    } else if (type === 37 && at + 2 < optionEnd) {
+      // Captive-Portal (RFC 8910): where a host must go before it is online.
+      const raw = rawBytes.subarray(at + 2, optionEnd);
+      const nul = raw.indexOf(0);
+      const uri = String.fromCharCode(...(nul < 0 ? raw : raw.subarray(0, nul)));
+      children.push({ name: 'Captive Portal', value: uri, abbrev: 'icmpv6.opt.captive_portal', rawBytesRange: [at + 2, optionEnd - 1] });
+    } else if (type === 38 && at + 16 <= optionEnd) {
+      // PREF64 (RFC 8781): the NAT64 prefix this network translates through.
+      const word = u16(rawBytes, at + 2);
+      const plc = word & 0x0007;
+      children.push(
+        { name: 'Scaled Lifetime', value: word >> 3, abbrev: 'icmpv6.opt.pref64.scaled_lifetime', rawBytesRange: [at + 2, at + 3], bitfield: { bitOffset: 0, bitLength: 13, totalBits: 16 } },
+        { name: 'PLC (Prefix Length Code)', value: `${PREF64_PLC[plc] ?? 'Unknown'} (0x${plc.toString(16)})`, abbrev: 'icmpv6.opt.pref64.plc', rawBytesRange: [at + 2, at + 3], bitfield: { bitOffset: 13, bitLength: 3, totalBits: 16 } },
+      );
+      const prefixBytes = [12, 8, 7, 6, 5, 4][plc];
+      if (prefixBytes !== undefined) {
+        const full = new Uint8Array(16);
+        full.set(rawBytes.subarray(at + 4, at + 4 + prefixBytes));
+        children.push({ name: 'Prefix', value: formatIpv6Address(full, 0), abbrev: 'icmpv6.opt.pref64.prefix', rawBytesRange: [at + 4, at + 4 + prefixBytes - 1] });
+      }
     }
 
     rows.push({ name: 'ICMPv6 Option', value: `(${summary})`, abbrev: 'icmpv6.opt', rawBytesRange: [at, optionEnd - 1], children });
@@ -703,6 +786,47 @@ function icmpv6BodyRows(
       }
       break;
 
+    case 130: // Multicast Listener Query - v2 when 28 bytes or more (RFC 3810 8.1).
+    case 131: // Multicast Listener Report (v1)
+    case 132: { // Multicast Listener Done
+      if (body + 20 > rawBytes.length) break;
+      const v2 = icmpType === 130 && messageEnd - transportOffset >= 28;
+      if (v2) {
+        // Both codes are exponential past their top bit; the reference shows
+        // the decoded value, in milliseconds and seconds respectively.
+        const raw = u16(rawBytes, body);
+        const mrc = raw >= 32768 ? ((raw & 0x0fff) | 0x1000) << (((raw & 0x7000) >> 12) + 3) : raw;
+        fields.push({ name: 'Maximum Response Code', value: mrc, abbrev: 'icmpv6.mld.maximum_response_code', rawBytesRange: [body, body + 1] });
+      } else {
+        fields.push({ name: 'Maximum Response Delay [ms]', value: u16(rawBytes, body), abbrev: 'icmpv6.mld.maximum_response_delay', rawBytesRange: [body, body + 1] });
+      }
+      reserved(body + 2, 2);
+      fields.push({ name: 'Multicast Address', value: formatIpv6Address(rawBytes, body + 4), abbrev: 'icmpv6.mld.multicast_address', rawBytesRange: [body + 4, body + 19] });
+      if (v2 && body + 24 <= rawBytes.length) {
+        const flags = rawBytes[body + 20];
+        const qqicRaw = rawBytes[body + 21];
+        const qqic = qqicRaw >= 128 ? ((qqicRaw & 0x0f) | 0x10) << (((qqicRaw & 0x70) >> 4) + 3) : qqicRaw;
+        const sources = u16(rawBytes, body + 22);
+        fields.push(
+          {
+            name: 'Flags', value: `0x${flags.toString(16).padStart(2, '0')}${flags & 0x08 ? ', Suppress Router-Side Processing' : ''}`,
+            abbrev: 'icmpv6.mld.flag', rawBytesRange: [body + 20, body + 20],
+            children: [
+              flagBit('Suppress Router-Side Processing', (flags & 0x08) !== 0, 'icmpv6.mld.flag.s', body + 20, 4, 8),
+              { name: "QRV (Querier's Robustness Variable)", value: flags & 0x07, abbrev: 'icmpv6.mld.flag.qrv', rawBytesRange: [body + 20, body + 20], bitfield: { bitOffset: 5, bitLength: 3, totalBits: 8 } },
+              { name: 'Reserved', value: flags >> 4, abbrev: 'icmpv6.mld.flag.reserved', rawBytesRange: [body + 20, body + 20], bitfield: { bitOffset: 0, bitLength: 4, totalBits: 8 } },
+            ],
+          },
+          { name: "QQIC (Querier's Query Interval Code)", value: qqic, abbrev: 'icmpv6.mld.qqi', rawBytesRange: [body + 21, body + 21] },
+          { name: 'Number of Sources', value: sources, abbrev: 'icmpv6.mld.nb_sources', rawBytesRange: [body + 22, body + 23] },
+        );
+        for (let i = 0, src = body + 24; i < sources && src + 16 <= Math.min(messageEnd, rawBytes.length); i++, src += 16) {
+          fields.push({ name: 'Source Address', value: formatIpv6Address(rawBytes, src), abbrev: 'icmpv6.mld.source_address', rawBytesRange: [src, src + 15] });
+        }
+      }
+      break;
+    }
+
     case 143: // Multicast Listener Report v2.
       if (body + 4 > rawBytes.length) break;
       reserved(body, 2);
@@ -917,12 +1041,46 @@ const ICMPV6_UNREACHABLE_CODES: Record<number, string> = {
   5: 'source address failed ingress/egress policy', 6: 'reject route to destination',
 };
 
-/** The Neighbor Discovery options worth naming, by their IANA type. */
+/** Neighbor Discovery options by IANA type, in the reference's words (`nd_opt_type_val`). */
 const NDP_OPTION_NAMES: Record<number, string> = {
   1: 'Source link-layer address', 2: 'Target link-layer address', 3: 'Prefix information',
-  4: 'Redirected header', 5: 'MTU', 24: 'Route Information', 25: 'Recursive DNS Server',
-  31: 'DNS Search List', 37: 'Captive-Portal', 38: 'PREF64',
+  4: 'Redirected header', 5: 'MTU', 6: 'NBMA Shortcut Limit Option', 7: 'Advertisement Interval',
+  8: 'Home Agent Information', 9: 'Source Address List', 10: 'Target Address List', 11: 'CGA',
+  12: 'RSA Signature', 13: 'Timestamp', 14: 'Nonce', 15: 'Trust Anchor', 16: 'Certificate',
+  17: 'IP Address/Prefix Option', 18: 'New Router Prefix Information', 19: 'Link-layer Address',
+  20: 'Neighbor Advertisement Acknowledgment', 21: 'PvD ID', 23: 'MAP', 24: 'Route Information',
+  25: 'Recursive DNS Server', 26: 'RA Flags Extension', 27: 'Handover Key Request',
+  28: 'Handover Key Reply', 29: 'Handover Assist Information', 30: 'Mobile Node Identifier Option',
+  31: 'DNS Search List Option', 32: 'Proxy Signature (PS)', 33: 'Address Registration Option',
+  34: '6LoWPAN Context Option', 35: 'Authoritative Border Router', 36: '6LoWPAN Capability Indication Option',
+  37: 'DHCP Captive-Portal', 38: 'PREF64 Option', 39: 'Crypto-ID Parameters Option (CIPO)',
+  40: 'NDP Signature Option (NDPSO)', 41: 'Resource Directory Address Option', 42: 'Consistent Uptime Option',
 };
+
+/** PREF64's Prefix Length Code (RFC 8781). */
+const PREF64_PLC = ['96 bits prefix length', '64 bits prefix length', '56 bits prefix length',
+  '48 bits prefix length', '40 bits prefix length', '32 bits prefix length'];
+
+/**
+ * A lifetime in seconds as the reference shows it: `Infinity` for all ones,
+ * otherwise the number and how long it is - "3600 (1 hour)".
+ */
+function lifetimeText(seconds: number): string {
+  if (seconds === 0xffffffff) return 'Infinity (4294967295)';
+  return `${seconds} (${durationText(seconds)})`;
+}
+
+/** `unsigned_time_secs_to_str`: "1 day, 2 hours, 3 minutes, 4 seconds", zero parts left out. */
+function durationText(seconds: number): string {
+  if (seconds === 0) return '0 seconds';
+  const parts: string[] = [];
+  const add = (n: number, unit: string) => { if (n > 0) parts.push(`${n} ${unit}${n === 1 ? '' : 's'}`); };
+  add(Math.floor(seconds / 86400), 'day');
+  add(Math.floor((seconds % 86400) / 3600), 'hour');
+  add(Math.floor((seconds % 3600) / 60), 'minute');
+  add(seconds % 60, 'second');
+  return parts.join(', ');
+}
 
 /** RFC 4191's two-bit Default Router Preference. */
 const ROUTER_PREFERENCE: Record<number, string> = {

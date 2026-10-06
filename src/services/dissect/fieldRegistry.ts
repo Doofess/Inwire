@@ -433,11 +433,14 @@ export const FIELDS: readonly FieldDef[] = [
   // not, so `tcp.analysis` - a filter meaning "this segment has a finding at
   // all", on 56% of frames here - answered nothing.
   treeOnly(str('tcp.analysis', 'SEQ/ACK analysis', 'tcp')),
+  treeOnly({ ...uint('tcp.stream.client.contiguity_count', 'Client Contiguous Streams', 'tcp'), generated: true }),
+  treeOnly({ ...uint('tcp.stream.server.contiguity_count', 'Server Contiguous Streams', 'tcp'), generated: true }),
   str('tcp.analysis.flags', 'TCP Analysis Flags', 'tcp'),
 
   // The payload rows. UDP's already existed and was display-only; TCP had no
   // row at all, so an empty ACK and 1,440 unread bytes looked the same.
   treeOnly(str('tcp.payload', 'TCP payload', 'tcp')),
+  treeOnly({ abbrev: 'tcp.segment_data', label: 'TCP segment data', type: 'bytes', layer: 'tcp' }),
   treeOnly(str('udp.payload', 'UDP payload', 'udp')),
 
   // SOA carries seven fields and this build drew all seven without naming one,
@@ -806,6 +809,29 @@ export const FIELDS: readonly FieldDef[] = [
   uint('icmpv6.opt.prefix.preferred_lifetime', 'Prefix preferred lifetime', 'icmpv6'),
   str('icmpv6.opt.rdnss', 'Recursive DNS server', 'icmpv6'),
   treeOnly(uint('icmpv6.opt.rdnss.lifetime', 'Lifetime', 'icmpv6')),
+  // MLD bodies and the remaining ND options (dissectors/icmp.ts).
+  treeOnly(uint('icmpv6.mld.maximum_response_delay', 'Maximum Response Delay [ms]', 'icmpv6')),
+  treeOnly(uint('icmpv6.mld.maximum_response_code', 'Maximum Response Code', 'icmpv6')),
+  treeOnly({ abbrev: 'icmpv6.mld.multicast_address', label: 'Multicast Address', type: 'ipv6', layer: 'icmpv6' }),
+  treeOnly(uint('icmpv6.mld.flag', 'Flags', 'icmpv6')),
+  treeOnly(bool('icmpv6.mld.flag.s', 'Suppress Router-Side Processing', 'icmpv6')),
+  treeOnly(uint('icmpv6.mld.flag.qrv', "QRV (Querier's Robustness Variable)", 'icmpv6')),
+  treeOnly(uint('icmpv6.mld.flag.reserved', 'Reserved', 'icmpv6')),
+  treeOnly(uint('icmpv6.mld.qqi', "QQIC (Querier's Query Interval Code)", 'icmpv6')),
+  treeOnly(uint('icmpv6.mld.nb_sources', 'Number of Sources', 'icmpv6')),
+  treeOnly({ abbrev: 'icmpv6.mld.source_address', label: 'Source Address', type: 'ipv6', layer: 'icmpv6' }),
+  treeOnly(bool('icmpv6.opt.redirected_packet', 'Redirected Packet', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.route_info.flag', 'Flag', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.route_info.flag.route_preference', 'Route Preference', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.route_info.flag.reserved', 'Reserved', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.route_lifetime', 'Route Lifetime', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.dnssl.lifetime', 'Lifetime', 'icmpv6')),
+  treeOnly(str('icmpv6.opt.dnssl', 'Domain Names', 'icmpv6')),
+  treeOnly(bool('icmpv6.opt.padding', 'Padding', 'icmpv6')),
+  treeOnly(str('icmpv6.opt.captive_portal', 'Captive Portal', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.pref64.scaled_lifetime', 'Scaled Lifetime', 'icmpv6')),
+  treeOnly(uint('icmpv6.opt.pref64.plc', 'PLC (Prefix Length Code)', 'icmpv6')),
+  treeOnly({ abbrev: 'icmpv6.opt.pref64.prefix', label: 'Prefix', type: 'ipv6', layer: 'icmpv6' }),
   // Multicast Listener Report v2 (RFC 3810). Every Windows machine emits these
   // on joining a link, so they are in any capture taken on one.
   treeOnly(uint('icmpv6.mldr.nb_mcast_records', 'Number of Multicast Address Records', 'icmpv6')),
