@@ -306,10 +306,10 @@ export function dissectTcpTransport(
   // the tracker's per-direction high-water mark, which would report the
   // stream's furthest-seen sequence for a retransmit/out-of-order segment
   // and a stale value for a keep-alive (which skips checkSequence). SYN and
-  // FIN each consume one sequence number. The reference analyzer omits the field for
-  // zero-length non-SYN/FIN segments, where it would just repeat Seq.
-  const nextSeqDelta = payloadLength + (syn || fin ? 1 : 0);
-  const expectedNextRel = nextSeqDelta > 0 ? relSeq + nextSeqDelta : undefined;
+  // FIN each consume one sequence number. Drawn on every segment, a bare ACK
+  // included, as the reference draws it - this omitted it where it would
+  // repeat Seq, which tshark 4.6 does not, on 40% of the inwire fixture.
+  const expectedNextRel = relSeq + payloadLength + (syn || fin ? 1 : 0);
 
   let streamId: number | undefined;
   let status: Packet['status'] | undefined;
@@ -818,24 +818,23 @@ export function dissectTcpTransport(
           // ended, abruptly and on purpose.
           ...(rst ? { expertInfo: { category: 'Reset' as const, message: 'Connection reset (RST)' } } : {}),
         },
-        ...(expectedNextRel !== undefined
-          ? [{ name: '[Next Sequence Number]', value: expectedNextRel, generated: true, abbrev: 'tcp.nxtseq' }]
-          : []),
+        { name: '[Next Sequence Number]', value: expectedNextRel, generated: true, abbrev: 'tcp.nxtseq' },
         // The window as sent, then the window after the scale factor from
         // this connection's SYN. Wireshark draws both, and `tcp.window_size`
         // is the scaled one - the number that actually bounds the sender.
         { name: 'Window', value: rawWindow, abbrev: 'tcp.window_size_value', rawBytesRange: [transportOffset + 14, transportOffset + 15] },
         { name: '[Calculated window size]', value: windowSize, generated: true, abbrev: 'tcp.window_size' },
         // **-1 when the scale is not in play**, which is the reference's own
-        // encoding and not a missing value: it means no scaling, either
-        // because this is the SYN that advertises it or because one end never
-        // did. A 1 would claim the option was negotiated and multiplied by one.
-        {
+        // encoding and not a missing value: one end never offered scaling.
+        // A 1 would claim the option was negotiated and multiplied by one.
+        // Not drawn on a SYN at all, as the reference does not: the SYN is
+        // where the scale is offered, before either side may apply it.
+        ...(syn ? [] : [{
           name: '[Window size scaling factor]',
           value: windowScaleShift > 0 ? 2 ** windowScaleShift : -1,
           generated: true,
           abbrev: 'tcp.window_size_scalefactor',
-        },
+        }]),
         { name: '[TCP Segment Len]', value: payloadLength, generated: true, abbrev: 'tcp.len' },
         {
           name: 'Checksum',
@@ -1298,8 +1297,8 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
       }),
     });
   }
-  if (children.length === 0) return [];
-  return [{ name: '[SEQ/ACK analysis]', value: '', generated: true, abbrev: 'tcp.analysis', children }];
+  if (children.length === 0 && !a.analyzed) return [];
+  return [{ name: '[SEQ/ACK analysis]', value: '', generated: true, abbrev: 'tcp.analysis', ...(children.length > 0 ? { children } : {}) }];
 }
 
 function tcpFlagFields(rawBytes: Uint8Array, transportOffset: number): ProtocolField[] {

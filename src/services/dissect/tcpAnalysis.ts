@@ -49,15 +49,18 @@ export interface TcpDirectionState {
   /** Segment length of the last segment that advanced nextSeq. */
   lastAckLen: number;
   /**
-   * Payload bytes sent in this direction since the last PSH, this one
-   * included.
-   *
-   * Wireshark's `push_bytes_sent`: it accumulates every segment's length and
-   * reports the total on the segment that carries PSH, then starts again. The
-   * number answers "how much did the sender batch up before asking for it to
-   * be delivered", which is why it is per direction and not per connection.
+   * Wireshark's `push_bytes_sent` and `push_set_last`: payload sent in this
+   * direction since a PSH, run the way packet-tcp.c runs it - a PSH segment
+   * after a non-PSH one closes the run including itself, the segment after a
+   * PSH starts a new one. Read on every segment that reports bytes in flight.
    */
   pushBytes: number;
+  pushSetLast: boolean;
+  /**
+   * Whether bytes in flight can be measured for this direction: set by any
+   * ACK from the other side, cleared by a gap in this one (`valid_bif`).
+   */
+  validBif: boolean;
   /** Raw window this direction last advertised. */
   window: number;
   /**
@@ -95,7 +98,8 @@ export interface TcpConnectionState {
 
 function freshDirection(): TcpDirectionState {
   return {
-    nextSeq: 0, nextSeqTimeUs: 0, nextSeqFrame: 0, maxSeqToBeAcked: 0, lastAck: 0, lastAckTimeUs: 0, lastAckLen: 0, pushBytes: 0,
+    nextSeq: 0, nextSeqTimeUs: 0, nextSeqFrame: 0, maxSeqToBeAcked: 0, lastAck: 0, lastAckTimeUs: 0, lastAckLen: 0,
+    pushBytes: 0, pushSetLast: false, validBif: false,
     window: 0, windowSeen: false, winScale: -1, dupAckNum: 0, lastNonDupAckFrame: 0, lastWasKeepAlive: false, lastWasZeroWindowProbe: false,
     sackRanges: [], segments: [], synTimeUs: null, synSeen: false,
   };
@@ -145,6 +149,12 @@ export interface TcpAnalysis {
   partialAck?: boolean;
   /** The segment acknowledged had been sent more than once (`UnackedSegment.karn`). */
   ambiguousAck?: boolean;
+  /**
+   * Whether the reference holds analysis for this frame at all (its `ta`):
+   * a verdict, an acknowledged segment, or a bytes-in-flight measurement. It
+   * draws the SEQ/ACK analysis node whenever it does, empty or not.
+   */
+  analyzed?: boolean;
   initialRttUs?: number;
   bytesInFlight?: number;
   /** Bytes sent since the previous PSH, on the segment that carries one. */
@@ -270,6 +280,8 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   const plain = !s.syn && !s.fin && !s.rst;
   const synOrFin = s.syn || s.fin;
 
+  // Any ACK makes the other direction's bytes in flight measurable.
+  if (s.ack_) rev.validBif = true;
   if (s.syn && s.windowScaleOption !== undefined) fwd.winScale = s.windowScaleOption;
   if (s.syn) {
     if (!s.ack_ && fwd.synSeen && fwd.nextSeq !== 0 && seq !== add(fwd.nextSeq, -1)) flags.add('reused_ports');
@@ -292,7 +304,11 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
   // ZERO WINDOW
   if (!finishedFwd && window === 0 && plain) flags.add('zero_window');
   // LOST PACKET
-  if (!finishedFwd && fwd.nextSeq !== 0 && gt(seq, fwd.nextSeq) && !s.rst) flags.add('lost_segment');
+  if (!finishedFwd && fwd.nextSeq !== 0 && gt(seq, fwd.nextSeq) && !s.rst) {
+    flags.add('lost_segment');
+    // Nothing in flight can be counted across a hole until the peer ACKs.
+    fwd.validBif = false;
+  }
   // KEEP ALIVE
   if (!finishedFwd && (seglen === 0 || seglen === 1) && seq === add(fwd.nextSeq, -1) && plain) flags.add('keep_alive');
   // A zero-length segment carrying a SACK block is reporting a HOLE - which is
@@ -509,17 +525,51 @@ export function analyzeTcpSegment(conn: TcpConnectionState, direction: 'a' | 'b'
     }
     rev.segments = remaining;
   }
-  if (seglen > 0 && rev.lastAck !== 0 && !retransmitted) {
-    const inFlight = (fwd.nextSeq - rev.lastAck) | 0;
-    if (inFlight > 0) out.bytesInFlight = inFlight;
+  // **Bytes in flight, packet-tcp.c's default ("historical") method**: the
+  // span of this direction's unacknowledged segments, this one included,
+  // less what the peer's latest segment SACKed (`sackRanges`, cleared by each
+  // segment as the reference clears it) - measured only on a
+  // segment carrying data while the direction is valid (`validBif`). Ported
+  // whole, with the push count beside it, because both read the same state
+  // and the reference draws them together.
+  let measured = false;
+  if (seglen !== 0 && fwd.segments.length > 0 && fwd.validBif) {
+    measured = true;
+    const ref = fwd.segments[fwd.segments.length - 1].seq;
+    let first = 0;
+    let last = 0;
+    fwd.segments.forEach((u, i) => {
+      const lo = (u.seq - ref) | 0;
+      const hi = (u.nextSeq - ref) | 0;
+      if (i === 0 || lo < first) first = lo;
+      if (i === 0 || hi > last) last = hi;
+    });
+    let inFlight = (last - first) >>> 0;
+    const delivered = rev.sackRanges.reduce((sum, r) => (sum + ((r.right - r.left) >>> 0)) >>> 0, 0);
+    inFlight = (inFlight - delivered) >>> 0;
+    if (inFlight > 0 && inFlight < 2_000_000_000) {
+      const shown = synOrFin ? inFlight - 1 : inFlight;
+      if (shown > 0) out.bytesInFlight = shown;
+    }
+    if (s.psh && !fwd.pushSetLast) {
+      fwd.pushBytes += seglen;
+      fwd.pushSetLast = true;
+    } else if (s.psh) {
+      fwd.pushBytes = seglen;
+    } else if (fwd.pushSetLast) {
+      fwd.pushBytes = seglen;
+      fwd.pushSetLast = false;
+    } else {
+      fwd.pushBytes += seglen;
+    }
+    if (out.bytesInFlight !== undefined) out.pushBytesSent = fwd.pushBytes;
   }
-  // **Accumulated on every segment, reported only on the one with PSH.** The
-  // run includes this segment, which is why the add comes first - a lone
-  // segment with PSH reports its own length rather than zero.
-  fwd.pushBytes += seglen;
-  if (s.psh) {
-    out.pushBytesSent = fwd.pushBytes;
-    fwd.pushBytes = 0;
+  // **iRTT on every frame the analysis says anything about**, as the
+  // reference prints the conversation's first RTT inside every SEQ/ACK
+  // analysis subtree once it is known - not only on the handshake's ACK.
+  if (flags.size > 0 || out.ackOfFrame !== undefined || measured) {
+    out.analyzed = true;
+    if (conn.initialRttUs !== null) out.initialRttUs = conn.initialRttUs;
   }
 
   out.nextSeq = fwd.nextSeq;
