@@ -34,6 +34,7 @@ import { dissectSip, looksLikeSip } from './sip';
 import { dissectRadius, looksLikeRadius } from './radius';
 import { dissectSyslog, looksLikeSyslog } from './syslog';
 import { dissectRtcp, looksLikeRtcp } from './rtcp';
+import { dissectWireGuard, looksLikeWireGuard } from './wireguard';
 
 export interface HeuristicDissector {
   /** The detector's name, so a match can be explained rather than just made. */
@@ -79,6 +80,7 @@ export const HEURISTIC_DISSECTORS: readonly HeuristicDissector[] = [
   { name: 'SIP', looksLike: looksLikeSip, dissect: adapt('sip', dissectSip) },
   { name: 'RTCP', looksLike: looksLikeRtcp, dissect: adapt('rtcp', dissectRtcp) },
   { name: 'Syslog', looksLike: looksLikeSyslog, dissect: adapt('syslog', dissectSyslog) },
+  { name: 'WireGuard', looksLike: looksLikeWireGuard, dissect: dissectWireGuard },
 ];
 
 export interface HeuristicMatch {

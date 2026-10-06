@@ -735,11 +735,11 @@ export function decodeNetworkLayer(
       // real length, so the transport checksum is verified against what was
       // actually sent rather than against one fragment of it.
       ? decodeTransportLayer(reassembled, 0, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, reassembled.length, quicTracker, tsUs, dnsTracker,
-        ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, reassembled.length), sentByUs, 0, nanosRemainder)
+        ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, reassembled.length), sentByUs, 0, nanosRemainder, l3Tracker)
       : isFragment
         ? null
         : decodeTransportLayer(rawBytes, transportOffset, ipProtocolNum, srcIp, dstIp, tcpTracker, ttl, icmpTracker, id, ipTotalLen - ipHeaderLen, quicTracker, tsUs, dnsTracker,
-          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen), sentByUs, captureShort, nanosRemainder);
+          ipv4PseudoHeader(rawBytes, l3Offset, ipProtocolNum, ipTotalLen - ipHeaderLen), sentByUs, captureShort, nanosRemainder, l3Tracker);
 
     if (isFragment && !reassembled) {
       // Wireshark's own wording for a fragment it cannot yet reassemble.
@@ -1002,10 +1002,10 @@ export function decodeNetworkLayer(
     const transport = isMalformedJumbo
       ? null
       : v6Reassembled
-        ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset), sentByUs, 0, nanosRemainder)
+        ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset), sentByUs, 0, nanosRemainder, l3Tracker)
         : (chain?.stopsHere ?? false)
           ? null
-          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen), sentByUs, captureShort, nanosRemainder);
+          : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen), sentByUs, captureShort, nanosRemainder, l3Tracker);
     if (transport) {
       proto = transport.proto;
       protocolLabel = transport.protocolLabel;
@@ -1112,6 +1112,8 @@ function decodeTransportLayer(
   notCaptured = 0,
   /** Nanoseconds past `tsUs` a nanosecond capture measured, 0-999. */
   nanosRemainder?: number,
+  /** For a datagram's session state - WireGuard's. Absent on a quoted one. */
+  l3Tracker?: L3TrackerApi,
 ): TransportResult | null {
   // TCP Decode
   if (ipProtocolNum === 6 && rawBytes.length >= transportOffset + 20) {
@@ -1128,7 +1130,7 @@ function decodeTransportLayer(
   } else if (ipProtocolNum === 17 && rawBytes.length >= transportOffset + 8) {
     // UDP - see dissectors/udpTransport.ts.
     const read = dissectUdpTransport(rawBytes, transportOffset, {
-      srcIp, dstIp, frameId, tsUs, quicTracker, dnsTracker, pseudoHeader, sentByUs,
+      srcIp, dstIp, frameId, tsUs, quicTracker, dnsTracker, l3Tracker, pseudoHeader, sentByUs,
     });
     if (read) return read;
   } else if (isPortlessProtocol(ipProtocolNum)) {

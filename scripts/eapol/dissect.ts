@@ -15,7 +15,7 @@
  * reading of the standard alone would number differently.
  */
 import { Bytes, ethernet } from '../parity/synthetic';
-import { check, compareWithReference, finish, type OracleCase } from '../parity/treeOracle';
+import { check, checkRevisit, compareWithReference, finish, type OracleCase } from '../parity/treeOracle';
 import { keyMessage } from '../../src/services/dissectors/eapol';
 
 const eapol = (body: Uint8Array) => new Bytes().raw(ethernet(0x888e).build()).raw(body).build();
@@ -71,6 +71,7 @@ const cases: OracleCase[] = [
 const packets = await compareWithReference(cases, {
   rows: /^(eapol|eap|wlan_rsna_eapol)\./,
 });
+await checkRevisit(cases);
 
 // --- the message number, at unit level ----------------------------------------
 check('Key ACK and Install is message 3', keyMessage(0x13ca, 56, false)?.n === 3);

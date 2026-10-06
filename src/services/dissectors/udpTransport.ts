@@ -15,7 +15,8 @@
 import type { Packet, ProtocolLayer } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
 import type { QuicHandshakeFacts } from '../quicFlowTracker';
-import type { QuicTrackerApi, DnsTrackerApi } from '../dissect/trackerApi';
+import type { QuicTrackerApi, DnsTrackerApi, L3TrackerApi } from '../dissect/trackerApi';
+import { wireGuardFacts } from './wireguard';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
@@ -41,6 +42,8 @@ export interface UdpContext {
   tsUs?: number;
   quicTracker?: QuicTrackerApi;
   dnsTracker?: DnsTrackerApi;
+  /** Datagram sessions: WireGuard's. */
+  l3Tracker?: L3TrackerApi;
   /** The IP pseudo-header for the checksum, or undefined when there is none. */
   pseudoHeader?: Uint8Array;
   /** This machine sent the frame, so its checksum may not be filled in yet. */
@@ -53,7 +56,7 @@ export function dissectUdpTransport(
   transportOffset: number,
   context: UdpContext,
 ): TransportResult | null {
-  const { srcIp, dstIp, frameId, tsUs, quicTracker, dnsTracker, pseudoHeader } = context;
+  const { srcIp, dstIp, frameId, tsUs, quicTracker, dnsTracker, l3Tracker, pseudoHeader } = context;
   // No `?? false`: see the same line in `tcpTransport.ts`.
   const { sentByUs } = context;
   // UDP Decode
@@ -341,6 +344,24 @@ export function dissectUdpTransport(
       // Which detector claimed it, so a wrong label can be traced to the
       // rule that made it rather than guessed at.
       if (found.detector !== null) appFields['inwire.heuristic'] = found.detector;
+      // A WireGuard datagram's session: which handshake it belongs to, and
+      // on a response the initiation it answers.
+      if (app.token === 'wg' && l3Tracker !== undefined && frameId !== undefined) {
+        const facts = wireGuardFacts(rawBytes, udpPayloadStart);
+        const session = l3Tracker.wireguard(facts.type, `${srcIp}:${srcPort}`, `${dstIp}:${dstPort}`, frameId,
+          facts.sender, facts.receiver);
+        if (session !== null) {
+          appFields['wg.stream'] = session.stream;
+          app.layer.fields.push({ name: 'Stream index', value: session.stream, abbrev: 'wg.stream', generated: true });
+          if (session.responseTo !== undefined) {
+            appFields['wg.response_to'] = session.responseTo;
+            app.layer.fields.push({
+              name: 'Response to Frame', value: session.responseTo, abbrev: 'wg.response_to',
+              generated: true, linkToFrame: session.responseTo,
+            });
+          }
+        }
+      }
     }
   }
 

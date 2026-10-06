@@ -151,6 +151,30 @@ const MAX_TRACKED_DATAGRAMS = 2048;
 /** How many ARP bindings are remembered. */
 const MAX_ARP_BINDINGS = 4096;
 
+/** WireGuard sessions kept, newest last; the oldest is forgotten past this. */
+const MAX_WIREGUARD_SESSIONS = 4096;
+
+/**
+ * One WireGuard handshake and what followed it: the two ends, the index each
+ * chose, and the frame that opened it. `responder` is filled by the response.
+ */
+interface WireGuardSession {
+  stream: number;
+  initiatorFrame: number;
+  initiator: string;
+  initiatorIndex: number;
+  responder: string;
+  responderIndex?: number;
+  responseFrame?: number;
+}
+
+/** What `L3Tracker.wireguard` knows of a datagram's session. */
+export interface WireGuardSessionFacts {
+  stream: number;
+  /** On a handshake response or a cookie reply: the message it answers. */
+  responseTo?: number;
+}
+
 /**
  * The largest datagram IPv4 can express, and therefore the most any one
  * reassembly can hold. A fragment claiming to reach past it is malformed or
@@ -218,6 +242,8 @@ export class L3Tracker {
   private parts = new Map<string, FragmentPart[]>();
   private retainedBytes = 0;
   private arpBindings = new Map<string, { mac: string; frame: number }>();
+  private wireguardSessions: WireGuardSession[] = [];
+  private nextWireGuardStream = 0;
 
   /** `eth.stream`: the conversation between two MAC addresses. */
   ethStream(srcMac: string, dstMac: string, tsUs: number): ConversationFacts {
@@ -376,7 +402,49 @@ export class L3Tracker {
     return null;
   }
 
+  /**
+   * The WireGuard session a datagram belongs to, as packet-wireguard.c finds
+   * it. An initiation opens a new session, numbered in order; a response
+   * joins the newest one whose initiator chose its receiver index and sits at
+   * the other end; a cookie reply or data joins the newest session where its
+   * receiver index is the far end's. Null when no session explains it - data
+   * from a handshake before the capture began.
+   *
+   * `from` and `to` are the datagram's `address:port` endpoints.
+   */
+  wireguard(
+    type: number, from: string, to: string, frame: number, sender?: number, receiver?: number,
+  ): WireGuardSessionFacts | null {
+    if (type === 1 && sender !== undefined) {
+      if (this.wireguardSessions.length >= MAX_WIREGUARD_SESSIONS) this.wireguardSessions.shift();
+      const stream = this.nextWireGuardStream++;
+      this.wireguardSessions.push({ stream, initiatorFrame: frame, initiator: from, initiatorIndex: sender, responder: to });
+      return { stream };
+    }
+    for (let i = this.wireguardSessions.length - 1; i >= 0; i--) {
+      const s = this.wireguardSessions[i];
+      if (type === 2) {
+        if (s.initiatorIndex !== receiver || s.initiator !== to || s.responder !== from) continue;
+        s.responderIndex = sender;
+        s.responseFrame = frame;
+        return { stream: s.stream, responseTo: s.initiatorFrame };
+      }
+      // A cookie reply answers the handshake message whose sender it names:
+      // the initiation, or the response.
+      const answers = (sent: number | undefined) => (type === 3 && sent !== undefined ? { responseTo: sent } : {});
+      if (s.initiatorIndex === receiver && s.initiator === to && s.responder === from) {
+        return { stream: s.stream, ...answers(s.initiatorFrame) };
+      }
+      if (s.responderIndex === receiver && s.responder === to && s.initiator === from) {
+        return { stream: s.stream, ...answers(s.responseFrame) };
+      }
+    }
+    return null;
+  }
+
   reset(): void {
+    this.wireguardSessions = [];
+    this.nextWireGuardStream = 0;
     this.fragments.clear();
     this.parts.clear();
     this.retainedBytes = 0;

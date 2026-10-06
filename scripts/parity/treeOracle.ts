@@ -23,6 +23,8 @@ import { spawnSync } from 'node:child_process';
 import { askTshark, pcapOf } from './synthetic';
 import { findWiresharkTool } from '../export/realCaptures';
 import { PcapService } from '../../src/services/pcapParser';
+import { recordRefs } from '../../src/services/dissect/frameRecord';
+import { arrive, firstDifference, render, revisit } from '../pipeline/arrival';
 import type { Packet, ProtocolField } from '../../src/types/packet';
 
 export interface OracleCase {
@@ -131,6 +133,38 @@ export async function compareWithReference(cases: OracleCase[], options: OracleO
     rmSync(dir, { recursive: true, force: true });
   }
   return packets;
+}
+
+/**
+ * Every frame rebuilt from its bytes and its record alone, as the app rebuilds
+ * a frame it opens later (ADR 0049), must draw the tree arrival drew. A
+ * dissector with cross-frame state - a session number, a response link - is
+ * exactly what this catches when a tracker question is not recorded.
+ */
+export async function checkRevisit(cases: OracleCase[], linktype?: number): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'inwire-oracle-revisit-'));
+  try {
+    const file = join(dir, 'revisit.pcap');
+    writeFileSync(file, pcapOf(cases.map((c) => c.frame), linktype));
+    const { arrived, patchesFor, host } = await arrive(file);
+    const wrong: string[] = [];
+    for (const { packet, record, input } of arrived) {
+      const named = new Set(recordRefs(record));
+      try {
+        const layers = revisit(input, packet.id, record, host, patchesFor.get(packet.id) ?? [],
+          (frame) => (named.has(frame) ? arrived[frame - 1]?.input.bytes : undefined));
+        const want = render(packet.layers);
+        const got = render(layers);
+        if (want !== got) wrong.push(`frame ${packet.id}: ${firstDifference(want, got)}`);
+      } catch (error) {
+        wrong.push(`frame ${packet.id}: ${(error as Error).message}`);
+      }
+    }
+    check(`every frame rebuilds from its record alone (${arrived.length})`, wrong.length === 0,
+      wrong.slice(0, 4).join('\n        '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Ends a suite. */

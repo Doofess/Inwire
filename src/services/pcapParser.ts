@@ -859,6 +859,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'RIPng': 'ripng',
   'Cisco Discovery Protocol': 'cdp',
   '802.1X Authentication': 'eapol',
+  'WireGuard Protocol': 'wg',
   'Extensible Authentication Protocol': 'eap',
   // The IPv6 extension headers. Without these the layer names fall through to
   // the underscore rule and the protocol hierarchy reads

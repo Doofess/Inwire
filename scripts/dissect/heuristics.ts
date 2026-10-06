@@ -83,6 +83,12 @@ const PAYLOADS: { protocol: string; bytes: Uint8Array }[] = [
       'INVITE sip:bob@example.com SIP/2.0\r\nCall-ID: x\r\nCSeq: 1 INVITE\r\n\r\n').build(),
   },
   {
+    protocol: 'WireGuard',
+    // A handshake initiation: type 1, three reserved bytes, the sender index,
+    // then 144 bytes of key, encrypted static, timestamp and MACs.
+    bytes: new Bytes().u8(1, 0, 0, 0).u8(4, 3, 2, 1).raw(new Array(140).fill(0xa5)).build(),
+  },
+  {
     protocol: 'Syslog',
     bytes: new Bytes().ascii('<34>Oct 11 22:14:15 host su: message').build(),
   },

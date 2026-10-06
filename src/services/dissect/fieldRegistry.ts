@@ -110,7 +110,7 @@ export const LAYERS = [
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
   // what a user types, and it has to be the one they already know.
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'tftp', 'bfd', 'coap', 'ptp',
+  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'wg', 'tftp', 'bfd', 'coap', 'ptp',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'smb2', 'kerberos', 'http', 'http2', 'http3',
   // **What a message BODY is**, which the reference makes four protocols of
   // rather than fields on HTTP - so a JSON API response's chain really does
@@ -177,6 +177,28 @@ export const FIELDS: readonly FieldDef[] = [
   str('kerberos.crealm', 'Client Realm', 'kerberos'),
   str('kerberos.cname_string', 'Client Name', 'kerberos'),
   str('kerberos.sname_string', 'Server Name', 'kerberos'),
+  // --- WireGuard ---------------------------------------------------------------
+  // `wg.stream` numbers sessions - one per handshake initiation - as the
+  // reference does, so `wg.stream == 2` is one VPN session from its handshake
+  // through its data. Indices are the little-endian values the protocol writes.
+  uint('wg.type', 'Type', 'wg'),
+  uint('wg.sender', 'Sender', 'wg'),
+  uint('wg.receiver', 'Receiver', 'wg'),
+  uint('wg.counter', 'Counter', 'wg'),
+  { ...uint('wg.stream', 'Stream index', 'wg'), generated: true },
+  { ...uint('wg.response_to', 'Response to Frame', 'wg'), generated: true },
+  treeOnly(str('wg.reserved', 'Reserved', 'wg')),
+  treeOnly(str('wg.ephemeral', 'Ephemeral', 'wg')),
+  treeOnly(bool('wg.ephemeral.known_privkey', 'Has Private Key', 'wg')),
+  treeOnly(str('wg.encrypted_static', 'Encrypted Static', 'wg')),
+  treeOnly(str('wg.encrypted_timestamp', 'Encrypted Timestamp', 'wg')),
+  treeOnly(str('wg.encrypted_empty', 'Encrypted Empty', 'wg')),
+  treeOnly(str('wg.mac1', 'mac1', 'wg')),
+  treeOnly(str('wg.mac2', 'mac2', 'wg')),
+  treeOnly(str('wg.nonce', 'Nonce', 'wg')),
+  treeOnly(str('wg.encrypted_cookie', 'Encrypted Cookie', 'wg')),
+  treeOnly(str('wg.encrypted_packet', 'Encrypted Packet', 'wg')),
+  treeOnly(str('wg.keepalive', 'This is a Keepalive message', 'wg')),
   // --- 802.1X: EAPOL and EAP -------------------------------------------------
   // `msgnr` is which message of the four-way handshake a key frame is, worked
   // out from its Key Information bits - so `wlan_rsna_eapol.keydes.msgnr == 3`
