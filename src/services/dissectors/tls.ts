@@ -1183,7 +1183,12 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     // reference draws it as one - `tcp.segments` with a row per contributing
     // frame - rather than as the single note this build had. The data was
     // already here; only the shape was missing.
-    if (r.reassembledFrom.length > 0 && r.contributions.length > 0) {
+    //
+    // Gated on the contributions, not on `reassembledFrom`: a frame that
+    // finished one record and began this one is left out of the latter, so
+    // it gets no "[TCP PDU reassembled in N]" of its own - but the reference
+    // still lists it among this PDU's segments.
+    if (r.contributions.length > 1) {
       // Summed rather than taken from `r.length`, which is the record BODY.
       // The sum is what the frames actually carried, so it stays right
       // wherever the header fell - including the case where the header

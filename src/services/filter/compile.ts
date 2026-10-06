@@ -221,6 +221,9 @@ function buildBitmask(f: FieldRef, mask: Literal): Predicate {
   return (p) => read(p).some((value) => typeof value === 'number' && (value & m) !== 0);
 }
 
+/** The analysis verdicts the reference also files as `tcp.analysis.retransmission`. */
+const RETRANSMISSION_KINDS = new Set(['retransmission', 'fast_retransmission', 'spurious_retransmission']);
+
 function buildPresent(f: FieldRef): Predicate {
   if (f.slice) {
     const { read } = buildReader(f);
@@ -234,6 +237,12 @@ function buildPresent(f: FieldRef): Predicate {
     const which = f.name.slice('tcp.analysis.'.length);
     const { read } = buildReader(f);
     if (which === 'flags') return (p) => (p.analysisFlags?.length ?? 0) > 0;
+    // The reference sets the generic verdict on a fast and a spurious
+    // retransmission too, so `tcp.analysis.retransmission` - the filter
+    // everyone types for "show me retransmissions" - matches all three.
+    if (which === 'retransmission') {
+      return (p) => (p.analysisFlags?.some((k) => RETRANSMISSION_KINDS.has(k)) ?? false) || read(p).length > 0;
+    }
     return (p) => (p.analysisFlags?.includes(which) ?? false) || read(p).length > 0;
   }
 

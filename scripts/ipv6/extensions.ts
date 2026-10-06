@@ -40,8 +40,9 @@ const bytes = (...xs: number[]) => Uint8Array.from(xs);
   check('...and does not stop the dissection', chain.stopsHere, false);
   check('one Hop-by-Hop layer', chain.layers.map((l) => l.name), ['IPv6 Hop-by-Hop Options']);
   check('...naming what follows', chain.layers[0].fields[0].value, 'ICMPv6 (58)');
-  check('...and decoding the Router Alert', chain.layers[0].fields.map((f) => f.name).includes('IPv6 Option (Router Alert)'), true);
-  check('the Router Alert names its value', chain.layers[0].fields.find((f) => f.name.includes('Router Alert'))?.value, 'MLD (0)');
+  const option = chain.layers[0].fields.find((f) => f.name === 'Router Alert');
+  check('...and decoding the Router Alert', option?.abbrev, 'ipv6.opt');
+  check('the Router Alert names its value', option?.children?.find((f) => f.abbrev === 'ipv6.opt.router_alert')?.value, 'MLD (0)');
   check('the filter token is the header, not a field', chain.protocolTokens, ['ipv6.hopopts']);
 }
 

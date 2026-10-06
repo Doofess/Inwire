@@ -113,6 +113,32 @@ function hostAliasRows(
   ];
 }
 
+/** A row's children, or none - an empty list would draw an expander over nothing. */
+const nonEmpty = (rows: ProtocolField[]): ProtocolField[] | undefined => (rows.length > 0 ? rows : undefined);
+
+/**
+ * What the reference notes about a TTL, by packet-ip.c's rules (RFC 3171).
+ * A packet to the Local Network Control Block (224.0.0.0/24) is never routed,
+ * so its TTL should be 1 - except where a protocol insists otherwise (VRRP,
+ * GLBP and mDNS send 255, LLMNR anything). Anything else unicast with a TTL
+ * under 5 is about to expire, unless it is PIM or OSPF, which send 1 on
+ * purpose. Notes on the row, not findings: a traceroute is all of these.
+ */
+function ttlNotes(ttl: number, bytes: Uint8Array, dstAt: number, protocol: number): ProtocolField[] {
+  const [a, b, c, d] = [bytes[dstAt], bytes[dstAt + 1], bytes[dstAt + 2], bytes[dstAt + 3]];
+  if (a === 224 && b === 0 && c === 0) {
+    const valid = protocol === 2 ? 1 : d === 18 || d === 102 || d === 251 ? 255 : d === 252 ? undefined : 1;
+    return valid === undefined || ttl === valid ? [] : [{
+      name: `["Time To Live" != ${valid} for a packet sent to the Local Network Control Block (see RFC 3171)]`,
+      value: '', generated: true, abbrev: 'ip.ttl.lncb',
+    }];
+  }
+  const multicast = (a & 0xf0) === 0xe0;
+  return ttl < 5 && !multicast && protocol !== 103 && protocol !== 89
+    ? [{ name: `["Time To Live" only ${ttl}]`, value: '', generated: true, abbrev: 'ip.ttl.too_small' }]
+    : [];
+}
+
 /**
  * Under an IPv6 address: what kind of address it is (`ipv6Address.ts`), then
  * the either-end names, with the same detail again beneath `ipv6.addr` - which
@@ -477,10 +503,13 @@ export function decodeNetworkLayer(
           // A TTL of 57 means nothing on its own and means "seven hops away"
           // once you know what initial values stacks actually use. Generated,
           // because it is inferred - see inferTtl.
-          children: ttlGuess ? [
-            { name: '[Inferred initial TTL]', value: ttlGuess.initial, generated: true },
-            { name: '[Hops away]', value: ttlGuess.hops, generated: true },
-          ] : undefined,
+          children: nonEmpty([
+            ...(ttlGuess ? [
+              { name: '[Inferred initial TTL]', value: ttlGuess.initial, generated: true },
+              { name: '[Hops away]', value: ttlGuess.hops, generated: true },
+            ] : []),
+            ...ttlNotes(ttl, rawBytes, l3Offset + 16, ipProtocolNum),
+          ]),
         },
         { name: 'Protocol', value: describeIpProtocol(ipProtocolNum), abbrev: 'ip.proto', rawBytesRange: [l3Offset + 9, l3Offset + 9] },
         {

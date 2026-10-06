@@ -1293,7 +1293,13 @@ function tcpAnalysisFields(a: TcpAnalysis): ProtocolField[] {
             ? { abbrev: ABBREV_BY_FLAG[flag as TcpAnalysisFlag] }
             : {}),
           expertInfo: { category, message: tag },
-        }];
+        }, ...(flag === 'fast_retransmission' || flag === 'spurious_retransmission' ? [{
+          // The reference files these under the plain verdict as well, which
+          // is what makes `tcp.analysis.retransmission` find all three. A row,
+          // not a second finding: the frame is already counted once above.
+          name: '[This frame is a (suspected) retransmission]', value: '', generated: true,
+          abbrev: 'tcp.analysis.retransmission',
+        }] : [])];
       }),
     });
   }

@@ -398,7 +398,14 @@ export function dissectIcmp(
   }
 
   const fields: ProtocolField[] = [
-    { name: 'Type', value: icmpTypeValue(isIcmpv6, icmpType), abbrev: names.type, rawBytesRange: [transportOffset, transportOffset] },
+    {
+      name: 'Type', value: icmpTypeValue(isIcmpv6, icmpType), abbrev: names.type, rawBytesRange: [transportOffset, transportOffset],
+      // The reference notes an error type on the row - for ICMPv6 every type
+      // below 128, for ICMP only unreachable, redirect and time exceeded.
+      ...((isIcmpv6 ? icmpType < 128 : icmpType === 3 || icmpType === 5 || icmpType === 11) ? {
+        children: [{ name: '[Type indicates an error]', value: '', generated: true, abbrev: isIcmpv6 ? 'icmpv6.type.error' : 'icmp.type.error' }],
+      } : {}),
+    },
     { name: 'Code', value: icmpCodeValue(isIcmpv6, icmpType, icmpCode), abbrev: names.code, rawBytesRange: [transportOffset + 1, transportOffset + 1] },
   ];
   const checksum = checksumRows(rawBytes, transportOffset, transportOffset + 2, names, ctx);
