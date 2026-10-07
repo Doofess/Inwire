@@ -238,7 +238,7 @@ check('a field name as a bareword tests presence', strict('tls.handshake.extensi
 // --- 5. what must NOT match ------------------------------------------------
 
 check('a protocol this build does not dissect matches nothing', strict('dcerpc'), []);
-check('...even when a frame mentions it', strict('nbss || netbios'), []);
+check('...even when a frame mentions it', strict('netbios'), []);
 check('an unknown field in a comparison matches nothing', strict('tpc.port == 443'), []);
 check('...and is reported as a typo', FilterEngine.validateFilter('tpc.port == 443').isValid, false);
 check('an undissected protocol is a warning, not an error', {

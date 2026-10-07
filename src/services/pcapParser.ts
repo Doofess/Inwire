@@ -849,6 +849,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Internet Group Management Protocol': 'igmp',
   'Trivial File Transfer Protocol': 'tftp',
   'NetBIOS Datagram Service': 'nbdgm',
+  'NetBIOS Session Service': 'nbss',
   'SMB (Server Message Block Protocol)': 'smb',
   'SMB MailSlot Protocol': 'mailslot',
   'Microsoft Windows Browser Protocol': 'browser',

@@ -109,7 +109,7 @@ export const LAYERS = [
   // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
   // what a user types, and it has to be the one they already know.
-  'dns', 'nbns', 'nbdgm', 'smb', 'mailslot', 'browser', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
+  'dns', 'nbns', 'nbdgm', 'nbss', 'smb', 'mailslot', 'browser', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'cldap', 'mscldap', 'smb2', 'kerberos', 'ssh', 'tpkt', 'cotp', 'rdp', 'http', 'http2', 'http3',
   // **What a message BODY is**, which the reference makes four protocols of
@@ -1945,6 +1945,19 @@ const BASE_FIELDS: readonly FieldDef[] = [
   treeOnly(str('browser.browser_to_promote', 'Browser to Promote', 'browser')),
   treeOnly(uint('browser.reset_cmd', 'ResetBrowserState Command', 'browser')),
   treeOnly(bool('nbdgm.next', 'More fragments follow', 'nbdgm')),
+  // --- NetBIOS Session Service --------------------------------------------------
+  uint('nbss.type', 'Message Type', 'nbss'),
+  treeOnly(uint('nbss.flags', 'Flags', 'nbss')),
+  treeOnly(bool('nbss.flags.e', 'Extend', 'nbss')),
+  treeOnly(uint('nbss.length', 'Length', 'nbss')),
+  str('nbss.called_name', 'Called name', 'nbss'),
+  str('nbss.calling_name', 'Calling name', 'nbss'),
+  uint('nbss.error_code', 'Error code', 'nbss'),
+  treeOnly(str('nbss.retarget_ip_address', 'Retarget IP address', 'nbss')),
+  treeOnly(uint('nbss.retarget_port', 'Retarget port', 'nbss')),
+  treeOnly(str('smb.dialect', 'Dialect', 'smb')),
+  treeOnly(uint('smb.buffer_format', 'Buffer Format', 'smb')),
+  treeOnly(str('smb.dialect.name', 'Name', 'smb')),
   treeOnly(bool('nbdgm.first', 'This is first fragment', 'nbdgm')),
   treeOnly(uint('nbdgm.node_type', 'Node Type', 'nbdgm')),
   treeOnly(uint('nbdgm.flags', 'Flags', 'nbdgm')),

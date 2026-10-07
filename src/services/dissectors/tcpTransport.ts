@@ -29,6 +29,7 @@ import { dataLayer } from './mediaType';
 import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
 import { dissectSshSegment, freshSshConversation, SSH_PORT, type SshSegmentResult } from './ssh';
 import { dissectRdpSetup, looksLikeTpkt, RDP_PORT, type RdpResult } from './rdp';
+import { dissectNbss, looksLikeNbss, nbssLayers, NBSS_PORT, SMB_DIRECT_PORT, type NbssResult } from './nbss';
 import type { TcpReassembly } from './tls';
 import { describeCutSegment, dissectTlsSegment, looksLikeTlsRecord, pendingSegmentBytes, type TlsSegmentResult } from './tls';
 
@@ -530,7 +531,20 @@ export function dissectTcpTransport(
     if (looksLikeTpkt(rawBytes, tcpPayloadStart, payloadEnd)) rdpResult = dissectRdpSetup(rawBytes, tcpPayloadStart, payloadEnd);
   }
 
+  // The NetBIOS Session Service on 139, and its bare framing on 445: session
+  // requests and their answers, and SMB1 inside a session message. SMB2 took
+  // its own path above and is declined here.
+  let nbssResult: NbssResult | null = null;
   if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && !sshResult && !rdpResult && payloadLength > 0
+    && !payloadCut && !isKeepAlive && !isRetransmitted) {
+    const direct = srcPort === SMB_DIRECT_PORT || dstPort === SMB_DIRECT_PORT;
+    if (direct || srcPort === NBSS_PORT || dstPort === NBSS_PORT) {
+      const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+      if (looksLikeNbss(rawBytes, tcpPayloadStart, payloadEnd, direct)) nbssResult = dissectNbss(rawBytes, tcpPayloadStart, payloadEnd, direct);
+    }
+  }
+
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && !sshResult && !rdpResult && !nbssResult && payloadLength > 0
     && !payloadCut && !isKeepAlive && !isRetransmitted) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
@@ -615,7 +629,7 @@ export function dissectTcpTransport(
     || tcpTracker.peekTlsCursor(srcIp, srcPort, dstIp, dstPort)?.unknown === false
     || tcpTracker.peekTlsCursor(dstIp, dstPort, srcIp, srcPort)?.unknown === false
   );
-  if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection && !sshResult && !rdpResult
+  if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection && !sshResult && !rdpResult && !nbssResult
     && payloadLength > 0 && !payloadCut && !isKeepAlive && !isRetransmitted && tlsInOrder && tcpTracker) {
     const conversation = tcpTracker.tlsConversation(srcIp, srcPort, dstIp, dstPort);
     const serverIsDestination = HTTP_PORTS.has(dstPort) || (!HTTP_PORTS.has(srcPort) && dstPort < srcPort);
@@ -656,6 +670,8 @@ export function dissectTcpTransport(
     protocolLabel = sshResult.protocolLabel;
   } else if (rdpResult) {
     protocolLabel = rdpResult.protocolLabel;
+  } else if (nbssResult) {
+    protocolLabel = nbssResult.protocolLabel;
   } else if (tlsResult) {
     proto = 'TLS';
     protocolLabel = tlsResult.appProtocolLabel ?? tlsResult.protocolLabel;
@@ -695,6 +711,8 @@ export function dissectTcpTransport(
     ? [sshResult.info]
     : rdpResult
     ? [rdpResult.info]
+    : nbssResult
+    ? [nbssResult.info]
     : smb2Result
     ? [smb2Result.info]
     : ldapResult
@@ -724,7 +742,7 @@ export function dissectTcpTransport(
   // A cut continuation says nothing of its own, and then the tags stand alone
   // as they would over an empty column: "[TCP Retransmission] ".
   const info = (tlsResult || (cutTls && cutTls.info !== '') || tcpDns || httpResult || ldapResult || smb2Result
-    || kerberosResult || bgpResult || sshResult?.layer || rdpResult)
+    || kerberosResult || bgpResult || sshResult?.layer || rdpResult || nbssResult)
     && expertTags.length > 0
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
@@ -744,8 +762,12 @@ export function dissectTcpTransport(
       ? [sshResult.layer]
       : rdpResult
       ? rdpResult.layers
+      : nbssResult
+      ? nbssResult.layers
       : smb2Result
-      ? [smb2Result.layer]
+      // The framing in front of the messages, as the reference draws it - all
+      // of a segment's NBSS layers first when it holds several messages.
+      ? [...nbssLayers(rawBytes, tcpPayloadStart, Math.min(rawBytes.length, tcpPayloadStart + payloadLength), true), smb2Result.layer]
       : ldapResult
       ? ldapResult.layers
       : tcpDns
@@ -787,6 +809,7 @@ export function dissectTcpTransport(
       ...(bgpResult ? bgpResult.fields : {}),
       ...(sshResult ? sshResult.fields : {}),
       ...(rdpResult ? rdpResult.fields : {}),
+      ...(nbssResult ? nbssResult.fields : {}),
       ...(smb2Result ? smb2Result.fields : {}),
       ...(ldapResult ? ldapResult.fields : {}),
       ...(tlsResult ? tlsResult.fields : {}),

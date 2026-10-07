@@ -234,6 +234,27 @@ export function dissectSmb(b: Uint8Array, start: number, end: number): SmbResult
         }
       }
     }
+  } else if (cmd === 0x72 && !isResponse) {
+    // SMB_COM_NEGOTIATE's request: the dialects the client speaks, oldest
+    // first. A client that lists `SMB 2.???` is offering to move to SMB2.
+    const dialects: ProtocolField[] = [];
+    const bytesEnd = Math.min(end, bccAt + 2 + bcc);
+    for (let p = bccAt + 2; p < bytesEnd;) {
+      const format = b[p];
+      const dialect = smbString(b, start, p + 1, bytesEnd, false);
+      dialects.push({
+        name: 'Dialect', value: dialect.text, abbrev: 'smb.dialect', rawBytesRange: [p, dialect.after - 1],
+        children: [
+          { name: 'Buffer Format', value: `${format === 2 ? 'Dialect' : 'Unknown'} (${format})`, abbrev: 'smb.buffer_format', rawBytesRange: [p, p] },
+          { name: 'Name', value: dialect.text, abbrev: 'smb.dialect.name', rawBytesRange: [p + 1, Math.max(p + 1, dialect.after - 1)] },
+        ],
+      });
+      p = dialect.after;
+    }
+    body.push({
+      name: 'Byte Count (BCC)', value: bcc, abbrev: 'smb.bcc', rawBytesRange: [bccAt, bccAt + 1],
+      children: [{ name: 'Requested Dialects', value: '', children: dialects }],
+    });
   } else {
     body.push({ name: 'Byte Count (BCC)', value: bcc, abbrev: 'smb.bcc', rawBytesRange: [bccAt, bccAt + 1] });
   }
