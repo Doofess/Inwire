@@ -81,7 +81,7 @@ function frameRows(layers: readonly ProtocolLayer[]): Map<string, string> {
 }
 
 /** Up to the zone name: `Sep 26, 2026 23:42:10.736581400`. */
-const beforeZone = (text: string) => /^\w{3} \d+, \d{4} \d{2}:\d{2}:\d{2}\.\d{9}/.exec(text)?.[0] ?? text;
+const beforeZone = (text: string) => /^\w{3} +\d+, \d{4} \d{2}:\d{2}:\d{2}\.\d{9}/.exec(text)?.[0] ?? text;
 const seconds = (text: string) => Number(text.replace(/ seconds$/, ''));
 
 interface Rule { abbrev: string; same: (ours: string, ref: { show: string; shown: string }) => boolean }
