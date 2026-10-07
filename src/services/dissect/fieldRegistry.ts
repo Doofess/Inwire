@@ -110,7 +110,7 @@ export const LAYERS = [
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
   // what a user types, and it has to be the one they already know.
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp',
+  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'smb2', 'kerberos', 'ssh', 'http', 'http2', 'http3',
   // **What a message BODY is**, which the reference makes four protocols of
   // rather than fields on HTTP - so a JSON API response's chain really does
@@ -277,6 +277,20 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(bool('isakmp.sa.situation.integrity', 'Integrity', 'isakmp')),
   treeOnly(bool('isakmp.ike.attr.format', 'Format', 'isakmp')),
   treeOnly(bool('isakmp.ike2.attr.format', 'Format', 'isakmp')),
+  // --- OpenVPN -------------------------------------------------------------------
+  uint('openvpn.opcode', 'Opcode', 'openvpn'),
+  uint('openvpn.keyid', 'Key ID', 'openvpn'),
+  uint('openvpn.peerid', 'Peer ID', 'openvpn'),
+  str('openvpn.sessionid', 'Session ID', 'openvpn'),
+  treeOnly(uint('openvpn.type', 'Type', 'openvpn')),
+  treeOnly(str('openvpn.hmac', 'HMAC', 'openvpn')),
+  treeOnly(uint('openvpn.pid', 'Replay-Packet-ID', 'openvpn')),
+  treeOnly({ abbrev: 'openvpn.net_time', label: 'Net Time', type: 'time', layer: 'openvpn' }),
+  treeOnly(uint('openvpn.mpidarraylength', 'Message Packet-ID Array Length', 'openvpn')),
+  treeOnly(uint('openvpn.mpidarrayelement', 'Message Packet-ID Array Element', 'openvpn')),
+  treeOnly(str('openvpn.rsessionid', 'Remote Session ID', 'openvpn')),
+  treeOnly(uint('openvpn.mpid', 'Message Packet-ID', 'openvpn')),
+  treeOnly(str('openvpn.data', 'Data', 'openvpn')),
   // --- SSH -----------------------------------------------------------------------
   // The hassh pair is to SSH what JA3/JA3S is to TLS: `ssh.kex.hassh` names the
   // client software from what it offered, `ssh.kex.hasshserver` the server.

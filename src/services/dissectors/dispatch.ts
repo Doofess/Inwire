@@ -78,6 +78,7 @@ import { dissectKerberosDatagram, KERBEROS_PORT } from './kerberos';
 import { dissectEapol } from './eapol';
 import { dissectDropboxDiscovery, dissectPortControl } from './portControl';
 import { dissectMediaType } from './mediaType';
+import { dissectOpenvpn, OPENVPN_PORT } from './openvpn';
 
 /** The three things this build dispatches on by value. */
 export type DispatchTableName = 'ethertype' | 'ip.proto' | 'udp.port';
@@ -245,6 +246,7 @@ const DISPATCH_TABLE: readonly DispatchEntry[] = [
   { table: 'udp.port', values: on(520), token: 'rip', dissect: dissectRip },
   { table: 'udp.port', values: on(521), token: 'ripng', dissect: dissectRipng },
   { table: 'udp.port', values: on(5350, 5351), token: 'portcontrol', dissect: dissectPortControl },
+  { table: 'udp.port', values: on(OPENVPN_PORT), token: 'openvpn', dissect: dissectOpenvpn },
   {
     table: 'udp.port', values: on(17500), token: 'db-lsp-disc',
     dissect: (b, s, e) => dissectDropboxDiscovery(b, s, e, (bytes) => dissectMediaType(bytes, 'application/json')),

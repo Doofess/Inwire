@@ -866,6 +866,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Port Control Protocol': 'portcontrol',
   'Dropbox LAN sync Discovery Protocol': 'db-lsp-disc',
   'SSH Protocol': 'ssh',
+  'OpenVPN Protocol': 'openvpn',
   'Internet Security Association and Key Management Protocol': 'isakmp',
   'Encapsulating Security Payload': 'esp',
   'UDP Encapsulation of IPsec Packets': 'udpencap',
