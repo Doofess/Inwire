@@ -35,6 +35,7 @@ import { dissectNtp, dissectStun } from './udpApps';
 import { dataLayer } from './mediaType';
 import { findUdpPort } from './dispatch';
 import { dissectCflow, isCflowPort } from './cflow';
+import { dissectTzsp, isTzspPort, TZSP_ENCAP_ETHERNET, TZSP_ENCAP_RAW_IP } from './tzsp';
 import { MemoryTemplateStore } from '../flow/flowExport';
 import { dissectRtp, looksLikeRtp, rtpHeader } from './rtp';
 import { sdpOfSip } from './sdp';
@@ -125,6 +126,7 @@ export function dissectUdpTransport(
   let dnsMatchedQueryFrameId: number | undefined;
   let resolvedNames: { name: string; addresses: string[] }[] | undefined;
   const protocolTokens: string[] = [];
+  let embeddedFrame: TransportResult['embeddedFrame'];
 
   if (isDhcp || isDhcpv6) {
     const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
@@ -136,6 +138,28 @@ export function dissectUdpTransport(
       info = dhcp.info;
       extraLayers.push(dhcp.layer);
       Object.assign(dhcpFields, dhcp.fields);
+    }
+  } else if (isTzspPort(srcPort, dstPort)) {
+    // A router's mirrored packet. The header is read here; the frame inside
+    // is dissected through by the network layer, which owns the columns it
+    // decides (`decodeEmbeddedFrame`).
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    const tzsp = dissectTzsp(rawBytes, udpPayloadStart, payloadEnd);
+    if (tzsp) {
+      protocolLabel = tzsp.protocolLabel;
+      info = tzsp.info;
+      extraLayers.push(tzsp.layer);
+      protocolTokens.push('tzsp');
+      Object.assign(appFields, tzsp.fields);
+      const frame = tzsp.frame;
+      if (frame !== undefined && frame.encapsulation === TZSP_ENCAP_ETHERNET) {
+        embeddedFrame = { offset: frame.offset, end: frame.end, kind: 'ethernet' };
+      } else if (frame !== undefined && frame.encapsulation === TZSP_ENCAP_RAW_IP) {
+        embeddedFrame = { offset: frame.offset, end: frame.end, kind: 'ip' };
+      } else if (frame !== undefined && frame.offset < frame.end) {
+        // 802.11 and the rest: named in the heading and Info, kept as bytes.
+        extraLayers.push(dataLayer(rawBytes.subarray(frame.offset, frame.end)));
+      }
     }
   } else if (isCflowPort(srcPort, dstPort)) {
     // NetFlow and IPFIX: a record per flow from a router to its collector.
@@ -563,6 +587,7 @@ export function dissectUdpTransport(
       ? [dataLayer(rawBytes.subarray(udpPayloadStart, udpPayloadStart + udpPayloadLen))]
       : extraLayers,
     protocolTokens,
+    ...(embeddedFrame !== undefined ? { embeddedFrame } : {}),
     dnsMatchedQueryFrameId,
     resolvedNames,
     ...(dtlsLabelPatches !== undefined ? { labelPatches: dtlsLabelPatches } : {}),

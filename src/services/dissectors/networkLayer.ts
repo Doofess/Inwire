@@ -38,6 +38,11 @@ import {
   VXLAN_HEADER_LENGTH, isVxlanPort, readInnerEthernet, readVxlanHeader,
 } from './vxlan';
 import { dissectArp } from './l2';
+import { dissectLinkLayer } from './linkLayer';
+import { LINKTYPE } from '../dissect/types';
+import { findEthertype } from './dispatch';
+import { dataLayer } from './mediaType';
+import { malformedRow } from './tzsp';
 import { resolveMacName } from '../macVendors';
 import { dissectTcpTransport } from './tcpTransport';
 import { dissectUdpTransport } from './udpTransport';
@@ -462,6 +467,87 @@ export function decodeNetworkLayer(
     };
   };
 
+  /**
+   * A mirrored frame a datagram carries for somebody else - TZSP's, from a
+   * router's packet sniffer - looked THROUGH as VXLAN's is, after the UDP
+   * layer that carried it rather than in its place.
+   *
+   * Three things differ from VXLAN, each because TZSP mirrors arbitrary
+   * traffic rather than an overlay's:
+   *
+   * - **The inner Ethernet header is the outer frame's own decoder**
+   *   (`dissectLinkLayer`), run on the inner bytes and moved to where they
+   *   sit, so the inner header carries the same rows and abbrevs as any
+   *   frame's - VLAN tags included, which a mirror port forwards.
+   * - **Anything the ethertype table claims** - ARP, LLDP, EAPOL - is read
+   *   there, with the inner MACs in the address columns as the outer frame
+   *   would have them; an ethertype nothing reads is the reference's `0x....`
+   *   and `Ethernet II`.
+   * - **The inner frame's field bag only adds**: an outer key keeps its
+   *   value, because one key holds one value and the outer `eth.src` is the
+   *   frame this machine received. The inner IP decode writes its own keys
+   *   as every tunnel's does.
+   *
+   * The bytes are bounded at the datagram's end, so a padded outer frame's
+   * padding is not read as the inner frame's, and the capture's own length is
+   * moved by the same amount so a whole frame is not read as a cut one.
+   */
+  const decodeEmbeddedFrame = (
+    embedded: { offset: number; end: number; kind: 'ethernet' | 'ip' },
+  ): NetworkDecode | null => {
+    const bytes = embedded.end >= rawBytes.length ? rawBytes : rawBytes.subarray(0, embedded.end);
+    const innerContext: NetworkContext = { ...context, origLen: Math.max(0, origLen - (rawBytes.length - bytes.length)) };
+    const carried: NetworkDecode = {
+      srcIp, dstIp, proto, protocolLabel, info, status, analysisFlags, srcPort, dstPort,
+      streamId, icmpMatchedRequestFrameId, infoPatches, resolvedNames, transportLayerIndex,
+      extensionTokens, transportTokens,
+    };
+    if (embedded.kind === 'ip') {
+      const version = embedded.offset < bytes.length ? bytes[embedded.offset] >> 4 : 0;
+      if (version !== 4 && version !== 6) return null;
+      layers.push({ name: 'Raw packet data', summary: 'Raw packet data', fields: [] });
+      return decodeNetworkLayer(
+        bytes, embedded.offset, version === 4 ? 0x0800 : 0x86dd, layers, filterFields, carried, innerContext);
+    }
+
+    const link = dissectLinkLayer(bytes.subarray(embedded.offset), LINKTYPE.ETHERNET);
+    if (link.truncated) {
+      layers[layers.length - 1]?.fields.push(malformedRow('Ethernet'));
+      return { ...carried, protocolLabel: 'Ethernet', info: `${info}[Malformed Packet]` };
+    }
+    for (const layer of link.layers) {
+      shiftByteRanges(layer, embedded.offset);
+      layers.push(layer);
+    }
+    for (const [key, value] of Object.entries(link.fields)) if (!(key in filterFields)) filterFields[key] = value;
+    const l3 = embedded.offset + link.l3Offset;
+    if (link.etherType === 0x0800 || link.etherType === 0x86dd) {
+      return decodeNetworkLayer(bytes, l3, link.etherType, layers, filterFields, carried, innerContext);
+    }
+    const byMac = {
+      srcIp: link.srcMac !== undefined ? resolveMacName(link.srcMac) : srcIp,
+      dstIp: link.dstMac !== undefined ? resolveMacName(link.dstMac) : dstIp,
+    };
+    const entry = findEthertype(link.etherType);
+    const leaf = entry?.dissect(bytes, l3, bytes.length) ?? null;
+    if (leaf !== null) {
+      layers.push(leaf.layer, ...(leaf.innerLayers ?? []));
+      if (leaf.fields) for (const [key, value] of Object.entries(leaf.fields)) if (!(key in filterFields)) filterFields[key] = value;
+      return {
+        ...carried, ...byMac,
+        proto: leaf.protocolLabel === 'ARP' ? 'ARP' : proto,
+        protocolLabel: leaf.protocolLabel,
+        info: leaf.info,
+      };
+    }
+    if (l3 < bytes.length) layers.push(dataLayer(bytes.subarray(l3)));
+    return {
+      ...carried, ...byMac,
+      protocolLabel: `0x${link.etherType.toString(16).padStart(4, '0')}`,
+      info: 'Ethernet II',
+    };
+  };
+
   if (currentEtherType === 0x0800 && rawBytes.length >= l3Offset + 20) {
     const ipHeaderLen = (rawBytes[l3Offset] & 0x0f) * 4;
     const tos = rawBytes[l3Offset + 1];
@@ -786,6 +872,10 @@ export function decodeNetworkLayer(
       const fromTransport = transportPatches(transport, id, 'icmp.resp_in');
       if (fromTransport) infoPatches = (infoPatches ?? []).concat(fromTransport);
       resolvedNames = transport.resolvedNames;
+      if (transport.embeddedFrame) {
+        const inner = decodeEmbeddedFrame(transport.embeddedFrame);
+        if (inner) return inner;
+      }
       // **`[Stream index]` is the TCP layer's row and is drawn there now.**
       // It sat here carrying no abbrev, so `tcp.stream` was answerable only by
       // a synthetic reader in `filter/fields.ts` and the detail pane showed
@@ -1044,6 +1134,10 @@ export function decodeNetworkLayer(
       const fromTransport = transportPatches(transport, id, 'icmpv6.resp_in');
       if (fromTransport) infoPatches = (infoPatches ?? []).concat(fromTransport);
       resolvedNames = transport.resolvedNames;
+      if (transport.embeddedFrame) {
+        const inner = decodeEmbeddedFrame(transport.embeddedFrame);
+        if (inner) return inner;
+      }
       // **`[Stream index]` is the TCP layer's row and is drawn there now.**
       // It sat here carrying no abbrev, so `tcp.stream` was answerable only by
       // a synthetic reader in `filter/fields.ts` and the detail pane showed
@@ -1319,6 +1413,18 @@ function ipv6TrafficClassFields(rawBytes: Uint8Array, l3Offset: number): Protoco
  * this with a second data source tab; the honest answer with one hex view is
  * to say nothing rather than to point somewhere wrong.
  */
+/** Moves every byte range in a layer by `by`: a layer read from a slice, put back where the slice sits. */
+function shiftByteRanges(layer: ProtocolLayer, by: number): void {
+  if (layer.rawBytesRange) layer.rawBytesRange = [layer.rawBytesRange[0] + by, layer.rawBytesRange[1] + by];
+  const visit = (fields: ProtocolField[]) => {
+    for (const field of fields) {
+      if (field.rawBytesRange) field.rawBytesRange = [field.rawBytesRange[0] + by, field.rawBytesRange[1] + by];
+      if (field.children) visit(field.children);
+    }
+  };
+  visit(layer.fields);
+}
+
 function stripByteRanges(layer: ProtocolLayer): void {
   delete layer.rawBytesRange;
   const visit = (fields: ProtocolField[]) => {

@@ -101,6 +101,13 @@ export interface TransportResult {
    * length that header declares.
    */
   embeddedNetwork?: { offset: number; etherType: number; end: number };
+  /**
+   * A whole frame this datagram carries for somebody else - a mirrored packet
+   * TZSP streams to a collector - for the caller to dissect THROUGH, as GRE
+   * and VXLAN are: unlike `embeddedNetwork`, the inner frame decides every
+   * column. `ethernet` starts at its MACs, `ip` at its IP header.
+   */
+  embeddedFrame?: { offset: number; end: number; kind: 'ethernet' | 'ip' };
   streamId?: number;
   status?: Packet['status'];
   analysisFlags?: string[];

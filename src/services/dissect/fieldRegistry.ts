@@ -110,7 +110,7 @@ export const LAYERS = [
   // `homeplug_av.*`, which is how the reference spells the two; the second is
   // a token only so the fields have a layer to belong to.
   'homeplug-av', 'homeplug_av',
-  'ip', 'ipv6', 'gre', 'vxlan', 'esp', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
+  'ip', 'ipv6', 'gre', 'vxlan', 'tzsp', 'esp', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
   // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
   // what a user types, and it has to be the one they already know.
@@ -178,6 +178,33 @@ const BASE_FIELDS: readonly FieldDef[] = [
   uint('vxlan.vni', 'VXLAN Network Identifier', 'vxlan'),
   uint('vxlan.flags', 'Flags', 'vxlan'),
   uint('vxlan.flag_i', 'VNI Valid', 'vxlan'),
+  // --- TZSP ----------------------------------------------------------------------
+  // A router's mirrored packet: like VXLAN, the columns report the frame
+  // inside it, so the header's three keys are what it adds to the bag. The
+  // options describe the capture (signal, channel, the sensor) and are drawn.
+  uint('tzsp.version', 'Version', 'tzsp'),
+  uint('tzsp.type', 'Type', 'tzsp'),
+  uint('tzsp.encap', 'Encapsulation', 'tzsp'),
+  treeOnly(uint('tzsp.option_tag', 'Option Tag', 'tzsp')),
+  treeOnly(uint('tzsp.option_length', 'Option Length', 'tzsp')),
+  treeOnly({ abbrev: 'tzsp.wlan.signal', label: 'Signal', type: 'int', layer: 'tzsp' }),
+  treeOnly({ abbrev: 'tzsp.wlan.silence', label: 'Silence', type: 'int', layer: 'tzsp' }),
+  treeOnly(uint('tzsp.wlan.rate', 'Rate', 'tzsp')),
+  treeOnly(uint('tzsp.wlan.time', 'Time', 'tzsp')),
+  treeOnly(uint('tzsp.wlan.status.msg_type', 'Type', 'tzsp')),
+  treeOnly(bool('tzsp.wlan.status.pcf', 'PCF', 'tzsp')),
+  treeOnly(bool('tzsp.wlan.status.undecrypted', 'Undecrypted', 'tzsp')),
+  treeOnly(bool('tzsp.wlan.status.fcs_err', 'FCS', 'tzsp')),
+  treeOnly(uint('tzsp.wlan.channel', 'Channel', 'tzsp')),
+  treeOnly(uint('tzsp.packet_id', 'Packet Id', 'tzsp')),
+  treeOnly({ abbrev: 'tzsp.original_length', label: 'Original Length', type: 'int', layer: 'tzsp' }),
+  treeOnly({ abbrev: 'tzsp.sensormac', label: 'Sensor Address', type: 'mac', layer: 'tzsp' }),
+  treeOnly(str('tzsp.device_name', 'Device Name', 'tzsp')),
+  treeOnly(str('tzsp.capture_location', 'Capture Location', 'tzsp')),
+  treeOnly(str('tzsp.time_stamp', 'Time Stamp', 'tzsp')),
+  treeOnly(str('tzsp.device_info', 'Capture Information', 'tzsp')),
+  treeOnly(uint('tzsp.device_id', 'Capture Id', 'tzsp')),
+  treeOnly(str('tzsp.unknown', 'Unknown tag', 'tzsp')),
   // --- Kerberos ---------------------------------------------------------------
   // The Protocol column reads KRB5 and the filter token reads `kerberos`; both
   // are the reference's own spellings. `cname_string`/`sname_string` are the
