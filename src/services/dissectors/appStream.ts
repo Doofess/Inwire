@@ -12,6 +12,8 @@ import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import { httpBodyRows, httpMessageFields, httpMessageRows } from './httpFields';
 import { dissectHttp1, freshHttp1Direction, looksLikeHttp1, type Http1Body, type Http1Direction } from './http1';
 import { dissectMediaType } from './mediaType';
+import { dissectSecurityBlob } from './gssapi';
+import { headingFor } from '../dissect/nestedLayers';
 import type { DecodedBody } from './httpBody';
 import {
   dissectHttp2, freshHttp2Direction, http2ErrorName, HTTP2_PREFACE,
@@ -195,8 +197,12 @@ function readHttp1(
       if (asked !== undefined) answers = { frameId: asked.frameId, elapsedUs: frame.tsUs - asked.tsUs };
     }
 
-    rows.push(...httpMessageRows(message, { answers }));
+    const messageRows = httpMessageRows(message, { answers });
+    rows.push(...messageRows);
     Object.assign(fields, httpMessageFields(message, { answers }));
+    const signIn = signInsOf(message.headers, messageRows);
+    extra.push(...signIn.layers);
+    Object.assign(fields, signIn.fields);
 
     // A body that began and ended inside this same segment belongs under the
     // message it is the body of, not in a separate frame's tree.
@@ -208,7 +214,7 @@ function readHttp1(
       media = mediaLayerFor(body, decoded);
       if (media !== null) extra.push(media);
     }
-    info.push(messageColumn(message.summary, message.kind === 'response' ? contentTypeOf(message) : undefined, media));
+    info.push(messageColumn(message.summary, message.kind === 'response' ? contentTypeOf(message) : undefined, media) + signIn.info);
   }
 
   // Anything left finished here but started earlier - the pipelined case,
@@ -273,6 +279,58 @@ function messageColumn(summary: string, type: string | undefined, media: Protoco
 }
 
 /** `HTTP/JSON`, `HTTP/XML`: each body dissector appends its name to the Protocol column after HTTP's. */
+/** The headers that carry a sign-in, by the row each is drawn as. */
+const SIGN_IN_HEADERS: Record<string, string> = {
+  authorization: 'http.authorization', 'www-authenticate': 'http.www_authenticate',
+  'proxy-authorization': 'http.proxy_authorization', 'proxy-authenticate': 'http.proxy_authenticate',
+};
+
+/** Rows that point into bytes this frame does not hold - a header's decoded base64 - point nowhere. */
+function withoutRanges(rows: ProtocolField[]): void {
+  for (const row of rows) {
+    delete row.rawBytesRange;
+    if (row.children) withoutRanges(row.children);
+  }
+}
+
+/**
+ * NTLM or Negotiate in a message's authentication headers: the base64 token
+ * read as the security blob it is, its protocols drawn inside the header's
+ * row as the reference draws them, and what it says appended to the column -
+ * `GET /a HTTP/1.1 , NTLMSSP_NEGOTIATE`.
+ */
+function signInsOf(
+  headers: readonly { name: string; value: string }[], rows: readonly ProtocolField[],
+): { info: string; layers: ProtocolLayer[]; fields: Record<string, string | number> } {
+  const out = { info: '', layers: [] as ProtocolLayer[], fields: {} as Record<string, string | number> };
+  const used = new Set<ProtocolField>();
+  for (const header of headers) {
+    const abbrev = SIGN_IN_HEADERS[header.name.toLowerCase()];
+    if (abbrev === undefined) continue;
+    const token = /^(?:NTLM|Negotiate)\s+([A-Za-z0-9+/]+={0,2})\s*$/i.exec(header.value)?.[1];
+    if (token === undefined) continue;
+    let bytes: Uint8Array;
+    try {
+      bytes = Uint8Array.from(atob(token), (c) => c.charCodeAt(0));
+    } catch {
+      continue;
+    }
+    const blob = dissectSecurityBlob(bytes, 0, bytes.length);
+    const row = rows.find((r) => r.abbrev === abbrev && r.value === header.value && !used.has(r));
+    if (blob === null || row === undefined) continue;
+    used.add(row);
+    for (const layer of blob.layers) {
+      delete layer.rawBytesRange;
+      withoutRanges(layer.fields);
+    }
+    row.children = [...(row.children ?? []), headingFor(blob.layers[0])];
+    out.layers.push(...blob.layers);
+    Object.assign(out.fields, blob.fields);
+    out.info += blob.info;
+  }
+  return out;
+}
+
 function protocolLabelFor(extra: readonly ProtocolLayer[]): string {
   const names = extra.map((l) => BODY_LABELS[l.name]).filter((x): x is string => x !== undefined);
   return ['HTTP', ...names.filter((x, i) => names.indexOf(x) === i)].join('/');

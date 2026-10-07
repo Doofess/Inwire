@@ -38,6 +38,7 @@
  */
 import type { ProtocolLayer, ProtocolField } from '../../types/packet';
 import { dissectDcerpc, freshDcerpcConversation, looksLikeDcerpc, type DcerpcConversationState, type DcerpcFrame, type DcerpcResult } from './dcerpc';
+import { dissectSecurityBlob, type GssResult } from './gssapi';
 
 /** SMB over TCP. 139 is the older NetBIOS session service, which SMB1 used. */
 export const SMB2_PORT = 445;
@@ -289,6 +290,8 @@ interface OneMessage {
   fields: Record<string, string | number>;
   /** DCE/RPC carried in a named pipe's data. */
   rpc?: DcerpcResult;
+  /** The sign-in a Negotiate response or a Session Setup carries. */
+  auth?: GssResult;
 }
 
 /**
@@ -371,7 +374,22 @@ function readMessage(
     }
     rpc = dissectDcerpc(bytes, from, dataEnd, pipe, frame);
   };
+  let auth: GssResult | null = null;
+  /** The security blob at a (offset from the header, length) pair. */
+  const securityBlob = (offsetAt: number): void => {
+    if (body + offsetAt + 4 > end) return;
+    const from = start + u16(bytes, body + offsetAt);
+    const length = u16(bytes, body + offsetAt + 2);
+    if (length === 0 || from < body || from + length > end) return;
+    auth = dissectSecurityBlob(bytes, from, from + length);
+  };
   switch (command) {
+    case 0x00:                                          // Negotiate Protocol
+      if (isResponse) securityBlob(56);
+      break;
+    case 0x01:                                          // Session Setup
+      securityBlob(isResponse ? 4 : 12);
+      break;
     case 0x03: {                                        // Tree Connect
       if (!isResponse && end - body >= 8) {
         const offset = u16(bytes, body + 4);
@@ -490,11 +508,16 @@ function readMessage(
     if (command === 0x06) state.files.delete(fid);
   }
   if (fileName !== undefined) fields['smb2.filename'] = fileName;
+  // Set inside `securityBlob`, which narrowing does not see: without the
+  // cast, `auth` reads as the `null` it was declared with.
+  const signIn = auth as GssResult | null;
+  if (signIn !== null) Object.assign(fields, signIn.fields);
   return {
     message: {
-      info: `${name} ${isResponse ? 'Response' : 'Request'}${error}${detail}`,
+      info: `${name} ${isResponse ? 'Response' : 'Request'}${error}${detail}${signIn?.info ?? ''}`,
       rows, fields,
       ...(rpc !== null ? { rpc } : {}),
+      ...(signIn !== null ? { auth: signIn } : {}),
     },
     nextCommand,
   };
@@ -555,11 +578,13 @@ export function dissectSmb2(
   // DCE/RPC in a pipe takes the columns over, as the reference has it.
   const rpc = messages.find((m) => m.rpc !== undefined)?.rpc;
   if (rpc !== undefined) Object.assign(fields, rpc.fields);
+  // The sign-in's protocols, then a pipe's RPC, each after SMB2's own layer.
+  const innerLayers = [...messages.flatMap((m) => m.auth?.layers ?? []), ...(rpc?.layers ?? [])];
   return {
     protocolLabel: rpc?.protocolLabel ?? 'SMB2',
     info: rpc?.info ?? messages.map((m) => m.info).join('; '),
     fields,
-    ...(rpc !== undefined ? { innerLayers: rpc.layers } : {}),
+    ...(innerLayers.length > 0 ? { innerLayers } : {}),
     ...(rpc?.answered !== undefined ? { answered: rpc.answered } : {}),
     layer: {
       name: 'SMB2',

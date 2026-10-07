@@ -18,13 +18,15 @@
  * drawn as bytes.
  *
  * Not read: a call fragmented across several PDUs is shown one PDU at a time,
- * where the reference reassembles it; and an authentication verifier is
- * drawn as its trailer and bytes, not decoded as NTLMSSP or Kerberos.
+ * where the reference reassembles it; and an authentication verifier other
+ * than NTLMSSP's is drawn as its trailer and bytes, not decoded as Kerberos.
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import { INTERFACES, SYNTAXES } from './dcerpcNames';
 import { dissectEpm, EPM_UUID, readUuid, uuidName } from './epm';
 import { elapsedText } from './ldap';
+import { dissectNtlmssp, ntlmsspVerifier } from './ntlmssp';
+import { headingFor } from '../dissect/nestedLayers';
 
 export const EPM_PORT = 135;
 
@@ -46,6 +48,7 @@ const AUTH_TYPES: Record<number, string> = {
   0: 'None', 1: 'Kerberos 5', 9: 'SPNEGO', 10: 'NTLMSSP', 14: 'SCHANNEL SSP', 16: 'Kerberos SSP',
   17: 'Distributed Password Authentication SSP', 18: 'MSN SSP', 21: 'Digest SSP', 68: 'NETLOGON Secure Channel', 100: 'MSMQ SSP',
 };
+const AUTH_NTLMSSP = 10;
 const AUTH_LEVELS: Record<number, string> = {
   1: 'None', 2: 'Connect', 3: 'Call', 4: 'Packet', 5: 'Packet integrity', 6: 'Packet privacy',
 };
@@ -396,6 +399,26 @@ export function dissectDcerpc(b: Uint8Array, start: number, end: number, state: 
     }
   }
 
+  /**
+   * The verifier itself. NTLMSSP's is read: a Bind, Bind_ack or AUTH3 carries
+   * a whole message, which names the sign-in on the Info line and is drawn
+   * inside Auth Info; every later PDU carries its signature. Any other
+   * mechanism's is its bytes.
+   */
+  const authData = (from: number): ProtocolField => {
+    if (b[bodyEnd] === AUTH_NTLMSSP) {
+      const ntlm = dissectNtlmssp(b, from, pduEnd);
+      if (ntlm !== null) {
+        extra.push(ntlm.layer);
+        Object.assign(fields, ntlm.fields);
+        info += `, ${ntlm.info}`;
+        return headingFor(ntlm.layer);
+      }
+      const verifier = ntlmsspVerifier(b, from, pduEnd);
+      if (verifier !== null) return verifier;
+    }
+    return { name: 'Auth Data', value: `${authLen} bytes`, rawBytesRange: [from, pduEnd - 1] };
+  };
   if (authLen > 0 && bodyEnd >= p) {
     const at = bodyEnd;
     const authType = b[at];
@@ -409,7 +432,7 @@ export function dissectDcerpc(b: Uint8Array, start: number, end: number, state: 
         { name: 'Auth pad len', value: b[at + 2], abbrev: 'dcerpc.auth_pad_len', rawBytesRange: [at + 2, at + 2] },
         { name: 'Auth Rsrvd', value: b[at + 3], abbrev: 'dcerpc.auth_rsrvd', rawBytesRange: [at + 3, at + 3] },
         { name: 'Auth Context ID', value: u32(at + 4), abbrev: 'dcerpc.auth_ctx_id', rawBytesRange: [at + 4, at + 7] },
-        { name: 'Auth Data', value: `${authLen} bytes`, rawBytesRange: [at + 8, pduEnd - 1] },
+        authData(at + 8),
       ],
     });
     fields['dcerpc.auth_type'] = authType;

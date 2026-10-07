@@ -17,6 +17,7 @@ import {
 
 import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { decodeNetworkLayer, nestQuotedLayers } from './dissectors/networkLayer';
+import { nestLayers } from './dissect/nestedLayers';
 import { keyLog } from './tls/keyLog';
 import { snaplenOrWhole, type CaptureFileFacts, type FileInterfaceFacts } from './captureFileFacts';
 import { DSB_SECRETS_TYPE_TLS_KEY_LOG, LINKTYPE, type InfoPatch } from './dissect/types';
@@ -803,6 +804,11 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Simple Network Management Protocol': 'snmp',
   'Lightweight Directory Access Protocol': 'ldap',
   'SMB2': 'smb2',
+  // A sign-in, which the reference makes three protocols: the envelope, the
+  // negotiation inside it and the mechanism inside that (`dissectors/gssapi.ts`).
+  'GSS-API Generic Security Service Application Program Interface': 'gss-api',
+  'Simple Protected Negotiation': 'spnego',
+  'NTLM Secure Service Provider': 'ntlmssp',
   'Border Gateway Protocol': 'bgp',
   'Generic Routing Encapsulation': 'gre',
   'Session Initiation Protocol': 'sip',
@@ -1311,6 +1317,7 @@ export function decodeRawEthernetPacket(
   // Extension headers are layers with generated names; their filter tokens
   // come from the walker, which knows which header each one was.
   for (const token of extensionTokens) if (!frameProtocols.includes(token)) frameProtocols.push(token);
+  nestLayers(layers);
   nestQuotedLayers(layers);
   layers[0].fields.push(
     { name: '[Protocols in frame]', value: protocolsInFrame(frameProtocols), generated: true, abbrev: 'frame.protocols' },
