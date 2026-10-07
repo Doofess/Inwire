@@ -29,7 +29,8 @@
  * - `extendedReq` names well-known OIDs: 1.3.6.1.4.1.1466.20037 is
  *   `LDAP_START_TLS_OID`.
  */
-import { Bytes, tcpFrame, runCases, finish, failureCount, type SyntheticCase } from '../parity/synthetic';
+import { Bytes, tcpFrame, runCases, failureCount, type SyntheticCase } from '../parity/synthetic';
+import { compareWithReference, finish } from '../parity/treeOracle';
 
 // --- BER, written out rather than helper-ised --------------------------------
 //
@@ -85,6 +86,18 @@ const unbindRequest = message(3, tlv(0x42, []));
 const abandonRequest = message(4, tlv(0x50, [0x02]));
 const extendedReq = message(5, tlv(0x77, ctx(0x80, '1.3.6.1.4.1.1466.20037')));
 
+/** A search whose filter exercises every shape: or, not, substrings, >=. */
+const searchFilters = message(7, tlv(0x63, [
+  ...octets(BASE), ...enumerated(2), ...enumerated(0), ...int(10), ...int(30), 0x01, 0x01, 0xff,
+  ...tlv(0xa1, [                                            // or
+    ...tlv(0xa3, [...octets('cn'), ...octets('alice')]),    //   (cn=alice)
+    ...tlv(0xa4, [...octets('sn'), ...tlv(0x30, [...ctx(0x80, 'Smi'), ...ctx(0x81, 'th'), ...ctx(0x82, 's')])]), // (sn=Smi*th*s)
+    ...tlv(0xa2, ctx(0x87, 'disabled')),                    //   (!(disabled=*))
+    ...tlv(0xa5, [...octets('uidNumber'), ...octets('1000')]), // (uidNumber>=1000)
+  ]),
+  ...tlv(0x30, [...octets('cn'), ...octets('mail')]),
+]));
+
 /** Two LDAPMessages back to back in one segment. */
 const entryThenDone = Uint8Array.from([...searchResEntry, ...searchResDone]);
 
@@ -128,6 +141,7 @@ const cases: SyntheticCase[] = [
   { name: 'an extended request names a well-known OID', frame: toServer(extendedReq) },
   { name: 'unbind carries nothing but its id', frame: toServer(unbindRequest) },
   { name: 'two messages in one segment join with a bar', frame: toClient(entryThenDone) },
+  { name: 'a search with or, substrings, not and >= in its filter', frame: toServer(searchFilters) },
 ];
 
 // The same `main()` shape every other dissector suite here ends on, rather than
@@ -136,7 +150,11 @@ const cases: SyntheticCase[] = [
 // helper is silently never run. `finish` still does the exiting.
 async function main(): Promise<void> {
   await runCases(cases, { statefulTcp: true });
-  if (failureCount() > 0) process.exit(1);
+  const columnFailures = failureCount();
+  // And the tree, row for row: asn2wrs's LDAPMessage structure, the filter as
+  // a tree of its choices, matchedDN and errorMessage drawn when empty.
+  await compareWithReference(cases.map((c) => ({ label: c.name, frame: c.frame })), { rows: /^ldap\./ });
+  if (columnFailures > 0) process.exit(1);
   finish('LDAP');
 }
 

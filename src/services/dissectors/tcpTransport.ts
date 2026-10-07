@@ -445,7 +445,8 @@ export function dissectTcpTransport(
       const state = tcpTracker
         ? tcpTracker.ldapConversation(srcIp, srcPort, dstIp, dstPort)
         : freshLdapConversation();
-      ldapResult = dissectLdap(rawBytes, tcpPayloadStart, payloadEnd, state);
+      ldapResult = dissectLdap(rawBytes, tcpPayloadStart, payloadEnd, state,
+        frameId !== undefined && tsUs !== undefined ? { frame: { id: frameId, tsUs } } : {});
     }
   }
 
@@ -729,7 +730,7 @@ export function dissectTcpTransport(
       : smb2Result
       ? [smb2Result.layer]
       : ldapResult
-      ? [ldapResult.layer]
+      ? ldapResult.layers
       : tcpDns
       ? [tcpDns.layer]
       : tlsResult

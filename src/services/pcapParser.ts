@@ -868,6 +868,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'SSH Protocol': 'ssh',
   'OpenVPN Protocol': 'openvpn',
   'Datagram Transport Layer Security': 'dtls',
+  'Connectionless Lightweight Directory Access Protocol': 'cldap',
   'Internet Security Association and Key Management Protocol': 'isakmp',
   'Encapsulating Security Payload': 'esp',
   'UDP Encapsulation of IPsec Packets': 'udpencap',

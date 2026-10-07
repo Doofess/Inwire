@@ -20,6 +20,7 @@ import { wireGuardFacts } from './wireguard';
 import { dissectXml } from './xml';
 import { dissectEsp, dissectIsakmp } from './isakmp';
 import { dissectDtls, freshDtlsConversation, looksLikeDtls } from './dtls';
+import { dissectLdap, freshLdapConversation, looksLikeLdap } from './ldap';
 import { dissectEnv } from '../dissect/dissectEnv';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
@@ -198,6 +199,28 @@ export function dissectUdpTransport(
         protocolTokens.push('udpencap', 'esp');
         Object.assign(appFields, esp.fields);
       }
+    }
+  } else if ((srcPort === 389 || dstPort === 389) && looksLikeLdap(rawBytes, udpPayloadStart,
+    Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen))) {
+    // CLDAP (RFC 1798, MS-ADTS 6.3.3): LDAP in one datagram, which is how a
+    // Windows machine finds a domain controller - a search for `Netlogon`
+    // answered with the controller's name, site and roles. The reference
+    // calls the layer `cldap` and keeps every field `ldap.`. The exchange is
+    // the two ends' (`L3Tracker.cldapConversation`), which is how a reply
+    // names the request it answers.
+    const state = l3Tracker !== undefined
+      ? l3Tracker.cldapConversation(`${srcIp}:${srcPort}`, `${dstIp}:${dstPort}`)
+      : freshLdapConversation();
+    const ldap = dissectLdap(rawBytes, udpPayloadStart, Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen), state, {
+      connectionless: true,
+      ...(frameId !== undefined && tsUs !== undefined ? { frame: { id: frameId, tsUs } } : {}),
+    });
+    if (ldap) {
+      protocolLabel = ldap.protocolLabel;
+      info = ldap.info;
+      extraLayers.push(...ldap.layers);
+      protocolTokens.push('cldap');
+      Object.assign(appFields, ldap.fields);
     }
   } else if (srcPort === 3702 || dstPort === 3702) {
     // WS-Discovery: SOAP over UDP, which the reference hands to its XML

@@ -19,6 +19,7 @@
  * runs inside the pipeline Worker.
  */
 import { freshDtlsConversation, type DtlsConversationState } from './dissectors/dtls';
+import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 
 /**
  * How many conversations each per-layer index remembers.
@@ -253,6 +254,7 @@ export class L3Tracker {
   private espSas = new Map<string, { seq: number; frame: number }>();
   private dtlsConversations = new Map<string, DtlsConversationState>();
   private nextDtlsStream = 0;
+  private cldapConversations = new Map<string, LdapConversationState>();
   private nextWireGuardStream = 0;
 
   /** `eth.stream`: the conversation between two MAC addresses. */
@@ -488,7 +490,26 @@ export class L3Tracker {
     return conv;
   }
 
+  /**
+   * A CLDAP exchange's state - which requests are outstanding, how many
+   * entries each has had - by its two `address:port` ends in either order.
+   */
+  cldapConversation(a: string, b: string): LdapConversationState {
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+    let state = this.cldapConversations.get(key);
+    if (state === undefined) {
+      if (this.cldapConversations.size >= MAX_DTLS_CONVERSATIONS) {
+        const oldest = this.cldapConversations.keys().next();
+        if (!oldest.done) this.cldapConversations.delete(oldest.value);
+      }
+      state = freshLdapConversation();
+      this.cldapConversations.set(key, state);
+    }
+    return state;
+  }
+
   reset(): void {
+    this.cldapConversations.clear();
     this.dtlsConversations.clear();
     this.nextDtlsStream = 0;
     this.espSas.clear();

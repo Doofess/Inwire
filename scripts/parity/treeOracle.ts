@@ -89,7 +89,9 @@ export function referenceRows(pdml: string, rows: RegExp): string[][] {
       // A long value is cut short in the label (`Client PQ KEM Public Key
       // [\u2026]: 0303...`); `show` holds all of it.
       const truncated = at >= 0 && shown.slice(0, at).endsWith('[\u2026]') && attrs.show !== undefined;
-      out.push(`${attrs.name}=${truncated ? attrs.show.replace(/:/g, '') : at >= 0 ? shown.slice(at + 2) : shown}`);
+      // A label cut at the reference's 240 characters keeps both what it showed
+      // and the field's own value (`show`); `sameRow` accepts either.
+      out.push(`${attrs.name}=${truncated ? `\u0001${shown.slice(at + 2)}\u0002${attrs.show.replace(/:/g, '')}` : at >= 0 ? shown.slice(at + 2) : shown}`);
     }
     return out;
   });
@@ -105,6 +107,16 @@ function sameRow(mine: string, ref: string): boolean {
   const [abbrev, ...rest] = mine.split('=');
   const value = rest.join('=');
   if (value.startsWith('\u0000')) return ref === `${abbrev}=` || ref === `${abbrev}=${value.slice(1)}`;
+  const refValue = ref.slice(abbrev.length + 1);
+  // A truncated label: this build's value begins with what the reference
+  // showed of it, or is the field's whole value.
+  if (refValue.startsWith('\u0001')) {
+    const [shown, show] = refValue.slice(1).split('\u0002');
+    return value.startsWith(shown) || value.replace(/:/g, '') === show;
+  }
+  // A long label the reference stopped adding to before the limit - a flag
+  // summary that lists the first few of the set flags.
+  if (refValue.length >= 200 && value.startsWith(refValue)) return true;
   return /^[0-9a-f]{2}(:[0-9a-f]{2})+$/.test(value) && `${abbrev}=${value.replace(/:/g, '')}` === ref;
 }
 

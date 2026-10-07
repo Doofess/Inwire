@@ -17,8 +17,9 @@
  * 6: the TCP tracker answers SSH conversations and the L3 tracker ESP
  * sequence numbers, which moved them again.
  * 7: the L3 tracker answers DTLS conversations.
+ * 8: and CLDAP exchanges.
  */
-export const FRAME_RECORD_VERSION = 7;
+export const FRAME_RECORD_VERSION = 8;
 
 function varint(record: Uint8Array, at: { i: number }): number {
   let n = 0;
