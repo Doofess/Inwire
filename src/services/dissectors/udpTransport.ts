@@ -36,6 +36,8 @@ import { dataLayer } from './mediaType';
 import { findUdpPort } from './dispatch';
 import { dissectCflow, isCflowPort } from './cflow';
 import { MemoryTemplateStore } from '../flow/flowExport';
+import { dissectRtp, looksLikeRtp, rtpHeader } from './rtp';
+import { sdpOfSip } from './sdp';
 
 /** A cut SSDP datagram's start line, which is all of it there may be to name. */
 const START_LINE_DECODER = new TextDecoder();
@@ -496,6 +498,35 @@ export function dissectUdpTransport(
             });
           }
         }
+      }
+    }
+  }
+
+  // RTP, last of all: it has no fingerprint of its own, so it gets only what
+  // every port and every detector above declined, and only on a flow a
+  // second datagram has vouched for (`rtpStreams.ts`). STUN, DTLS, QUIC and
+  // WireGuard cannot reach here as RTP - none of them opens with version 2,
+  // which is RFC 7983's demultiplexing rule - and RTCP was claimed above.
+  //
+  // A SIP message's session description is heard first: it is what tells the
+  // tracker which endpoints carry a signalled call's media.
+  if (l3Tracker !== undefined && frameId !== undefined && protocolTokens[protocolTokens.length - 1] === 'sip') {
+    const description = sdpOfSip(rawBytes, udpPayloadStart, Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen));
+    if (description !== null) l3Tracker.rtpDescription(description.callId, description.request, frameId, description.media);
+  }
+  if (info === null && l3Tracker !== undefined && frameId !== undefined) {
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    if (looksLikeRtp(rawBytes, udpPayloadStart, payloadEnd, payloadCut, true)) {
+      const header = rtpHeader(rawBytes, udpPayloadStart);
+      const stream = l3Tracker.rtpStream(srcIp, srcPort, dstIp, dstPort, frameId, header.ssrc, header.seq, header.timestamp,
+        header.payloadType, looksLikeRtp(rawBytes, udpPayloadStart, payloadEnd, payloadCut));
+      const rtp = stream !== null ? dissectRtp(rawBytes, udpPayloadStart, payloadEnd, stream, payloadCut) : null;
+      if (rtp !== null) {
+        protocolLabel = rtp.protocolLabel;
+        info = rtp.info;
+        extraLayers.push(...rtp.layers);
+        protocolTokens.push(...rtp.tokens);
+        Object.assign(appFields, rtp.fields);
       }
     }
   }

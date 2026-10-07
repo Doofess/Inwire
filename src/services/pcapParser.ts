@@ -814,6 +814,8 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Session Initiation Protocol': 'sip',
   'Real-time Transport Control Protocol': 'rtcp',
   'Cisco NetFlow/IPFIX': 'cflow',
+  'Real-Time Transport Protocol': 'rtp',
+  'RFC 2833 RTP Event': 'rtpevent',
   'Transport Layer Security': 'tls',
   // The reference's own name for the layer, so the map can hand back the `quic`
   // token that `udpTransport.ts` also pushes through `protocolTokens`. The

@@ -101,6 +101,7 @@ const L3 = {
   fragment: 'answer', forgetFragments: 'effect', arpClaim: 'answer', wireguard: 'answer',
   espSequence: 'answer', dtlsConversation: 'snapshot', cldapConversation: 'snapshot',
   flowTemplate: 'answer', defineFlowTemplate: 'effect', flowSequence: 'answer',
+  rtpStream: 'answer', rtpDescription: 'effect',
 } as const satisfies Record<keyof L3TrackerApi, Kind>;
 
 const ENV = {

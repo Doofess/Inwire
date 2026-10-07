@@ -39,4 +39,5 @@ export type IcmpTrackerApi = Pick<IcmpEchoTracker, 'recordRequest' | 'matchReply
 export type L3TrackerApi = Pick<L3Tracker,
   | 'ethStream' | 'ipStream' | 'ipv6Stream' | 'udpStream'
   | 'fragment' | 'forgetFragments' | 'arpClaim' | 'wireguard' | 'espSequence' | 'dtlsConversation' | 'cldapConversation'
-  | 'flowTemplate' | 'defineFlowTemplate' | 'flowSequence'>;
+  | 'flowTemplate' | 'defineFlowTemplate' | 'flowSequence'
+  | 'rtpStream' | 'rtpDescription'>;

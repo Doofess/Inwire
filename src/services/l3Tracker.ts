@@ -21,6 +21,8 @@
 import { freshDtlsConversation, type DtlsConversationState } from './dissectors/dtls';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 import { MemoryTemplateStore, type FlowTemplate, type StoredFlowTemplate } from './flow/flowExport';
+import { RtpStreams, type RtpStreamFacts } from './rtpStreams';
+import type { SdpMedia } from './dissectors/sdp';
 
 /**
  * How many conversations each per-layer index remembers.
@@ -264,6 +266,7 @@ export class L3Tracker {
   // The reference keeps the first definition of a template id: see `MemoryTemplateStore`.
   private flowTemplates = new MemoryTemplateStore(false, MAX_FLOW_TEMPLATES);
   private flowSequences = new Map<string, { next: number; frame: number }>();
+  private readonly rtp = new RtpStreams();
 
   /** `eth.stream`: the conversation between two MAC addresses. */
   ethStream(srcMac: string, dstMac: string, tsUs: number): ConversationFacts {
@@ -548,9 +551,26 @@ export class L3Tracker {
     return last === undefined ? null : { expected: last.next, previousFrame: last.frame };
   }
 
+  /**
+   * The RTP stream a datagram belongs to, or null while its flow is only a
+   * candidate - `rtpStreams.ts` says why a flow needs a second packet.
+   */
+  rtpStream(
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number, frame: number,
+    ssrc: number, seq: number, ts: number, payloadType: number, shaped: boolean,
+  ): RtpStreamFacts | null {
+    return this.rtp.observe(srcIp, srcPort, dstIp, dstPort, frame, ssrc, seq, ts, payloadType, shaped);
+  }
+
+  /** A SIP message's session description, whose media endpoints are RTP from now on. */
+  rtpDescription(callId: string, request: boolean, frame: number, media: readonly SdpMedia[]): void {
+    this.rtp.describe(callId, request, frame, media);
+  }
+
   reset(): void {
     this.flowTemplates = new MemoryTemplateStore(false, MAX_FLOW_TEMPLATES);
     this.flowSequences.clear();
+    this.rtp.reset();
     this.cldapConversations.clear();
     this.dtlsConversations.clear();
     this.nextDtlsStream = 0;

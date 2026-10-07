@@ -7,16 +7,15 @@
  * It has no assigned port - it runs on whatever SIP or ICE negotiated, usually
  * one above the media - so it is found by content or not at all.
  *
- * **RTP itself is deliberately not dissected here**, and that is the more
- * interesting half. An RTP packet's only fingerprint is two version bits and a
- * payload type in a wide range, which is far too weak to claim a payload on:
- * Wireshark ships its own `rtp.heuristic_rtp` preference **off** for exactly
- * that reason, and shows a bare RTP packet as `UDP`. Verified, not assumed -
- * `tshark -o rtp.heuristic_rtp:TRUE` names the same frames RTP and without it
- * they are UDP. Claiming them would break agreement with the reference
- * analyzer on every capture containing media, in exchange for a label that is
- * a guess. RTCP is different and is what makes the pair findable anyway: its
- * packet types are a narrow, reserved range, and Wireshark reads it by default.
+ * **RTP itself is found differently, and that is the more interesting half.**
+ * An RTP packet's only fingerprint is two version bits and a payload type in
+ * a wide range, which is far too weak to claim a payload on: Wireshark ships
+ * its own RTP heuristic **off** for exactly that reason, and shows a bare RTP
+ * packet as `UDP`. So `dissectors/rtp.ts` claims a flow only once a second
+ * datagram on it agrees with the first (`rtpStreams.ts`). RTCP needs no such
+ * help: its packet types are a narrow, reserved range, Wireshark reads it by
+ * default, and it is asked before RTP is - which is how RTCP multiplexed onto
+ * a media port (RFC 5761) still reads as RTCP.
  *
  * The specificity rule is Wireshark's, and it is narrower than RFC 3550 §6.1's
  * "must begin with SR or RR": see `MAY_LEAD`. A lone Source Description is not
