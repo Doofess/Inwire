@@ -17,8 +17,13 @@
  * agrees (`rtpStreams.ts`). Each stream's first datagram is therefore in the
  * capture - the reference's setup frame and extended numbers count it - but
  * not compared, and its reading here is asserted instead: plain UDP.
+ *
+ * A SIP call is the other way RTP is found, and the reference's default one:
+ * its session descriptions name the media endpoints, which are RTP from their
+ * first packet, with the descriptions' encoding names. Those are compared
+ * without asking for the heuristic's help - it changes nothing on them.
  */
-import { udpFrameTo } from '../parity/synthetic';
+import { udp6Frame, udpFrameTo } from '../parity/synthetic';
 import { check, checkRevisit, compareWithReference, finish, type OracleCase } from '../parity/treeOracle';
 
 interface RtpOptions {
@@ -153,6 +158,63 @@ cases.push(
   { label: 'WebRTC: media again', frame: webrtc(rtp({ pt: 111, seq: 42, ext: ONE_BYTE })) },
 );
 
+// --- a signalled call: SIP's session descriptions announce the media ------------
+// The reference reads these without its heuristic, from the first packet,
+// naming each payload type with the `a=rtpmap` encoding its description gave.
+// The descriptions are written with SIP's compact headers (`i:`, `c:`), and
+// the offer names its address once for the session where the answer names it
+// per stream. Only encodings the reference has no codec dissector for are
+// used: for opus, H.264, VP8 and the like its Protocol column is the codec's.
+const ALICE = '192.168.1.40', BOB = '198.51.100.9', RELAY = '198.51.100.77';
+const text = (s: string) => [...new TextEncoder().encode(s)];
+const sipMessage = (first: string, cseq: string, body: string) => text([
+  first, `Via: SIP/2.0/UDP ${ALICE}:5060;branch=z9hG4bK1`, 'From: <sip:alice@example.com>;tag=1',
+  'To: <sip:bob@example.com>', `i: call-1@${ALICE}`, `CSeq: ${cseq}`, 'c: application/sdp',
+  `Content-Length: ${body.length}`, '', body,
+].join('\r\n'));
+const offer = [
+  'v=0', `o=alice 1 1 IN IP4 ${ALICE}`, 's=-', `c=IN IP4 ${ALICE}`, 't=0 0',
+  'm=audio 49170 RTP/AVP 0 96 97 98 101', 'a=rtpmap:0 PCMU/8000', 'a=rtpmap:96 speex/16000', 'a=rtpmap:97 L16/16000',
+  'a=rtpmap:98 iLBC/8000', 'a=rtpmap:101 telephone-event/8000', 'm=video 0 RTP/AVP 99', '',
+].join('\r\n');
+const answer = [
+  'v=0', `o=bob 1 1 IN IP4 ${BOB}`, 's=-', 't=0 0',
+  'm=audio 30000 RTP/AVP 0 96', `c=IN IP4 ${BOB}`, 'a=rtpmap:96 speex/16000', '',
+].join('\r\n');
+const sipFrame = (from: string, to: string, bytes: number[]) => udpFrameTo(from, to, 5060, 5060, Uint8Array.from(bytes));
+const toAlice = (from: string, port: number, bytes: number[]) => udpFrameTo(from, ALICE, port, 49170, Uint8Array.from(bytes));
+const toBob = (bytes: number[]) => udpFrameTo(ALICE, BOB, 49170, 30000, Uint8Array.from(bytes));
+const NO_SDP_LAYER = 'the session description is read for its media but not drawn: the reference\'s column reads SIP/SDP';
+cases.push(
+  { label: 'SIP: the INVITE offers media', frame: sipFrame(ALICE, BOB, sipMessage('INVITE sip:bob@example.com SIP/2.0', '1 INVITE', offer)), notCompared: NO_SDP_LAYER },
+  { label: 'signalled: early media to the offered port', frame: toAlice(BOB, 30000, rtp({ pt: 96, seq: 1, ssrc: 0xb0b }) ) },
+  { label: 'signalled: from a port nobody announced, to the offered one', frame: toAlice(RELAY, 7777, rtp({ pt: 0, seq: 9, ssrc: 0xfeed }) ) },
+  { label: 'signalled: from the offered port, before the answer', frame: toBob(rtp({ pt: 97, seq: 1, ssrc: 0xa11ce }) ) },
+  { label: 'SIP: the 200 OK answers', frame: sipFrame(BOB, ALICE, sipMessage('SIP/2.0 200 OK', '1 INVITE', answer)), notCompared: NO_SDP_LAYER },
+  { label: 'signalled: to the answered port', frame: toBob(rtp({ pt: 96, seq: 2, ssrc: 0xa11ce }) ) },
+  { label: 'signalled: a type the answer did not name', frame: toBob(rtp({ pt: 98, seq: 3, ssrc: 0xa11ce }) ) },
+  { label: 'signalled: DTMF on 101, which the answer did not name', frame: toBob(rtp({ pt: 101, seq: 4, ssrc: 0xa11ce, payload: event(7, 0x8a, 800) }) ) },
+  { label: 'signalled: G.711, which the offer named', frame: toAlice(BOB, 30000, rtp({ pt: 0, seq: 2, ssrc: 0xb0b }) ) },
+  { label: 'signalled: iLBC', frame: toAlice(BOB, 30000, rtp({ pt: 98, seq: 3, ssrc: 0xb0b }) ) },
+  { label: 'signalled: telephone-event, by name', frame: toAlice(BOB, 30000, rtp({ pt: 101, seq: 4, ssrc: 0xb0b, payload: event(1, 0x0a, 160) }) ) },
+  { label: 'signalled: a reserved type, which a signalled stream may carry', frame: toAlice(BOB, 30000, rtp({ pt: 72, seq: 5, ssrc: 0xb0b }) ) },
+  { label: 'signalled: version 1 is still not RTP', frame: toAlice(BOB, 30000, rtp({ pt: 0, seq: 6, ssrc: 0xb0b, version: 1 }) ) },
+  { label: 'signalled: a connectivity check on the media port', frame: toAlice(BOB, 30000, stunBinding) },
+);
+
+// An IPv6 description, its address written longhand: the datagram's is not.
+const V6_ALICE = '2001:0db8:0000:0000:0000:0000:0000:0040';
+const V6_BOB = '2001:0db8:0000:0000:0000:0000:0000:0009';
+const v6Offer = ['v=0', 'o=alice 2 2 IN IP6 2001:db8::40', 's=-', 'c=IN IP6 2001:0DB8:0:0:0:0:0:40', 't=0 0',
+  'm=audio 40000 RTP/AVP 8 100', 'a=rtpmap:100 speex/8000', ''].join('\r\n');
+cases.push(
+  {
+    label: 'SIP over IPv6: an offer', notCompared: NO_SDP_LAYER,
+    frame: udp6Frame(5060, 5060, Uint8Array.from(sipMessage('INVITE sip:bob@example.com SIP/2.0', '2 INVITE', v6Offer)), V6_BOB, V6_ALICE),
+  },
+  { label: 'signalled over IPv6: speex', frame: udp6Frame(41000, 40000, Uint8Array.from(rtp({ pt: 100, seq: 1, ssrc: 0x66 })), V6_BOB, V6_ALICE) },
+);
+
 // --- a flow whose second datagram does not agree --------------------------------
 // Random bytes under the version bits: the reference's heuristic reads all
 // three as RTP; this build reads none of them, because no two share an SSRC.
@@ -166,7 +228,7 @@ await checkRevisit(cases);
 
 const at = (label: string) => packets[cases.findIndex((c) => c.label === label)];
 for (const [i, c] of cases.entries()) {
-  if (c.notCompared === undefined) continue;
+  if (c.notCompared !== FIRST && c.notCompared !== NOISE) continue;
   check(`${c.label}: plain UDP here`, packets[i]?.protocol === 'UDP' && packets[i]?.protocolLabel === undefined
     && !(packets[i]?.frameProtocols ?? []).includes('rtp'), `${packets[i]?.protocolLabel} ${packets[i]?.frameProtocols?.join(':')}`);
 }
@@ -175,6 +237,8 @@ check('audio is the `rtp` layer over UDP', audioPacket?.frameProtocols?.slice(-2
 check('the SSRC is a field', audioPacket?.fields?.['rtp.ssrc'] === 0x5e2a01c4);
 check('the payload type is a field', at('two contributing sources')?.fields?.['rtp.p_type'] === 8);
 check('the extended sequence number counts the wrap', at('after the wrap')?.fields?.['rtp.extseq'] === 65537);
+const invite = at('SIP: the INVITE offers media');
+check('the INVITE is still SIP', invite?.protocolLabel === 'SIP', invite?.protocolLabel);
 const press = at('DTMF 5 pressed');
 check('a key press is `rtp:rtpevent`', press?.frameProtocols?.slice(-2).join(':') === 'rtp:rtpevent', press?.frameProtocols?.join(':'));
 check('...and its digit is a field', press?.fields?.['rtpevent.event_id'] === 5);

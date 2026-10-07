@@ -19,7 +19,7 @@
  * 7: the L3 tracker answers DTLS conversations.
  * 8: and CLDAP exchanges.
  * 9: the TCP tracker answers DCE/RPC conversations.
- * 10: the L3 tracker answers RTP streams.
+ * 10: the L3 tracker answers RTP streams, and hears session descriptions.
  */
 export const FRAME_RECORD_VERSION = 10;
 

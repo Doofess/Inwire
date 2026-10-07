@@ -15,9 +15,10 @@
  * Rows, names and Info are the reference's, checked against `tshark -T pdml`
  * by `scripts/rtp/dissect.ts`, including RFC 8285's one- and two-byte header
  * extensions - the audio-level and transport-sequence numbers every WebRTC
- * packet carries. Payload types 100 and 101 read as telephone events because
- * that is the reference's default for them; a capture's own session
- * description is not consulted for that yet.
+ * packet carries. A payload type a SIP call's session description named is
+ * shown by that name (`PT=speex`), and read as a telephone event when it is
+ * `telephone-event`; without one, payload types 100 and 101 are, because that
+ * is the reference's default for them.
  *
  * Not read, where the reference hands the payload on: the codecs with a
  * dissector of their own (G.723.1, JPEG, H.261, MPEG-1 video, MPEG-2
@@ -68,6 +69,8 @@ const ONE_BYTE_PROFILE = 0xbede;
 
 export function payloadTypeName(pt: number): string {
   if (pt >= 96) return `DynamicRTP-Type-${pt}`;
+  // Only a signalled stream carries these: a flow found by content refuses them.
+  if (pt >= 72 && pt <= 76) return 'Reserved for RTCP conflict avoidance';
   return STATIC_TYPES[pt] ?? 'Unassigned';
 }
 
@@ -121,14 +124,14 @@ interface Layout {
  * `cut` is a datagram a snaplen shortened: its padding count is not there to
  * read, so the payload runs to what was kept.
  */
-function layoutOf(b: Uint8Array, start: number, end: number, cut = false): Layout | null {
+function layoutOf(b: Uint8Array, start: number, end: number, cut = false, anyType = false): Layout | null {
   if (end - start < 12) return null;
   const first = b[start];
   if (first >> 6 !== 2) return null;
   const second = b[start + 1];
   const pt = second & 0x7f;
-  if (pt >= 72 && pt <= 76) return null;
-  if (second >= 192 && second <= 223) return null;
+  if (!anyType && pt >= 72 && pt <= 76) return null;
+  if (!anyType && second >= 192 && second <= 223) return null;
   const csrcCount = first & 0x0f;
   let at = start + 12 + 4 * csrcCount;
   if (at > end) return null;
@@ -149,8 +152,13 @@ function layoutOf(b: Uint8Array, start: number, end: number, cut = false): Layou
   return { csrcCount, extension, extensionEnd, payload: at, payloadEnd: end - padding, padding };
 }
 
-export function looksLikeRtp(b: Uint8Array, start: number, end: number, cut = false): boolean {
-  return layoutOf(b, start, end, cut) !== null;
+/**
+ * `anyType` drops the payload-type refusals, for a stream a session
+ * description announced: the reference reads any type on one of those, and
+ * RTCP sharing its port has already been claimed by RTCP's own test.
+ */
+export function looksLikeRtp(b: Uint8Array, start: number, end: number, cut = false, anyType = false): boolean {
+  return layoutOf(b, start, end, cut, anyType) !== null;
 }
 
 export function rtpHeader(b: Uint8Array, start: number): RtpHeader {
@@ -244,7 +252,7 @@ function eventLayer(b: Uint8Array, at: number): { layer: ProtocolLayer; info: st
  * like RTP, which a caller has normally asked `looksLikeRtp` already.
  */
 export function dissectRtp(b: Uint8Array, start: number, end: number, stream: RtpStreamFacts, cut = false): RtpResult | null {
-  const layout = layoutOf(b, start, end, cut);
+  const layout = layoutOf(b, start, end, cut, stream.setupMethod === 'SDP');
   if (layout === null) return null;
   const first = b[start];
   const second = b[start + 1];
@@ -252,7 +260,7 @@ export function dissectRtp(b: Uint8Array, start: number, end: number, stream: Rt
   const marker = (second & 0x80) !== 0;
   const padded = (first & 0x20) !== 0;
   const extended = (first & 0x10) !== 0;
-  const ptName = payloadTypeName(pt);
+  const ptName = stream.encoding ?? payloadTypeName(pt);
   const flag = (offset: number): ProtocolField['bitfield'] => ({ bitOffset: offset, bitLength: 1, totalBits: 8 });
 
   const rows: ProtocolField[] = [
@@ -335,7 +343,12 @@ export function dissectRtp(b: Uint8Array, start: number, end: number, stream: Rt
 
   const payloadLength = layout.payloadEnd - layout.payload;
   let event: ReturnType<typeof eventLayer> | null = null;
-  if (EVENT_TYPES.has(pt) && payloadLength >= 4) event = eventLayer(b, layout.payload);
+  // A description's own name for the type decides; without one, the
+  // reference's default event types do.
+  const isEvent = stream.encoding !== undefined
+    ? stream.encoding.toLowerCase() === 'telephone-event'
+    : EVENT_TYPES.has(pt);
+  if (isEvent && payloadLength >= 4) event = eventLayer(b, layout.payload);
   else if (payloadLength > 0) {
     rows.push({ name: 'Payload', value: hex(b, layout.payload, layout.payloadEnd), abbrev: 'rtp.payload', rawBytesRange: [layout.payload, layout.payloadEnd - 1] });
   }

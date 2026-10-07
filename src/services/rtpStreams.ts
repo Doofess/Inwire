@@ -26,13 +26,33 @@
  *
  * A flow is keyed as the reference registers one: the destination address
  * and port, and the source port. Each direction of a call is its own flow.
+ *
+ * **A signalled call needs none of that.** A SIP message's session
+ * description names the address and port each end will receive media on
+ * (`dissectors/sdp.ts`), and from then on a datagram to or from one of them is
+ * RTP from its first packet, as the reference reads it - payload types named
+ * with that description's `a=rtpmap` encodings, and RTCP's reserved types
+ * accepted. An answer's endpoints are set up by the OFFER's frame, which is
+ * the frame the reference names for both ends of the exchange.
  */
+import type { SdpMedia } from './dissectors/sdp';
+
 
 /** What a datagram's stream contributes to its tree. */
 export interface RtpStreamFacts {
   setupFrame: number;
   /** `HEUR RTP` for a flow found by content; `SDP` for one a session description announced. */
   setupMethod: string;
+  extSeq: number;
+  extTs: number;
+  /** The payload type's encoding, when a session description named it. */
+  encoding?: string;
+}
+
+/** A session description's endpoint: one end's media address and port. */
+interface Endpoint {
+  setupFrame: number;
+  encodings: Record<number, string>;
   extSeq: number;
   extTs: number;
 }
@@ -50,6 +70,18 @@ interface Flow {
 const MAX_CONFIRM_GAP = 64;
 /** Flows held at once; the oldest goes first. A call is two; a busy capture is a few hundred. */
 const MAX_FLOWS = 4096;
+/** Signalled endpoints, and calls with an offer outstanding. */
+const MAX_ENDPOINTS = 4096;
+const MAX_OFFERS = 1024;
+
+/** Adds to a bounded map, dropping its oldest entry when full. */
+function bounded<K, V>(map: Map<K, V>, max: number, key: K, value: V): void {
+  if (!map.has(key) && map.size >= max) {
+    const oldest = map.keys().next();
+    if (!oldest.done) map.delete(oldest.value);
+  }
+  map.set(key, value);
+}
 
 const TWO_32 = 0x100000000;
 
@@ -71,24 +103,61 @@ function extendTs(previous: number, raw: number): number {
 
 export class RtpStreams {
   private flows = new Map<string, Flow>();
+  private endpoints = new Map<string, Endpoint>();
+  /** By Call-ID: the frame whose description is awaiting its answer, and which side sent it. */
+  private offers = new Map<string, { frame: number; request: boolean }>();
 
   /**
-   * One datagram that passed RTP's structural checks: its stream's facts if
-   * the flow is RTP, or null while it is still a candidate.
+   * A SIP message's session description: its media endpoints are RTP from
+   * now on. The first description of an exchange is the offer; the next one
+   * from the other side is its answer, and is set up by the offer's frame.
+   */
+  describe(callId: string, request: boolean, frame: number, media: readonly SdpMedia[]): void {
+    const offer = this.offers.get(callId);
+    let setupFrame = frame;
+    if (offer !== undefined && offer.request !== request) {
+      setupFrame = offer.frame;
+      this.offers.delete(callId);
+    } else {
+      bounded(this.offers, MAX_OFFERS, callId, { frame, request });
+    }
+    for (const m of media) {
+      const key = `${m.address}|${m.port}`;
+      const known = this.endpoints.get(key);
+      // A description repeated in a re-INVITE keeps the stream's numbers
+      // running, as the reference keeps its conversation's.
+      bounded(this.endpoints, MAX_ENDPOINTS, key, {
+        setupFrame, encodings: m.encodings, extSeq: known?.extSeq ?? 0x10000, extTs: known?.extTs ?? TWO_32,
+      });
+    }
+  }
+
+  /**
+   * One version-2 datagram: its stream's facts if it is RTP, or null. A
+   * signalled endpoint takes any; a flow found by content takes only one that
+   * passed the structural checks (`shaped`), and only once it is confirmed.
    */
   observe(
-    srcPort: number, dstIp: string, dstPort: number, frame: number,
-    ssrc: number, seq: number, ts: number,
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number, frame: number,
+    ssrc: number, seq: number, ts: number, payloadType: number, shaped: boolean,
   ): RtpStreamFacts | null {
+    // The receiving end first, as the reference looks it up.
+    const endpoint = this.endpoints.get(`${dstIp}|${dstPort}`) ?? this.endpoints.get(`${srcIp}|${srcPort}`);
+    if (endpoint !== undefined) {
+      endpoint.extSeq = extendSeq(endpoint.extSeq, seq);
+      endpoint.extTs = extendTs(endpoint.extTs, ts);
+      const encoding = endpoint.encodings[payloadType];
+      return {
+        setupFrame: endpoint.setupFrame, setupMethod: 'SDP', extSeq: endpoint.extSeq, extTs: endpoint.extTs,
+        ...(encoding !== undefined ? { encoding } : {}),
+      };
+    }
+    if (!shaped) return null;
     const key = `${dstIp}|${dstPort}|${srcPort}`;
     let flow = this.flows.get(key);
     if (flow === undefined) {
-      if (this.flows.size >= MAX_FLOWS) {
-        const oldest = this.flows.keys().next();
-        if (!oldest.done) this.flows.delete(oldest.value);
-      }
       flow = { setupFrame: frame, confirmed: false, lastSsrc: ssrc, lastSeq: seq, extSeq: 0x10000, extTs: TWO_32 };
-      this.flows.set(key, flow);
+      bounded(this.flows, MAX_FLOWS, key, flow);
     } else if (!flow.confirmed) {
       const ahead = (seq - flow.lastSeq) & 0xffff;
       flow.confirmed = ssrc === flow.lastSsrc && ahead >= 1 && ahead <= MAX_CONFIRM_GAP;
@@ -104,5 +173,7 @@ export class RtpStreams {
 
   reset(): void {
     this.flows.clear();
+    this.endpoints.clear();
+    this.offers.clear();
   }
 }

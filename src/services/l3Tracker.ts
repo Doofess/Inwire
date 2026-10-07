@@ -21,6 +21,7 @@
 import { freshDtlsConversation, type DtlsConversationState } from './dissectors/dtls';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 import { RtpStreams, type RtpStreamFacts } from './rtpStreams';
+import type { SdpMedia } from './dissectors/sdp';
 
 /**
  * How many conversations each per-layer index remembers.
@@ -515,9 +516,15 @@ export class L3Tracker {
    * candidate - `rtpStreams.ts` says why a flow needs a second packet.
    */
   rtpStream(
-    srcPort: number, dstIp: string, dstPort: number, frame: number, ssrc: number, seq: number, ts: number,
+    srcIp: string, srcPort: number, dstIp: string, dstPort: number, frame: number,
+    ssrc: number, seq: number, ts: number, payloadType: number, shaped: boolean,
   ): RtpStreamFacts | null {
-    return this.rtp.observe(srcPort, dstIp, dstPort, frame, ssrc, seq, ts);
+    return this.rtp.observe(srcIp, srcPort, dstIp, dstPort, frame, ssrc, seq, ts, payloadType, shaped);
+  }
+
+  /** A SIP message's session description, whose media endpoints are RTP from now on. */
+  rtpDescription(callId: string, request: boolean, frame: number, media: readonly SdpMedia[]): void {
+    this.rtp.describe(callId, request, frame, media);
   }
 
   reset(): void {
