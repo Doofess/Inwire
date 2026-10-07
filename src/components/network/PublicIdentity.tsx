@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Shield } from 'lucide-react';
 import { Row, Section, Empty, Value } from './rows';
+import { failureForStatus, nextRetry, type LookupFailure, type RetryStep } from '../../services/lookupRetry';
 
 /**
  * The public-identity lookup: what the internet sees when this machine
@@ -28,6 +29,10 @@ const IPAPI_ENDPOINT = 'https://ipapi.co/json/';
  * The disclosure is the request itself. Nothing from the capture is sent;
  * `ipapi.co` simply sees this machine's public address because it is the one
  * asking, and answers with what that address is registered to.
+ *
+ * **A failed lookup retries by itself**, within the bound `services/lookupRetry.ts`
+ * sets: when the connection comes back, or after a growing delay, never after a
+ * refusal. The Try again button appears only once that is spent.
  */
 
 interface IspData {
@@ -51,30 +56,76 @@ interface PublicIdentityProps {
   onAllow: () => void;
 }
 
+/** A failed attempt, with what `lookupRetry.ts` should make of it. */
+class LookupError extends Error {
+  constructor(message: string, readonly failure: LookupFailure) { super(message); }
+}
+
 export const PublicIdentity: React.FC<PublicIdentityProps> = ({ allowed, hidden, onAllow }) => {
   const [data, setData] = useState<IspData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** What happens next after a failure; `stop` is the only one that needs a click. */
+  const [next, setNext] = useState<RetryStep | null>(null);
+  /** Bumped to run the lookup again. */
+  const [run, setRun] = useState(0);
+  /** Requests spent on retries, against `RETRY_DELAYS_MS`. A ref: it is not drawn. */
+  const retries = useRef(0);
 
   useEffect(() => {
     if (!allowed) return;
     let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const again = () => { if (live) setRun((r) => r + 1); };
     setLoading(true);
     (async () => {
       try {
-        const response = await fetch(IPAPI_ENDPOINT);
-        if (!response.ok) throw new Error('Could not reach the lookup service');
+        let response: Response;
+        try {
+          response = await fetch(IPAPI_ENDPOINT);
+        } catch {
+          throw new LookupError(navigator.onLine === false ? 'This machine is offline' : 'Could not reach the lookup service',
+            navigator.onLine === false ? 'offline' : 'network');
+        }
+        const failure = failureForStatus(response.status);
+        if (failure !== null) {
+          throw new LookupError(failure === 'server' ? 'The lookup service is having trouble' : 'The lookup service refused the request', failure);
+        }
         const json = await response.json();
-        if (json.error) throw new Error(json.reason || 'The lookup service refused the request');
-        if (live) setData(json);
+        if (json.error) throw new LookupError(json.reason || 'The lookup service refused the request', 'refused');
+        if (!live) return;
+        setData(json);
+        setError(null);
+        setNext(null);
+        retries.current = 0;
       } catch (err) {
-        if (live) setError(err instanceof Error ? err.message : 'The lookup failed');
+        if (!live) return;
+        const failure = err instanceof LookupError ? err.failure : 'network';
+        const step = nextRetry(failure, retries.current);
+        setError(err instanceof Error ? err.message : 'The lookup failed');
+        setNext(step);
+        if (step.kind === 'after') {
+          retries.current++;
+          timer = setTimeout(again, step.ms);
+        } else if (step.kind === 'when-online') {
+          window.addEventListener('online', again, { once: true });
+        }
       } finally {
         if (live) setLoading(false);
       }
     })();
-    return () => { live = false; };
-  }, [allowed]);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+      window.removeEventListener('online', again);
+    };
+  }, [allowed, run]);
+
+  /** The one manual way back, offered only once the automatic ones are spent. */
+  const tryAgain = () => {
+    retries.current = 0;
+    setRun((r) => r + 1);
+  };
 
   if (!allowed) {
     return (
@@ -101,7 +152,9 @@ export const PublicIdentity: React.FC<PublicIdentityProps> = ({ allowed, hidden,
     );
   }
 
-  if (loading) {
+  // A retry in flight keeps the last result on screen rather than a spinner;
+  // only a lookup with nothing to show yet spins.
+  if (loading && data === null && error === null) {
     return (
       <Section title="Public identity">
         <div className="flex flex-col items-center justify-center py-10 gap-3">
@@ -112,10 +165,26 @@ export const PublicIdentity: React.FC<PublicIdentityProps> = ({ allowed, hidden,
     );
   }
 
-  if (error) {
+  if (error && data === null) {
+    const status = loading ? 'Trying again…'
+      : next?.kind === 'after' ? `Trying again in ${Math.round(next.ms / 1000)} seconds.`
+        : next?.kind === 'when-online' ? 'Will try again when the connection comes back.'
+          : null;
     return (
       <Section title="Public identity">
-        <Empty>{error}. Check your connection, or whether an ad-blocker is refusing the request.</Empty>
+        <Empty>
+          {error}.{' '}
+          {status ?? (next?.kind === 'stop' && retries.current > 0
+            ? 'Gave up after a few tries. Check your connection, or whether an ad-blocker is refusing the request.'
+            : 'Check your connection, or whether an ad-blocker is refusing the request.')}
+          {status === null && (
+            <button onClick={tryAgain}
+              className="block mx-auto mt-3 px-3 py-1 rounded-md text-xs font-semibold border border-border
+                text-foreground hover:bg-secondary">
+              Try again
+            </button>
+          )}
+        </Empty>
       </Section>
     );
   }
