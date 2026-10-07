@@ -1,4 +1,5 @@
 import { Packet, ProtocolLayer, ProtocolField, ExpertCategory, ExpertInfo } from '../types/packet';
+import { INTERFACES as DCERPC_INTERFACES } from './dissectors/dcerpcNames';
 import { applyInfoPatch } from './dissect/infoPatch';
 import { CATEGORY_RANK } from './expertInfo';
 import { TcpStreamTracker } from './tcpStreamTracker';
@@ -850,6 +851,10 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Trivial File Transfer Protocol': 'tftp',
   'NetBIOS Datagram Service': 'nbdgm',
   'NetBIOS Session Service': 'nbss',
+  'Distributed Computing Environment / Remote Procedure Call (DCE/RPC)': 'dcerpc',
+  'DCE/RPC Endpoint Mapper': 'epm',
+  // Every other named RPC interface's layer, by its own token.
+  ...Object.fromEntries(Object.values(DCERPC_INTERFACES).map((i) => [i.layer, i.token])),
   'SMB (Server Message Block Protocol)': 'smb',
   'SMB MailSlot Protocol': 'mailslot',
   'Microsoft Windows Browser Protocol': 'browser',

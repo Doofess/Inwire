@@ -26,7 +26,7 @@ export type TcpTrackerApi = Pick<TcpStreamTracker,
   | 'isAtOrPastExpected' | 'analyze' | 'noteGap'
   | 'getConversationCompleteness' | 'getCompletenessMask'
   | 'ldapConversation' | 'smb2Conversation' | 'peekBgpDirection' | 'bgpDirection'
-  | 'peekTlsCursor' | 'tlsCursor' | 'tlsConversation' | 'getTlsStreamId' | 'sshConversation'>;
+  | 'peekTlsCursor' | 'tlsCursor' | 'tlsConversation' | 'getTlsStreamId' | 'sshConversation' | 'dcerpcConversation'>;
 
 export type QuicTrackerApi = Pick<QuicFlowTracker,
   | 'isKnownFlow' | 'matchConnectionId' | 'createInitialDecryptor'

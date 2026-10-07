@@ -110,6 +110,8 @@ export interface TransportResult {
   reassembledFrom?: number[];
   /** Earlier frames whose Protocol label this segment's ServerHello settled. */
   labelPatches?: { frameId: number; protocolLabel: string }[];
+  /** Links a later frame writes into an earlier one's tree: a DCE/RPC request learning its response. */
+  linkPatches?: { frameId: number; links: Record<string, number> }[];
   /** The query frame this DNS response answers, for its "[Response In]" patch. */
   dnsMatchedQueryFrameId?: number;
   /** Names this frame mapped to addresses, for passive name resolution. */

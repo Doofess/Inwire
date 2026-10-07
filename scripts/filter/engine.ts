@@ -237,13 +237,12 @@ check('a field name as a bareword tests presence', strict('tls.handshake.extensi
 
 // --- 5. what must NOT match ------------------------------------------------
 
-check('a protocol this build does not dissect matches nothing', strict('dcerpc'), []);
-check('...even when a frame mentions it', strict('netbios'), []);
+check('a protocol this build does not dissect matches nothing', strict('netbios'), []);
 check('an unknown field in a comparison matches nothing', strict('tpc.port == 443'), []);
 check('...and is reported as a typo', FilterEngine.validateFilter('tpc.port == 443').isValid, false);
 check('an undissected protocol is a warning, not an error', {
-  valid: FilterEngine.validateFilter('dcerpc', { strict: true }).isValid,
-  warnings: FilterEngine.validateFilter('dcerpc', { strict: true }).warnings?.length,
+  valid: FilterEngine.validateFilter('netbios', { strict: true }).isValid,
+  warnings: FilterEngine.validateFilter('netbios', { strict: true }).warnings?.length,
 }, { valid: true, warnings: 1 });
 // `ospf.msg` stood here until OSPF became a real layer token, and `bgp.type`
 // until BGP became one - each time this quietly began asserting the opposite of
@@ -252,16 +251,13 @@ check('an undissected protocol is a warning, not an error', {
 // is that a field UNDER an undissected name warns too, which that check cannot
 // see.
 //
-// `dcerpc.opnum` should outlast the others, and for a measured reason rather
-// than a guess. The reference's Protocol and Info columns for DCERPC are not
-// the RPC layer at all: a bound context turns them into the INTERFACE's name
-// and its OPERATION's name (`SRVSVC` / `NetShareEnumAll request`), from some
-// hundred per-interface opnum tables and the NDR argument dissectors under
-// them. A build that read the RPC header and stopped would be right on the
-// interfaces nobody uses and wrong on every one they do.
+// `dcerpc.opnum` stood here until DCE/RPC became a layer token too - with the
+// interface and operation names generated from the reference
+// (`scripts/parity/gen-dcerpc-tables.ts`), because its Protocol and Info
+// columns are the INTERFACE's and OPERATION's names, not the RPC layer's.
 check('...and so is a field belonging to one', {
-  valid: FilterEngine.validateFilter('dcerpc.opnum != 1').isValid,
-  warnings: FilterEngine.validateFilter('dcerpc.opnum != 1').warnings?.length,
+  valid: FilterEngine.validateFilter('netbios.command != 1').isValid,
+  warnings: FilterEngine.validateFilter('netbios.command != 1').warnings?.length,
 }, { valid: true, warnings: 1 });
 // --- the two lists of protocol names must not overlap ---------------------------
 //

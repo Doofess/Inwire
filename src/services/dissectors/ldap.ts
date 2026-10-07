@@ -843,7 +843,7 @@ function operationRows(bytes: Uint8Array, operation: number, op: BerValue, child
 }
 
 /** A response time, in the unit the reference scales it to. */
-function elapsedText(us: number): string {
+export function elapsedText(us: number): string {
   if (us < 1000) return `${us.toFixed(3)} microseconds`;
   if (us < 1_000_000) return `${(us / 1000).toFixed(6)} milliseconds`;
   if (us % 1_000_000 === 0) return `${us / 1_000_000} second${us === 1_000_000 ? '' : 's'}`;

@@ -37,13 +37,15 @@ import type { InfoPatch } from './types';
  * segment to the frame its PDU was reassembled in, from a fragment to its
  * datagram, from a request to its answer.
  */
-export const TREE_LINKS: Readonly<Record<string, { layer: string; name: string }>> = {
+export const TREE_LINKS: Readonly<Record<string, { layer: string; name: string; after?: string }>> = {
   'dns.response_in': { layer: 'Domain Name System', name: '[Response In]' },
   'tcp.reassembled_in': { layer: 'Transmission Control Protocol', name: '[Reassembled PDU in frame]' },
   'ip.reassembled_in': { layer: 'Internet Protocol Version 4', name: '[Reassembled IPv4 in frame]' },
   'ipv6.reassembled.in': { layer: 'Internet Protocol Version 6', name: '[Reassembled IPv6 in frame]' },
   'icmp.resp_in': { layer: 'Internet Control Message Protocol', name: '[Response frame]' },
   'icmpv6.resp_in': { layer: 'Internet Control Message Protocol v6', name: '[Response In]' },
+  // Drawn where the reference draws it, after the request's opnum.
+  'dcerpc.response_in': { layer: 'Distributed Computing Environment / Remote Procedure Call (DCE/RPC)', name: 'Response in frame', after: 'dcerpc.opnum' },
 };
 
 /** Applies one patch to a packet, in place. */
@@ -59,7 +61,10 @@ export function applyInfoPatch(packet: Packet, patch: InfoPatch): void {
     // its own, and the link belongs to the frame's, not the quoted one's.
     const layer = where === undefined ? undefined : packet.layers?.find((l) => l.name === where.layer);
     if (where === undefined || layer === undefined || layer.fields.some((f) => f.abbrev === abbrev)) continue;
-    layer.fields.push({ name: where.name, value: frame, generated: true, linkToFrame: frame, abbrev });
+    const row = { name: where.name, value: frame, generated: true, linkToFrame: frame, abbrev };
+    const at = where.after === undefined ? -1 : layer.fields.findIndex((f) => f.abbrev === where.after);
+    if (at >= 0) layer.fields.splice(at + 1, 0, row);
+    else layer.fields.push(row);
   }
 }
 

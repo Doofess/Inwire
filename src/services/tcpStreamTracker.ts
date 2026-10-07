@@ -21,6 +21,7 @@
  * Handshake records are additionally buffered so a ClientHello that straddles
  * segments can still be parsed for its SNI and fingerprint.
  */
+import { freshDcerpcConversation, type DcerpcConversationState } from './dissectors/dcerpc';
 import { analyzeTcpSegment, freshConnection, type TcpAnalysis, type TcpConnectionState, type TcpSegment } from './dissect/tcpAnalysis';
 
 import type { TlsDecryptionKeys } from './tls/decrypt';
@@ -314,6 +315,7 @@ interface TcpConnection {
   ldap?: LdapConversationState;
   /** SMB2's per-connection state, on the same terms as `ldap` above. */
   smb2?: Smb2ConversationState;
+  dcerpc?: DcerpcConversationState;
   ssh?: SshConversationState;
   /** The endpoint that sorts first, and the other one. */
   a: TcpDirection;
@@ -717,6 +719,13 @@ export class TcpStreamTracker {
     const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
     conn.smb2 ??= freshSmb2Conversation();
     return conn.smb2;
+  }
+
+  /** DCE/RPC's bound contexts and outstanding calls, created on first use. */
+  public dcerpcConversation(srcIp: string, srcPort: number, dstIp: string, dstPort: number): DcerpcConversationState {
+    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.dcerpc ??= freshDcerpcConversation();
+    return conn.dcerpc;
   }
 
   /**

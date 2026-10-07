@@ -30,6 +30,7 @@ import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult }
 import { dissectSshSegment, freshSshConversation, SSH_PORT, type SshSegmentResult } from './ssh';
 import { dissectRdpSetup, looksLikeTpkt, RDP_PORT, type RdpResult } from './rdp';
 import { dissectNbss, looksLikeNbss, nbssLayers, NBSS_PORT, SMB_DIRECT_PORT, type NbssResult } from './nbss';
+import { dissectDcerpc, freshDcerpcConversation, looksLikeDcerpc, type DcerpcResult } from './dcerpc';
 import type { TcpReassembly } from './tls';
 import { describeCutSegment, dissectTlsSegment, looksLikeTlsRecord, pendingSegmentBytes, type TlsSegmentResult } from './tls';
 
@@ -544,7 +545,23 @@ export function dissectTcpTransport(
     }
   }
 
-  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && !sshResult && !rdpResult && !nbssResult && payloadLength > 0
+  // DCE/RPC, connection-oriented, on any port: the endpoint mapper on 135
+  // and every dynamic port it hands out. The header is distinctive enough to
+  // claim by - version 5, a known type, a fragment that fits - which is how
+  // the reference finds it too. Bind, call and answer share one state per
+  // connection.
+  let dcerpcResult: DcerpcResult | null = null;
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && !sshResult && !rdpResult && !nbssResult
+    && payloadLength > 0 && !payloadCut && !isKeepAlive && !isRetransmitted) {
+    const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+    if (looksLikeDcerpc(rawBytes, tcpPayloadStart, payloadEnd)) {
+      const state = tcpTracker ? tcpTracker.dcerpcConversation(srcIp, srcPort, dstIp, dstPort) : freshDcerpcConversation();
+      dcerpcResult = dissectDcerpc(rawBytes, tcpPayloadStart, payloadEnd, state,
+        frameId !== undefined && tsUs !== undefined ? { id: frameId, tsUs } : undefined);
+    }
+  }
+
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && !sshResult && !rdpResult && !nbssResult && !dcerpcResult && payloadLength > 0
     && !payloadCut && !isKeepAlive && !isRetransmitted) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
@@ -629,7 +646,7 @@ export function dissectTcpTransport(
     || tcpTracker.peekTlsCursor(srcIp, srcPort, dstIp, dstPort)?.unknown === false
     || tcpTracker.peekTlsCursor(dstIp, dstPort, srcIp, srcPort)?.unknown === false
   );
-  if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection && !sshResult && !rdpResult && !nbssResult
+  if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection && !sshResult && !rdpResult && !nbssResult && !dcerpcResult
     && payloadLength > 0 && !payloadCut && !isKeepAlive && !isRetransmitted && tlsInOrder && tcpTracker) {
     const conversation = tcpTracker.tlsConversation(srcIp, srcPort, dstIp, dstPort);
     const serverIsDestination = HTTP_PORTS.has(dstPort) || (!HTTP_PORTS.has(srcPort) && dstPort < srcPort);
@@ -672,6 +689,8 @@ export function dissectTcpTransport(
     protocolLabel = rdpResult.protocolLabel;
   } else if (nbssResult) {
     protocolLabel = nbssResult.protocolLabel;
+  } else if (dcerpcResult) {
+    protocolLabel = dcerpcResult.protocolLabel;
   } else if (tlsResult) {
     proto = 'TLS';
     protocolLabel = tlsResult.appProtocolLabel ?? tlsResult.protocolLabel;
@@ -713,6 +732,8 @@ export function dissectTcpTransport(
     ? [rdpResult.info]
     : nbssResult
     ? [nbssResult.info]
+    : dcerpcResult
+    ? [dcerpcResult.info]
     : smb2Result
     ? [smb2Result.info]
     : ldapResult
@@ -742,7 +763,7 @@ export function dissectTcpTransport(
   // A cut continuation says nothing of its own, and then the tags stand alone
   // as they would over an empty column: "[TCP Retransmission] ".
   const info = (tlsResult || (cutTls && cutTls.info !== '') || tcpDns || httpResult || ldapResult || smb2Result
-    || kerberosResult || bgpResult || sshResult?.layer || rdpResult || nbssResult)
+    || kerberosResult || bgpResult || sshResult?.layer || rdpResult || nbssResult || dcerpcResult)
     && expertTags.length > 0
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
@@ -764,6 +785,8 @@ export function dissectTcpTransport(
       ? rdpResult.layers
       : nbssResult
       ? nbssResult.layers
+      : dcerpcResult
+      ? dcerpcResult.layers
       : smb2Result
       // The framing in front of the messages, as the reference draws it - all
       // of a segment's NBSS layers first when it holds several messages.
@@ -804,12 +827,16 @@ export function dissectTcpTransport(
     resolvedNames: tcpDns && tcpDns.resolved.length > 0 ? tcpDns.resolved : undefined,
     reassembledFrom,
     labelPatches,
+    ...(dcerpcResult?.answered !== undefined
+      ? { linkPatches: [{ frameId: dcerpcResult.answered.requestFrame, links: { 'dcerpc.response_in': dcerpcResult.answered.responseFrame } }] }
+      : {}),
     fields: {
       ...(kerberosResult ? kerberosResult.fields : {}),
       ...(bgpResult ? bgpResult.fields : {}),
       ...(sshResult ? sshResult.fields : {}),
       ...(rdpResult ? rdpResult.fields : {}),
       ...(nbssResult ? nbssResult.fields : {}),
+      ...(dcerpcResult ? dcerpcResult.fields : {}),
       ...(smb2Result ? smb2Result.fields : {}),
       ...(ldapResult ? ldapResult.fields : {}),
       ...(tlsResult ? tlsResult.fields : {}),

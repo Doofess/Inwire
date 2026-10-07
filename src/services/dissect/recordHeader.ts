@@ -18,8 +18,9 @@
  * sequence numbers, which moved them again.
  * 7: the L3 tracker answers DTLS conversations.
  * 8: and CLDAP exchanges.
+ * 9: the TCP tracker answers DCE/RPC conversations.
  */
-export const FRAME_RECORD_VERSION = 8;
+export const FRAME_RECORD_VERSION = 9;
 
 function varint(record: Uint8Array, at: { i: number }): number {
   let n = 0;

@@ -12,8 +12,8 @@
  * field name the dump holds both tables back to back, the second starting
  * over at its lowest value; they are split there.
  *
- * A generator, not a test: it writes a source file, so it has no
- * `process.exit` and `check.ts` does not run it. Rerun it after a Wireshark
+ * A generator, not a test: it writes a source file and never exits with a
+ * status, which is how `check.ts` knows not to run it. Rerun it after a Wireshark
  * upgrade; `scripts/isakmp/dissect.ts` is what notices that it is due.
  */
 import { writeFileSync } from 'node:fs';

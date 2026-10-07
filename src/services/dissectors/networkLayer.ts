@@ -1334,6 +1334,7 @@ function transportPatches(
   transport: {
     reassembledFrom?: number[];
     labelPatches?: { frameId: number; protocolLabel: string }[];
+    linkPatches?: { frameId: number; links: Record<string, number> }[];
     dnsMatchedQueryFrameId?: number;
     icmpMatchedRequestFrameId?: number;
   },
@@ -1352,6 +1353,7 @@ function transportPatches(
     out.push({ frameId, suffix: ` [TCP PDU reassembled in ${completedIn}]`, links: { 'tcp.reassembled_in': completedIn } });
   }
   for (const patch of transport.labelPatches ?? []) out.push(patch);
+  for (const patch of transport.linkPatches ?? []) out.push(patch);
   // The query frame learns which frame answered it only now.
   if (transport.dnsMatchedQueryFrameId !== undefined) {
     out.push({ frameId: transport.dnsMatchedQueryFrameId, responseInFrame: completedIn });
