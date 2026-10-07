@@ -28,6 +28,7 @@ import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2
 import { dataLayer } from './mediaType';
 import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
 import { dissectSshSegment, freshSshConversation, SSH_PORT, type SshSegmentResult } from './ssh';
+import { dissectRdpSetup, looksLikeTpkt, RDP_PORT, type RdpResult } from './rdp';
 import type { TcpReassembly } from './tls';
 import { describeCutSegment, dissectTlsSegment, looksLikeTlsRecord, pendingSegmentBytes, type TlsSegmentResult } from './tls';
 
@@ -519,7 +520,17 @@ export function dissectTcpTransport(
     }
   }
 
+  // Remote Desktop's connection setup: TPKT, X.224 and RDP's negotiation, one
+  // message to a segment. What follows a TLS or CredSSP choice is TLS, which
+  // the check below then reads - so this claims only what opens with TPKT.
+  let rdpResult: RdpResult | null = null;
   if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && !sshResult && payloadLength > 0
+    && !payloadCut && !isKeepAlive && !isRetransmitted && (srcPort === RDP_PORT || dstPort === RDP_PORT)) {
+    const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+    if (looksLikeTpkt(rawBytes, tcpPayloadStart, payloadEnd)) rdpResult = dissectRdpSetup(rawBytes, tcpPayloadStart, payloadEnd);
+  }
+
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && !sshResult && !rdpResult && payloadLength > 0
     && !payloadCut && !isKeepAlive && !isRetransmitted) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
@@ -604,7 +615,7 @@ export function dissectTcpTransport(
     || tcpTracker.peekTlsCursor(srcIp, srcPort, dstIp, dstPort)?.unknown === false
     || tcpTracker.peekTlsCursor(dstIp, dstPort, srcIp, srcPort)?.unknown === false
   );
-  if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection && !sshResult
+  if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection && !sshResult && !rdpResult
     && payloadLength > 0 && !payloadCut && !isKeepAlive && !isRetransmitted && tlsInOrder && tcpTracker) {
     const conversation = tcpTracker.tlsConversation(srcIp, srcPort, dstIp, dstPort);
     const serverIsDestination = HTTP_PORTS.has(dstPort) || (!HTTP_PORTS.has(srcPort) && dstPort < srcPort);
@@ -643,6 +654,8 @@ export function dissectTcpTransport(
   } else if (sshResult?.layer) {
     proto = 'SSH';
     protocolLabel = sshResult.protocolLabel;
+  } else if (rdpResult) {
+    protocolLabel = rdpResult.protocolLabel;
   } else if (tlsResult) {
     proto = 'TLS';
     protocolLabel = tlsResult.appProtocolLabel ?? tlsResult.protocolLabel;
@@ -680,6 +693,8 @@ export function dissectTcpTransport(
     ? [bgpResult.info]
     : sshResult?.layer
     ? [sshResult.info]
+    : rdpResult
+    ? [rdpResult.info]
     : smb2Result
     ? [smb2Result.info]
     : ldapResult
@@ -709,7 +724,7 @@ export function dissectTcpTransport(
   // A cut continuation says nothing of its own, and then the tags stand alone
   // as they would over an empty column: "[TCP Retransmission] ".
   const info = (tlsResult || (cutTls && cutTls.info !== '') || tcpDns || httpResult || ldapResult || smb2Result
-    || kerberosResult || bgpResult || sshResult?.layer)
+    || kerberosResult || bgpResult || sshResult?.layer || rdpResult)
     && expertTags.length > 0
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
@@ -727,6 +742,8 @@ export function dissectTcpTransport(
       ? [bgpResult.layer]
       : sshResult?.layer
       ? [sshResult.layer]
+      : rdpResult
+      ? rdpResult.layers
       : smb2Result
       ? [smb2Result.layer]
       : ldapResult
@@ -769,6 +786,7 @@ export function dissectTcpTransport(
       ...(kerberosResult ? kerberosResult.fields : {}),
       ...(bgpResult ? bgpResult.fields : {}),
       ...(sshResult ? sshResult.fields : {}),
+      ...(rdpResult ? rdpResult.fields : {}),
       ...(smb2Result ? smb2Result.fields : {}),
       ...(ldapResult ? ldapResult.fields : {}),
       ...(tlsResult ? tlsResult.fields : {}),

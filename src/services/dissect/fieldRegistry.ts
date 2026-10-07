@@ -111,7 +111,7 @@ export const LAYERS = [
   // what a user types, and it has to be the one they already know.
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
   'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp',
-  'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'cldap', 'mscldap', 'smb2', 'kerberos', 'ssh', 'http', 'http2', 'http3',
+  'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'cldap', 'mscldap', 'smb2', 'kerberos', 'ssh', 'tpkt', 'cotp', 'rdp', 'http', 'http2', 'http3',
   // **What a message BODY is**, which the reference makes four protocols of
   // rather than fields on HTTP - so a JSON API response's chain really does
   // read `...tcp:http:json`. `data-text-lines` keeps its hyphens because that
@@ -277,6 +277,42 @@ const BASE_FIELDS: readonly FieldDef[] = [
   treeOnly(bool('isakmp.sa.situation.integrity', 'Integrity', 'isakmp')),
   treeOnly(bool('isakmp.ike.attr.format', 'Format', 'isakmp')),
   treeOnly(bool('isakmp.ike2.attr.format', 'Format', 'isakmp')),
+  // --- Remote Desktop's connection setup: TPKT, COTP and RDP's negotiation ---------
+  // `rdp.rt_cookie` is who is logging on (`Cookie: mstshash=<user>`), and the
+  // selected protocol or failure code what the server made of the offer.
+  treeOnly(uint('tpkt.version', 'Version', 'tpkt')),
+  treeOnly(uint('tpkt.reserved', 'Reserved', 'tpkt')),
+  treeOnly(uint('tpkt.length', 'Length', 'tpkt')),
+  treeOnly(uint('cotp.li', 'Length', 'cotp')),
+  uint('cotp.type', 'PDU Type', 'cotp'),
+  treeOnly(uint('cotp.destref', 'Destination reference', 'cotp')),
+  treeOnly(uint('cotp.srcref', 'Source reference', 'cotp')),
+  treeOnly(uint('cotp.class', 'Class', 'cotp')),
+  treeOnly(bool('cotp.opts.extended_formats', 'Extended formats', 'cotp')),
+  treeOnly(bool('cotp.opts.no_explicit_flow_control', 'No explicit flow control', 'cotp')),
+  treeOnly(uint('cotp.cause', 'Cause', 'cotp')),
+  treeOnly(str('cotp.disconnect_request', 'Disconnect Request(DR)', 'cotp')),
+  treeOnly(uint('cotp.tpdu-number', 'TPDU number', 'cotp')),
+  treeOnly(bool('cotp.eot', 'Last data unit', 'cotp')),
+  str('rdp.rt_cookie', 'Routing Token/Cookie', 'rdp'),
+  uint('rdp.neg_type', 'Type', 'rdp'),
+  treeOnly(uint('rdp.neg_length', 'Length', 'rdp')),
+  treeOnly(uint('rdp.negReq.flags', 'Flags', 'rdp')),
+  treeOnly(bool('rdp.negReq.flags.restricted_admin_mode_req', 'Restricted admin mode required', 'rdp')),
+  treeOnly(bool('rdp.negReq.flags.redirected_auth_req', 'Redirected Authentication required', 'rdp')),
+  treeOnly(bool('rdp.negReq.flags.correlation_info_present', 'Correlation info present', 'rdp')),
+  uint('rdp.negReq.requestedProtocols', 'requestedProtocols', 'rdp'),
+  treeOnly(bool('rdp.negReq.requestedProtocols.ssl', 'TLS security supported', 'rdp')),
+  treeOnly(bool('rdp.negReq.requestedProtocols.hybrid', 'CredSSP supported', 'rdp')),
+  treeOnly(bool('rdp.negReq.requestedProtocols.rdstls', 'RDSTLS supported', 'rdp')),
+  treeOnly(bool('rdp.negReq.requestedProtocols.hybrid_ex', 'CredSSP with Early User Authorization Result PDU supported', 'rdp')),
+  treeOnly(uint('rdp.negRsp.flags', 'Flags', 'rdp')),
+  treeOnly(bool('rdp.negRsp.flags.extended_client_data_supported', 'Extended Client Data Blocks supported', 'rdp')),
+  treeOnly(bool('rdp.negRsp.flags.dynvc_gfx_protocol_supported', 'Graphics Pipeline Extension Protocol supported', 'rdp')),
+  treeOnly(bool('rdp.negRsp.flags.restricted_admin_mode_supported', 'Restricted admin mode supported', 'rdp')),
+  treeOnly(bool('rdp.negRsp.flags.restricted_authentication_mode_supported', 'Restricted authentication mode supported', 'rdp')),
+  uint('rdp.negReq.selectedProtocol', 'selectedProtocol', 'rdp'),
+  uint('rdp.negFailure.failureCode', 'failureCode', 'rdp'),
   // --- OpenVPN -------------------------------------------------------------------
   uint('openvpn.opcode', 'Opcode', 'openvpn'),
   uint('openvpn.keyid', 'Key ID', 'openvpn'),
