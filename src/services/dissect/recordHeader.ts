@@ -19,8 +19,9 @@
  * 7: the L3 tracker answers DTLS conversations.
  * 8: and CLDAP exchanges.
  * 9: the TCP tracker answers DCE/RPC conversations.
+ * 10: the L3 tracker answers RTP streams.
  */
-export const FRAME_RECORD_VERSION = 9;
+export const FRAME_RECORD_VERSION = 10;
 
 function varint(record: Uint8Array, at: { i: number }): number {
   let n = 0;

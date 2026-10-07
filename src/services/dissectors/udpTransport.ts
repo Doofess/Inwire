@@ -34,6 +34,7 @@ import { buildQuicTlsLayer } from './tls';
 import { dissectNtp, dissectStun } from './udpApps';
 import { dataLayer } from './mediaType';
 import { findUdpPort } from './dispatch';
+import { dissectRtp, looksLikeRtp, rtpHeader } from './rtp';
 
 /** A cut SSDP datagram's start line, which is all of it there may be to name. */
 const START_LINE_DECODER = new TextDecoder();
@@ -473,6 +474,27 @@ export function dissectUdpTransport(
             });
           }
         }
+      }
+    }
+  }
+
+  // RTP, last of all: it has no fingerprint of its own, so it gets only what
+  // every port and every detector above declined, and only on a flow a
+  // second datagram has vouched for (`rtpStreams.ts`). STUN, DTLS, QUIC and
+  // WireGuard cannot reach here as RTP - none of them opens with version 2,
+  // which is RFC 7983's demultiplexing rule - and RTCP was claimed above.
+  if (info === null && l3Tracker !== undefined && frameId !== undefined) {
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    if (looksLikeRtp(rawBytes, udpPayloadStart, payloadEnd, payloadCut)) {
+      const header = rtpHeader(rawBytes, udpPayloadStart);
+      const stream = l3Tracker.rtpStream(srcPort, dstIp, dstPort, frameId, header.ssrc, header.seq, header.timestamp);
+      const rtp = stream !== null ? dissectRtp(rawBytes, udpPayloadStart, payloadEnd, stream, payloadCut) : null;
+      if (rtp !== null) {
+        protocolLabel = rtp.protocolLabel;
+        info = rtp.info;
+        extraLayers.push(...rtp.layers);
+        protocolTokens.push(...rtp.tokens);
+        Object.assign(appFields, rtp.fields);
       }
     }
   }

@@ -23,6 +23,7 @@ import { HEURISTIC_DISSECTORS, detectUdpPayload } from '../../src/services/disse
 import { PcapService } from '../../src/services/pcapParser';
 import { Bytes } from '../parity/synthetic';
 import { looksLikeDtls } from '../../src/services/dissectors/dtls';
+import { looksLikeRtp } from '../../src/services/dissectors/rtp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -131,6 +132,30 @@ for (const payload of PAYLOADS) {
 }
 check('no detector claims a DTLS record', detectUdpPayload(DTLS_RECORD, 0, DTLS_RECORD.length)?.detector ?? null, null);
 
+// --- RTP, which is found per flow outside the list --------------------------------
+// It is confirmed by a second datagram on its flow (`rtpStreams.ts`), so it is
+// asked in udpTransport.ts after everything else - and its shape test must
+// still reject every payload above, and the RTCP, STUN, DTLS and QUIC that
+// share a WebRTC call's port with it (RFC 7983, RFC 5761).
+console.log();
+const RTP_PACKET = new Bytes().u8(0x90, 111).u16(4812).u32(96000, 0x5e2a01c4)
+  .u16(0xbede, 1).u8(0x10, 0xaa, 0, 0).raw(new Array(40).fill(0x5c)).build();
+check('RTP accepts its own packet', looksLikeRtp(RTP_PACKET, 0, RTP_PACKET.length), true);
+const RTCP_PACKETS: { name: string; bytes: Uint8Array }[] = [
+  { name: 'an RTCP Sender Report', bytes: new Bytes().u8(0x80, 200).u16(6).u32(1).zeros(20).build() },
+  { name: 'an RTCP Receiver Report', bytes: new Bytes().u8(0x80, 201).u16(1).u32(1).build() },
+  { name: 'an RTCP NACK', bytes: new Bytes().u8(0x81, 205).u16(3).u32(1, 2).u16(9, 0).build() },
+  { name: 'an RTCP picture loss indication', bytes: new Bytes().u8(0x81, 206).u16(2).u32(1, 2).build() },
+  { name: 'an RTCP extended report', bytes: new Bytes().u8(0x80, 207).u16(1).u32(1).build() },
+  { name: 'a QUIC Initial', bytes: new Bytes().u8(0xc3).u32(1).u8(8).raw(new Array(60).fill(0x3c)).build() },
+  { name: 'a QUIC short-header packet', bytes: new Bytes().u8(0x42, 0x48, 0x5c, 0x44, 0x40).raw(new Array(50).fill(0x9a)).build() },
+  { name: 'a DTLS record', bytes: DTLS_RECORD },
+];
+for (const payload of [...PAYLOADS.map((p) => ({ name: p.protocol, bytes: p.bytes })), ...RTCP_PACKETS]) {
+  check(`RTP rejects ${payload.name}`, looksLikeRtp(payload.bytes, 0, payload.bytes.length), false);
+}
+check('no detector claims an RTP packet', detectUdpPayload(RTP_PACKET, 0, RTP_PACKET.length)?.detector ?? null, null);
+
 // --- payloads that are nothing --------------------------------------------------
 console.log();
 const NOT_PROTOCOLS: { name: string; bytes: Uint8Array }[] = [
@@ -201,6 +226,10 @@ async function corpus(): Promise<void> {
     }
 
     const name = path.split('/').pop()!.split('_')[0];
+    // The reference's own RTP heuristic, switched on, finds no RTP in either
+    // capture; neither may this build's flow test.
+    const rtp = packets.filter((p) => (p.frameProtocols ?? []).includes('rtp')).map((p) => p.id);
+    check(`${name}: no frame of it reads as RTP`, rtp.slice(0, 5), []);
     const total = [...claimed.values()].reduce((a, b) => a + b, 0);
     check(`${name}: no detector claims any of its ${examined} anonymous UDP payloads`,
       total === 0 ? [] : [...claimed.entries()].map(([d, n]) => `${d}=${n}`), []);

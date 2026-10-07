@@ -31,6 +31,12 @@ import type { Packet, ProtocolField } from '../../src/types/packet';
 export interface OracleCase {
   label: string;
   frame: Uint8Array;
+  /**
+   * Why this frame is in the capture but not compared: one this build reads
+   * differently on purpose, kept because the frames after it depend on it.
+   * A suite asserts what it does read for it instead.
+   */
+  notCompared?: string;
 }
 
 export interface OracleOptions {
@@ -47,6 +53,11 @@ export interface OracleOptions {
    * while each tree is what was known when its frame arrived.
    */
   twoPass?: boolean | 'columns';
+  /**
+   * More of the reference's own switches, for a protocol it reads only when
+   * asked - RTP, whose heuristic it ships off: `['--enable-heuristic', 'rtp_udp']`.
+   */
+  tsharkArgs?: string[];
 }
 
 let failures = 0;
@@ -131,7 +142,7 @@ export async function compareWithReference(cases: OracleCase[], options: OracleO
   try {
     const file = join(dir, 'oracle.pcap');
     writeFileSync(file, pcapOf(cases.map((c) => c.frame), options.linktype));
-    return await compareCaptureFile(file, cases.map((c) => c.label), options);
+    return await compareCaptureFile(file, cases.map((c) => (c.notCompared === undefined ? c.label : null)), options);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -139,9 +150,9 @@ export async function compareWithReference(cases: OracleCase[], options: OracleO
 
 /**
  * The same comparison over a capture file as it is - a real one, of any link
- * type - with one label per frame.
+ * type - with one label per frame, or null for a frame not to compare.
  */
-export async function compareCaptureFile(file: string, labels: string[], options: OracleOptions): Promise<Packet[]> {
+export async function compareCaptureFile(file: string, labels: (string | null)[], options: OracleOptions): Promise<Packet[]> {
   const { packets } = await PcapService.parseCaptureFile(new File([readFileSync(file)], basename(file)), Number.POSITIVE_INFINITY, true);
   check(`every frame dissected (${labels.length})`, packets.length === labels.length);
   const tshark = findWiresharkTool('tshark');
@@ -150,7 +161,7 @@ export async function compareCaptureFile(file: string, labels: string[], options
     return packets;
   }
   const env = { ...process.env, WIRESHARK_CONFIG_DIR: join(process.cwd(), 'scripts', 'wireshark-profile') };
-  const pass = (two: boolean) => (two ? ['-2'] : []);
+  const pass = (two: boolean) => [...(two ? ['-2'] : []), ...(options.tsharkArgs ?? [])];
   const pdml = spawnSync(tshark, [...pass(options.twoPass === true), '-n', '-r', file, '-T', 'pdml'], { encoding: 'utf8', env, maxBuffer: 1 << 28 }).stdout;
   const theirs = referenceRows(pdml, options.rows);
   const cols = spawnSync(tshark, [...pass(options.twoPass !== undefined && options.twoPass !== false), '-n', '-r', file, '-T', 'fields',
@@ -159,7 +170,7 @@ export async function compareCaptureFile(file: string, labels: string[], options
   check('the reference read every frame', theirs.length === labels.length && cols.length === labels.length);
   labels.forEach((label, i) => {
     const packet = packets[i];
-    if (packet === undefined) return;
+    if (packet === undefined || label === null) return;
     const protocol = packet.protocolLabel ?? packet.protocol;
     check(`${label}: Protocol`, protocol === cols[i]?.protocol,
       `reference "${cols[i]?.protocol}", this build "${protocol}"`);

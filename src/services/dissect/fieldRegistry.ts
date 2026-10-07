@@ -118,7 +118,7 @@ export const LAYERS = [
   // DCE/RPC - generated into `dissectors/dcerpcNames.ts`.
   'srvsvc', 'wkssvc', 'lsarpc', 'samr', 'rpc_netlogon', 'winreg', 'svcctl', 'spoolss', 'drsuapi', 'dssetup', 'atsvc', 'mgmt', 'oxid', 'isystemactivator', 'remunk', 'remunk2', 'taskschedulerservice', 'eventlog', 'netdfs', 'rpc_browser', 'dnsserver', 'iremotewinspool', 'initshutdown', 'fsrvp', 'witness', 'frsrpc', 'frstrans', 'nspi', 'efs', 'pnp', 'clusapi', 'rras', 'wzcsvc', 'mapi', 'tapi', 'trksvr', 'rfr',
   'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp', 'steam_ihs_discovery',
+  'syslog', 'radius', 'snmp', 'sip', 'rtp', 'rtpevent', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp', 'steam_ihs_discovery',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'cldap', 'mscldap', 'smb2', 'kerberos', 'ssh', 'tpkt', 'cotp', 'rdp', 'http', 'http2', 'http3',
   // **What a message BODY is**, which the reference makes four protocols of
   // rather than fields on HTTP - so a JSON API response's chain really does
@@ -1802,6 +1802,40 @@ const BASE_FIELDS: readonly FieldDef[] = [
   //
   // The SSRC is the join key: it is what ties a control packet to the media
   // stream it reports on, and the filter anyone tracing one call types.
+  // RTP (rtpStreams.ts, dissectors/rtp.ts): the header's numbers, which a
+  // stream is filtered on, and the rest in the tree.
+  treeOnly(str('rtp.setup', 'Stream setup', 'rtp')),
+  treeOnly(uint('rtp.setup-frame', 'Setup frame', 'rtp')),
+  treeOnly(str('rtp.setup-method', 'Setup Method', 'rtp')),
+  uint('rtp.version', 'Version', 'rtp'),
+  bool('rtp.padding', 'Padding', 'rtp'),
+  bool('rtp.ext', 'Extension', 'rtp'),
+  uint('rtp.cc', 'Contributing source identifiers count', 'rtp'),
+  bool('rtp.marker', 'Marker', 'rtp'),
+  uint('rtp.p_type', 'Payload type', 'rtp'),
+  uint('rtp.seq', 'Sequence number', 'rtp'),
+  uint('rtp.extseq', 'Extended sequence number', 'rtp'),
+  uint('rtp.timestamp', 'Timestamp', 'rtp'),
+  treeOnly(uint('rtp.timestamp_ext', 'Extended timestamp', 'rtp')),
+  uint('rtp.ssrc', 'Synchronization Source identifier', 'rtp', { label: 'RTP SSRC', align: 'right' }),
+  treeOnly(str('rtp.csrc.items', 'Contributing Source identifiers', 'rtp')),
+  treeOnly(uint('rtp.csrc.item', 'CSRC item', 'rtp')),
+  treeOnly(uint('rtp.ext.profile', 'Defined by profile', 'rtp')),
+  treeOnly(uint('rtp.ext.len', 'Extension length', 'rtp')),
+  treeOnly(str('rtp.hdr_exts', 'Header extensions', 'rtp')),
+  treeOnly(uint('rtp.hdr_ext', 'Header extension', 'rtp')),
+  treeOnly(uint('rtp.ext.rfc5285.id', 'Identifier', 'rtp')),
+  treeOnly(uint('rtp.ext.rfc5285.len', 'Length', 'rtp')),
+  treeOnly(uint('rtp.ext.rfc5285.appbits', 'Application Bits', 'rtp')),
+  treeOnly({ abbrev: 'rtp.ext.rfc5285.data', label: 'Extension Data', type: 'bytes', layer: 'rtp' }),
+  treeOnly({ abbrev: 'rtp.payload', label: 'Payload', type: 'bytes', layer: 'rtp' }),
+  treeOnly({ abbrev: 'rtp.padding.data', label: 'Padding data', type: 'bytes', layer: 'rtp' }),
+  treeOnly(uint('rtp.padding.count', 'Padding count', 'rtp')),
+  uint('rtpevent.event_id', 'Event ID', 'rtpevent'),
+  bool('rtpevent.end_of_event', 'End of Event', 'rtpevent'),
+  treeOnly(bool('rtpevent.reserved', 'Reserved', 'rtpevent')),
+  uint('rtpevent.volume', 'Volume', 'rtpevent'),
+  uint('rtpevent.duration', 'Event Duration', 'rtpevent'),
   uint('rtcp.version', 'Version', 'rtcp'),
   treeOnly(bool('rtcp.padding', 'Padding', 'rtcp')),
   uint('rtcp.pt', 'Packet type', 'rtcp'),

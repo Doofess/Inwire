@@ -20,6 +20,7 @@
  */
 import { freshDtlsConversation, type DtlsConversationState } from './dissectors/dtls';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
+import { RtpStreams, type RtpStreamFacts } from './rtpStreams';
 
 /**
  * How many conversations each per-layer index remembers.
@@ -256,6 +257,7 @@ export class L3Tracker {
   private nextDtlsStream = 0;
   private cldapConversations = new Map<string, LdapConversationState>();
   private nextWireGuardStream = 0;
+  private readonly rtp = new RtpStreams();
 
   /** `eth.stream`: the conversation between two MAC addresses. */
   ethStream(srcMac: string, dstMac: string, tsUs: number): ConversationFacts {
@@ -508,7 +510,18 @@ export class L3Tracker {
     return state;
   }
 
+  /**
+   * The RTP stream a datagram belongs to, or null while its flow is only a
+   * candidate - `rtpStreams.ts` says why a flow needs a second packet.
+   */
+  rtpStream(
+    srcPort: number, dstIp: string, dstPort: number, frame: number, ssrc: number, seq: number, ts: number,
+  ): RtpStreamFacts | null {
+    return this.rtp.observe(srcPort, dstIp, dstPort, frame, ssrc, seq, ts);
+  }
+
   reset(): void {
+    this.rtp.reset();
     this.cldapConversations.clear();
     this.dtlsConversations.clear();
     this.nextDtlsStream = 0;
