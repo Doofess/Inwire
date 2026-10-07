@@ -76,6 +76,8 @@ import { dissectHsrp, HSRP_V1_GROUP, HSRP_V2_GROUP } from './hsrp';
 import { dissectRip, dissectRipng } from './rip';
 import { dissectKerberosDatagram, KERBEROS_PORT } from './kerberos';
 import { dissectEapol } from './eapol';
+import { dissectDropboxDiscovery, dissectPortControl } from './portControl';
+import { dissectMediaType } from './mediaType';
 
 /** The three things this build dispatches on by value. */
 export type DispatchTableName = 'ethertype' | 'ip.proto' | 'udp.port';
@@ -97,6 +99,12 @@ export interface LeafResult {
    * inside EAPOL, which the reference draws as a protocol of its own.
    */
   innerLayers?: ProtocolLayer[];
+  /**
+   * The token this frame is known by, when it is not the entry's own: one
+   * port that carries two protocols - NAT-PMP and PCP on 5351 - names
+   * whichever it found.
+   */
+  token?: string;
 }
 
 /** What an entry may look at beyond the bytes, for the one case that needs it. */
@@ -236,6 +244,11 @@ const DISPATCH_TABLE: readonly DispatchEntry[] = [
   },
   { table: 'udp.port', values: on(520), token: 'rip', dissect: dissectRip },
   { table: 'udp.port', values: on(521), token: 'ripng', dissect: dissectRipng },
+  { table: 'udp.port', values: on(5350, 5351), token: 'portcontrol', dissect: dissectPortControl },
+  {
+    table: 'udp.port', values: on(17500), token: 'db-lsp-disc',
+    dissect: (b, s, e) => dissectDropboxDiscovery(b, s, e, (bytes) => dissectMediaType(bytes, 'application/json')),
+  },
 ];
 
 for (const entry of DISPATCH_TABLE) {

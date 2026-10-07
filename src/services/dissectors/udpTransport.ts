@@ -139,7 +139,7 @@ export function dissectUdpTransport(
       protocolLabel = read.protocolLabel;
       info = read.info;
       extraLayers.push(read.layer, ...(read.innerLayers ?? []));
-      protocolTokens.push(subdissector.token);
+      protocolTokens.push(read.token ?? subdissector.token);
       Object.assign(appFields, read.fields);
     }
   } else if (srcPort === 3702 || dstPort === 3702) {

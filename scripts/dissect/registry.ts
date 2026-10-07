@@ -89,12 +89,15 @@ const writersByKey = new Map<string, string[]>();
 const bagWrites = new Set<string>();
 for (const file of DISSECTION_SOURCES) {
   const text = readFileSync(file, 'utf8');
-  for (const m of text.matchAll(/\[\s*'([a-z][a-z0-9_]*\.[A-Za-z0-9_.-]+)'\s*\]\s*=/g)) {
+  for (const m of text.matchAll(/\[\s*'([a-z][a-z0-9_-]*\.[A-Za-z0-9_.-]+)'\s*\]\s*=/g)) {
     bagWrites.add(m[1]);
   }
   // The tail allows upper case for the same reason the identifier check below
   // does: `ptp.v2.mm.managementId` is the reference analyzer's own spelling.
-  for (const m of text.matchAll(/'([a-z][a-z0-9_]*\.[A-Za-z0-9_.-]+)'/g)) {
+  // The head allows a hyphen because some layers have one - `nat-pmp.opcode`
+  // is the reference's field - and the layer-token check below still has to
+  // pass, so `e-g.x` is no more a field than `e.g.` is.
+  for (const m of text.matchAll(/'([a-z][a-z0-9_-]*\.[A-Za-z0-9_.-]+)'/g)) {
     const key = m[1];
     if (NOT_FIELDS.has(key)) continue;
     // Something like 'e.g.' or a file name is not a field: require the last

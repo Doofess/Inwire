@@ -197,6 +197,16 @@ export function formatIpv6Address(bytes: Uint8Array, offset: number): string {
     }
   }
 
+  // An IPv4-mapped (`::ffff:`) or IPv4-compatible (`::`) address keeps its
+  // IPv4 half dotted, as inet_ntop writes it - but only when that half's top
+  // 16 bits are not zero, which is the reference's own condition: `::ffff:0:1`
+  // and `::1` stay hex, `::ffff:10.0.0.0` and `::1.2.3.4` do not.
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0
+    && (groups[5] === 0 || groups[5] === 0xffff) && groups[6] !== 0) {
+    const v4 = `${bytes[offset + 12]}.${bytes[offset + 13]}.${bytes[offset + 14]}.${bytes[offset + 15]}`;
+    return pooled(groups[5] === 0xffff ? `::ffff:${v4}` : `::${v4}`);
+  }
+
   const hex = groups.map(g => g.toString(16));
   if (bestLen < 2) return pooled(hex.join(':'));
 
