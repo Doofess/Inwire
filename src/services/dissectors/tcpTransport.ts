@@ -27,6 +27,7 @@ import { dissectKerberos, looksLikeKerberos, KERBEROS_PORT, type KerberosResult 
 import { dissectSmb2, looksLikeSmb2, freshSmb2Conversation, SMB2_PORT, type Smb2Result } from './smb2';
 import { dataLayer } from './mediaType';
 import { dissectBgp, looksLikeBgp, freshBgpDirection, BGP_PORT, type BgpResult } from './bgp';
+import { dissectSshSegment, freshSshConversation, SSH_PORT, type SshSegmentResult } from './ssh';
 import type { TcpReassembly } from './tls';
 import { describeCutSegment, dissectTlsSegment, looksLikeTlsRecord, pendingSegmentBytes, type TlsSegmentResult } from './tls';
 
@@ -498,7 +499,26 @@ export function dissectTcpTransport(
     }
   }
 
-  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && payloadLength > 0
+  // SSH, on port 22 as the reference dispatches it, read as a stream per
+  // direction: the banner, then packets, a packet larger than its segment
+  // finished by the next. In order only - a retransmission or a segment out
+  // of order would put the packet boundaries out of step.
+  let sshResult: SshSegmentResult | null = null;
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && payloadLength > 0 && !payloadCut
+    && !isKeepAlive && !isRetransmitted && tlsInOrder && (srcPort === SSH_PORT || dstPort === SSH_PORT)) {
+    const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
+    const conversation = tcpTracker
+      ? tcpTracker.sshConversation(srcIp, srcPort, dstIp, dstPort)
+      : freshSshConversation();
+    sshResult = dissectSshSegment(rawBytes, tcpPayloadStart, payloadEnd, conversation, dstPort === SSH_PORT, frameId ?? 0);
+    if (sshResult !== null) {
+      segmentDataBytes = sshResult.pendingBytes;
+      reassemblies = sshResult.reassemblies;
+      reassembledFrom = sshResult.reassembledFrom;
+    }
+  }
+
+  if (!tcpDns && !ldapResult && !kerberosResult && !smb2Result && !bgpResult && !sshResult && payloadLength > 0
     && !payloadCut && !isKeepAlive && !isRetransmitted) {
     const payloadEnd = Math.min(rawBytes.length, tcpPayloadStart + payloadLength);
     const existing = tcpTracker?.peekTlsCursor(srcIp, srcPort, dstIp, dstPort);
@@ -583,7 +603,7 @@ export function dissectTcpTransport(
     || tcpTracker.peekTlsCursor(srcIp, srcPort, dstIp, dstPort)?.unknown === false
     || tcpTracker.peekTlsCursor(dstIp, dstPort, srcIp, srcPort)?.unknown === false
   );
-  if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection
+  if (!tcpDns && !ldapResult && !tlsResult && !tlsOnThisConnection && !sshResult
     && payloadLength > 0 && !payloadCut && !isKeepAlive && !isRetransmitted && tlsInOrder && tcpTracker) {
     const conversation = tcpTracker.tlsConversation(srcIp, srcPort, dstIp, dstPort);
     const serverIsDestination = HTTP_PORTS.has(dstPort) || (!HTTP_PORTS.has(srcPort) && dstPort < srcPort);
@@ -619,6 +639,9 @@ export function dissectTcpTransport(
   } else if (bgpResult) {
     proto = 'BGP';
     protocolLabel = 'BGP';
+  } else if (sshResult?.layer) {
+    proto = 'SSH';
+    protocolLabel = sshResult.protocolLabel;
   } else if (tlsResult) {
     proto = 'TLS';
     protocolLabel = tlsResult.appProtocolLabel ?? tlsResult.protocolLabel;
@@ -628,7 +651,7 @@ export function dissectTcpTransport(
   } else if (cutTls) {
     proto = 'TLS';
     protocolLabel = cutTls.protocolLabel;
-  } else if (proto === 'TLS' || proto === 'HTTP') {
+  } else if (proto === 'TLS' || proto === 'HTTP' || proto === 'SSH') {
     // The port was only ever a hint. A bare ACK or a handshake segment on
     // port 80 carries no HTTP, and calling it HTTP is what made the shipped
     // `http` colour rule paint a connection's whole three-way handshake.
@@ -654,6 +677,8 @@ export function dissectTcpTransport(
     ? [kerberosResult.info]
     : bgpResult
     ? [bgpResult.info]
+    : sshResult?.layer
+    ? [sshResult.info]
     : smb2Result
     ? [smb2Result.info]
     : ldapResult
@@ -683,7 +708,7 @@ export function dissectTcpTransport(
   // A cut continuation says nothing of its own, and then the tags stand alone
   // as they would over an empty column: "[TCP Retransmission] ".
   const info = (tlsResult || (cutTls && cutTls.info !== '') || tcpDns || httpResult || ldapResult || smb2Result
-    || kerberosResult || bgpResult)
+    || kerberosResult || bgpResult || sshResult?.layer)
     && expertTags.length > 0
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
@@ -699,6 +724,8 @@ export function dissectTcpTransport(
       ? [kerberosResult.layer]
       : bgpResult
       ? [bgpResult.layer]
+      : sshResult?.layer
+      ? [sshResult.layer]
       : smb2Result
       ? [smb2Result.layer]
       : ldapResult
@@ -721,7 +748,8 @@ export function dissectTcpTransport(
       // The bounds test is the same one `udpTransport.ts` explains: a quoted
       // datagram inside an ICMP error carries eight bytes of transport header
       // and a length field describing a frame nobody captured.
-      : payloadLength > 0 && !tlsOnThisConnection
+      // An SSH segment that only continued a packet is that packet's, not data.
+      : payloadLength > 0 && !tlsOnThisConnection && sshResult === null
         && transportOffset + tcpHeaderLen + payloadLength <= rawBytes.length
       ? [dataLayer(rawBytes.subarray(
         transportOffset + tcpHeaderLen, transportOffset + tcpHeaderLen + payloadLength,
@@ -739,6 +767,7 @@ export function dissectTcpTransport(
     fields: {
       ...(kerberosResult ? kerberosResult.fields : {}),
       ...(bgpResult ? bgpResult.fields : {}),
+      ...(sshResult ? sshResult.fields : {}),
       ...(smb2Result ? smb2Result.fields : {}),
       ...(ldapResult ? ldapResult.fields : {}),
       ...(tlsResult ? tlsResult.fields : {}),

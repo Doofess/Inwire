@@ -864,6 +864,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'NAT Port Mapping Protocol': 'nat-pmp',
   'Port Control Protocol': 'portcontrol',
   'Dropbox LAN sync Discovery Protocol': 'db-lsp-disc',
+  'SSH Protocol': 'ssh',
   'Extensible Authentication Protocol': 'eap',
   // The IPv6 extension headers. Without these the layer names fall through to
   // the underscore rule and the protocol hierarchy reads

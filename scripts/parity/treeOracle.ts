@@ -36,6 +36,13 @@ export interface OracleOptions {
   /** The abbrevs under test, e.g. `/^eapol\./`. */
   rows: RegExp;
   linktype?: number;
+  /**
+   * Ask the reference for its two-pass reading (`-2`), which is what the
+   * fixture ground truth is and what this build's tree shows: a segment that
+   * a later one completes says so (`[TCP PDU reassembled in N]`). Off for a
+   * protocol whose single-pass reading is the one to match.
+   */
+  twoPass?: boolean;
 }
 
 let failures = 0;
@@ -52,7 +59,10 @@ export function ourRows(packet: Packet, rows: RegExp): string[] {
     for (const f of fields) {
       if (f.abbrev !== undefined && rows.test(f.abbrev)) {
         const value = typeof f.value === 'boolean' ? (f.value ? 'True' : 'False') : String(f.value);
-        out.push(`${f.abbrev}=${value === '' ? f.name : value}`);
+        // An empty value is either a row that is only its name - a heading,
+        // `Encrypted Static` - or a string that is empty. `\u0000` marks it,
+        // and `sameRow` takes either reading.
+        out.push(`${f.abbrev}=${value === '' ? `\u0000${f.name}` : value}`);
       }
       if (f.children) walk(f.children);
     }
@@ -73,7 +83,10 @@ export function referenceRows(pdml: string, rows: RegExp): string[][] {
       if (!rows.test(attrs.name ?? '') || attrs.hide === 'yes') continue;
       const shown = attrs.showname ?? attrs.show ?? '';
       const at = shown.indexOf(': ');
-      out.push(`${attrs.name}=${at >= 0 ? shown.slice(at + 2) : shown}`);
+      // A long value is cut short in the label (`Client PQ KEM Public Key
+      // [\u2026]: 0303...`); `show` holds all of it.
+      const truncated = at >= 0 && shown.slice(0, at).endsWith('[\u2026]') && attrs.show !== undefined;
+      out.push(`${attrs.name}=${truncated ? attrs.show.replace(/:/g, '') : at >= 0 ? shown.slice(at + 2) : shown}`);
     }
     return out;
   });
@@ -88,6 +101,7 @@ function sameRow(mine: string, ref: string): boolean {
   if (mine === ref) return true;
   const [abbrev, ...rest] = mine.split('=');
   const value = rest.join('=');
+  if (value.startsWith('\u0000')) return ref === `${abbrev}=` || ref === `${abbrev}=${value.slice(1)}`;
   return /^[0-9a-f]{2}(:[0-9a-f]{2})+$/.test(value) && `${abbrev}=${value.replace(/:/g, '')}` === ref;
 }
 
@@ -106,28 +120,32 @@ export async function compareWithReference(cases: OracleCase[], options: OracleO
     console.log('SKIP  tshark not found - the frames were read; whether as the reference reads them was not checked');
     return packets;
   }
-  const columns = askTshark(tshark, cases.map((c) => c.frame));
+  const columns = options.twoPass ? null : askTshark(tshark, cases.map((c) => c.frame));
   const dir = mkdtempSync(join(tmpdir(), 'inwire-oracle-'));
   try {
     const file = join(dir, 'oracle.pcap');
     writeFileSync(file, pcap);
     const env = { ...process.env, WIRESHARK_CONFIG_DIR: join(process.cwd(), 'scripts', 'wireshark-profile') };
-    const pdml = spawnSync(tshark, ['-n', '-r', file, '-T', 'pdml'], { encoding: 'utf8', env, maxBuffer: 1 << 28 }).stdout;
+    const pass = options.twoPass ? ['-2'] : [];
+    const pdml = spawnSync(tshark, [...pass, '-n', '-r', file, '-T', 'pdml'], { encoding: 'utf8', env, maxBuffer: 1 << 28 }).stdout;
     const theirs = referenceRows(pdml, options.rows);
-    check('the reference read every frame', theirs.length === cases.length && columns.length === cases.length);
+    const cols = columns ?? spawnSync(tshark, [...pass, '-n', '-r', file, '-T', 'fields', '-E', 'separator=/t',
+      '-e', '_ws.col.Protocol', '-e', '_ws.col.Info'], { encoding: 'utf8', env, maxBuffer: 1 << 28 }).stdout
+      .split(/\r?\n/).slice(0, cases.length).map((line) => { const [protocol, info = ''] = line.split('\t'); return { protocol, info }; });
+    check('the reference read every frame', theirs.length === cases.length && cols.length === cases.length);
     cases.forEach((c, i) => {
       const packet = packets[i];
       if (packet === undefined) return;
       const protocol = packet.protocolLabel ?? packet.protocol;
-      check(`${c.label}: Protocol`, protocol === columns[i]?.protocol,
-        `reference "${columns[i]?.protocol}", this build "${protocol}"`);
-      check(`${c.label}: Info`, packet.info === columns[i]?.info,
-        `reference "${columns[i]?.info}"\n        this build "${packet.info}"`);
+      check(`${c.label}: Protocol`, protocol === cols[i]?.protocol,
+        `reference "${cols[i]?.protocol}", this build "${protocol}"`);
+      check(`${c.label}: Info`, packet.info === cols[i]?.info,
+        `reference "${cols[i]?.info}"\n        this build "${packet.info}"`);
       const mine = ourRows(packet, options.rows);
       const ref = theirs[i] ?? [];
       const differ = mine.length !== ref.length || mine.some((row, k) => !sameRow(row, ref[k]));
       check(`${c.label}: every row matches the reference (${ref.length})`, !differ,
-        `reference:\n          ${ref.join('\n          ')}\n        this build:\n          ${mine.join('\n          ')}`);
+        `reference:\n          ${ref.join('\n          ')}\n        this build:\n          ${mine.map((r) => r.replace('\u0000', '')).join('\n          ')}`);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

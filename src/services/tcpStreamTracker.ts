@@ -28,6 +28,7 @@ import type { AppDirection } from './dissectors/appStream';
 import { releaseHttp1Body } from './dissectors/http1';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 import { freshSmb2Conversation, type Smb2ConversationState } from './dissectors/smb2';
+import { freshSshConversation, type SshConversationState } from './dissectors/ssh';
 import { freshBgpDirection, type BgpDirectionState } from './dissectors/bgp';
 
 export interface TlsRecordCursor {
@@ -313,6 +314,7 @@ interface TcpConnection {
   ldap?: LdapConversationState;
   /** SMB2's per-connection state, on the same terms as `ldap` above. */
   smb2?: Smb2ConversationState;
+  ssh?: SshConversationState;
   /** The endpoint that sorts first, and the other one. */
   a: TcpDirection;
   b: TcpDirection;
@@ -701,6 +703,13 @@ export class TcpStreamTracker {
     const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
     conn.ldap ??= freshLdapConversation();
     return conn.ldap;
+  }
+
+  /** SSH's two directions and what each side offered, created on first use. */
+  public sshConversation(srcIp: string, srcPort: number, dstIp: string, dstPort: number): SshConversationState {
+    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.ssh ??= freshSshConversation();
+    return conn.ssh;
   }
 
   /** SMB2's per-connection counters, created on first use. */

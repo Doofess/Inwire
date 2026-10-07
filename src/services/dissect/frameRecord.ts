@@ -79,7 +79,7 @@ const TCP = {
   getConversationCompleteness: 'answer', getCompletenessMask: 'answer',
   ldapConversation: 'snapshot', smb2Conversation: 'snapshot', peekBgpDirection: 'peek',
   bgpDirection: 'snapshot', peekTlsCursor: 'peek', tlsCursor: 'snapshot',
-  tlsConversation: 'snapshot', getTlsStreamId: 'answer',
+  tlsConversation: 'snapshot', getTlsStreamId: 'answer', sshConversation: 'snapshot',
 } as const satisfies Record<keyof TcpTrackerApi, Kind>;
 
 const QUIC = {
