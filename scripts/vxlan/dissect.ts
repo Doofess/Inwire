@@ -31,9 +31,10 @@
  *    this, because a capture is not a receiver.
  */
 import {
-  Bytes, ethernet, ipv4, udpFrame, internetChecksum, runCases, finish, failureCount,
+  Bytes, ethernet, ipv4, udpFrame, internetChecksum, runCases, failureCount,
   type SyntheticCase,
 } from '../parity/synthetic';
+import { check, checkRevisit, compareWithReference, finish, type OracleCase } from '../parity/treeOracle';
 
 /** An ICMPv4 echo request with a correct checksum. */
 function icmpEcho(id: number, seq: number): Uint8Array {
@@ -103,9 +104,31 @@ const cases: SyntheticCase[] = [
   { name: 'the VNI-valid flag being clear changes nothing', frame: vx(innerIcmp, 100, 4789, 0x00) },
 ];
 
+/** The mirrored-frame reader's own cases, which only the tree can see. */
+const innerTagged = Uint8Array.from([
+  ...ethernet(0x8100).build(), 0x20, 0x2a, 0x08, 0x00, ...ipv4(1, icmpEcho(0x1234, 2), '10.1.1.1', '10.2.2.2'),
+]);
+const treeCases: OracleCase[] = [
+  ...cases.map((c) => ({ label: c.name, frame: c.frame })),
+  { label: 'a VLAN-tagged frame inside the overlay', frame: vx(innerTagged) },
+  { label: 'an inner ethertype nobody names', frame: vx(innerFrame(0x9999, Uint8Array.from([1, 2, 3, 4]))) },
+  { label: 'an inner frame cut short of its Ethernet header', frame: vx(Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8])) },
+];
+
 async function main(): Promise<void> {
   await runCases(cases, { compareAddresses: true });
   if (failureCount() > 0) process.exit(1);
+  // The tree: the UDP layer that carries the overlay, the VXLAN header, and
+  // the inner frame's own Ethernet rows - its tag and its conversation.
+  const packets = await compareWithReference(treeCases, {
+    rows: /^(udp\.(srcport|dstport|length)|vxlan\.|eth\.stream$|vlan\.(?!etype$)|arp\.)/,
+  });
+  await checkRevisit(treeCases);
+  check('the overlay is carried by UDP, as the reference chains it',
+    packets[0]?.frameProtocols?.join(':').includes('udp:vxlan:eth:ip:icmp') === true,
+    packets[0]?.frameProtocols?.join(':'));
+  check('the inner Ethernet header carries abbrevs, as any frame\'s does',
+    packets[0]?.layers.filter((l) => l.name === 'Ethernet II')[1]?.fields.some((f) => f.abbrev === 'eth.src') === true);
   finish('VXLAN');
 }
 

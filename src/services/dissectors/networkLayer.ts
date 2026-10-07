@@ -41,12 +41,7 @@ import { readErspan } from './erspan';
 import { findEthertype } from './dispatch';
 import { labelForEtherType } from './l2';
 import { dataLayer } from './mediaType';
-import {
-  VXLAN_HEADER_LENGTH, isVxlanPort, readInnerEthernet, readVxlanHeader,
-} from './vxlan';
-import { dissectArp } from './l2';
-import { dissectEmbeddedEthernet, dissectLinkLayer } from './linkLayer';
-import { LINKTYPE } from '../dissect/types';
+import { dissectEmbeddedEthernet } from './linkLayer';
 import { malformedRow } from './tzsp';
 import { resolveMacName } from '../macVendors';
 import { dissectTcpTransport } from './tcpTransport';
@@ -364,6 +359,79 @@ export function decodeNetworkLayer(
   };
 
   /**
+   * A whole Ethernet frame carried for somebody else - mirrored into ERSPAN
+   * by a switch, streamed in TZSP by a router's sniffer, or bridged across a
+   * VXLAN overlay - looked THROUGH: the reference reports the inner frame in
+   * every column, so this hands back whatever the inner decode decided. One
+   * reader for all three, so a mirrored frame reads the same whichever tunnel
+   * brought it.
+   *
+   * - **The inner header is the outer frame's own decoder**
+   *   (`dissectEmbeddedEthernet`), with every byte range pointing into this
+   *   frame, so it carries the same rows and abbrevs as any frame's - VLAN
+   *   tags and 802.3/LLC included, which a mirror port forwards.
+   * - **Its MAC pair is a conversation of its own**, so it gets an
+   *   `eth.stream`, as the reference gives it one.
+   * - **Its field bag only adds**: an outer key keeps its value, because one
+   *   key holds one value and the outer `eth.src` is the frame this machine
+   *   received. A mirrored VLAN tag on an untagged carrier is still
+   *   filterable. The inner IP decode writes its own keys, as every tunnel's
+   *   does.
+   * - **Anything the ethertype table claims** - ARP, LLDP, EAPOL - is read
+   *   there, with the inner MACs in the address columns, since a layer-2
+   *   protocol has no addresses of its own; an ethertype nothing reads is
+   *   named as the reference names it, with its bytes as data.
+   *
+   * The bytes are bounded at `end`, so a padded carrier's padding is not read
+   * as the inner frame's, and the capture's own length moves by the same
+   * amount so a whole frame is not read as a cut one. Null when there is not a
+   * whole Ethernet header; each caller reports that in its own words.
+   */
+  const decodeMirroredEthernet = (start: number, end: number, carried: NetworkDecode): NetworkDecode | null => {
+    const bytes = end >= rawBytes.length ? rawBytes : rawBytes.subarray(0, end);
+    const innerContext: NetworkContext = { ...context, origLen: Math.max(0, origLen - (rawBytes.length - bytes.length)) };
+    const link = dissectEmbeddedEthernet(bytes, start, bytes.length);
+    if (link === null || link.truncated || link.srcMac === undefined || link.dstMac === undefined) return null;
+    if (!context.quoted && context.l3Tracker !== undefined && link.layers.length > 0) {
+      link.layers[0].fields.push({
+        name: '[Stream index]', value: context.l3Tracker.ethStream(link.srcMac, link.dstMac, tsUs).index,
+        generated: true, abbrev: 'eth.stream',
+      });
+    }
+    layers.push(...link.layers);
+    for (const [key, value] of Object.entries(link.fields)) if (!(key in filterFields)) filterFields[key] = value;
+    const inner: NetworkDecode = { ...carried, transportTokens: [...carried.transportTokens, 'eth'] };
+
+    if (link.etherType === 0x0800 || link.etherType === 0x86dd) {
+      return decodeNetworkLayer(bytes, link.l3Offset, link.etherType, layers, filterFields, inner, innerContext);
+    }
+    const byMac = { srcIp: resolveMacName(link.srcMac), dstIp: resolveMacName(link.dstMac) };
+    const entry = findEthertype(link.etherType);
+    const leaf = entry !== null ? entry.dissect(bytes, link.l3Offset, bytes.length) : null;
+    if (leaf !== null) {
+      layers.push(leaf.layer, ...(leaf.innerLayers ?? []));
+      if (leaf.fields) for (const [key, value] of Object.entries(leaf.fields)) if (!(key in filterFields)) filterFields[key] = value;
+      return {
+        ...inner, ...byMac,
+        proto: leaf.protocolLabel === 'ARP' ? 'ARP' : carried.proto,
+        protocolLabel: leaf.protocolLabel,
+        info: leaf.info,
+        transportTokens: [...inner.transportTokens, entry!.token],
+      };
+    }
+    const length = Math.max(0, bytes.length - link.l3Offset);
+    if (link.llcOffset !== undefined && link.etherType <= 1500) {
+      return { ...inner, ...byMac, protocolLabel: 'LLC', info: `LLC frame, ${length} byte${length === 1 ? '' : 's'}` };
+    }
+    if (length > 0) layers.push(dataLayer(bytes.subarray(link.l3Offset)));
+    return {
+      ...inner, ...byMac,
+      protocolLabel: labelForEtherType(link.etherType) ?? `0x${link.etherType.toString(16).padStart(4, '0')}`,
+      info: 'Ethernet II',
+    };
+  };
+
+  /**
    * ERSPAN: another switch port's frames, mirrored to this machine in GRE
    * (`dissectors/erspan.ts`), and looked THROUGH as GRE and VXLAN are - the
    * reference reports the mirrored frame in every column.
@@ -399,55 +467,13 @@ export function decodeNetworkLayer(
       return named('ERSPAN', 'ERSPAN:');
     }
 
-    const link = dissectEmbeddedEthernet(rawBytes, erspan.payloadStart, end);
-    const withEth = [...through.transportTokens, 'eth'];
-    if (link === null || link.srcMac === undefined || link.dstMac === undefined) {
-      erspan.layer.fields.push({
-        name: '[Malformed Packet: Ethernet]', value: '', generated: true,
-        expertInfo: { category: 'Broken', message: 'Malformed Packet (Exception occurred)' },
-      });
-      return named('Ethernet', 'ERSPAN:[Malformed Packet]', withEth);
-    }
-    if (!context.quoted && context.l3Tracker !== undefined && link.layers.length > 0) {
-      link.layers[0].fields.push({
-        name: '[Stream index]', value: context.l3Tracker.ethStream(link.srcMac, link.dstMac, tsUs).index,
-        generated: true, abbrev: 'eth.stream',
-      });
-    }
-    layers.push(...link.layers);
-    const inner: NetworkDecode = { ...through, transportTokens: withEth };
-
-    if (link.etherType === 0x0800 || link.etherType === 0x86dd) {
-      return decodeNetworkLayer(rawBytes, link.l3Offset, link.etherType, layers, filterFields, inner, context);
-    }
-    // A layer-2 protocol has no addresses of its own, so the columns show the
-    // mirrored frame's MACs - which is what VXLAN's inner ARP does too.
-    const macs = { srcIp: resolveMacName(link.srcMac), dstIp: resolveMacName(link.dstMac) };
-    const entry = findEthertype(link.etherType);
-    const l2 = entry !== null ? entry.dissect(rawBytes, link.l3Offset, end) : null;
-    if (l2 !== null) {
-      layers.push(l2.layer, ...(l2.innerLayers ?? []));
-      return {
-        ...inner, ...macs,
-        proto: l2.protocolLabel === 'ARP' ? 'ARP' : 'TCP',
-        protocolLabel: l2.protocolLabel,
-        info: l2.info,
-      };
-    }
-    // Named from its ethertype, in the words the outer frame's fallback uses
-    // (`pcapParser.ts`).
-    const isLlc = link.llcOffset !== undefined && link.etherType <= 1500;
-    const known = labelForEtherType(link.etherType);
-    const hex = `0x${link.etherType.toString(16).padStart(4, '0')}`;
-    const length = Math.max(0, end - link.l3Offset);
-    return {
-      ...inner, ...macs,
-      proto: 'TCP',
-      protocolLabel: known ?? (isLlc ? 'LLC' : hex),
-      info: isLlc
-        ? `LLC frame, ${length} byte${length === 1 ? '' : 's'}`
-        : known ? `${known} (${hex}), ${length} byte${length === 1 ? '' : 's'}` : `Ethernet II, unhandled ethertype ${hex}`,
-    };
+    const inner = decodeMirroredEthernet(erspan.payloadStart, end, { ...through, proto: 'GRE' });
+    if (inner !== null) return inner;
+    erspan.layer.fields.push({
+      name: '[Malformed Packet: Ethernet]', value: '', generated: true,
+      expertInfo: { category: 'Broken', message: 'Malformed Packet (Exception occurred)' },
+    });
+    return named('Ethernet', 'ERSPAN:[Malformed Packet]', [...through.transportTokens, 'eth']);
   };
 
   /**
@@ -500,147 +526,33 @@ export function decodeNetworkLayer(
   };
 
   /**
-   * VXLAN, which differs from GRE in where the recursion lands.
-   *
-   * GRE's payload is a network packet, so `innerNetworkStart` hands an offset
-   * and an ethertype straight to `decodeNetworkLayer`. VXLAN's payload is a
-   * whole Ethernet FRAME, so its own header has to be read first and then the
-   * ethertype dispatched - and that dispatch lives in `decodeRawEthernetPacket`
-   * rather than here, because until now no tunnel needed it. Rather than lift
-   * the whole chain out for one caller, the two cases that occur inside an
-   * overlay are handled: IP recurses exactly as GRE does, and ARP goes to the
-   * same `dissectArp` the outer frame would use.
-   *
-   * ARP is the case that makes this a layer-2 tunnel rather than a layer-3 one.
-   * It carries no addresses this column can show, so the reference reports the
-   * inner MACs - and `pcapParser` has already filled those columns with the
-   * OUTER pair, which is why they are overwritten here and nowhere else.
-   */
-  const decodeVxlanTunnel = (payloadStart: number, payloadEnd: number): NetworkDecode | null => {
-    const header = readVxlanHeader(rawBytes, payloadStart, payloadEnd);
-    if (header === null) return null;
-    const inner = readInnerEthernet(rawBytes, payloadStart + VXLAN_HEADER_LENGTH, payloadEnd);
-    if (inner === null) return null;
-    layers.push(header.layer);
-    layers.push(inner.layer);
-    Object.assign(filterFields, header.fields);
-    const carried: NetworkDecode = {
-      srcIp, dstIp, proto, protocolLabel, info, status, analysisFlags, srcPort, dstPort,
-      streamId, icmpMatchedRequestFrameId, infoPatches, resolvedNames, transportLayerIndex,
-      extensionTokens, transportTokens: [...transportTokens, 'vxlan', 'eth'],
-    };
-
-    if (inner.etherType === 0x0800 || inner.etherType === 0x86dd) {
-      return decodeNetworkLayer(
-        rawBytes, inner.l3Offset, inner.etherType, layers, filterFields, carried, context);
-    }
-
-    if (inner.etherType === 0x0806) {
-      const arp = dissectArp(rawBytes, inner.l3Offset);
-      if (arp === null) return null;
-      layers.push(arp.layer);
-      Object.assign(filterFields, arp.fields);
-      return {
-        ...carried,
-        // The inner pair, resolved the way the outer pair is - which is what
-        // turns ff:ff:ff:ff:ff:ff into `Broadcast`.
-        srcIp: resolveMacName(inner.srcMac),
-        dstIp: resolveMacName(inner.dstMac),
-        proto: 'ARP',
-        protocolLabel: arp.protocolLabel,
-        info: arp.info,
-        transportTokens: [...carried.transportTokens, 'arp'],
-      };
-    }
-
-    // Anything else inside an overlay is not something this build reads, and
-    // the tunnel is what it can honestly report.
-    return {
-      ...carried,
-      protocolLabel: 'VxLAN',
-      info: `Virtual eXtensible Local Area Network, VNI: ${header.vni}`,
-    };
-  };
-
-  /**
-   * A mirrored frame a datagram carries for somebody else - TZSP's, from a
-   * router's packet sniffer - looked THROUGH as VXLAN's is, after the UDP
-   * layer that carried it rather than in its place.
-   *
-   * Three things differ from VXLAN, each because TZSP mirrors arbitrary
-   * traffic rather than an overlay's:
-   *
-   * - **The inner Ethernet header is the outer frame's own decoder**
-   *   (`dissectLinkLayer`), run on the inner bytes and moved to where they
-   *   sit, so the inner header carries the same rows and abbrevs as any
-   *   frame's - VLAN tags included, which a mirror port forwards.
-   * - **Anything the ethertype table claims** - ARP, LLDP, EAPOL - is read
-   *   there, with the inner MACs in the address columns as the outer frame
-   *   would have them; an ethertype nothing reads is the reference's `0x....`
-   *   and `Ethernet II`.
-   * - **The inner frame's field bag only adds**: an outer key keeps its
-   *   value, because one key holds one value and the outer `eth.src` is the
-   *   frame this machine received. The inner IP decode writes its own keys
-   *   as every tunnel's does.
-   *
-   * The bytes are bounded at the datagram's end, so a padded outer frame's
-   * padding is not read as the inner frame's, and the capture's own length is
-   * moved by the same amount so a whole frame is not read as a cut one.
+   * A frame a datagram carries for somebody else - TZSP's from a router's
+   * sniffer, VXLAN's across an overlay - read after the UDP layer that
+   * carried it rather than in its place, as the reference draws it. An
+   * Ethernet frame goes to `decodeMirroredEthernet`; TZSP's raw-IP
+   * encapsulation straight to the network layer.
    */
   const decodeEmbeddedFrame = (
     embedded: { offset: number; end: number; kind: 'ethernet' | 'ip' },
   ): NetworkDecode | null => {
-    const bytes = embedded.end >= rawBytes.length ? rawBytes : rawBytes.subarray(0, embedded.end);
-    const innerContext: NetworkContext = { ...context, origLen: Math.max(0, origLen - (rawBytes.length - bytes.length)) };
     const carried: NetworkDecode = {
       srcIp, dstIp, proto, protocolLabel, info, status, analysisFlags, srcPort, dstPort,
       streamId, icmpMatchedRequestFrameId, infoPatches, resolvedNames, transportLayerIndex,
       extensionTokens, transportTokens,
     };
     if (embedded.kind === 'ip') {
+      const bytes = embedded.end >= rawBytes.length ? rawBytes : rawBytes.subarray(0, embedded.end);
+      const innerContext: NetworkContext = { ...context, origLen: Math.max(0, origLen - (rawBytes.length - bytes.length)) };
       const version = embedded.offset < bytes.length ? bytes[embedded.offset] >> 4 : 0;
       if (version !== 4 && version !== 6) return null;
       layers.push({ name: 'Raw packet data', summary: 'Raw packet data', fields: [] });
       return decodeNetworkLayer(
         bytes, embedded.offset, version === 4 ? 0x0800 : 0x86dd, layers, filterFields, carried, innerContext);
     }
-
-    const link = dissectLinkLayer(bytes.subarray(embedded.offset), LINKTYPE.ETHERNET);
-    if (link.truncated) {
-      layers[layers.length - 1]?.fields.push(malformedRow('Ethernet'));
-      return { ...carried, protocolLabel: 'Ethernet', info: `${info}[Malformed Packet]` };
-    }
-    for (const layer of link.layers) {
-      shiftByteRanges(layer, embedded.offset);
-      layers.push(layer);
-    }
-    for (const [key, value] of Object.entries(link.fields)) if (!(key in filterFields)) filterFields[key] = value;
-    const l3 = embedded.offset + link.l3Offset;
-    if (link.etherType === 0x0800 || link.etherType === 0x86dd) {
-      return decodeNetworkLayer(bytes, l3, link.etherType, layers, filterFields, carried, innerContext);
-    }
-    const byMac = {
-      srcIp: link.srcMac !== undefined ? resolveMacName(link.srcMac) : srcIp,
-      dstIp: link.dstMac !== undefined ? resolveMacName(link.dstMac) : dstIp,
-    };
-    const entry = findEthertype(link.etherType);
-    const leaf = entry?.dissect(bytes, l3, bytes.length) ?? null;
-    if (leaf !== null) {
-      layers.push(leaf.layer, ...(leaf.innerLayers ?? []));
-      if (leaf.fields) for (const [key, value] of Object.entries(leaf.fields)) if (!(key in filterFields)) filterFields[key] = value;
-      return {
-        ...carried, ...byMac,
-        proto: leaf.protocolLabel === 'ARP' ? 'ARP' : proto,
-        protocolLabel: leaf.protocolLabel,
-        info: leaf.info,
-      };
-    }
-    if (l3 < bytes.length) layers.push(dataLayer(bytes.subarray(l3)));
-    return {
-      ...carried, ...byMac,
-      protocolLabel: `0x${link.etherType.toString(16).padStart(4, '0')}`,
-      info: 'Ethernet II',
-    };
+    const inner = decodeMirroredEthernet(embedded.offset, embedded.end, carried);
+    if (inner !== null) return inner;
+    layers[layers.length - 1]?.fields.push(malformedRow('Ethernet'));
+    return { ...carried, protocolLabel: 'Ethernet', info: `${info}[Malformed Packet]` };
   };
 
   if (currentEtherType === 0x0800 && rawBytes.length >= l3Offset + 20) {
@@ -899,17 +811,6 @@ export function decodeNetworkLayer(
       if (tunnelled) return tunnelled;
     }
 
-    // Port-gated, and read here rather than in `udpDispatch.ts` for the same
-    // reason GRE is read here: a tunnel decides the ADDRESS columns, and this
-    // is the function that owns them. A subdissector returning up through the
-    // transport result could only ever change the label.
-    if (ipProtocolNum === 17 && !isFragment && rawBytes.length >= transportOffset + 8
-      && isVxlanPort((rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1],
-        (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3])) {
-      const tunnelled = decodeVxlanTunnel(
-        transportOffset + 8, Math.min(rawBytes.length, l3Offset + ipTotalLen));
-      if (tunnelled) return tunnelled;
-    }
 
     const transport = reassembled
       // The whole datagram, dissected from offset 0 of its own buffer. The
@@ -1173,15 +1074,6 @@ export function decodeNetworkLayer(
       && !(chain?.stopsHere ?? false)) {
       const tunnelled = decodeGreTunnel(
         transportOffset, Math.min(rawBytes.length, transportOffset + transportPayloadLen));
-      if (tunnelled) return tunnelled;
-    }
-
-    if (effectiveNextHeader === 17 && !isV6Fragment && !isMalformedJumbo
-      && !(chain?.stopsHere ?? false) && rawBytes.length >= transportOffset + 8
-      && isVxlanPort((rawBytes[transportOffset] << 8) | rawBytes[transportOffset + 1],
-        (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3])) {
-      const tunnelled = decodeVxlanTunnel(transportOffset + 8,
-        Math.min(rawBytes.length, transportOffset + transportPayloadLen));
       if (tunnelled) return tunnelled;
     }
 
@@ -1508,17 +1400,6 @@ function ipv6TrafficClassFields(rawBytes: Uint8Array, l3Offset: number): Protoco
  * this with a second data source tab; the honest answer with one hex view is
  * to say nothing rather than to point somewhere wrong.
  */
-/** Moves every byte range in a layer by `by`: a layer read from a slice, put back where the slice sits. */
-function shiftByteRanges(layer: ProtocolLayer, by: number): void {
-  if (layer.rawBytesRange) layer.rawBytesRange = [layer.rawBytesRange[0] + by, layer.rawBytesRange[1] + by];
-  const visit = (fields: ProtocolField[]) => {
-    for (const field of fields) {
-      if (field.rawBytesRange) field.rawBytesRange = [field.rawBytesRange[0] + by, field.rawBytesRange[1] + by];
-      if (field.children) visit(field.children);
-    }
-  };
-  visit(layer.fields);
-}
 
 function stripByteRanges(layer: ProtocolLayer): void {
   delete layer.rawBytesRange;

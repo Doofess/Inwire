@@ -44,8 +44,6 @@
  *    a frame somebody needs to see.
  */
 import type { ProtocolLayer, ProtocolField } from '../../types/packet';
-import { formatMac } from '../addressFormat';
-import { describeEtherType, macAddressFields } from './linkLayer';
 
 /**
  * The ports that carry RFC 7348 VXLAN.
@@ -59,9 +57,8 @@ export function isVxlanPort(srcPort: number, dstPort: number): boolean {
   return VXLAN_PORTS.has(dstPort) || VXLAN_PORTS.has(srcPort);
 }
 
-/** The fixed VXLAN header, and the inner Ethernet frame's own header. */
+/** The fixed VXLAN header. */
 export const VXLAN_HEADER_LENGTH = 8;
-const ETHERNET_HEADER_LENGTH = 14;
 
 export interface VxlanHeader {
   vni: number;
@@ -70,8 +67,17 @@ export interface VxlanHeader {
   fields: Record<string, string | number>;
 }
 
+/** The four flags the reference names, by bit, in its words and its order. */
+const FLAG_NAMES: readonly [number, string][] = [
+  [0x8000, 'GBP Extension'], [0x0800, 'VXLAN Network ID (VNI)'], [0x0040, "Don't Learn"], [0x0008, 'Policy Applied'],
+];
+/** Every bit of the flags word that is none of the four. */
+const FLAGS_RESERVED = 0x77b7;
+
 /**
- * The eight-byte header: flags, three reserved, a 24-bit VNI, one reserved.
+ * The eight-byte header as the reference reads it: a 16-bit flags word (RFC
+ * 7348's I flag, and the Group Policy extension's G, D and A), the Group
+ * Policy ID, the 24-bit VNI, and a reserved byte.
  *
  * Returns null only when the bytes are not there. A header whose reserved bits
  * are set is still read - the reference reads it, and a capture that hid a
@@ -81,100 +87,42 @@ export function readVxlanHeader(
   bytes: Uint8Array, start: number, end: number,
 ): VxlanHeader | null {
   if (start + VXLAN_HEADER_LENGTH > end) return null;
-  const flags = bytes[start];
+  const flags = (bytes[start] << 8) | bytes[start + 1];
+  const gbp = (bytes[start + 2] << 8) | bytes[start + 3];
   const vni = (bytes[start + 4] << 16) | (bytes[start + 5] << 8) | bytes[start + 6];
-  const vniValid = (flags & 0x08) !== 0;
+  const set = (bit: number) => (flags & bit) !== 0;
+  const hex4 = (n: number) => `0x${n.toString(16).padStart(4, '0')}`;
+  const named = FLAG_NAMES.filter(([bit]) => set(bit)).map(([, name]) => name);
+  const flagRange: [number, number] = [start, start + 1];
 
   const rows: ProtocolField[] = [
     {
       name: 'Flags',
-      value: `0x${flags.toString(16).padStart(2, '0')}`,
+      value: [hex4(flags), ...named].join(', '),
       abbrev: 'vxlan.flags',
-      rawBytesRange: [start, start],
-      children: [{
-        name: vniValid ? 'VXLAN Network ID (VNI): Set' : 'VXLAN Network ID (VNI): Not set',
-        value: vniValid ? '1' : '0',
-        abbrev: 'vxlan.flag_i',
-      }],
+      rawBytesRange: flagRange,
+      children: [
+        { name: 'GBP Extension', value: set(0x8000) ? 'Defined' : 'Not defined', abbrev: 'vxlan.flag_g', rawBytesRange: flagRange },
+        { name: 'VXLAN Network ID (VNI)', value: set(0x0800), abbrev: 'vxlan.flag_i', rawBytesRange: flagRange },
+        { name: "Don't Learn", value: set(0x0040), abbrev: 'vxlan.flag_d', rawBytesRange: flagRange },
+        { name: 'Policy Applied', value: set(0x0008), abbrev: 'vxlan.flag_a', rawBytesRange: flagRange },
+        { name: 'Reserved(R)', value: hex4(flags & FLAGS_RESERVED), abbrev: 'vxlan.flags_reserved', rawBytesRange: flagRange },
+      ],
     },
-    {
-      name: 'VXLAN Network Identifier (VNI)',
-      value: String(vni),
-      abbrev: 'vxlan.vni',
-      rawBytesRange: [start + 4, start + 6],
-    },
+    { name: 'Group Policy ID', value: String(gbp), abbrev: 'vxlan.gbp', rawBytesRange: [start + 2, start + 3] },
+    { name: 'VXLAN Network Identifier (VNI)', value: String(vni), abbrev: 'vxlan.vni', rawBytesRange: [start + 4, start + 6] },
+    { name: 'Reserved', value: String(bytes[start + 7]), abbrev: 'vxlan.reserved8', rawBytesRange: [start + 7, start + 7] },
   ];
 
   return {
     vni,
     flags,
-    fields: { 'vxlan.vni': vni, 'vxlan.flags': flags, 'vxlan.flag_i': vniValid ? 1 : 0 },
+    fields: { 'vxlan.vni': vni, 'vxlan.flags': flags, 'vxlan.flag_i': set(0x0800) ? 1 : 0 },
     layer: {
       name: 'Virtual eXtensible Local Area Network',
-      summary: `Virtual eXtensible Local Area Network, VNI: ${vni}`,
+      summary: 'Virtual eXtensible Local Area Network',
+      rawBytesRange: [start, start + VXLAN_HEADER_LENGTH - 1],
       fields: rows,
-    },
-  };
-}
-
-export interface InnerEthernet {
-  srcMac: string;
-  dstMac: string;
-  etherType: number;
-  /** Where the inner network header starts. */
-  l3Offset: number;
-  layer: ProtocolLayer;
-  fields: Record<string, string | number>;
-}
-
-/**
- * The encapsulated Ethernet header.
- *
- * Ethernet II only, and that is the format rather than a shortcut: RFC 7348
- * defines the VXLAN payload as an Ethernet frame, and an 802.3 length field
- * inside an overlay is not a thing that occurs. `eth.src`/`eth.dst` are NOT
- * written into `filterFields` from here - the outer frame already claimed those
- * keys, and a dense column holds one value per frame, so the inner pair would
- * either overwrite the outer or be dropped depending on assignment order.
- * Both are wrong; the tree row carries them instead, which is where a reader
- * looking at a tunnel expects to find them.
- */
-export function readInnerEthernet(
-  bytes: Uint8Array, start: number, end: number,
-): InnerEthernet | null {
-  if (start + ETHERNET_HEADER_LENGTH > end) return null;
-  const dstMac = formatMac(bytes.slice(start, start + 6));
-  const srcMac = formatMac(bytes.slice(start + 6, start + 12));
-  const etherType = (bytes[start + 12] << 8) | bytes[start + 13];
-
-  return {
-    srcMac,
-    dstMac,
-    etherType,
-    l3Offset: start + ETHERNET_HEADER_LENGTH,
-    fields: {},
-    layer: {
-      name: 'Ethernet II',
-      summary: `Ethernet II, Src: ${srcMac}, Dst: ${dstMac}`,
-      fields: [
-        {
-          name: 'Destination',
-          value: dstMac,
-          rawBytesRange: [start, start + 5],
-          children: macAddressFields(dstMac, start, true),
-        },
-        {
-          name: 'Source',
-          value: srcMac,
-          rawBytesRange: [start + 6, start + 11],
-          children: macAddressFields(srcMac, start + 6),
-        },
-        {
-          name: 'Type',
-          value: `${describeEtherType(etherType)} (0x${etherType.toString(16).padStart(4, '0')})`,
-          rawBytesRange: [start + 12, start + 13],
-        },
-      ],
     },
   };
 }

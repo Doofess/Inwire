@@ -178,6 +178,12 @@ const BASE_FIELDS: readonly FieldDef[] = [
   uint('vxlan.vni', 'VXLAN Network Identifier', 'vxlan'),
   uint('vxlan.flags', 'Flags', 'vxlan'),
   uint('vxlan.flag_i', 'VNI Valid', 'vxlan'),
+  treeOnly(str('vxlan.flag_g', 'GBP Extension', 'vxlan')),
+  treeOnly(bool('vxlan.flag_d', "Don't Learn", 'vxlan')),
+  treeOnly(bool('vxlan.flag_a', 'Policy Applied', 'vxlan')),
+  treeOnly(uint('vxlan.flags_reserved', 'Reserved(R)', 'vxlan')),
+  treeOnly(uint('vxlan.gbp', 'Group Policy ID', 'vxlan')),
+  treeOnly(uint('vxlan.reserved8', 'Reserved', 'vxlan')),
   // --- TZSP ----------------------------------------------------------------------
   // A router's mirrored packet: like VXLAN, the columns report the frame
   // inside it, so the header's three keys are what it adds to the bag. The

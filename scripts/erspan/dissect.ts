@@ -91,7 +91,7 @@ const cases: OracleCase[] = [
   {
     label: 'a mirrored frame of an ethertype nobody reads',
     frame: erspanFrame(gre({ protocol: 0x88be, seq: 70 }), [...typeII({ session: 2 }), ...mirrored(0x88b5, [1, 2, 3, 4, 5, 6])]),
-    notCompared: 'its Info is the words an outer frame of an unhandled ethertype gets here, which the reference words differently - the same for both',
+    notCompared: 'the reference puts an unread ethertype\'s name in Info ("Local Experimental Ethertype 1") from a table far longer than this build\'s, and "Ethernet II" only when it has no name; this build has none for 0x88b5',
   },
 ];
 
@@ -113,8 +113,11 @@ check('mirrored ARP shows the mirrored MACs', arp?.source === '02:00:00:00:00:0a
 const unknown = at('a mirrored frame of an ethertype nobody reads');
 check('an unread ethertype is named from its number, as an outer frame is', unknown?.protocolLabel === '0x88b5', unknown?.protocolLabel);
 const tagged = at('type II mirroring a VLAN-tagged frame');
-check('a mirrored VLAN tag is drawn, and the outer frame\'s bag does not take it',
-  tagged?.layers.some((l) => l.name === '802.1Q Virtual LAN') === true && tagged?.fields?.['vlan.id'] === undefined);
+// The carrier is untagged, so the mirrored tag is the frame's only one and
+// filters as Wireshark's `vlan.id` does; an outer key would keep its value.
+check('a mirrored VLAN tag is drawn, and filters when the carrier has none',
+  tagged?.layers.some((l) => l.name === '802.1Q Virtual LAN') === true && tagged?.fields?.['vlan.id'] !== undefined,
+  String(tagged?.fields?.['vlan.id']));
 const inner = tagged?.layers.filter((l) => l.name === 'Ethernet II')[1];
 check('the mirrored Ethernet header\'s bytes are where they are in the frame',
   inner?.rawBytesRange?.[0] === 14 + 20 + 8 + 8, String(inner?.rawBytesRange));

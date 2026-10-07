@@ -35,6 +35,7 @@ import { dissectNtp, dissectStun } from './udpApps';
 import { dataLayer } from './mediaType';
 import { findUdpPort } from './dispatch';
 import { dissectCflow, isCflowPort } from './cflow';
+import { VXLAN_HEADER_LENGTH, isVxlanPort, readVxlanHeader } from './vxlan';
 import { dissectTzsp, isTzspPort, TZSP_ENCAP_ETHERNET, TZSP_ENCAP_RAW_IP } from './tzsp';
 import { MemoryTemplateStore } from '../flow/flowExport';
 import { dissectRtp, looksLikeRtp, rtpHeader } from './rtp';
@@ -139,6 +140,20 @@ export function dissectUdpTransport(
       extraLayers.push(dhcp.layer);
       Object.assign(dhcpFields, dhcp.fields);
     }
+  } else if (isVxlanPort(srcPort, dstPort) && readVxlanHeader(rawBytes, udpPayloadStart, Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen)) !== null) {
+    // An overlay's Ethernet frame, drawn after the UDP layer that carried it,
+    // as the reference draws it; the frame itself is the network layer's
+    // (`decodeMirroredEthernet`), which owns the columns it decides.
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    const vxlan = readVxlanHeader(rawBytes, udpPayloadStart, payloadEnd)!;
+    protocolLabel = 'VXLAN';
+    // The inner frame writes the Info; only a frame too short to have one
+    // leaves it to the malformed note, which is all the reference shows.
+    info = '';
+    extraLayers.push(vxlan.layer);
+    protocolTokens.push('vxlan');
+    Object.assign(appFields, vxlan.fields);
+    embeddedFrame = { offset: udpPayloadStart + VXLAN_HEADER_LENGTH, end: payloadEnd, kind: 'ethernet' };
   } else if (isTzspPort(srcPort, dstPort)) {
     // A router's mirrored packet. The header is read here; the frame inside
     // is dissected through by the network layer, which owns the columns it

@@ -815,6 +815,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Session Initiation Protocol': 'sip',
   'Real-time Transport Control Protocol': 'rtcp',
   'Cisco NetFlow/IPFIX': 'cflow',
+  'Virtual eXtensible Local Area Network': 'vxlan',
   'Tazmen Sniffer Protocol': 'tzsp',
   'Real-Time Transport Protocol': 'rtp',
   'RFC 2833 RTP Event': 'rtpevent',
