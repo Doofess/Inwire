@@ -49,13 +49,25 @@ export const TREE_LINKS: Readonly<Record<string, { layer: string; name: string; 
 };
 
 /** Applies one patch to a packet, in place. */
-export function applyInfoPatch(packet: Packet, patch: InfoPatch): void {
+/**
+ * `owned`: the caller owns this packet's field bag outright - nobody else holds
+ * the object - so the link is written into it rather than into a copy. The
+ * copy is what lets a caller that replaces packets (`{ ...packet }`) leave the
+ * old one exactly as it was; it costs a copy of ~25 keys per patch, and in a
+ * bulk TLS download nearly every segment is patched with the frame its record
+ * finished in, so a caller that needs no copy should not pay for one
+ * (`scripts/perf/profile.ts` charged it 10% of dissection).
+ */
+export function applyInfoPatch(packet: Packet, patch: InfoPatch, owned = false): void {
   if (patch.suffix) packet.info += patch.suffix;
   if (patch.protocolLabel) packet.protocolLabel = patch.protocolLabel;
-  const links: Record<string, number> = { ...patch.links };
-  if (patch.responseInFrame !== undefined) links['dns.response_in'] = patch.responseInFrame;
-  for (const [abbrev, frame] of Object.entries(links)) {
-    packet.fields = { ...(packet.fields ?? {}), [abbrev]: frame };
+  const links: Record<string, number> = patch.responseInFrame === undefined
+    ? (patch.links ?? {})
+    : { ...patch.links, 'dns.response_in': patch.responseInFrame };
+  for (const abbrev in links) {
+    const frame = links[abbrev];
+    if (owned) (packet.fields ??= {})[abbrev] = frame;
+    else packet.fields = { ...(packet.fields ?? {}), [abbrev]: frame };
     const where = TREE_LINKS[abbrev];
     // The outermost layer of that name: an ICMP error quotes an IP header of
     // its own, and the link belongs to the frame's, not the quoted one's.

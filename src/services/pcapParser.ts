@@ -731,7 +731,8 @@ export class PcapService {
         // Frame ids are 1-based positions in the window, so no search is needed.
         for (const patch of infoPatches) {
           const target = held(patch.frameId);
-          if (target) applyInfoPatch(target, patch);
+          // The window's own packets: this pass built them and owns them.
+          if (target) applyInfoPatch(target, patch, true);
           else missedPatches += 1;
         }
       }
