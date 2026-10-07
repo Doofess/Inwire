@@ -37,6 +37,7 @@
  * Pinned in `scripts/smb2/dissect.ts`.
  */
 import type { ProtocolLayer, ProtocolField } from '../../types/packet';
+import { dissectDcerpc, freshDcerpcConversation, looksLikeDcerpc, type DcerpcConversationState, type DcerpcFrame, type DcerpcResult } from './dcerpc';
 
 /** SMB over TCP. 139 is the older NetBIOS session service, which SMB1 used. */
 export const SMB2_PORT = 445;
@@ -96,8 +97,10 @@ const COMMAND_NAMES: Record<number, string> = {
 export const STATUS_NAMES: Record<number, string> = {
   0x00000103: 'STATUS_PENDING',
   0x80000005: 'STATUS_BUFFER_OVERFLOW',
+  0x80000006: 'STATUS_NO_MORE_FILES',
   0xc000000d: 'STATUS_INVALID_PARAMETER',
   0xc0000010: 'STATUS_INVALID_DEVICE_REQUEST',
+  0xc0000011: 'STATUS_END_OF_FILE',
   0xc0000016: 'STATUS_MORE_PROCESSING_REQUIRED',
   0xc0000022: 'STATUS_ACCESS_DENIED',
   0xc0000034: 'STATUS_OBJECT_NAME_NOT_FOUND',
@@ -117,7 +120,9 @@ export const STATUS_NAMES: Record<number, string> = {
 const FSCTL_NAMES: Record<number, string> = {
   0x00060194: 'FSCTL_DFS_GET_REFERRALS',
   0x00090000: 'FSCTL_REQUEST_OPLOCK_LEVEL_1',
+  0x00090078: 'FSCTL_IS_VOLUME_DIRTY',
   0x0011400c: 'FSCTL_PIPE_PEEK',
+  0x0011c017: 'FSCTL_PIPE_TRANSCEIVE',
   0x001401d4: 'FSCTL_LMR_REQUEST_RESILIENCY',
   0x00140204: 'FSCTL_VALIDATE_NEGOTIATE_INFO',
 };
@@ -173,11 +178,47 @@ const MAX_TRACKED_MESSAGES = 512;
 export interface Smb2ConversationState {
   /** File name by the message id of the Create request that asked for it. */
   createdFiles: Map<number, string>;
+  /** Share path by the message id of the Tree Connect that asked for it, then by tree id. */
+  treeRequests: Map<number, string>;
+  trees: Map<number, string>;
+  /** An open file's name by its FileId, from the Create response that opened it to the Close. */
+  files: Map<string, string>;
+  /**
+   * A request's file, by message id, for its response - which carries no
+   * FileId of its own - and a Find's whole detail, which its response repeats.
+   */
+  requests: Map<number, { fid: string; name?: string; detail?: string }>;
+  /** DCE/RPC on each named pipe, by FileId. */
+  pipes: Map<string, DcerpcConversationState>;
 }
 
 export function freshSmb2Conversation(): Smb2ConversationState {
-  return { createdFiles: new Map() };
+  return { createdFiles: new Map(), treeRequests: new Map(), trees: new Map(), files: new Map(), requests: new Map(), pipes: new Map() };
 }
+
+/** Bounded like `createdFiles`: drop the oldest past the limit. */
+function bounded<K, V>(map: Map<K, V>, key: K, value: V): void {
+  map.set(key, value);
+  if (map.size > MAX_TRACKED_MESSAGES) {
+    const oldest = map.keys().next();
+    if (!oldest.done) map.delete(oldest.value);
+  }
+}
+
+/** A FileId as a key: its sixteen bytes in hex. */
+const fileIdAt = (b: Uint8Array, at: number): string =>
+  Array.from(b.subarray(at, at + 16), (x) => x.toString(16).padStart(2, '0')).join('');
+
+/**
+ * Where each request carries its FileId, from the start of its body - for
+ * the commands whose Info names the file, which the reference appends once it
+ * has seen the Create that opened it. Ioctl carries one too and is never
+ * named; it is here for its pipe.
+ */
+const FILE_ID_AT: Record<number, number> = {
+  0x06: 8, 0x07: 8, 0x08: 16, 0x09: 16, 0x0a: 8, 0x0b: 8, 0x0e: 8, 0x0f: 8, 0x10: 24, 0x11: 16,
+};
+const FSCTL_PIPE_TRANSCEIVE = 0x0011c017;
 
 function rememberFile(state: Smb2ConversationState, messageId: number, name: string): void {
   state.createdFiles.set(messageId, name);
@@ -236,12 +277,18 @@ export interface Smb2Result {
   info: string;
   layer: ProtocolLayer;
   fields: Record<string, string | number>;
+  /** DCE/RPC's layers, when a named pipe carried it - after SMB2's. */
+  innerLayers?: ProtocolLayer[];
+  /** A DCE/RPC request this frame's response answered. */
+  answered?: DcerpcResult['answered'];
 }
 
 interface OneMessage {
   info: string;
   rows: ProtocolField[];
   fields: Record<string, string | number>;
+  /** DCE/RPC carried in a named pipe's data. */
+  rpc?: DcerpcResult;
 }
 
 /**
@@ -251,7 +298,7 @@ interface OneMessage {
  * chain shares one, and `NextCommand` says where the next begins.
  */
 function readMessage(
-  bytes: Uint8Array, start: number, end: number, state: Smb2ConversationState,
+  bytes: Uint8Array, start: number, end: number, state: Smb2ConversationState, frame?: DcerpcFrame,
 ): { message: OneMessage; nextCommand: number } | null {
   if (end - start < HEADER_SIZE) return null;
   if (!hasSmb2Magic(bytes, start)) return null;
@@ -295,6 +342,35 @@ function readMessage(
   // comma before most of them, a bare space before Read/Write's Len, and
   // nothing at all before an Ioctl's function name.
   let detail = '';
+  // The file this message is about, when its Create was seen: a request names
+  // its FileId, a response is matched to its request.
+  const fidAt = FILE_ID_AT[command];
+  let fid: string | undefined;
+  let fileName: string | undefined;
+  const asked = isResponse ? state.requests.get(messageId) : undefined;
+  if (!isResponse && fidAt !== undefined && body + fidAt + 16 <= end) {
+    fid = fileIdAt(bytes, body + fidAt);
+    fileName = state.files.get(fid);
+  } else if (asked !== undefined) {
+    fid = asked.fid;
+    fileName = asked.name;
+  }
+  const fileSuffix = fileName !== undefined && command !== 0x0b ? `, File: ${forColumn(fileName)}` : '';
+  let rpc: DcerpcResult | null = null;
+  /** DCE/RPC in a pipe's data, when the tree is IPC$ - or, with the tree unseen, when it reads as one. */
+  const pipeRpc = (from: number, length: number): void => {
+    if (fid === undefined || length <= 0) return;
+    const tree = state.trees.get(treeId);
+    if (tree !== undefined && !/\\IPC\$$/i.test(tree)) return;
+    const dataEnd = Math.min(end, from + length);
+    if (from < start || !looksLikeDcerpc(bytes, from, dataEnd)) return;
+    let pipe = state.pipes.get(fid);
+    if (pipe === undefined) {
+      pipe = freshDcerpcConversation();
+      bounded(state.pipes, fid, pipe);
+    }
+    rpc = dissectDcerpc(bytes, from, dataEnd, pipe, frame);
+  };
   switch (command) {
     case 0x03: {                                        // Tree Connect
       if (!isResponse && end - body >= 8) {
@@ -303,7 +379,15 @@ function readMessage(
         const tree = utf16(bytes, start + offset, length);
         fields['smb2.tree'] = tree;
         rows.push({ name: 'Tree', value: tree, abbrev: 'smb2.tree' });
+        bounded(state.treeRequests, messageId, tree);
         detail = `, Tree: '${forColumn(tree)}'`;
+      } else if (isResponse) {
+        // The response names the request's tree, as the packet list shows it.
+        const tree = state.treeRequests.get(messageId);
+        if (tree !== undefined) {
+          if (status === 0) bounded(state.trees, treeId, tree);
+          detail = `, Tree: '${forColumn(tree)}'`;
+        }
       }
       break;
     }
@@ -322,6 +406,8 @@ function readMessage(
         const file = state.createdFiles.get(messageId);
         if (file !== undefined) fields['smb2.filename'] = file;
         detail = `, File: ${file === undefined ? '[unknown]' : forColumn(file)}`;
+        // The FileId the server gave it, which every later request names.
+        if (file !== undefined && status === 0 && body + 80 <= end) bounded(state.files, fileIdAt(bytes, body + 64), file);
       }
       break;
     }
@@ -338,6 +424,9 @@ function readMessage(
         // No comma, and no space after the colons - the one detail formatted
         // differently from every other, and only the oracle says so.
         detail = ` Len:${length} Off:${offset}`;
+        if (!isRead) pipeRpc(start + u16(bytes, body + 2), length);
+      } else if (isResponse && command === 0x08 && status === 0 && end - body >= 8) {
+        pipeRpc(start + bytes[body + 2], u32(bytes, body + 4));
       }
       break;
     }
@@ -347,6 +436,10 @@ function readMessage(
         fields['smb2.ioctl.function'] = code;
         rows.push({ name: 'Function', value: nameIoctl(code), abbrev: 'smb2.ioctl.function' });
         detail = ` ${nameIoctl(code)}`;
+        if (code === FSCTL_PIPE_TRANSCEIVE && end - body >= 32) pipeRpc(start + u32(bytes, body + 24), u32(bytes, body + 28));
+      } else if (isResponse && status === 0 && end - body >= 40 && u32(bytes, body + 4) === FSCTL_PIPE_TRANSCEIVE) {
+        fid = fileIdAt(bytes, body + 8);
+        pipeRpc(start + u32(bytes, body + 32), u32(bytes, body + 36));
       }
       break;
     }
@@ -358,8 +451,12 @@ function readMessage(
         const pattern = utf16(bytes, start + offset, length);
         fields['smb2.find.pattern'] = pattern;
         rows.push({ name: 'Search Pattern', value: pattern, abbrev: 'smb2.find.pattern' });
-        detail = `, ${FIND_CLASS_NAMES[infoClass] ?? `(Class:0x${infoClass.toString(16).padStart(2, '0')})`}`
+        // The file goes before the class here, not after the detail.
+        detail = `${fileSuffix}, ${FIND_CLASS_NAMES[infoClass] ?? `(Class:0x${infoClass.toString(16).padStart(2, '0')})`}`
           + `, Pattern: ${forColumn(pattern)}`;
+      } else if (isResponse) {
+        // The request's whole detail, error or not.
+        detail = asked?.detail ?? '';
       }
       break;
     }
@@ -384,10 +481,20 @@ function readMessage(
   const error = isResponse && status !== 0
     ? `, Error: ${STATUS_NAMES[status] ?? `0x${status.toString(16).padStart(8, '0')}`}`
     : '';
+  // The file closes the Info line - on a request, and on a response that
+  // succeeded. Find placed it already; Create names its own.
+  if (command !== 0x0e && command !== 0x05 && (!isResponse || status === 0)) detail += fileSuffix;
+  if (!isResponse && fid !== undefined) {
+    bounded(state.requests, messageId, { fid, ...(fileName !== undefined ? { name: fileName } : {}), ...(command === 0x0e ? { detail } : {}) });
+    // A Close forgets the file: what follows on that FileId is unnamed.
+    if (command === 0x06) state.files.delete(fid);
+  }
+  if (fileName !== undefined) fields['smb2.filename'] = fileName;
   return {
     message: {
       info: `${name} ${isResponse ? 'Response' : 'Request'}${error}${detail}`,
       rows, fields,
+      ...(rpc !== null ? { rpc } : {}),
     },
     nextCommand,
   };
@@ -412,7 +519,7 @@ export function looksLikeSmb2(bytes: Uint8Array, start: number, end: number): bo
  * rather than half-read, the rule DNS-over-TCP and LDAP both follow.
  */
 export function dissectSmb2(
-  bytes: Uint8Array, start: number, end: number, state: Smb2ConversationState,
+  bytes: Uint8Array, start: number, end: number, state: Smb2ConversationState, frame?: DcerpcFrame,
 ): Smb2Result | null {
   const messages: OneMessage[] = [];
   let offset = start;
@@ -426,7 +533,7 @@ export function dissectSmb2(
     // The compound chain inside this NBSS message.
     let pdu = offset + 4;
     for (;;) {
-      const read = readMessage(bytes, pdu, messageEnd, state);
+      const read = readMessage(bytes, pdu, messageEnd, state, frame);
       if (read === null) break;
       messages.push(read.message);
       if (read.nextCommand === 0 || pdu + read.nextCommand >= messageEnd) break;
@@ -445,10 +552,15 @@ export function dissectSmb2(
       value: '', children: message.rows,
     });
   }
+  // DCE/RPC in a pipe takes the columns over, as the reference has it.
+  const rpc = messages.find((m) => m.rpc !== undefined)?.rpc;
+  if (rpc !== undefined) Object.assign(fields, rpc.fields);
   return {
-    protocolLabel: 'SMB2',
-    info: messages.map((m) => m.info).join('; '),
+    protocolLabel: rpc?.protocolLabel ?? 'SMB2',
+    info: rpc?.info ?? messages.map((m) => m.info).join('; '),
     fields,
+    ...(rpc !== undefined ? { innerLayers: rpc.layers } : {}),
+    ...(rpc?.answered !== undefined ? { answered: rpc.answered } : {}),
     layer: {
       name: 'SMB2',
       summary: messages.length === 1

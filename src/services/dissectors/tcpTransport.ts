@@ -480,7 +480,8 @@ export function dissectTcpTransport(
       const state = tcpTracker
         ? tcpTracker.smb2Conversation(srcIp, srcPort, dstIp, dstPort)
         : freshSmb2Conversation();
-      smb2Result = dissectSmb2(rawBytes, tcpPayloadStart, payloadEnd, state);
+      smb2Result = dissectSmb2(rawBytes, tcpPayloadStart, payloadEnd, state,
+        frameId !== undefined && tsUs !== undefined ? { id: frameId, tsUs } : undefined);
     }
   }
 
@@ -678,7 +679,7 @@ export function dissectTcpTransport(
     protocolLabel = 'KRB5';
   } else if (smb2Result) {
     proto = 'SMB2';
-    protocolLabel = 'SMB2';
+    protocolLabel = smb2Result.protocolLabel;
   } else if (bgpResult) {
     proto = 'BGP';
     protocolLabel = 'BGP';
@@ -790,7 +791,8 @@ export function dissectTcpTransport(
       : smb2Result
       // The framing in front of the messages, as the reference draws it - all
       // of a segment's NBSS layers first when it holds several messages.
-      ? [...nbssLayers(rawBytes, tcpPayloadStart, Math.min(rawBytes.length, tcpPayloadStart + payloadLength), true), smb2Result.layer]
+      ? [...nbssLayers(rawBytes, tcpPayloadStart, Math.min(rawBytes.length, tcpPayloadStart + payloadLength), true), smb2Result.layer,
+        ...(smb2Result.innerLayers ?? [])]
       : ldapResult
       ? ldapResult.layers
       : tcpDns
@@ -827,8 +829,9 @@ export function dissectTcpTransport(
     resolvedNames: tcpDns && tcpDns.resolved.length > 0 ? tcpDns.resolved : undefined,
     reassembledFrom,
     labelPatches,
-    ...(dcerpcResult?.answered !== undefined
-      ? { linkPatches: [{ frameId: dcerpcResult.answered.requestFrame, links: { 'dcerpc.response_in': dcerpcResult.answered.responseFrame } }] }
+    ...((dcerpcResult?.answered ?? smb2Result?.answered) !== undefined
+      ? { linkPatches: [((answered) => ({ frameId: answered.requestFrame, links: { 'dcerpc.response_in': answered.responseFrame } }))(
+        (dcerpcResult?.answered ?? smb2Result?.answered)!)] }
       : {}),
     fields: {
       ...(kerberosResult ? kerberosResult.fields : {}),
