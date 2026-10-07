@@ -2,6 +2,11 @@
  * A CPU profile of a real dissection run, by function, descending.
  *
  *   npx tsx scripts/perf/profile.ts [--fixture inwire|bulk] [--top 30] [--trees]
+ *   npx tsx scripts/perf/profile.ts --file some.pcapng
+ *
+ * `--file` profiles any capture instead of a fixture - the one a user saw the
+ * app fall behind on is the one worth asking. Cut it with `editcap -r` first:
+ * the whole file is dissected in memory.
  *
  * **This is the instrument ADR 0011's central finding came from, and it was
  * never committed.** That ADR put one function at *38% of the entire profile*
@@ -76,8 +81,9 @@ function arg(name: string, fallback: string): string {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 
-const fixtureName = arg('fixture', 'inwire');
-const FIXTURE = FIXTURES[fixtureName];
+const fileArg = arg('file', '');
+const fixtureName = fileArg !== '' ? fileArg : arg('fixture', 'inwire');
+const FIXTURE = fileArg !== '' ? fileArg : FIXTURES[fixtureName];
 const TOP = Number(arg('top', '30'));
 const KEEP_TREES = process.argv.includes('--trees');
 
