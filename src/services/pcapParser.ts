@@ -811,6 +811,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'NTLM Secure Service Provider': 'ntlmssp',
   'Border Gateway Protocol': 'bgp',
   'Generic Routing Encapsulation': 'gre',
+  'Encapsulated Remote Switch Packet ANalysis': 'erspan',
   'Session Initiation Protocol': 'sip',
   'Real-time Transport Control Protocol': 'rtcp',
   'Cisco NetFlow/IPFIX': 'cflow',

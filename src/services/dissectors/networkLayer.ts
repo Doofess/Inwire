@@ -33,7 +33,15 @@ import { NO_NEXT_HEADER, walkIpv6Extensions } from './ipv6Ext';
 import { describeIpProtocol } from '../dissect/ipProtocolNames';
 import { dissectPortless, isPortlessProtocol } from './portless';
 import { dissectEsp } from './isakmp';
-import { GRE_PROTOCOL, encapsulatedInfo, innerNetworkStart, readGreHeader } from './gre';
+import {
+  GRE_ERSPAN, GRE_ERSPAN_III, GRE_PROTOCOL, encapsulatedInfo, innerNetworkStart, readGreHeader,
+  type GreHeader,
+} from './gre';
+import { readErspan } from './erspan';
+import { dissectEmbeddedEthernet } from './linkLayer';
+import { findEthertype } from './dispatch';
+import { labelForEtherType } from './l2';
+import { dataLayer } from './mediaType';
 import {
   VXLAN_HEADER_LENGTH, isVxlanPort, readInnerEthernet, readVxlanHeader,
 } from './vxlan';
@@ -341,6 +349,9 @@ export function decodeNetworkLayer(
       streamId, icmpMatchedRequestFrameId, infoPatches, resolvedNames, transportLayerIndex,
       extensionTokens, transportTokens: [...transportTokens, 'gre'],
     };
+    if (header.protocolType === GRE_ERSPAN || header.protocolType === GRE_ERSPAN_III) {
+      return decodeErspan(payloadStart + header.headerLength, payloadEnd, header, carried);
+    }
     const inner = innerNetworkStart(
       rawBytes, payloadStart + header.headerLength, header.protocolType, payloadEnd);
     if (inner === null) {
@@ -348,6 +359,93 @@ export function decodeNetworkLayer(
     }
     return decodeNetworkLayer(
       rawBytes, inner.offset, inner.etherType, layers, filterFields, carried, context);
+  };
+
+  /**
+   * ERSPAN: another switch port's frames, mirrored to this machine in GRE
+   * (`dissectors/erspan.ts`), and looked THROUGH as GRE and VXLAN are - the
+   * reference reports the mirrored frame in every column.
+   *
+   * What differs from VXLAN is that the frame inside is a whole Ethernet frame
+   * with nothing guaranteed about it - VLAN tags, 802.3 lengths, any ethertype
+   * - so it is read by the same link-layer code the outer frame was
+   * (`dissectEmbeddedEthernet`) and handed on as the outer frame is: IP to the
+   * network layer, the registered ethertypes (ARP, LLDP, ...) to their
+   * dissectors, anything else named from its ethertype. Its MACs and VLAN
+   * tags stay in the tree and out of `filterFields`, for VXLAN's reason: the
+   * outer frame claimed those keys first and a key holds one value.
+   *
+   * Its MAC pair is a conversation of its own, so it gets an `eth.stream` as
+   * the reference gives it one.
+   */
+  const decodeErspan = (start: number, end: number, gre: GreHeader, carried: NetworkDecode): NetworkDecode => {
+    const erspan = readErspan(rawBytes, start, end, gre.protocolType, gre.hasSequence);
+    layers.push(erspan.layer);
+    Object.assign(filterFields, erspan.fields);
+    const through: NetworkDecode = { ...carried, transportTokens: [...carried.transportTokens, 'erspan'] };
+    const named = (protocolLabel: string, info: string, tokens = through.transportTokens): NetworkDecode =>
+      ({ ...through, proto: 'GRE', protocolLabel, info, transportTokens: tokens });
+
+    if (erspan.carries === 'malformed') return named('ERSPAN', 'ERSPAN:[Malformed Packet]');
+    if (erspan.carries === 'none') return named('ERSPAN', 'ERSPAN:');
+    if (erspan.carries === 'data') {
+      if (erspan.payloadStart < end) {
+        const data = dataLayer(rawBytes.subarray(erspan.payloadStart, end));
+        data.rawBytesRange = [erspan.payloadStart, end - 1];
+        layers.push(data);
+      }
+      return named('ERSPAN', 'ERSPAN:');
+    }
+
+    const link = dissectEmbeddedEthernet(rawBytes, erspan.payloadStart, end);
+    const withEth = [...through.transportTokens, 'eth'];
+    if (link === null || link.srcMac === undefined || link.dstMac === undefined) {
+      erspan.layer.fields.push({
+        name: '[Malformed Packet: Ethernet]', value: '', generated: true,
+        expertInfo: { category: 'Broken', message: 'Malformed Packet (Exception occurred)' },
+      });
+      return named('Ethernet', 'ERSPAN:[Malformed Packet]', withEth);
+    }
+    if (!context.quoted && context.l3Tracker !== undefined && link.layers.length > 0) {
+      link.layers[0].fields.push({
+        name: '[Stream index]', value: context.l3Tracker.ethStream(link.srcMac, link.dstMac, tsUs).index,
+        generated: true, abbrev: 'eth.stream',
+      });
+    }
+    layers.push(...link.layers);
+    const inner: NetworkDecode = { ...through, transportTokens: withEth };
+
+    if (link.etherType === 0x0800 || link.etherType === 0x86dd) {
+      return decodeNetworkLayer(rawBytes, link.l3Offset, link.etherType, layers, filterFields, inner, context);
+    }
+    // A layer-2 protocol has no addresses of its own, so the columns show the
+    // mirrored frame's MACs - which is what VXLAN's inner ARP does too.
+    const macs = { srcIp: resolveMacName(link.srcMac), dstIp: resolveMacName(link.dstMac) };
+    const entry = findEthertype(link.etherType);
+    const l2 = entry !== null ? entry.dissect(rawBytes, link.l3Offset, end) : null;
+    if (l2 !== null) {
+      layers.push(l2.layer, ...(l2.innerLayers ?? []));
+      return {
+        ...inner, ...macs,
+        proto: l2.protocolLabel === 'ARP' ? 'ARP' : 'TCP',
+        protocolLabel: l2.protocolLabel,
+        info: l2.info,
+      };
+    }
+    // Named from its ethertype, in the words the outer frame's fallback uses
+    // (`pcapParser.ts`).
+    const isLlc = link.llcOffset !== undefined && link.etherType <= 1500;
+    const known = labelForEtherType(link.etherType);
+    const hex = `0x${link.etherType.toString(16).padStart(4, '0')}`;
+    const length = Math.max(0, end - link.l3Offset);
+    return {
+      ...inner, ...macs,
+      proto: 'TCP',
+      protocolLabel: known ?? (isLlc ? 'LLC' : hex),
+      info: isLlc
+        ? `LLC frame, ${length} byte${length === 1 ? '' : 's'}`
+        : known ? `${known} (${hex}), ${length} byte${length === 1 ? '' : 's'}` : `Ethernet II, unhandled ethertype ${hex}`,
+    };
   };
 
   /**
