@@ -110,7 +110,7 @@ export const LAYERS = [
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
   // what a user types, and it has to be the one they already know.
   'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp',
+  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'smb2', 'kerberos', 'ssh', 'http', 'http2', 'http3',
   // **What a message BODY is**, which the reference makes four protocols of
   // rather than fields on HTTP - so a JSON API response's chain really does
@@ -157,7 +157,7 @@ const bool = (abbrev: string, label: string, layer: LayerToken): FieldDef =>
  */
 const treeOnly = (def: FieldDef): FieldDef => ({ ...def, treeOnly: true });
 
-export const FIELDS: readonly FieldDef[] = [
+const BASE_FIELDS: readonly FieldDef[] = [
   // --- VXLAN --------------------------------------------------------------------
   // A layer-2 tunnel: the columns report the frame INSIDE it, so these are the
   // only three keys the outer header contributes. `eth.src`/`eth.dst` are
@@ -1469,6 +1469,7 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(str('tls.change_cipher_spec', 'Change Cipher Spec Message', 'tls')),
   treeOnly(str('tls.alert_message', 'Alert Message', 'tls')),
   treeOnly(uint('tls.handshake.extensions_reneg_info_len', 'Renegotiation info extension length', 'tls')),
+  treeOnly(str('tls.handshake.extensions_reneg_info', 'Renegotiation info', 'tls')),
   treeOnly(str('tls.handshake.extensions.session_ticket', 'Session Ticket', 'tls')),
   // status_request (OCSP stapling) and its v2. The client asks the server to
   // staple a revocation response to its certificate, which is why both lists
@@ -2337,6 +2338,65 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.tid_count', 'Number of Wi-Fi 6 TIDs', 'ieee1905')),
   treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.tid', 'TID', 'ieee1905')),
   treeOnly(uint('ieee1905.assoc_wf6_sta_status_report.queue_size', 'Queue Size', 'ieee1905')),
+];
+
+/**
+ * DTLS's tree is TLS's renamed `dtls.` (`dissectors/dtls.ts`), so each TLS
+ * field the reference also has under `dtls.` is registered again under that
+ * name - derived rather than listed, so the two cannot drift. Tree-only, but
+ * for the three a DTLS frame writes into its bag. The TLS fields with no DTLS
+ * twin in the reference are left out by name.
+ */
+const NO_DTLS_TWIN: ReadonlySet<string> = new Set([
+  'tls.ignored_unknown_record', 'tls.record.opaque_type', 'tls.handshake.extensions_ech', 'tls.reassembled',
+]);
+const DTLS_BAG: ReadonlySet<string> = new Set(['dtls.stream', 'dtls.record.content_type', 'dtls.handshake.type']);
+const DTLS_TWINS: readonly FieldDef[] = BASE_FIELDS
+  .filter((f) => f.abbrev.startsWith('tls.') && !f.abbrev.startsWith('tls.x509.') && !NO_DTLS_TWIN.has(f.abbrev))
+  .map((f): FieldDef => {
+    const { treeOnly: _ignored, column: _column, ...rest } = f;
+    const abbrev = `d${f.abbrev}`;
+    return { ...rest, abbrev, layer: 'dtls', ...(DTLS_BAG.has(abbrev) ? {} : { treeOnly: true }) };
+  });
+
+export const FIELDS: readonly FieldDef[] = [
+  ...BASE_FIELDS,
+  ...DTLS_TWINS,
+  // --- DTLS's own --------------------------------------------------------------
+  treeOnly(uint('dtls.record.epoch', 'Epoch', 'dtls')),
+  treeOnly(uint('dtls.record.sequence_number', 'Sequence Number', 'dtls')),
+  treeOnly(uint('dtls.handshake.message_seq', 'Message Sequence', 'dtls')),
+  treeOnly(uint('dtls.handshake.fragment_offset', 'Fragment Offset', 'dtls')),
+  treeOnly(uint('dtls.handshake.fragment_length', 'Fragment Length', 'dtls')),
+  treeOnly(uint('dtls.handshake.cookie_length', 'Cookie Length', 'dtls')),
+  treeOnly(str('dtls.handshake.cookie', 'Cookie', 'dtls')),
+  treeOnly(str('dtls.fragments', 'Message fragments', 'dtls')),
+  treeOnly(uint('dtls.fragment', 'Message fragment', 'dtls')),
+  treeOnly(uint('dtls.fragment.count', 'Message fragment count', 'dtls')),
+  treeOnly(uint('dtls.reassembled.length', 'Reassembled DTLS length', 'dtls')),
+  treeOnly(uint('dtls.use_srtp.protection_profiles_length', 'SRTP Protection Profiles Length', 'dtls')),
+  treeOnly(uint('dtls.use_srtp.protection_profile', 'SRTP Protection Profile', 'dtls')),
+  treeOnly(uint('dtls.use_srtp.mki_length', 'MKI Length', 'dtls')),
+  treeOnly(str('dtls.use_srtp.mki', 'MKI', 'dtls')),
+  // The handshake bodies TLS does not draw here - a 1.2 server's
+  // certificate list and key exchange, a ticket - but DTLS does.
+  treeOnly(uint('dtls.handshake.certificates_length', 'Certificates Length', 'dtls')),
+  treeOnly(str('dtls.handshake.certificates', 'Certificates', 'dtls')),
+  treeOnly(uint('dtls.handshake.certificate_length', 'Certificate Length', 'dtls')),
+  treeOnly(str('dtls.handshake.certificate', 'Certificate', 'dtls')),
+  treeOnly(uint('dtls.handshake.server_curve_type', 'Curve Type', 'dtls')),
+  treeOnly(uint('dtls.handshake.server_named_curve', 'Named Curve', 'dtls')),
+  treeOnly(uint('dtls.handshake.server_point_len', 'Pubkey Length', 'dtls')),
+  treeOnly(str('dtls.handshake.server_point', 'Pubkey', 'dtls')),
+  treeOnly(uint('dtls.handshake.client_point_len', 'Pubkey Length', 'dtls')),
+  treeOnly(str('dtls.handshake.client_point', 'Pubkey', 'dtls')),
+  treeOnly(uint('dtls.handshake.epms_len', 'Encrypted PreMaster length', 'dtls')),
+  treeOnly(str('dtls.handshake.epms', 'Encrypted PreMaster', 'dtls')),
+  treeOnly(uint('dtls.handshake.sig_len', 'Signature Length', 'dtls')),
+  treeOnly(str('dtls.handshake.sig', 'Signature', 'dtls')),
+  treeOnly(uint('dtls.handshake.session_ticket_lifetime_hint', 'Session Ticket Lifetime Hint', 'dtls')),
+  treeOnly(uint('dtls.handshake.session_ticket_length', 'Session Ticket Length', 'dtls')),
+  treeOnly(str('dtls.handshake.session_ticket', 'Session Ticket', 'dtls')),
 ];
 
 export const FIELD_BY_ABBREV: ReadonlyMap<string, FieldDef> = new Map(FIELDS.map((f) => [f.abbrev, f]));

@@ -16,11 +16,11 @@
  *
  * A helper, not a test: no `process.exit`, so `check.ts` does not run it.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { askTshark, pcapOf } from './synthetic';
+import { pcapOf } from './synthetic';
 import { findWiresharkTool } from '../export/realCaptures';
 import { PcapService } from '../../src/services/pcapParser';
 import { recordRefs } from '../../src/services/dissect/frameRecord';
@@ -40,9 +40,12 @@ export interface OracleOptions {
    * Ask the reference for its two-pass reading (`-2`), which is what the
    * fixture ground truth is and what this build's tree shows: a segment that
    * a later one completes says so (`[TCP PDU reassembled in N]`). Off for a
-   * protocol whose single-pass reading is the one to match.
+   * protocol whose single-pass reading is the one to match. `'columns'` takes
+   * the two-pass columns and the single-pass tree: a protocol whose earlier
+   * frames' Protocol column a later frame settles (TLS's and DTLS's version),
+   * while each tree is what was known when its frame arrived.
    */
-  twoPass?: boolean;
+  twoPass?: boolean | 'columns';
 }
 
 let failures = 0;
@@ -111,50 +114,55 @@ function sameRow(mine: string, ref: string): boolean {
  * Returns the packets, for a suite's own further assertions.
  */
 export async function compareWithReference(cases: OracleCase[], options: OracleOptions): Promise<Packet[]> {
-  const pcap = pcapOf(cases.map((c) => c.frame), options.linktype);
-  const { packets } = await PcapService.parseCaptureFile(new File([pcap], 'oracle.pcap'), Number.POSITIVE_INFINITY, true);
-  check(`every frame dissected (${cases.length})`, packets.length === cases.length);
+  const dir = mkdtempSync(join(tmpdir(), 'inwire-oracle-'));
+  try {
+    const file = join(dir, 'oracle.pcap');
+    writeFileSync(file, pcapOf(cases.map((c) => c.frame), options.linktype));
+    return await compareCaptureFile(file, cases.map((c) => c.label), options);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
+/**
+ * The same comparison over a capture file as it is - a real one, of any link
+ * type - with one label per frame.
+ */
+export async function compareCaptureFile(file: string, labels: string[], options: OracleOptions): Promise<Packet[]> {
+  const { packets } = await PcapService.parseCaptureFile(new File([readFileSync(file)], basename(file)), Number.POSITIVE_INFINITY, true);
+  check(`every frame dissected (${labels.length})`, packets.length === labels.length);
   const tshark = findWiresharkTool('tshark');
   if (tshark === null) {
     console.log('SKIP  tshark not found - the frames were read; whether as the reference reads them was not checked');
     return packets;
   }
-  const columns = options.twoPass ? null : askTshark(tshark, cases.map((c) => c.frame));
-  const dir = mkdtempSync(join(tmpdir(), 'inwire-oracle-'));
-  try {
-    const file = join(dir, 'oracle.pcap');
-    writeFileSync(file, pcap);
-    const env = { ...process.env, WIRESHARK_CONFIG_DIR: join(process.cwd(), 'scripts', 'wireshark-profile') };
-    const pass = options.twoPass ? ['-2'] : [];
-    const pdml = spawnSync(tshark, [...pass, '-n', '-r', file, '-T', 'pdml'], { encoding: 'utf8', env, maxBuffer: 1 << 28 }).stdout;
-    const theirs = referenceRows(pdml, options.rows);
-    const cols = columns ?? spawnSync(tshark, [...pass, '-n', '-r', file, '-T', 'fields', '-E', 'separator=/t',
-      '-e', '_ws.col.Protocol', '-e', '_ws.col.Info'], { encoding: 'utf8', env, maxBuffer: 1 << 28 }).stdout
-      .split(/\r?\n/).slice(0, cases.length).map((line) => { const [protocol, info = ''] = line.split('\t'); return { protocol, info }; });
-    check('the reference read every frame', theirs.length === cases.length && cols.length === cases.length);
-    cases.forEach((c, i) => {
-      const packet = packets[i];
-      if (packet === undefined) return;
-      const protocol = packet.protocolLabel ?? packet.protocol;
-      check(`${c.label}: Protocol`, protocol === cols[i]?.protocol,
-        `reference "${cols[i]?.protocol}", this build "${protocol}"`);
-      check(`${c.label}: Info`, packet.info === cols[i]?.info,
-        `reference "${cols[i]?.info}"\n        this build "${packet.info}"`);
-      const mine = ourRows(packet, options.rows);
-      const ref = theirs[i] ?? [];
-      const differ = mine.length !== ref.length || mine.some((row, k) => !sameRow(row, ref[k]));
-      // From the first row that differs, a few either side: a whole tree of a
-      // hundred rows hides the one that moved.
-      let at = mine.findIndex((row, k) => k >= ref.length || !sameRow(row, ref[k]));
-      if (at < 0) at = Math.min(mine.length, ref.length);
-      const around = (rows: string[]) => rows.slice(Math.max(0, at - 2), at + 6).map((r) => r.replace('\u0000', '')).join('\n          ');
-      check(`${c.label}: every row matches the reference (${ref.length})`, !differ,
-        `first difference at row ${at + 1} (this build has ${mine.length})\n        reference:\n          ${around(ref)}\n        this build:\n          ${around(mine)}`);
-    });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const env = { ...process.env, WIRESHARK_CONFIG_DIR: join(process.cwd(), 'scripts', 'wireshark-profile') };
+  const pass = (two: boolean) => (two ? ['-2'] : []);
+  const pdml = spawnSync(tshark, [...pass(options.twoPass === true), '-n', '-r', file, '-T', 'pdml'], { encoding: 'utf8', env, maxBuffer: 1 << 28 }).stdout;
+  const theirs = referenceRows(pdml, options.rows);
+  const cols = spawnSync(tshark, [...pass(options.twoPass !== undefined && options.twoPass !== false), '-n', '-r', file, '-T', 'fields',
+    '-e', '_ws.col.Protocol', '-e', '_ws.col.Info'], { encoding: 'utf8', env, maxBuffer: 1 << 28 }).stdout
+    .split(/\r?\n/).slice(0, labels.length).map((line) => { const [protocol, info = ''] = line.split('\t'); return { protocol, info }; });
+  check('the reference read every frame', theirs.length === labels.length && cols.length === labels.length);
+  labels.forEach((label, i) => {
+    const packet = packets[i];
+    if (packet === undefined) return;
+    const protocol = packet.protocolLabel ?? packet.protocol;
+    check(`${label}: Protocol`, protocol === cols[i]?.protocol,
+      `reference "${cols[i]?.protocol}", this build "${protocol}"`);
+    check(`${label}: Info`, packet.info === cols[i]?.info,
+      `reference "${cols[i]?.info}"\n        this build "${packet.info}"`);
+    const mine = ourRows(packet, options.rows);
+    const ref = theirs[i] ?? [];
+    const differ = mine.length !== ref.length || mine.some((row, k) => !sameRow(row, ref[k]));
+    // From the first row that differs, a few either side: a whole tree of a
+    // hundred rows hides the one that moved.
+    let at = mine.findIndex((row, k) => k >= ref.length || !sameRow(row, ref[k]));
+    if (at < 0) at = Math.min(mine.length, ref.length);
+    const around = (rows: string[]) => rows.slice(Math.max(0, at - 2), at + 6).map((r) => r.replace('\u0000', '')).join('\n          ');
+    check(`${label}: every row matches the reference (${ref.length})`, !differ,
+      `first difference at row ${at + 1} (this build has ${mine.length})\n        reference:\n          ${around(ref)}\n        this build:\n          ${around(mine)}`);
+  });
   return packets;
 }
 
@@ -169,25 +177,30 @@ export async function checkRevisit(cases: OracleCase[], linktype?: number): Prom
   try {
     const file = join(dir, 'revisit.pcap');
     writeFileSync(file, pcapOf(cases.map((c) => c.frame), linktype));
-    const { arrived, patchesFor, host } = await arrive(file);
-    const wrong: string[] = [];
-    for (const { packet, record, input } of arrived) {
-      const named = new Set(recordRefs(record));
-      try {
-        const layers = revisit(input, packet.id, record, host, patchesFor.get(packet.id) ?? [],
-          (frame) => (named.has(frame) ? arrived[frame - 1]?.input.bytes : undefined));
-        const want = render(packet.layers);
-        const got = render(layers);
-        if (want !== got) wrong.push(`frame ${packet.id}: ${firstDifference(want, got)}`);
-      } catch (error) {
-        wrong.push(`frame ${packet.id}: ${(error as Error).message}`);
-      }
-    }
-    check(`every frame rebuilds from its record alone (${arrived.length})`, wrong.length === 0,
-      wrong.slice(0, 4).join('\n        '));
+    await checkRevisitFile(file);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** The same, over a capture file as it is. */
+export async function checkRevisitFile(file: string): Promise<void> {
+  const { arrived, patchesFor, host } = await arrive(file);
+  const wrong: string[] = [];
+  for (const { packet, record, input } of arrived) {
+    const named = new Set(recordRefs(record));
+    try {
+      const layers = revisit(input, packet.id, record, host, patchesFor.get(packet.id) ?? [],
+        (frame) => (named.has(frame) ? arrived[frame - 1]?.input.bytes : undefined));
+      const want = render(packet.layers);
+      const got = render(layers);
+      if (want !== got) wrong.push(`frame ${packet.id}: ${firstDifference(want, got)}`);
+    } catch (error) {
+      wrong.push(`frame ${packet.id}: ${(error as Error).message}`);
+    }
+  }
+  check(`every frame rebuilds from its record alone (${arrived.length})`, wrong.length === 0,
+    wrong.slice(0, 4).join('\n        '));
 }
 
 /** Ends a suite. */

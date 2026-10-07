@@ -18,6 +18,7 @@
  * same way. Deliberately free of React and the DOM (docs/decisions/0003): this
  * runs inside the pipeline Worker.
  */
+import { freshDtlsConversation, type DtlsConversationState } from './dissectors/dtls';
 
 /**
  * How many conversations each per-layer index remembers.
@@ -151,6 +152,9 @@ const MAX_TRACKED_DATAGRAMS = 2048;
 /** How many ARP bindings are remembered. */
 const MAX_ARP_BINDINGS = 4096;
 
+/** DTLS conversations kept; the oldest is forgotten past this. */
+const MAX_DTLS_CONVERSATIONS = 4096;
+
 /** ESP security associations whose last sequence number is kept. */
 const MAX_ESP_SAS = 4096;
 
@@ -247,6 +251,8 @@ export class L3Tracker {
   private arpBindings = new Map<string, { mac: string; frame: number }>();
   private wireguardSessions: WireGuardSession[] = [];
   private espSas = new Map<string, { seq: number; frame: number }>();
+  private dtlsConversations = new Map<string, DtlsConversationState>();
+  private nextDtlsStream = 0;
   private nextWireGuardStream = 0;
 
   /** `eth.stream`: the conversation between two MAC addresses. */
@@ -464,7 +470,27 @@ export class L3Tracker {
     return last === undefined ? null : { expected: last.seq + 1, previousFrame: last.frame };
   }
 
+  /**
+   * A DTLS conversation's state, by its two `address:port` ends in either
+   * order, created - and numbered, `dtls.stream` - on first use.
+   */
+  dtlsConversation(a: string, b: string): DtlsConversationState {
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+    let conv = this.dtlsConversations.get(key);
+    if (conv === undefined) {
+      if (this.dtlsConversations.size >= MAX_DTLS_CONVERSATIONS) {
+        const oldest = this.dtlsConversations.keys().next();
+        if (!oldest.done) this.dtlsConversations.delete(oldest.value);
+      }
+      conv = freshDtlsConversation(this.nextDtlsStream++);
+      this.dtlsConversations.set(key, conv);
+    }
+    return conv;
+  }
+
   reset(): void {
+    this.dtlsConversations.clear();
+    this.nextDtlsStream = 0;
     this.espSas.clear();
     this.wireguardSessions = [];
     this.nextWireGuardStream = 0;

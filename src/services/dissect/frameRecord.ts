@@ -99,7 +99,7 @@ const ICMP = {
 const L3 = {
   ethStream: 'answer', ipStream: 'answer', ipv6Stream: 'answer', udpStream: 'answer',
   fragment: 'answer', forgetFragments: 'effect', arpClaim: 'answer', wireguard: 'answer',
-  espSequence: 'answer',
+  espSequence: 'answer', dtlsConversation: 'snapshot',
 } as const satisfies Record<keyof L3TrackerApi, Kind>;
 
 const ENV = {

@@ -44,8 +44,10 @@ import {
   ALERT_DESCRIPTION_NAMES, ALERT_LEVEL_NAMES, CONTENT_TYPE_NAMES, EC_POINT_FORMAT_NAMES,
   HANDSHAKE_TYPE_NAMES, PSK_KEY_EXCHANGE_MODE_NAMES, TLS_VERSION_NAMES,
   CERTIFICATE_STATUS_TYPE_NAMES,
-  isGrease, nameAlert, nameCipher, nameExtension, nameGroup, nameSignatureAlgorithm, nameVersion,
+  groupName, isGrease, nameAlert, nameCipher, nameExtension, nameGroup, nameSignatureAlgorithm, nameSignatureHash,
+  nameSignatureKind, nameVersion,
 } from './tlsTables';
+import { formatArrivalTime } from '../dissect/arrivalTime';
 import { cipherSuiteSpec, undecryptableReason } from '../tls/cipherSuites';
 import { decryptRecord, deriveFromKeyLog, keyLabels } from '../tls/decrypt';
 import { keyLog } from '../tls/keyLog';
@@ -369,6 +371,9 @@ function ja4Version(v: number): string {
     case 0x0302: return '11';
     case 0x0301: return '10';
     case 0x0300: return 's3';
+    case 0xfeff: return 'd1';
+    case 0xfefd: return 'd2';
+    case 0xfefc: return 'd3';
     default: return '00';
   }
 }
@@ -386,7 +391,7 @@ function ja4Alpn(alpn: string[]): string {
   return `${h[0]}${h[h.length - 1]}`;
 }
 
-export function parseClientHello(body: Uint8Array, transport: 't' | 'q' = 't'): HelloFacts | null {
+export function parseClientHello(body: Uint8Array, transport: 't' | 'q' | 'd' = 't'): HelloFacts | null {
   // Handshake header: type(1) length(3), then ClientHello.
   if (body.length < 4 + 2 + 32 + 1) return null;
   let p = 4;
@@ -1429,7 +1434,7 @@ function extensionFields(ext: Extension): ProtocolField[] {
     case 10:
       if (b.length >= 2) children.push({ name: 'Supported Groups List Length', value: u16(b, 0), abbrev: 'tls.handshake.extensions_supported_groups_length' });
       children.push({
-        name: 'Supported Groups List',
+        name: `Supported Groups (${u16List(b, 2).length} group${u16List(b, 2).length === 1 ? '' : 's'})`,
         value: '',
         abbrev: 'tls.handshake.extensions_supported_groups',
         children: u16List(b, 2).map((g): ProtocolField => ({
@@ -1444,7 +1449,7 @@ function extensionFields(ext: Extension): ProtocolField[] {
       // somebody can write.
       if (b.length >= 2) children.push({ name: 'Signature Hash Algorithms Length', value: u16(b, 0), abbrev: 'tls.handshake.sig_hash_alg_len' });
       children.push({
-        name: 'Signature Algorithms',
+        name: `Signature Hash Algorithms (${u16List(b, 2).length} algorithm${u16List(b, 2).length === 1 ? '' : 's'})`,
         value: '',
         abbrev: 'tls.handshake.sig_hash_algs',
         children: u16List(b, 2).map((s): ProtocolField => ({
@@ -1452,8 +1457,8 @@ function extensionFields(ext: Extension): ProtocolField[] {
           value: nameSignatureAlgorithm(s),
           abbrev: 'tls.handshake.sig_hash_alg',
           children: [
-            { name: 'Signature Hash Algorithm Hash', value: (s >> 8) & 0xff, abbrev: 'tls.handshake.sig_hash_hash' },
-            { name: 'Signature Hash Algorithm Signature', value: s & 0xff, abbrev: 'tls.handshake.sig_hash_sig' },
+            { name: 'Signature Hash Algorithm Hash', value: nameSignatureHash((s >> 8) & 0xff), abbrev: 'tls.handshake.sig_hash_hash' },
+            { name: 'Signature Hash Algorithm Signature', value: nameSignatureKind(s & 0xff), abbrev: 'tls.handshake.sig_hash_sig' },
           ],
         })),
       });
@@ -1505,19 +1510,24 @@ function extensionFields(ext: Extension): ProtocolField[] {
       // would like one - and the reference emits the field for it regardless,
       // so an early return on a zero length would lose six of this fixture's
       // seven.
-      children.push({
-        ...hexField('Session Ticket', b),
-        abbrev: 'tls.handshake.extensions.session_ticket',
-      });
+      // Empty, it is the reference's `<MISSING>` rather than an empty value.
+      children.push(b.length > 0
+        ? { ...hexField('Session Ticket', b), abbrev: 'tls.handshake.extensions.session_ticket' }
+        : { name: 'Session Ticket', value: '<MISSING>', abbrev: 'tls.handshake.extensions.session_ticket' });
       break;
     case 0xff01:
       // renegotiation_info. TLS 1.3 cannot renegotiate at all, so on a modern
       // ClientHello this is a zero-length field whose presence is the whole
       // message: it signals RFC 5746 support to a server that might be 1.2.
+      // Under a heading of its own, as the reference draws it, with the
+      // verify data when a renegotiation actually carries some.
       if (b.length >= 1) {
         children.push({
-          name: 'Renegotiation info extension length', value: b[0],
-          abbrev: 'tls.handshake.extensions_reneg_info_len',
+          name: 'Renegotiation Info extension', value: '',
+          children: [
+            { name: 'Renegotiation info extension length', value: b[0], abbrev: 'tls.handshake.extensions_reneg_info_len' },
+            ...(b[0] > 0 ? [{ ...hexField('Renegotiation info', b.subarray(1, 1 + b[0])), abbrev: 'tls.handshake.extensions_reneg_info' }] : []),
+          ],
         });
       }
       break;
@@ -1647,7 +1657,7 @@ function extensionFields(ext: Extension): ProtocolField[] {
         const len = u16(b, q + 2);
         children.push({
           name: 'Key Share Entry',
-          value: `Group: ${nameGroup(group)}, Key Exchange length: ${len}`,
+          value: `Group: ${groupName(group)}, Key Exchange length: ${len}`,
           abbrev: 'tls.handshake.extensions_key_share_group',
           ...(len >= 1000 ? { description: 'A share this large is a post-quantum (ML-KEM / Kyber) key.' } : {}),
           children: [
@@ -1673,7 +1683,7 @@ function extensionFields(ext: Extension): ProtocolField[] {
       const count = b[0];
       children.push({ name: 'EC point formats Length', value: count, abbrev: 'tls.handshake.extensions_ec_point_formats_length' });
       children.push({
-        name: 'Elliptic curves point formats', value: `${count} format${count === 1 ? '' : 's'}`,
+        name: `Elliptic curves point formats (${count})`, value: '',
         abbrev: 'tls.handshake.extensions_ec_point_formats',
         children: Array.from(b.subarray(1, Math.min(1 + count, b.length)), (format) => ({
           name: 'EC point format',
@@ -1827,7 +1837,23 @@ function asciiOf(bytes: Uint8Array): string {
   return out;
 }
 
-function helloFields(h: HelloFacts): ProtocolField[] {
+/**
+ * A hello's random, and its first four bytes as the clock they once were - in
+ * the reference's local-time format, as the Frame layer's times are written.
+ */
+function randomField(random: Uint8Array): ProtocolField {
+  return {
+    ...hexField('Random', random), abbrev: 'tls.handshake.random',
+    children: random.length >= 32
+      ? [
+        { name: 'GMT Unix Time', value: formatArrivalTime(u32(random, 0) * 1_000_000), abbrev: 'tls.handshake.random_time' },
+        { ...hexField('Random Bytes', random.subarray(4, 32)), abbrev: 'tls.handshake.random_bytes' },
+      ]
+      : undefined,
+  };
+}
+
+export function helloFields(h: HelloFacts): ProtocolField[] {
   const fields: ProtocolField[] = [
     // **`legacy_version` when supported_versions is present**, which is what
     // the reference calls this field on a TLS 1.3 hello and is not pedantry:
@@ -1838,25 +1864,13 @@ function helloFields(h: HelloFacts): ProtocolField[] {
       ? { ...versionField('Version (legacy)', h.version, 'tls.handshake.legacy_version'),
           description: 'RFC 8446: ignored when supported_versions is present' }
       : versionField('Version', h.version, 'tls.handshake.version'),
-    {
-      ...hexField('Random', h.random), abbrev: 'tls.handshake.random',
-      // **Thirty-two bytes that are not all random.** The first four were
-      // `gmt_unix_time` in TLS 1.0-1.2 and are drawn as a clock because the
-      // reference draws them as one - and because a sender that still fills
-      // them in is leaking its wall clock to every observer, which is worth
-      // being able to see. RFC 8446 made all 32 random, so a modern hello
-      // shows a nonsense date here and that IS the correct reading.
-      children: h.random.length >= 32
-        ? [
-          {
-            name: 'GMT Unix Time',
-            value: new Date(u32(h.random, 0) * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC'),
-            abbrev: 'tls.handshake.random_time',
-          },
-          { ...hexField('Random Bytes', h.random.subarray(4, 32)), abbrev: 'tls.handshake.random_bytes' },
-        ]
-        : undefined,
-    },
+    // **Thirty-two bytes that are not all random.** The first four were
+    // `gmt_unix_time` in TLS 1.0-1.2 and are drawn as a clock because the
+    // reference draws them as one - and because a sender that still fills
+    // them in is leaking its wall clock to every observer, which is worth
+    // being able to see. RFC 8446 made all 32 random, so a modern hello
+    // shows a nonsense date here and that IS the correct reading.
+    randomField(h.random),
     { name: 'Session ID Length', value: h.sessionId.length, abbrev: 'tls.handshake.session_id_length' },
     ...(h.sessionId.length > 0
       ? [{ ...hexField('Session ID', h.sessionId), abbrev: 'tls.handshake.session_id' }] : []),
@@ -1869,8 +1883,8 @@ function helloFields(h: HelloFacts): ProtocolField[] {
     },
     { name: 'Compression Methods Length', value: h.compression.length, abbrev: 'tls.handshake.comp_methods_length' },
     {
-      name: 'Compression Methods',
-      value: h.compression.map((c) => (c === 0 ? 'null (0)' : String(c))).join(', '),
+      name: `Compression Methods (${h.compression.length} method${h.compression.length === 1 ? '' : 's'})`,
+      value: '',
       abbrev: 'tls.handshake.comp_methods',
       children: h.compression.map((c): ProtocolField => ({
         name: 'Compression Method', value: c === 0 ? 'null (0)' : String(c), abbrev: 'tls.handshake.comp_method',
@@ -1883,10 +1897,11 @@ function helloFields(h: HelloFacts): ProtocolField[] {
       abbrev: 'tls.handshake.extension',
       children: extensionFields(e),
     })),
-    { name: '[JA3 Fullstring]', value: h.ja3Full, generated: true, abbrev: 'tls.handshake.ja3_full' },
-    { name: '[JA3]', value: h.ja3, generated: true, abbrev: 'tls.handshake.ja3' },
+    // JA4 before JA3, the reference's order.
     { name: '[JA4]', value: h.ja4, generated: true, abbrev: 'tls.handshake.ja4' },
     { name: '[JA4_r]', value: h.ja4Raw, generated: true, abbrev: 'tls.handshake.ja4_r' },
+    { name: '[JA3 Fullstring]', value: h.ja3Full, generated: true, abbrev: 'tls.handshake.ja3_full' },
+    { name: '[JA3]', value: h.ja3, generated: true, abbrev: 'tls.handshake.ja3' },
   ];
   if (h.echPresent) {
     fields.push({
@@ -1901,13 +1916,13 @@ function helloFields(h: HelloFacts): ProtocolField[] {
   return fields;
 }
 
-function serverHelloFields(s: ServerHelloFacts, conv: TlsConversationState): ProtocolField[] {
+export function serverHelloFields(s: ServerHelloFacts, conv: TlsConversationState): ProtocolField[] {
   const fields: ProtocolField[] = [
     s.selectedVersion !== null
       ? { ...versionField('Version (legacy)', s.version, 'tls.handshake.legacy_version'),
           description: 'RFC 8446: ignored when supported_versions is present' }
       : versionField('Version', s.version, 'tls.handshake.version'),
-    { ...hexField('Random', s.random), abbrev: 'tls.handshake.random' },
+    randomField(s.random),
     { name: 'Session ID Length', value: s.sessionId.length, abbrev: 'tls.handshake.session_id_length' },
     ...(s.sessionId.length > 0
       ? [{ ...hexField('Session ID', s.sessionId), abbrev: 'tls.handshake.session_id' }] : []),
@@ -1947,7 +1962,7 @@ function serverHelloFields(s: ServerHelloFacts, conv: TlsConversationState): Pro
  * built on demand and thrown away with the pane (ADR 0007). The two CN fields
  * stay in the bag because they are the two anybody filters on.
  */
-function certificateFields(certs: CertificateSummary[], conv: TlsConversationState, now: Date): ProtocolField[] {
+export function certificateFields(certs: CertificateSummary[], conv: TlsConversationState, now: Date): ProtocolField[] {
   return certs.map((c, i): ProtocolField => {
     const children: ProtocolField[] = [
       ...(c.version !== null ? [{ name: 'version', value: c.version, abbrev: 'x509af.version' }] : []),

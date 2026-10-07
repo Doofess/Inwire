@@ -19,6 +19,8 @@ import type { QuicTrackerApi, DnsTrackerApi, L3TrackerApi } from '../dissect/tra
 import { wireGuardFacts } from './wireguard';
 import { dissectXml } from './xml';
 import { dissectEsp, dissectIsakmp } from './isakmp';
+import { dissectDtls, freshDtlsConversation, looksLikeDtls } from './dtls';
+import { dissectEnv } from '../dissect/dissectEnv';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
@@ -383,6 +385,26 @@ export function dissectUdpTransport(
     }
   }
 
+  // DTLS, by content on any port: a WebRTC call's or AnyConnect's handshake.
+  // Its records fill the datagram exactly, which nothing below matches.
+  let dtlsLabelPatches: { frameId: number; protocolLabel: string }[] | undefined;
+  if (info === null) {
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    if (!payloadCut && looksLikeDtls(rawBytes, udpPayloadStart, payloadEnd)) {
+      const from = `${srcIp}:${srcPort}`;
+      const conversation = l3Tracker !== undefined ? l3Tracker.dtlsConversation(from, `${dstIp}:${dstPort}`) : freshDtlsConversation(0);
+      const dtls = dissectDtls(rawBytes, udpPayloadStart, payloadEnd, conversation, from, frameId ?? 0, dissectEnv().now());
+      if (dtls !== null) {
+        protocolLabel = dtls.protocolLabel;
+        info = dtls.info;
+        extraLayers.push(dtls.layer);
+        protocolTokens.push('dtls');
+        Object.assign(appFields, dtls.fields);
+        dtlsLabelPatches = dtls.labelPatches;
+      }
+    }
+  }
+
   if (info === null) {
     // NTP and STUN, by their port first and then by what the payload
     // actually is. The content check is what matters for STUN: it is how a
@@ -466,6 +488,7 @@ export function dissectUdpTransport(
     protocolTokens,
     dnsMatchedQueryFrameId,
     resolvedNames,
+    ...(dtlsLabelPatches !== undefined ? { labelPatches: dtlsLabelPatches } : {}),
     fields: {
       'udp.srcport': srcPort,
       'udp.dstport': dstPort,

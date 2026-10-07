@@ -22,6 +22,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { HEURISTIC_DISSECTORS, detectUdpPayload } from '../../src/services/dissectors/heuristics';
 import { PcapService } from '../../src/services/pcapParser';
 import { Bytes } from '../parity/synthetic';
+import { looksLikeDtls } from '../../src/services/dissectors/dtls';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -116,6 +117,19 @@ for (const payload of PAYLOADS) {
   const match = detectUdpPayload(payload.bytes, 0, payload.bytes.length);
   check(`${payload.protocol} is dispatched to its own dissector`, match?.detector, payload.protocol);
 }
+
+// --- DTLS, which is found by content outside the list ----------------------------
+// It keeps per-conversation state, so it is asked in udpTransport.ts before the
+// list rather than from it - and must still reject every payload above, as
+// every detector above must reject a DTLS record.
+console.log();
+const DTLS_RECORD = new Bytes().u8(22).u16(0xfefd).u16(0).u16(0, 0, 0).u16(12)
+  .u8(1).u8(0, 0, 0).u16(0).u8(0, 0, 0).u8(0, 0, 0).build();
+check('DTLS accepts its own record', looksLikeDtls(DTLS_RECORD, 0, DTLS_RECORD.length), true);
+for (const payload of PAYLOADS) {
+  check(`DTLS rejects ${payload.protocol}`, looksLikeDtls(payload.bytes, 0, payload.bytes.length), false);
+}
+check('no detector claims a DTLS record', detectUdpPayload(DTLS_RECORD, 0, DTLS_RECORD.length)?.detector ?? null, null);
 
 // --- payloads that are nothing --------------------------------------------------
 console.log();
