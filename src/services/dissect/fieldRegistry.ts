@@ -110,7 +110,7 @@ export const LAYERS = [
   // `homeplug_av.*`, which is how the reference spells the two; the second is
   // a token only so the fields have a layer to belong to.
   'homeplug-av', 'homeplug_av',
-  'ip', 'ipv6', 'gre', 'vxlan', 'tzsp', 'esp', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
+  'ip', 'ipv6', 'gre', 'erspan', 'vxlan', 'tzsp', 'esp', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
   // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
   // what a user types, and it has to be the one they already know.
@@ -2522,6 +2522,59 @@ const BASE_FIELDS: readonly FieldDef[] = [
   uint('gre.key', 'Key', 'gre'),
   uint('gre.sequence_number', 'Sequence Number', 'gre'),
   uint('gre.checksum', 'Checksum', 'gre'),
+  treeOnly(uint('gre.flags_and_version', 'Flags and Version', 'gre')),
+  treeOnly(bool('gre.flags.checksum', 'Checksum Bit', 'gre')),
+  treeOnly(bool('gre.flags.routing', 'Routing Bit', 'gre')),
+  treeOnly(bool('gre.flags.key', 'Key Bit', 'gre')),
+  treeOnly(bool('gre.flags.sequence_number', 'Sequence Number Bit', 'gre')),
+  treeOnly(bool('gre.flags.strict_source_route', 'Strict Source Route Bit', 'gre')),
+  treeOnly(uint('gre.flags.recursion_control', 'Recursion control', 'gre')),
+  treeOnly(uint('gre.flags.reserved', 'Flags (Reserved)', 'gre')),
+  treeOnly(uint('gre.flags.version', 'Version', 'gre')),
+  treeOnly(uint('gre.checksum.status', 'Checksum Status', 'gre')),
+  treeOnly(str('gre.checksum.incorrect', 'Incorrect GRE Checksum', 'gre')),
+  treeOnly(uint('gre.offset', 'Offset', 'gre')),
+
+  // --- ERSPAN ----------------------------------------------------------------
+  //
+  // A switch's port mirror carried in GRE (`dissectors/erspan.ts`). Like GRE it
+  // names no column - the mirrored frame does - so these are what tells one
+  // mirror session from another: `erspan.spanid == 100 && tcp.port == 443`.
+  uint('erspan.version', 'Version', 'erspan'),
+  uint('erspan.vlan', 'Vlan', 'erspan'),
+  uint('erspan.spanid', 'SpanID', 'erspan'),
+  treeOnly(uint('erspan.cos', 'COS', 'erspan')),
+  treeOnly(uint('erspan.encap', 'Encap', 'erspan')),
+  treeOnly(uint('erspan.bso', 'Bad/Short/Oversized', 'erspan')),
+  treeOnly(uint('erspan.truncated', 'Truncated', 'erspan')),
+  treeOnly(uint('erspan.reserved', 'Reserved', 'erspan')),
+  treeOnly(uint('erspan.index', 'Index', 'erspan')),
+  treeOnly(uint('erspan.timestamp', 'Timestamp', 'erspan')),
+  treeOnly(uint('erspan.sgt', 'Security Group Tag', 'erspan')),
+  treeOnly(uint('erspan.p', 'Has Ethernet PDU', 'erspan')),
+  treeOnly(uint('erspan.ft', 'Frame Type', 'erspan')),
+  treeOnly(uint('erspan.hw', 'Hardware ID', 'erspan')),
+  treeOnly(bool('erspan.direction', 'Direction', 'erspan')),
+  treeOnly(uint('erspan.gra', 'Timestamp granularity', 'erspan')),
+  treeOnly(uint('erspan.o', 'Optional Sub headers', 'erspan')),
+  treeOnly(uint('erspan.platid', 'Platform ID', 'erspan')),
+  treeOnly(uint('erspan.pid1.rsvd1', 'Reserved', 'erspan')),
+  treeOnly(uint('erspan.pid1.vsmid', 'VSM Domain ID', 'erspan')),
+  treeOnly(uint('erspan.pid1.port_index', 'Port ID/Index', 'erspan')),
+  treeOnly(uint('erspan.pid3.rsvd1', 'Reserved', 'erspan')),
+  treeOnly(uint('erspan.pid3.port_index', 'Port ID/Index', 'erspan')),
+  treeOnly(uint('erspan.pid3.timestamp', 'Upper 32-bit Timestamp', 'erspan')),
+  treeOnly(uint('erspan.pid4.rsvd1', 'Reserved', 'erspan')),
+  treeOnly(uint('erspan.pid4.rsvd2', 'Reserved', 'erspan')),
+  treeOnly(uint('erspan.pid4.rsvd3', 'Reserved', 'erspan')),
+  treeOnly(uint('erspan.pid5.switchid', 'Switch ID', 'erspan')),
+  treeOnly(uint('erspan.pid5.port_index', 'Port ID/Index', 'erspan')),
+  treeOnly(uint('erspan.pid5.timestamp', 'Timestamp (seconds)', 'erspan')),
+  treeOnly(uint('erspan.pid7.rsvd1', 'Reserved', 'erspan')),
+  treeOnly(uint('erspan.pid7.source_index', 'Source Index', 'erspan')),
+  treeOnly(uint('erspan.pid7.timestamp', 'Upper 32-bit Timestamp', 'erspan')),
+  treeOnly(uint('erspan.pid.rsvd', 'Reserved', 'erspan')),
+  treeOnly(str('erspan.version.unknown', 'Unknown version, please report or test to use fake ERSPAN preference', 'erspan')),
 
   // --- SMB2 ------------------------------------------------------------------
   //

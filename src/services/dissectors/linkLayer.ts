@@ -308,6 +308,35 @@ export function dissectLinkLayer(rawBytes: Uint8Array, linktype: number): LinkLa
   }
 }
 
+/**
+ * An Ethernet frame carried inside another one - the frame a switch mirrored
+ * into ERSPAN - read exactly as an outer frame is, VLAN tags and LLC
+ * included, with every byte range and offset pointing into the OUTER buffer.
+ *
+ * Bounded at `end` by reading a view of the carrier rather than the whole
+ * buffer, so a tag or an LLC header cannot be read out of whatever follows the
+ * mirrored frame; `subarray` shares the bytes, and every offset is moved back
+ * into the carrier's coordinates afterwards. Null when there is not a whole
+ * Ethernet header, which the caller reports as malformed.
+ */
+export function dissectEmbeddedEthernet(rawBytes: Uint8Array, start: number, end: number): LinkLayerResult | null {
+  if (end - start < 14) return null;
+  const out = dissectEthernet(rawBytes.subarray(start, end), 'Ethernet');
+  const shift = (fields: ProtocolField[]) => {
+    for (const f of fields) {
+      if (f.rawBytesRange) f.rawBytesRange = [f.rawBytesRange[0] + start, f.rawBytesRange[1] + start];
+      if (f.children) shift(f.children);
+    }
+  };
+  for (const layer of out.layers) {
+    if (layer.rawBytesRange) layer.rawBytesRange = [layer.rawBytesRange[0] + start, layer.rawBytesRange[1] + start];
+    shift(layer.fields);
+  }
+  out.l3Offset += start;
+  if (out.llcOffset !== undefined) out.llcOffset += start;
+  return out;
+}
+
 // --- Ethernet ----------------------------------------------------------------
 
 function dissectEthernet(rawBytes: Uint8Array, encapsulation: string): LinkLayerResult {
