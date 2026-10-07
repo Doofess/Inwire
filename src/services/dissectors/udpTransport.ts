@@ -34,6 +34,8 @@ import { buildQuicTlsLayer } from './tls';
 import { dissectNtp, dissectStun } from './udpApps';
 import { dataLayer } from './mediaType';
 import { findUdpPort } from './dispatch';
+import { dissectCflow, isCflowPort } from './cflow';
+import { MemoryTemplateStore } from '../flow/flowExport';
 
 /** A cut SSDP datagram's start line, which is all of it there may be to name. */
 const START_LINE_DECODER = new TextDecoder();
@@ -132,6 +134,27 @@ export function dissectUdpTransport(
       info = dhcp.info;
       extraLayers.push(dhcp.layer);
       Object.assign(dhcpFields, dhcp.fields);
+    }
+  } else if (isCflowPort(srcPort, dstPort)) {
+    // NetFlow and IPFIX: a record per flow from a router to its collector.
+    // Templates and sequence numbers are the exporter's, kept by the L3
+    // tracker under both ends of the datagram - the reference's keying.
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    const store = l3Tracker === undefined ? new MemoryTemplateStore(false) : undefined;
+    const cflow = dissectCflow(rawBytes, udpPayloadStart, payloadEnd, {
+      exporter: `${srcIp}:${srcPort}>${dstIp}:${dstPort}`,
+      frame: frameId ?? 0,
+      templates: l3Tracker !== undefined
+        ? { lookup: (e, d, id) => l3Tracker.flowTemplate(e, d, id), define: (e, d, id, t, f) => l3Tracker.defineFlowTemplate(e, d, id, t, f) }
+        : store!,
+      sequence: (e, d, next, f) => (l3Tracker !== undefined ? l3Tracker.flowSequence(e, d, next, f) : null),
+    });
+    if (cflow) {
+      protocolLabel = cflow.protocolLabel;
+      info = cflow.info;
+      extraLayers.push(cflow.layer);
+      protocolTokens.push('cflow');
+      Object.assign(appFields, cflow.fields);
     }
   } else if (subdissector !== null) {
     // Every leaf UDP protocol - one label, one Info line, one tree layer and

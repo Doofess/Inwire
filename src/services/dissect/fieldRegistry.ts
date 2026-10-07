@@ -23,6 +23,7 @@
  */
 
 import { ABBREV_BY_FLAG } from './tcpAnalysis';
+import { ELEMENTS } from '../dissectors/cflowNames';
 
 export type FieldType =
   | 'uint'      // unsigned integer, compared numerically
@@ -118,7 +119,7 @@ export const LAYERS = [
   // DCE/RPC - generated into `dissectors/dcerpcNames.ts`.
   'srvsvc', 'wkssvc', 'lsarpc', 'samr', 'rpc_netlogon', 'winreg', 'svcctl', 'spoolss', 'drsuapi', 'dssetup', 'atsvc', 'mgmt', 'oxid', 'isystemactivator', 'remunk', 'remunk2', 'taskschedulerservice', 'eventlog', 'netdfs', 'rpc_browser', 'dnsserver', 'iremotewinspool', 'initshutdown', 'fsrvp', 'witness', 'frsrpc', 'frstrans', 'nspi', 'efs', 'pnp', 'clusapi', 'rras', 'wzcsvc', 'mapi', 'tapi', 'trksvr', 'rfr',
   'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp', 'steam_ihs_discovery',
+  'syslog', 'radius', 'snmp', 'cflow', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp', 'steam_ihs_discovery',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'cldap', 'mscldap', 'smb2', 'kerberos', 'ssh', 'tpkt', 'cotp', 'rdp', 'http', 'http2', 'http3',
   // **What a message BODY is**, which the reference makes four protocols of
   // rather than fields on HTTP - so a JSON API response's chain really does
@@ -2917,6 +2918,110 @@ const DTLS_TWINS: readonly FieldDef[] = BASE_FIELDS
     return { ...rest, abbrev, layer: 'dtls', ...(DTLS_BAG.has(abbrev) ? {} : { treeOnly: true }) };
   });
 
+// --- NetFlow / IPFIX (`dissectors/cflow.ts`) -------------------------------------
+// The header is filterable; a message carries many flows, so every element of
+// a record is the tree's alone.
+const CFLOW_FIELDS: readonly FieldDef[] = [
+  uint('cflow.version', 'Version', 'cflow'),
+  uint('cflow.count', 'Count', 'cflow'),
+  uint('cflow.len', 'Length', 'cflow'),
+  uint('cflow.sequence', 'FlowSequence', 'cflow'),
+  uint('cflow.source_id', 'SourceId', 'cflow'),
+  uint('cflow.od_id', 'Observation Domain Id', 'cflow'),
+  treeOnly(str('cflow.sysuptime', 'SysUptime', 'cflow')),
+  treeOnly({ abbrev: 'cflow.timestamp', label: 'Timestamp', type: 'time', layer: 'cflow' }),
+  treeOnly(uint('cflow.unix_secs', 'CurrentSecs', 'cflow')),
+  treeOnly(uint('cflow.unix_nsecs', 'CurrentNSecs', 'cflow')),
+  treeOnly(uint('cflow.exporttime', 'ExportTime', 'cflow')),
+  treeOnly(uint('cflow.engine_type', 'EngineType', 'cflow')),
+  treeOnly(uint('cflow.engine_id', 'EngineId', 'cflow')),
+  treeOnly(uint('cflow.samplingmode', 'SamplingMode', 'cflow')),
+  treeOnly(uint('cflow.samplerate', 'SampleRate', 'cflow')),
+  treeOnly(uint('cflow.flowset_id', 'FlowSet Id', 'cflow')),
+  treeOnly(uint('cflow.flowset_length', 'FlowSet Length', 'cflow')),
+  treeOnly(uint('cflow.template_id', 'Template Id', 'cflow')),
+  treeOnly(uint('cflow.template_field_count', 'Field Count', 'cflow')),
+  treeOnly(uint('cflow.template_field_type', 'Type', 'cflow')),
+  treeOnly(uint('cflow.template_field_length', 'Length', 'cflow')),
+  treeOnly(uint('cflow.option_scope_length', 'Option Scope Length', 'cflow')),
+  treeOnly(uint('cflow.option_length', 'Option Length', 'cflow')),
+  treeOnly(uint('cflow.scope_field_type', 'Scope Type', 'cflow')),
+  treeOnly(uint('cflow.template_ipfix_total_field_count', 'Total Field Count', 'cflow')),
+  treeOnly(uint('cflow.template_ipfix_scope_field_count', 'Scope Field Count', 'cflow')),
+  treeOnly(bool('cflow.template_ipfix_pen_provided', 'Pen provided', 'cflow')),
+  treeOnly(uint('cflow.template_ipfix_field_type', 'Type', 'cflow')),
+  treeOnly(uint('cflow.template_cisco_field_type', 'Type', 'cflow')),
+  treeOnly(uint('cflow.template_ipfix_field_type_enterprise', 'Type', 'cflow')),
+  treeOnly(uint('cflow.template_ipfix_field_pen', 'PEN', 'cflow')),
+  treeOnly(uint('cflow.template_frame', 'Template Frame', 'cflow')),
+  treeOnly(str('cflow.flowsets.impossible', 'FlowSets impossible', 'cflow')),
+  treeOnly(str('cflow.no_template_found', 'No template found', 'cflow')),
+  treeOnly(str('cflow.flowset_length.invalid', 'Flow length invalid', 'cflow')),
+  treeOnly(str('cflow.unexpected_sequence_number', 'Unexpected flow sequence for domain ID', 'cflow')),
+  treeOnly(uint('cflow.sequence_analysis.expected_sn', 'Expected Sequence Number', 'cflow')),
+  treeOnly(uint('cflow.sequence_analysis.previous_frame', 'Previous Frame in Sequence', 'cflow')),
+  treeOnly({ abbrev: 'cflow.enterprise_private_entry', label: 'Enterprise Private entry', type: 'bytes', layer: 'cflow' }),
+  treeOnly({ abbrev: 'cflow.unknown_field_type', label: 'Unknown Field Type', type: 'bytes', layer: 'cflow' }),
+  treeOnly(uint('cflow.string_len_short', 'String_len_short', 'cflow')),
+  treeOnly(uint('cflow.string_len_long', 'String_len_short', 'cflow')),
+  treeOnly({ abbrev: 'cflow.scope_system', label: 'ScopeSystem', type: 'bytes', layer: 'cflow' }),
+  treeOnly(uint('cflow.scope_interface', 'ScopeInterface', 'cflow')),
+  treeOnly(uint('cflow.scope_linecard', 'ScopeLinecard', 'cflow')),
+  treeOnly({ abbrev: 'cflow.scope_cache', label: 'ScopeCache', type: 'bytes', layer: 'cflow' }),
+  treeOnly({ abbrev: 'cflow.scope_template', label: 'ScopeTemplate', type: 'bytes', layer: 'cflow' }),
+  // The elements drawn by hand: TCP flags bit by bit, the forwarding status,
+  // an application id, an ICMPv6 type and code, an MPLS label entry.
+  treeOnly(uint('cflow.tcpflags', 'TCP Flags', 'cflow')),
+  treeOnly(uint('cflow.tcpflags.zero', 'Zero (Header Length)', 'cflow')),
+  treeOnly(uint('cflow.tcpflags.reserved', 'Reserved', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.ns', 'ECN Nonce Sum', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.cwr', 'CWR', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.ece', 'ECN Echo', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.urg', 'URG', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.ack', 'ACK', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.psh', 'PSH', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.rst', 'RST', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.syn', 'SYN', 'cflow')),
+  treeOnly(bool('cflow.tcpflags.fin', 'FIN', 'cflow')),
+  treeOnly(uint('cflow.forwarding_status', 'ForwardingStatus', 'cflow')),
+  treeOnly(uint('cflow.forwarding_status_unknown_code', 'ForwardingStatusUnknown', 'cflow')),
+  treeOnly(uint('cflow.forwarding_status_forward_code', 'ForwardingStatusForwardCode', 'cflow')),
+  treeOnly(uint('cflow.forwarding_status_drop_code', 'ForwardingStatusDropCode', 'cflow')),
+  treeOnly(uint('cflow.forwarding_status_consume_code', 'ForwardingStatusConsumeCode', 'cflow')),
+  treeOnly(uint('cflow.appl_id.classification_engine_id', 'Classification Engine ID', 'cflow')),
+  treeOnly({ abbrev: 'cflow.appl_id.selector_id', label: 'Selector ID', type: 'bytes', layer: 'cflow' }),
+  treeOnly(uint('cflow.icmp_ipv6_type', 'IPv6 ICMP Type', 'cflow')),
+  treeOnly(uint('cflow.icmp_ipv6_code', 'IPv6 ICMP Code', 'cflow')),
+  treeOnly(uint('cflow.mpls_label', 'MPLS label', 'cflow')),
+  treeOnly(uint('cflow.mpls_exp', 'MPLS experimental bits', 'cflow')),
+  treeOnly(bool('cflow.mpls_bos', 'MPLS Bottom of Stack', 'cflow')),
+  treeOnly(str('cflow.timestart', 'StartTime', 'cflow')),
+  treeOnly(str('cflow.timeend', 'EndTime', 'cflow')),
+  treeOnly(str('cflow.timedelta', 'Duration', 'cflow')),
+];
+
+/** A generated element's filter type, from how its value is written. */
+const ELEMENT_TYPES: Record<string, FieldType> = {
+  u: 'uint', x: 'uint', X: 'uint', P: 'uint', o: 'uint', e: 'uint', p: 'uint', i: 'int', a4: 'ipv4', a6: 'ipv6', m: 'mac', b: 'bytes',
+  s: 'string', B: 'bool', f: 'string', F: 'string', t: 'time', r: 'string',
+};
+
+/**
+ * Every other element the reference names, from `dissectors/cflowNames.ts`:
+ * one registration per field, though several elements share one
+ * (`cflow.abstimestart` is the start of four kinds of time).
+ */
+const CFLOW_ELEMENT_FIELDS: readonly FieldDef[] = (() => {
+  const taken = new Set(CFLOW_FIELDS.map((f) => f.abbrev));
+  const out: FieldDef[] = [];
+  for (const [abbrev, label, kind] of Object.values(ELEMENTS)) {
+    if (abbrev === '' || taken.has(abbrev)) continue;
+    taken.add(abbrev);
+    out.push(treeOnly({ abbrev, label, type: ELEMENT_TYPES[kind] ?? ELEMENT_TYPES[kind[0]] ?? 'string', layer: 'cflow' }));
+  }
+  return out;
+})();
+
 export const FIELDS: readonly FieldDef[] = [
   ...BASE_FIELDS,
   ...DTLS_TWINS,
@@ -2955,6 +3060,8 @@ export const FIELDS: readonly FieldDef[] = [
   treeOnly(uint('dtls.handshake.session_ticket_lifetime_hint', 'Session Ticket Lifetime Hint', 'dtls')),
   treeOnly(uint('dtls.handshake.session_ticket_length', 'Session Ticket Length', 'dtls')),
   treeOnly(str('dtls.handshake.session_ticket', 'Session Ticket', 'dtls')),
+  ...CFLOW_FIELDS,
+  ...CFLOW_ELEMENT_FIELDS,
 ];
 
 export const FIELD_BY_ABBREV: ReadonlyMap<string, FieldDef> = new Map(FIELDS.map((f) => [f.abbrev, f]));

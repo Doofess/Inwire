@@ -20,6 +20,7 @@
  */
 import { freshDtlsConversation, type DtlsConversationState } from './dissectors/dtls';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
+import { MemoryTemplateStore, type FlowTemplate, type StoredFlowTemplate } from './flow/flowExport';
 
 /**
  * How many conversations each per-layer index remembers.
@@ -162,6 +163,10 @@ const MAX_ESP_SAS = 4096;
 /** WireGuard sessions kept, newest last; the oldest is forgotten past this. */
 const MAX_WIREGUARD_SESSIONS = 4096;
 
+/** NetFlow v9 / IPFIX templates, and the exporters whose sequence numbers are followed. */
+const MAX_FLOW_TEMPLATES = 4096;
+const MAX_FLOW_EXPORTERS = 4096;
+
 /**
  * One WireGuard handshake and what followed it: the two ends, the index each
  * chose, and the frame that opened it. `responder` is filled by the response.
@@ -256,6 +261,9 @@ export class L3Tracker {
   private nextDtlsStream = 0;
   private cldapConversations = new Map<string, LdapConversationState>();
   private nextWireGuardStream = 0;
+  // The reference keeps the first definition of a template id: see `MemoryTemplateStore`.
+  private flowTemplates = new MemoryTemplateStore(false, MAX_FLOW_TEMPLATES);
+  private flowSequences = new Map<string, { next: number; frame: number }>();
 
   /** `eth.stream`: the conversation between two MAC addresses. */
   ethStream(srcMac: string, dstMac: string, tsUs: number): ConversationFacts {
@@ -508,7 +516,41 @@ export class L3Tracker {
     return state;
   }
 
+  /**
+   * The NetFlow v9 or IPFIX template a data set names, and the frame that
+   * defined it, or null when no earlier message (or this one) has. `exporter`
+   * is both ends of the datagram and `domain` the source id or observation
+   * domain - the reference's keying.
+   */
+  flowTemplate(exporter: string, domain: number, id: number): StoredFlowTemplate | null {
+    return this.flowTemplates.lookup(exporter, domain, id);
+  }
+
+  /** Keeps a template a message defined, unless the id already has one. */
+  defineFlowTemplate(exporter: string, domain: number, id: number, template: FlowTemplate, frame: number): void {
+    this.flowTemplates.define(exporter, domain, id, { scopeCount: template.scopeCount, fields: template.fields, ...(template.v9Options ? { v9Options: true } : {}) }, frame);
+  }
+
+  /**
+   * What a NetFlow v9 or IPFIX message's sequence number should have been -
+   * the last message's, plus one (v9) or plus the data records it carried
+   * (IPFIX) - and the frame that message was in; null for an exporter's first.
+   * Records `next` as what the following message should carry.
+   */
+  flowSequence(exporter: string, domain: number, next: number, frame: number): { expected: number; previousFrame: number } | null {
+    const key = `${exporter}#${domain}`;
+    const last = this.flowSequences.get(key);
+    if (last === undefined && this.flowSequences.size >= MAX_FLOW_EXPORTERS) {
+      const oldest = this.flowSequences.keys().next();
+      if (!oldest.done) this.flowSequences.delete(oldest.value);
+    }
+    this.flowSequences.set(key, { next, frame });
+    return last === undefined ? null : { expected: last.next, previousFrame: last.frame };
+  }
+
   reset(): void {
+    this.flowTemplates = new MemoryTemplateStore(false, MAX_FLOW_TEMPLATES);
+    this.flowSequences.clear();
     this.cldapConversations.clear();
     this.dtlsConversations.clear();
     this.nextDtlsStream = 0;
