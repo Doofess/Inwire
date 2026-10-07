@@ -18,16 +18,39 @@
  * `data-text-lines` lexes as one word because `-` is a word character in
  * `filter/lexer.ts`, which was checked rather than hoped for.
  *
- * ## What is deliberately NOT built
+ * ## XML
  *
- * **No DOM for XML.** The reference's own XML dissector is a large tree this
- * build has no fixture for, and `text/*` covering XML as line-based text is
- * what the reference does for `application/xhtml+xml` anyway. A half-built
- * XML tree would be worse than a line count.
+ * Its own tree (`dissectors/xml.ts`), for the media types the reference's XML
+ * dissector claims (`XML_TYPES`) - which is the markup drawn as written, not a
+ * parsed DOM, so it could be matched row for row. This used to be refused as
+ * a half-built tree being worse than a line count; it is no longer half
+ * built. Every other `+xml` type stays line-based text, as it does there.
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import { hexColons } from '../dissect/hexBytes';
 import { dissectJson } from './json';
+import { dissectXml } from './xml';
+
+/**
+ * The media types the reference hands its XML dissector, as `tshark -G
+ * decodes` lists them - an exact list, not every `+xml`: `application/
+ * xhtml+xml` is not on it and stays line-based text, as it does there.
+ */
+const XML_TYPES = new Set([
+  'application/3gpp-ims+xml', 'application/atom+xml', 'application/auth-policy+xml', 'application/ccmp+xml',
+  'application/conference-info+xml', 'application/cpim-pidf+xml', 'application/cpl+xml', 'application/dds-web+xml',
+  'application/im-iscomposing+xml', 'application/load-control+xml', 'application/mathml+xml',
+  'application/media_control+xml', 'application/mediaservercontrol+xml', 'application/note+xml', 'application/pidf+xml',
+  'application/pidf-diff+xml', 'application/poc-settings+xml', 'application/rdf+xml', 'application/reginfo+xml',
+  'application/resource-lists+xml', 'application/rlmi+xml', 'application/rls-services+xml',
+  'application/rs-metadata+xml', 'application/rss+xml', 'application/simple-filter+xml',
+  'application/simple-message-summary+xml', 'application/simservs+xml', 'application/smil', 'application/soap+xml',
+  'application/upp-directory+xml', 'application/watcherinfo+xml', 'application/x-crd+xml',
+  'application/xcap-att+xml', 'application/xcap-caps+xml', 'application/xcap-diff+xml', 'application/xcap-el+xml',
+  'application/xcap-error+xml', 'application/xcap-ns+xml', 'application/xml', 'application/xml-dtd',
+  'application/xpidf+xml', 'application/xslt+xml', 'image/svg+xml', 'message/imdn+xml', 'text/xml',
+  'text/vnd.wap.co', 'text/vnd.wap.emn', 'text/vnd.wap.si', 'text/vnd.wap.sl', 'text/vnd.wap.wml',
+]);
 
 export interface MediaEntry {
   /** Exact media types this claims, lower-cased, without parameters. */
@@ -51,6 +74,13 @@ function previewLine(line: string): string {
 }
 
 export const MEDIA_DISSECTORS: readonly MediaEntry[] = [
+  {
+    claims: (type) => XML_TYPES.has(type),
+    token: 'xml',
+    dissect(bytes) {
+      return dissectXml(bytes, 0, bytes.length);
+    },
+  },
   {
     types: ['application/json', 'text/json', 'application/problem+json'],
     // `application/vnd.api+json`, `application/ld+json` and every other

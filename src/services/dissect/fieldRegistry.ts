@@ -119,7 +119,7 @@ export const LAYERS = [
   // `-` (checked, not hoped for). `data-text-lines` owns no fields: it is a
   // protocol with nothing but lines under it, which is why nothing below
   // carries that prefix.
-  'json', 'media', 'data', 'data-text-lines',
+  'json', 'xml', 'media', 'data', 'data-text-lines',
   // IPv6 extension headers are their own filter tokens, as in Wireshark:
   // `ipv6.hopopts`, `ipv6.fragment`. They appear in frameProtocols rather
   // than as field prefixes, so they own no fields of their own.
@@ -177,6 +177,21 @@ export const FIELDS: readonly FieldDef[] = [
   str('kerberos.crealm', 'Client Realm', 'kerberos'),
   str('kerberos.cname_string', 'Client Name', 'kerberos'),
   str('kerberos.sname_string', 'Server Name', 'kerberos'),
+  // --- XML ---------------------------------------------------------------------
+  // The reference's tree is the markup as written, row for row, so each of
+  // these is a string of source text; a document has many of each, which a
+  // field bag of one value per name cannot hold, so they are tree rows.
+  treeOnly(str('xml.tag', 'Tag', 'xml')),
+  treeOnly(str('xml.attribute', 'Attribute', 'xml')),
+  treeOnly(str('xml.cdata', 'CDATA', 'xml')),
+  treeOnly(str('xml.cdatasection', 'CDATASection', 'xml')),
+  treeOnly(str('xml.comment', 'Comment', 'xml')),
+  treeOnly(str('xml.dtdtag', 'DTD Tag', 'xml')),
+  treeOnly(str('xml.unknown', 'Unknown', 'xml')),
+  treeOnly(str('xml.xmlpi.xml', 'xml.xmlpi.xml', 'xml')),
+  treeOnly(str('xml.xmlpi.xml.version', 'version', 'xml')),
+  treeOnly(str('xml.xmlpi.xml.encoding', 'encoding', 'xml')),
+  treeOnly(str('xml.xmlpi.xml.standalone', 'standalone', 'xml')),
   // --- WireGuard ---------------------------------------------------------------
   // `wg.stream` numbers sessions - one per handshake initiation - as the
   // reference does, so `wg.stream == 2` is one VPN session from its handshake

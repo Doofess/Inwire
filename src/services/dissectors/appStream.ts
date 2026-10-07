@@ -149,10 +149,12 @@ function readHttp1(
       rows.push(...bodyRows);
       const media = mediaLayerFor(body, decoded);
       if (media !== null) extra.push(media);
-      summary = `${body.message.summary} (reassembled body, ${body.bytes.length} bytes)`;
+      // The reference dissects the reassembled message here, start line and
+      // all, so the column reads as it would for a body that fit one segment.
+      summary = messageColumn(body.message.summary, contentTypeOf(body.message), media);
     }
     return {
-      protocolLabel: 'HTTP', info: [result.bodies.length > 0 ? summary : 'Continuation'],
+      protocolLabel: protocolLabelFor(extra), info: [result.bodies.length > 0 ? summary : 'Continuation'],
       layers: [{ name: 'Hypertext Transfer Protocol', summary, fields: rows }, ...extra],
       fields,
     };
@@ -177,11 +179,6 @@ function readHttp1(
     // messages run together with no separator between them - so two requests
     // in one segment read "GET /one HTTP/1.1 GET /two HTTP/1.1 ". Matched
     // exactly, because the column text is the contract.
-    const type = message.kind === 'response'
-      ? message.headers.find((h) => h.name.toLowerCase() === 'content-type')?.value
-      : undefined;
-    const mediaType = type === undefined ? '' : ` (${type.split(';')[0].trim()})`;
-    info.push(`${message.summary} ${mediaType}`);
 
     let answers: { frameId: number; elapsedUs: number } | undefined;
     if (message.kind === 'request') {
@@ -204,12 +201,14 @@ function readHttp1(
     // A body that began and ended inside this same segment belongs under the
     // message it is the body of, not in a separate frame's tree.
     const body = result.bodies.find((candidate) => candidate.message === message);
+    let media: ProtocolLayer | null = null;
     if (body !== undefined) {
       const { rows: bodyRows, decoded } = httpBodyRows(body);
       rows.push(...bodyRows);
-      const media = mediaLayerFor(body, decoded);
+      media = mediaLayerFor(body, decoded);
       if (media !== null) extra.push(media);
     }
+    info.push(messageColumn(message.summary, message.kind === 'response' ? contentTypeOf(message) : undefined, media));
   }
 
   // Anything left finished here but started earlier - the pipelined case,
@@ -224,7 +223,7 @@ function readHttp1(
 
   const line = info.join('');
   return {
-    protocolLabel: 'HTTP',
+    protocolLabel: protocolLabelFor(extra),
     // One entry, already joined: pipelined messages are concatenated, not
     // comma-separated, so the caller must not put a separator between them.
     info: [line],
@@ -250,6 +249,35 @@ function readHttp1(
  *   implemented. The Content-Type describes what is UNDER the encoding, and
  *   until the encoding comes off it describes nothing present.
  */
+const JSON_LAYER = 'JavaScript Object Notation';
+const XML_LAYER = 'eXtensible Markup Language';
+/** What each body dissector appends to the Protocol column. */
+const BODY_LABELS: Record<string, string> = { [JSON_LAYER]: 'JSON', [XML_LAYER]: 'XML' };
+
+/** A message's media type, without its parameters. */
+function contentTypeOf(message: Http1Body['message']): string | undefined {
+  const type = message.headers.find((h) => h.name.toLowerCase() === 'content-type')?.value;
+  return type === undefined ? undefined : type.split(';')[0].trim();
+}
+
+/**
+ * One message's part of the Info column. HTTP writes its start line and a
+ * space; the body's own dissector, when it has one, then writes after it as
+ * the reference's do - JSON `, JSON (type)`, XML nothing at all - and
+ * otherwise HTTP names the type itself in brackets.
+ */
+function messageColumn(summary: string, type: string | undefined, media: ProtocolLayer | null): string {
+  if (media?.name === JSON_LAYER) return `${summary} , JSON (${type})`;
+  if (media?.name === XML_LAYER) return `${summary} `;
+  return `${summary} ${type === undefined ? '' : ` (${type})`}`;
+}
+
+/** `HTTP/JSON`, `HTTP/XML`: each body dissector appends its name to the Protocol column after HTTP's. */
+function protocolLabelFor(extra: readonly ProtocolLayer[]): string {
+  const names = extra.map((l) => BODY_LABELS[l.name]).filter((x): x is string => x !== undefined);
+  return ['HTTP', ...names.filter((x, i) => names.indexOf(x) === i)].join('/');
+}
+
 function mediaLayerFor(body: Http1Body, decoded: DecodedBody): ProtocolLayer | null {
   if (body.truncated !== null) return null;
   if (decoded.unsupported !== undefined || decoded.error !== undefined) return null;

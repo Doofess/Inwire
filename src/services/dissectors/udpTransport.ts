@@ -17,6 +17,7 @@ import type { TransportResult } from '../dissect/types';
 import type { QuicHandshakeFacts } from '../quicFlowTracker';
 import type { QuicTrackerApi, DnsTrackerApi, L3TrackerApi } from '../dissect/trackerApi';
 import { wireGuardFacts } from './wireguard';
+import { dissectXml } from './xml';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
@@ -140,6 +141,17 @@ export function dissectUdpTransport(
       extraLayers.push(read.layer, ...(read.innerLayers ?? []));
       protocolTokens.push(subdissector.token);
       Object.assign(appFields, read.fields);
+    }
+  } else if (srcPort === 3702 || dstPort === 3702) {
+    // WS-Discovery: SOAP over UDP, which the reference hands to its XML
+    // dissector. The column says so - `UDP/XML` - and Info stays the
+    // datagram's own, with no URL lifted out of the document.
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    if (payloadEnd > udpPayloadStart) {
+      protocolLabel = 'UDP/XML';
+      info = `${srcPort} → ${dstPort} Len=${udpPayloadLen}`;
+      extraLayers.push(dissectXml(rawBytes, udpPayloadStart, payloadEnd));
+      protocolTokens.push('xml');
     }
   } else if (nbnsPort) {
     const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
