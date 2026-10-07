@@ -53,10 +53,10 @@ may touch what, and the map from concept to file.
 
 - **Live capture** from any adapter, with throughput sparklines in the picker so
   you can see which one is carrying traffic before you commit.
-- **140 dissected layers** — Ethernet/VLAN/802.1ad/LLC, 802.1X (EAPOL and EAP), HomePlug AV (powerline adapters' management header, each vendor's message names), IEEE 1905.1a and EasyMesh (what mesh Wi-Fi routers say to each other, every message and TLV named), Linux cooked capture, IPv4/IPv6
+- **142 dissected layers** — Ethernet/VLAN/802.1ad/LLC, 802.1X (EAPOL and EAP), HomePlug AV (powerline adapters' management header, each vendor's message names), IEEE 1905.1a and EasyMesh (what mesh Wi-Fi routers say to each other, every message and TLV named), Linux cooked capture, IPv4/IPv6
   with fragment reassembly, TCP/UDP, DNS, TLS, DTLS, SSH, QUIC, HTTP/1.1 through HTTP/3,
   DHCP, NetBIOS (names, datagrams, and the Windows browser announcements they carry over SMB1), CLDAP (the domain-controller locator), NAT-PMP/PCP, WireGuard, OpenVPN, IPsec (IKE, ESP, NAT-T), LDAP, SMB2 and SMB1 over the NetBIOS session service, DCE/RPC (the endpoint mapper read whole, and 37 more RPC interfaces - SRVSVC, LSARPC, SAMR, DRSUAPI and the rest - named down to the call, their arguments left as bytes), Kerberos, NTLMSSP inside SPNEGO (Windows logins over SMB2, DCE/RPC and HTTP), RDP (TPKT, X.224 and the security negotiation), Steam's LAN streaming discovery, SIP, RTP (calls' audio and video, found from SIP's session description or by content, DTMF events named), NetFlow v5/v9 and IPFIX (templates remembered across packets) and sFlow v5 (flow and interface-counter samples) - what routers export about a whole network, SNMP, RADIUS, BGP, OSPF and the rest, plus GRE
-  and VXLAN dissected *through*, and an HTTP body read on into JSON, XML or text (WS-Discovery's SOAP too). The list is `LAYERS` in
+  and VXLAN dissected *through*, and another network's traffic read through the way a switch or router mirrors it to you - ERSPAN (Cisco's and others' remote SPAN, types I-III) and TZSP (MikroTik's packet sniffer streaming), and an HTTP body read on into JSON, XML or text (WS-Discovery's SOAP too). The list is `LAYERS` in
   `src/services/dissect/fieldRegistry.ts`, which also feeds the filter's names,
   the autocomplete and the column catalogue.
 - **Decryption from a key log.** `Settings → Decryption` takes the
