@@ -813,6 +813,7 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Generic Routing Encapsulation': 'gre',
   'Session Initiation Protocol': 'sip',
   'Real-time Transport Control Protocol': 'rtcp',
+  'Cisco NetFlow/IPFIX': 'cflow',
   'Transport Layer Security': 'tls',
   // The reference's own name for the layer, so the map can hand back the `quic`
   // token that `udpTransport.ts` also pushes through `protocolTokens`. The
