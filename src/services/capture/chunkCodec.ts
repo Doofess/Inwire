@@ -50,13 +50,13 @@
  * without decoding anything. The same relationship holds for `frameProtocols`
  * and `analysisFlags`: exact as interned lists, mirrored as bitmaps.
  *
- * That is what makes growth safe. `LAYERS` is 57 tokens today and the bitmap
- * holds 64; when it passes 64 the *accelerator* degrades for the overflow
- * tokens and the filter falls back to the list, and nothing decodes wrongly.
+ * That is what makes growth safe. `LAYERS` is past 64 tokens and the bitmap
+ * holds 64, in the frozen order of `LAYER_BIT_ORDER`; for every other token
+ * the *accelerator* degrades and the filter falls back to the list, and
+ * nothing decodes wrongly.
  * A layout that stored only the bitmap would silently lose a protocol instead.
  */
 import type { Packet, PacketStatus, ProtocolType, ExpertInfo, ExpertCategory } from '../../types/packet';
-import { LAYERS } from '../dissect/fieldRegistry';
 import { fieldEntries } from '../dissect/fieldAccess';
 
 export const CHUNK_MAGIC = 0x314b4349;            // 'ICK1'
@@ -143,8 +143,8 @@ const OFF_LENGTH = 8;         // u32
 const OFF_STREAM_ID = 12;     // u32  - 0xffffffff means "none"
 const OFF_SRC_ADDR = 16;      // 16 bytes
 const OFF_DST_ADDR = 32;      // 16 bytes
-const OFF_LAYERS_LO = 48;     // u32  - LAYERS[0..31]
-const OFF_LAYERS_HI = 52;     // u32  - LAYERS[32..63]
+const OFF_LAYERS_LO = 48;     // u32  - LAYER_BIT_ORDER[0..31]
+const OFF_LAYERS_HI = 52;     // u32  - LAYER_BIT_ORDER[32..63]
 const OFF_ANALYSIS = 56;      // u32  - ANALYSIS_FLAGS bitmap
 const OFF_SRC_PORT = 60;      // u16
 const OFF_DST_PORT = 62;      // u16
@@ -171,7 +171,30 @@ export const ANALYSIS_FLAGS: readonly string[] = [
 ];
 
 const ANALYSIS_BIT = new Map<string, number>(ANALYSIS_FLAGS.map((f, i) => [f, i]));
-const LAYER_BIT = new Map<string, number>(LAYERS.map((l, i) => [l, i]));
+/**
+ * Each layer token's bit in the prefix's 64-bit layer bitmap, in a fixed
+ * order because the bits are WRITTEN TO DISK. Appending is safe; reordering,
+ * inserting or removing is not.
+ *
+ * It used to be `LAYERS`' own order, which is the autocomplete's and gains
+ * tokens in the middle - so every protocol added below the end moved every
+ * bit after it, and a capture written before the change read back as the
+ * wrong layers. Nothing reads the bitmap today (`hasLayer` has no caller
+ * outside this file and its test; the filter answers from the interned
+ * list), which is the only reason that was never seen. This is the order the
+ * last build to use `LAYERS` wrote, so its captures keep their meaning; a
+ * token past 64 or not listed here is answered from the list.
+ */
+export const LAYER_BIT_ORDER: readonly string[] = [
+  'frame', 'eth', 'vlan', 'ieee8021ad', 'ieee8021ah', 'llc', 'sll', 'null', 'arp', 'stp', 'lldp', 'ieee1905', 'cdp',
+  'eapol', 'eap', 'wlan_rsna_eapol',
+  'ip', 'ipv6', 'gre', 'vxlan', 'esp', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
+  'dns', 'nbns', 'nbdgm', 'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
+  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol',
+  'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp',
+  'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'cldap', 'mscldap', 'smb2', 'kerberos',
+];
+const LAYER_BIT = new Map<string, number>(LAYER_BIT_ORDER.map((l, i) => [l, i]));
 
 /** How an address was parsed into the prefix, so a filter knows what it holds. */
 const ADDR_NONE = 0;

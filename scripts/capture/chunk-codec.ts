@@ -29,8 +29,9 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import {
   encodeChunk, decodeChunk, applyPrefixes, PrefixBlock, ChunkDirectory, chunkStoresLinkType, CHUNK_VERSION,
   DIRECTORY_BYTES, prefixBlockBytes,
-  CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND,
+  CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND, LAYER_BIT_ORDER,
 } from '../../src/services/capture/chunkCodec';
+import { LAYERS } from '../../src/services/dissect/fieldRegistry';
 import { PcapService } from '../../src/services/pcapParser';
 import { fieldEntries } from '../../src/services/dissect/fieldAccess';
 import type { Packet } from '../../src/types/packet';
@@ -275,6 +276,11 @@ console.log('\n--- the prefix block, which filters read on its own ---\n');
     [true, false, true]);
   // The network reviewer's point: without this a read-back frame does not match
   // the filter you use to FIND retransmissions.
+  // The bits are on disk, so their order is frozen apart from LAYERS': a
+  // token listed must still be a layer, and the list must fit the 64 bits.
+  check('every frozen layer bit names a layer this build has',
+    LAYER_BIT_ORDER.filter((t) => !(LAYERS as readonly string[]).includes(t)), []);
+  check('the frozen layer bits fit the bitmap', LAYER_BIT_ORDER.length <= 64, true);
   check('a tcp.analysis flag is answered from the bitmap',
     [block.hasAnalysisFlag(0, 'retransmission'), block.hasAnalysisFlag(0, 'out_of_order')],
     [true, false]);
