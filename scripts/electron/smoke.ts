@@ -483,8 +483,49 @@ try {
    * The stub's adapter is the device name `\Device\NPF_{STUB-0}` under the
    * label `Ethernet (stub)`, so both rows are predictable exactly.
    */
+  /*
+   * **Scrolled up first, as a person reading a live capture does, and on a
+   * renderer slowed twentyfold.**
+   *
+   * The list follows the tail while the capture runs: every flush, ten a
+   * second, scrolls it and swaps the rows under the pointer. Playwright clicks
+   * only an element that holds still across two animation frames, so on a
+   * loaded machine - a game running beside the suite, seen - frames come
+   * slower than flushes, every row detaches before it settles, and the click
+   * timed out on four checks that had nothing wrong with them. A covered
+   * window is NOT the cause: run under a full-screen window, this passed.
+   *
+   * So the test does what a reader does - a wheel gesture upward, which in
+   * the default `reading` follow mode stops the tail - and checks that the
+   * list then holds still, which is the behaviour being relied on. The
+   * slowdown is Chromium's own CPU throttle, around this block only, so
+   * every run proves the click on the machine it was failing on.
+   */
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 20 });
+  const listCentre = await page.evaluate(() => {
+    const scroller = [...document.querySelectorAll('div')].find(
+      (d) => d.scrollHeight > d.clientHeight + 200 && d.querySelector('[role="row"]'));
+    const box = scroller?.getBoundingClientRect();
+    return box ? { x: box.x + box.width / 2, y: box.y + box.height / 2 } : null;
+  });
+  if (listCentre) {
+    // Raw mouse input, which waits for nothing - unlike hover(), which would
+    // wait on the same moving row this block exists to avoid.
+    await page.mouse.move(listCentre.x, listCentre.y);
+    await page.mouse.wheel(0, -400);
+  }
+  await sleep(500);
+  const firstRowId = () => page.locator('[role="row"]').nth(1).evaluate((row) => row.id).catch(() => '');
+  const before = await firstRowId();
+  await sleep(1_000);
+  const after = await firstRowId();
+  const heldStill = before !== '' && before === after;
+  checkTrue('scrolling up stops the live list following the tail', heldStill);
+  if (!heldStill) console.log(`        the first row was ${before || 'missing'}, then ${after || 'missing'}`);
   checkTrue('a frame can be selected', await clicks('the first packet row',
     () => page.locator('[role="row"]').nth(1).click()));
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
   const frameLayer = await until(async () => (await page.evaluate(
     () => document.body.innerText)).includes('Interface description:'), 10_000);
   checkTrue('...and its tree is drawn', frameLayer);
