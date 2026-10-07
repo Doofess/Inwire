@@ -81,6 +81,7 @@ import { dissectMediaType } from './mediaType';
 import { dissectOpenvpn, OPENVPN_PORT } from './openvpn';
 import { dissectHomeplugAv } from './homeplugAv';
 import { dissectSteamIhs, STEAM_IHS_PORT } from './steamIhs';
+import { dissectSflow, SFLOW_PORT } from './sflow';
 
 /** The three things this build dispatches on by value. */
 export type DispatchTableName = 'ethertype' | 'ip.proto' | 'udp.port';
@@ -240,6 +241,9 @@ const DISPATCH_TABLE: readonly DispatchEntry[] = [
   // Steam's LAN discovery. Declines a datagram without its signature, which
   // then reads as plain UDP, as it does in the reference.
   { table: 'udp.port', values: on(STEAM_IHS_PORT), token: 'steam_ihs_discovery', dissect: dissectSteamIhs },
+  // sFlow v5 from a switch or router. Declines anything but version 5 with an
+  // IPv4 or IPv6 agent address, which then reads as plain UDP.
+  { table: 'udp.port', values: on(SFLOW_PORT), token: 'sflow', dissect: dissectSflow },
   {
     table: 'udp.port',
     values: on(1985, 2029),
