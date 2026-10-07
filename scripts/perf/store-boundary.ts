@@ -53,6 +53,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { serialize, deserialize } from 'node:v8';
+import { deflateRawSync } from 'node:zlib';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { CaptureWriter } from '../../src/services/capture/captureWriter';
@@ -144,12 +145,30 @@ if (!isMainThread) {
     byt: NodeBlockFile.open(path.join(dir, 'frames.iwbyt')),
     rec: NodeBlockFile.open(path.join(dir, 'records.iwrec')),
   };
-  const writer = new CaptureWriter(files);
+  // What the store passes (`electron/store/entry.ts`): node's zlib at level
+  // 1. The writer's own default is `fflate` at 6, which is measured beside it
+  // because it is what the store used until a 36,000 frame-a-second burst
+  // outran it - 57% of the writer was that deflate.
+  const nativeDeflate = (b: Uint8Array) => new Uint8Array(deflateRawSync(b, { level: 1 }));
+  const writer = new CaptureWriter(files, { deflate: nativeDeflate });
   const writerMs = await time('CaptureWriter.append + finish', () => {
     for (const b of work) writer.append(b);
     writer.finish();
   });
   for (const f of Object.values(files)) f.close();
+  const fflateFiles = {
+    index: NodeBlockFile.open(path.join(dir, 'f-index.iwidx')),
+    pfx: NodeBlockFile.open(path.join(dir, 'f-prefix.iwpfx')),
+    sum: NodeBlockFile.open(path.join(dir, 'f-summary.iwsum')),
+    byt: NodeBlockFile.open(path.join(dir, 'f-frames.iwbyt')),
+    rec: NodeBlockFile.open(path.join(dir, 'f-records.iwrec')),
+  };
+  const fflateWriter = new CaptureWriter(fflateFiles);
+  await time('the same, with fflate at level 6 (the old)', () => {
+    for (const b of work) fflateWriter.append(b);
+    fflateWriter.finish();
+  });
+  for (const f of Object.values(fflateFiles)) f.close();
 
   console.log('\n2. the per-frame write, which the writer does one syscall at a time\n');
   const one = NodeBlockFile.open(path.join(dir, 'one.bin'));

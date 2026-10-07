@@ -113,6 +113,23 @@ interface RunningScan {
   reported: number;
 }
 
+export interface CaptureHostOptions {
+  scanSliceMs?: number;
+  /**
+   * How a sealed chunk is compressed, and read back. Raw DEFLATE either way,
+   * so a capture written with one reads with the other.
+   *
+   * Injected because this module imports no `node:*` (`node-safe.ts`), and
+   * the store's process is the one place the native zlib is there to be had:
+   * `electron/store/entry.ts` passes it. It is not a nicety - compressing the
+   * chunk was 57% of the writer's time in `fflate`'s JavaScript, and the store
+   * falling behind a 36,000 frame-a-second burst is what filled its heap
+   * (`scripts/perf/store-boundary.ts` has the numbers).
+   */
+  deflate?: (bytes: Uint8Array) => Uint8Array;
+  inflate?: (bytes: Uint8Array) => Uint8Array;
+}
+
 export class CaptureHost {
   private open: OpenCapture | null = null;
   /** Said once, so a wiring error is reported without becoming a stream. */
@@ -130,13 +147,17 @@ export class CaptureHost {
    * would pass whether or not the yield happened.
    */
   private readonly scanSliceMs: number;
+  private readonly deflate: ((bytes: Uint8Array) => Uint8Array) | undefined;
+  private readonly inflate: (bytes: Uint8Array) => Uint8Array;
 
   constructor(
     private readonly volume: CaptureVolume,
     private readonly post: (message: FromCapture) => void,
-    options: { scanSliceMs?: number } = {},
+    options: CaptureHostOptions = {},
   ) {
     this.scanSliceMs = options.scanSliceMs ?? DEFAULT_SLICE_MS;
+    this.deflate = options.deflate;
+    this.inflate = options.inflate ?? inflateSync;
   }
 
   /**
@@ -299,10 +320,11 @@ export class CaptureHost {
     const writer = new CaptureWriter(volume, {
       resumeFrom: records.slice(0, plan.keepRecords),
       floorChunk: plan.floorChunk,
+      ...(this.deflate !== undefined ? { deflate: this.deflate } : {}),
     });
     // The reader shares the writer's index, so a chunk is readable the moment
     // its record is appended rather than only after the file is re-read.
-    const reader = new CaptureReader(volume, writer.index, inflateSync);
+    const reader = new CaptureReader(volume, writer.index, this.inflate);
     this.open = { id: message.captureId, volume, writer, reader, floorChunk: writer.index.floorChunk };
 
     if (plan.framesLost > 0) {

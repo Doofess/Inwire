@@ -30,6 +30,7 @@ import type { FromCapture, ToCapture } from '../../src/services/capture/captureP
 import { captureVolume } from './volume';
 import { HEAP_SAMPLE_MS, judgeHeap } from './heapGuard';
 import { getHeapStatistics } from 'node:v8';
+import { deflateRawSync, inflateRawSync } from 'node:zlib';
 
 /** Where captures live. Passed in by main, which owns every path decision. */
 const directory = process.argv[2];
@@ -38,9 +39,28 @@ if (!directory) {
   process.exit(1);
 }
 
+/**
+ * Node's own zlib, at level 1. `fflate`'s level 6 cost 25.8 us of the writer's
+ * frame and this costs 9.0, for output within 1% of the size - measured by
+ * `scripts/perf/store-boundary.ts`, which is what a 36,000 frame-a-second
+ * burst needs: at the old rate the store fell behind, its queue filled its
+ * heap, and the guard stopped it 51 seconds in.
+ */
+/**
+ * A `Buffer` may be a window onto a larger pooled allocation, and a view
+ * posted across a port clones its whole backing buffer - so one that does not
+ * own its buffer is copied, once, here.
+ */
+const owned = (out: Buffer): Uint8Array =>
+  out.byteOffset === 0 && out.byteLength === out.buffer.byteLength
+    ? new Uint8Array(out.buffer)
+    : new Uint8Array(out);
+const deflate = (bytes: Uint8Array): Uint8Array => owned(deflateRawSync(bytes, { level: 1 }));
+const inflate = (bytes: Uint8Array): Uint8Array => owned(inflateRawSync(bytes));
+
 const host = new CaptureHost(captureVolume(directory), (message) => {
   port?.postMessage(message);
-});
+}, { deflate, inflate });
 
 /**
  * The app's channel. **Every reply goes here and nowhere else.**

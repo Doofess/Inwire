@@ -1113,14 +1113,24 @@ batches of 300:
 
 | | |
 |---|---|
-| `CaptureWriter` + `NodeBlockFile`, no boundary | 26.68 µs a frame — **37,477 f/s** |
-| serialize + deserialize (`v8`) | 5.27 µs a frame |
-| the whole hop over a real `MessagePort` | 5.26 µs a frame |
-| **both together** | 31.94 µs a frame — **31,308 f/s** |
+| `CaptureWriter` + `NodeBlockFile`, no boundary | 9.71 µs a frame — **103,022 f/s** |
+| the same with `fflate` at level 6, which it was | 24.63 µs a frame — 40,598 f/s |
+| serialize + deserialize (`v8`) | 5.08 µs a frame |
+| the whole hop over a real `MessagePort` | 5.21 µs a frame |
+| **both together** | 14.89 µs a frame — **67,000 f/s** |
 
-The crossing is **16%**, and 1,955 B a frame on the wire. This is the number
-ADR 0028 was waiting for, and it says the opposite of what was assumed: moving
-the store back in-process would buy 16%.
+1,955 B a frame on the wire. The crossing was 16% of the cost when this was
+first measured, which is the number ADR 0028 was waiting for, and it said the
+opposite of what was assumed: moving the store back in-process would buy 16%.
+It is a third now, because the writer got cheaper and the crossing did not.
+
+**57% of the writer was deflate**, in `fflate`'s JavaScript, and that is what
+a real burst found: a 66-second download at 36,000 frames a second (peaks
+near 50,000) outran a store that took 31,000, its queue filled its heap, and
+the heap guard stopped it 51 seconds in, with every frame before that intact.
+The store now passes node's own zlib at level 1 (`electron/store/entry.ts`),
+output within 1% of the size, and the rest of the app still reads with
+`fflate`; `scripts/capture/native-zlib.ts` holds that either reads the other.
 
 One thing that looked worth having and is not: the writer's per-frame
 `writeSync` costs 3.40 µs where the same bytes in one write a batch cost 0.28,
@@ -1145,9 +1155,11 @@ the ceiling with a message — which a V8 abort cannot give. The wall is the
 lower of our 2 GB and 90% of V8's own limit. `scripts/capture/heap-guard.ts`.
 
 Still unfixed: the store's inbound queue is unbounded, and each pending `append`
-holds its frames. It has not been seen to matter since the throughput was
-measured — the store takes 31,000 frames a second and the app feeds it far less
-— so the 4 GB heap remains unexplained rather than diagnosed.
+holds its frames. **It has now been seen to matter**: the burst above is the
+first diagnosis of a store heap reaching its ceiling, a queue growing at the
+gap between arrival and the store's rate. A faster store moves that gap; it
+does not close it. A link that delivers more than the store takes fills it
+again, and the guard is still what stops it.
 
 ## 8. Status
 
@@ -1230,9 +1242,8 @@ that asks for rows. The store protocol was built so this is a relocation rather
 than a rewrite. **Trigger:** a profile showing the cross-process copy on the
 frame path, or a sustained rate above ~100 MB/s.
 
-**The boundary is measured and it is not the trigger.** The hop is 5.26 µs a
-frame against the writer's 26.68 — 16% of the cost (see **What the store
-actually costs**). ADR 0038 took the *write* off the dissector's critical path,
+**The boundary is measured and it is not the trigger.** The hop is 5.21 µs a
+frame against the writer's 9.71 (see **What the store actually costs**). ADR 0038 took the *write* off the dissector's critical path,
 which is half of what this entry was for: bytes go to disk before anything
 dissects them, and the writer never stalls behind a slow dissector. What it did
 **not** do is make dissection asynchronous — within one Worker, decoding and
