@@ -10,7 +10,10 @@
  * Discovery is by directory walk rather than a hand-maintained list, because a
  * list is the thing that silently stops including the newest script. A file
  * counts as an assertion script if it calls `process.exit`, which is how every
- * one of them signals failure.
+ * one of them signals failure - or if it imports `parity/treeOracle.ts`, whose
+ * `finish()` makes that call for it. The second rule was missing while the
+ * oracle's first seventeen callers were written, so sixteen of them never ran
+ * here: a test that exits through a helper has no `process.exit` of its own.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -30,6 +33,7 @@ const repoRoot = join(here, '..');
  */
 const NOT_TESTS: Record<string, string> = {
   'gen-oui.ts': 'generator; downloads ~5MB from IEEE',
+  'parity/treeOracle.ts': 'helper; every script that imports it is run instead',
   'agent/sync-version.ts':
     'generator; WRITES local-agent/agent_version.py, agent-rs/Cargo.toml and Cargo.lock '
     + 'from package.json. A check suite that rewrites its own inputs cannot fail - '
@@ -122,7 +126,10 @@ const candidates = walk(here)
   .map((f) => relative(here, f).split(sep).join('/'))
   .filter((f) => f !== 'check.ts')
   .filter((f) => !(f in NOT_TESTS))
-  .filter((f) => readFileSync(join(here, f), 'utf8').includes('process.exit'))
+  .filter((f) => {
+    const text = readFileSync(join(here, f), 'utf8');
+    return text.includes('process.exit') || /from '\.\.\/parity\/treeOracle'/.test(text);
+  })
   .sort();
 
 const skipped = Object.entries(NOT_TESTS);

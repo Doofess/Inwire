@@ -14,7 +14,8 @@
  * its name. Rows the reference hides (`hide="yes"`) are not drawn by it, so
  * they are not asked for here.
  *
- * A helper, not a test: no `process.exit`, so `check.ts` does not run it.
+ * A helper, not a test: `check.ts` names it in NOT_TESTS, and runs every
+ * script that imports it, since `finish()` is how those exit.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
