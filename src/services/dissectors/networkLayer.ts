@@ -32,6 +32,7 @@ import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './ipv4';
 import { NO_NEXT_HEADER, walkIpv6Extensions } from './ipv6Ext';
 import { describeIpProtocol } from '../dissect/ipProtocolNames';
 import { dissectPortless, isPortlessProtocol } from './portless';
+import { dissectEsp } from './isakmp';
 import { GRE_PROTOCOL, encapsulatedInfo, innerNetworkStart, readGreHeader } from './gre';
 import {
   VXLAN_HEADER_LENGTH, isVxlanPort, readInnerEthernet, readVxlanHeader,
@@ -1003,7 +1004,9 @@ export function decodeNetworkLayer(
       ? null
       : v6Reassembled
         ? decodeTransportLayer(v6Reassembled, v6ReassembledOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, v6Reassembled.length - v6ReassembledOffset, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, v6Reassembled.length - v6ReassembledOffset), sentByUs, 0, nanosRemainder, l3Tracker)
-        : (chain?.stopsHere ?? false)
+        // The chain stops at ESP because everything after it is encrypted;
+        // ESP itself is still read, as IPv4's is.
+        : (chain?.stopsHere ?? false) && effectiveNextHeader !== 50
           ? null
           : decodeTransportLayer(rawBytes, transportOffset, effectiveNextHeader, srcIp, dstIp, tcpTracker, hopLimit, icmpTracker, id, transportPayloadLen, quicTracker, tsUs, dnsTracker, ipv6PseudoHeader(rawBytes, l3Offset, effectiveNextHeader, transportPayloadLen), sentByUs, captureShort, nanosRemainder, l3Tracker);
     if (transport) {
@@ -1133,6 +1136,18 @@ function decodeTransportLayer(
       srcIp, dstIp, frameId, tsUs, quicTracker, dnsTracker, l3Tracker, pseudoHeader, sentByUs,
     });
     if (read) return read;
+  } else if (ipProtocolNum === 50 && rawBytes.length >= transportOffset + 8) {
+    // ESP: an SPI and a sequence number, then ciphertext. The sequence is
+    // checked against the SA's last packet, as the reference does.
+    const espEnd = Math.min(rawBytes.length, transportOffset + (l4SegmentLen ?? rawBytes.length - transportOffset));
+    const spi = ((rawBytes[transportOffset] << 24) | (rawBytes[transportOffset + 1] << 16)
+      | (rawBytes[transportOffset + 2] << 8) | rawBytes[transportOffset + 3]) >>> 0;
+    const seq = ((rawBytes[transportOffset + 4] << 24) | (rawBytes[transportOffset + 5] << 16)
+      | (rawBytes[transportOffset + 6] << 8) | rawBytes[transportOffset + 7]) >>> 0;
+    const sequence = l3Tracker !== undefined && frameId !== undefined
+      ? l3Tracker.espSequence(srcIp, dstIp, spi, seq, frameId) : null;
+    const esp = dissectEsp(rawBytes, transportOffset, espEnd, sequence);
+    if (esp) return { proto: 'ESP', protocolLabel: 'ESP', info: esp.info, fields: esp.fields, layer: esp.layer };
   } else if (isPortlessProtocol(ipProtocolNum)) {
     // IGMP, VRRP and OSPF - see dissectors/portless.ts.
     const read = dissectPortless(rawBytes, transportOffset, ipProtocolNum, l4SegmentLen);

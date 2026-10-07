@@ -144,8 +144,13 @@ export async function compareWithReference(cases: OracleCase[], options: OracleO
       const mine = ourRows(packet, options.rows);
       const ref = theirs[i] ?? [];
       const differ = mine.length !== ref.length || mine.some((row, k) => !sameRow(row, ref[k]));
+      // From the first row that differs, a few either side: a whole tree of a
+      // hundred rows hides the one that moved.
+      let at = mine.findIndex((row, k) => k >= ref.length || !sameRow(row, ref[k]));
+      if (at < 0) at = Math.min(mine.length, ref.length);
+      const around = (rows: string[]) => rows.slice(Math.max(0, at - 2), at + 6).map((r) => r.replace('\u0000', '')).join('\n          ');
       check(`${c.label}: every row matches the reference (${ref.length})`, !differ,
-        `reference:\n          ${ref.join('\n          ')}\n        this build:\n          ${mine.map((r) => r.replace('\u0000', '')).join('\n          ')}`);
+        `first difference at row ${at + 1} (this build has ${mine.length})\n        reference:\n          ${around(ref)}\n        this build:\n          ${around(mine)}`);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

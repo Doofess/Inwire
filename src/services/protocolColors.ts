@@ -72,6 +72,9 @@ const HUE_BY_PROTOCOL: Record<ProtocolType, Hue> = {
   // A GRE frame only reaches the map when its payload could not be read - a
   // readable tunnel reports the INNER protocol, so it is never coloured GRE.
   GRE: 'neutral',
+  // An IPsec tunnel, for the same reason: what it carries is what matters,
+  // and with no keys that is not readable.
+  ESP: 'neutral',
   CUSTOM: 'neutral',
 };
 

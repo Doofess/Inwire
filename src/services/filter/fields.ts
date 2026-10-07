@@ -186,7 +186,8 @@ const PROTOCOL_PREDICATES: Record<string, (p: Packet) => boolean> = {
   // actually carried an HTTP message, so the bareword resolves there and the
   // predicate that matched every frame on port 80 is gone.
   https: (p) => p.protocol === 'HTTPS',
-  ssh: (p) => p.protocol === 'SSH',
+  // `ssh` left when it became a layer token - see dissectors/ssh.ts. The
+  // predicate it had matched every segment on port 22, bare ACKs included.
   mqtt: (p) => p.protocol === 'MQTT',
   mdns: (p) => p.protocolLabel === 'MDNS',
   llmnr: (p) => p.protocolLabel === 'LLMNR',

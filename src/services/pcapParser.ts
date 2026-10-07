@@ -865,6 +865,9 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'Port Control Protocol': 'portcontrol',
   'Dropbox LAN sync Discovery Protocol': 'db-lsp-disc',
   'SSH Protocol': 'ssh',
+  'Internet Security Association and Key Management Protocol': 'isakmp',
+  'Encapsulating Security Payload': 'esp',
+  'UDP Encapsulation of IPsec Packets': 'udpencap',
   'Extensible Authentication Protocol': 'eap',
   // The IPv6 extension headers. Without these the layer names fall through to
   // the underscore rule and the protocol hierarchy reads

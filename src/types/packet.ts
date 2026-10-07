@@ -19,6 +19,9 @@ export type ProtocolType =
   | 'MQTT'
   | 'QUIC'
   | 'SSH'
+  // ESP straight over IP; ESP inside NAT-T's UDP stays `UDP`, as every leaf
+  // UDP protocol does (`protocolColors.ts`).
+  | 'ESP'
   | 'CUSTOM';
 
 export type PacketStatus = 'ok' | 'warning' | 'alert' | 'retransmit' | 'dropped';

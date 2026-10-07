@@ -151,6 +151,9 @@ const MAX_TRACKED_DATAGRAMS = 2048;
 /** How many ARP bindings are remembered. */
 const MAX_ARP_BINDINGS = 4096;
 
+/** ESP security associations whose last sequence number is kept. */
+const MAX_ESP_SAS = 4096;
+
 /** WireGuard sessions kept, newest last; the oldest is forgotten past this. */
 const MAX_WIREGUARD_SESSIONS = 4096;
 
@@ -243,6 +246,7 @@ export class L3Tracker {
   private retainedBytes = 0;
   private arpBindings = new Map<string, { mac: string; frame: number }>();
   private wireguardSessions: WireGuardSession[] = [];
+  private espSas = new Map<string, { seq: number; frame: number }>();
   private nextWireGuardStream = 0;
 
   /** `eth.stream`: the conversation between two MAC addresses. */
@@ -442,7 +446,26 @@ export class L3Tracker {
     return null;
   }
 
+  /**
+   * What ESP's sequence analysis compares a packet with: the sequence number
+   * its SA should have carried next and the frame it was last seen in, or
+   * null for the first packet of an SA. An SA is its SPI and its two ends.
+   * Records this packet as the SA's latest, in or out of order, as the
+   * reference does.
+   */
+  espSequence(src: string, dst: string, spi: number, seq: number, frame: number): { expected: number; previousFrame: number } | null {
+    const key = `${src}>${dst}#${spi}`;
+    const last = this.espSas.get(key);
+    if (last === undefined && this.espSas.size >= MAX_ESP_SAS) {
+      const oldest = this.espSas.keys().next();
+      if (!oldest.done) this.espSas.delete(oldest.value);
+    }
+    this.espSas.set(key, { seq, frame });
+    return last === undefined ? null : { expected: last.seq + 1, previousFrame: last.frame };
+  }
+
   reset(): void {
+    this.espSas.clear();
     this.wireguardSessions = [];
     this.nextWireGuardStream = 0;
     this.fragments.clear();

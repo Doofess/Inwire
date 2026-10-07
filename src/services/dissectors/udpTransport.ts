@@ -18,6 +18,7 @@ import type { QuicHandshakeFacts } from '../quicFlowTracker';
 import type { QuicTrackerApi, DnsTrackerApi, L3TrackerApi } from '../dissect/trackerApi';
 import { wireGuardFacts } from './wireguard';
 import { dissectXml } from './xml';
+import { dissectEsp, dissectIsakmp } from './isakmp';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
@@ -141,6 +142,60 @@ export function dissectUdpTransport(
       extraLayers.push(read.layer, ...(read.innerLayers ?? []));
       protocolTokens.push(read.token ?? subdissector.token);
       Object.assign(appFields, read.fields);
+    }
+  } else if (srcPort === 500 || dstPort === 500) {
+    // IKE, unencapsulated.
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    const ike = dissectIsakmp(rawBytes, udpPayloadStart, payloadEnd);
+    if (ike) {
+      protocolLabel = ike.protocolLabel;
+      info = ike.info;
+      extraLayers.push(ike.layer);
+      protocolTokens.push('isakmp');
+      Object.assign(appFields, ike.fields);
+    }
+  } else if (srcPort === 4500 || dstPort === 4500) {
+    // NAT traversal (RFC 3948): one port for IKE and ESP behind a NAT, told
+    // apart by four zero bytes - the non-ESP marker - in front of IKE, and a
+    // lone 0xFF that keeps the NAT's mapping alive.
+    const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
+    const length = payloadEnd - udpPayloadStart;
+    const encap: ProtocolLayer = {
+      name: 'UDP Encapsulation of IPsec Packets', summary: 'UDP Encapsulation of IPsec Packets', fields: [],
+      rawBytesRange: [udpPayloadStart, Math.max(udpPayloadStart, payloadEnd - 1)],
+    };
+    if (length === 1 && rawBytes[udpPayloadStart] === 0xff) {
+      encap.fields.push({ name: 'NAT-keepalive packet', value: '', abbrev: 'udpencap.nat_keepalive', rawBytesRange: [udpPayloadStart, udpPayloadStart] });
+      protocolLabel = 'UDPENCAP';
+      info = 'NAT-keepalive';
+      extraLayers.push(encap);
+      protocolTokens.push('udpencap');
+    } else if (length >= 8 && rawBytes[udpPayloadStart] === 0 && rawBytes[udpPayloadStart + 1] === 0
+      && rawBytes[udpPayloadStart + 2] === 0 && rawBytes[udpPayloadStart + 3] === 0) {
+      const ike = dissectIsakmp(rawBytes, udpPayloadStart + 4, payloadEnd);
+      if (ike) {
+        encap.fields.push({ name: 'Non-ESP Marker', value: '', abbrev: 'udpencap.non_esp_marker', rawBytesRange: [udpPayloadStart, udpPayloadStart + 3] });
+        protocolLabel = ike.protocolLabel;
+        info = ike.info;
+        extraLayers.push(encap, ike.layer);
+        protocolTokens.push('udpencap', 'isakmp');
+        Object.assign(appFields, ike.fields);
+      }
+    } else if (length >= 8) {
+      const spi = ((rawBytes[udpPayloadStart] << 24) | (rawBytes[udpPayloadStart + 1] << 16)
+        | (rawBytes[udpPayloadStart + 2] << 8) | rawBytes[udpPayloadStart + 3]) >>> 0;
+      const seq = ((rawBytes[udpPayloadStart + 4] << 24) | (rawBytes[udpPayloadStart + 5] << 16)
+        | (rawBytes[udpPayloadStart + 6] << 8) | rawBytes[udpPayloadStart + 7]) >>> 0;
+      const sequence = l3Tracker !== undefined && frameId !== undefined
+        ? l3Tracker.espSequence(srcIp, dstIp, spi, seq, frameId) : null;
+      const esp = dissectEsp(rawBytes, udpPayloadStart, payloadEnd, sequence);
+      if (esp) {
+        protocolLabel = 'ESP';
+        info = esp.info;
+        extraLayers.push(encap, esp.layer);
+        protocolTokens.push('udpencap', 'esp');
+        Object.assign(appFields, esp.fields);
+      }
     }
   } else if (srcPort === 3702 || dstPort === 3702) {
     // WS-Discovery: SOAP over UDP, which the reference hands to its XML

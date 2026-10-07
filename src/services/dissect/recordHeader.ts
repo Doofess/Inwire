@@ -14,7 +14,8 @@
  * The record format; a record with any other leading byte reads as no record.
  * 5: the L3 tracker answers WireGuard sessions, which moved every method id
  * after it - a version 4 record replays its conversation instead.
- * 6: the TCP tracker answers SSH conversations, which moved them again.
+ * 6: the TCP tracker answers SSH conversations and the L3 tracker ESP
+ * sequence numbers, which moved them again.
  */
 export const FRAME_RECORD_VERSION = 6;
 
