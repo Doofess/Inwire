@@ -869,6 +869,8 @@ const PROTOCOL_NAME_MAP: Record<string, string> = {
   'RIPng': 'ripng',
   'Cisco Discovery Protocol': 'cdp',
   '802.1X Authentication': 'eapol',
+  'HomePlug AV protocol': 'homeplug-av',
+  'Steam In-Home Streaming Discovery Protocol': 'steam_ihs_discovery',
   'WireGuard Protocol': 'wg',
   'eXtensible Markup Language': 'xml',
   'NAT Port Mapping Protocol': 'nat-pmp',

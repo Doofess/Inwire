@@ -105,6 +105,10 @@ export const LAYERS = [
   // so the bareword matches nothing in either - it is a token here only so
   // its fields have a layer to belong to.
   'eapol', 'eap', 'wlan_rsna_eapol',
+  // Powerline adapters. The frame's token is `homeplug-av` and every field is
+  // `homeplug_av.*`, which is how the reference spells the two; the second is
+  // a token only so the fields have a layer to belong to.
+  'homeplug-av', 'homeplug_av',
   'ip', 'ipv6', 'gre', 'vxlan', 'esp', 'icmp', 'icmpv6', 'igmp', 'vrrp', 'ospf', 'tcp', 'udp',
   // `nbdgm` and `hsrp` are spelt as the reference analyzer spells them rather
   // than as the Protocol column shows them (NBDS, HSRP): the filter name is
@@ -114,7 +118,7 @@ export const LAYERS = [
   // DCE/RPC - generated into `dissectors/dcerpcNames.ts`.
   'srvsvc', 'wkssvc', 'lsarpc', 'samr', 'rpc_netlogon', 'winreg', 'svcctl', 'spoolss', 'drsuapi', 'dssetup', 'atsvc', 'mgmt', 'oxid', 'isystemactivator', 'remunk', 'remunk2', 'taskschedulerservice', 'eventlog', 'netdfs', 'rpc_browser', 'dnsserver', 'iremotewinspool', 'initshutdown', 'fsrvp', 'witness', 'frsrpc', 'frstrans', 'nspi', 'efs', 'pnp', 'clusapi', 'rras', 'wzcsvc', 'mapi', 'tapi', 'trksvr', 'rfr',
   'tls', 'quic', 'ssdp', 'dhcp', 'dhcpv6', 'ntp', 'stun',
-  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp',
+  'syslog', 'radius', 'snmp', 'sip', 'rtcp', 'udpencap', 'isakmp', 'wg', 'openvpn', 'dtls', 'nat-pmp', 'portcontrol', 'db-lsp-disc', 'tftp', 'bfd', 'coap', 'ptp', 'steam_ihs_discovery',
   'hsrp', 'rip', 'ripng', 'bgp', 'ldap', 'cldap', 'mscldap', 'smb2', 'kerberos', 'ssh', 'tpkt', 'cotp', 'rdp', 'http', 'http2', 'http3',
   // **What a message BODY is**, which the reference makes four protocols of
   // rather than fields on HTTP - so a JSON API response's chain really does
@@ -2120,6 +2124,78 @@ const BASE_FIELDS: readonly FieldDef[] = [
   str('coap.opt.uri_query', 'Uri-Query', 'coap'),
   uint('coap.payload_length', 'Payload length', 'coap'),
 
+  // --- HomePlug AV ------------------------------------------------------------
+  // The message type is filed under the table that names it, as the reference
+  // files it: `.qualcomm` and `.st` for those vendors' OUIs, the bare field
+  // for every other message.
+  treeOnly(str('homeplug_av.mmhdr', 'MAC Management Header', 'homeplug_av')),
+  uint('homeplug_av.mmhdr.mmver', 'Version', 'homeplug_av'),
+  uint('homeplug_av.mmhdr.mmtype', 'Type', 'homeplug_av'),
+  uint('homeplug_av.mmhdr.mmtype.qualcomm', 'Type', 'homeplug_av'),
+  uint('homeplug_av.mmhdr.mmtype.st', 'Type', 'homeplug_av'),
+  uint('homeplug_av.mmhdr.mmtype.lsb', 'LSB', 'homeplug_av'),
+  uint('homeplug_av.mmhdr.mmtype.msb', 'MSB', 'homeplug_av'),
+  uint('homeplug_av.mmhdr.fmi', 'Fragmentation Info', 'homeplug_av'),
+  treeOnly(str('homeplug_av.public', 'Public MME', 'homeplug_av')),
+  treeOnly(uint('homeplug_av.public.frag_count', 'Fragment count', 'homeplug_av')),
+  treeOnly(uint('homeplug_av.public.frag_index', 'Fragment index', 'homeplug_av')),
+  treeOnly(uint('homeplug_av.public.frag_seqnum', 'Fragment Sequence number', 'homeplug_av')),
+  treeOnly(str('homeplug_av.vendor', 'Vendor MME', 'homeplug_av')),
+  uint('homeplug_av.vendor.oui', 'OUI', 'homeplug_av'),
+  treeOnly(uint('homeplug_av.st_iotecha.mmever', 'MME version', 'homeplug_av')),
+  treeOnly(str('homeplug_av.st_iotecha.rsvd', 'Reserved', 'homeplug_av')),
+  // --- Steam In-Home Streaming discovery ---------------------------------------
+  // The 64-bit IDs are tree-only: a filter value here is a JS number, which
+  // cannot hold one exactly.
+  treeOnly(uint('steam_ihs_discovery.signature', 'Signature', 'steam_ihs_discovery')),
+  uint('steam_ihs_discovery.header_length', 'Header Length', 'steam_ihs_discovery'),
+  treeOnly(uint('steam_ihs_discovery.header_client_id', 'Client ID', 'steam_ihs_discovery')),
+  uint('steam_ihs_discovery.header_msg_type', 'Message Type', 'steam_ihs_discovery'),
+  treeOnly(uint('steam_ihs_discovery.header_instance_id', 'Instance ID', 'steam_ihs_discovery')),
+  uint('steam_ihs_discovery.body_length', 'Body Length', 'steam_ihs_discovery'),
+  uint('steam_ihs_discovery.body_discovery_seqnum', 'Sequence Number', 'steam_ihs_discovery'),
+  treeOnly(uint('steam_ihs_discovery.body_discovery_clientids', 'Client IDs', 'steam_ihs_discovery')),
+  { abbrev: 'steam_ihs_discovery.body_status_version', label: 'Version', type: 'int', layer: 'steam_ihs_discovery' },
+  { abbrev: 'steam_ihs_discovery.body_status_minversion', label: 'Minimum Version', type: 'int', layer: 'steam_ihs_discovery' },
+  uint('steam_ihs_discovery.body_status_connectport', 'Connect Port', 'steam_ihs_discovery'),
+  str('steam_ihs_discovery.body_status_hostname', 'Hostname', 'steam_ihs_discovery'),
+  uint('steam_ihs_discovery.body_status_enabledservices', 'Enabled Services', 'steam_ihs_discovery'),
+  { abbrev: 'steam_ihs_discovery.body_status_ostype', label: 'OS Type', type: 'int', layer: 'steam_ihs_discovery' },
+  bool('steam_ihs_discovery.body_status_is64bit', 'Is 64 Bit', 'steam_ihs_discovery'),
+  treeOnly(uint('steam_ihs_discovery.body_status_user_steamid', 'Steam ID', 'steam_ihs_discovery')),
+  uint('steam_ihs_discovery.body_status_user_authkeyid', 'Auth Key ID', 'steam_ihs_discovery'),
+  { abbrev: 'steam_ihs_discovery.body_status_euniverse', label: 'EUniverse', type: 'int', layer: 'steam_ihs_discovery' },
+  treeOnly(str('steam_ihs_discovery.body_status_timestamp', 'Timestamp', 'steam_ihs_discovery')),
+  bool('steam_ihs_discovery.body_status_screenlocked', 'Screen Locked', 'steam_ihs_discovery'),
+  bool('steam_ihs_discovery.body_status_gamesrunning', 'Games Running', 'steam_ihs_discovery'),
+  str('steam_ihs_discovery.body_status_macaddresses', 'MAC Addresses', 'steam_ihs_discovery'),
+  treeOnly(str('steam_ihs_discovery.body_authrequest_devicetoken', 'Device Token', 'steam_ihs_discovery')),
+  str('steam_ihs_discovery.body_authrequest_devicename', 'Device Name', 'steam_ihs_discovery'),
+  treeOnly(str('steam_ihs_discovery.body_authrequest_encryptedrequest', 'Encrypted Request', 'steam_ihs_discovery')),
+  uint('steam_ihs_discovery.body_authresponse_authresult', 'Result', 'steam_ihs_discovery'),
+  uint('steam_ihs_discovery.body_streamingrequest_requestid', 'Request ID', 'steam_ihs_discovery'),
+  { abbrev: 'steam_ihs_discovery.body_streamingrequest_maximumresolutionx', label: 'Maximum Resolution X', type: 'int', layer: 'steam_ihs_discovery' },
+  { abbrev: 'steam_ihs_discovery.body_streamingrequest_maximumresolutiony', label: 'Maximum Resolution Y', type: 'int', layer: 'steam_ihs_discovery' },
+  { abbrev: 'steam_ihs_discovery.body_streamingrequest_audiochannelcount', label: 'Audio Channel Count', type: 'int', layer: 'steam_ihs_discovery' },
+  str('steam_ihs_discovery.body_streamingrequest_deviceversion', 'Device Version', 'steam_ihs_discovery'),
+  bool('steam_ihs_discovery.body_streamingrequest_streamdesktop', 'Stream Desktop', 'steam_ihs_discovery'),
+  treeOnly(str('steam_ihs_discovery.body_streamingrequest_devicetoken', 'Device Token', 'steam_ihs_discovery')),
+  treeOnly(str('steam_ihs_discovery.body_streamingrequest_pin', 'PIN', 'steam_ihs_discovery')),
+  bool('steam_ihs_discovery.body_streamingrequest_enablevideostreaming', 'Enable Video Streaming', 'steam_ihs_discovery'),
+  bool('steam_ihs_discovery.body_streamingrequest_enableaudiostreaming', 'Enable Audio Streaming', 'steam_ihs_discovery'),
+  bool('steam_ihs_discovery.body_streamingrequest_enableinputstreaming', 'Enable Input Streaming', 'steam_ihs_discovery'),
+  uint('steam_ihs_discovery.body_streamingcancelrequest_requestid', 'Request ID', 'steam_ihs_discovery'),
+  uint('steam_ihs_discovery.body_streamingresponse_requestid', 'Request ID', 'steam_ihs_discovery'),
+  uint('steam_ihs_discovery.body_streamingresponse_result', 'Result', 'steam_ihs_discovery'),
+  uint('steam_ihs_discovery.body_streamingresponse_port', 'Port', 'steam_ihs_discovery'),
+  treeOnly(str('steam_ihs_discovery.body_streamingresponse_encryptedsessionkey', 'Encrypted Session Key', 'steam_ihs_discovery')),
+  { abbrev: 'steam_ihs_discovery.body_streamingresponse_virtualherelicenseddevicecount', label: 'VirtualHere Licensed Device Count', type: 'int', layer: 'steam_ihs_discovery' },
+  treeOnly(str('steam_ihs_discovery.body_proofrequest_challenge', 'Challenge', 'steam_ihs_discovery')),
+  treeOnly(str('steam_ihs_discovery.body_proofresponse_response', 'Response', 'steam_ihs_discovery')),
+  treeOnly(uint('steam_ihs_discovery.unknown_number', 'Unknown Number', 'steam_ihs_discovery')),
+  treeOnly(str('steam_ihs_discovery.unknown_data', 'Unknown Data', 'steam_ihs_discovery')),
+  treeOnly(str('steam_ihs_discovery.unknownnumber', 'Unknown numeric protobuf field', 'steam_ihs_discovery')),
+  treeOnly(str('steam_ihs_discovery.unknownlengthdelimited', 'Unknown length-delimited protobuf field', 'steam_ihs_discovery')),
   // --- PTP -------------------------------------------------------------------
   uint('ptp.v2.messagetype', 'messageType', 'ptp'),
   uint('ptp.v2.versionptp', 'versionPTP', 'ptp'),

@@ -79,6 +79,8 @@ import { dissectEapol } from './eapol';
 import { dissectDropboxDiscovery, dissectPortControl } from './portControl';
 import { dissectMediaType } from './mediaType';
 import { dissectOpenvpn, OPENVPN_PORT } from './openvpn';
+import { dissectHomeplugAv } from './homeplugAv';
+import { dissectSteamIhs, STEAM_IHS_PORT } from './steamIhs';
 
 /** The three things this build dispatches on by value. */
 export type DispatchTableName = 'ethertype' | 'ip.proto' | 'udp.port';
@@ -208,6 +210,7 @@ const DISPATCH_TABLE: readonly DispatchEntry[] = [
   { table: 'ethertype', values: on(0x893a), token: 'ieee1905', dissect: (b, s) => dissectIeee1905(b, s) },
   { table: 'ethertype', values: on(0x88cc), token: 'lldp', dissect: (b, s) => dissectLldp(b, s) },
   { table: 'ethertype', values: on(0x888e), token: 'eapol', dissect: dissectEapol },
+  { table: 'ethertype', values: on(0x88e1), token: 'homeplug-av', dissect: dissectHomeplugAv },
 
   // --- ip.proto: the three that sit on IP with no ports at all --------------
   { table: 'ip.proto', values: on(2), token: 'igmp', dissect: (b, s, e) => dissectIgmp(b, s, e - s) },
@@ -234,6 +237,9 @@ const DISPATCH_TABLE: readonly DispatchEntry[] = [
   { table: 'udp.port', values: on(3785), token: 'bfd', dissect: dissectBfdEcho },
   { table: 'udp.port', values: on(5683, 5684), token: 'coap', dissect: dissectCoap },
   { table: 'udp.port', values: on(319, 320), token: 'ptp', dissect: dissectPtp },
+  // Steam's LAN discovery. Declines a datagram without its signature, which
+  // then reads as plain UDP, as it does in the reference.
+  { table: 'udp.port', values: on(STEAM_IHS_PORT), token: 'steam_ihs_discovery', dissect: dissectSteamIhs },
   {
     table: 'udp.port',
     values: on(1985, 2029),

@@ -53,9 +53,9 @@ may touch what, and the map from concept to file.
 
 - **Live capture** from any adapter, with throughput sparklines in the picker so
   you can see which one is carrying traffic before you commit.
-- **128 dissected layers** — Ethernet/VLAN/802.1ad/LLC, 802.1X (EAPOL and EAP), Linux cooked capture, IPv4/IPv6
+- **131 dissected layers** — Ethernet/VLAN/802.1ad/LLC, 802.1X (EAPOL and EAP), HomePlug AV (powerline adapters' management header, each vendor's message names), Linux cooked capture, IPv4/IPv6
   with fragment reassembly, TCP/UDP, DNS, TLS, DTLS, SSH, QUIC, HTTP/1.1 through HTTP/3,
-  DHCP, NetBIOS (names, datagrams, and the Windows browser announcements they carry over SMB1), CLDAP (the domain-controller locator), NAT-PMP/PCP, WireGuard, OpenVPN, IPsec (IKE, ESP, NAT-T), LDAP, SMB2 and SMB1 over the NetBIOS session service, DCE/RPC (the endpoint mapper read whole, and 37 more RPC interfaces - SRVSVC, LSARPC, SAMR, DRSUAPI and the rest - named down to the call, their arguments left as bytes), Kerberos, RDP (TPKT, X.224 and the security negotiation), SIP, SNMP, RADIUS, BGP, OSPF and the rest, plus GRE
+  DHCP, NetBIOS (names, datagrams, and the Windows browser announcements they carry over SMB1), CLDAP (the domain-controller locator), NAT-PMP/PCP, WireGuard, OpenVPN, IPsec (IKE, ESP, NAT-T), LDAP, SMB2 and SMB1 over the NetBIOS session service, DCE/RPC (the endpoint mapper read whole, and 37 more RPC interfaces - SRVSVC, LSARPC, SAMR, DRSUAPI and the rest - named down to the call, their arguments left as bytes), Kerberos, RDP (TPKT, X.224 and the security negotiation), Steam's LAN streaming discovery, SIP, SNMP, RADIUS, BGP, OSPF and the rest, plus GRE
   and VXLAN dissected *through*, and an HTTP body read on into JSON, XML or text (WS-Discovery's SOAP too). The list is `LAYERS` in
   `src/services/dissect/fieldRegistry.ts`, which also feeds the filter's names,
   the autocomplete and the column catalogue.
