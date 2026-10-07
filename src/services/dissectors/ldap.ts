@@ -667,6 +667,9 @@ function flagsRow(name: string, abbrev: string, word: number, bits: FlagBit[]): 
 }
 const ntVersionRow = (word: number) => flagsRow('Version Flags', 'mscldap.ntver.flags', word, NT_VERSION_FLAGS);
 
+/** One decoder for every label, at module scope (`scripts/perf/hot-path-allocations.ts`). */
+const NAME_DECODER = new TextDecoder('utf-8', { fatal: false });
+
 /** A name in RFC 1035 form, compression pointers relative to the Netlogon blob. */
 function netlogonName(b: Uint8Array, start: number, end: number, at: number): { name: string; next: number } {
   const labels: string[] = [];
@@ -681,7 +684,7 @@ function netlogonName(b: Uint8Array, start: number, end: number, at: number): { 
       jumps++;
       continue;
     }
-    labels.push(new TextDecoder().decode(b.subarray(p + 1, p + 1 + length)));
+    labels.push(NAME_DECODER.decode(b.subarray(p + 1, p + 1 + length)));
     p += 1 + length;
   }
   return { name: labels.length === 0 ? '<Root>' : labels.join('.'), next: next >= 0 ? next : p };
