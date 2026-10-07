@@ -93,7 +93,7 @@ const COMMAND_NAMES: Record<number, string> = {
  * matters because the reference does not spell them all as Microsoft does.
  * An unlisted code falls back to its hex value.
  */
-const STATUS_NAMES: Record<number, string> = {
+export const STATUS_NAMES: Record<number, string> = {
   0x00000103: 'STATUS_PENDING',
   0x80000005: 'STATUS_BUFFER_OVERFLOW',
   0xc000000d: 'STATUS_INVALID_PARAMETER',

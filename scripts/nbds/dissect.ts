@@ -65,7 +65,7 @@ async function main(): Promise<void> {
   const packetBytes = datagram(0x11, mailslot, 'ALICE-PC', 'ACCOUNTS', 0x1e);
   const read = dissectNbds(packetBytes, 0, packetBytes.length);
   check('the source name is decoded', read?.fields['nbdgm.source_name'], 'ALICE-PC<00>');
-  check('...and so is the destination', read?.fields['nbdgm.destination_name'], 'ACCOUNTS<1E>');
+  check('...and so is the destination', read?.fields['nbdgm.destination_name'], 'ACCOUNTS<1e>');
   check('the source endpoint is read', read?.fields['nbdgm.src.ip'], '192.0.2.1');
   check('...with its port', read?.fields['nbdgm.src.port'], 138);
 

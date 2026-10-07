@@ -73,21 +73,25 @@ const TYPE_NAMES: Record<number, string> = { 32: 'NB', 33: 'NBSTAT' };
 /**
  * What a name's sixteenth byte says the name is for.
  *
- * Only the values Wireshark names; anything else renders as the bare suffix,
- * because inventing a description for an unknown one would be a guess wearing
- * the same clothes as a fact.
+ * Wireshark's table, read from tshark one suffix at a time; anything else is
+ * `Unknown`, as there. `0x02` really is Workstation/Redirector in it.
  */
 const SUFFIX_NAMES: Record<number, string> = {
-  0x00: 'Workstation/Redirector',
-  0x03: 'Messenger service',
-  0x06: 'RAS Server service',
-  0x1b: 'Domain Master Browser',
-  0x1c: 'Domain Controllers',
-  0x1d: 'Master Browser',
-  0x1e: 'Browser Election Service',
-  0x20: 'Server service',
-  0x21: 'RAS Client service',
+  0x00: 'Workstation/Redirector', 0x01: 'Browser', 0x02: 'Workstation/Redirector',
+  0x03: 'Messenger service/Main name', 0x05: 'Forwarded name', 0x06: 'RAS Server service',
+  0x1b: 'Domain Master Browser', 0x1c: 'Domain Controllers', 0x1d: 'Local Master Browser',
+  0x1e: 'Browser Election Service', 0x1f: 'Net DDE Service', 0x20: 'Server service', 0x21: 'RAS client service',
+  0x22: 'Exchange Interchange (MSMail Connector)', 0x23: 'Exchange Store', 0x24: 'Exchange Directory',
+  0x2b: 'Lotus Notes Server service', 0x30: 'Modem sharing server service', 0x31: 'Modem sharing client service',
+  0x43: 'SMS Clients Remote Control', 0x44: 'SMS Administrators Remote Control Tool',
+  0x45: 'SMS Clients Remote Chat', 0x46: 'SMS Clients Remote Transfer',
+  0x4c: 'DEC Pathworks TCP/IP Service on Windows NT', 0x52: 'DEC Pathworks TCP/IP Service on Windows NT',
+  0x6a: 'Microsoft Exchange IMC', 0x87: 'Microsoft Exchange MTA', 0xbe: 'Network Monitor Agent',
+  0xbf: 'Network Monitor Analyzer',
 };
+
+/** What a name's suffix says it is for, in the reference's words. */
+export const netbiosSuffixName = (suffix: number): string => SUFFIX_NAMES[suffix] ?? 'Unknown';
 
 export interface NetbiosName {
   /** The trimmed name, without its suffix: `WORKGROUP`. */
@@ -123,9 +127,13 @@ export function decodeNetbiosName(encoded: string): NetbiosName | null {
   // NULs too: some stacks pad with those instead.
   let end = 15;
   while (end > 0 && (bytes[end - 1] === 0x20 || bytes[end - 1] === 0x00)) end--;
-  const name = String.fromCharCode(...bytes.slice(0, end));
+  // A byte that does not print is written as its hex in angle brackets, as
+  // the reference writes `<01><02>__MSBROWSE__<02>`; so is the suffix, in
+  // lower case.
+  const name = bytes.slice(0, end).map((c) => (c >= 0x20 && c < 0x7f
+    ? String.fromCharCode(c) : `<${c.toString(16).padStart(2, '0')}>`)).join('');
   const scope = scopeParts.length > 0 ? scopeParts.join('.') : undefined;
-  const suffixHex = suffix.toString(16).toUpperCase().padStart(2, '0');
+  const suffixHex = suffix.toString(16).padStart(2, '0');
   return {
     name,
     suffix,
@@ -213,7 +221,7 @@ export function dissectNbns(bytes: Uint8Array, start: number, end: number): Nbns
       value: '',
       rawBytesRange: [q.start, Math.max(q.start, q.end - 1)],
       children: [
-        { name: 'Name', value: `${label}${nb ? ` (${SUFFIX_NAMES[nb.suffix] ?? 'Unknown'})` : ''}`,
+        { name: 'Name', value: `${label}${nb ? ` (${netbiosSuffixName(nb.suffix)})` : ''}`,
           abbrev: 'nbns.name', rawBytesRange: [q.start, Math.max(q.start, q.nameEnd - 1)] },
         { name: 'Type', value: `${typeName} (${q.type})`, abbrev: 'nbns.type' },
         { name: 'Class', value: `IN (${q.qclass})`, abbrev: 'nbns.class' },
@@ -233,7 +241,7 @@ export function dissectNbns(bytes: Uint8Array, start: number, end: number): Nbns
     const label = nb?.display ?? record.name;
     const typeName = TYPE_NAMES[record.type] ?? `Unknown (${record.type})`;
     const children: ProtocolField[] = [
-      { name: 'Name', value: `${label}${nb ? ` (${SUFFIX_NAMES[nb.suffix] ?? 'Unknown'})` : ''}`,
+      { name: 'Name', value: `${label}${nb ? ` (${netbiosSuffixName(nb.suffix)})` : ''}`,
         abbrev: 'nbns.name', rawBytesRange: [record.start, Math.max(record.start, record.nameEnd - 1)] },
       { name: 'Type', value: `${typeName} (${record.type})`, abbrev: 'nbns.type' },
       { name: 'Class', value: `IN (${record.rclass})`, abbrev: 'nbns.class' },

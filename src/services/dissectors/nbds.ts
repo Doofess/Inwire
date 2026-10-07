@@ -11,13 +11,14 @@
  * and the datagram carries **two** encoded names rather than a question
  * section.
  *
- * The user data after those names is an SMB Mailslot, which this does not
- * decode: doing so means the SMB command set, which is not a leaf and is not
- * cheap. What is here names the datagram, both endpoints and the mailslot's
- * size, which is what a reader needs to see who is announcing what.
+ * The user data after those names is an SMB message - in practice a Trans
+ * request to a mailslot - and `dissectors/smb.ts` reads it, down to the
+ * browser announcement it usually carries. The tree is the reference's, row
+ * for row: `scripts/browser/dissect.ts`.
  */
 import { ProtocolField, ProtocolLayer } from '../../types/packet';
-import { decodeNetbiosName } from './nbns';
+import { decodeNetbiosName, netbiosSuffixName } from './nbns';
+import { dissectSmb, hasSmbMagic, type SmbResult } from './smb';
 import { readDnsName } from './dnsRecords';
 import { formatIpv4Address } from '../addressFormat';
 
@@ -26,6 +27,8 @@ export interface NbdsResult {
   info: string;
   layer: ProtocolLayer;
   fields: Record<string, string | number>;
+  /** SMB, and what it carries. */
+  innerLayers?: ProtocolLayer[];
 }
 
 /** RFC 1002 §4.4.1. Wireshark's wording, which keeps the underscores. */
@@ -42,6 +45,14 @@ const MESSAGE_TYPES: Record<number, string> = {
 /** The types that carry two names and user data rather than an error code. */
 const CARRIES_DATA = new Set([0x10, 0x11, 0x12]);
 
+const NODE_TYPES = ['B node', 'P node', 'M node', 'NBDD'];
+const ERROR_CODES: Record<number, string> = {
+  0x82: 'Destination name not present', 0x83: 'Invalid source name format', 0x84: 'Invalid destination name format',
+};
+const hex2 = (n: number) => `0x${n.toString(16).padStart(2, '0')}`;
+/** A name as the tree shows it: `LAPTOP1<00> (Workstation/Redirector)`. */
+const withRole = (name: { display: string; suffix: number }) => `${name.display} (${netbiosSuffixName(name.suffix)})`;
+
 /**
  * One RFC 1001 encoded name, read where it sits.
  *
@@ -52,12 +63,12 @@ const CARRIES_DATA = new Set([0x10, 0x11, 0x12]);
  * decline the datagram rather than show a mangled one.
  */
 function netbiosNameAt(bytes: Uint8Array, messageStart: number, offset: number, end: number):
-  { display: string; after: number } | null {
+  { display: string; suffix: number; after: number } | null {
   if (offset >= end) return null;
   const raw = readDnsName(bytes, messageStart, offset);
   const decoded = decodeNetbiosName(raw.name);
   if (decoded === null || raw.nextOffset > end) return null;
-  return { display: decoded.display, after: raw.nextOffset };
+  return { display: decoded.display, suffix: decoded.suffix, after: raw.nextOffset };
 }
 
 export function dissectNbds(bytes: Uint8Array, start: number, end: number): NbdsResult | null {
@@ -78,14 +89,26 @@ export function dissectNbds(bytes: Uint8Array, start: number, end: number): Nbds
     'nbdgm.src.port': sourcePort,
   };
 
+  // The two low bits are the fragment flags; the next two the node type,
+  // which is the same B/P/M taxonomy NBNS registers under.
+  const more = (flags & 0x01) !== 0;
+  const first = (flags & 0x02) !== 0;
+  const nodeType = (flags >> 2) & 0x03;
+  const bit = (bitOffset: number, bitLength = 1) => ({ bitOffset, bitLength, totalBits: 8 });
+  let smb: SmbResult | null = null;
   const rows: ProtocolField[] = [
-    { name: 'Message Type', value: `${typeName} (0x${messageType.toString(16)})`,
+    { name: 'Message Type', value: `${typeName} (${messageType})`,
       abbrev: 'nbdgm.type', rawBytesRange: [start, start] },
-    // The two low bits are the fragment flags; the rest is the node type,
-    // which is the same B/P/M/H taxonomy NBNS registers under.
-    { name: 'More fragments follow', value: (flags & 0x01) !== 0 ? 'Yes' : 'No' },
-    { name: 'This is first fragment', value: (flags & 0x02) !== 0 ? 'Yes' : 'No' },
-    { name: 'Node Type', value: ['B node', 'P node', 'M node', 'NBDD'][(flags >> 2) & 0x03] },
+    {
+      name: 'Flags',
+      value: `${hex2(flags)}${more ? ', More fragments follow' : ''}${first ? ', This is first fragment' : ''}, Node Type: ${NODE_TYPES[nodeType]}`,
+      abbrev: 'nbdgm.flags', rawBytesRange: [start + 1, start + 1],
+      children: [
+        { name: 'More fragments follow', value: more ? 'Yes' : 'No', abbrev: 'nbdgm.next', rawBytesRange: [start + 1, start + 1], bitfield: bit(7) },
+        { name: 'This is first fragment', value: first ? 'Yes' : 'No', abbrev: 'nbdgm.first', rawBytesRange: [start + 1, start + 1], bitfield: bit(6) },
+        { name: 'Node Type', value: `${NODE_TYPES[nodeType]} (${nodeType})`, abbrev: 'nbdgm.node_type', rawBytesRange: [start + 1, start + 1], bitfield: bit(4, 2) },
+      ],
+    },
     { name: 'Datagram ID', value: `0x${id.toString(16).padStart(4, '0')}`, abbrev: 'nbdgm.dgram_id',
       rawBytesRange: [start + 2, start + 3] },
     { name: 'Source IP', value: sourceIp, abbrev: 'nbdgm.src.ip',
@@ -101,7 +124,7 @@ export function dissectNbds(bytes: Uint8Array, start: number, end: number): Nbds
     rows.push(
       { name: 'Datagram length', value: `${dataLength} bytes`, abbrev: 'nbdgm.dgram_len',
         rawBytesRange: [start + 10, start + 11] },
-      { name: 'Packet offset', value: `${offset} bytes`, rawBytesRange: [start + 12, start + 13] },
+      { name: 'Packet offset', value: `${offset} bytes`, abbrev: 'nbdgm.pkt_offset', rawBytesRange: [start + 12, start + 13] },
     );
     fields['nbdgm.dgram_len'] = dataLength;
 
@@ -112,16 +135,16 @@ export function dissectNbds(bytes: Uint8Array, start: number, end: number): Nbds
     fields['nbdgm.source_name'] = sourceName.display;
     fields['nbdgm.destination_name'] = destName.display;
     rows.push(
-      { name: 'Source name', value: sourceName.display, abbrev: 'nbdgm.source_name',
+      { name: 'Source name', value: withRole(sourceName), abbrev: 'nbdgm.source_name',
         rawBytesRange: [start + 14, sourceName.after - 1] },
-      { name: 'Destination name', value: destName.display, abbrev: 'nbdgm.destination_name',
+      { name: 'Destination name', value: withRole(destName), abbrev: 'nbdgm.destination_name',
         rawBytesRange: [sourceName.after, destName.after - 1] },
     );
 
     const userDataStart = destName.after;
-    if (userDataStart < end) {
-      // Not decoded, and deliberately - this is an SMB Mailslot. Reporting its
-      // size is honest; naming it would not be.
+    smb = hasSmbMagic(bytes, userDataStart) ? dissectSmb(bytes, userDataStart, end) : null;
+    if (smb === null && userDataStart < end) {
+      // Not SMB, so not decoded; its size is reported rather than dropped.
       rows.push({ name: 'User data', value: `${end - userDataStart} bytes`,
         rawBytesRange: [userDataStart, end - 1] });
     }
@@ -129,20 +152,22 @@ export function dissectNbds(bytes: Uint8Array, start: number, end: number): Nbds
     if (start + 11 > end) return null;
     const code = bytes[start + 10];
     fields['nbdgm.error_code'] = code;
-    rows.push({ name: 'Error code', value: code, abbrev: 'nbdgm.error_code',
+    rows.push({ name: 'Error code', value: `${ERROR_CODES[code] ?? 'Unknown'} (${hex2(code)})`, abbrev: 'nbdgm.error_code',
       rawBytesRange: [start + 10, start + 10] });
   } else {
     const name = netbiosNameAt(bytes, start, start + 10, end);
     if (name === null) return null;
     fields['nbdgm.destination_name'] = name.display;
-    rows.push({ name: 'Destination name', value: name.display, abbrev: 'nbdgm.destination_name',
+    rows.push({ name: 'Destination name', value: withRole(name), abbrev: 'nbdgm.destination_name',
       rawBytesRange: [start + 10, name.after - 1] });
   }
 
+  if (smb !== null) Object.assign(fields, smb.fields);
   return {
-    protocolLabel: 'NBDS',
-    info: typeName,
+    protocolLabel: smb?.protocolLabel ?? 'NBDS',
+    info: smb?.info ?? typeName,
     fields,
+    ...(smb !== null ? { innerLayers: smb.layers } : {}),
     layer: {
       name: 'NetBIOS Datagram Service',
       summary: `NetBIOS Datagram Service (${typeName})`,

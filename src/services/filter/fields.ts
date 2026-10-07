@@ -239,10 +239,9 @@ export const UNDISSECTED = [
   'gvrp', 'ismp', 'vtp', 'dtp', 'edp',
   // Windows file sharing, from the "SMB" rule.
   // `nbns` was here until it became a real layer token - see dissectors/nbns.ts,
-  // and `smb2` went the same way - see dissectors/smb2.ts. `smb` is SMB1, which
-  // is a different wire format rather than the same protocol with a smaller
-  // number, so it stays.
-  'smb', 'nbss', 'netbios', 'dcerpc', 'browser',
+  // and `smb2`, `smb` (SMB1) and `browser` went the same way - see
+  // dissectors/smb2.ts and dissectors/smb.ts.
+  'nbss', 'netbios', 'dcerpc',
   // Transport and application layers not yet decoded.
   // sip, radius, snmp and rtcp left this list when they became real layer
   // tokens. `rtcp` outstayed the others by a batch, which meant a misspelt
