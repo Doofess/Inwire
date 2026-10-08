@@ -1235,12 +1235,16 @@ These are **not** work in progress and get an ADR when each is started.
 - **The trigger for porting macOS and Linux** is 0037 §1's reason for not
   porting them: a desktop app there to talk to.
 
-**Engine-side dissection.** Move the pipeline Worker's work into the store
-`utilityProcess` with a `worker_threads` pool over `SharedArrayBuffer`, sharded
-by stream and merged back into timestamp order; the renderer becomes a viewer
-that asks for rows. The store protocol was built so this is a relocation rather
-than a rewrite. **Trigger:** a profile showing the cross-process copy on the
-frame path, or a sustained rate above ~100 MB/s.
+**Engine-side dissection is decided: ADR 0053, and it fired.** A real
+36,000 frame-a-second download outran the store and then the single Worker,
+which is the trigger this entry named in other words. The pool lives in the
+**renderer** as nested Workers, not in the store's `utilityProcess` this entry
+used to propose - every shard parses hostile bytes, and that process has Node
+and the filesystem. A Sequencer on the coordinator owns everything numbered
+across conversations; TCP shards by IP pair; frames merge in id order. Before
+any of it, every app-side queue gets a budget and the agent's pcapng carries
+the rest, so the live view falls behind on disk and says so. 0053 has the
+phases and the equality test.
 
 **The boundary is measured and it is not the trigger.** The hop is 5.21 µs a
 frame against the writer's 9.71 (see **What the store actually costs**). ADR 0038 took the *write* off the dissector's critical path,
