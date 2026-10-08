@@ -116,8 +116,12 @@ export async function replayBundleFor(
     }
     : undefined;
 
+  // The live view's note on the first frame after a hole (ADR 0053).
+  const skipped = fieldValue(packet, 'inwire.live.skipped');
+  const liveSkipped = typeof skipped === 'number' ? skipped : undefined;
+
   return {
-    frames, truncated, streamId: packet.streamId, retroactive, process,
+    frames, truncated, streamId: packet.streamId, retroactive, process, liveSkipped,
     // Every layer's conversation index, read off the frame for the same reason
     // `streamId` is: the replay rebuilds one conversation from a five-tuple
     // bundle through fresh trackers, which would number it 0.

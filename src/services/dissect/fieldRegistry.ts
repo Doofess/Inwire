@@ -3072,6 +3072,10 @@ const BASE_FIELDS: readonly FieldDef[] = [
   str('inwire.process.name', 'Process', 'frame', { label: 'Process', align: 'left' }),
   uint('inwire.process.pid', 'Process ID', 'frame', { label: 'PID', align: 'right' }),
   str('inwire.process.path', 'Process path', 'frame'),
+  // On the first frame after a hole in the live stream: how many frames the
+  // live view skipped there. They are in the capture's pcapng (ADR 0053), so
+  // this is about how the view received the capture, not about the wire.
+  uint('inwire.live.skipped', 'Skipped by the live view', 'frame'),
   // Not "this IS that program" - "this fingerprint has only ever been seen
   // from that program, on this machine". Learned from frames the OS attributed
   // and applied to ones it could not, which is how a hello from ANOTHER

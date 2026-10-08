@@ -16,6 +16,7 @@ import type { StreamSeeds } from './pipeline/replay';
 import type { HostIdentity } from './direction';
 import type { NetworkFacts } from './networkFacts';
 import type { AgentServiceFacts } from './agentLink';
+import { publishLiveLag } from './liveLag';
 import type {
   FromPipeline, PipelineInterface, PipelineStatus, ReplayFrame, ToPipeline,
 } from './pipeline/protocol';
@@ -47,6 +48,11 @@ export interface ReplayBundle {
    * and the Process column cannot end up disagreeing about one frame.
    */
   process?: { pid: number; name: string; exe: string };
+  /**
+   * Frames the live view skipped just before this one (ADR 0053), carried for
+   * the same reason as `process`: the rebuilt tree puts the note back.
+   */
+  liveSkipped?: number;
 }
 
 /**
@@ -172,6 +178,17 @@ export class PipelineClient {
       case 'networkFacts':
         this.onNetworkFacts(message.facts);
         break;
+      case 'liveLag':
+        // A store, not a callback into App: once a second, read by one status
+        // item, and nothing else should re-render for it (`liveLag.ts`).
+        publishLiveLag({
+          behindFrames: message.behindFrames,
+          behindMs: message.behindMs,
+          skippedFrames: message.skippedFrames,
+          shedding: message.shedding,
+          storeBehind: message.storeBehind,
+        });
+        break;
       case 'agentService':
         this.onAgentService(message.facts, message.shortConnections);
         break;
@@ -201,6 +218,7 @@ export class PipelineClient {
               frames: bundle.frames, truncated: bundle.truncated,
               streamId: bundle.streamId, seeds: bundle.seeds, retroactive: bundle.retroactive,
               process: bundle.process,
+              liveSkipped: bundle.liveSkipped,
             });
           },
           // A rejected replay used to wedge the frame permanently. Nothing
