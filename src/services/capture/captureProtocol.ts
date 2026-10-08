@@ -79,7 +79,17 @@ export type ToCapture =
    * itself - so the app never has to know whether the ingest port exists, and a
    * build without one writes bytes and rows together exactly as it always did.
    */
-  | { type: 'appendBytes'; frames: RawFrame[] }
+  | {
+      type: 'appendBytes';
+      frames: RawFrame[];
+      /**
+       * Answered with `bytesTaken` once the writer has these frames, on the
+       * port that sent them - the pipeline Worker's (ADR 0053). Its count of
+       * unanswered appends is the store's backlog, and past a budget it stops
+       * sending. Absent from a sender that keeps no count.
+       */
+      ack?: number;
+    }
   /**
    * Frame records from the pipeline Worker, on its own port, one-way
    * (ADR 0049): what each frame's first dissection learned from the frames
@@ -220,6 +230,14 @@ export type FromCapture =
       row: Packet | null;
       frames: [number, Uint8Array][];
     }
+  /**
+   * The writer has taken an `appendBytes` - or dropped it, with no capture
+   * open, or failed it, which is reported on the client port as every failure
+   * is. Answered either way: the Worker counts unanswered appends as the
+   * store's backlog, and an answer that never came would stop the live view
+   * for good.
+   */
+  | { type: 'bytesTaken'; ack: number }
   /**
    * Decoded chunks answering a `rowsAt`, each with where it starts and
    * whether its rows carry their own link type (`RowBlock.linkTypesStored`).

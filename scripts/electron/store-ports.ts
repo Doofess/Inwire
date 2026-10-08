@@ -77,13 +77,15 @@ checkTrue('...and feeds the same host', /host\.receive/.test(ingestBranch));
 checkTrue('replies go to the client port alone',
   /port\?\.postMessage\(message\)/.test(entry));
 
-// ADR 0049's one exception, held to exactly one: the host answers down a
-// message's own callback for a revisit kit and for nothing else, so no reply
+// The exceptions, held to exactly two: the host answers down a message's own
+// callback for a revisit kit the Worker asked for (ADR 0049) and for an append
+// the Worker counts as owed (ADR 0053), and for nothing else - so no reply
 // meant for the renderer can ever leave on the Worker's port.
 const captureHost = read('src/services/capture/captureHost.ts');
-checkTrue('the host answers down a message\'s own port only with a revisit kit',
-  JSON.stringify([...captureHost.matchAll(/\breply\(\{ type: '([a-zA-Z]+)'/g)].map((m) => m[1])) === '["revisitKit"]'
-  && (captureHost.match(/\breply\(/g) ?? []).length === 1);
+checkTrue('the host answers down a message\'s own port only with a revisit kit or a bytesTaken',
+  JSON.stringify([...captureHost.matchAll(/\breply\(\{ type: '([a-zA-Z]+)'/g)].map((m) => m[1]).sort())
+    === '["bytesTaken","revisitKit"]'
+  && (captureHost.match(/\breply\(/g) ?? []).length === 2);
 
 console.log('\n--- the renderer only ferries it ---\n');
 
