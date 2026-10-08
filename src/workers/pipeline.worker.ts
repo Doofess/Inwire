@@ -37,6 +37,7 @@ import { TcpStreamTracker } from '../services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../services/icmpEchoTracker';
 import { QuicFlowTracker } from '../services/quicFlowTracker';
 import { DnsTracker } from '../services/dnsTracker';
+import { Sequencer } from '../services/dissect/sequencer';
 import { L3Tracker } from '../services/l3Tracker';
 import { NO_HOST, type HostIdentity } from '../services/direction';
 import { NetworkFactsCollector } from '../services/networkFacts';
@@ -127,11 +128,17 @@ let bytesPostedWhileIdle = 0;
 let capturedSinceReset = false;
 let interfaces: PipelineInterface[] = [];
 
-let tcpTracker = new TcpStreamTracker();
+/**
+ * Everything numbered across conversations - the stream indexes, the TCP
+ * connection order, each frame's clocks - in one stage the trackers ask
+ * (`dissect/sequencer.ts`, ADR 0053). Rebuilt with them.
+ */
+let sequencer = new Sequencer();
+let tcpTracker = new TcpStreamTracker(sequencer);
 let icmpTracker = new IcmpEchoTracker();
 let quicTracker = new QuicFlowTracker();
 let dnsTracker = new DnsTracker();
-let l3Tracker = new L3Tracker();
+let l3Tracker = new L3Tracker(sequencer);
 
 /**
  * Who this machine is, and what the capture says about the network.
@@ -207,16 +214,6 @@ let nextId = 1;
 const ringFiling = new RingFiling();
 /** Stand-in sequence number for an agent that sends none. */
 let arrivalSeq = 0;
-let captureStartUs: number | null = null;
-let lastPacketUs: number | null = null;
-/**
- * The nanoseconds past each of those, so an adapter stamping in nanoseconds
- * gets a relative-time column in nanoseconds. A restored session hands back
- * microseconds only, and its remainders start at 0 - a sub-microsecond offset
- * on a column that capture was already showing to six places.
- */
-let captureStartNsRem = 0;
-let lastPacketNsRem = 0;
 
 let pendingPackets: Packet[] = [];
 let pendingIcmpReplies: { requestFrameId: number; replyId: number }[] = [];
@@ -252,11 +249,12 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   released = [];
   releasedFrom = 0;
   flow.abandonBatches();
-  tcpTracker = new TcpStreamTracker();
+  sequencer = new Sequencer();
+  tcpTracker = new TcpStreamTracker(sequencer);
   icmpTracker = new IcmpEchoTracker();
   quicTracker = new QuicFlowTracker();
   dnsTracker = new DnsTracker();
-  l3Tracker = new L3Tracker();
+  l3Tracker = new L3Tracker(sequencer);
   recorder = makeRecorder();
   // The facts, but not the identity. Clearing the buffer discards what this
   // capture observed; it does not make the machine a different machine, and
@@ -272,13 +270,8 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   pendingInfoPatches = [];
   capturedSinceReset = false;
   pendingRecords = [];
-  // A restored session hands back the capture it is continuing, so the frames
-  // that arrive next carry on its relative-time column rather than restarting
-  // it at zero underneath frames that are already numbered in the thousands.
-  captureStartUs = startUs ?? null;
-  lastPacketUs = lastUs ?? null;
-  captureStartNsRem = 0;
-  lastPacketNsRem = 0;
+  // A restored session hands back the capture it is continuing (`resumeLive`).
+  sequencer.clock.resumeLive(startUs ?? null, lastUs ?? null);
   arrivalSeq = 0;
   nextId = startId;
 }
@@ -387,19 +380,8 @@ function linkTypeFor(iface: number): number {
 
 function ingest(frame: LiveFrame, id: number): void {
   try {
-    if (captureStartUs === null) {
-      captureStartUs = frame.tsUs;
-      captureStartNsRem = frame.tsNsRem;
-      lastPacketUs = null;
-    }
-    // In nanoseconds, then seconds: a difference of two stamps is small enough
-    // that its nanosecond count is exact in a double where the stamps are not.
-    const relativeTime = ((frame.tsUs - captureStartUs) * 1000 + frame.tsNsRem - captureStartNsRem) / 1e9;
-    const timeDelta = lastPacketUs !== null
-      ? Math.max(0, ((frame.tsUs - lastPacketUs) * 1000 + frame.tsNsRem - lastPacketNsRem) / 1e9)
-      : 0;
-    lastPacketUs = frame.tsUs;
-    lastPacketNsRem = frame.tsNsRem;
+    // Clamped at zero and kept to the nanosecond (`FrameClock.fromLive`).
+    const { relativeTime, timeDelta } = sequencer.clock.fromLive(frame.tsUs, frame.tsNsRem);
 
     const precision = tsPrecisionById.get(frame.iface) ?? 6;
     recorder.begin();
@@ -871,7 +853,7 @@ function receiveControl(text: string): void {
     pendingPackets.push(buildFallbackPacket({
       id: nextId++,
       tsUs,
-      relativeTime: captureStartUs === null ? 0 : (tsUs - captureStartUs) / 1_000_000,
+      relativeTime: sequencer.clock.liveStartUs === null ? 0 : (tsUs - sequencer.clock.liveStartUs) / 1_000_000,
       timeDelta: 0,
       length: Number(raw.length) || 0,
       source: String(raw.source ?? ''),

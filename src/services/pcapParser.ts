@@ -8,6 +8,7 @@ import { dissectStp, labelForEtherType, L2DissectorResult } from './dissectors/l
 import { findEthertype } from './dissectors/dispatch';
 import { formatArrivalTime } from './dissect/arrivalTime';
 import { declaredPayloadEnd, dissectLinkLayer, ethernetTrailerRows } from './dissectors/linkLayer';
+import { Sequencer } from './dissect/sequencer';
 import { L3Tracker } from './l3Tracker';
 import {
   Direction, directionFromAddresses, directionFromMacs, directionFromOffload,
@@ -664,13 +665,14 @@ export class PcapService {
     };
 
     let packetIndex = 1;
-    let baseNanos: bigint | null = null;
-    let prevNanos: bigint | null = null;
-    const tcpTracker = new TcpStreamTracker();
+    // One stage numbers across conversations, and both trackers ask it
+    // (`dissect/sequencer.ts`).
+    const sequencer = new Sequencer();
+    const tcpTracker = new TcpStreamTracker(sequencer);
     const icmpTracker = new IcmpEchoTracker();
     const quicTracker = new QuicFlowTracker();
     const dnsTracker = new DnsTracker();
-    const l3Tracker = new L3Tracker();
+    const l3Tracker = new L3Tracker(sequencer);
     // Recording, every frame is dissected through a recorder in front of the
     // trackers - the same one the live Worker uses. A frame's record waits here
     // with the frame, and leaves with it.
@@ -680,14 +682,8 @@ export class PcapService {
     const records = new Map<number, { record: Uint8Array; derived: Uint8Array | null }>();
 
     for (const frame of frames) {
-      if (baseNanos === null) baseNanos = frame.tsNanos;
-      // Subtracting in bigint *before* converting to a float is what keeps
-      // nanosecond precision: the difference is a small number of seconds, so
-      // it lands well inside float64's exact range even though the absolute
-      // epoch-nanosecond value does not.
-      const relativeTime = Number(frame.tsNanos - baseNanos) / 1e9;
-      const timeDelta = prevNanos === null ? 0 : Number(frame.tsNanos - prevNanos) / 1e9;
-      prevNanos = frame.tsNanos;
+      // In bigint before a float, which keeps nanosecond precision (`FrameClock`).
+      const { relativeTime, timeDelta } = sequencer.clock.fromNanos(frame.tsNanos);
       const tsUs = Number(frame.tsNanos / 1000n);
 
       const id = packetIndex++;

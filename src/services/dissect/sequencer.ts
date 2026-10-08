@@ -359,6 +359,25 @@ export class FrameClock {
     return { relativeTime, timeDelta };
   }
 
+  /**
+   * A restored session's clock, so the frames that arrive next carry on its
+   * relative-time column rather than restarting it at zero underneath frames
+   * already numbered in the thousands. A session keeps microseconds only, so
+   * the nanoseconds past them start at 0 - a sub-microsecond offset on a
+   * column that capture was already showing to six places.
+   */
+  resumeLive(startUs: number | null, lastUs: number | null): void {
+    this.startUs = startUs;
+    this.lastUs = lastUs;
+    this.startNsRem = 0;
+    this.lastNsRem = 0;
+  }
+
+  /** The live capture's first stamp, or null before its first frame. */
+  get liveStartUs(): number | null {
+    return this.startUs;
+  }
+
   fromLive(tsUs: number, tsNsRem: number): { relativeTime: number; timeDelta: number } {
     if (this.startUs === null) {
       this.startUs = tsUs;
