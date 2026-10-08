@@ -50,7 +50,7 @@ const inFlight = Number(arg('--in-flight') ?? 2);
 /** Frames handed to the coordinator at a time, as the Worker's flush does. */
 const DISPATCH = 2048;
 /** Frames in flight past which dispatch waits, as the Worker's `PARALLEL_BACKLOG`. */
-const BACKLOG = 32_768;
+const BACKLOG = Number(arg('--backlog') ?? 32_768);
 
 function trackers(sequencer: Sequencer) {
   return {

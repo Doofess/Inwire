@@ -271,7 +271,7 @@ const keyLogTexts: string[] = [];
 const shardDetails = new Map<number, (layers: ProtocolLayer[] | null) => void>();
 let nextShardDetail = 1;
 /** Frames in flight past which the flush stops handing the coordinator more. */
-const PARALLEL_BACKLOG = 32_768;
+const PARALLEL_BACKLOG = 65_536;
 /** Trees each shard keeps for the detail pane: lane 0 keeps its own `DETAIL_CACHE_FRAMES`. */
 const SHARD_CACHE_FRAMES = 2_000;
 
@@ -315,6 +315,7 @@ function startParallel(shards: number): void {
   const coordinator = new Coordinator({
     shards,
     route: 'connection',
+    maxInFlight: 3,
     trackers: lane.trackers,
     sequencer: lane.sequencer,
     env: shardEnv(LIVE_ENV, shards),

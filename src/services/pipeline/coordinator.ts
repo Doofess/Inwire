@@ -178,6 +178,7 @@ export class Coordinator {
   /** Which lane holds each connection: 0, or a shard's lane (shard + 1). */
   private readonly keyHome = new Map<string, number>();
   private readonly datagramKey = new Map<string, string>();
+  private readonly datagramShard = new Map<string, number>();
   /** Placeholder to real `tls.stream`, per shard lane. */
   private tlsMaps: Map<number, number>[];
   private nextTls = 0;
@@ -315,6 +316,7 @@ export class Coordinator {
     }
     this.keyHome.clear();
     this.datagramKey.clear();
+    this.datagramShard.clear();
     this.tlsMaps = Array.from({ length: this.shards + 1 }, () => new Map());
     this.nextTls = 0;
     this.treeLane.clear();
@@ -443,9 +445,21 @@ export class Coordinator {
     if (lane.key !== undefined) this.rememberDatagram(lane.datagram, lane.key);
     const key = lane.key ?? this.datagramKey.get(lane.datagram) ?? this.lookAhead(lane.datagram);
     const home = key === undefined ? undefined : this.keyHome.get(key);
+    // Every fragment of a datagram to one place, or it never reassembles: a
+    // connection that is new has no home until the datagram completes, and an
+    // assignment by load would answer each fragment differently.
     const shard = home !== undefined
       ? home - 1
-      : this.shardFor(this.route === 'pair' || key === undefined ? lane.pair : key);
+      : this.datagramShard.get(lane.datagram)
+        ?? this.shardFor(this.route === 'pair' || key === undefined ? lane.pair : key);
+    if (shard !== null && shard >= 0) {
+      this.datagramShard.set(lane.datagram, shard);
+      if (this.datagramShard.size > MAX_DATAGRAMS) {
+        // Small and short-lived: a datagram's fragments arrive together.
+        const oldest = this.datagramShard.keys().next();
+        if (!oldest.done) this.datagramShard.delete(oldest.value);
+      }
+    }
     if (shard === null || shard < 0) {
       this.dissectHere(frame);
       return;
