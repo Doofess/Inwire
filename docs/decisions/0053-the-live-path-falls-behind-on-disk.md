@@ -9,7 +9,20 @@ at 60,000 (sent ~70,000) it advanced 12,700 -> 36,700 a second, the backlog
 grew without limit (1.18 million frames and rising) -> held near 400,000, the
 Worker's heap peaked 727 MB and rising -> 356 MB, and 880,122 frames were shed
 and counted as skipped - in the capture file, said so on screen and on the
-frame after each hole. The rest of the phases are still to come. The fixes
+frame after each hole. **Phase 2 landed 2026-10-08**: `dissect/sequencer.ts`
+owns everything numbered across conversations - the four conversation
+indexes, the TCP connection order with its eviction, `tcp.stream`,
+`tls.stream`, and the frame clock - and the trackers ask it, so the output is
+byte for byte what it was (342,321 frames of the fixtures and the burst, and a
+20,000-connection capture that evicts, hashed before and after).
+`dissect/frameLane.ts` reads from the headers which frames phase 3 may shard,
+in 0.7 us a frame; on every fixture and the burst it reached 100% of TCP
+frames, each numbered by the dissection exactly as its headers said
+(`scripts/pipeline/sequencer.ts`). One thing phase 2 found that the design did
+not list: **`tls.stream` cannot be read ahead** - a connection takes it on its
+first TLS record, which only dissecting the payload finds - so phase 3 needs
+it numbered late, in merge order (see **Phases**). The rest of the phases are
+still to come. The fixes
 that measured the problem landed the same day and are listed under **What came
 first**. Narrows **[0038](0038-the-worker-writes-the-bytes.md)**: the
 Worker still writes the bytes before it dissects, and now also stops when the
@@ -119,8 +132,23 @@ once, and it is recorded, so a revisit agrees with arrival.
    catch-up): no heap grows without limit, and the user sees the lag.
 2. **The Sequencer, with one Worker** - stream numbering and the TCP eviction
    moved behind `trackerApi`, no behaviour change, every gate green.
+   *Landed.*
 3. **TCP shards**, behind the setting. The first speed-up: roughly 3-4x at
-   four shards on a bulk-TCP burst.
+   four shards on a bulk-TCP burst. What it needs from phase 2, and what is
+   still open:
+   - The coordinator runs `frameLane` and, for a TCP-lane frame, asks the
+     Sequencer in frame order: `eth`, then `ip`/`ipv6` (`ConversationIndex.
+     observe`), then `TcpOrder.locate` and `streamId`. The shard's trackers
+     answer those same calls from what it was sent, the way `FrameRevisit`
+     answers from a record, and drop the state for any key the order evicted
+     (`TcpStreamTracker.forget` is already the one place that does).
+   - **`tls.stream` must be numbered at the merge.** A shard reports that a
+     frame was its connection's first TLS record; the coordinator assigns the
+     number in id order and the merge writes it into the row, the field and
+     the record's answer. Until that exists, a capture with TLS keeps its TCP
+     on the sequential lane, or `tls.stream` comes out in shard order.
+   - A frame marked `fragmentOf: 'tcp'` holds back later frames of its address
+     pair until the shard reports the reassembled datagram's connection.
 4. **Catch-up from the agent's file.**
 5. **QUIC and UDP sharding** - the CID-to-connection map into the Sequencer,
    QUIC sharded by server; SDP handed out in frame order.
