@@ -1257,10 +1257,13 @@ which is the trigger this entry named in other words. The pool lives in the
 **renderer** as nested Workers, not in the store's `utilityProcess` this entry
 used to propose - every shard parses hostile bytes, and that process has Node
 and the filesystem. A Sequencer on the coordinator owns everything numbered
-across conversations; TCP shards by IP pair; frames merge in id order. Before
-any of it, every app-side queue gets a budget and the agent's pcapng carries
-the rest, so the live view falls behind on disk and says so. 0053 has the
-phases and the equality test.
+across conversations; TCP shards by connection (the ADR said pair; one pair
+was more than half the burst); frames merge in id order. Every app-side queue
+has a budget and the agent's pcapng carries the rest, so the live view falls
+behind on disk and says so. **Phases 1-3 have landed**: at 40,000 frames a
+second the live view now keeps up on this machine, and past ~45,000 the
+renderer's main thread is the limit, not dissection. 0053 has the phases and
+the numbers; `scripts/pipeline/parallel.ts` is the equality test.
 
 **The boundary is measured and it is not the trigger.** The hop is 5.21 µs a
 frame against the writer's 9.71 (see **What the store actually costs**). ADR 0038 took the *write* off the dissector's critical path,

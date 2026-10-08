@@ -25,9 +25,10 @@
  *
  * **A fragment of a TCP datagram is a barrier.** Its ports are in the first
  * fragment only, and which connection it belongs to is known when the last one
- * reassembles it - so it cannot be numbered ahead. It stays on the sequential
- * lane, and `fragmentOf` says so, which is what phase 3's coordinator needs to
- * hold later frames of that address pair back until it is done.
+ * reassembles it - so it cannot be numbered ahead. `fragmentOf` says so, and
+ * the lane carries what the headers do say - the addresses, the datagram, and
+ * on the first fragment the connection - which is what the coordinator routes
+ * it by and holds later frames back on until it is done (ADR 0053 phase 3).
  */
 import { formatIpv4Address, formatIpv6Address, formatMacAt } from '../addressFormat';
 import { LINKTYPE } from './types';
