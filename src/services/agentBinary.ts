@@ -140,6 +140,38 @@ export function isPacketBatch(buffer: ArrayBuffer): boolean {
 }
 
 /**
+ * How many frames a batch says it carries, from its header alone - or null for
+ * a message that is not a batch.
+ *
+ * For main, which treats every batch as opaque bytes and must go on doing so:
+ * when the live view is behind it sheds whole batches itself
+ * (`electron/pipeCredit.ts`, ADR 0053), and it has to say how many frames
+ * went without decoding a single record. Takes a view, unlike the two above,
+ * because main's payloads are views into the frame reader's output.
+ */
+export function batchFrameCount(bytes: Uint8Array): number | null {
+  if (bytes.byteLength < BATCH_HEADER_BYTES) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== MAGIC_LE) return null;
+  return view.getUint16(6, true);
+}
+
+/**
+ * The sequence number of a batch's first frame, from its first record's
+ * header - or null for a message that is not a batch, or an empty one.
+ *
+ * The agent queues frames in the order it numbered them - exactly so for one
+ * adapter, within a few places across several - so this and the count say
+ * which frames a batch main sheds held: the Worker is told, and counts them
+ * even when no later frame arrives to reveal the gap.
+ */
+export function batchFirstSeq(bytes: Uint8Array): number | null {
+  const count = batchFrameCount(bytes);
+  if (count === null || count === 0 || bytes.byteLength < BATCH_HEADER_BYTES + 4) return null;
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(BATCH_HEADER_BYTES, true);
+}
+
+/**
  * Every frame in one batch.
  *
  * Throws rather than returning what it managed to read: a truncated batch

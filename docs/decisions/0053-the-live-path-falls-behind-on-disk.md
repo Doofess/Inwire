@@ -1,7 +1,16 @@
 # 0053 — The live path falls behind on disk, and dissects on every core
 
-**Status:** accepted 2026-10-08; no phase landed yet (below). The fixes that
-measured the problem landed the same day and are listed under **What came
+**Status:** accepted 2026-10-08. **Phase 1 landed 2026-10-08**: every
+app-side queue is bounded and the status bar says how far behind live the
+view is and what it skipped. `ui-burst-drive.ts` on the real burst, before ->
+after: at 40,000 frames a second the Worker advanced 28,600 -> 34,500 a second
+with its heap peaking 520 -> 296 MB and the main thread's long tasks 29% -> 0%;
+at 60,000 (sent ~70,000) it advanced 12,700 -> 36,700 a second, the backlog
+grew without limit (1.18 million frames and rising) -> held near 400,000, the
+Worker's heap peaked 727 MB and rising -> 356 MB, and 880,122 frames were shed
+and counted as skipped - in the capture file, said so on screen and on the
+frame after each hole. The rest of the phases are still to come. The fixes
+that measured the problem landed the same day and are listed under **What came
 first**. Narrows **[0038](0038-the-worker-writes-the-bytes.md)**: the
 Worker still writes the bytes before it dissects, and now also stops when the
 store has not taken them. Answers CLAUDE.md §10's **Engine-side dissection**,
@@ -39,13 +48,30 @@ oldest batches and counts them (`outbound.rs`). So the file is the source of
 truth and the live stream is best-effort, and every queue on the app's side
 gets a budget:
 
-- **main -> Worker:** credit by bytes the Worker has drained; past the budget
-  main stops posting and stops reading the pipe, and the agent sheds.
-- **Worker -> store:** a count of unacknowledged `appendBytes`; past it the
-  Worker stops releasing from its ordering window.
+- **main -> Worker:** credit by batches the Worker has dissected
+  (`electron/pipeCredit.ts`, 256 MB); past it **main sheds whole batches
+  itself and tells the Worker which**, with hysteresis so a hole is one hole.
+  - **Not by stopping the pipe**, which this said when it was written: the
+    agent's per-client queue would then shed whatever is oldest, and it carries
+    control messages too - a lost `capture_boundary` misfiles a ring, a lost
+    state message leaves a stopped capture looking live. Main tells a batch
+    from a control message by its frame kind alone, so it sheds only batches.
+- **Worker -> store:** a count of unanswered `appendBytes` (the store answers
+  each with `bytesTaken`, 50,000 frames, `pipeline/liveFlow.ts`); past it the
+  Worker stops releasing from its ordering window. The flush also dissects in
+  50 ms slices now, so a Worker that is behind still answers the detail pane
+  and main's report between them.
 - **Worker -> shards:** at most two flushes in flight per shard.
 
 The heap guards stay, as backstops that should never fire again.
+
+**Until phase 4, a hole is reported, not caught up.** The first frame after
+it carries `inwire.live.skipped`, a `CaptureGap` finding saying the frames are
+in the capture file, and a row on its Frame layer. TCP analysis runs across
+the hole and says "previous segment not captured" of the streams that crossed
+it - true of what the view dissected, filed as a capture gap rather than as
+loss, and what keeps the TLS record cursor from reading past a hole as the
+middle of a record (`dissect/liveGapFields.ts`).
 
 **2. A hole is caught up from the file, never dissected across.** A jump in
 the agent's sequence numbers means the live stream shed. Dissecting across it

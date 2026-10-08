@@ -1154,12 +1154,15 @@ after the store was seen to die at 4,060 MB.
 the ceiling with a message — which a V8 abort cannot give. The wall is the
 lower of our 2 GB and 90% of V8's own limit. `scripts/capture/heap-guard.ts`.
 
-Still unfixed: the store's inbound queue is unbounded, and each pending `append`
-holds its frames. **It has now been seen to matter**: the burst above is the
-first diagnosis of a store heap reaching its ceiling, a queue growing at the
-gap between arrival and the store's rate. A faster store moves that gap; it
-does not close it. A link that delivers more than the store takes fills it
-again, and the guard is still what stops it.
+**The store's inbound queue is bounded now** (ADR 0053, phase 1). It was not,
+and it mattered: the burst above was the first store heap seen reaching its
+ceiling, a queue growing at the gap between arrival and the store's rate. The
+store answers every `appendBytes` with `bytesTaken`, the Worker stops
+releasing frames past 50,000 unanswered (`pipeline/liveFlow.ts`), and main
+sheds whole batches past 256 MB the Worker owes it (`electron/pipeCredit.ts`)
+- so a link faster than the app falls behind into the agent's pcapng, which
+holds every frame, and the status bar says by how much. The heap guard stays
+as a backstop that should no longer fire.
 
 ## 8. Status
 

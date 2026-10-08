@@ -38,10 +38,12 @@ import { MessageChannelMain, type MessagePortMain, type WebContents } from 'elec
 import { execFile } from 'node:child_process';
 import type { FromAgentLink, ToAgentLink } from '../src/services/agentLink';
 import { encodeCaptureRootCommand } from '../src/services/agentProtocol';
+import { batchFirstSeq, batchFrameCount } from '../src/services/agentBinary';
 import { readAgentService } from './agentService';
 import { classifyStart, MAX_AUTO_START_ATTEMPTS, worthStarting } from './serviceStart';
 import { AGENT_PIPE_PATH, PipeTransport } from './pipeTransport';
 import { AGENT_PORT_CHANNEL } from './channels';
+import { PipeCredit } from './pipeCredit';
 
 /**
  * How often the service's registry key is re-read while the link is down.
@@ -61,6 +63,9 @@ const SERVICE_POLL_MS = 20_000;
  */
 const START_TIMEOUT_MS = 10_000;
 
+/** How often main tells the Worker how far behind live it is (ADR 0053). */
+const BACKLOG_REPORT_MS = 1000;
+
 /**
  * One renderer's link to the agent.
  *
@@ -79,6 +84,13 @@ export class AgentPipeLink {
    * change the answer: a start that worked, and a person clicking the button.
    */
   private autoStarts = 0;
+  /**
+   * What the Worker owes main, and whether main is shedding: ADR 0053's bound
+   * on the live path. `pipeCredit.ts` says why main sheds batches itself
+   * rather than stopping the pipe.
+   */
+  private readonly credit = new PipeCredit();
+  private backlogTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
    * @param captureRoot Where this app's captures live, which the agent writes
@@ -88,6 +100,10 @@ export class AgentPipeLink {
   constructor(pipePath: string = AGENT_PIPE_PATH, captureRoot: string | null = null) {
     this.pipe = new PipeTransport({
       status: (status) => {
+        // Every change of connection is a new stream: nothing the Worker was
+        // owed survives it, and nothing is reported while there is no stream.
+        this.credit.reset();
+        this.reportBacklog(status === 'connected');
         this.tell({ type: 'status', status });
         // Only while it is down. A connected link needs no diagnosis, and
         // asking anyway would be a second source of truth that can disagree
@@ -99,7 +115,24 @@ export class AgentPipeLink {
       // list accepts only ports. One memcpy per ~256 kB batch at ~30 batches a
       // second is what the renderer's main thread staying out of the frame
       // path costs, and it is not the number worth optimising.
-      binary: (bytes) => this.tell({ type: 'binary', bytes }),
+      //
+      // Unless the Worker already owes too much: then the batch is shed here,
+      // whole, and the frames in it are still in the capture's pcapng. A
+      // control message is never shed - `pipeCredit.ts` says why that is the
+      // whole reason main does this rather than letting the agent shed.
+      binary: (bytes) => {
+        const frames = batchFrameCount(bytes) ?? 0;
+        const batch = this.credit.admit(bytes.byteLength, frames);
+        if (batch !== null) {
+          this.tell({ type: 'binary', bytes, batch });
+          return;
+        }
+        // Said in the batch's place, so the Worker counts the hole even when
+        // nothing arrives after it - the end of a burst - and marks it on the
+        // next frame that does.
+        const firstSeq = batchFirstSeq(bytes);
+        if (firstSeq !== null) this.tell({ type: 'shed', firstSeq, frames });
+      },
     }, pipePath, undefined, captureRoot === null ? null : encodeCaptureRootCommand(captureRoot));
   }
 
@@ -145,6 +178,7 @@ export class AgentPipeLink {
 
   /** Drops the connection and the channel. Called on reload and on quit. */
   detach(): void {
+    this.reportBacklog(false);
     this.pipe.close();
     this.port?.close();
     this.port = null;
@@ -156,7 +190,25 @@ export class AgentPipeLink {
       case 'close': this.pipe.close(); break;
       case 'send': this.pipe.send(message.text); break;
       case 'startService': void this.startService(); break;
+      case 'drained': this.credit.drained(message.batches); break;
     }
+  }
+
+  /**
+   * Starts or stops the once-a-second report of the backlog. Only while
+   * connected: a link that is down has no stream to be behind.
+   */
+  private reportBacklog(on: boolean): void {
+    if (!on) {
+      if (this.backlogTimer !== null) clearInterval(this.backlogTimer);
+      this.backlogTimer = null;
+      return;
+    }
+    if (this.backlogTimer !== null) return;
+    this.backlogTimer = setInterval(
+      () => this.tell({ type: 'backlog', backlog: this.credit.backlog() }),
+      BACKLOG_REPORT_MS,
+    );
   }
 
   private tell(message: FromAgentLink): void {

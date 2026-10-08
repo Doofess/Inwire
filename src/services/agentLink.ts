@@ -56,7 +56,28 @@ export type FromAgentLink =
    * one memcpy per ~256 kB batch at ~30 batches a second is not the cost worth
    * optimising.
    */
-  | { type: 'binary'; bytes: Uint8Array }
+  | {
+      type: 'binary';
+      bytes: Uint8Array;
+      /**
+       * Main's id for this batch, which the Worker hands back in `drained`
+       * once every frame in it is dissected (`electron/pipeCredit.ts`).
+       * Absent from a sender that keeps no credit, which a test may be.
+       */
+      batch?: number;
+    }
+  /**
+   * How far behind live the Worker is, as main counts it, once a second
+   * while connected (ADR 0053). Main's to say, because main is the one end
+   * that knows both when a batch arrived and whether it has been answered.
+   */
+  | { type: 'backlog'; backlog: LiveBacklog }
+  /**
+   * Main shed a batch rather than post it (`electron/pipeCredit.ts`): these
+   * frames are in the capture's pcapng and will not be in the view. Sent in
+   * the batch's place, so it arrives exactly where the gap is.
+   */
+  | { type: 'shed'; firstSeq: number; frames: number }
   /**
    * Why the link is down, as far as anything outside the pipe can tell.
    *
@@ -66,6 +87,20 @@ export type FromAgentLink =
    * what is made of them - this message carries facts and no conclusion.
    */
   | { type: 'service'; facts: AgentServiceFacts; shortConnections: number };
+
+/** What main reports about the live stream (`electron/pipeCredit.ts`). */
+export interface LiveBacklog {
+  /** Frames posted to the Worker and not yet dissected. */
+  frames: number;
+  /** The same, in batch bytes. */
+  bytes: number;
+  /** Milliseconds since main read the oldest of them off the pipe; 0 when none. */
+  oldestMs: number;
+  /** Frames main has shed since the link connected. */
+  shedFrames: number;
+  /** Whether main is shedding right now. */
+  shedding: boolean;
+}
 
 /** Worker -> main. */
 export type ToAgentLink =
@@ -82,6 +117,12 @@ export type ToAgentLink =
    * what the answers mean.
    */
   | { type: 'send'; text: string }
+  /**
+   * Batches whose every frame has been dissected, or dropped unread: main's
+   * credit for them is returned (`electron/pipeCredit.ts`). Sent once per
+   * flush with whatever completed in it.
+   */
+  | { type: 'drained'; batches: number[] }
   /**
    * Ask Windows to start the agent's service.
    *

@@ -7,6 +7,7 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import { StatusItem } from './StatusItem';
+import { LiveLagStatus } from './LiveLagStatus';
 import type { AgentInterface, CaptureDropStats } from '../../services/agentProtocol';
 import {
   type AgentHealth,
@@ -243,6 +244,11 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
           </span>
         </StatusItem>
       )}
+
+      {/* Behind live, and what the view skipped to keep up - after the losses,
+          because it is not one: those frames are in the capture file. Its own
+          subscriber, so a once-a-second number re-renders only itself. */}
+      <LiveLagStatus />
     </>
   );
 };

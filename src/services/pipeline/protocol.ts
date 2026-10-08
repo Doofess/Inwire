@@ -166,6 +166,8 @@ export type ToPipeline =
       streamId?: number; seeds?: StreamSeeds; retroactive?: InfoPatch;
       /** See ReplayBundle.process - a fact the bytes do not contain. */
       process?: { pid: number; name: string; exe: string };
+      /** See ReplayBundle.liveSkipped - another. */
+      liveSkipped?: number;
     };
 
 /** One frame of a replay: everything dissection needs and nothing else. */
@@ -255,5 +257,22 @@ export type FromPipeline =
   | { type: 'needReplay'; id: number }
   /** Every frame held at a `drain` has been posted, rows included. */
   | { type: 'drained'; requestId: number }
+  /**
+   * How far the live view is behind the agent, once a second while the link
+   * is up (ADR 0053). `behindFrames`/`behindMs` are what main counts as posted
+   * and not yet dissected, the age of the oldest; `skippedFrames` is what the
+   * live stream never delivered, counted from the agent's numbering - frames
+   * that are in the capture file and not in the view.
+   */
+  | {
+      type: 'liveLag';
+      behindFrames: number;
+      behindMs: number;
+      skippedFrames: number;
+      /** Main is shedding batches right now. */
+      shedding: boolean;
+      /** The store's backlog is holding frames back. */
+      storeBehind: boolean;
+    }
   /** Something went wrong that the user should be told about, not swallowed. */
   | { type: 'failure'; message: string };

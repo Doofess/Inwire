@@ -29,6 +29,8 @@ import { decodeRawEthernetPacket, type InfoPatch } from '../services/pcapParser'
 import { LINKTYPE } from '../services/dissect/types';
 import { flowAnnotations } from '../services/flowAnnotations';
 import { addProcessRow, annotatePacket } from '../services/dissect/processFields';
+import { addLiveGapRow, markLiveGap } from '../services/dissect/liveGapFields';
+import { LiveFlow } from '../services/pipeline/liveFlow';
 import { clientFingerprints, learnOrLabelFingerprint } from '../services/dissect/clientFingerprints';
 import { buildFallbackPacket } from '../services/sessionRestore';
 import { TcpStreamTracker } from '../services/tcpStreamTracker';
@@ -75,6 +77,10 @@ interface LiveFrame extends Orderable {
   iface: number;
   /** The agent's ring file it is in, filed as it arrived (`ringFiling.ts`). */
   ring?: RingPart;
+  /** Main's id for the batch it came in, handed back once it is dissected. */
+  batch?: number;
+  /** Frames the live stream skipped just before this one (`liveFlow.ts`). */
+  holeBefore?: number;
 }
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -163,6 +169,34 @@ const duplicates = new DuplicateFinder();
 
 const ordering = new OrderingWindow<LiveFrame>(ORDERING_HOLD_MS);
 
+/**
+ * What this Worker owes main and is owed by the store, and the holes in the
+ * agent's numbering - ADR 0053's bounds on the live path (`liveFlow.ts`).
+ */
+const flow = new LiveFlow();
+
+/**
+ * Frames released from the ordering window, in capture order, not yet
+ * dissected; `releasedFrom` is the first one still waiting.
+ *
+ * **Why there is a queue between the window and the dissector at all.** A
+ * flush used to dissect everything the window released in one go, which is
+ * right while dissection keeps up - and when it does not, each flush is
+ * longer than the last and the Worker answers nothing else for the length of
+ * it: not the detail pane asking for the selected frame's tree, and not
+ * main's report of how far behind live it is, which would then be as late as
+ * the backlog it reports. So a flush dissects a slice (`SLICE_MS`) and comes
+ * straight back for the next while frames are waiting, and messages are
+ * handled between slices.
+ */
+let released: LiveFrame[] = [];
+let releasedFrom = 0;
+/** How long one flush may dissect before it yields, in milliseconds. */
+const SLICE_MS = 50;
+/** A running estimate of one frame's dissection, so a slice is sized without a clock read per frame. */
+let usPerFrame = 25;
+let flushSoon = false;
+
 /** Ids are assigned here now: the frame is numbered where it is dissected. */
 let nextId = 1;
 /**
@@ -213,6 +247,11 @@ function cacheTree(id: number, layers: ProtocolLayer[]) {
 
 function resetPipeline(startId: number, startUs?: number | null, lastUs?: number | null) {
   ordering.clear();
+  // Cleared frames will never be dissected, so main is told it is owed
+  // nothing for them; the next flush sends the ids.
+  released = [];
+  releasedFrom = 0;
+  flow.abandonBatches();
   tcpTracker = new TcpStreamTracker();
   icmpTracker = new IcmpEchoTracker();
   quicTracker = new QuicFlowTracker();
@@ -394,6 +433,10 @@ function ingest(frame: LiveFrame, id: number): void {
     //
     // Before the tree is cached, because it adds a row to it.
     annotatePacket(packet, flowAnnotations);
+    // The first frame after a hole in the live stream says so, and says the
+    // frames are in the capture file (`liveGapFields.ts`). Before the tree is
+    // cached, for the same reason as the process row.
+    if (frame.holeBefore !== undefined) markLiveGap(packet, frame.holeBefore);
 
     // After attribution, because it is attribution that makes a hello a
     // labelled example. A frame the OS named teaches this store; one it could
@@ -501,6 +544,7 @@ async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
     const links = treeLinksOf((abbrev) => row.fields?.[abbrev]);
     if (links !== undefined) applyInfoPatch(packet, { frameId: id, links });
     addProcessRow(packet.layers, processOfRow(row));
+    addLiveGapRow(packet.layers, row.fields?.['inwire.live.skipped']);
     revisitedTrees.set(id, packet.layers);
     while (revisitedTrees.size > REVISITED_TREES) {
       const oldest = revisitedTrees.keys().next();
@@ -517,10 +561,39 @@ async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
 }
 
 function flush(): void {
+  flushSoon = false;
   // Frames leave the ordering window in capture order and are dissected right
   // here, so the trackers see them in the order the wire did. Stopping
   // releases whatever is still held rather than stranding it.
-  const ready = capturing ? ordering.drain(performance.now()) : ordering.flush();
+  const fresh = capturing ? ordering.drain(performance.now()) : ordering.flush();
+  for (const frame of fresh) released.push(frame);
+
+  // **The store's backlog is a reason to stop releasing** (ADR 0053): past
+  // its budget, frames wait here - bounded, because main stops posting to a
+  // Worker that has not answered for them - rather than in the store's inbound
+  // queue, which nothing bounded and which a real burst grew to its 2 GB heap
+  // guard. A stopped capture releases everything regardless: the stop path is
+  // waiting for its last rows.
+  let take = 0;
+  if (!capturing) take = released.length - releasedFrom;
+  else if (!flow.storeBehind) {
+    take = Math.min(released.length - releasedFrom, Math.max(256, Math.floor((SLICE_MS * 1000) / usPerFrame)));
+  }
+  const ready = released.slice(releasedFrom, releasedFrom + take);
+  releasedFrom += take;
+  if (releasedFrom === released.length) {
+    released = [];
+    releasedFrom = 0;
+  } else if (releasedFrom > 65_536) {
+    released = released.slice(releasedFrom);
+    releasedFrom = 0;
+  }
+  // More waiting and the store not in the way: straight back for it, after
+  // whatever messages queued behind this slice.
+  if (releasedFrom < released.length && !flow.storeBehind && !flushSoon) {
+    flushSoon = true;
+    setTimeout(flush, 0);
+  }
 
   // **Ids first, then bytes to disk, then dissection - in that order, for the
   // whole group.** ADR 0038.
@@ -552,10 +625,23 @@ function flush(): void {
       frames: assigned.map(({ frame, id }) => (frame.ring === undefined
         ? { id, tsUs: frame.tsUs, bytes: frame.bytes }
         : { id, tsUs: frame.tsUs, bytes: frame.bytes, ring: frame.ring })),
+      // Answered with `bytesTaken`; the unanswered count is the store's backlog.
+      ack: flow.storeSent(assigned.length),
     });
   }
 
-  for (const { frame, id } of assigned) ingest(frame, id);
+  const sliceStart = performance.now();
+  for (const { frame, id } of assigned) {
+    ingest(frame, id);
+    flow.frameDone(frame.batch);
+  }
+  if (assigned.length >= 64) {
+    const measured = ((performance.now() - sliceStart) * 1000) / assigned.length;
+    usPerFrame = usPerFrame * 0.7 + measured * 0.3;
+  }
+  // Main's credit for every batch whose last frame is now dissected.
+  const drained = flow.takeCompleted();
+  if (drained.length > 0) tellAgent({ type: 'drained', batches: drained });
 
   // The group's records, after its bytes and in the same flush - so no chunk
   // can seal between a frame's bytes and its record.
@@ -659,7 +745,23 @@ function receiveFromAgent(message: FromAgentLink): void {
       });
       return;
     case 'binary':
-      receiveBatch(message.bytes);
+      receiveBatch(message.bytes, message.batch);
+      return;
+    case 'shed':
+      if (capturing) flow.noteShed(message.firstSeq, message.frames);
+      return;
+    case 'backlog':
+      // Main counts what this Worker owes it; the skipped frames are counted
+      // here, from the agent's numbering, because only the frames say where
+      // the stream had holes. Forwarded once a second, as main sends it.
+      post({
+        type: 'liveLag',
+        behindFrames: message.backlog.frames,
+        behindMs: message.backlog.oldestMs,
+        skippedFrames: flow.skippedFrames,
+        shedding: message.backlog.shedding,
+        storeBehind: flow.storeBehind,
+      });
       return;
     case 'text':
       receiveControl(message.text);
@@ -681,19 +783,24 @@ function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
     : (bytes.slice().buffer as ArrayBuffer);
 }
 
-function receiveBatch(bytes: Uint8Array): void {
-  if (!capturing) return; // agent detected, capture not started
+function receiveBatch(bytes: Uint8Array, batch: number | undefined): void {
+  // A batch that will never be dissected is answered for now, or main would
+  // count it as owed for ever and stop posting.
+  if (!capturing) { flow.batchDropped(batch); return; } // agent detected, capture not started
   const buffer = asArrayBuffer(bytes);
   let frames;
   try {
     frames = isPacketBatch(buffer) ? decodePacketBatch(buffer) : null;
   } catch (err) {
+    flow.batchDropped(batch);
     post({ type: 'failure', message: String(err) });
     return;
   }
-  if (!frames) return;
+  if (!frames) { flow.batchDropped(batch); return; }
+  flow.batchArrived(batch, frames.length);
   const arrivedAt = performance.now();
   for (const frame of frames) {
+    const hole = flow.seqArrived(frame.seq);
     // Not dissected here: frames wait in the ordering window and are dissected
     // by the flush, in capture order. `retain` copies the bytes out of the
     // batch, which one held frame would otherwise keep alive in full.
@@ -706,6 +813,8 @@ function receiveBatch(bytes: Uint8Array): void {
       origLen: frame.origLen,
       iface: frame.iface,
       ring: ringFiling.partOf(frame.seq),
+      batch,
+      ...(hole > 0 ? { holeBefore: hole } : {}),
     });
   }
 }
@@ -809,7 +918,20 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       // Frames and records go out on it; the one thing that comes back is a
       // revisit kit this Worker asked for (ADR 0049). Everything else the store
       // says goes to the app's own port - `entry.ts` keeps them apart.
+      // A new store owes nothing on the old one's ledger.
+      flow.forgetStore();
       port.onmessage = (message: MessageEvent<FromCapture>) => {
+        // The store has taken an append: its backlog shrinks, and a flush
+        // the backlog was holding can go.
+        if (message.data?.type === 'bytesTaken') {
+          const wasBehind = flow.storeBehind;
+          flow.storeTaken(message.data.ack);
+          if (wasBehind && !flow.storeBehind && !flushSoon) {
+            flushSoon = true;
+            setTimeout(flush, 0);
+          }
+          return;
+        }
         if (message.data?.type !== 'revisitKit') return;
         const waiter = kitWaiters.get(message.data.requestId);
         kitWaiters.delete(message.data.requestId);
@@ -846,6 +968,8 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       break;
 
     case 'capturing':
+      // A capture starting is a new run of the agent's numbering.
+      if (command.capturing && !capturing) flow.startCapture();
       capturing = command.capturing;
       if (capturing) capturedSinceReset = true;
       break;
@@ -946,6 +1070,7 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       // here: this store is a moving picture of open sockets, and a frame
       // scrolled back to may belong to one that closed long ago.
       addProcessRow(layers, command.process ?? null);
+      addLiveGapRow(layers, command.liveSkipped);
       // Not cached: a replayed frame is one the user scrolled back to, and
       // caching it would evict the recent frames that answer without any work
       // at all.

@@ -249,7 +249,7 @@ export class CaptureHost {
       switch (message.type) {
         case 'open': return this.onOpen(message);
         case 'append': return this.onAppend(message);
-        case 'appendBytes': return this.onAppendBytes(message);
+        case 'appendBytes': return this.onAppendBytes(message, reply);
         case 'appendRecords': {
           this.open?.writer.attachRecords(message.frames);
           return;
@@ -374,9 +374,17 @@ export class CaptureHost {
    * because the pipe is in flight; treating that as a fault would fire the
    * alarm on every single capture that ends.
    */
-  private onAppendBytes(message: Extract<ToCapture, { type: 'appendBytes' }>): void {
-    if (this.open === null) return;
-    this.open.writer.appendBytes(message.frames);
+  private onAppendBytes(
+    message: Extract<ToCapture, { type: 'appendBytes' }>,
+    reply: (message: FromCapture) => void,
+  ): void {
+    try {
+      if (this.open !== null) this.open.writer.appendBytes(message.frames);
+    } finally {
+      // In a `finally`: a throw is reported by `handle` on the client port,
+      // and the Worker must still hear that the append is no longer owed.
+      if (message.ack !== undefined) reply({ type: 'bytesTaken', ack: message.ack });
+    }
   }
 
 
