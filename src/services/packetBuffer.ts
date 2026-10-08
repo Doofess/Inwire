@@ -31,6 +31,7 @@ import type { InfoPatch } from './dissect/types';
 import { estimateSummaryBytes, planBufferTrim, shouldStopForDisk } from './bufferBudget';
 import { evictOldBytes } from './packetBytes';
 import { applyIcmpRepliesInPlace } from './sessionRestore';
+import { notePatched } from './patchLog';
 import { applyInfoPatchesInPlace } from './pcapParser';
 
 /**
@@ -227,6 +228,11 @@ export function commitBatch(
   let next = prev.concat(incoming);
   if (replies.length > 0) applyIcmpRepliesInPlace(next, replies);
   if (patches.length > 0) applyInfoPatchesInPlace(next, patches);
+  // Each of those replaced a packet with a copy. The caches that extend a
+  // result flush by flush refresh exactly these ids (`patchLog.ts`) rather
+  // than reading a replaced packet as a new buffer.
+  if (replies.length > 0) notePatched(replies.map((r) => r.requestFrameId));
+  if (patches.length > 0) notePatched(patches.map((p) => p.frameId));
 
   const plan = planBufferTrim(next, options.residentBytesAtEntry, options.budgetBytes);
   const trimmed = plan.dropCount > 0 ? next.slice(plan.dropCount) : next;

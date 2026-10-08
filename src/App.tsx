@@ -73,6 +73,7 @@ import { processForPacket, sendingProcessName, writeProcessFields } from './serv
 import { fieldValue } from './services/dissect/fieldAccess';
 import { LINKTYPE } from './services/dissect/types';
 import { filterIncrementally, type FilterCache } from "./services/incrementalFilter";
+import { PATCH_LOG } from "./services/patchLog";
 import {
   clearSession,
   loadSessionMeta,
@@ -1724,7 +1725,7 @@ export default function App() {
   // Display Filter Evaluation. The incremental part - and why it is worth
   // having - lives in services/incrementalFilter.ts.
   const filteredPackets = useMemo(() => {
-    const { result, cache } = filterIncrementally(packets, appliedFilter, filterCacheRef.current);
+    const { result, cache } = filterIncrementally(packets, appliedFilter, filterCacheRef.current, PATCH_LOG);
     // Writing a ref during render is only safe because this is idempotent: a
     // StrictMode double-invoke re-enters with cache.source === packets, finds
     // the prefix intact with nothing appended, and returns the very same array.

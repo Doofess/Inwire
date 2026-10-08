@@ -4,12 +4,13 @@ import type { Packet } from '../types/packet';
  * True when `packets` provably still begins with `previous`, so only the tail
  * past it can contain anything new.
  *
- * Two identity checks establish that, given the buffer is only ever appended
- * to, trimmed from the front, or replaced wholesale:
+ * Two checks establish that, given the buffer is only ever appended to,
+ * trimmed from the front, patched, or replaced wholesale:
  *
- *   - element 0 catches a trim or a clear, since both shift the head;
- *   - the element sitting at `previous`'s final index catches a wholesale
- *     replacement, which is what a pcap import does.
+ *   - element 0, by identity, catches a trim, a clear or a replacement, since
+ *     each moves or rebuilds the head;
+ *   - the element at `previous`'s final index must be the same frame - the
+ *     same object, or a patched copy with its id (see `sameFrame`).
  *
  * Being wrong here must only ever cost time, so every caller falls back to a
  * full pass when this returns false. It is deliberately conservative: two
@@ -25,8 +26,30 @@ export function packetsExtend(packets: Packet[], previous: Packet[]): boolean {
     previous.length > 0 &&
     packets.length >= previous.length &&
     packets[0] === previous[0] &&
-    packets[previous.length - 1] === previous[previous.length - 1]
+    sameFrame(packets[previous.length - 1], previous[previous.length - 1])
   );
+}
+
+/**
+ * The same frame, possibly as a patched copy.
+ *
+ * **Why the second check compares ids and the first does not.** A patch
+ * replaces a packet with a copy (`commitBatch`), and in a bulk download most
+ * flushes patch the last frame of the one before - so an identity test there
+ * read nearly every flush as a new buffer and every cache keyed on it started
+ * again from nothing (`patchLog.ts` has the measurement). The FIRST element
+ * still compares by identity, and that is what keeps an id test here safe: a
+ * clear or an import builds new packet objects from the head, so a buffer
+ * whose head is the same object is this buffer, grown or patched, and the
+ * frame at the old last index is the same frame if it has the same id. Two
+ * imports of the same length would share every id - and no head.
+ *
+ * A cache that holds packet OBJECTS must still refresh the replaced ones,
+ * which `patchLog.ts` names; a fold over packets that a patch cannot change
+ * needs nothing more.
+ */
+function sameFrame(a: Packet, b: Packet): boolean {
+  return a === b || a.id === b.id;
 }
 
 /**
@@ -55,10 +78,11 @@ export function packetsExtend(packets: Packet[], previous: Packet[]): boolean {
  * comment is the link.
  *
  * **Being wrong here may only ever cost time.** Every answer is confirmed by
- * two identity checks before it is returned - the same two `packetsExtend`
- * makes, shifted by `k` - so a wrong guess about ids returns `null` and the
- * caller does the full pass it would have done anyway. It can never return a
- * `k` that describes a relationship the arrays do not have.
+ * the same two checks `packetsExtend` makes, shifted by `k` - the new head by
+ * identity, the old tail as the same frame - so a wrong guess about ids
+ * returns `null` and the caller does the full pass it would have done anyway.
+ * It can never return a `k` that describes a relationship the arrays do not
+ * have.
  */
 export function prefixShift(packets: Packet[], previous: Packet[]): number | null {
   if (previous.length === 0) return null;
@@ -91,6 +115,6 @@ export function prefixShift(packets: Packet[], previous: Packet[]): number | nul
   // wholesale replacement whose ids happen to line up.
   const retained = previous.length - k;
   if (packets.length < retained) return null;
-  if (packets[retained - 1] !== previous[previous.length - 1]) return null;
+  if (!sameFrame(packets[retained - 1], previous[previous.length - 1])) return null;
   return k;
 }

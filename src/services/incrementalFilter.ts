@@ -1,6 +1,7 @@
 import { Packet } from '../types/packet';
 import { FilterEngine } from './filterEngine';
 import { prefixShift } from './packetPrefix';
+import type { PatchSource } from './patchLog';
 
 /**
  * Applying a display filter to a growing packet buffer without re-deciding
@@ -24,6 +25,8 @@ export interface FilterCache {
   /** The exact array this result was computed from. Compared by identity. */
   source: Packet[];
   result: Packet[];
+  /** Where the patch log stood when this was built (`patchLog.ts`). */
+  patchPosition?: number;
 }
 
 /**
@@ -66,10 +69,86 @@ function dropLeading(result: Packet[], packets: Packet[]): Packet[] | null {
   if (lo === 0) return result;
   const kept = result.slice(lo);
   if (kept.length > 0) {
+    // The same frame, not necessarily the same object: it may be a patched
+    // copy, which `refreshPatched` swaps in afterwards.
     const at = kept[0].id - firstId;
-    if (!(at >= 0 && at < packets.length && packets[at] === kept[0])) return null;
+    if (!(at >= 0 && at < packets.length && packets[at].id === kept[0].id)) return null;
   }
   return kept;
+}
+
+/** The index of frame `id` in an id-ordered list, or -1. */
+function indexById(list: readonly Packet[], id: number): number {
+  const guess = list.length > 0 ? id - list[0].id : -1;
+  if (guess >= 0 && guess < list.length && list[guess].id === id) return guess;
+  let lo = 0;
+  let hi = list.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const at = list[mid].id;
+    if (at === id) return mid;
+    if (at < id) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/**
+ * The result with every frame patched since `position` decided again, from
+ * its current copy - or null when the log no longer reaches back that far.
+ *
+ * Only frames that were already decided need it: anything past `decided` was
+ * just filtered from the buffer as it stands. A patch rarely changes a match
+ * (it adds a link field and an Info suffix), so a frame still matching is
+ * swapped for its copy in place, and only a change of verdict rebuilds the
+ * list - once, however many changed.
+ */
+function refreshPatched(
+  result: Packet[], fresh: boolean, packets: Packet[], decidedBelowId: number,
+  filter: string, patches: PatchSource, position: number,
+): Packet[] | null {
+  const ids = patches.since(position);
+  if (ids === null) return null;
+  if (ids.length === 0 || packets.length === 0) return result;
+  const firstId = packets[0].id;
+  let out = result;
+  let owned = fresh;
+  const flip: Packet[] = [];
+  let matcher: ((p: Packet) => boolean) | null = null;
+  const seen = new Set<number>();
+  for (const id of ids) {
+    if (id < firstId || id >= decidedBelowId || seen.has(id)) continue;
+    seen.add(id);
+    const at = indexById(packets, id);
+    if (at < 0) continue;
+    const packet = packets[at];
+    const inResult = indexById(out, id);
+    if (inResult >= 0 && out[inResult] === packet) continue;
+    matcher ??= FilterEngine.compileFilter(filter);
+    const matches = matcher(packet);
+    if (inResult >= 0 && matches) {
+      if (!owned) { out = out.slice(); owned = true; }
+      out[inResult] = packet;
+    } else if (inResult >= 0 || matches) {
+      flip.push(packet);
+    }
+  }
+  if (flip.length === 0) return out;
+  // A verdict changed: rebuild once, in id order. The log is in patch order,
+  // not id order, so the changed frames are sorted before they are merged.
+  flip.sort((a, b) => a.id - b.id);
+  const flipped = new Set(flip.map((p) => p.id));
+  const merged: Packet[] = [];
+  let i = 0;
+  for (const packet of out) {
+    while (i < flip.length && flip[i].id < packet.id) {
+      if (indexById(out, flip[i].id) < 0) merged.push(flip[i]);
+      i++;
+    }
+    if (!flipped.has(packet.id)) merged.push(packet);
+  }
+  for (; i < flip.length; i++) if (indexById(out, flip[i].id) < 0) merged.push(flip[i]);
+  return merged;
 }
 
 /**
@@ -85,13 +164,30 @@ export function filterIncrementally(
   packets: Packet[],
   filter: string,
   cache: FilterCache | null,
+  patches?: PatchSource,
 ): { result: Packet[]; cache: FilterCache | null } {
   const trimmed = filter.trim();
   // An empty filter is the identity, and must hand back the very same array so
   // that consumers memoizing on its reference are not woken for nothing.
   if (!trimmed) return { result: packets, cache: null };
 
-  const shift = reusableShift(packets, trimmed, cache);
+  // A cache built without the log, or with it while this call has none,
+  // cannot know which of its packets were replaced since: start again.
+  const logged = patches !== undefined && cache?.patchPosition !== undefined;
+  const shift = (patches === undefined) === (cache?.patchPosition === undefined)
+    ? reusableShift(packets, trimmed, cache)
+    : null;
+  const position = patches?.position();
+  const built = (result: Packet[]): { result: Packet[]; cache: FilterCache } => ({
+    result,
+    cache: { filter: trimmed, source: packets, result, ...(position !== undefined ? { patchPosition: position } : {}) },
+  });
+  /** Frames below this id were decided before this call; the rest just now. */
+  const decidedBelow = (decided: number) =>
+    decided < packets.length ? packets[decided].id : packets[packets.length - 1].id + 1;
+  const refreshed = (result: Packet[], fresh: boolean, decided: number): Packet[] | null =>
+    !logged ? result
+      : refreshPatched(result, fresh, packets, decidedBelow(decided), trimmed, patches!, cache!.patchPosition!);
 
   // A trim. Everything from `shift` on was already decided and is still in
   // order, so the answer is the old result minus what fell off the front, plus
@@ -104,10 +200,11 @@ export function filterIncrementally(
     const kept = dropLeading(cache.result, packets);
     if (kept !== null) {
       const decided = cache.source.length - shift;
-      const result = packets.length === decided
+      const grown = packets.length === decided
         ? kept
         : kept.concat(FilterEngine.filterPackets(packets.slice(decided), trimmed));
-      return { result, cache: { filter: trimmed, source: packets, result } };
+      const result = refreshed(grown, grown !== cache.result, decided);
+      if (result !== null) return built(result);
     }
     // `dropLeading` could not confirm its own answer; fall through to the full
     // pass, which is what this call would have cost before any of this existed.
@@ -126,13 +223,15 @@ export function filterIncrementally(
     // would keep the same identity, and the identity is the contract: React
     // memoises on it, so a result that grew without changing identity would
     // simply not be re-read. Left alone deliberately.
-    result =
+    const grown =
       packets.length === cache.source.length
         ? cache.result
         : cache.result.concat(FilterEngine.filterPackets(packets.slice(cache.source.length), trimmed));
+    result = refreshed(grown, grown !== cache.result, cache.source.length)
+      ?? FilterEngine.filterPackets(packets, trimmed);
   } else {
     result = FilterEngine.filterPackets(packets, trimmed);
   }
 
-  return { result, cache: { filter: trimmed, source: packets, result } };
+  return built(result);
 }

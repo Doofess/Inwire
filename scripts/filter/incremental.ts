@@ -12,6 +12,8 @@
  */
 import { FilterEngine } from '../../src/services/filterEngine';
 import { filterIncrementally, type FilterCache } from '../../src/services/incrementalFilter';
+import { patchLog } from '../../src/services/patchLog';
+import { packetsExtend } from '../../src/services/packetPrefix';
 import type { Packet, ProtocolType } from '../../src/types/packet';
 
 let failures = 0;
@@ -214,6 +216,65 @@ const buffer = Array.from({ length: 200 }, (_, i) => makePacket(i));
   const empty = filterIncrementally([], FILTER, null);
   const firstPackets = buffer.slice(0, 10);
   check('growing from empty matches a full pass', ids(filterIncrementally(firstPackets, FILTER, empty.cache).result), full(firstPackets, FILTER));
+}
+
+// --- Patched copies: the case a bulk download produces on most flushes -----
+// A patch replaces a packet with a copy (`commitBatch`). The prefix proof must
+// read a patched last frame as the same buffer grown, and the filter must show
+// the copy - including for a frame deep in the buffer, which it used to keep
+// showing as it was before the patch.
+{
+  const patch = (list: Packet[], id: number, info: string): Packet[] => {
+    const out = list.slice();
+    const at = out.findIndex((p) => p.id === id);
+    out[at] = { ...out[at], info, fields: { ...(out[at].fields ?? {}), 'tcp.reassembled_in': id + 1 } };
+    return out;
+  };
+  const tcpIds = buffer.filter((p) => p.protocol === 'TCP').map((p) => p.id);
+  const log = patchLog();
+  const first = buffer.slice(0, 100);
+  const built = filterIncrementally(first, FILTER, null, log);
+
+  // The last TCP frame of the first flush, and one deep in it, both patched
+  // by the next flush.
+  const lastTcp = tcpIds.filter((id) => id <= first[first.length - 1].id).at(-1)!;
+  const deep = tcpIds[2];
+  let next = buffer.slice(0, 140);
+  next = patch(next, lastTcp, 'patched last');
+  next = patch(next, deep, 'patched deep');
+  log.note([lastTcp, deep]);
+  const lastIndex = first.length - 1;
+  const patchedTail = first.slice();
+  patchedTail[lastIndex] = { ...first[lastIndex], info: 'patched tail' };
+  check('a patched copy at the old last index still extends the buffer',
+    packetsExtend(patchedTail.concat(next.slice(100)), first), true);
+  const out = filterIncrementally(next, FILTER, built.cache, log);
+  check('with patches, the result matches a full pass', ids(out.result), full(next, FILTER));
+  check('...and shows the patched copy of the last frame', out.result.find((p) => p.id === lastTcp)?.info, 'patched last');
+  check('...and of a frame deep in the buffer', out.result.find((p) => p.id === deep)?.info, 'patched deep');
+  check('a re-run with nothing new returns the very same array',
+    filterIncrementally(next, FILTER, out.cache, log).result === out.result, true);
+
+  // A patch that changes the verdict: a filter on the link field itself.
+  const LINK = 'tcp.reassembled_in';
+  const linkLog = patchLog();
+  const before = filterIncrementally(first, LINK, null, linkLog);
+  check('a link filter matches nothing before the patch', before.result.length, 0);
+  linkLog.note([lastTcp, deep]);
+  const after = filterIncrementally(next, LINK, before.cache, linkLog);
+  check('a patch that adds the field brings the frame into the result', ids(after.result), full(next, LINK));
+
+  // The log no longer reaching back: a full pass, not a wrong answer.
+  const lost = { position: () => 99, since: () => null };
+  const fallback = filterIncrementally(next, FILTER, { ...built.cache!, patchPosition: 0 }, lost);
+  check('a log that has moved past the cache falls back to a full pass', ids(fallback.result), full(next, FILTER));
+}
+
+// --- Same ids, different buffer: an import replacing an import -------------
+{
+  const a = buffer.slice(0, 50);
+  const b = a.map((p) => ({ ...p }));
+  check('two buffers with the same ids but a different head do not extend', packetsExtend(b, a), false);
 }
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`);
