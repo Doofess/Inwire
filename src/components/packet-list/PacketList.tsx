@@ -331,23 +331,38 @@ export const PacketList: React.FC<PacketListProps> = ({
   // address is far too wide for a fixed default, and truncating it to an
   // ellipsis hides the part that distinguishes one host from another. A column
   // the user has dragged is theirs from then on and stops auto-sizing.
-  const autoSizeRef = useRef({ firstPacketId: -1, measuredCount: 0, source: 0, destination: 0 });
+  const autoSizeRef = useRef({ firstPacketId: -1, lastMeasuredId: -1, source: 0, destination: 0 });
+  /**
+   * Widths already measured, by address. A capture's addresses repeat - a
+   * download is a handful of hosts - so most frames cost a map lookup rather
+   * than a `measureText`. Bounded, and cleared with the measurement.
+   */
+  const widthByTextRef = useRef(new Map<string, number>());
   const textMeasureRef = useRef<CanvasRenderingContext2D | null>(null);
 
   useEffect(() => {
     const state = autoSizeRef.current;
 
-    // A new capture (or a cleared buffer) restarts the measurement; the live
-    // buffer also drops its oldest packets once full, but always keeps
-    // appending, so a *changed* first id is what identifies a genuine reset.
+    // A new capture, a cleared buffer or an import restarts the measurement,
+    // and each shows as ids going BACKWARDS: frame ids rise for the life of a
+    // capture, and a new one starts again from 1. A trim does not - the
+    // buffer drops its oldest frames and keeps appending, so its first id
+    // rises. This used to restart on any change of the first id, which a full
+    // buffer trims on nearly every flush, so a long capture re-measured the
+    // whole buffer ten times a second: `measureText` was 27% of the main
+    // thread at 60,000 frames a second (`scripts/perf/ui-burst-drive.ts`).
+    // Widths only grow between restarts; an address that left the buffer can
+    // leave its column wide, which is steadier than a column that jitters.
     const firstPacketId = packets.length > 0 ? packets[0].id : -1;
-    if (packets.length < state.measuredCount || firstPacketId !== state.firstPacketId) {
-      state.firstPacketId = firstPacketId;
-      state.measuredCount = 0;
+    const lastId = packets.length > 0 ? packets[packets.length - 1].id : -1;
+    if (packets.length === 0 || firstPacketId < state.firstPacketId || lastId < state.lastMeasuredId) {
+      state.lastMeasuredId = -1;
       state.source = 0;
       state.destination = 0;
+      widthByTextRef.current.clear();
     }
-    if (packets.length === state.measuredCount) return;
+    state.firstPacketId = firstPacketId;
+    if (packets.length === 0 || lastId <= state.lastMeasuredId) return;
 
     if (!textMeasureRef.current) {
       const cell = tableContainerRef.current?.querySelector('tbody td');
@@ -358,14 +373,29 @@ export const PacketList: React.FC<PacketListProps> = ({
       textMeasureRef.current = context;
     }
     const measure = textMeasureRef.current;
+    const widths = widthByTextRef.current;
+    const widthOf = (text: string): number => {
+      let width = widths.get(text);
+      if (width === undefined) {
+        width = measure.measureText(text).width;
+        if (widths.size >= 4096) widths.clear();
+        widths.set(text, width);
+      }
+      return width;
+    };
 
-    // Only the packets appended since last time are measured, so sustained
-    // live capture stays O(new packets) rather than re-walking the buffer.
-    for (let i = state.measuredCount; i < packets.length; i++) {
-      state.source = Math.max(state.source, measure.measureText(packets[i].source).width);
-      state.destination = Math.max(state.destination, measure.measureText(packets[i].destination).width);
+    // Only the frames past the last one measured, found by id: the buffer is
+    // id-ordered, and a trim moved its indices but not its ids.
+    let start = state.lastMeasuredId < 0 ? 0 : state.lastMeasuredId - firstPacketId + 1;
+    if (start < 0 || start > packets.length || (start < packets.length && packets[start].id <= state.lastMeasuredId)) {
+      start = packets.findIndex((p) => p.id > state.lastMeasuredId);
+      if (start < 0) start = packets.length;
     }
-    state.measuredCount = packets.length;
+    for (let i = start; i < packets.length; i++) {
+      state.source = Math.max(state.source, widthOf(packets[i].source));
+      state.destination = Math.max(state.destination, widthOf(packets[i].destination));
+    }
+    state.lastMeasuredId = lastId;
 
     const CELL_PADDING = 18; // px-2 either side, plus a little breathing room
     setColumnWidths(prev => {
@@ -600,7 +630,10 @@ export const PacketList: React.FC<PacketListProps> = ({
   useEffect(() => {
     hasMeasuredRowHeightRef.current = false;
     textMeasureRef.current = null;
-    autoSizeRef.current.measuredCount = 0;
+    autoSizeRef.current.lastMeasuredId = -1;
+    autoSizeRef.current.source = 0;
+    autoSizeRef.current.destination = 0;
+    widthByTextRef.current.clear();
     setMeasureEpoch((n) => n + 1);
   }, [listPrefs.density]);
 
