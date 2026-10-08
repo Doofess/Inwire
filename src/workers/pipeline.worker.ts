@@ -271,6 +271,8 @@ let nextShardDetail = 1;
 const PARALLEL_BACKLOG = 65_536;
 /** Trees each shard keeps for the detail pane: lane 0 keeps its own `DETAIL_CACHE_FRAMES`. */
 const SHARD_CACHE_FRAMES = 2_000;
+/** When rows were last posted to the app, for `afterMerge`'s cadence. */
+let lastPostedAt = 0;
 
 /** Lane 0's trackers for a new capture, numbering through a watched TCP order. */
 function laneZero(): { trackers: { tcp: TcpStreamTracker; icmp: IcmpEchoTracker; quic: QuicFlowTracker; dns: DnsTracker; l3: L3Tracker }; sequencer: Sequencer } {
@@ -421,10 +423,30 @@ function emitMerged(merged: Merged): void {
   }
 }
 
+/**
+ * Whether what this Worker feeds - the store, or the app's window - has not
+ * taken enough of what it was sent, so frames wait in the ordering window
+ * (ADR 0053, `liveFlow.ts`).
+ */
+function downstreamBehind(): boolean {
+  return flow.storeBehind || flow.rendererBehind;
+}
+
+/** The window or the store just took something: a flush they were holding back can go. */
+function resumeIfHeld(wasBehind: boolean): void {
+  if (wasBehind && !downstreamBehind() && !flushSoon) {
+    flushSoon = true;
+    setTimeout(flush, 0);
+  }
+}
+
 /** After the coordinator merged something: post it, and let the flush take more. */
 function afterMerge(): void {
-  postFlushed();
-  if (released.length > releasedFrom && !flushSoon && !flow.storeBehind
+  // Not on every answer: a shard answers every few hundred frames, and the
+  // app's main thread pays per message as well as per row. The flush timer
+  // posts whatever this leaves.
+  if (pendingPackets.length >= 4096 || performance.now() - lastPostedAt >= SLICE_MS) postFlushed();
+  if (released.length > releasedFrom && !flushSoon && !downstreamBehind()
     && parallel !== null && parallel.coordinator.backlog < PARALLEL_BACKLOG / 2) {
     flushSoon = true;
     setTimeout(flush, 0);
@@ -457,6 +479,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   released = [];
   releasedFrom = 0;
   flow.abandonBatches();
+  flow.forgetRenderer();
   sequencer = new Sequencer();
   tcpTracker = new TcpStreamTracker(sequencer);
   icmpTracker = new IcmpEchoTracker();
@@ -766,7 +789,7 @@ function flush(): void {
   // waiting for its last rows.
   let take = 0;
   if (!capturing) take = released.length - releasedFrom;
-  else if (!flow.storeBehind) {
+  else if (!downstreamBehind()) {
     take = Math.min(released.length - releasedFrom, Math.max(256, Math.floor((SLICE_MS * 1000) / usPerFrame)));
     // With shards, what is in flight on them is the queue to bound: past it
     // frames wait here, and each answer that brings it down asks for a flush.
@@ -784,7 +807,7 @@ function flush(): void {
   // More waiting and the store not in the way: straight back for it, after
   // whatever messages queued behind this slice.
   // With shards full, it is their answers that come back for it (`afterMerge`).
-  if (releasedFrom < released.length && !flow.storeBehind && !flushSoon && !(parallel !== null && take === 0)) {
+  if (releasedFrom < released.length && !downstreamBehind() && !flushSoon && !(parallel !== null && take === 0)) {
     flushSoon = true;
     setTimeout(flush, 0);
   }
@@ -935,6 +958,9 @@ function postFlushed(): void {
   }
 
   post({ type: 'frames', packets, icmpReplies, infoPatches, lateCount: ordering.lateCount }, transfer);
+  // Owed until the app says it committed them (`rowsTaken`).
+  flow.rowsPosted(packets.length);
+  lastPostedAt = performance.now();
 }
 
 // Started at the bottom of this file, in the pipeline role only.
@@ -1145,12 +1171,9 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
         // The store has taken an append: its backlog shrinks, and a flush
         // the backlog was holding can go.
         if (message.data?.type === 'bytesTaken') {
-          const wasBehind = flow.storeBehind;
+          const wasBehind = downstreamBehind();
           flow.storeTaken(message.data.ack);
-          if (wasBehind && !flow.storeBehind && !flushSoon) {
-            flushSoon = true;
-            setTimeout(flush, 0);
-          }
+          resumeIfHeld(wasBehind);
           return;
         }
         if (message.data?.type !== 'revisitKit') return;
@@ -1215,6 +1238,13 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
         });
       }
       break;
+
+    case 'rowsTaken': {
+      const wasBehind = downstreamBehind();
+      flow.rowsTaken(command.count);
+      resumeIfHeld(wasBehind);
+      break;
+    }
 
     case 'threads':
       // Applied at the next reset - the start of the next capture - so a

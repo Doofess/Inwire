@@ -326,6 +326,11 @@ export class PipelineClient {
     this.send({ type: 'capturing', capturing });
   }
 
+  /** Rows from `onFrames` the buffer has committed - the window's answer (ADR 0053). */
+  rowsTaken(count: number) {
+    if (count > 0) this.send({ type: 'rowsTaken', count });
+  }
+
   /** Dissection threads (ADR 0053 phase 3); the Worker applies it at the next `reset`. */
   setThreads(threads: DissectionThreads) {
     this.send({ type: 'threads', threads });

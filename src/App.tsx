@@ -400,6 +400,7 @@ export default function App() {
       autoPauseRef.current();
     },
   }), []);
+  const pipelineRowsTaken = useCallback((rows: number) => pipeline.rowsTaken(rows), []);
   const onFramesQueued = useCallback((firstTsUs: number, lastTsUs: number) => {
     if (captureStartRef.current === null) captureStartRef.current = firstTsUs;
     lastPacketTimeRef.current = lastTsUs;
@@ -409,7 +410,9 @@ export default function App() {
     packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
     queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
     dropBelow,
-  } = usePacketBuffer({ packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued });
+  } = usePacketBuffer({
+    packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued, onRowsTaken: pipelineRowsTaken,
+  });
 
 
   const [selectedPacket, setSelectedPacket] = useState<Packet | null>(null);

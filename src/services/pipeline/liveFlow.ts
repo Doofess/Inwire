@@ -34,6 +34,13 @@
 export const STORE_BACKLOG_FRAMES = 50_000;
 
 /**
+ * Rows the app may not yet have committed before the Worker stops releasing:
+ * about two seconds of what its main thread was measured to take at the top
+ * rate (ADR 0053 phase 3), and under 100 MB of rows.
+ */
+export const RENDERER_BACKLOG_FRAMES = 60_000;
+
+/**
  * The smallest jump in sequence numbers marked as a hole on a frame.
  *
  * Not 1, because the agent pushes a frame onto its live queue after it lets
@@ -206,5 +213,41 @@ export class LiveFlow {
   forgetStore(): void {
     this.storeAcks.clear();
     this.storeOwed = 0;
+  }
+
+  // -- the renderer -------------------------------------------------------------
+
+  private rowsOwed = 0;
+  /** As `storeAnswers`: the gate engages only once the renderer has answered. */
+  private rendererAnswers = false;
+
+  /** A flush of `frames` rows was posted to the app. */
+  rowsPosted(frames: number): void {
+    this.rowsOwed += frames;
+  }
+
+  /** The app committed `frames` of them to its buffer. */
+  rowsTaken(frames: number): void {
+    this.rendererAnswers = true;
+    this.rowsOwed = Math.max(0, this.rowsOwed - frames);
+  }
+
+  /**
+   * Whether the Worker must hold frames until the window catches up.
+   *
+   * The queue phase 1 left unbounded, because nothing could fill it then: the
+   * single Worker was slower than the window. With shards it is faster, and at
+   * 60,000 frames a second the main thread fell 400,000 rows behind in 16 s
+   * with nothing shed - rows waiting in its message queue and its arrival
+   * queue, in its heap. Held here instead, the Worker falls behind, main
+   * sheds, and the status bar counts what was skipped.
+   */
+  get rendererBehind(): boolean {
+    return this.rendererAnswers && this.rowsOwed >= RENDERER_BACKLOG_FRAMES;
+  }
+
+  /** A cleared buffer: rows posted before it are not owed. */
+  forgetRenderer(): void {
+    this.rowsOwed = 0;
   }
 }

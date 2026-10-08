@@ -145,6 +145,11 @@ export type ToPipeline =
    * TCP across cores, 1 is the single Worker. Takes effect at the next `reset`.
    */
   | { type: 'threads'; threads: DissectionThreads }
+  /**
+   * The app committed `count` rows of the flushes it was posted. What the
+   * Worker owes the window is bounded by these (`LiveFlow.rendererBehind`).
+   */
+  | { type: 'rowsTaken'; count: number }
   /** How many bytes of decrypted answers to keep (`derivedBudgetFor`). */
   | { type: 'derivedBudget'; bytes: number }
   /**
